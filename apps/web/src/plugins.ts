@@ -155,6 +155,7 @@ export interface PluginResourceCollection {
   singular: string
   parent?: string
   delegation?: boolean
+  form?: boolean
   settings?: SettingField[]
 }
 

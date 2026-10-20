@@ -33,6 +33,16 @@ fn option(value: &Value) -> bool {
 /// fields, values only for declared non-secret settings, errors for settings, the
 /// credential or the whole form (`form`).
 pub fn validate_form_result(manifest: &Manifest, result: &Value) -> Result<(), &'static str> {
+    validate_form_fields(&manifest.settings, &["credential", "form"], result)
+}
+
+/// Validate a form against its own declared fields and explicitly allowed global
+/// errors. Resource forms cannot derive root settings or return secret values.
+pub fn validate_form_fields(
+    settings: &[Value],
+    global_errors: &[&str],
+    result: &Value,
+) -> Result<(), &'static str> {
     if result.is_null() {
         return Ok(());
     }
@@ -45,7 +55,7 @@ pub fn validate_form_result(manifest: &Manifest, result: &Value) -> Result<(), &
     {
         return Err(invalid);
     }
-    let field = |key: &str| manifest.settings.iter().find(|field| field["key"] == key);
+    let field = |key: &str| settings.iter().find(|field| field["key"] == key);
     if let Some(options) = map.get("options").filter(|value| !value.is_null()) {
         for (key, items) in options.as_object().ok_or(invalid)? {
             let dynamic = field(key).is_some_and(|field| field["dynamic"] == true);
@@ -64,7 +74,7 @@ pub fn validate_form_result(manifest: &Manifest, result: &Value) -> Result<(), &
     }
     if let Some(errors) = map.get("errors").filter(|value| !value.is_null()) {
         for (key, message) in errors.as_object().ok_or(invalid)? {
-            let known = matches!(key.as_str(), "credential" | "form") || field(key).is_some();
+            let known = global_errors.contains(&key.as_str()) || field(key).is_some();
             let message = message.as_str().unwrap_or("");
             if !known || message.trim().is_empty() || !super::short(message, 300) {
                 return Err(invalid);
@@ -140,6 +150,30 @@ mod tests {
         ] {
             assert!(
                 validate_form_result(&manifest, &invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn scoped_forms_cannot_fill_another_schema_or_publish_secrets() {
+        let fields = manifest().settings;
+        validate_form_fields(
+            &fields,
+            &["form", "parentId"],
+            &json!({
+                "values": {"spaceName": "General"}, "errors": {"parentId": "Choose a workspace"}
+            }),
+        )
+        .unwrap();
+        for invalid in [
+            json!({"values": {"key": "not-public"}}),
+            json!({"values": {"appClientId": "another-schema"}}),
+            json!({"errors": {"credential": "An app-level error"}}),
+            json!({"options": {"space": vec![json!({"value": "1", "label": "General"}); MAX_OPTIONS + 1]}}),
+        ] {
+            assert!(
+                validate_form_fields(&fields, &["form", "parentId"], &invalid).is_err(),
                 "{invalid}"
             );
         }

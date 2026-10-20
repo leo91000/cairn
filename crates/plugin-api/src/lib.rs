@@ -13,7 +13,7 @@ mod view;
 mod webhooks;
 
 pub use arguments::{parse_arguments, usage};
-pub use form::validate_form_result;
+pub use form::{validate_form_fields, validate_form_result};
 pub use oauth::{OAuth, OAuthPersonal, OAuthTokenResponse};
 pub use operations::{Operation, Profile, RequestRule};
 pub use resources::ResourceCollection;

@@ -1,5 +1,6 @@
 //! Instance-owned collections. Schema validation and encrypted fields are shared
 //! with instance forms; neither management responses nor Luau can read secrets.
+pub(crate) mod forms;
 pub(crate) mod target;
 
 use super::connections::{self, Connection};
@@ -24,6 +25,51 @@ pub(crate) struct Reference {
     pub(crate) revisions: Vec<(String, String)>,
 }
 
+/// Configuration references are constructed only from a host-bound owner form;
+/// an operational caller cannot opt out of enabled-resource checks.
+#[derive(Clone)]
+pub(crate) enum Access {
+    Operational(Reference),
+    Configuration {
+        form: Arc<forms::Form>,
+        resource: Resource,
+    },
+}
+
+impl Access {
+    pub(crate) fn resource(&self) -> &Resource {
+        match self {
+            Self::Operational(reference) => &reference.resource,
+            Self::Configuration { resource, .. } => resource,
+        }
+    }
+
+    pub(crate) fn setup(&self) -> Option<&super::setup::SetupDraft> {
+        match self {
+            Self::Operational(_) => None,
+            Self::Configuration { form, .. } => form.target.setup_snapshot(),
+        }
+    }
+
+    pub(crate) fn current(&self, db: &Db<'_>, connection: &Connection) -> Result<()> {
+        match self {
+            Self::Operational(reference) => recheck_in(db, connection, reference),
+            Self::Configuration { form, .. } => form.current(db),
+        }
+    }
+
+    pub(crate) async fn recheck(
+        &self,
+        s: &Service,
+        context: &super::capabilities::Context,
+    ) -> Result<()> {
+        match self {
+            Self::Operational(reference) => recheck(s, context, reference).await,
+            Self::Configuration { form, .. } => form.recheck(s).await,
+        }
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Resource {
@@ -43,7 +89,7 @@ pub fn secrets_key(id: &str) -> String {
     format!("plugin-resource-secrets:{id}")
 }
 
-fn declared<'a>(manifest: &'a Manifest, name: &str) -> Result<&'a ResourceCollection> {
+pub(super) fn declared<'a>(manifest: &'a Manifest, name: &str) -> Result<&'a ResourceCollection> {
     manifest
         .resources
         .iter()
@@ -96,16 +142,30 @@ pub async fn save(
     input: &Value,
     existing: Option<&str>,
 ) -> Result<Value> {
-    let target = Target::active(s, plugin, instance).await?;
-    save_for(s, target, name, input, existing).await
+    let owner = Arc::new(super::operations::Owner::current(s).await?);
+    save_owned(s, plugin, instance, name, input, existing, owner).await
 }
 
-async fn save_for(
+pub(crate) async fn save_owned(
+    s: &Service,
+    plugin: &str,
+    instance: &str,
+    name: &str,
+    input: &Value,
+    existing: Option<&str>,
+    owner: Arc<super::operations::Owner>,
+) -> Result<Value> {
+    let target = Target::active(s, plugin, instance).await?;
+    save_for(s, target, name, input, existing, owner).await
+}
+
+pub(super) async fn save_for(
     s: &Service,
     target: Arc<Target>,
     name: &str,
     input: &Value,
     existing: Option<&str>,
+    owner: Arc<super::operations::Owner>,
 ) -> Result<Value> {
     target.require_revision(input)?;
     let manifest = target.manifest();
@@ -143,14 +203,35 @@ async fn save_for(
         Some(Value::Bool(enabled)) => *enabled,
         _ => return Err(Error::bad("Resource enabled must be a boolean.")),
     };
-    let mut schema = manifest.clone();
-    schema.settings.clone_from(&collection.settings);
+    let mut fields = collection.settings.clone();
     if target.is_setup() {
-        for field in &mut schema.settings {
+        for field in &mut fields {
             field["required"] = json!(false);
         }
     }
-    let settings = connections::settings(&schema, &input["settings"])?;
+    let form = if collection.form {
+        Some(
+            forms::Form::load(
+                s,
+                target.clone(),
+                &collection.name,
+                existing,
+                input,
+                true,
+                owner.clone(),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let mut settings = input["settings"].clone();
+    if let Some(form) = &form {
+        let result = form.run(s, settings.clone(), None, true).await?;
+        super::forms::require_valid(&collection.settings, &result)?;
+        super::forms::merge_values(&mut settings, &result);
+    }
+    let settings = connections::settings_fields(&fields, &settings)?;
     let resource_id = previous
         .as_ref()
         .map_or_else(id, |resource| resource.id.clone());
@@ -164,7 +245,7 @@ async fn save_for(
             .unwrap_or_default(),
         None => Map::new(),
     };
-    let secrets = connections::secrets(&schema, &input["secrets"], &saved)?;
+    let secrets = connections::secret_fields(&fields, &input["secrets"], &saved)?;
     if serde_json::to_vec(&settings)?.len() > 65_536 || serde_json::to_vec(&secrets)?.len() > 65_536
     {
         return Err(Error::too_large(
@@ -184,10 +265,14 @@ async fn save_for(
         updated_at: now(),
     };
     let encrypted = s.vault.encrypt(&key, &json!({ "fields": secrets }))?;
+    owner.recheck(s).await?;
     let input = input.clone();
     s.store
         .transaction(move |db| {
             target.current(db)?;
+            if let Some(form) = &form {
+                form.current(db)?;
+            }
             if let Some(previous) = &previous {
                 let stored = target.get(db, &previous.id)?;
                 if !stored.is_some_and(|stored| stored["revision"] == previous.revision) {
@@ -542,6 +627,16 @@ pub(crate) async fn setup_routes(
         .map_or("", |identity| identity.account_id.as_str());
     let target = Target::setup(s, plugin, draft, account).await?;
     match (input.method.as_str(), resource) {
+        ("POST", Some("form")) => {
+            forms::preview(
+                s,
+                target,
+                collection,
+                &input.body,
+                Arc::new(super::operations::Owner::for_account(s, account).await?),
+            )
+            .await
+        }
         ("GET", None) => {
             list_for(
                 s,
@@ -551,11 +646,31 @@ pub(crate) async fn setup_routes(
             )
             .await
         }
-        ("POST", None) => save_for(s, target, collection, &input.body, None).await,
+        ("POST", None) => {
+            save_for(
+                s,
+                target,
+                collection,
+                &input.body,
+                None,
+                Arc::new(super::operations::Owner::for_account(s, account).await?),
+            )
+            .await
+        }
         ("GET", Some(id)) => Ok(serde_json::to_value(
             get_for(s, target, collection, id).await?,
         )?),
-        ("PUT", Some(id)) => save_for(s, target, collection, &input.body, Some(id)).await,
+        ("PUT", Some(id)) => {
+            save_for(
+                s,
+                target,
+                collection,
+                &input.body,
+                Some(id),
+                Arc::new(super::operations::Owner::for_account(s, account).await?),
+            )
+            .await
+        }
         ("DELETE", Some(id)) => remove_for(s, target, collection, id, &input.body).await,
         _ => Err(Error::method_not_allowed("Method not allowed.")),
     }

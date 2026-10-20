@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type {
+  FormResult,
   Manifest,
   PluginPage,
   PluginResource,
@@ -14,14 +15,18 @@ import {
 import { api, ApiError } from '../api'
 import {
   pluginFormSecrets,
+  pluginFormValue,
   pluginFormValues,
   pluginSecrets,
   pluginSettings,
 } from '../plugin-form-values'
+import { pluginOperation } from '../plugin-operations'
+import { formResult } from '../plugins'
 import PluginFields from './PluginFields.vue'
 import PluginResourceAuthorization from './PluginResourceAuthorization.vue'
 import PluginResourceGrants from './PluginResourceGrants.vue'
 import PluginResourceRoutes from './PluginResourceRoutes.vue'
+import PluginView from './PluginView.vue'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
 import VirtualSelect from './VirtualSelect.vue'
@@ -50,6 +55,12 @@ const busy = ref(false)
 const loading = ref(false)
 const ready = ref(false)
 const submitted = ref(false)
+const completion = ref<FormResult>()
+const completing = ref(false)
+const formReady = ref(true)
+const formFailure = ref('')
+let asked = 0
+let formTimer: ReturnType<typeof setTimeout> | undefined
 const error = ref('')
 const removing = ref<PluginResource>()
 const accessEditors = ref<Record<string, boolean>>({})
@@ -59,6 +70,8 @@ const oauthBusy = computed(() => Object.values(authorizations.value).some(value 
 const oauthPending = computed(() => Object.values(authorizations.value).some(value => value.pending))
 const oauthLocked = computed(() => oauthBusy.value || oauthPending.value)
 const blocked = computed(() => busy.value || loading.value || !ready.value || accessLocked.value || props.disabled || oauthLocked.value || submitted.value)
+const saveBlocked = computed(() => blocked.value || completing.value || !formReady.value || Object.keys(completion.value?.errors ?? {}).length > 0)
+const formMessages = computed(() => Object.entries(completion.value?.errors ?? {}).filter(([key]) => key === 'form' || key === 'parentId' || editing.value?.collection.settings?.some(field => field.key === key && field.hidden)).map(([, message]) => message))
 let generation = 0
 
 function accessBlocked(own: string) {
@@ -93,8 +106,8 @@ function authorizationState(key: string, value: { busy: boolean, pending: boolea
   authorizations.value = next
 }
 
-watch(() => [busy.value, loading.value, Boolean(editing.value || removing.value), oauthBusy.value, oauthPending.value, accessLocked.value], () => {
-  emit('state', { busy: busy.value || loading.value || oauthBusy.value, editing: Boolean(editing.value || removing.value) || accessLocked.value, pending: oauthPending.value })
+watch(() => [busy.value, loading.value, completing.value, Boolean(editing.value || removing.value), oauthBusy.value, oauthPending.value, accessLocked.value], () => {
+  emit('state', { busy: busy.value || loading.value || oauthBusy.value || completing.value, editing: Boolean(editing.value || removing.value) || accessLocked.value, pending: oauthPending.value })
 }, { immediate: true, flush: 'sync' })
 
 async function load() {
@@ -177,16 +190,78 @@ async function edit(collection: PluginResourceCollection, resource?: PluginResou
       }
     }
 
+    cancelCompletion()
     name.value = resource?.name ?? ''
     parent.value = resource?.parentId ?? ''
     enabled.value = resource?.enabled ?? true
     values.value = pluginFormValues(collection.settings ?? [], resource?.settings ?? {})
     secrets.value = pluginFormSecrets()
     editing.value = { collection, resource }
+    formReady.value = !collection.form
+    typed()
   })
 }
 
+function cancelCompletion() {
+  asked++
+  clearTimeout(formTimer)
+  completing.value = false
+  completion.value = undefined
+  formFailure.value = ''
+}
+
+async function complete(changed?: string) {
+  const editor = editing.value
+  if (!editor?.collection.form)
+    return
+  const request = ++asked
+  formReady.value = false
+  completing.value = true
+  formFailure.value = ''
+  try {
+    const { collection, resource } = editor
+    const result = formResult(await pluginOperation<FormResult | null>(`${path.value}/${collection.name}/form`, {
+      settings: pluginSettings(collection.settings ?? [], values.value),
+      secrets: pluginSecrets(secrets.value),
+      ...(resource && { resource: resource.id, revision: resource.revision }),
+      ...(collection.parent && parent.value && { parentId: parent.value }),
+      ...(props.setupRevision && { setupRevision: props.setupRevision }),
+      changed,
+    }))
+    if (request !== asked)
+      return
+    for (const field of collection.settings ?? []) {
+      if (Object.hasOwn(result.values, field.key))
+        values.value[field.key] = pluginFormValue(field, result.values[field.key])
+    }
+
+    completion.value = result
+    formReady.value = true
+  }
+  catch (e) {
+    if (request === asked)
+      formFailure.value = (e as Error).message
+  }
+  finally {
+    if (request === asked)
+      completing.value = false
+  }
+}
+
+function typed(changed?: string) {
+  if (!editing.value?.collection.form)
+    return
+  clearTimeout(formTimer)
+  asked++
+  formReady.value = false
+  completing.value = true
+  formTimer = setTimeout(() => void complete(changed), 350)
+}
+
+watch(parent, () => typed('parentId'))
+
 function resetEditor() {
+  cancelCompletion()
   editing.value = undefined
   secrets.value = pluginFormSecrets()
   submitted.value = false
@@ -211,24 +286,21 @@ async function close() {
 }
 
 async function save() {
-  if (!editing.value || blocked.value)
+  if (!editing.value || saveBlocked.value)
     return
   await action(async () => {
     const { collection, resource } = editing.value!
     submitted.value = true
     try {
-      await api(`${path.value}/${collection.name}${resource ? `/${resource.id}` : ''}`, {
-        method: resource ? 'PUT' : 'POST',
-        body: JSON.stringify({
-          name: name.value,
-          settings: pluginSettings(collection.settings ?? [], values.value),
-          secrets: pluginSecrets(secrets.value),
-          enabled: enabled.value,
-          ...(collection.parent && { parentId: parent.value }),
-          ...(resource && { revision: resource.revision }),
-          ...(props.setupRevision && { setupRevision: props.setupRevision }),
-        }),
-      })
+      await pluginOperation(`${path.value}/${collection.name}${resource ? `/${resource.id}` : ''}`, {
+        name: name.value,
+        settings: pluginSettings(collection.settings ?? [], values.value),
+        secrets: pluginSecrets(secrets.value),
+        enabled: enabled.value,
+        ...(collection.parent && { parentId: parent.value }),
+        ...(resource && { revision: resource.revision }),
+        ...(props.setupRevision && { setupRevision: props.setupRevision }),
+      }, resource ? 'PUT' : 'POST')
     }
     catch (e) {
       if (e instanceof ApiError && e.status === 400)
@@ -253,12 +325,13 @@ async function remove() {
   })
 }
 
-watch(path, () => {
+watch([path, () => props.setupRevision, () => props.manifest.version, () => JSON.stringify(props.manifest.resources)], () => {
   resetEditor()
   pages.value = Object.create(null)
   void load()
 }, { immediate: true })
 onBeforeUnmount(() => {
+  cancelCompletion()
   generation++
   secrets.value = pluginFormSecrets()
   emit('state', { busy: false, editing: false, pending: false })
@@ -403,13 +476,36 @@ onBeforeUnmount(() => {
           :disabled="blocked"
           required
         />
-        <PluginFields
-          v-model:values="values"
-          v-model:secrets="secrets"
-          :fields="(collection.settings ?? []).map(field => setupRevision ? { ...field, required: false } : field)"
-          :saved="editing.resource?.secretKeys"
-          :disabled="blocked"
-        />
+        <div @input="typed()">
+          <PluginFields
+            v-model:values="values"
+            v-model:secrets="secrets"
+            :fields="(collection.settings ?? []).map(field => setupRevision ? { ...field, required: false } : field)"
+            :saved="editing.resource?.secretKeys"
+            :disabled="blocked"
+            :options="completion?.options"
+            :errors="completion?.errors"
+            @refresh="typed"
+          />
+        </div>
+        <PluginView v-if="completion?.view?.length" :nodes="completion.view" busy />
+        <UiAlert v-for="(message, index) in formMessages" :key="index">
+          {{ message }}
+        </UiAlert>
+        <UiAlert v-if="formFailure">
+          {{ formFailure }}
+          <UiButton
+            type="button"
+            size="small"
+            :disabled="blocked || completing"
+            @click="complete()"
+          >
+            Retry checking
+          </UiButton>
+        </UiAlert>
+        <p v-if="completing" class="text-xs text-muted" role="status">
+          Checking resource settings…
+        </p>
         <label class="flex flex-row! items-center gap-2!"><input
           v-model="enabled"
           type="checkbox"
@@ -420,7 +516,7 @@ onBeforeUnmount(() => {
           <UiButton type="button" :disabled="busy" @click="close">
             Cancel
           </UiButton>
-          <UiButton type="submit" variant="primary" :disabled="blocked">
+          <UiButton type="submit" variant="primary" :disabled="saveBlocked">
             Save {{ collection.singular.toLowerCase() }}
           </UiButton>
         </div>

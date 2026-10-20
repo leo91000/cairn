@@ -58,7 +58,7 @@ async fn owner_configures_resource_fields_and_secret_names_while_members_cannot_
             .unwrap();
         request
             .extensions_mut()
-            .insert(InstallationIdentity::trusted(role, "fixture-account"));
+            .insert(InstallationIdentity::trusted(role, "fixture-owner"));
         request
     };
     let input = json!({"name": "Engineering", "settings": {"externalId": "T111"}, "secrets": {"token": "resource-fixture-token"}});

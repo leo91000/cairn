@@ -1248,3 +1248,166 @@ async fn cold_program_update_rechecks_the_initiating_owner() {
     );
     assert_eq!(result["state"], "failed", "{result}");
 }
+
+#[tokio::test]
+async fn cold_setup_forms_and_activation_acknowledge_before_program_download_finishes() {
+    for action in ["form", "activate"] {
+        setup_preparation(action, false).await;
+    }
+}
+
+#[tokio::test]
+async fn cold_setup_preparation_keeps_its_original_owner() {
+    for action in ["form", "activate"] {
+        setup_preparation(action, true).await;
+    }
+}
+
+async fn setup_preparation(action: &str, revoke: bool) {
+    use cairn_installation::{
+        auth::{InstallationIdentity, InstallationRole},
+        plugins::{connections, setup},
+    };
+
+    let f = Fixture::new().await;
+    let manifest = MANIFEST.replace(
+        "capabilities = [\"http\", \"exec\"]",
+        "instanceForm = true\ncapabilities = [\"http\", \"exec\", \"resources\"]",
+    ) + "\n[[resources]]\nname = \"workspace\"\ntitle = \"Workspaces\"\nsingular = \"Workspace\"\n";
+    let source = "return {form = function() local result = cairn.exec.run({program = 'probe'}) assert(result.stdout == '1.0.0') return {} end}";
+    let package = registry::install(
+        &f.service,
+        &json!({
+            "manifest": manifest,
+            "manifestFormat": "toml",
+            "source": source,
+            "modules": {"programs/probe.luau": INSTALLER},
+        }),
+    )
+    .await
+    .unwrap();
+    registry::approve(
+        &f.service,
+        "program-probe",
+        "1.0.0",
+        package["digest"].as_str().unwrap(),
+    )
+    .await
+    .unwrap();
+    let draft = setup::save(
+        &f.service,
+        "program-probe",
+        "fixture-owner",
+        &json!({"name":"Prepared program"}),
+        None,
+    )
+    .await
+    .unwrap();
+    std::fs::remove_dir_all(
+        f.service
+            .config
+            .data_dir
+            .join("plugin-programs/program-probe"),
+    )
+    .unwrap();
+    let before = f.publisher.requests.load(Ordering::SeqCst);
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *f.publisher.download_gate.lock().await = Some(gate.clone());
+    let path = format!(
+        "/api/plugins/program-probe/setup-drafts/{}/{action}",
+        draft["id"].as_str().unwrap()
+    );
+    let body = json!({"revision":draft["revision"],"enabled":false});
+    let mut request = common::request("POST", &path)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(InstallationIdentity::trusted(
+            InstallationRole::Owner,
+            "fixture-owner",
+        ));
+    let input = cairn_installation::http::Input::read(request)
+        .await
+        .unwrap();
+    let acknowledged = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        cairn_installation::plugins::routes(&f.service, &input),
+    )
+    .await;
+    assert!(
+        acknowledged.is_ok(),
+        "{action} held its request open for the gated download"
+    );
+    let accepted = acknowledged.unwrap().unwrap();
+    let id = accepted["operation"]
+        .as_str()
+        .expect("Cold setup must return an operation");
+    common::eventually(
+        std::time::Duration::from_secs(15),
+        std::time::Duration::from_millis(10),
+        async || (f.publisher.requests.load(Ordering::SeqCst) >= before + 2).then_some(()),
+    )
+    .await;
+    assert_eq!(
+        f.service.plugins.operations.get(id).unwrap()["state"],
+        "running"
+    );
+    assert!(
+        connections::get(&f.service, "program-probe", draft["id"].as_str().unwrap())
+            .await
+            .is_err()
+    );
+    let replacement = if revoke {
+        Some(f.replace_owner("replacement-owner").await)
+    } else {
+        None
+    };
+    gate.notify_one();
+    *f.publisher.download_gate.lock().await = None;
+    let completed = f.operation(id).await;
+    if let Some(server) = replacement {
+        server.abort();
+        assert_eq!(completed["state"], "failed", "{action}: {completed}");
+        assert!(
+            connections::get(&f.service, "program-probe", draft["id"].as_str().unwrap())
+                .await
+                .is_err()
+        );
+        assert!(
+            f.service
+                .store
+                .kv(&format!("plugin-setup:{}", draft["id"].as_str().unwrap()))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        return;
+    }
+    assert_eq!(completed["state"], "completed", "{action}: {completed}");
+    if action == "activate" {
+        assert_eq!(completed["result"]["id"], draft["id"]);
+        assert!(
+            setup::get(
+                &f.service,
+                "program-probe",
+                draft["id"].as_str().unwrap(),
+                "fixture-owner"
+            )
+            .await
+            .is_err()
+        );
+    } else {
+        assert!(
+            setup::get(
+                &f.service,
+                "program-probe",
+                draft["id"].as_str().unwrap(),
+                "fixture-owner"
+            )
+            .await
+            .is_ok()
+        );
+    }
+}

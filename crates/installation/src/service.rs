@@ -110,6 +110,10 @@ impl Service {
         service.store.transaction(crate::accounts::migrate).await?;
         service
             .store
+            .transaction(crate::chats::questions::retire_unattributed)
+            .await?;
+        service
+            .store
             .transaction(crate::notifications::remove_local_registrations)
             .await?;
         service.avatars.recover(&service).await?;

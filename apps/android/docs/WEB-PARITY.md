@@ -82,6 +82,10 @@ coverage used, not a claim that every production account/provider was exercised.
   only in memory and require saved root settings before resource changes or activation.
   Both load all bounded draft-list pages before showing saved setups and cancel
   unfinished reads when leaving the screen.
+- Resource collections can declare package-driven configuration forms on both clients.
+  Selected-parent credentials and OAuth stay in the installation; only declared choices,
+  nonsecret derived values, errors and guidance reach either editor. Both wait for the
+  current parent response, revalidate restored drafts and reconcile uncertain saves.
 - Personal plugin consent opens an explicit new browser page on the web and a
   Custom Tab on Android. Both require returning to check completion, keep consent
   state only in screen memory and never receive provider credentials.

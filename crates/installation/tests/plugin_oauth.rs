@@ -45,6 +45,14 @@ async fn configured_fixture(
     pkce: bool,
     personal: bool,
 ) -> (TempDir, Arc<Service>, String, String, String, axum::Router) {
+    configured_form_fixture(pkce, personal, false).await
+}
+
+async fn configured_form_fixture(
+    pkce: bool,
+    personal: bool,
+    resource_forms: bool,
+) -> (TempDir, Arc<Service>, String, String, String, axum::Router) {
     let root = TempDir::new().unwrap();
     std::fs::create_dir_all(root.path().join("home")).unwrap();
     let mut config = common::config(root.path());
@@ -106,6 +114,12 @@ async fn configured_fixture(
             "name": "read", "operation": "read", "arguments": [{"name": "resource", "flag": "--resource", "required": true}]
         }]);
     }
+    if resource_forms {
+        manifest["resources"].as_array_mut().unwrap().push(json!({
+            "name": "channel", "title": "Channels", "singular": "Channel", "parent": "workspace", "form": true,
+            "settings": [{"key": "verified", "title": "Verified status", "type": "string", "hidden": true}]
+        }));
+    }
     let source = r#"local function read(resource)
         return cairn.http.request({url = 'https://api.example.test/messages',
             auth = {resource = resource, oauth = 'bot'}})
@@ -115,6 +129,14 @@ async fn configured_fixture(
         return {notice = response.json.ok and 'Authorized' or 'Denied'}
     end, tool = function(event) return read(event.input.resource).json end,
     command = function(event) return read(event.arguments.resource).json end}"#;
+    let source = if resource_forms {
+        format!(
+            "{}, form = function(event)\n local response = cairn.http.request({{url = 'https://api.example.test/messages', auth = {{configuration = 'parent', oauth = 'bot'}}}})\n return {{values = {{verified = response.json.ok and 'Authorized' or 'Denied'}}}}\n end}}",
+            source.strip_suffix('}').unwrap()
+        )
+    } else {
+        source.to_owned()
+    };
     let package = registry::install(&s, &json!({"manifest": manifest, "source": source}))
         .await
         .unwrap();
@@ -289,6 +311,224 @@ async fn owner_oauth_captures_tokens_without_exposing_them_and_binds_the_resourc
         .await
         .is_err()
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn owner_resource_forms_share_one_parent_refresh_for_active_and_inert_configuration() {
+    for inert in [false, true] {
+        resource_form_parent_refresh(inert, false).await;
+    }
+}
+
+#[tokio::test]
+async fn owner_resource_forms_never_retry_an_uncertain_parent_refresh() {
+    for inert in [false, true] {
+        resource_form_parent_refresh(inert, true).await;
+    }
+}
+
+async fn resource_form_parent_refresh(inert: bool, uncertain: bool) {
+    let (_root, s, active, active_resource, active_path, app) =
+        configured_form_fixture(false, false, true).await;
+    let (instance, resource, oauth, setup_revision) = if inert {
+        let (draft, resource, path) = create_setup(&app).await;
+        (
+            text(&draft, "id").to_owned(),
+            text(&resource, "id").to_owned(),
+            path,
+            Some(draft["revision"].clone()),
+        )
+    } else {
+        connections::set_enabled(&s, "example", &active, &json!({"enabled": false}))
+            .await
+            .unwrap();
+        (active, active_resource, active_path, None)
+    };
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    let count = refreshes.clone();
+    let provider = axum::Router::new()
+            .route("/token", axum::routing::post(move |axum::Form(fields): axum::Form<HashMap<String, String>>| {
+                let count = count.clone();
+                async move {
+                    let tokens = if fields["grant_type"] == "refresh_token" {
+                        assert_eq!(count.fetch_add(1, Ordering::SeqCst), 0, "Parent refresh was consumed twice");
+                        assert_eq!(fields["refresh_token"], "parent-refresh-fixture");
+                        if uncertain {return Err(StatusCode::BAD_GATEWAY);}
+                        json!({
+                            "access_token": "parent-renewed-fixture",
+                            "refresh_token": "parent-next-fixture",
+                            "expires_in": 43200,
+                            "scope": "messages:read",
+                        })
+                    } else {
+                        json!({
+                            "access_token": "parent-old-fixture",
+                            "refresh_token": "parent-refresh-fixture",
+                            "expires_in": 1,
+                            "scope": "messages:read",
+                            "team": {"id": "T111"},
+                        })
+                    };
+                    Ok(axum::Json(tokens))
+                }
+            }))
+            .route("/messages", axum::routing::get(|headers: axum::http::HeaderMap| async move {
+                axum::Json(json!({
+                    "ok": headers.get("authorization").is_some_and(|value| value == "Bearer parent-renewed-fixture"),
+                }))
+            }));
+    let (origin, server) = common::serve_locally(provider).await;
+    s.plugins.route_http_to(Some(origin));
+    let mut body = json!({"scopes": ["messages:read"]});
+    if let Some(revision) = &setup_revision {
+        body["setupRevision"] = revision.clone();
+    }
+    let response = common::send(&app, request("POST", &oauth, body, Some("fixture-owner"))).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(response).await
+    );
+    let started = common::read_json(response).await;
+    let callback = format!(
+        "/api/plugin-oauth/{instance}/callback?state={}&code=fixture",
+        text(&started, "state")
+    );
+    assert_eq!(
+        common::send(&app, request("GET", &callback, Value::Null, None))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let mut body = json!({"state": started["state"]});
+    if let Some(revision) = &setup_revision {
+        body["setupRevision"] = revision.clone();
+    }
+    let response = common::send(
+        &app,
+        request(
+            "POST",
+            &format!("{oauth}/finish"),
+            body,
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(response).await
+    );
+
+    let item = oauth.strip_suffix("/oauth/bot").unwrap();
+    let parent = common::read_json(
+        common::send(
+            &app,
+            request("GET", item, Value::Null, Some("fixture-owner")),
+        )
+        .await,
+    )
+    .await;
+    let mut body = json!({"name": "Paused parent", "settings": parent["settings"], "revision": parent["revision"], "enabled": false});
+    if let Some(revision) = &setup_revision {
+        body["setupRevision"] = revision.clone();
+    }
+    let paused = common::send(&app, request("PUT", item, body, Some("fixture-owner"))).await;
+    assert_eq!(
+        paused.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(paused).await
+    );
+    let collection = item.rsplit_once("/workspace/").unwrap().0;
+    let form = format!("{collection}/channel/form");
+    let mut body = json!({"parentId": resource, "settings": {}});
+    if let Some(revision) = &setup_revision {
+        body["setupRevision"] = revision.clone();
+    }
+    let (first, second) = tokio::join!(
+        common::send(
+            &app,
+            request("POST", &form, body.clone(), Some("fixture-owner"))
+        ),
+        common::send(
+            &app,
+            request("POST", &form, body.clone(), Some("fixture-owner"))
+        )
+    );
+    for response in [first, second] {
+        if uncertain {
+            assert!(matches!(
+                response.status(),
+                StatusCode::BAD_GATEWAY | StatusCode::FORBIDDEN
+            ));
+        } else {
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{}",
+                common::read_text(response).await
+            );
+            assert_eq!(
+                common::read_json(response).await["values"]["verified"],
+                "Authorized"
+            );
+        }
+    }
+    if uncertain {
+        let refused = common::send(
+            &app,
+            request("POST", &form, body.clone(), Some("fixture-owner")),
+        )
+        .await;
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        assert!(
+            common::read_text(refused)
+                .await
+                .contains("renewal was interrupted")
+        );
+    }
+    assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn owner_resource_forms_cannot_borrow_personal_oauth() {
+    let (_root, s, instance, resource, _oauth, app) =
+        configured_form_fixture(false, true, true).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let provider = axum::Router::new().route(
+        "/messages",
+        axum::routing::get(move || {
+            seen.fetch_add(1, Ordering::SeqCst);
+            async { axum::Json(json!({"ok": true})) }
+        }),
+    );
+    let (origin, server) = common::serve_locally(provider).await;
+    s.plugins.route_http_to(Some(origin));
+    let path = format!("/api/plugins/example/connections/{instance}/resources/channel/form");
+    let response = common::send(
+        &app,
+        request(
+            "POST",
+            &path,
+            json!({"parentId": resource}),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "{}",
+        common::read_text(response).await
+    );
+    assert!(common::read_text(response).await.contains("personal OAuth"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
     server.abort();
 }
 

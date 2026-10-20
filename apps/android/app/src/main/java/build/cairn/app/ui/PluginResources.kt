@@ -8,6 +8,9 @@ import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.*
 
@@ -314,12 +317,13 @@ internal fun PluginResources(
         }
     }
     editing?.let { (collection, initial) ->
-        key(location.path, collection.name, initial?.id) {
+        key(location, manifest.version, collection.name, initial?.id) {
             val unchanged =
-                initial == null ||
-                    pages[collection.name]?.items.orEmpty().any {
-                        it.id == initial.id && it.revision == initial.revision
-                    }
+                manifest.resources.any { it == collection } &&
+                    (initial == null ||
+                        pages[collection.name]?.items.orEmpty().any {
+                            it.id == initial.id && it.revision == initial.revision
+                        })
             ResourceEditor(
                 vm,
                 state,
@@ -390,6 +394,69 @@ private fun ResourceEditor(
     var secrets by remember { mutableStateOf(mapOf<String, String>()) }
     var submitted by rememberForm(false)
     val controls = ready && !state.busy && !submitted
+    var completion by remember { mutableStateOf<PluginForm?>(null) }
+    var completing by remember { mutableStateOf(collection.form) }
+    var formReady by remember { mutableStateOf(!collection.form) }
+    var formFailure by remember { mutableStateOf<String?>(null) }
+    var asking by remember { mutableIntStateOf(0) }
+    val formGeneration = remember { AtomicInteger() }
+    var changed by remember { mutableStateOf<String?>(null) }
+    fun refresh(key: String? = null) {
+        if (!collection.form) return
+        changed = key
+        asking++
+        completing = true
+        formReady = false
+    }
+    if (collection.form)
+        LaunchedEffect(location, initial?.revision, parent, asking, ready, submitted) {
+            val generation = formGeneration.incrementAndGet()
+            formReady = false
+            if (!ready || submitted) return@LaunchedEffect
+            val request = asking
+            completing = true
+            formFailure = null
+            if (request > 0) delay(350)
+            try {
+                val result =
+                    decodePluginForm(
+                        vm.api.pluginOperation(
+                            "${location.path}/${segment(collection.name)}/form",
+                            buildJsonObject {
+                                put("settings", pluginSettings(collection.settings, values))
+                                put("secrets", pluginSecrets(secrets))
+                                if (parent.isNotBlank()) put("parentId", parent)
+                                initial?.let {
+                                    put("resource", it.id)
+                                    put("revision", it.revision)
+                                }
+                                location.setupRevision?.let { put("setupRevision", it) }
+                                changed?.let { put("changed", it) }
+                            },
+                        )
+                    )
+                currentCoroutineContext().ensureActive()
+                if (request != asking || generation != formGeneration.get()) return@LaunchedEffect
+                values =
+                    values +
+                        result.values.mapValues { (key, value) ->
+                            formValue(
+                                collection.settings.find { it.key == key }
+                                    ?: PluginSetting(key = key),
+                                value,
+                            )
+                        }
+                completion = result
+                formReady = true
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                if (request == asking && generation == formGeneration.get())
+                    formFailure = e.message ?: "Le plugin n’a pas répondu."
+            } finally {
+                if (request == asking && generation == formGeneration.get()) completing = false
+            }
+        }
+    val canSave = controls && !completing && formReady && completion?.errors.orEmpty().isEmpty()
     fun reconcile() {
         vm.perform { saved() }
     }
@@ -404,14 +471,13 @@ private fun ResourceEditor(
                 close()
             }
         },
-        valid = controls && name.isNotBlank() && (collection.parent == null || parent.isNotBlank()),
+        valid = canSave && name.isNotBlank() && (collection.parent == null || parent.isNotBlank()),
         save = save@{
-                if (!controls || submitted) return@save
+                if (!canSave || submitted) return@save
                 vm.perform {
                     submitted = true
                     try {
-                        api.request(
-                            if (initial == null) "POST" else "PUT",
+                        api.pluginOperation(
                             "${location.path}/${segment(collection.name)}${initial?.let { "/${segment(it.id)}" }.orEmpty()}",
                             buildJsonObject {
                                 put("name", name.trim())
@@ -429,6 +495,7 @@ private fun ResourceEditor(
                                 initial?.let { put("revision", it.revision) }
                                 location.setupRevision?.let { put("setupRevision", it) }
                             },
+                            method = if (initial == null) "POST" else "PUT",
                         )
                         secrets = emptyMap()
                         ordinaryDraft.discard()
@@ -464,17 +531,52 @@ private fun ResourceEditor(
             enabled = controls,
         )
         if (collection.parent != null && controls)
-            Choice("Parent", parent, parents.map { it.id to it.name }) { parent = it }
+            Choice("Parent", parent, parents.map { it.id to it.name }) {
+                parent = it
+                refresh("parentId")
+            }
         PluginFields(
             collection.settings,
             values,
-            { key, value -> values = values + (key to value) },
+            { key, value ->
+                values = values + (key to value)
+                refresh(key)
+            },
             secrets,
-            { key, value -> secrets = secrets + (key to value) },
+            { key, value ->
+                secrets = secrets + (key to value)
+                refresh(key)
+            },
             initial?.secretKeys.orEmpty(),
             enabled = controls,
+            options = completion?.options.orEmpty(),
+            errors = completion?.errors.orEmpty(),
         )
+        completion?.let { result ->
+            result.errors
+                .filterKeys { key ->
+                    key == "form" ||
+                        key == "parentId" ||
+                        collection.settings.any { it.key == key && it.hidden }
+                }
+                .values
+                .forEach { FormError(it) }
+            PluginViewNodes(result.view, true, {}, { _, _, _ -> })
+        }
+        if (completing)
+            Text("Vérification des réglages…", style = MaterialTheme.typography.bodySmall)
+        formFailure?.let {
+            FormError(it)
+            TextButton(onClick = { refresh() }, enabled = controls && !completing) {
+                Text("Réessayer la vérification")
+            }
+        }
         Toggle("Activé", enabled) { if (controls) enabled = it }
     }
-    DisposableEffect(Unit) { onDispose { secrets = emptyMap() } }
+    DisposableEffect(Unit) {
+        onDispose {
+            formGeneration.incrementAndGet()
+            secrets = emptyMap()
+        }
+    }
 }

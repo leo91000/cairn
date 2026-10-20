@@ -833,8 +833,11 @@ abstract class PluginsCases {
         }
     }
 
-    @Test
-    fun anOwnerResumesSetupAndActivatesItsPreparedResources() {
+    @Test fun anOwnerResumesSetupAndActivatesItsPreparedResources() = ownerSetup(false)
+
+    @Test fun setupFormsAndActivationFollowManagerOperations() = ownerSetup(true)
+
+    private fun ownerSetup(tracked: Boolean) {
         val entry =
             wireJson.decodeFromString<PluginEntry>(
                 """{
@@ -858,11 +861,33 @@ abstract class PluginsCases {
         val writes = CopyOnWriteArrayList<Pair<String, JsonObject>>()
         val active = java.util.concurrent.atomic.AtomicReference<PluginConnection?>(null)
         val root = "/plugins/workspace-service/setup-drafts"
+        val operations = java.util.concurrent.ConcurrentHashMap<String, String>()
+        val operationReads = AtomicInteger()
+        fun operation(id: String, result: String): String {
+            if (!tracked) return result
+            operations[id] = result
+            return buildJsonObject { put("operation", id) }.toString()
+        }
         MockWebServer().use { server ->
             server.dispatcher =
                 dispatcher(
                     read = { path ->
                         when {
+                            path.contains("/plugins/packages/operations/") -> {
+                                operationReads.incrementAndGet()
+                                val id = path.substringAfterLast('/')
+                                val result =
+                                    operations[id] ?: error("Unknown fixture operation $id")
+                                if (id == "activate") {
+                                    active.set(wireJson.decodeFromString<PluginConnection>(result))
+                                    draft.set(null)
+                                }
+                                buildJsonObject {
+                                    put("state", "completed")
+                                    put("result", wireJson.parseToJsonElement(result))
+                                }
+                                    .toString()
+                            }
                             path.endsWith("/plugins") ->
                                 wireJson.encodeToString(
                                     PluginCatalog(
@@ -886,7 +911,10 @@ abstract class PluginsCases {
                     writes.add(path to input)
                     when {
                         path.endsWith("$root/setup1/form") ->
-                            """{"options":{},"values":{"setupIdentity":"setup1"},"errors":{},"view":[{"type":"alert","tone":"info","title":"Prepare the service","text":"Save settings before adding workspaces."}]}"""
+                            operation(
+                                "form-${writes.size}",
+                                """{"options":{},"values":{"setupIdentity":"setup1"},"errors":{},"view":[{"type":"alert","tone":"info","title":"Prepare the service","text":"Save settings before adding workspaces."}]}""",
+                            )
                         path.endsWith(root) || path.endsWith("$root/setup1") -> {
                             val value = buildJsonObject {
                                 put("id", "setup1")
@@ -922,7 +950,7 @@ abstract class PluginsCases {
                             value.toString()
                         }
                         path.endsWith("$root/setup1/activate") -> {
-                            active.set(
+                            val connection =
                                 PluginConnection(
                                     id = "setup1",
                                     pluginId = "workspace-service",
@@ -930,9 +958,11 @@ abstract class PluginsCases {
                                     settings = draft.get()!!["settings"]!!.jsonObject,
                                     status = PluginStatus("ready"),
                                 )
-                            )
-                            draft.set(null)
-                            wireJson.encodeToString(active.get()!!)
+                            if (!tracked) {
+                                active.set(connection)
+                                draft.set(null)
+                            }
+                            operation("activate", wireJson.encodeToString(connection))
                         }
                         path.endsWith("/connections/setup1/resources/workspace/workspace1") -> {
                             if (input["name"] != null) {
@@ -985,6 +1015,7 @@ abstract class PluginsCases {
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
+            if (tracked) assertTrue(operationReads.get() > 0)
             assertEquals(
                 "clientId",
                 writes
@@ -1045,7 +1076,16 @@ abstract class PluginsCases {
             }
             capture("plugin-setup-prepared-resources")
             compose.onNodeWithText("Activer l’instance").performScrollTo().performClick()
-            compose.waitUntil(10000) { active.get() != null }
+            // Follow the actual screen so Robolectric processes the response and
+            // subsequent manager polling on the UI thread before inspecting the fixture.
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Configurer Workspace service")
+                    .fetchSemanticsNodes()
+                    .isEmpty()
+            }
+            assertNotNull(active.get())
+            assertNull(draft.get())
             val activation = writes.single { it.first.endsWith("/activate") }.second
             assertEquals("rev2", activation["revision"]?.jsonPrimitive?.content)
             assertEquals(JsonArray(emptyList()), activation["agentIds"])
@@ -3695,6 +3735,228 @@ abstract class PluginsCases {
                 )
                 assertTrue(writes.isEmpty())
             } finally {
+                models.clear()
+            }
+        }
+    }
+
+    @Test
+    fun activeResourceFormsDiscardStaleParentsAndRestoreWithoutSecrets() = scopedResourceForm(false)
+
+    @Test
+    fun preparedResourceFormsDiscardStaleParentsAndRestoreWithoutSecrets() =
+        scopedResourceForm(true)
+
+    private fun scopedResourceForm(prepared: Boolean) {
+        val workspaces = PluginResourceCollection("workspace", "Workspaces", "Workspace")
+        val channels =
+            PluginResourceCollection(
+                name = "channel",
+                title = "Channels",
+                singular = "Channel",
+                parent = "workspace",
+                form = true,
+                settings =
+                    listOf(
+                        PluginSetting(
+                            "channel",
+                            "Channel",
+                            type = "select",
+                            dynamic = true,
+                            required = true,
+                        ),
+                        PluginSetting("verified", "Verified name", hidden = true),
+                        PluginSetting("token", "Credential", type = "secret"),
+                    ),
+            )
+        val manifest = PluginManifest(id = "scoped-form", resources = listOf(workspaces, channels))
+        val location =
+            PluginResourceLocation(manifest.id, "app", if (prepared) "setup-r1" else null)
+        val engineering =
+            PluginResource(
+                id = "engineering",
+                connectionId = "app",
+                collection = "workspace",
+                name = "Engineering",
+                revision = "e1",
+            )
+        val sales = engineering.copy(id = "sales", name = "Sales", revision = "s1")
+        val previews = CopyOnWriteArrayList<JsonObject>()
+        val writes = CopyOnWriteArrayList<JsonObject>()
+        val stored = AtomicReference<PluginResource?>(null)
+        val hold = java.util.concurrent.atomic.AtomicBoolean(true)
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val released = CountDownLatch(1)
+        val restoration = StateRestorationTester(compose)
+        fun waitEnabled(label: String) =
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText(label) and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+        MockWebServer().use { server ->
+            server.dispatcher =
+                dispatcher(
+                    read = { path ->
+                        when {
+                            path.endsWith("${location.path}/workspace") ->
+                                wireJson.encodeToString(PluginPage(listOf(engineering, sales)))
+                            path.endsWith("${location.path}/channel") ->
+                                wireJson.encodeToString(PluginPage(listOfNotNull(stored.get())))
+                            else -> null
+                        }
+                    }
+                ) { path, body ->
+                    if (!path.contains(location.path)) return@dispatcher null
+                    val input = wireJson.parseToJsonElement(body).jsonObject
+                    if (path.endsWith("/channel/form")) {
+                        previews += input
+                        val parent = input["parentId"]?.jsonPrimitive?.content
+                        if (parent == "engineering" && hold.compareAndSet(true, false)) {
+                            entered.countDown()
+                            check(release.await(20, TimeUnit.SECONDS))
+                            released.countDown()
+                        }
+                        if (parent == null)
+                            """{"errors":{"parentId":"Choose a workspace first."}}"""
+                        else
+                            wireJson.encodeToString(
+                                PluginForm(
+                                    options =
+                                        mapOf(
+                                            "channel" to
+                                                listOf(
+                                                    PluginOption(
+                                                        "$parent-general",
+                                                        "$parent general",
+                                                    )
+                                                )
+                                        ),
+                                    values =
+                                        buildJsonObject { put("verified", "$parent verified") },
+                                    view =
+                                        buildJsonArray {
+                                            add(
+                                                buildJsonObject {
+                                                    put("type", "alert")
+                                                    put("tone", "info")
+                                                    put("text", "Only $parent is queried.")
+                                                }
+                                            )
+                                        },
+                                )
+                            )
+                    } else if (path.endsWith("/channel")) {
+                        writes += input
+                        val resource =
+                            PluginResource(
+                                id = "saved",
+                                connectionId = "app",
+                                collection = "channel",
+                                parentId = input["parentId"]!!.jsonPrimitive.content,
+                                name = input["name"]!!.jsonPrimitive.content,
+                                revision = "c1",
+                                settings = input["settings"]!!.jsonObject,
+                                secretKeys = listOf("token"),
+                            )
+                        stored.set(resource)
+                        wireJson.encodeToString(resource)
+                    } else null
+                }
+            server.start()
+            val vm =
+                show(server, restoration) { model, state ->
+                    Page { PluginResources(model, state, manifest, location) }
+                }
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            try {
+                waitEnabled("Ajouter · Channel")
+                compose.onNodeWithText("Ajouter · Channel").performScrollTo().performClick()
+                waitEnabled("Nom · Channel")
+                compose
+                    .onNodeWithText("Nom · Channel")
+                    .performScrollTo()
+                    .performTextInput("Support")
+                compose.onNodeWithText("Choisir…").performScrollTo().performClick()
+                compose.onNode(hasText("Engineering") and hasClickAction()).performClick()
+                compose.waitUntil(10000) { entered.count == 0L }
+                compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                compose
+                    .onNode(hasText("Engineering") and hasClickAction())
+                    .performScrollTo()
+                    .performClick()
+                compose.onNode(hasText("Sales") and hasClickAction()).performClick()
+                waitEnabled("sales general")
+                compose
+                    .onNodeWithContentDescription("sales general")
+                    .performScrollTo()
+                    .performClick()
+                waitEnabled("Enregistrer")
+                release.countDown()
+                compose.waitUntil(10000) { released.count == 0L }
+                compose.waitForIdle()
+                compose.onNodeWithText("Only sales is queried.").assertExists()
+                compose.onNodeWithText("engineering general").assertDoesNotExist()
+                compose
+                    .onNodeWithText("Credential")
+                    .performScrollTo()
+                    .performTextInput("fixture-secret")
+                waitEnabled("Enregistrer")
+                val before = previews.size
+                restoration.emulateSavedInstanceStateRestore()
+                waitEnabled("Enregistrer")
+                compose.waitUntil(10000) { previews.size > before }
+                compose
+                    .onNodeWithText("Nom · Channel")
+                    .performScrollTo()
+                    .assertTextContains("Support")
+                compose
+                    .onNodeWithText("Credential")
+                    .performScrollTo()
+                    .assertTextEquals("Credential", "")
+                assertEquals(JsonObject(emptyMap()), previews.last()["secrets"])
+                assertEquals("sales", previews.last()["parentId"]?.jsonPrimitive?.content)
+                assertEquals(
+                    "sales-general",
+                    previews.last()["settings"]?.jsonObject?.get("channel")?.jsonPrimitive?.content,
+                )
+                assertTrue(writes.isEmpty())
+                compose.onNodeWithText("Credential").performTextInput("replacement-secret")
+                waitEnabled("Enregistrer")
+                capture(if (prepared) "prepared-resource-form" else "active-resource-form")
+                compose.onNodeWithText("Enregistrer").performClick()
+                waitEnabled("Modifier Support")
+                assertEquals(1, writes.size)
+                assertEquals(
+                    "sales verified",
+                    writes
+                        .single()["settings"]
+                        ?.jsonObject
+                        ?.get("verified")
+                        ?.jsonPrimitive
+                        ?.content,
+                )
+                assertEquals(
+                    "replacement-secret",
+                    writes.single()["secrets"]?.jsonObject?.get("token")?.jsonPrimitive?.content,
+                )
+                assertEquals(
+                    if (prepared) JsonPrimitive("setup-r1") else null,
+                    writes.single()["setupRevision"],
+                )
+                compose.onNodeWithText("Modifier Support").performScrollTo().performClick()
+                waitEnabled("Enregistrer")
+                compose.waitUntil(10000) {
+                    previews.last()["resource"]?.jsonPrimitive?.content == "saved"
+                }
+                assertEquals("c1", previews.last()["revision"]?.jsonPrimitive?.content)
+                assertEquals(JsonObject(emptyMap()), previews.last()["secrets"])
+                compose.onNodeWithContentDescription("Fermer").performClick()
+                assertEquals(1, writes.size)
+            } finally {
+                release.countDown()
                 models.clear()
             }
         }

@@ -30,6 +30,9 @@
 --                     { values, credential, secrets, instance?, changed?, submit, setup? }
 --                     setup = {revision, expiresAt, urls = {webhooks: {[name]: url}, oauthCallback}}
 --                     appears only for an owner-bound persisted configuration draft
+--                     or a collection declaring form=true: {instance, app, resource,
+--                     values, changed?, submit}. resource={collection,id?,parent?,secrets};
+--                     app/parent contain nonsecret settings; secrets are names only.
 --                     -> FormResult; http and exec use the draft's credential and secrets
 --   webhook           a verified signed public POST         {endpoint, method, headers, body, instance, setup}
 --                     setup=true accepts only declared setup challenges; all host capabilities are refused
@@ -63,7 +66,11 @@ export type HttpRequest = {
     -- true adds the instance's credential using the manifest's "credential" rule; a
     -- table adds a secret field to one header. The script never sees the value.
     auth: (boolean | { secret: string, header: string?, prefix: string?, resource: string? }
-        | { resource: string, oauth: string })?, -- host-managed bearer token; saved HTTP only
+        | { resource: string, oauth: string }
+        -- Resource form only: relative, host-bound credentials. A new self may use
+        -- typed secrets; OAuth needs a saved self or the selected parent. Owner-only.
+        | { configuration: "self" | "parent", secret: string, header: string?, prefix: string? }
+        | { configuration: "self" | "parent", oauth: string })?,
     -- The instance to act for, in commands and tools granted several.
     instance: string?,
 }
@@ -113,7 +120,8 @@ export type Component = { type: string, [string]: Json }
 export type FieldOption = { value: string, label: string, description: string?, disabled: boolean? }
 
 -- What the `form` handler returns. `values` may set any declared non-secret setting,
--- hidden ones included; errors are keyed by setting, "credential" or "form".
+-- hidden ones included. Root errors also allow "credential"/"form"; resource
+-- errors allow "parentId"/"form". Resource results use only their collection schema.
 export type FormResult = {
     options: { [string]: { FieldOption } }?,
     values: { [string]: Json }?,
@@ -142,6 +150,17 @@ export type Resource = {
     settings: { [string]: Json },
     secretKeys: { string }, -- names only; auth.resource injects a value in HTTP
     updatedAt: number,
+}
+
+-- A collection declaring `form = true` uses the package's shared form handler.
+-- App and parent metadata are nonsecret; credential values remain in the host.
+export type ResourceFormInput = {
+    instance: string,
+    app: { id: string, name: string, enabled: boolean, settings: { [string]: Json }, secrets: { string } },
+    resource: { collection: string, id: string?, parent: Resource?, secrets: { string } },
+    values: { [string]: Json },
+    changed: string?,
+    submit: boolean,
 }
 
 export type HttpResponse = {

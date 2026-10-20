@@ -398,7 +398,17 @@ pub(crate) async fn authorization(
         return Err(Error::bad("Invalid credential header."));
     }
     let key = rule.get("secret").and_then(Value::as_str).unwrap_or("");
-    let secret = if let Some(resource) = rule.get("resource") {
+    let secret = if let Some(selector) = rule.get("configuration") {
+        let form = context
+            .draft
+            .as_ref()
+            .and_then(|draft| draft.resource.as_ref())
+            .ok_or_else(|| {
+                Error::forbidden("Configuration credentials belong to resource forms.")
+            })?;
+        form.secret(s, selector.as_str().unwrap_or_default(), key)
+            .await?
+    } else if let Some(resource) = rule.get("resource") {
         if context.draft.is_some() {
             return Err(Error::forbidden(
                 "Resource credentials are only available to saved HTTP requests.",
@@ -444,11 +454,37 @@ where
         _ => return Err(invalid("Unsupported HTTP method.")),
     };
     let target = target(s, &context.manifest, text(args, "url"), "https")?;
-    let resource = match args["auth"].get("resource") {
-        Some(value) => {
-            Some(super::resources::reference(s, context, value.as_str().unwrap_or_default()).await?)
+    let configuration = args["auth"].get("configuration");
+    if configuration.is_some()
+        && args["auth"].as_object().is_none_or(|auth| {
+            auth.keys().any(|key| {
+                !["configuration", "secret", "header", "prefix", "oauth"].contains(&key.as_str())
+            })
+        })
+    {
+        return Err(invalid("Invalid configuration authentication."));
+    }
+    let resource = if let Some(selector) = configuration {
+        let form = context
+            .draft
+            .as_ref()
+            .and_then(|draft| draft.resource.as_ref())
+            .ok_or_else(|| {
+                Error::forbidden("Configuration credentials belong to resource forms.")
+            })?;
+        form.selected(selector.as_str().unwrap_or_default())?
+            .cloned()
+            .map(|resource| super::resources::Access::Configuration {
+                form: form.clone(),
+                resource,
+            })
+    } else {
+        match args["auth"].get("resource") {
+            Some(value) => Some(super::resources::Access::Operational(
+                super::resources::reference(s, context, value.as_str().unwrap_or_default()).await?,
+            )),
+            None => None,
         }
-        None => None,
     };
     let mut request = s
         .plugins
@@ -503,7 +539,7 @@ where
         request = request.body(body.to_owned());
     }
     let oauth = if let Some(name) = args["auth"].get("oauth") {
-        if context.draft.is_some()
+        if (context.draft.is_some() && configuration.is_none())
             || !context.manifest.permits_capability("oauth")
             || args["auth"].as_object().is_none_or(|auth| auth.len() != 2)
         {
@@ -511,13 +547,11 @@ where
                 "Use an OAuth provider and resource on a saved instance.",
             ));
         }
-        let (token, reference) = super::oauth::credential(
-            s,
-            context,
-            text(&args["auth"], "resource"),
-            name.as_str().unwrap_or(""),
-        )
-        .await?;
+        let resource = resource
+            .as_ref()
+            .ok_or_else(|| Error::bad("Save the OAuth resource or select its parent first."))?;
+        let (token, reference) =
+            super::oauth::credential_for(s, context, resource, name.as_str().unwrap_or("")).await?;
         request = request.bearer_auth(token);
         Some(reference)
     } else {
@@ -579,10 +613,14 @@ where
 async fn recheck_http_access(
     s: &Service,
     context: &Context,
-    resource: Option<&super::resources::Reference>,
+    resource: Option<&super::resources::Access>,
     oauth: Option<&super::oauth::Reference>,
 ) -> Result<()> {
-    if resource.is_some() || oauth.is_some() || context.resource_grant.is_some() {
+    let form = context
+        .draft
+        .as_ref()
+        .and_then(|draft| draft.resource.clone());
+    if resource.is_some() || oauth.is_some() || context.resource_grant.is_some() || form.is_some() {
         let connection = context.connection.clone();
         let resource = resource.cloned();
         let oauth = oauth.cloned();
@@ -596,7 +634,10 @@ async fn recheck_http_access(
                     super::grants::recheck_in(db, grant)?;
                 }
                 if let Some(resource) = &resource {
-                    super::resources::recheck_in(db, &connection, resource)?;
+                    resource.current(db, &connection)?;
+                }
+                if let Some(form) = &form {
+                    form.current(db)?;
                 }
                 if let Some(oauth) = &oauth {
                     super::oauth::recheck_in(&vault, db, oauth)?;

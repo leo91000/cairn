@@ -113,8 +113,7 @@ internal fun PluginSetup(
             try {
                 val result =
                     decodePluginForm(
-                        vm.api.send<JsonElement>(
-                            "POST",
+                        vm.api.pluginOperation(
                             "$path/form",
                             buildJsonObject {
                                 put("revision", revision)
@@ -360,8 +359,7 @@ internal fun PluginSetup(
                             (!manifest.delegates || agentId.isNotBlank()),
                 ) {
                     vm.perform {
-                        api.request(
-                            "POST",
+                        api.pluginOperation(
                             "$path/activate",
                             buildJsonObject {
                                 put("revision", revision)

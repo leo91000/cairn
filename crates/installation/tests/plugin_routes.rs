@@ -6059,15 +6059,25 @@ async fn queued_routed_request() -> QueuedRoutedRequest {
 }
 
 async fn queued_routed_request_with_mode(mode: &str) -> QueuedRoutedRequest {
-    let (_root, s, instance, resource, app) = fixture().await;
-    s.accounts
-        .create(
-            &s,
-            cairn_installation::provider::Provider::Codex,
-            "Not connected fixture",
-        )
-        .await
-        .unwrap();
+    queued_routed_request_for_execution(mode, false).await
+}
+
+async fn queued_routed_request_for_execution(mode: &str, host: bool) -> QueuedRoutedRequest {
+    let (_root, s, instance, resource, app) = if host {
+        configured_fixture_with_runner(None, "").await
+    } else {
+        fixture().await
+    };
+    if !host {
+        s.accounts
+            .create(
+                &s,
+                cairn_installation::provider::Provider::Codex,
+                "Not connected fixture",
+            )
+            .await
+            .unwrap();
+    }
     let mut access = json!({"projects": [], "installation": false, "github": false});
     if mode == "everyone" {
         access["sandbox"] = json!("read-only");
@@ -6127,7 +6137,9 @@ async fn queued_routed_request_with_mode(mode: &str) -> QueuedRoutedRequest {
     assert_eq!(detail["run"]["status"], "queued");
     // A real scheduler pass leaves a valid request waiting for unavailable capacity.
     // This fixture launches no agent process or VM.
-    s.worker.tick(&s).await.unwrap();
+    if !host {
+        s.worker.tick(&s).await.unwrap();
+    }
     let waiting = s.store.run(&id).await.unwrap();
     assert_eq!(waiting["status"], "queued");
     assert!(s.worker.active.lock().await.is_empty());
@@ -6796,4 +6808,106 @@ async fn approval_replacement_during_ingress_authority_check_keeps_no_content_or
         s.store.kv(&dedupe).await.unwrap().is_none(),
         "Rejected ingress consumed its event ID"
     );
+}
+
+#[tokio::test]
+async fn preparing_routed_runs_retry_authority_outages_without_owner_resume() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    // Fail before mark_running, then after access preparation has started.
+    for outage_after in [2, 3] {
+        let QueuedRoutedRequest { _root, s, run, .. } =
+            queued_routed_request_for_execution("requests", true).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let restored = Arc::new(AtomicBool::new(false));
+        let resumed_calls = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (observed, available) = (calls.clone(), restored.clone());
+        let (preparing, entering, releasing) =
+            (resumed_calls.clone(), entered.clone(), release.clone());
+        let authority = axum::Router::new().route(
+            "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+            axum::routing::get(move || {
+                let call = observed.fetch_add(1, Ordering::SeqCst);
+                let restored = available.load(Ordering::SeqCst);
+                let resumed = restored && preparing.fetch_add(1, Ordering::SeqCst) >= 2;
+                let (entered, release) = (entering.clone(), releasing.clone());
+                async move {
+                    if call >= outage_after && !restored {
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "Synthetic preparation outage",
+                        )
+                            .into_response();
+                    }
+                    let access = if resumed {
+                        entered.notify_one();
+                        release.notified().await;
+                        "owner-rejoined"
+                    } else {
+                        "fixture-owner"
+                    };
+                    axum::Json(json!({
+                        "owner": {"account_id": "fixture-owner", "access_id": access},
+                        "members": [],
+                    }))
+                    .into_response()
+                }
+            }),
+        );
+        let (origin, authority_server) = common::serve_locally(authority).await;
+        let identity_path = s.config.data_dir.join("installation-relay/identity.json");
+        let mut identity: Value =
+            serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+        identity["origin"] = json!(origin);
+        std::fs::write(identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+        s.worker.tick(&s).await.unwrap();
+        common::eventually(
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_millis(10),
+            async || {
+                (calls.load(Ordering::SeqCst) > outage_after
+                    && s.worker.active.lock().await.is_empty())
+                .then_some(())
+            },
+        )
+        .await;
+        let waiting = s.store.run(&run).await.unwrap();
+        assert_eq!(
+            waiting["status"], "queued",
+            "Preparation outage lost admitted work: {waiting}"
+        );
+        assert_eq!(
+            waiting["accountWaitReason"],
+            "Waiting to verify the requester's source access."
+        );
+        assert!(waiting["error"].is_null());
+
+        // Ordinary admission reaches launch again for the same run without an
+        // owner resume. Hold that launch check before any agent process can run.
+        restored.store(true, Ordering::SeqCst);
+        s.worker.tick(&s).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+            .await
+            .unwrap();
+        assert!(s.worker.active.lock().await.contains_key(&run));
+        assert_eq!(resumed_calls.load(Ordering::SeqCst), 3);
+        // A fresh owner generation still revokes the preparing run's old proof;
+        // recovery must not replace its original admitted authority.
+        release.notify_one();
+        let cancelled = common::eventually(
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_millis(10),
+            async || {
+                let current = s.store.run(&run).await.unwrap();
+                (current["status"] == "cancelled" && s.worker.active.lock().await.is_empty())
+                    .then_some(current)
+            },
+        )
+        .await;
+        authority_server.abort();
+        assert_eq!(cancelled["id"], run);
+        assert_eq!(s.chat_list().await.unwrap().len(), 1);
+    }
 }

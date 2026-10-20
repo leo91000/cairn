@@ -644,9 +644,21 @@ abstract class NodePlacementCases {
                     .int,
             )
             compose.onNodeWithText("Configurer", substring = false).performScrollTo().performClick()
+            // The previous save may close its sheet before releasing busy.
+            // Wait for the actual editor before sending text or toggle gestures.
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Enregistrer") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
             compose.onNodeWithText("Budget CPU partagé").performTextReplacement("3")
             compose.onNodeWithText("Slots d’exécution").performTextReplacement("12")
-            compose.onNodeWithText("Autoriser Agent test").performScrollTo().performClick()
+            compose
+                .onNodeWithText("Autoriser Agent test")
+                .performScrollTo()
+                .performClick()
+                .assertIsOn()
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(10000) {
                 writes.any { it.first == "/api/installations/fixture/api/nodes/node" }

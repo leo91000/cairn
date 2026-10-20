@@ -14,6 +14,9 @@ pub struct ResourceCollection {
     pub parent: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub delegation: bool,
+    /// The package's form handler completes this collection's configuration.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub form: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub settings: Vec<Value>,
 }

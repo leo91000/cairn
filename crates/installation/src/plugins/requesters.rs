@@ -318,6 +318,10 @@ pub(crate) struct RunRequester {
 pub(crate) struct ExecutionSource(RunRequester);
 
 impl ExecutionSource {
+    pub(crate) fn is_unavailable(error: &Error) -> bool {
+        matches!(error.status, 408 | 429 | 502 | 503 | 504)
+    }
+
     pub(crate) fn is_revoked(error: &Error) -> bool {
         matches!(error.status, 401 | 403 | 404 | 409)
     }

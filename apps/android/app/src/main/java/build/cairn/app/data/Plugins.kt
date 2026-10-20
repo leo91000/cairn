@@ -182,6 +182,7 @@ data class PluginResourceCollection(
     val singular: String = "",
     val parent: String? = null,
     val delegation: Boolean = false,
+    val form: Boolean = false,
     val settings: List<PluginSetting> = emptyList(),
 )
 

@@ -15,6 +15,7 @@ import {
   pluginSecrets,
   pluginSettings,
 } from '../plugin-form-values'
+import { pluginOperation } from '../plugin-operations'
 import {
   delegates,
   eligibleAgent,
@@ -76,15 +77,12 @@ async function complete(changed?: string) {
   formFailure.value = ''
   completing.value = true
   try {
-    const result = formResult(await api<FormResult | null>(`${path}/form`, {
-      method: 'POST',
-      body: JSON.stringify({
-        revision: draft.value.revision,
-        settings: settings(),
-        secrets: secrets.value,
-        ...(token.value ? { token: token.value } : {}),
-        changed,
-      }),
+    const result = formResult(await pluginOperation<FormResult | null>(`${path}/form`, {
+      revision: draft.value.revision,
+      settings: settings(),
+      secrets: secrets.value,
+      ...(token.value ? { token: token.value } : {}),
+      changed,
     }))
     if (request !== asked)
       return
@@ -158,14 +156,11 @@ async function activate() {
     return
   await action(async () => {
     const agent = state.agents.find(agent => agent.id === agentId.value)
-    await api(`${path}/activate`, {
-      method: 'POST',
-      body: JSON.stringify({
-        revision: draft.value.revision,
-        enabled: enabled.value,
-        agentIds: agentIds.value,
-        ...(delegates(props.manifest) && { agentId: agentId.value, projectId: agent?.access.projects?.[0] ?? null, accessMode: 'requests' }),
-      }),
+    await pluginOperation(`${path}/activate`, {
+      revision: draft.value.revision,
+      enabled: enabled.value,
+      agentIds: agentIds.value,
+      ...(delegates(props.manifest) && { agentId: agentId.value, projectId: agent?.access.projects?.[0] ?? null, accessMode: 'requests' }),
     })
     emit('activated')
   })

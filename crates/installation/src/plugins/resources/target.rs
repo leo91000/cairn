@@ -56,6 +56,17 @@ impl Target {
         }
     }
 
+    pub(crate) fn connection(&self) -> Connection {
+        match self {
+            Self::Active { connection, .. } => (**connection).clone(),
+            Self::Setup { draft, .. } => {
+                let mut connection = draft.connection();
+                connection.revision.clone_from(&draft.revision);
+                connection
+            }
+        }
+    }
+
     pub(crate) fn manifest(&self) -> &Manifest {
         match self {
             Self::Active { approved, .. } | Self::Setup { approved, .. } => {

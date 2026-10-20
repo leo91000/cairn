@@ -351,6 +351,10 @@ pub(crate) async fn status_with(
 /// Validates settings against the manifest schema. Unknown keys are rejected; secret
 /// fields are saved separately with [`secrets`].
 pub fn settings(manifest: &Manifest, input: &Value) -> Result<Value> {
+    settings_fields(&manifest.settings, input)
+}
+
+pub(crate) fn settings_fields(fields: &[Value], input: &Value) -> Result<Value> {
     let empty = Map::new();
     let input = match input {
         Value::Object(map) => map,
@@ -358,19 +362,14 @@ pub fn settings(manifest: &Manifest, input: &Value) -> Result<Value> {
         _ => return Err(Error::bad("Plugin settings must be an object.")),
     };
     if let Some(key) = input.keys().find(|key| {
-        !manifest
-            .settings
+        !fields
             .iter()
             .any(|field| field["key"] == **key && field["type"] != "secret")
     }) {
         return Err(Error::bad(format!("Unknown plugin setting: {key}.")));
     }
     let mut output = Map::new();
-    for field in manifest
-        .settings
-        .iter()
-        .filter(|field| field["type"] != "secret")
-    {
+    for field in fields.iter().filter(|field| field["type"] != "secret") {
         let key = text(field, "key").to_owned();
         // An empty choice is no choice, e.g. a dynamic channel reset by the package.
         let empty = |value: &&Value| {
@@ -527,14 +526,21 @@ pub fn secrets(
     input: &Value,
     saved: &Map<String, Value>,
 ) -> Result<Map<String, Value>> {
+    secret_fields(&manifest.settings, input, saved)
+}
+
+pub(crate) fn secret_fields(
+    settings: &[Value],
+    input: &Value,
+    saved: &Map<String, Value>,
+) -> Result<Map<String, Value>> {
     let empty = Map::new();
     let input = match input {
         Value::Object(map) => map,
         Value::Null => &empty,
         _ => return Err(Error::bad("Plugin secrets must be an object.")),
     };
-    let fields = manifest
-        .settings
+    let fields = settings
         .iter()
         .filter(|field| field["type"] == "secret")
         .collect::<Vec<_>>();
@@ -828,6 +834,7 @@ pub(crate) async fn prepare(
             secrets: secret_fields.clone(),
             setup: setup.cloned().map(Box::new),
             owner: request_owner,
+            resource: None,
             urls: if setup.is_some() {
                 Some(forms::setup_urls(s, &package.manifest, &connection_id, input).await?)
             } else {

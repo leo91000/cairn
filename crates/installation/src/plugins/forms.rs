@@ -24,6 +24,7 @@ pub struct Draft {
     pub setup: Option<Box<super::setup::SetupDraft>>,
     pub urls: Option<Value>,
     pub(crate) owner: Option<Arc<super::operations::Owner>>,
+    pub(crate) resource: Option<Arc<super::resources::forms::Form>>,
 }
 
 /// A credential entered during setup; incomplete drafts may omit it.
@@ -50,13 +51,9 @@ pub(crate) fn typed_credential(manifest: &Manifest, input: &Value) -> Result<Opt
 }
 
 /// Settings as typed so far: valid values only, nothing required yet.
-fn values(manifest: &Manifest, input: &Value) -> Result<Value> {
+pub(super) fn partial_values(fields: &[Value], input: &Value) -> Result<Value> {
     let mut output = Map::new();
-    for field in manifest
-        .settings
-        .iter()
-        .filter(|field| field["type"] != "secret")
-    {
+    for field in fields.iter().filter(|field| field["type"] != "secret") {
         let key = text(field, "key");
         if let Some(value) = input.get(key).filter(|value| !value.is_null())
             && let Ok(value) = connections::setting(field, value)
@@ -164,11 +161,12 @@ pub(crate) async fn form_owned(
         setup: None,
         urls: None,
         owner: Some(owner),
+        resource: None,
     };
     let changed = input["changed"].as_str().filter(|key| {
         *key == "credential" || manifest.settings.iter().any(|field| field["key"] == *key)
     });
-    let settings = values(manifest, &input["settings"])?;
+    let settings = partial_values(&manifest.settings, &input["settings"])?;
     let result = run(
         s,
         &package,
@@ -199,8 +197,8 @@ pub(crate) async fn setup_form(
         return Err(Error::not_found("This plugin has no instance form."));
     }
     let saved = secret_values(s, &setup.id).await?;
-    let settings = values(
-        &package.manifest,
+    let settings = partial_values(
+        &package.manifest.settings,
         input.get("settings").unwrap_or(&setup.settings),
     )?;
     let changed = input["changed"].as_str().filter(|key| {
@@ -227,6 +225,7 @@ pub(crate) async fn setup_form(
         setup: Some(Box::new(setup)),
         urls: Some(urls),
         owner: None,
+        resource: None,
     };
     run(s, package, Some(&instance), settings, draft, changed, false).await
 }
@@ -274,6 +273,13 @@ pub(crate) async fn submit(
             .map(|_| instance)
     };
     let result = run(s, package, existing, settings.clone(), draft, None, true).await?;
+    require_valid(&package.manifest.settings, &result)?;
+    let mut merged = settings;
+    merge_values(&mut merged, &result);
+    connections::settings(&package.manifest, &merged)
+}
+
+pub(crate) fn require_valid(settings: &[Value], result: &Value) -> Result<()> {
     if let Some(errors) = result["errors"]
         .as_object()
         .filter(|errors| !errors.is_empty())
@@ -282,9 +288,7 @@ pub(crate) async fn submit(
         let message = errors
             .get("form")
             .or_else(|| {
-                package
-                    .manifest
-                    .settings
+                settings
                     .iter()
                     .find_map(|field| errors.get(text(field, "key")))
             })
@@ -293,8 +297,14 @@ pub(crate) async fn submit(
             .unwrap_or("Check the form.");
         return Err(Error::bad(message));
     }
-    let mut merged = settings;
-    if let (Some(target), Some(values)) = (merged.as_object_mut(), result["values"].as_object()) {
+    Ok(())
+}
+
+pub(crate) fn merge_values(settings: &mut Value, result: &Value) {
+    if settings.is_null() {
+        *settings = json!({});
+    }
+    if let (Some(target), Some(values)) = (settings.as_object_mut(), result["values"].as_object()) {
         for (key, value) in values {
             if value.is_null() {
                 target.remove(key);
@@ -303,5 +313,4 @@ pub(crate) async fn submit(
             }
         }
     }
-    connections::settings(&package.manifest, &merged)
 }

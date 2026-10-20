@@ -184,6 +184,124 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         .collect::<Vec<_>>();
     let body = &input.body;
     let version = || crate::validation::text(body, "version").to_owned();
+    // Resource forms use the same tracked preparation as instance forms. Keep
+    // the configuration target and owner captured before any cold worker runs.
+    let resource_handler = match (input.method.as_str(), parts.as_slice()) {
+        (
+            "POST",
+            [
+                "plugins",
+                id,
+                namespace @ ("connections" | "setup-drafts"),
+                root,
+                "resources",
+                collection,
+                "form",
+            ],
+        ) => Some((*id, *namespace, *root, *collection, None, true)),
+        (
+            "POST",
+            [
+                "plugins",
+                id,
+                namespace @ ("connections" | "setup-drafts"),
+                root,
+                "resources",
+                collection,
+            ],
+        ) => Some((*id, *namespace, *root, *collection, None, false)),
+        (
+            "PUT",
+            [
+                "plugins",
+                id,
+                namespace @ ("connections" | "setup-drafts"),
+                root,
+                "resources",
+                collection,
+                resource,
+            ],
+        ) => Some((*id, *namespace, *root, *collection, Some(*resource), false)),
+        _ => None,
+    };
+    if let Some((id, namespace, root, collection, resource, preview)) = resource_handler {
+        let account = input
+            .identity
+            .as_ref()
+            .map_or("", |identity| identity.account_id.as_str());
+        let target = if namespace == "setup-drafts" {
+            resources::target::Target::setup(s, id, root, account).await?
+        } else {
+            resources::target::Target::active(s, id, root).await?
+        };
+        if resources::declared(target.manifest(), collection)?.form {
+            let owner = Arc::new(operations::Owner::for_account(s, account).await?);
+            let tracked = program_installation::needs_preparation(s, target.package());
+            let (service, collection, resource, body) = (
+                s.clone(),
+                collection.to_owned(),
+                resource.map(str::to_owned),
+                body.clone(),
+            );
+            let work = async move {
+                if preview {
+                    resources::forms::preview(&service, target, &collection, &body, owner).await
+                } else {
+                    resources::save_for(
+                        &service,
+                        target,
+                        &collection,
+                        &body,
+                        resource.as_deref(),
+                        owner,
+                    )
+                    .await
+                }
+            };
+            return if tracked {
+                s.plugins.operations.start(s.clone(), work)
+            } else {
+                work.await
+            };
+        }
+    }
+    let setup_handler = match (input.method.as_str(), parts.as_slice()) {
+        ("POST", ["plugins", id, "setup-drafts", draft, "form"]) => Some((*id, *draft, true)),
+        ("POST", ["plugins", id, "setup-drafts", draft, "activate"]) => Some((*id, *draft, false)),
+        _ => None,
+    };
+    if let Some((id, draft, form)) = setup_handler {
+        let account = input
+            .identity
+            .as_ref()
+            .map_or("", |identity| identity.account_id.as_str());
+        let owner = operations::Owner::for_account(s, account).await?;
+        let (_, approved) = setup::configuration(s, id, draft, account).await?;
+        let tracked = approved.package.manifest.instance_form
+            && program_installation::needs_preparation(s, &approved.package);
+        let (service, id, draft, account, body) = (
+            s.clone(),
+            id.to_owned(),
+            draft.to_owned(),
+            account.to_owned(),
+            body.clone(),
+        );
+        let work = async move {
+            owner.recheck(&service).await?;
+            // These functions retain the setup's exact owner, revision, expiry
+            // and approval checks, including through final form execution.
+            if form {
+                Box::pin(setup::form(&service, &id, &draft, &account, &body)).await
+            } else {
+                Box::pin(setup::activate(&service, &id, &draft, &account, &body)).await
+            }
+        };
+        return if tracked {
+            s.plugins.operations.start(s.clone(), work)
+        } else {
+            work.await
+        };
+    }
     // Bind warm and tracked handlers to the owner who admitted the request.
     // Cold work may outlive both the relay request and that owner's access.
     let owner_handler = match (input.method.as_str(), parts.as_slice()) {
@@ -323,20 +441,6 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 .as_ref()
                 .map_or("", |identity| identity.account_id.as_str());
             setup::save(s, id, account, body, None).await
-        }
-        ("POST", ["plugins", id, "setup-drafts", draft, "activate"]) => {
-            let account = input
-                .identity
-                .as_ref()
-                .map_or("", |identity| identity.account_id.as_str());
-            Box::pin(setup::activate(s, id, draft, account, body)).await
-        }
-        ("POST", ["plugins", id, "setup-drafts", draft, "form"]) => {
-            let account = input
-                .identity
-                .as_ref()
-                .map_or("", |identity| identity.account_id.as_str());
-            Box::pin(setup::form(s, id, draft, account, body)).await
         }
         (
             _,
@@ -487,7 +591,40 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 "resources",
                 collection,
             ],
-        ) => resources::save(s, id, connection, collection, body, None).await,
+        ) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.account_id.as_str());
+            let owner = Arc::new(operations::Owner::for_account(s, account).await?);
+            Box::pin(resources::save_owned(
+                s, id, connection, collection, body, None, owner,
+            ))
+            .await
+        }
+        (
+            "POST",
+            [
+                "plugins",
+                id,
+                "connections",
+                instance,
+                "resources",
+                collection,
+                "form",
+            ],
+        ) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.account_id.as_str());
+            let owner = Arc::new(operations::Owner::for_account(s, account).await?);
+            let target = resources::target::Target::active(s, id, instance).await?;
+            Box::pin(resources::forms::preview(
+                s, target, collection, body, owner,
+            ))
+            .await
+        }
         (
             "GET",
             [
@@ -533,7 +670,23 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 collection,
                 resource,
             ],
-        ) => resources::save(s, id, connection, collection, body, Some(resource)).await,
+        ) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.account_id.as_str());
+            let owner = Arc::new(operations::Owner::for_account(s, account).await?);
+            Box::pin(resources::save_owned(
+                s,
+                id,
+                connection,
+                collection,
+                body,
+                Some(resource),
+                owner,
+            ))
+            .await
+        }
         (
             "DELETE",
             [

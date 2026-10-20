@@ -419,7 +419,7 @@ budget can carry secret inputs without putting them in the worker's event.
 ### Resource collections
 
 The `resources` capability declares related collections in `resources`:
-`{name, title, singular, parent?, delegation?, settings}`. Each collection uses the
+`{name, title, singular, parent?, delegation?, form?, settings}`. Each collection uses the
 same field schema as instance forms; parent declarations must form an acyclic tree.
 Resources belong to exactly one instance. Parent references cannot cross instances
 or name an unrelated collection. Each instance can keep at most 256 resources;
@@ -442,6 +442,54 @@ metadata. HTTP can select a secret using
 Cairn verifies the resource and every parent before use and after I/O; paused,
 removed or changed resources cannot deliver a result. The package never receives
 the credential. Resource access by agents requires a separate resource grant.
+
+#### Resource configuration forms
+
+A collection declaring `"form": true` uses the package's `form` handler on web
+and Android. POST `.../resources/<collection>/form` with `{settings, secrets?,
+parentId?, resource?, revision?, setupRevision?, changed?}` to preview it. Editing
+a saved resource supplies its ID as `resource` and its exact `revision`; inert
+setup targets also require `setupRevision`. A missing parent can be reported as
+an error before any parent credential is requested.
+
+The event contains `instance`, `app` (the root's nonsecret summary), `resource`
+(`collection`, saved `id` or null, the selected `parent` or null, and secret names),
+`values`, `changed` and `submit`. Parent metadata contains nonsecret settings and
+secret names, never values. The result uses the collection's own fields:
+`{options, values, errors, view}`. Errors may name its fields, `parentId` or `form`;
+derived values cannot set app fields or secrets. Guidance views display content
+and links; action buttons/forms have no configuration action endpoint and remain
+disabled. Instance panels continue to provide package actions.
+
+Only HTTP and declared programs are available during configuration. Unqualified
+HTTP authentication and program secret injection still use the root app's
+credential/secrets. Resource-form HTTP can explicitly select:
+
+```lua
+local response = cairn.http.request({
+    url = "https://api.example.test/channels",
+    auth = { configuration = "parent", oauth = "bot" },
+})
+-- Or: { configuration = "self", secret = "token", prefix = "Bearer " }
+```
+
+`configuration` accepts only `self` or `parent`, bound by the host to this editor.
+A new self may use its temporary typed secrets; OAuth needs a saved self or the
+selected parent. Personal OAuth and arbitrary resource IDs are unavailable here.
+Root, saved-resource and selected-parent/ancestor revisions, exact approval,
+owner access and setup expiry are rechecked around I/O and before publication.
+Owner configuration can inspect paused or inert resources without making them
+operational; ordinary resource references still require every ancestor enabled.
+Owner OAuth uses the same serialized, single-use refresh path and retains setup
+expiry/provenance. An uncertain refresh requires reconnection.
+
+Both clients discard obsolete responses when the editor or parent changes, keep
+typed secrets only in memory, show errors and wait for the current form before
+enabling Save. Saving reruns the package with `submit = true`, validates derived
+nonsecret fields and commits only under the original configuration snapshot and
+resource revision. Form handlers should perform repeatable discovery/validation:
+they may run several times, including again at Save. Dynamic options remain
+bounded to 200 per field; a partial provider directory is not a complete catalogue.
 
 ### Resource grants and operations
 
@@ -532,8 +580,10 @@ Unapproved requests retain the person's identity, never message content.
 Native execution retains the original routed requester while waiting for capacity
 and across account, workspace and runner preparation. The scheduler rechecks it
 before admission and the worker checks it again before starting the agent. A
-withdrawn source cancels queued work; temporary authority lookup failures defer
-admission. Reapproval cannot replace the proof already captured by a preparing run.
+withdrawn source cancels queued work. Temporary authority lookup failures defer
+admission or requeue an execution still in preparation, releasing its account and
+worker reservation before retrying through ordinary admission. Reapproval cannot
+replace the proof already captured by a preparing run.
 
 The per-person generations are host-only. They are never accepted from a plugin
 or an owner form, and only currently listed grants need entries (at most 100).
@@ -988,7 +1038,7 @@ their synchronous summary response. This keeps downloads independent of the
 30-second HTTP relay deadline. Operations have a nine-minute total budget, four
 concurrent slots, and 64 recent in-memory results. A server restart loses operation
 status, not the atomic program/package locks; refresh the plugin and retry if
-needed. Web and Android perform this polling, including approval failures. Cold instance tests, views/actions and form handlers
+needed. Web and Android perform this polling, including approval failures. Cold instance tests, views/actions, setup forms/activation and resource forms/saves
 also use this response when they may prepare an executable; once prepared, their
 ordinary synchronous responses are unchanged. Instance saves without a form
 handler remain synchronous and do not download programs.
@@ -1226,6 +1276,10 @@ executed on a JVM or device in this change. Backend admission now rejects that
 manifest before it can reach either client's field decoder.
 
 ## Client form values (F5)
+
+Instance and resource form callbacks receive the same partial typed values:
+missing or explicitly cleared fields do not gain defaults before Luau runs.
+Final server save completion and required-field validation remain unchanged.
 
 Web instance editors and view forms use pure value transformations, compared with
 Android's native form helpers using `tests/fixtures/plugin-form-values.json`.

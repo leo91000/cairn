@@ -1289,19 +1289,21 @@ pub async fn revoke(
     Ok(json!({ "status": "disconnected" }))
 }
 
-pub(crate) async fn credential(
+pub(crate) async fn credential_for(
     s: &Service,
     context: &capabilities::Context,
-    resource: &str,
+    resource: &resources::Access,
     name: &str,
 ) -> Result<(String, Reference)> {
-    let resource = resources::reference(s, context, resource).await?;
-    let selected = &resource.resource;
+    let selected = resource.resource();
     let provider = provider(&context.manifest, name, &selected.collection)?;
     let mut subject_link = None;
     let mut external_subject = None;
     let mut selected_key = None;
     let actor = if provider.personal.is_some() {
+        let resources::Access::Operational(operational) = resource else {
+            return Err(Error::forbidden("Owner forms cannot use personal OAuth."));
+        };
         let requester = context
             .resource_grant
             .as_ref()
@@ -1312,7 +1314,7 @@ pub(crate) async fn credential(
             requesters::Principal::Account(actor) => Some(actor.clone()),
             requesters::Principal::External(external) => {
                 let selected =
-                    external::selection(s, &context.connection, &resource, external, name)
+                    external::selection(s, &context.connection, operational, external, name)
                         .await?
                         .ok_or_else(|| {
                             Error::forbidden(
@@ -1336,7 +1338,14 @@ pub(crate) async fn credential(
         .await?
         .ok_or_else(|| Error::forbidden("Connect this resource through OAuth first."))?;
     let mut authorization: Authorization = serde_json::from_value(value)?;
-    if authorization.setup.is_some() {
+    let same_setup = match (authorization.setup.as_deref(), resource.setup()) {
+        (None, None) => true,
+        (Some(saved), Some(current)) => {
+            serde_json::to_value(saved)? == serde_json::to_value(current)?
+        }
+        _ => false,
+    };
+    if !same_setup {
         return Err(Error::forbidden(
             "This OAuth authorization has not been activated.",
         ));
@@ -1411,13 +1420,23 @@ pub(crate) async fn credential(
         let fence = authorization.revision.clone();
         let vault = s.vault.clone();
         let stored = key.clone();
+        let access = resource.clone();
+        let connection = context.connection.clone();
+        let grant = context.resource_grant.clone();
+        let approved = approval.clone();
+        let expires_at = resource.setup().map(|draft| draft.expires_at);
         s.store
             .transaction(move |db| {
+                approved.recheck_in(db)?;
+                access.current(db, &connection)?;
+                if let Some(grant) = &grant {
+                    super::grants::recheck_in(db, grant)?;
+                }
                 let value = db.kv(&stored_key(&stored))?.ok_or_else(expired)?;
                 if vault.decrypt(&stored, &value)?["revision"] != expected {
                     return Err(expired());
                 }
-                db.set(&stored_key(&stored), &encrypted, None)
+                db.set(&stored_key(&stored), &encrypted, expires_at)
             })
             .await?;
         let check = Reference {
@@ -1454,7 +1473,7 @@ pub(crate) async fn credential(
                 s.store
                     .transaction(move |db| {
                         approval.recheck_in(db)?;
-                        resources::recheck_in(db, &connection, &resource)?;
+                        resource.current(db, &connection)?;
                         if let Some(grant) = &grant {
                             super::grants::recheck_in(db, grant)?;
                         }
@@ -1491,7 +1510,7 @@ pub(crate) async fn credential(
                 "OAuth renewed a different personal identity.",
             ));
         }
-        resources::recheck(s, context, &resource).await?;
+        resource.recheck(s, context).await?;
         recheck(s, &check).await?;
         authorization.tokens = tokens;
         authorization.refreshing = false;
@@ -1501,17 +1520,27 @@ pub(crate) async fn credential(
             .encrypt(&key, &serde_json::to_value(&authorization)?)?;
         let vault = s.vault.clone();
         let stored = key.clone();
+        let access = resource.clone();
+        let connection = context.connection.clone();
+        let grant = context.resource_grant.clone();
+        let approved = approval.clone();
+        let expires_at = resource.setup().map(|draft| draft.expires_at);
         s.store
             .transaction(move |db| {
+                approved.recheck_in(db)?;
+                access.current(db, &connection)?;
+                if let Some(grant) = &grant {
+                    super::grants::recheck_in(db, grant)?;
+                }
                 let value = db.kv(&stored_key(&stored))?.ok_or_else(expired)?;
                 if vault.decrypt(&stored, &value)?["revision"] != fence {
                     return Err(expired());
                 }
-                db.set(&stored_key(&stored), &encrypted, None)
+                db.set(&stored_key(&stored), &encrypted, expires_at)
             })
             .await?;
     }
-    resources::recheck(s, context, &resource).await?;
+    resource.recheck(s, context).await?;
     Ok((
         authorization.tokens.access,
         Reference {

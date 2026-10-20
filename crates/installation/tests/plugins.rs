@@ -2270,3 +2270,156 @@ async fn installed_packages_can_be_split_into_modules_and_any_file_change_needs_
     std::fs::remove_file(directory.join("link.luau")).unwrap();
     registry::active(&s, "splitter").await.unwrap();
 }
+
+#[tokio::test]
+async fn upgrade_retires_unattributed_questions_visibly_without_answering_them() {
+    let (_root, s, connection) = fixture().await;
+    let event = json!({
+        "name": "message", "revision": connection.revision,
+        "authorId": "300", "payload": { "id": "590" },
+    });
+    let receipt = work::submit(
+        &s,
+        &context(&connection, &event),
+        &json!({ "text": "Help", "thread": "590", "shared": true }),
+    )
+    .await
+    .unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let chat_id = text(&receipt, "chatId").to_owned();
+    let chat = s.get("chats", &chat_id).await.unwrap();
+    let run = text(&chat, "runId").to_owned();
+    let pending = "d".repeat(64);
+    let answering = "e".repeat(64);
+    let current = "f".repeat(64);
+    let answered = "a".repeat(64);
+    for id in [&pending, &answering, &current, &answered] {
+        s.question_receive(
+            &run,
+            json!({
+                "id": id, "blocking": true,
+                "fields": [{
+                    "id": "0", "title": "PRIVATE_QUESTION_CONTENT",
+                    "secret": true, "options": [],
+                }],
+            }),
+        )
+        .await
+        .unwrap();
+    }
+    let prefix = cairn_installation::chats::question_prefix(&chat_id);
+    let answer = cairn_installation::config::id();
+    s.store
+        .transaction({
+            let (prefix, chat, pending, answering, answered, answer) = (
+                prefix.clone(),
+                chat_id.clone(),
+                pending.clone(),
+                answering.clone(),
+                answered.clone(),
+                answer.clone(),
+            );
+            move |db| {
+                // These are the fields a base-release host had persisted before
+                // turn attribution and its one-time transition marker existed.
+                db.delete("migration:question-turn-attribution")?;
+                for id in [&pending, &answering, &answered] {
+                    let key = format!("{prefix}{id}");
+                    let mut question = db.kv(&key)?.unwrap();
+                    question.as_object_mut().unwrap().remove("turnId");
+                    if id == &answering {
+                        question["status"] = json!("answering");
+                        question["messageId"] = json!(answer);
+                    } else if id == &answered {
+                        question["status"] = json!("answered");
+                        question["blocking"] = json!(false);
+                    }
+                    db.set(&key, &question, None)?;
+                }
+                db.put_message(&json!({
+                    "id": answer, "chatId": chat, "questionId": answering,
+                    "text": "PRIVATE_ANSWER_CONTENT", "mode": "steer",
+                    "status": "queued", "createdAt": now(),
+                }))?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let unchanged = s.store.keys(&prefix).await.unwrap();
+    let config = s.config.clone();
+    s.shutdown.cancel();
+    let reopened = Service::new(config.clone()).await.unwrap();
+    for id in [&pending, &answering] {
+        let value = reopened
+            .store
+            .kv(&format!("{prefix}{id}"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            value["status"], "cancelled",
+            "An ambiguous old question stays hidden and pending"
+        );
+        assert_eq!(value["blocking"], false);
+        assert!(
+            value["turnId"].is_null(),
+            "Do not infer another turn's authority"
+        );
+    }
+    for id in [&current, &answered] {
+        let key = format!("{prefix}{id}");
+        assert_eq!(
+            reopened.store.kv(&key).await.unwrap().unwrap(),
+            unchanged.iter().find(|(saved, _)| saved == &key).unwrap().1,
+        );
+    }
+    let chat = reopened.chat_detail(&chat_id).await.unwrap();
+    let message = chat["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == answer)
+        .unwrap();
+    assert_eq!(message["status"], "cancelled");
+    assert_eq!(
+        chat["run"]["chatExecution"]["messageId"],
+        receipt["messageId"]
+    );
+    let notices = reopened
+        .store
+        .read({
+            let run = run.clone();
+            move |db| db.events(&run, 0, 1000)
+        })
+        .await
+        .unwrap();
+    let recovery = notices
+        .iter()
+        .filter(|e| text(e, "text").contains("Ask the agent to repeat"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recovery.len(),
+        1,
+        "One visible recovery notice per affected conversation"
+    );
+    assert_eq!(
+        recovery[0]["type"], "error",
+        "Both clients present this as an attention notice"
+    );
+    assert!(!recovery[0].to_string().contains("PRIVATE_"));
+    reopened.shutdown.cancel();
+    let again = Service::new(config).await.unwrap();
+    let repeated = again
+        .store
+        .read(move |db| db.events(&run, 0, 1000))
+        .await
+        .unwrap();
+    assert_eq!(
+        repeated, notices,
+        "Restarting cannot repeat the retirement notice"
+    );
+    again.shutdown.cancel();
+}

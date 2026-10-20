@@ -39,6 +39,12 @@ const SUMMARY_LIMIT: usize = 100_000;
 const HISTORY_LIMIT: usize = 16_000;
 const RESUME_PROMPT: &str = "Continue the same task from the saved conversation and current workspace. Execution was interrupted. Resume the original task from its last completed step. Preserve completed work and verify external effects before repeating any action.";
 
+/// Source verification can be retried without treating it as an agent failure.
+pub(super) enum Failure {
+    SourceUnavailable(Error),
+    Other(Error),
+}
+
 /// Runs `run` until it finishes, retrying on another account when usage runs out.
 pub(super) async fn execute(
     s: &Arc<Service>,
@@ -48,7 +54,7 @@ pub(super) async fn execute(
     checkpoint: &Checkpoint,
     existing: bool,
     sensitive: &mut Vec<String>,
-) -> Result<()> {
+) -> std::result::Result<(), Failure> {
     let span = tracing::info_span!(target: "cairn_performance", "agent_execution", run_id = text(run, "id"));
     execute_inner(s, run, admission, cancel, checkpoint, existing, sensitive)
         .instrument(span)
@@ -63,12 +69,11 @@ async fn execute_inner(
     checkpoint: &Checkpoint,
     existing: bool,
     sensitive: &mut Vec<String>,
-) -> Result<()> {
+) -> std::result::Result<(), Failure> {
     let id = text(run, "id").to_owned();
-    let mut timing = Operation::new("agent_prepare", &id, "mark_running");
     let mut execution = Execution {
         s,
-        provider: Provider::of_run(run)?,
+        provider: Provider::of_run(run).map_err(Failure::Other)?,
         directory: s.config.data_dir.join("runs").join(&id),
         id,
         run,
@@ -79,25 +84,39 @@ async fn execute_inner(
         sensitive,
         attempt_id: String::new(),
         source: admission.source.as_ref(),
+        source_unavailable: false,
     };
-    execution.check_source().await?;
-    execution.mark_running().await?;
-    timing.next("access");
-    execution.refresh_access().await?;
-    execution.check_source().await?;
-    timing.next("workspace");
-    let mut workspace = execution.prepare(existing).await?;
-    timing.next("session_lookup");
-    let mut resume = execution.resume_session(&workspace).await?;
-    timing.finish();
-    let mut log_total = 0;
-    loop {
-        match execution
-            .attempt(&mut workspace, resume.as_deref(), &mut log_total)
-            .await?
-        {
-            Attempt::Finished => return Ok(()),
-            Attempt::Resume(session) => resume = Some(session),
+    execution.run(existing).await.map_err(|error| {
+        if execution.source_unavailable {
+            Failure::SourceUnavailable(error)
+        } else {
+            Failure::Other(error)
+        }
+    })
+}
+
+impl Execution<'_> {
+    async fn run(&mut self, existing: bool) -> Result<()> {
+        let mut timing = Operation::new("agent_prepare", &self.id, "mark_running");
+        self.check_source().await?;
+        self.mark_running().await?;
+        timing.next("access");
+        self.refresh_access().await?;
+        self.check_source().await?;
+        timing.next("workspace");
+        let mut workspace = self.prepare(existing).await?;
+        timing.next("session_lookup");
+        let mut resume = self.resume_session(&workspace).await?;
+        timing.finish();
+        let mut log_total = 0;
+        loop {
+            match self
+                .attempt(&mut workspace, resume.as_deref(), &mut log_total)
+                .await?
+            {
+                Attempt::Finished => return Ok(()),
+                Attempt::Resume(session) => resume = Some(session),
+            }
         }
     }
 }
@@ -115,6 +134,7 @@ struct Execution<'a> {
     directory: PathBuf,
     attempt_id: String,
     source: Option<&'a ExecutionSource>,
+    source_unavailable: bool,
 }
 
 /// The prepared execution environment shared by every launch attempt.
@@ -188,13 +208,14 @@ struct RunnerStorage<'a> {
 }
 
 impl Execution<'_> {
-    async fn check_source(&self) -> Result<()> {
+    async fn check_source(&mut self) -> Result<()> {
         if let Some(source) = self.source
             && let Err(error) = source.recheck(self.s).await
         {
             if ExecutionSource::is_revoked(&error) {
                 self.cancel.cancel();
             }
+            self.source_unavailable = ExecutionSource::is_unavailable(&error);
             return Err(error);
         }
         Ok(())

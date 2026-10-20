@@ -73,3 +73,33 @@ validation and the final persistent-format inventory remain delivery gates.
 See [production compatibility](PRODUCTION-CAIRN.md#installation-data-compatibility),
 [plugin contract](PLUGINS.md), [Slack delivery](SLACK-PLUGIN-IMPLEMENTATION.md),
 and [OAuth lifecycle](SLACK-TOKEN-LIFECYCLE.md).
+
+## Pending questions from before turn attribution
+
+Base-release question records do not identify the turn that issued them. A run
+and its conversation may already have advanced to another author or turn, so
+neither the current execution nor a matching run ID proves that attribution.
+The candidate does not assign those questions the current turn's rights.
+
+Before workers or plugin delivery start, a one-time store transaction retires
+unattributed open questions (`pending` and `answering`). It keeps their fields,
+history and unknown properties, marks them cancelled/nonblocking with
+`retiredReason = "missing-turn-attribution"`, and cancels only their exact
+still-queued/sending answer messages. Already delivered answers, closed questions
+and questions with an explicit turn ID remain unchanged. A single visible error
+notice in each affected conversation instructs the owner to ask the agent to
+repeat the questions; it contains no question or answer content and does not
+change the run status. Ordinary cancelled-question delivery withdraws a matching
+outstanding provider prompt. Retirement, the notice, audit and the one-time
+`migration:question-turn-attribution` marker commit together, so another startup
+cannot repeat the action.
+
+The separately reviewed epoch transition must inventory these open legacy
+questions and their queued answers. The owner may answer or withdraw them with
+the served version before transition; otherwise the candidate uses the visible
+retirement above. Preserve the original store and identity. A stored fixture
+regression exercises restart, exact answer cancellation, unchanged attributed and
+closed questions, content-free recovery instructions and idempotence. It does
+not replace qualification against actual prior production data. The
+[storage-shape observation](performance/QUESTION-TURN-MIGRATION.md) records the
+bounded additional records and its measurement limits.

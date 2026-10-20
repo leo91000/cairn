@@ -371,6 +371,7 @@ test('owner resumes an inert setup, prepares resources and activates the same in
   await expect(editor.getByLabel('Workspace token', { exact: true })).toHaveValue('')
   await editor.getByLabel('Name', { exact: true }).fill('Engineering team')
   await editor.getByRole('button', { name: 'Save workspace', exact: true }).click()
+  await expect(editor).not.toBeVisible()
   const updated = await workspace.api(`/api/plugins/workspace-service/connections/${active.id}/resources/workspace/${resources.items[0].id}`)
   expect(updated.name).toBe('Engineering team')
   expect(updated.secretKeys).toEqual(['token'])
@@ -405,6 +406,80 @@ test('owner resumes an inert setup, prepares resources and activates the same in
   await expect(discard).not.toBeVisible()
   expect((await workspace.api('/api/plugins/workspace-service/setup-drafts')).items).toEqual([])
   expect((await workspace.api('/api/plugins')).connections.find((item: any) => item.id === active.id)).toBeDefined()
+})
+
+test('setup forms and activation follow manager preparation operations', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const id = 'cold-setup-ui'
+  const manifest = {
+    id,
+    name: 'Prepared service',
+    version: '1',
+    apiVersion: 2,
+    capabilities: ['resources'],
+    instanceForm: true,
+    resources: [{ name: 'workspace', title: 'Workspaces', singular: 'Workspace' }],
+  }
+  const installed = await workspace.api('/api/plugins/packages', 'POST', { manifest, source: 'return {form = function() return {} end}' })
+  await workspace.api(`/api/plugins/packages/${id}/approve`, 'POST', { version: '1', digest: installed.digest })
+  const draft = await workspace.api(`/api/plugins/${id}/setup-drafts`, 'POST', { name: 'Prepared app' })
+  const root = `/plugins/${id}/setup-drafts/${draft.id}`
+  const results = new Map<string, unknown>()
+  let formPolls = 0
+  let formRequests = 0
+  let activation: unknown
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let started!: () => void
+  const entered = new Promise<void>((resolve) => {
+    started = resolve
+  })
+  await page.route(`**${root}/form`, async (route) => {
+    const response = await route.fetch()
+    expect(response.ok()).toBe(true)
+    const ticket = `setup-form-${++formRequests}`
+    results.set(ticket, await response.json())
+    await route.fulfill({ json: { operation: ticket } })
+  })
+  await page.route(`**${root}/activate`, async (route) => {
+    activation = route.request().postDataJSON()
+    await route.fulfill({ json: { operation: 'setup-activate' } })
+  })
+  await page.route('**/plugins/packages/operations/setup-*', async (route) => {
+    const ticket = new URL(route.request().url()).pathname.split('/').at(-1)!
+    if (ticket === 'setup-activate') {
+      started()
+      await gate
+      const result = await workspace.api(`/api${root}/activate`, 'POST', activation)
+      await route.fulfill({ json: { state: 'completed', result } })
+    }
+    else {
+      formPolls++
+      expect(results.has(ticket)).toBe(true)
+      await route.fulfill({ json: { state: 'completed', result: results.get(ticket) } })
+    }
+  })
+  try {
+    await page.goto(workspacePath(`/plugins/${id}`))
+    await signIn(page)
+    await page.getByRole('button', { name: 'Continue Prepared app', exact: true }).click()
+    const setup = page.getByRole('dialog', { name: 'Set up Prepared service', exact: true })
+    await expect(setup.getByRole('button', { name: 'Activate instance', exact: true })).toBeEnabled()
+    expect(formPolls).toBeGreaterThan(0)
+    await setup.getByRole('button', { name: 'Activate instance', exact: true }).click()
+    await entered
+    await expect(setup).toBeVisible()
+    await expect(setup.getByRole('button', { name: 'Activate instance', exact: true })).toBeDisabled()
+    expect((await workspace.api('/api/plugins')).connections.filter((item: any) => item.pluginId === id)).toEqual([])
+    release()
+    await expect(setup).not.toBeVisible()
+    expect((await workspace.api('/api/plugins')).connections.find((item: any) => item.pluginId === id).id).toBe(draft.id)
+  }
+  finally {
+    release()
+  }
 })
 
 test('setup agent and resource parent selection preserve explicit authority', async ({ page, workspace }) => {
@@ -1939,6 +2014,143 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
   })
   expect(saves[0].secrets).toEqual({})
 })
+
+for (const prepared of [false, true]) {
+  test(`scoped ${prepared ? 'prepared' : 'active'} resource forms discard stale parents and reconcile an uncertain save`, async ({ page, workspace }) => {
+    await useRelayForHttpMocks(page)
+    const id = `scoped-form-${prepared ? 'prepared' : 'active'}`
+    const manifest = {
+      id,
+      name: 'Scoped service',
+      version: '1',
+      apiVersion: 2,
+      capabilities: ['resources'],
+      resources: [
+        { name: 'workspace', title: 'Workspaces', singular: 'Workspace' },
+        {
+          name: 'channel',
+          title: 'Channels',
+          singular: 'Channel',
+          parent: 'workspace',
+          form: true,
+          settings: [
+            {
+              key: 'channel',
+              title: 'Channel',
+              type: 'select',
+              dynamic: true,
+              refresh: true,
+              required: true,
+            },
+            {
+              key: 'verifiedName',
+              title: 'Verified name',
+              type: 'string',
+              hidden: true,
+              required: true,
+            },
+            { key: 'token', title: 'Channel token', type: 'secret' },
+          ],
+        },
+      ],
+    }
+    const source = `return {form = function(event)
+      local parent = event.resource.parent
+      if parent == nil then return {errors = {parentId = 'Choose a workspace first.'}} end
+      local channel = parent.name .. '-general'
+      if event.submit and event.values.channel ~= channel then return {errors = {channel = 'Choose a channel in this workspace.'}} end
+      return {options = {channel = {{value = channel, label = parent.name .. ' channel'}}},
+        values = {verifiedName = parent.name .. (event.submit and ' verified' or ' preview')},
+        view = {{type = 'alert', text = 'Workspace: ' .. parent.name, tone = 'info'}}}
+    end}`
+    const installed = await workspace.api('/api/plugins/packages', 'POST', { manifest, source })
+    await workspace.api(`/api/plugins/packages/${id}/approve`, 'POST', { version: '1', digest: installed.digest })
+    const root = `/api/plugins/${id}/${prepared ? 'setup-drafts' : 'connections'}`
+    const instance = await workspace.api(root, 'POST', { name: 'Scoped app', ...(!prepared && { enabled: false }) })
+    const path = `${root}/${instance.id}/resources`
+    const revision = prepared ? { setupRevision: instance.revision } : {}
+    const engineering = await workspace.api(`${path}/workspace`, 'POST', { name: 'Engineering', ...revision })
+    const sales = await workspace.api(`${path}/workspace`, 'POST', { name: 'Sales', ...revision })
+    let releaseOld!: () => void
+    const oldGate = new Promise<void>((resolve) => {
+      releaseOld = resolve
+    })
+    let oldStarted!: () => void
+    const oldRequest = new Promise<void>((resolve) => {
+      oldStarted = resolve
+    })
+    let held = false
+    await page.route(`**${path.replace('/api', '')}/channel/form`, async (route) => {
+      const response = await route.fetch()
+      expect(response.ok()).toBe(true)
+      if (route.request().postDataJSON().parentId === engineering.id && !held) {
+        held = true
+        oldStarted()
+        await oldGate
+      }
+
+      await route.fulfill({ response })
+    })
+    let writes = 0
+    await page.route(`**${path.replace('/api', '')}/channel`, async (route) => {
+      if (route.request().method() !== 'POST')
+        return route.continue()
+      writes++
+      const response = await route.fetch()
+      expect(response.ok()).toBe(true)
+      await route.abort('failed')
+    })
+    try {
+      await page.goto(workspacePath(`/plugins/${id}`))
+      await signIn(page)
+      if (prepared)
+        await page.getByRole('button', { name: 'Continue Scoped app', exact: true }).click()
+      const owner = prepared ? page.getByRole('dialog', { name: 'Set up Scoped service', exact: true }) : page.getByRole('article', { name: 'Scoped app', exact: true })
+      await owner.getByRole('button', { name: 'Add channel', exact: true }).click()
+      const form = owner.getByRole('form', { name: 'New channel', exact: true })
+      await form.getByLabel('Name', { exact: true }).fill('Support')
+      await form.getByLabel('Channel token', { exact: true }).fill('synthetic-scoped-secret')
+      await selectField(form, 'Parent', 'Engineering')
+      await oldRequest
+      if (!prepared) {
+        // Keep the real five-second catalogue refresh inside this regression.
+        await page.waitForResponse(response => response.url().endsWith('/plugins') && response.request().method() === 'GET' && response.ok())
+      }
+
+      await expect(form.getByRole('button', { name: 'Save channel', exact: true })).toBeDisabled()
+      await selectField(form, 'Parent', 'Sales')
+      await expect(form.getByRole('combobox', { name: 'Channel', exact: true }).getByRole('option', { name: 'Sales channel', exact: true })).toHaveCount(1)
+      await form.getByRole('combobox', { name: 'Channel', exact: true }).selectOption('Sales-general')
+      await expect(form.getByRole('button', { name: 'Save channel', exact: true })).toBeEnabled()
+      const oldResponse = page.waitForResponse(response => response.url().endsWith('/channel/form') && response.request().postDataJSON().parentId === engineering.id)
+      releaseOld()
+      await oldResponse
+      await expect(form.getByRole('combobox', { name: 'Channel', exact: true })).toHaveValue('Sales-general')
+      await expect(form.getByText('Workspace: Sales', { exact: true })).toBeVisible()
+      await form.getByRole('button', { name: 'Save channel', exact: true }).click()
+      await expect(form.getByText('Check whether this resource was saved before making another change.', { exact: false })).toBeVisible()
+      expect(writes).toBe(1)
+      await expect(form.getByRole('button', { name: 'Save channel', exact: true })).toBeDisabled()
+      await form.getByRole('button', { name: 'Check save result', exact: true }).click()
+      const saved = (await workspace.api(`${path}/channel`)).items[0]
+      expect(saved.parentId).toBe(sales.id)
+      expect(saved.settings).toEqual({ channel: 'Sales-general', verifiedName: 'Sales verified' })
+      expect(saved.secretKeys).toEqual(['token'])
+      expect(JSON.stringify(saved)).not.toContain('synthetic-scoped-secret')
+      const card = owner.getByRole('article', { name: 'Support', exact: true })
+      await expect(card).toBeVisible()
+      await card.getByRole('button', { name: 'Edit Support', exact: true }).click()
+      const edit = owner.getByRole('form', { name: 'Edit Support', exact: true })
+      await expect(edit.getByLabel('Channel token', { exact: true })).toHaveValue('')
+      await expect(edit.getByRole('button', { name: 'Save channel', exact: true })).toBeEnabled()
+      await edit.getByRole('button', { name: 'Cancel', exact: true }).click()
+      expect(writes).toBe(1)
+    }
+    finally {
+      releaseOld()
+    }
+  })
+}
 
 test('resource forms share native defaults, exact choices and secret normalization', async ({ page, workspace }) => {
   test.setTimeout(90000)

@@ -28,7 +28,7 @@ const DAY_MS: i64 = 86_400_000;
 const RECOVERY_WAIT_REASON: &str = "Waiting for the previous execution to stop before recovery.";
 /// Starts the reason of a run that stays queued until a node has room for it.
 pub(super) const CAPACITY_WAIT_REASON: &str = "Waiting for capacity.";
-const SOURCE_WAIT_REASON: &str = "Waiting to verify the requester's source access.";
+pub(super) const SOURCE_WAIT_REASON: &str = "Waiting to verify the requester's source access.";
 
 impl Worker {
     pub async fn tick(self: &Arc<Self>, s: &Arc<Service>) -> Result<()> {
@@ -262,7 +262,7 @@ impl Worker {
                 .await?;
             return Ok(false);
         }
-        if matches!(error.status, 408 | 429 | 502 | 503 | 504) {
+        if ExecutionSource::is_unavailable(&error) {
             if s.store.run(run_id).await?["accountWaitReason"] == SOURCE_WAIT_REASON {
                 return Ok(false);
             }

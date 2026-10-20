@@ -78,52 +78,52 @@ test.afterAll(async () => {
   await server?.close()
 })
 
-test('panel action whitespace matches Kotlin for opening, edits and raw secrets', async ({ page }) => {
-  test.setTimeout(90000)
-  const errors: string[] = []
-  page.on('pageerror', error => errors.push(error.message))
-  const fields = [
-    { key: 'note', title: 'Note', type: 'text' },
-    { key: 'password', title: 'Password', type: 'secret' },
-    { key: 'arrayFlag', title: 'Array flag', type: 'boolean' },
-    { key: 'stringArrayFlag', title: 'String array flag', type: 'boolean' },
-    { key: 'objectFlag', title: 'Object flag', type: 'boolean' },
-    { key: 'primitive', title: 'Primitive flag', type: 'boolean' },
-    {
-      key: 'choice',
-      title: 'Choice',
-      type: 'select',
-      required: true,
-      options: [{ value: '\u00A0', label: 'Exact whitespace ID' }],
-    },
-  ]
-  let value = ''
-  const actions: Record<string, unknown>[] = []
-  await page.route('**/api/plugins/forms/connections/example/view', route => route.fulfill({
-    json: {
-      view: [{
-        type: 'form',
-        fields,
-        values: {
-          note: value,
-          choice: '\u00A0',
-          arrayFlag: [true],
-          stringArrayFlag: ['true'],
-          objectFlag: { value: true },
-          primitive: true,
-        },
-        submit: { label: 'Apply', action: 'apply' },
-      }],
-    },
-  }))
-  await page.route('**/api/plugins/forms/connections/example/actions', async (route) => {
-    const body = route.request().postDataJSON()
-    expect(body.action).toBe('apply')
-    actions.push(body.values)
-    await route.fulfill({ json: {} })
-  })
+for (const code of ['0085', '001C', '001D', '001E', '001F', 'FEFF', '00A0', '2007', '202F', '200B', '2060']) {
+  test(`panel action U+${code} whitespace matches Kotlin for opening, edits and raw secrets`, async ({ page }) => {
+    test.setTimeout(90000)
+    const errors: string[] = []
+    page.on('pageerror', error => errors.push(error.message))
+    const fields = [
+      { key: 'note', title: 'Note', type: 'text' },
+      { key: 'password', title: 'Password', type: 'secret' },
+      { key: 'arrayFlag', title: 'Array flag', type: 'boolean' },
+      { key: 'stringArrayFlag', title: 'String array flag', type: 'boolean' },
+      { key: 'objectFlag', title: 'Object flag', type: 'boolean' },
+      { key: 'primitive', title: 'Primitive flag', type: 'boolean' },
+      {
+        key: 'choice',
+        title: 'Choice',
+        type: 'select',
+        required: true,
+        options: [{ value: '\u00A0', label: 'Exact whitespace ID' }],
+      },
+    ]
+    let value = ''
+    const actions: Record<string, unknown>[] = []
+    await page.route('**/api/plugins/forms/connections/example/view', route => route.fulfill({
+      json: {
+        view: [{
+          type: 'form',
+          fields,
+          values: {
+            note: value,
+            choice: '\u00A0',
+            arrayFlag: [true],
+            stringArrayFlag: ['true'],
+            objectFlag: { value: true },
+            primitive: true,
+          },
+          submit: { label: 'Apply', action: 'apply' },
+        }],
+      },
+    }))
+    await page.route('**/api/plugins/forms/connections/example/actions', async (route) => {
+      const body = route.request().postDataJSON()
+      expect(body.action).toBe('apply')
+      actions.push(body.values)
+      await route.fulfill({ json: {} })
+    })
 
-  for (const code of ['0085', '001C', '001D', '001E', '001F', 'FEFF', '00A0', '2007', '202F', '200B', '2060']) {
     const character = String.fromCodePoint(Number.parseInt(code, 16))
     const blank = whitespace.blank.includes(code)
     for (const input of [character, `${character}x`, `x${character}`, `${character}x${character}`]) {
@@ -164,10 +164,10 @@ test('panel action whitespace matches Kotlin for opening, edits and raw secrets'
         password: edited,
       })
     }
-  }
 
-  expect(errors).toEqual([])
-})
+    expect(errors).toEqual([])
+  })
+}
 
 test('a declared constructor collection stays visible while its resources load', async ({ page }) => {
   test.setTimeout(90000)

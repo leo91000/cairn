@@ -103,6 +103,9 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
     match scope {
         Scope::Instance(_, owner) => owner.recheck(s).await?,
         Scope::Draft(_, values) => {
+            if let Some(resource) = &values.resource {
+                resource.recheck(s).await?;
+            }
             if let Some(owner) = &values.owner {
                 owner.recheck(s).await?;
             }
@@ -137,6 +140,9 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
     if let Scope::Draft(connection, values) = scope {
         if requested.is_some_and(|id| id != connection.id) {
             return Err(Error::forbidden("Another instance is not available here."));
+        }
+        if values.resource.is_some() {
+            return Ok((**connection).clone());
         }
         if let Some(expected) = &values.setup {
             let draft = super::setup::load(s, &expected.id).await?;
@@ -266,7 +272,7 @@ pub async fn call(
     })
     .await?;
     // Revocation or a changed secret during slow I/O must not deliver its result.
-    let bound_form = matches!(scope, Scope::Draft(_, values) if values.setup.is_some());
+    let bound_form = matches!(scope, Scope::Draft(_, values) if values.setup.is_some() || values.resource.is_some());
     if (matches!(scope, Scope::Agent(_)) || bound_form)
         && matches!(method, "exec.run" | "http.request")
     {

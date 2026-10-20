@@ -1126,3 +1126,62 @@ rules. Browser journeys exercise searching and choosing these values, required
 parent validation, explicit incoming-agent authority and the saved native payloads.
 The web lint, 602 unit tests and production build pass. These corrections do not
 complete scoped resource forms, guided route selectors or the full Slack contract.
+
+## Resource-scoped configuration forms
+
+Collections may opt into the shared package `form` handler with `form = true`.
+The handler receives the selected collection, saved self and parent metadata,
+nonsecret app settings, typed values and secret-presence keys. A private owner
+configuration proof binds approval, root revision, saved self and both old and
+selected ancestor chains. It allows paused and inert configuration without
+changing operational resource references or agent grants.
+
+HTTP authentication can select only the proved `self` or `parent`. New self
+secrets remain in memory; owner OAuth requires a saved target and reuses the
+single-use refresher, preserving setup provenance and expiry. Personal OAuth
+cannot be borrowed by owner configuration. Native save runs submit validation
+again, applies declared nonsecret derived values and retains the atomic resource,
+quota and vault publication checks. Cold program preparation follows manager
+operations on both clients rather than keeping a relay request open.
+
+Both editors show dynamic choices, field/global errors and read-only guidance.
+Changing parents invalidates pending results; restored Android drafts must
+revalidate and never restore typed secrets. Unknown save outcomes retain the
+existing read-before-another-write recovery. The new native, browser and shared
+JVM/device scenarios qualify this slice; final checkpoint results are recorded
+separately. Guided search/pagination, catalogue/route summaries and the actual
+Slack package remain subsequent work. This does not complete Q1–Q20.
+
+Unchanged catalog refreshes preserve resource editors and pending owner consent;
+only changes to the namespace, setup revision, package version or collection
+schema invalidate the resource editor. Setup forms and activation use the same
+pollable manager operations when a missing executable needs preparation. The
+original owner and the setup's existing revision/expiry/approval checks still
+control execution and atomic activation; both clients await completion.
+
+Preparing native executions distinguish a temporary source-authority outage from
+an agent failure. They requeue through ordinary fencing, release and admission.
+The regression exercises outages before and after marking a run running,
+automatic re-admission of that same run, and cancellation if owner authority
+changes during its next launch check. This does not relax source verification.
+
+Root and resource form callbacks share partial-value normalization. Cleared or
+missing optional fields stay absent before Luau runs; final server save/default
+completion retains its existing behavior. The HTTP regression compares the same
+installed Luau handler on root and collection forms for active and inert setups,
+including omitted/null/defaulted scalar fields and explicit zero values.
+
+## Unattributed questions at the persisted-format transition
+
+The upgrade fixture reproduces a base-release pending question without `turnId`
+remaining invisible to plugin delivery after restart. A run can span several
+turns, so the host cannot safely fill that field from its current execution.
+Startup now atomically retires unattributed open questions and their exact
+undelivered answer messages, with one content-free recovery notice per affected
+conversation. The notice asks the owner to have the agent repeat the question;
+it changes no execution status. Attributed and closed questions retain their
+original records. A one-time marker prevents duplicate notices on restart.
+The [compatibility inventory](SLACK-PLUGIN-COMPATIBILITY.md) covers this transition
+and keeps actual prior-production-data qualification as a delivery gate.
+Corrected native/client presentation qualification and fresh complete independent
+review remain required. This does not complete the Slack contract.
