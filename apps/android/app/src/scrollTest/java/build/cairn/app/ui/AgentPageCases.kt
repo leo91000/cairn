@@ -121,6 +121,8 @@ abstract class AgentPageCases {
         val older: AtomicBoolean = AtomicBoolean(false),
         /** Reading the dedicated GitHub token's state fails. */
         val failToken: AtomicBoolean = AtomicBoolean(false),
+        /** The installation's MCP connections, as `GET /mcps` returns them. */
+        val mcps: AtomicReference<String> = AtomicReference("[]"),
     )
 
     private fun fixture(): Fixture {
@@ -138,6 +140,7 @@ abstract class AgentPageCases {
         val tokenConfigured = AtomicBoolean(false)
         val older = AtomicBoolean(false)
         val failToken = AtomicBoolean(false)
+        val mcps = AtomicReference("[]")
         val server = MockWebServer()
         server.dispatcher =
             object : Dispatcher() {
@@ -231,6 +234,7 @@ abstract class AgentPageCases {
                             path == "/agents" -> wireJson.encodeToString(agents.get())
                             path == "/projects" ->
                                 """[{"id":"p1","name":"cairn","path":"/srv/cairn"},{"id":"p2","name":"SheetOM","path":"/srv/sheetom"}]"""
+                            path == "/mcps" -> mcps.get()
                             path == "/skills" ->
                                 """[{"name":"review","scope":"global"},{"name":"lint","scope":"p1"}]"""
                             path == "/nodes" ->
@@ -279,6 +283,7 @@ abstract class AgentPageCases {
             tokenConfigured,
             older,
             failToken,
+            mcps,
         )
     }
 
@@ -748,6 +753,89 @@ abstract class AgentPageCases {
             confirmReview()
             compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
             assertTrue(fixture.tokens.isEmpty())
+        }
+    }
+
+    @Test
+    fun everyMcpConnectionCanBeChosenEvenBeforeAnyExists() {
+        journey(
+            "agent",
+            prepare = { fixture ->
+                fixture.agents.set(
+                    fixture.agents.get().map {
+                        if (it.id == "agent") it.copy(access = it.access.copy(mcps = emptyList()))
+                        else it
+                    }
+                )
+            },
+        ) { fixture ->
+            open(AgentSection.Mcp)
+            compose.onNodeWithText("Aucune connexion MCP").assertExists()
+            compose.onNodeWithText("Toutes, y compris futures").performClick()
+            compose
+                .onNodeWithText("Les nouvelles connexions MCP seront accessibles dès leur ajout.")
+                .assertExists()
+            back()
+            compose.onNodeWithText("Enregistrer").performClick()
+            confirmReview()
+            compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
+            assertEquals(JsonNull, fixture.saved.single().second["access"]!!.jsonObject["mcps"])
+        }
+    }
+
+    @Test
+    fun untickingAConnectionKeepsItsToolRestrictionForWhenItIsGrantedAgain() {
+        journey(
+            "agent",
+            prepare = { fixture ->
+                fixture.mcps.set(
+                    """[{"id":"linear","name":"Linear","url":"https://mcp.linear.invalid","tools":[{"name":"read"},{"name":"write"}]}]"""
+                )
+                fixture.agents.set(
+                    fixture.agents.get().map {
+                        if (it.id == "agent")
+                            it.copy(
+                                access =
+                                    it.access.copy(
+                                        mcps = listOf("linear"),
+                                        mcpTools = mapOf("linear" to listOf("read")),
+                                    )
+                            )
+                        else it
+                    }
+                )
+            },
+        ) { fixture ->
+            open(AgentSection.Mcp)
+            waitForText("Linear")
+            compose.onNodeWithText("Linear").performClick()
+            compose.onNodeWithText("● 1 modification non enregistrée").assertExists()
+            // Granted again, it comes back with its restriction: nothing left to save.
+            compose.onNodeWithText("Linear").performClick()
+            compose.onNodeWithTag("agent-save-bar").assertDoesNotExist()
+            compose.onNodeWithText("Outils : 2 activés sur la connexion · 1 choisis").assertExists()
+        }
+    }
+
+    @Test
+    fun aFailedReReadOnReloadMakesTokenAndPluginsUnknown() {
+        journey("agent") { fixture ->
+            open(AgentSection.Identity)
+            compose.onNodeWithText("Nom").performTextReplacement("Release bot")
+            back()
+            compose.onNodeWithContentDescription("GitHub, ${GithubMode.None.label}").assertExists()
+            fixture.conflict.set(true)
+            fixture.failToken.set(true)
+            fixture.failPlugins.set(true)
+            compose.onNodeWithText("Enregistrer").performClick()
+            confirmReview()
+            waitForText("Cet agent a été modifié ailleurs", substring = true)
+            compose.onNodeWithText("Recharger").performClick()
+            // Known before, unknown now: never shown as it was.
+            waitForDescription("GitHub, Non chargé")
+            open(AgentSection.Plugins)
+            waitForText("Impossible de charger les plugins", substring = true)
+            compose.onNodeWithContentDescription("Accès à Production").assertDoesNotExist()
         }
     }
 

@@ -180,6 +180,12 @@ export function rebaseDraft(base: AgentDraft, mine: AgentDraft, theirs: AgentDra
     .map(key => [key, pick(base.access[key], mine.access[key], theirs.access[key])]))
   for (const key of listAccess)
     access[key] = mergeList(base.access[key], mine.access[key], theirs.access[key])
+  // Nodes belong to one backend: when either side changed it, its node lists are taken whole,
+  // the owner's if they changed it, never merged across backends.
+  const backendChanged = backendOf(mine.access) !== backendOf(base.access) || backendOf(theirs.access) !== backendOf(base.access)
+  const ownBackend = backendOf(mine.access) !== backendOf(base.access)
+  if (backendChanged)
+    access.nodes = ownBackend ? mine.access.nodes : theirs.access.nodes
   access.mcpTools = mergeTools(base.access.mcpTools ?? {}, mine.access.mcpTools ?? {}, theirs.access.mcpTools ?? {})
   const rebased: AgentDraft = {
     name: pick(base.name, mine.name, theirs.name),
@@ -190,7 +196,9 @@ export function rebaseDraft(base: AgentDraft, mine: AgentDraft, theirs: AgentDra
     reasoning: pick(base.reasoning, mine.reasoning, theirs.reasoning),
     timeoutMinutes: pick(base.timeoutMinutes, mine.timeoutMinutes, theirs.timeoutMinutes),
     access: access as unknown as AgentAccess,
-    exclusiveNodes: mergeList(base.exclusiveNodes, mine.exclusiveNodes, theirs.exclusiveNodes) ?? [],
+    exclusiveNodes: backendChanged
+      ? (ownBackend ? mine.exclusiveNodes : theirs.exclusiveNodes)
+      : mergeList(base.exclusiveNodes, mine.exclusiveNodes, theirs.exclusiveNodes) ?? [],
     plugins: mergeList(base.plugins, mine.plugins, theirs.plugins) ?? [],
   }
   return JSON.parse(JSON.stringify(rebased))
@@ -242,6 +250,35 @@ export function savedDraft(draft: AgentDraft, existingMcps?: string[]): AgentDra
     return draft
   return { ...draft, access: { ...draft.access, mcpTools: granted } }
 }
+
+/**
+ * An installation that predates agent revisions also predates live grants on the agent: it ignores
+ * top-level `exclusiveNodes` and `plugins` and keeps them on the resources, as Android handles it.
+ */
+export function olderInstallation(agents: Pick<Agent, 'revision'>[]) {
+  return agents.length > 0 && agents.every(agent => !agent.revision)
+}
+
+/** On an older installation, the agent's live grants as its resources record them. */
+export function withResourceGrants(draft: AgentDraft, agentId: string, connections: Pick<PluginConnection, 'id' | 'agentIds'>[], nodes: Pick<ExecutionNode, 'id' | 'local' | 'exclusiveAgents'>[]): AgentDraft {
+  return {
+    ...draft,
+    plugins: connections.filter(connection => connection.agentIds?.includes(agentId)).map(connection => connection.id),
+    exclusiveNodes: nodes.filter(node => node.exclusiveAgents?.includes(agentId)).map(node => node.local ? LOCAL_NODE_ID : node.id),
+  }
+}
+
+/**
+ * The agents an instance save must send back unchanged on an older installation, which replaces
+ * the list when it is omitted; undefined when it should be omitted.
+ */
+export function keptAgentIds(agents: Pick<Agent, 'revision'>[], entry: Pick<PluginEntry, 'manifest'> | undefined, connection: Pick<PluginConnection, 'agentIds'> | null | undefined) {
+  if (!olderInstallation(agents) || !entry?.manifest?.agentAccess || !connection?.agentIds?.length)
+    return undefined
+  return [...connection.agentIds]
+}
+
+export const updateForGrants = 'Update the installation to grant these from the agent page.'
 
 /** "All, including future" | "3 of 12" | "None". */
 export function selectionSummary(selected: string[] | null, total: number) {
@@ -415,6 +452,8 @@ export interface Context {
   pluginsUnavailable?: boolean
   // The nodes could not be loaded: node grants cannot be checked.
   nodesUnavailable?: boolean
+  // Projects, skills and MCP connections are not loaded (yet, or the refresh failed).
+  workspaceUnavailable?: boolean
 }
 
 function listChanges(before: string[] | null, after: string[] | null) {
@@ -615,7 +654,8 @@ export interface Issue {
 export function issues(draft: AgentDraft, context: Context, isMain: boolean, agentId: string | null = null) {
   const found: Issue[] = []
   const access = draft.access
-  if (!isMain) {
+  // Until the workspace lists load, a grant cannot be said to be gone.
+  if (!isMain && !context.workspaceUnavailable) {
     for (const id of access.projects ?? []) {
       if (!context.projects.some(project => project.id === id))
         found.push({ section: 'projects', text: 'A selected project no longer exists.' })
@@ -683,15 +723,23 @@ export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 
     count(nodes, 'node', 'All nodes'),
     ...(backendOf(access) === 'native' ? ['Native process'] : []),
   ]
+  // Named by package when the catalogue says which; members, who do not see plugins, get a count.
   const packages = new Set<string>()
+  let unnamed = 0
   for (const id of agent.plugins ?? []) {
     const connection = context.connections.find(item => item.id === id)
     const name = context.packages.find(entry => entry.id === connection?.pluginId)?.manifest?.name
-    packages.add(name ?? 'Plugin')
+    if (name)
+      packages.add(name)
+    else
+      unnamed++
   }
 
   parts.push(...packages)
-  if (agent.exclusiveNodes?.length && (!context.nodes || effectiveExclusive({ access, exclusiveNodes: agent.exclusiveNodes }, context.nodes).length))
+  if (unnamed)
+    parts.push(`${unnamed} ${packages.size ? 'other ' : ''}plugin${unnamed === 1 ? '' : 's'}`)
+  // Only an effective reservation, which the node list says; without it, none is claimed.
+  if (agent.exclusiveNodes?.length && context.nodes && effectiveExclusive({ access, exclusiveNodes: agent.exclusiveNodes }, context.nodes).length)
     parts.push('Exclusive reservation')
   if (access.installation)
     parts.push('Installation management')

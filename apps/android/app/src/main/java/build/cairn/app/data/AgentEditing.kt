@@ -177,8 +177,13 @@ const val NOT_LOADED = "Non chargé"
  * MCP tool choices only for connections the agent is granted: the server rejects the others. All
  * are kept when every connection is granted.
  */
-fun AccessPolicy.withGrantedTools(): AccessPolicy =
-    if (mcps == null) this else copy(mcpTools = mcpTools.filterKeys { it in mcps })
+fun AccessPolicy.withGrantedTools(existing: Set<String>? = null): AccessPolicy =
+    copy(
+        mcpTools =
+            mcpTools.filterKeys {
+                (mcps == null || it in mcps) && (existing == null || it in existing)
+            }
+    )
 
 /**
  * How the agent will reach GitHub. Without the shared connection, a saved token is used unless the
@@ -552,13 +557,34 @@ fun timeoutSummary(minutes: Int) =
     if (minutes == 0) "Sans limite de temps" else "Limite : $minutes min"
 
 /** The short access summary on an agent card: "3 projets · 2 nodes · 1 plugin". */
-fun agentAccessSummary(agent: Agent): String {
+fun agentAccessSummary(
+    agent: Agent,
+    catalog: PluginCatalog? = null,
+    /** Known machines, to show exclusivity only where it takes effect; null when unknown. */
+    nodes: List<ExecutionNode>? = null,
+): String {
     val access = agent.access
     return buildList {
             add(access.projects?.let { plural(it.size, "projet") } ?: "Tous les projets")
             add(access.nodes?.let { plural(it.size, "node") } ?: "Toutes les nodes")
-            if (agent.plugins.isNotEmpty()) add(plural(agent.plugins.size, "plugin"))
-            if (agent.exclusiveNodes.isNotEmpty()) add("Exclusivité")
+            if (access.backend == NATIVE_BACKEND) add(backendLabel(access.backend))
+            if (agent.plugins.isNotEmpty())
+                if (catalog == null) add(plural(agent.plugins.size, "plugin"))
+                else
+                    addAll(
+                        agent.plugins
+                            .map { id ->
+                                val connection = catalog.connections.find { it.id == id }
+                                catalog.packages.find { it.id == connection?.pluginId }?.name
+                                    ?: "Plugin"
+                            }
+                            .distinct()
+                    )
+            if (
+                agent.exclusiveNodes.isNotEmpty() &&
+                    (nodes == null || agent.effectiveExclusive(nodes).isNotEmpty())
+            )
+                add("Exclusivité")
             if (access.installation) add("Gestion de l’installation")
         }
         .joinToString(" · ")
@@ -782,6 +808,7 @@ fun agentReductions(
         .filter { it !in edited.plugins }
         .forEach { id -> add(pluginGrantLabel(id, resources.catalog)) }
     if (before.installation && !after.installation) add("gestion de l’installation")
+    if (before.backend == NATIVE_BACKEND && after.backend != NATIVE_BACKEND) add("exécution native")
     if (before.github && !after.github) add("connexion GitHub partagée")
     if (tokenRemoved) add("jeton GitHub dédié")
     if ((sandboxStrictness[after.sandbox] ?: 0) > (sandboxStrictness[before.sandbox] ?: 0))
@@ -945,6 +972,17 @@ fun rebaseAgent(
         mergeToolChoices(a.mcpTools, m.mcpTools, t.mcpTools).filterKeys {
             mcpIds == null || it in mcpIds
         }
+    // Node lists only make sense for one backend: a side that switched backend wins them whole,
+    // the owner first, so entries of the other backend are never merged in.
+    val (nodes, exclusive) =
+        when {
+            m.backend != a.backend -> m.nodes to mine.exclusiveNodes
+            t.backend != a.backend -> t.nodes to theirs.exclusiveNodes
+            else ->
+                mergeList(a.nodes, m.nodes, t.nodes) to
+                    mergeList(base.exclusiveNodes, mine.exclusiveNodes, theirs.exclusiveNodes)
+                        .orEmpty()
+        }
     return theirs.copy(
         name = pick(base.name, mine.name, theirs.name),
         description = pick(base.description, mine.description, theirs.description),
@@ -953,12 +991,11 @@ fun rebaseAgent(
         provider = pick(base.provider, mine.provider, theirs.provider),
         instructions = pick(base.instructions, mine.instructions, theirs.instructions),
         timeoutMinutes = pick(base.timeoutMinutes, mine.timeoutMinutes, theirs.timeoutMinutes),
-        exclusiveNodes =
-            mergeList(base.exclusiveNodes, mine.exclusiveNodes, theirs.exclusiveNodes).orEmpty(),
+        exclusiveNodes = exclusive,
         plugins = mergeList(base.plugins, mine.plugins, theirs.plugins).orEmpty(),
         access =
             AccessPolicy(
-                nodes = mergeList(a.nodes, m.nodes, t.nodes),
+                nodes = nodes,
                 projects = mergeList(a.projects, m.projects, t.projects),
                 skills = mergeList(a.skills, m.skills, t.skills),
                 mcps = mergeList(a.mcps, m.mcps, t.mcps),
@@ -1012,10 +1049,15 @@ fun AgentDraft.rebased(base: Agent, theirs: Agent, mcpIds: Set<String>? = null):
  * explicit nulls: an omitted key keeps the saved value on the server. The loaded revision is sent
  * back so a concurrent save is refused instead of overwritten.
  */
-fun agentSaveBody(agent: Agent, reapprove: List<String> = emptyList()): JsonObject {
+fun agentSaveBody(
+    agent: Agent,
+    reapprove: List<String> = emptyList(),
+    /** MCP connections that exist; tool choices of deleted ones are not sent. Null keeps all. */
+    mcpIds: Set<String>? = null,
+): JsonObject {
     val fields =
         wireJson
-            .encodeToJsonElement(agent.copy(access = agent.access.withGrantedTools()))
+            .encodeToJsonElement(agent.copy(access = agent.access.withGrantedTools(mcpIds)))
             .jsonObject
             .toMutableMap()
     fields.remove("avatar")

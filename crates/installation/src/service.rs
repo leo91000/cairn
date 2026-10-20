@@ -1033,6 +1033,9 @@ fn validate_access(agent: &Value, access: &Value) -> Result<()> {
 }
 
 fn save_agent(db: &Db<'_>, mut agent: Value, access: &Value) -> Result<Value> {
+    let previous_nodes = db
+        .get("agents", text(&agent, "id"))?
+        .and_then(|saved| policy(&saved)["nodes"].as_array().cloned());
     // Serialize grants with revocation; a concurrent editor must never
     // restore a grant that the revocation transaction just removed.
     for node in access["nodes"].as_array().into_iter().flatten() {
@@ -1046,7 +1049,11 @@ fn save_agent(db: &Db<'_>, mut agent: Value, access: &Value) -> Result<Value> {
         if record["revoked"] == true {
             return Err(Error::bad("A revoked node cannot be authorized."));
         }
-        if crate::native::policy::node_native(&record) != (access["backend"] == "native") {
+        // Nodes the agent already held stay accepted, so unrelated edits still save.
+        let held = previous_nodes
+            .as_ref()
+            .is_some_and(|nodes| nodes.iter().any(|held| held == node));
+        if !held && crate::native::policy::node_native(&record) != (access["backend"] == "native") {
             return Err(Error::bad(
                 "Choose nodes that use this agent's execution backend.",
             ));

@@ -25,7 +25,8 @@ import UiSwitch from './UiSwitch.vue'
 import VirtualSelect from './VirtualSelect.vue'
 
 // Per node: may the agent run there, and may it reserve the node exclusively.
-const props = defineProps<{ nodes: ExecutionNode[] }>()
+// `readOnlyGrants` says why exclusive reservations cannot be changed here (an older installation).
+const props = defineProps<{ nodes: ExecutionNode[], readOnlyGrants?: string }>()
 const access = defineModel<AgentAccess>('access', { required: true })
 // Nodes the agent may reserve exclusively, a live grant kept beside `access`.
 const exclusiveNodes = defineModel<string[]>('exclusiveNodes', { required: true })
@@ -201,14 +202,19 @@ function exclusiveBlocked(node: ExecutionNode) {
           <template v-if="exclusiveNodes.includes(node.id) && exclusiveBlocked(node)">
             <span class="flex min-w-0 flex-wrap items-center gap-2 compact:justify-end">
               <AccessChip tone="unavailable">{{ runsOn(access, node.id) ? 'Inactive: unavailable on this runtime' : 'Inactive: cannot run here' }}</AccessChip>
-              <UiButton size="small" :aria-label="`Remove exclusive reservation on ${nodeName(node, node.id)}`" @click="setExclusive(node.id, false)">Remove</UiButton>
+              <UiButton
+                v-if="!readOnlyGrants"
+                size="small"
+                :aria-label="`Remove exclusive reservation on ${nodeName(node, node.id)}`"
+                @click="setExclusive(node.id, false)"
+              >Remove</UiButton>
             </span>
           </template>
           <span v-else class="flex min-w-0 flex-col items-start gap-0.5 compact:items-end">
             <UiSwitch
               power
               :model-value="exclusiveNodes.includes(node.id)"
-              :disabled="Boolean(exclusiveBlocked(node)) && !exclusiveNodes.includes(node.id)"
+              :disabled="Boolean(readOnlyGrants) || (Boolean(exclusiveBlocked(node)) && !exclusiveNodes.includes(node.id))"
               :label="`Can reserve ${nodeName(node, node.id)} exclusively`"
               @update:model-value="setExclusive(node.id, $event)"
             />
@@ -241,7 +247,12 @@ function exclusiveBlocked(node: ExecutionNode) {
         <AccessChip tone="missing">
           Not found
         </AccessChip>
-        <UiButton size="small" aria-label="Remove exclusive reservation on a removed node" @click="setExclusive(id, false)">
+        <UiButton
+          v-if="!readOnlyGrants"
+          size="small"
+          aria-label="Remove exclusive reservation on a removed node"
+          @click="setExclusive(id, false)"
+        >
           <Icon :name="X" :size="13" />Remove
         </UiButton>
       </div>
@@ -270,6 +281,9 @@ function exclusiveBlocked(node: ExecutionNode) {
         <b>Reserve exclusively:</b> during intensive work the agent may suspend all other conversations on the machine for up to 15 minutes per request (1 hour with renewals). They resume automatically. Requires permission to run.
       </p>
     </details>
+    <p v-if="readOnlyGrants" class="rounded-xl bg-soft px-5 py-3 text-sm" role="note">
+      Exclusive reservations: {{ readOnlyGrants }}
+    </p>
     <p v-if="exclusiveCount" class="rounded-xl bg-power-surface px-5 py-3 text-xs text-power">
       Exclusive reservation granted on {{ exclusiveCount }} {{ exclusiveCount === 1 ? 'node' : 'nodes' }}. While it holds a reservation, other agents’ conversations on that machine are suspended.
     </p>

@@ -41,6 +41,7 @@ import {
   newAgentDraft,
   nodeName,
   nodesFor,
+  olderInstallation,
   rebaseDraft,
   restrictedGithubMode,
   reviewLines,
@@ -49,6 +50,8 @@ import {
   selectionSummary,
   skillKey,
   skillLabel,
+  updateForGrants,
+  withResourceGrants,
 } from '../agent-access'
 import {
   api,
@@ -136,6 +139,10 @@ const githubToken = ref('')
 const dedicated = ref(false)
 const savedDedicated = ref(false)
 const removeToken = ref(false)
+// An installation older than agent revisions keeps live grants on its resources: shown read-only.
+const legacy = ref(false)
+// Reload found a dedicated token saved since the owner chose "No GitHub".
+const tokenSavedMeanwhile = ref(false)
 // The token state could not be read: the GitHub section is read-only until it is.
 const githubError = ref('')
 const githubLoading = ref(false)
@@ -163,6 +170,7 @@ const context = computed<Context>(() => ({
   connections: catalog.value.connections,
   pluginsUnavailable: Boolean(catalogError.value),
   nodesUnavailable: Boolean(nodesError.value),
+  workspaceUnavailable: !state.workspaceLoaded,
 }))
 const access = computed(() => draft.value.access)
 const backend = computed(() => backendOf(access.value))
@@ -193,7 +201,9 @@ const tokenChange = computed(() => githubError.value
 const usesSavedToken = computed<boolean | 'unknown'>(() => githubError.value
   ? (switchedToToken.value ? 'unknown' : false)
   : githubMode.value === 'dedicated' && githubConfigured.value && !githubToken.value.trim())
-const changed = computed(() => [...changes(saved.value, draft.value), ...(tokenChange.value ? ['github' as const] : [])])
+// A token typed before its state became unknown stays pending: it is not lost, nor claimed saved.
+const tokenPendingUnknown = computed(() => Boolean(githubError.value) && Boolean(githubToken.value.trim()))
+const changed = computed(() => [...changes(saved.value, draft.value), ...(tokenChange.value || tokenPendingUnknown.value ? ['github' as const] : [])])
 const dirty = computed(() => loaded.value && !notFound.value && changed.value.length > 0)
 const issues = computed(() => loaded.value ? findIssues(draft.value, context.value, isMain.value, isNew.value ? null : id.value) : [])
 
@@ -393,10 +403,16 @@ const overview = computed(() => [
   },
 ])
 
+/** The agent as the page edits it; on an older installation, with grants from its resources. */
+function loadedDraft(found: Agent) {
+  const loadedAgent = draftOf(found)
+  return legacy.value ? withResourceGrants(loadedAgent, found.id, catalog.value.connections, nodes.value) : loadedAgent
+}
+
 function apply(found: Agent) {
   agent.value = found
-  saved.value = draftOf(found)
-  draft.value = draftOf(found)
+  saved.value = loadedDraft(found)
+  draft.value = loadedDraft(found)
   githubToken.value = ''
   removeToken.value = false
   switchedToToken.value = false
@@ -442,10 +458,22 @@ async function retryGithub() {
     await loadGithub(isNew.value ? creation.savedId.value : id.value)
     if (edited)
       dedicated.value = pendingDedicated
+    // A shared connection turned off while the token state was unknown is resolved now: to the
+    // saved token when there is one (note and review), otherwise to no GitHub.
+    if (!githubError.value && switchedToToken.value) {
+      const mode = restrictedGithubMode('shared', githubConfigured.value)
+      dedicated.value = mode === 'dedicated'
+      switchedToToken.value = mode === 'dedicated'
+    }
   }
   finally {
     githubLoading.value = false
   }
+}
+
+// Reloads projects, skills and MCP connections; a failure leaves them flagged as not loaded.
+async function loadWorkspace() {
+  await refresh().catch(() => {})
 }
 
 // An installation without plugins still edits every other permission.
@@ -514,6 +542,7 @@ async function load() {
       nodes.value = nodeList
     if (plugins)
       catalog.value = plugins
+    legacy.value = olderInstallation(agents)
     if (isNew.value) {
       saved.value = newAgentDraft()
       draft.value = newAgentDraft()
@@ -561,10 +590,12 @@ watch([draft, githubToken, dedicated], () => {
 function body(reapprove: string[] = []) {
   // Also set once a new agent exists: a recovery update must not overwrite another client's change.
   const revision = agent.value?.revision
+  // Only a loaded connection list says which ones were deleted.
+  const { exclusiveNodes: _nodes, plugins: _plugins, ...profile } = savedDraft(draft.value, state.mcps.length ? state.mcps.map(connection => connection.id) : undefined)
   return {
-    // Only a loaded connection list says which ones were deleted.
-    ...savedDraft(draft.value, state.mcps.length ? state.mcps.map(connection => connection.id) : undefined),
-    ...(revision ? { revision } : {}),
+    // An older installation has no live grants on agents nor revisions: they are not sent.
+    ...(legacy.value ? profile : { ...profile, exclusiveNodes: draft.value.exclusiveNodes, plugins: draft.value.plugins }),
+    ...(revision && !legacy.value ? { revision } : {}),
     ...(reapprove.length ? { reapproveDelegations: reapprove } : {}),
   }
 }
@@ -596,8 +627,11 @@ async function requestSave() {
       current = preview
     }
     catch (e) {
-      failed(e)
-      return
+      // An older installation has no preview: the review is computed here only.
+      if (!(e instanceof ApiError && (e.status === 404 || e.status === 405))) {
+        failed(e)
+        return
+      }
     }
     finally {
       busy.value = false
@@ -685,8 +719,8 @@ async function commit(reapprove: string[]) {
   // retrying then updates the same agent instead of creating another one.
   agent.value = result
   if (profileChanged) {
-    saved.value = draftOf(result)
-    draft.value = draftOf(result)
+    saved.value = loadedDraft(result)
+    draft.value = loadedDraft(result)
     fieldErrors.value = {}
     attempted.value = false
   }
@@ -694,6 +728,9 @@ async function commit(reapprove: string[]) {
   let phase: 'token' | 'refresh' = 'token'
   let completed = false
   try {
+    // A token typed before its state became unknown is kept pending, never claimed saved.
+    if (tokenPendingUnknown.value)
+      throw new Error(githubError.value)
     if (change) {
       await api(`/agents/${result.id}/github-token`, { method: 'PUT', body: JSON.stringify({ token: change === 'set' ? token : '' }) })
       githubConfigured.value = change === 'set'
@@ -739,7 +776,7 @@ async function reloadAgent() {
   busy.value = true
   try {
     // Nodes, plugins and MCP connections may have changed too, as the agent did.
-    const [agents, nodeList, plugins] = await Promise.all([api<Agent[]>('/agents'), loadNodes(), loadCatalog(), refresh().catch(() => {})])
+    const [agents, nodeList, plugins] = await Promise.all([api<Agent[]>('/agents'), loadNodes(), loadCatalog(), loadWorkspace()])
     if (nodeList)
       nodes.value = nodeList
     if (plugins)
@@ -757,17 +794,24 @@ async function reloadAgent() {
     const hadToken = githubConfigured.value
     agent.value = found
     saved.value = draftOf(found)
+    legacy.value = olderInstallation(agents)
+    saved.value = loadedDraft(found)
     const rebased = rebaseDraft(base, mine, saved.value)
     // Tool choices of deleted MCP connections are dropped.
-    if (state.mcps.length)
+    if (state.workspaceLoaded)
       rebased.access.mcpTools = Object.fromEntries(Object.entries(rebased.access.mcpTools ?? {}).filter(([connection]) => state.mcps.some(item => item.id === connection)))
     draft.value = rebased
+    const knewToken = !githubError.value
     await loadGithub(found.id)
     if (githubEdited)
       dedicated.value = pendingDedicated
     // "No GitHub" chosen while no token existed never removes a token saved since.
-    if (!hadToken && githubConfigured.value)
+    if (knewToken && !githubError.value && !hadToken && githubConfigured.value) {
+      tokenSavedMeanwhile.value = removeToken.value || githubMode.value === 'none'
       removeToken.value = false
+    }
+
+    void loadSuspension()
     conflict.value = false
     serverError.value = ''
   }
@@ -1145,7 +1189,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               <p v-if="switchedToToken && githubMode === 'dedicated'" class="rounded-xl bg-soft px-4 py-3 text-sm" role="status">
                 The shared connection was turned off: this agent will use its saved dedicated token.
               </p>
-              <p v-if="githubMode === 'none' && githubConfigured && !removeToken" class="flex flex-wrap items-center gap-2 rounded-xl bg-soft px-4 py-3 text-sm" role="status">
+              <p v-if="tokenSavedMeanwhile && githubMode === 'none' && githubConfigured && !removeToken" class="flex flex-wrap items-center gap-2 rounded-xl bg-soft px-4 py-3 text-sm" role="status">
                 <span class="min-w-0 flex-1">A dedicated token was saved meanwhile: this agent will use it unless you remove it.</span>
                 <UiButton size="small" @click="githubMode = 'none'">
                   Remove saved token
@@ -1194,6 +1238,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               :packages="catalog.packages"
               :connections="catalog.connections"
               :suspended="suspended"
+              :read-only-grants="legacy ? updateForGrants : ''"
             />
             <p v-if="!catalogError && !grantablePackages(catalog.packages).length && !catalog.packages.length" class="text-xs text-muted">
               Plugins add secrets and tools that you grant per agent.
@@ -1230,6 +1275,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               v-model:access="draft.access"
               v-model:exclusive-nodes="draft.exclusiveNodes"
               :nodes="nodes"
+              :read-only-grants="legacy ? updateForGrants : ''"
             />
           </template>
 

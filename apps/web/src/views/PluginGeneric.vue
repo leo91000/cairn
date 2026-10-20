@@ -13,6 +13,7 @@ import {
   ref,
 } from 'vue'
 import { useRoute } from 'vue-router'
+import { keptAgentIds } from '../agent-access'
 import {
   api,
   notify,
@@ -248,6 +249,8 @@ async function save() {
         maxPerPersonPerHour: Number(form.value.maxPerPersonPerHour),
       }),
       enabled: form.value.enabled,
+      // An older installation needs the granted agents back, or it would revoke them.
+      ...(keptAgentIds(state.agents, entry.value, editing.value) ? { agentIds: keptAgentIds(state.agents, entry.value, editing.value) } : {}),
     }
     const path = `/plugins/${id.value}/connections${editing.value ? `/${editing.value.id}` : ''}`
     await pluginOperation(path, body, editing.value ? 'PUT' : 'POST')

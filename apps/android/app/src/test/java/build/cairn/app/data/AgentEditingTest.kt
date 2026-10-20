@@ -441,6 +441,80 @@ class AgentEditingTest {
     }
 
     @Test
+    fun aBackendSwitchOnEitherSideKeepsThatSidesNodesWhole() {
+        val base = agent.withExclusive("gpu", true)
+        // I switched to native and chose desk; they added mac meanwhile.
+        val mine = base.withBackend(native = true).withNodeRun("desk", true)
+        val theirs =
+            base.copy(
+                revision = "r2",
+                access = base.access.copy(nodes = base.access.nodes!! + "mac"),
+            )
+        val rebased = rebaseAgent(base, mine, theirs)
+        assertEquals(NATIVE_BACKEND, rebased.access.backend)
+        assertEquals(listOf("desk"), rebased.access.nodes)
+        assertEquals(emptyList<String>(), rebased.exclusiveNodes)
+
+        // They switched; I only added a VM node: their native nodes win, mine is not merged in.
+        val theirsNative = base.withBackend(native = true).withNodeRun("desk", true)
+        val mineVm = base.withNodeRun("mac", true)
+        val kept = rebaseAgent(base, mineVm, theirsNative.copy(revision = "r2"))
+        assertEquals(NATIVE_BACKEND, kept.access.backend)
+        assertEquals(listOf("desk"), kept.access.nodes)
+    }
+
+    @Test
+    fun cardsAndReviewsNameTheBackendAndOnlyEffectiveExclusivity() {
+        val native = agent.withBackend(native = true).withNodeRun("desk", true)
+        assertEquals(
+            listOf("exécution native"),
+            agentReductions(native, native.withBackend(native = false), resources).filter {
+                it == "exécution native"
+            },
+        )
+        assertEquals("2 projets · 1 node · Exécution native", agentAccessSummary(native))
+
+        val granted = agent.copy(plugins = listOf("prod", "staging")).withExclusive("mac", true)
+        // Without the catalog or machines, counts and the grant as saved.
+        assertEquals(
+            "2 projets · 2 nodes · 2 plugins · Exclusivité",
+            agentAccessSummary(granted),
+        )
+        // With them: package names, and exclusivity only where it applies (mac cannot run it).
+        assertEquals("2 projets · 2 nodes · 1Password", agentAccessSummary(granted, catalog, nodes))
+    }
+
+    @Test
+    fun toolChoicesOfDeletedConnectionsAreNeverSent() {
+        val tools = mapOf("kept" to listOf("a"), "gone" to listOf("b"))
+        val all = agent.copy(access = agent.access.copy(mcps = null, mcpTools = tools))
+        val sent = agentSaveBody(all, mcpIds = setOf("kept"))["access"]!!.jsonObject["mcpTools"]!!
+        assertEquals(setOf("kept"), sent.jsonObject.keys)
+        assertEquals(
+            setOf("kept", "gone"),
+            agentSaveBody(all)["access"]!!.jsonObject["mcpTools"]!!.jsonObject.keys,
+        )
+    }
+
+    @Test
+    fun anExplicitDedicatedChoiceDropsTheAutomaticSwitchLine() {
+        val shared = agent.copy(access = agent.access.copy(projects = null, github = true))
+        val switched = AgentDraft(shared).withAllProjects(false, tokenSaved = true)
+        assertTrue(switched.switchedToSavedToken(tokenSaved = true))
+        val chosen = switched.withGithub(GithubMode.Dedicated, tokenSaved = true)
+        assertFalse(chosen.switchedToSavedToken(tokenSaved = true))
+        val lines =
+            agentReview(
+                shared,
+                chosen.resolved(true),
+                resources,
+                null,
+                savedToken = chosen.switchedToSavedToken(true),
+            )
+        assertTrue(lines.none { "utilisera son jeton dédié enregistré" in it.text })
+    }
+
+    @Test
     fun runPermissionsOnUnusableNodesAreReportedAndNativeNeedsANode() {
         val desk =
             ExecutionNode(

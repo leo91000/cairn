@@ -18,14 +18,11 @@ const items = computed<SelectionItem[]>(() => props.mcps.map(connection => ({
 })))
 const selection = computed({
   get: () => access.value.mcps,
+  // Leaving "All" starts with no connection chosen, as for projects and skills and on Android.
+  // Tool choices stay in the draft, also for connections no longer chosen, so choosing one again
+  // or going back to "All" restores them; only granted connections' choices are saved.
   set: (value: string[] | null) => {
-    // Leaving "All" starts with no connection chosen, as for projects and skills and on Android,
-    // and keeps the tool choices until the chosen list changes.
-    const leavingAll = access.value.mcps === null
     access.value.mcps = value
-    // Tool choices only apply to connections that stay granted.
-    if (value !== null && !leavingAll)
-      access.value.mcpTools = Object.fromEntries(Object.entries(access.value.mcpTools).filter(([id]) => value.includes(id)))
   },
 })
 

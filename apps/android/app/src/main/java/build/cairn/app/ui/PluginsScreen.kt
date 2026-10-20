@@ -826,7 +826,12 @@ private fun InstanceEditor(
                         put("enabled", enabled)
                         // An older installation reads a missing list as "no agents": send the
                         // current grants unchanged. A current one keeps them when omitted.
-                        if (!creating && olderInstallation(state.agents))
+                        if (
+                            !creating &&
+                                olderInstallation(state.agents) &&
+                                manifest.agentAccess != null &&
+                                initial.agentIds.isNotEmpty()
+                        )
                             put("agentIds", JsonArray(initial.agentIds.map(::JsonPrimitive)))
                     },
                     method = if (creating) "POST" else "PUT",

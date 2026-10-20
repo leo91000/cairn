@@ -15,10 +15,12 @@ import {
   grantableConnection,
   grantablePackages,
   issues,
+  keptAgentIds,
   mergeList,
   needsReview,
   newAgentDraft,
   nodesFor,
+  olderInstallation,
   rebaseDraft,
   restrictedGithubMode,
   reviewLines,
@@ -27,6 +29,7 @@ import {
   selectionSummary,
   skillLabel,
   unknownNode,
+  withResourceGrants,
 } from '../src/agent-access'
 
 const gpu = {
@@ -604,4 +607,67 @@ it('never sends tool choices of deleted MCP connections', () => {
   draft.access.mcps = null
   draft.access.mcpTools = { m1: ['echo'], gone: ['x'] }
   expect(savedDraft(draft, ['m1']).access.mcpTools).toEqual({ m1: ['echo'] })
+})
+
+it('recognizes an older installation and reads its grants from the resources', () => {
+  expect(olderInstallation([{ revision: '' }, {}] as Agent[])).toBe(true)
+  expect(olderInstallation([{ revision: 'r1' }, {}] as Agent[])).toBe(false)
+  expect(olderInstallation([])).toBe(false)
+  const local = {
+    ...gpu,
+    id: 'runner-record',
+    local: true,
+    exclusiveAgents: ['a'],
+  } as ExecutionNode
+  const draft = withResourceGrants(newAgentDraft(), 'a', [{ ...production, agentIds: ['a'] }, { ...production, id: 'other', agentIds: ['b'] }], [{ ...gpu, exclusiveAgents: ['a'] }, local])
+  expect(draft).toMatchObject({ plugins: ['prod'], exclusiveNodes: ['gpu', LOCAL_NODE_ID] })
+  // An instance save sends its agents back unchanged there, and only there.
+  const older = [{ revision: '' }] as Agent[]
+  expect(keptAgentIds(older, onePassword, { agentIds: ['a'] })).toEqual(['a'])
+  expect(keptAgentIds(older, onePassword, { agentIds: [] })).toBeUndefined()
+  expect(keptAgentIds(older, { manifest: null }, { agentIds: ['a'] })).toBeUndefined()
+  expect(keptAgentIds([{ revision: 'r1' }] as Agent[], onePassword, { agentIds: ['a'] })).toBeUndefined()
+})
+
+it('never merges node grants across execution backends', () => {
+  const base = newAgentDraft()
+  base.access.nodes = ['gpu']
+  base.exclusiveNodes = ['gpu']
+  const mine = structuredClone(base)
+  mine.access.backend = 'native'
+  mine.access.nodes = ['desktop']
+  mine.exclusiveNodes = []
+  const theirs = structuredClone(base)
+  theirs.access.nodes = ['gpu', 'other']
+  theirs.exclusiveNodes = ['gpu', 'other']
+  expect(rebaseDraft(base, mine, theirs)).toMatchObject({ access: { backend: 'native', nodes: ['desktop'] }, exclusiveNodes: [] })
+  // Changed elsewhere: their backend's lists, without the owner's VM additions.
+  const vm = structuredClone(base)
+  vm.access.nodes = ['gpu', 'box']
+  const native = structuredClone(base)
+  native.access.backend = 'native'
+  native.access.nodes = ['desktop']
+  native.exclusiveNodes = []
+  expect(rebaseDraft(base, vm, native)).toMatchObject({ access: { backend: 'native', nodes: ['desktop'] }, exclusiveNodes: [] })
+})
+
+it('reports no missing project or skill until the workspace lists load', () => {
+  const draft = newAgentDraft()
+  draft.access.projects = ['gone']
+  draft.access.skills = ['global/gone']
+  expect(issues(draft, { ...context, projects: [], workspaceUnavailable: true }, false)).toEqual([])
+  expect(issues(draft, { ...context, projects: [] }, false).map(issue => issue.section)).toEqual(['projects', 'skills'])
+})
+
+it('names plugin grants it cannot resolve by count, and claims reservations only when effective', () => {
+  const agent = {
+    id: 'a',
+    name: 'Agent',
+    access: { projects: [], nodes: ['gpu'] },
+    plugins: ['prod', 'x'],
+    exclusiveNodes: ['gpu'],
+  } as unknown as Agent
+  // A member sees no catalogue nor nodes.
+  expect(accessSummary(agent, { packages: [], connections: [] })).toBe('No projects · 1 node · 2 plugins')
+  expect(accessSummary(agent, context)).toBe('No projects · 1 node · 1Password · 1 other plugin · Exclusive reservation')
 })

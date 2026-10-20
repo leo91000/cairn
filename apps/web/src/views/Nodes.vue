@@ -9,6 +9,7 @@ import {
 import { diskCapacity, formatMiB, nodeDiagnostics } from '../../../../packages/contracts/nodes'
 import {
   api,
+  ApiError,
   notify,
   refresh,
   state,
@@ -197,8 +198,19 @@ function saveGrants() {
   // `add` only grants the chosen agents: finishing never revokes one allowed meanwhile.
   const agentIds = granted.value.filter(agentId => !allowed(agentId) && !mismatch(agentId))
   return action(async () => {
-    if (agentIds.length)
-      await api(`/nodes/${node.id}/agents`, { method: 'PUT', body: JSON.stringify({ agentIds, add: true }) })
+    if (agentIds.length) {
+      try {
+        await api(`/nodes/${node.id}/agents`, { method: 'PUT', body: JSON.stringify({ agentIds, add: true }) })
+      }
+      catch (e) {
+        // An older installation only replaces the list: send the agents already allowed with the new ones.
+        if (!(e instanceof ApiError && e.status === 400 && e.message === 'Invalid node request.'))
+          throw e
+        const kept = (node.agents ?? []).filter(agent => !agent.allNodes).map(agent => agent.id)
+        await api(`/nodes/${node.id}/agents`, { method: 'PUT', body: JSON.stringify({ agentIds: [...new Set([...kept, ...agentIds])] }) })
+      }
+    }
+
     granting.value = null
     notify(`${node.name} is ready`)
     await refresh()

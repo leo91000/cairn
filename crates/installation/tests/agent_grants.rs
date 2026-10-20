@@ -792,6 +792,21 @@ async fn grants_follow_the_agent_execution_backend() {
         Value::Null
     );
 
+    // A node held before (for example from before the backend check) still saves.
+    let mut held = owner.stored("agents", text(&agent, "id")).await;
+    held["access"]["nodes"] = json!([LOCAL_NODE_ID, native]);
+    owner
+        .service
+        .store
+        .put("agents", held.clone())
+        .await
+        .unwrap();
+    let mut renamed = owner.stored("agents", text(&agent, "id")).await;
+    renamed["description"] = "Unrelated edit".into();
+    let (status, error) = owner.send("PUT", &path(&renamed), renamed).await;
+    assert_eq!(status, StatusCode::OK, "{error}");
+    let agent = owner.stored("agents", text(&agent, "id")).await;
+
     // A Firecracker node it may run on stays reservable.
     let mut vm = agent.clone();
     vm["access"]["nodes"] = json!([LOCAL_NODE_ID, NODE]);

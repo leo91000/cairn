@@ -147,6 +147,7 @@ private fun AgentPage(
             nodesFailed = false
         } catch (e: Exception) {
             if (e is CancellationException) throw e
+            nodesLoaded = false
             nodesFailed = true
         }
     }
@@ -156,6 +157,8 @@ private fun AgentPage(
             catalogFailed = false
         } catch (e: Exception) {
             if (e is CancellationException) throw e
+            // A failed re-read leaves the catalog unknown, not as it was.
+            catalog = null
             catalogFailed = true
         }
     }
@@ -186,6 +189,8 @@ private fun AgentPage(
         }
     }
 
+    // Existing MCP connections (owners load them): tool choices of deleted ones are never sent.
+    val mcpIds = state.mcps.map { it.id }.toSet().takeIf { state.isOwner }
     val resources =
         AgentResources(
             state.projects,
@@ -247,10 +252,11 @@ private fun AgentPage(
                                     agentSaveBody(
                                         edited.copy(revision = baseline.revision),
                                         approved,
+                                        mcpIds,
                                     )
                                 },
                                 createValue = {
-                                    agentSaveBody(edited.copy(revision = ""), approved)
+                                    agentSaveBody(edited.copy(revision = ""), approved, mcpIds)
                                 },
                                 onCreated = {
                                     baseline = wireJson.decodeFromJsonElement<Agent>(it)
@@ -272,7 +278,7 @@ private fun AgentPage(
                     vm.api.send(
                         "PUT",
                         "/agents/${segment(agentId)}",
-                        agentSaveBody(edited, approved),
+                        agentSaveBody(edited, approved, mcpIds),
                     )
             }
 
@@ -343,11 +349,12 @@ private fun AgentPage(
                             vm.api.send<AgentPreview>(
                                 "POST",
                                 "/agents/${segment(agentId)}/preview",
-                                agentSaveBody(edited),
+                                agentSaveBody(edited, mcpIds = mcpIds),
                             )
                         }
                 val tokenRemoved = draft.tokenChange(tokenSaved, newToken) == ""
-                val savedToken = draft.githubMode(tokenSaved) == GithubMode.Dedicated && tokenSaved
+                // Only the automatic switch; an explicit « Jeton dédié » needs no such line.
+                val savedToken = draft.switchedToSavedToken(tokenSaved)
                 val lines =
                     agentReview(
                         baseline,
@@ -377,17 +384,22 @@ private fun AgentPage(
                 val theirs =
                     vm.api.get<List<Agent>>("/agents").find { it.id == agentId }
                         ?: error("Cet agent n’existe plus.")
-                // Tool choices of connections deleted meanwhile cannot be saved.
-                val mcpIds = state.mcps.map { it.id }.toSet().takeIf { state.isOwner }
-                draft = draft.rebased(baseline, theirs, mcpIds)
+                // Tool choices of connections deleted meanwhile cannot be saved: read the
+                // connections again first.
+                val refreshed = runCatching { vm.refresh() }.isSuccess
+                val fresh = vm.state.value
+                val freshMcps =
+                    fresh.mcps.map { it.id }.toSet().takeIf { refreshed && fresh.isOwner }
+                draft = draft.rebased(baseline, theirs, freshMcps)
                 baseline = theirs
-                // The token, machines and plugin instances may have changed elsewhere too.
+                // The token, machines and plugin instances may have changed elsewhere too; until
+                // read again they are unknown.
+                tokenLoaded = false
                 loadToken()
                 nodesAttempt++
                 catalogAttempt++
                 saveError = null
                 conflict = false
-                runCatching { vm.refresh() }
             } catch (e: Exception) {
                 fail(e)
             } finally {
@@ -957,7 +969,7 @@ private fun AgentOverview(
         OverviewRow(
             AgentSection.Powers,
             when {
-                !resources.nodesLoaded && !access.installation -> NOT_LOADED
+                !resources.nodesLoaded -> NOT_LOADED
                 exclusive.isEmpty() && !access.installation -> "Aucun"
                 exclusive.isEmpty() -> ""
                 access.installation -> ""
@@ -1430,11 +1442,6 @@ private fun McpSection(
     Note(
         "L’accès réel combine les connexions accordées ici et les outils activés sur chaque connexion. S’applique aux prochaines exécutions."
     )
-    if (mcps.isEmpty()) {
-        Empty("Aucune connexion MCP", "Ajoutez une connexion pour la proposer à vos agents.")
-        TextButton(onClick = openMcps) { Text("Ouvrir les serveurs MCP ›") }
-        return
-    }
     ScopeChoice(access.mcps == null, true) { all ->
         change {
             it.copy(
@@ -1445,6 +1452,7 @@ private fun McpSection(
         }
     }
     if (access.mcps == null) {
+        if (mcps.isEmpty()) Note("Les nouvelles connexions MCP seront accessibles dès leur ajout.")
         mcps.forEach { mcp ->
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(mcp.name, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
@@ -1456,6 +1464,10 @@ private fun McpSection(
         return
     }
     val selected = access.mcps
+    if (mcps.isEmpty()) {
+        Empty("Aucune connexion MCP", "Ajoutez une connexion pour la proposer à vos agents.")
+        TextButton(onClick = openMcps) { Text("Ouvrir les serveurs MCP ›") }
+    }
     val items =
         mcps.map {
             ChoiceItem(
@@ -1473,9 +1485,8 @@ private fun McpSection(
         selected,
         "Rechercher une connexion",
         { list ->
-            change {
-                it.copy(mcps = list, mcpTools = it.mcpTools.filterKeys { id -> id in list })
-            }
+            // Tool choices stay in the draft: granting the connection again restores them.
+            change { it.copy(mcps = list) }
         },
     ) { item, checked ->
         mcps.find { it.id == item.id }?.let { if (checked) McpTools(it, access, change) }

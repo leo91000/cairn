@@ -436,3 +436,59 @@ test('native enrollment requires explicit people and native agent grants', async
   await expect(grant).toHaveCount(0)
   expect((await workspace.api('/api/nodes')).find((value: { id: string }) => value.id === desktop).nativeEnabled).toBe(false)
 })
+
+test('on an older installation, finishing the first step sends the machine\'s whole list', async ({ page, workspace }) => {
+  test.setTimeout(60000)
+  const earlier = await workspace.api('/api/agents', 'POST', { name: 'Earlier agent', access: { nodes: [] } })
+  await useRelayForHttpMocks(page)
+  // An older installation rejects `add` and replaces the list instead.
+  const bodies: unknown[] = []
+  await page.route('**/api/nodes/*/agents', async (route) => {
+    const body = route.request().postDataJSON()
+    bodies.push(body)
+    if (body.add)
+      await route.fulfill({ status: 400, json: { error: 'Invalid node request.' } })
+    else
+      await route.continue()
+  })
+  await page.goto(workspacePath('/nodes'))
+  await authenticateWorkspace(page)
+  await page.getByRole('button', { name: 'Add a machine', exact: true }).click()
+  await page.getByLabel('Machine name').fill('Older Linux')
+  await page.getByLabel('Direct manager address').fill(workspace.url)
+  await page.getByRole('button', { name: 'Create enrollment code' }).click()
+  const code = await page.getByLabel('Single-use enrollment code').textContent()
+  const response = await page.request.post(`${workspace.installationUrl}/internal/nodes/enroll`, {
+    data: {
+      code,
+      name: 'Older Linux',
+      protocol: 1,
+      runtimeId: 'fixture',
+      capabilities: {
+        os: 'linux',
+        arch: 'x86_64',
+        kvm: true,
+        cpu: 8,
+        memoryMiB: 16384,
+        diskMiB: 65536,
+      },
+    },
+  })
+  expect(response.ok()).toBe(true)
+  const { nodeId } = await response.json()
+  const grant = page.getByRole('dialog', { name: 'Who can use “Older Linux”?' })
+  await expect(grant).toBeVisible({ timeout: 20000 })
+  // Allowed meanwhile from its agent page: the replacing list must keep it.
+  const current = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === earlier.id)
+  await workspace.api(`/api/agents/${earlier.id}`, 'PUT', { ...current, access: { ...current.access, nodes: [nodeId] } })
+  await expect(grant.getByRole('checkbox', { name: /^Earlier agent/ })).toBeDisabled({ timeout: 15000 })
+  await grant.getByRole('checkbox', { name: 'Main agent', exact: true }).check()
+  await grant.getByRole('button', { name: 'Finish', exact: true }).click()
+  await expect(grant).toHaveCount(0)
+  expect(bodies).toEqual([
+    { agentIds: [MAIN_AGENT_ID], add: true },
+    { agentIds: [earlier.id, MAIN_AGENT_ID] },
+  ])
+  const saved = (await workspace.api('/api/nodes')).find((node: { id: string }) => node.id === nodeId)
+  expect(saved.agents.map((item: { id: string }) => item.id).sort()).toEqual([MAIN_AGENT_ID, earlier.id].sort())
+})
