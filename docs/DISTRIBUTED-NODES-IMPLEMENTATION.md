@@ -23,8 +23,9 @@ has not been merged, deployed or released.
   (a preferred node wins, ties keep the master runner). Agents discover their
   authorized nodes, tags, shared budgets and free slots with `list_nodes` before calling
   `move_to_node` with a destination. Agents never request resource allocations.
-- Agent access can be granted from each node's card; a newly connected node
-  asks for it right after enrollment and reports why it cannot take work.
+- Agent access is granted on each agent's page; node cards list it read-only. A
+  newly connected node ends with an add-only "Who can use it?" step and reports why
+  it cannot take work.
   Conversations only show execution details once remote nodes are relevant.
 - Owner alerts when a conversation waits for its node, fails over, fails to move
   or cannot save a recovery point: a message in the conversation, web push and

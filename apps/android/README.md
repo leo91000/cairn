@@ -170,7 +170,7 @@ See [validation](VALIDATION.md).
 | Task editor | Agent selection, optional project focus (all authorized projects), instructions, isolated worktree, tags, all authorized or individually selected skills, once/daily/weekly/custom cron, timezone, server schedule preview |
 | Runs | Status and task filters, 30-item pagination, current status, results, sharing/copy through Android selection, duration and metadata |
 | Run detail | SSE activity with follow/reconnection, original brief and snapshot, skills, usage, cancellation, retry, resume, recovery/account waiting states, multiple workspaces and guarded cleanup; chat runs link back to their conversation |
-| Agents | List/search, create/edit/delete, server model/reasoning catalog, instructions, timeout, project/skill/GitHub access, dedicated GitHub token, sandbox, MCP server and per-tool restrictions |
+| Agents | List/search with access summaries; a full-screen agent page for creation and editing: projects, skills, MCP servers and tools, GitHub (dedicated token saved with the page), 1Password/plugin grants, nodes and exclusive reservations, execution mode, installation management, model/reasoning, instructions and timeout, saved as one reviewed draft |
 | Projects | List/search, GitHub repository picker with filtering/pagination and automatic cloning, register/edit/delete, server path, description, base branch and origin |
 | Skills | Search, global/project filters, create/edit/delete, validation errors, Markdown preview, supporting file list/read/create/edit |
 | Connections | GitHub status/version and device login; Codex multi-account creation, renaming, reconnect, removal, pause, concurrency, quota windows, refresh, reset-credit status and active run links |
@@ -331,9 +331,11 @@ The same Compose gesture regression cases run as JVM tests and device instrument
 
 ## 1Password
 
-Connections includes service account creation, token rotation, connection testing,
-disabling/deleting accounts, and explicit per-agent grants. No agent receives
-access by default. Tokens use masked input and are not saved in instance state.
+**Atelier → Plugins → 1Password** includes service account creation, token rotation,
+connection testing and disabling/deleting accounts. Agents are granted an account on
+their own page, in **Secrets & plugins**; the account screen only lists them. No agent
+receives access by default, Main included. Tokens use masked input and are not saved
+in instance state.
 See [server setup and access](../../docs/ONEPASSWORD.md).
 
 

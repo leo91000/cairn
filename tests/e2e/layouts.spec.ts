@@ -5,6 +5,7 @@ import {
   signIn as authenticateWorkspace,
   expect,
   expectSingleScroll,
+  openAgentSection,
   test,
   useRelayForHttpMocks,
   workspacePath,
@@ -211,9 +212,15 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     await page.getByRole('button', { name: 'Mission brief', exact: true }).click()
     await screenshot(`${viewport.width}-brief`)
 
+    // Agents are edited on their own page rather than in a dialog.
+    await navigate('/agents')
+    await page.getByRole('link', { name: 'New agent', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'Identity & instructions', level: 2 })).toBeVisible()
+    await screenshot(`${viewport.width}-agent-editor`)
+    await openAgentSection(page, 'Nodes')
+    await screenshot(`${viewport.width}-agent-editor-nodes`)
     for (const [name, url, button] of [
       ['task-editor', '/tasks', 'New mission'],
-      ['agent-editor', '/agents', 'New agent'],
       ['project-editor', '/projects', 'Add project'],
       ['skill-editor', '/skills', 'New skill'],
       ['skill-files', '/skills', 'Edit review'],
@@ -283,6 +290,8 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     id: `virtual-${index}`,
     name: index === 4999 ? 'Équipe sécurité' : `Agent ${index.toString().padStart(5, '0')}`,
     description: `Maintains project ${index}`,
+    // A current installation marks its agents as holding their live grants.
+    grantsOnAgent: true,
     model: '',
     reasoning: 'high',
     access: {

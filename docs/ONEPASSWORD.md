@@ -2,13 +2,14 @@
 
 1Password is an ordinary plugin package (see [plugins](PLUGINS.md#1password)). In
 **Atelier → Plugins → 1Password** on web or Android, add a service account with a
-name and an `ops_…` token. Select the agents allowed to use it, then save and test
-it. Every account starts with **no authorized agents**, including Main agent.
+name and an `ops_…` token, then save and test it. Grant it to agents from each
+agent's page, under **Secrets & plugins**. Every account starts with **no
+authorized agents**, including Main agent; the instance lists them read-only.
 Multiple accounts can have independent agent lists. Each account's panel lists the
 vaults it can read on demand.
 
 Editing with an empty token keeps the existing credential. Enter a new token to
-rotate it. Disable the account, uncheck an agent, or delete the account to revoke
+rotate it. Disable the account, remove it from an agent, or delete the account to revoke
 future reads, including in active conversations. A read already in flight is
 checked again before its result is returned. Secrets previously retrieved by an
 agent cannot be recalled. Grants are live and do not depend on a run snapshot.

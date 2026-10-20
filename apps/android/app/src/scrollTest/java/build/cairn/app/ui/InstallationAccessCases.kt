@@ -3,8 +3,11 @@ package build.cairn.app.ui
 import android.app.Application
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
@@ -20,10 +23,11 @@ abstract class InstallationAccessCases {
     @get:Rule val compose = createComposeRule()
 
     @Test
-    fun ownerCanEnableAndRevokeInstallationAccessInTheAgentEditor() {
+    fun ownerCanEnableAndRevokeInstallationAccessOnTheAgentPage() {
         MockWebServer().use { server ->
             val saved = CopyOnWriteArrayList<Agent>()
-            val agent = AtomicReference(Agent(MAIN_AGENT_ID, "Agent principal"))
+            val agent =
+                AtomicReference(Agent(MAIN_AGENT_ID, "Agent principal", grantsOnAgent = true))
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
@@ -33,11 +37,15 @@ abstract class InstallationAccessCases {
                                 path == "/api/installations/fixture/api/agents/$MAIN_AGENT_ID" &&
                                     request.method == "PUT" -> {
                                     val updated =
-                                        wireJson.decodeFromString<Agent>(request.body.readUtf8())
+                                        wireJson
+                                            .decodeFromString<Agent>(request.body.readUtf8())
+                                            .copy(grantsOnAgent = true)
                                     agent.set(updated)
                                     saved += updated
                                     wireJson.encodeToString(updated)
                                 }
+                                path.endsWith("/preview") -> "{}"
+                                path.endsWith("/github-token") -> """{"configured":false}"""
                                 path == "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(listOf(agent.get()))
                                 path == "/api/installations" -> beaconInstallationsFixture()
@@ -64,6 +72,8 @@ abstract class InstallationAccessCases {
                     vault,
                     beaconOrigin = "",
                 )
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            var mounted by mutableStateOf(true)
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()
                 LaunchedEffect(Unit) {
@@ -71,31 +81,53 @@ abstract class InstallationAccessCases {
                     vm.connect(server.url("/").toString())
                 }
                 CairnTheme {
-                    if (state.session.authenticated) ResourcesScreen(vm, state, agents = true)
+                    if (mounted && state.agents.isNotEmpty())
+                        AgentScreen(vm, state, MAIN_AGENT_ID, back = {}, chat = {}, navigate = {})
                 }
             }
-            compose.waitUntil(20000) {
-                compose
-                    .onAllNodesWithContentDescription("Modifier")
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
+            try {
+                grantAndRevoke(saved)
+            } finally {
+                // Unmount and clear the view model before the server closes.
+                compose.runOnIdle { mounted = false }
+                compose.waitForIdle()
+                compose.runOnIdle { models.clear() }
             }
-            val label = "Autoriser l’accès à l’installation Cairn courante"
-            compose.onNodeWithContentDescription("Modifier").performClick()
-            compose.onNodeWithText(label).performScrollTo().assertIsOff().performClick()
-            compose.onNodeWithText(label).assertIsOn()
-            compose.onNodeWithText("Enregistrer").performClick()
-            compose.waitUntil(10000) {
-                saved.size == 1 && compose.onAllNodesWithText(label).fetchSemanticsNodes().isEmpty()
-            }
-            assertTrue(saved[0].access.installation)
-            compose.onNodeWithContentDescription("Modifier").performClick()
-            compose.onNodeWithText(label).performScrollTo().assertIsOn().performClick()
-            compose.onNodeWithText("Enregistrer").performClick()
-            compose.waitUntil(10000) {
-                saved.size == 2 && compose.onAllNodesWithText(label).fetchSemanticsNodes().isEmpty()
-            }
-            assertFalse(saved[1].access.installation)
         }
+    }
+
+    private fun grantAndRevoke(saved: List<Agent>) {
+        compose.waitUntil(20000) {
+            compose.onAllNodesWithTag("agent-section-Powers").fetchSemanticsNodes().isNotEmpty()
+        }
+        val label = "Gérer l’installation Cairn"
+        compose.onNodeWithTag("agent-section-Powers").performScrollTo().performClick()
+        compose.onNodeWithText(label).assertIsOff().performClick()
+        compose.onNodeWithText(label).assertIsOn()
+        compose.onNodeWithContentDescription("Retour").performClick()
+        compose.onNodeWithText("Enregistrer").performClick()
+        // A power added is always reviewed before saving.
+        compose.waitUntil(10000) {
+            compose.onAllNodesWithTag("agent-review").fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithText("Ajout : gestion de l’installation", substring = true).assertExists()
+        compose
+            .onNode(hasText("Enregistrer") and hasAnyAncestor(hasTestTag("agent-review")))
+            .performClick()
+        compose.waitUntil(10000) {
+            saved.size == 1 &&
+                compose.onAllNodesWithTag("agent-save-bar").fetchSemanticsNodes().isEmpty()
+        }
+        assertTrue(saved[0].access.installation)
+        compose.onNodeWithTag("agent-section-Powers").performScrollTo().performClick()
+        compose.onNodeWithText(label).assertIsOn().performClick()
+        compose.onNodeWithContentDescription("Retour").performClick()
+        // Removing a power that stops no work saves directly.
+        compose.onNodeWithText("Enregistrer").performClick()
+        compose.waitUntil(10000) {
+            saved.size == 2 &&
+                compose.onAllNodesWithTag("agent-save-bar").fetchSemanticsNodes().isEmpty()
+        }
+        assertFalse(saved[1].access.installation)
     }
 }

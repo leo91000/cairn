@@ -11,8 +11,9 @@ memory headroom are confirmed. Controller, authentication, leases, disk safety
 and recovery services stay active. This excludes other Cairn guest execution;
 it does not allocate every physical host CPU or stop software outside Cairn.
 
-The installation owner grants this permission separately with a node's
-`exclusiveAgents`. Existing nodes have no grants. The current agent must still
+The installation owner grants this permission separately, on the agent's page
+(`exclusiveNodes`, see [agent-centric permissions](0051-agent-centric-permissions.md)); the node keeps a synchronized
+`exclusiveAgents` copy. Existing nodes have no grants. The current agent must still
 have node access and cover its original run permissions. Dependencies must be
 explicit, active attempts of the same agent on the same node; a new attempt
 cannot inherit a member's privilege. `list_nodes` reports eligibility and whether

@@ -1,8 +1,11 @@
 import {
   signIn as authenticateWorkspace,
+  createAgent,
   expect,
   expectSingleScroll,
+  grantFullAccess,
   initializeRepository,
+  openAgentSection,
   test,
   workspacePath,
 } from './fixtures'
@@ -14,8 +17,10 @@ test('selects live models and supported reasoning for agents and queued chat tur
   await authenticateWorkspace(page)
   await expect(page.locator('.shell')).toBeVisible()
   await page.goto(workspacePath('/agents'))
-  await page.getByRole('button', { name: 'New agent', exact: true }).click()
+  await page.getByRole('link', { name: 'New agent', exact: true }).click()
   await page.getByLabel('Name', { exact: true }).fill('Model explorer')
+  await grantFullAccess(page)
+  await openAgentSection(page, 'Coding agent & model')
   const picker = page.getByRole('button', { name: /^Agent, model and reasoning/ })
   const menu = page.getByRole('dialog', { name: 'Agent & model' })
   const reasoning = menu.getByRole('radiogroup', { name: 'Reasoning' })
@@ -37,12 +42,11 @@ test('selects live models and supported reasoning for agents and queued chat tur
   await effort('Ultra').click()
   await menu.getByRole('button', { name: 'Close', exact: true }).click()
   await expect(picker).toHaveAccessibleName('Agent, model and reasoning: Codex · Deep thinker · Ultra reasoning')
-  await page.getByRole('button', { name: 'Save agent', exact: true }).click()
-  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await createAgent(page)
   const agent = workspace.service.store.list('agents').find(agent => agent.name === 'Model explorer')!
   expect(agent.model).toBe('fixture-deep')
   expect(agent.reasoning).toBe('ultra')
-  await page.locator('article').filter({ has: page.getByRole('button', { name: 'Model explorer', exact: true }) }).getByRole('link', { name: 'Start chat' }).click()
+  await page.getByRole('link', { name: 'Chat with this agent' }).click()
   await picker.click()
   await expect(effort('Agent default · Ultra')).toHaveAttribute('aria-checked', 'true')
   await menu.getByRole('radio', { name: 'Quick coder', exact: true }).click()

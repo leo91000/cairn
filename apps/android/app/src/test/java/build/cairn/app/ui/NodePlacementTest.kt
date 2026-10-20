@@ -8,10 +8,14 @@ import org.junit.*
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowLooper
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36], qualifiers = "w412dp-h915dp-mdpi")
 class NodePlacementTest : NodePlacementCases() {
+    override fun elapse(millis: Long) =
+        ShadowLooper.idleMainLooper(millis, java.util.concurrent.TimeUnit.MILLISECONDS)
+
     @Before
     fun setup() {
         WorkManagerTestInitHelper.initializeTestWorkManager(

@@ -111,7 +111,17 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
         ("GET", ["overview"]) => overview(s).await?,
         ("GET", ["agent-avatars"]) => json!({ "configured": s.avatars.configured(s).await? }),
         ("POST", ["agents", id, "avatar", "generate"]) => s.avatars.generate(s, id).await?,
-        ("GET", [kind @ ("agents" | "projects" | "tasks")]) => s.store.list(kind).await?.into(),
+        ("POST", ["agents", id, "preview"]) => s.agent_preview(input.body.clone(), id).await?,
+        ("GET", ["agents"]) => {
+            // Never stored: clients tell this release from an earlier or rolled-back one,
+            // which does not keep grants on agents.
+            let mut agents = s.store.list("agents").await?;
+            for agent in &mut agents {
+                agent["grantsOnAgent"] = true.into();
+            }
+            agents.into()
+        }
+        ("GET", [kind @ ("projects" | "tasks")]) => s.store.list(kind).await?.into(),
         ("POST", ["task-authors", "refresh"]) => {
             s.synchronize_task_authors().await?;
             json!({ "updated": true })

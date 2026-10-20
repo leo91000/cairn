@@ -472,3 +472,32 @@ fun PluginCatalog.grantsOf(agentId: String): List<String> =
             val plugin = packages.find { it.id == connection.pluginId }?.name ?: connection.pluginId
             "$plugin · ${connection.name}"
         }
+
+/**
+ * The grants an edited instance must send back unchanged, or null to omit them. An older
+ * installation reads a missing list as "no agents"; a current one keeps the grants when omitted.
+ * With the agents not loaded yet (Main always exists) the installation is unknown, so they are kept
+ * as for an older one. Only packages giving agents access have grants to keep.
+ */
+fun PluginConnection.agentIdsToKeep(agents: List<Agent>, manifest: PluginManifest): List<String>? =
+    agentIds.takeIf {
+        it.isNotEmpty() &&
+            manifest.agentAccess != null &&
+            (agents.isEmpty() || olderInstallation(agents))
+    }
+
+/**
+ * The grants to send back on an older or unknown installation, always read again just before saving
+ * ([current], null when the instance no longer exists) whatever the editor last saw: a grant
+ * revoked meanwhile is never restored, one added meanwhile is never dropped.
+ */
+suspend fun PluginConnection.agentIdsToSend(
+    agents: List<Agent>,
+    manifest: PluginManifest,
+    current: suspend () -> List<String>?,
+): List<String>? {
+    val keeps = manifest.agentAccess != null && (agents.isEmpty() || olderInstallation(agents))
+    if (!keeps) return null
+    val fresh = current() ?: return null
+    return copy(agentIds = fresh).agentIdsToKeep(agents, manifest)
+}

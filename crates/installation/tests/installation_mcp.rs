@@ -1954,3 +1954,70 @@ async fn code_mode_isolates_scripts_bounds_resources_and_remains_usable_after_fa
     .await;
     assert_eq!(result(&valid), 42);
 }
+
+#[tokio::test]
+async fn installation_access_cannot_grant_secrets_or_exclusive_reservations() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let account = cairn_installation::plugins::connections::save(
+        &s,
+        "onepassword",
+        &json!({ "name": "Production", "enabled": true, "secrets": { "token": "ops_fixture" } }),
+        None,
+    )
+    .await
+    .unwrap();
+    let account = account["id"].clone();
+    let manager = s
+        .agent(
+            json!({
+                "name": "Manager",
+                "access": { "installation": true },
+                "plugins": [account]
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let (_, configuration) = active_run(&s, &manager).await;
+
+    // Neither an update nor a new agent can change the owner's live grants.
+    call(
+        &s,
+        &configuration,
+        "update_agent",
+        json!({
+            "id": manager["id"],
+            "agent": { "description": "Edited", "plugins": [], "exclusiveNodes": [] }
+        }),
+    )
+    .await;
+    let stored = s
+        .get("agents", manager["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(stored["plugins"], json!([account]));
+
+    let created = call(
+        &s,
+        &configuration,
+        "save_agent",
+        json!({ "name": "Escalation", "plugins": [account] }),
+    )
+    .await;
+    // The published contract has no live grants: the request is refused or ignored.
+    let agents = s.store.list("agents").await.unwrap();
+    for agent in agents.iter().filter(|agent| agent["id"] != manager["id"]) {
+        assert_eq!(agent["plugins"], json!([]), "{created}");
+    }
+    let instance = s
+        .store
+        .get(
+            cairn_installation::plugins::connections::KIND,
+            account.as_str().unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(instance["agentIds"], json!([manager["id"]]));
+}

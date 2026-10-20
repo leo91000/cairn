@@ -1223,3 +1223,135 @@ async fn continuous_named_send_completions_do_not_starve_reads_or_cancellation()
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
+    let (_root, s, agent) = service().await;
+    let saved = save(&s, &agent, json!({ "guildId": "100", "channelId": "200" }))
+        .await
+        .unwrap();
+    let connection = text(&saved, "id").to_owned();
+    let id = text(&agent, "id").to_owned();
+    let effect = |preview: &Value| preview["delegations"][0].clone();
+
+    // Instructions are not part of the approved access.
+    let mut described = agent.clone();
+    described["instructions"] = "Be brief.".into();
+    let preview = s.agent_preview(described, &id).await.unwrap();
+    assert_eq!(effect(&preview)["id"], connection);
+    assert_eq!(effect(&preview)["suspended"], false);
+
+    // A stricter sandbox changes the access the owner approved for Discord people.
+    let mut stricter = agent.clone();
+    stricter["access"]["sandbox"] = "read-only".into();
+    let preview = s.agent_preview(stricter.clone(), &id).await.unwrap();
+    assert_eq!(effect(&preview)["suspended"], true);
+    assert_eq!(effect(&preview)["blocked"], Value::Null);
+    assert_eq!(effect(&preview)["alreadySuspended"], false);
+
+    stricter["reapproveDelegations"] = json!([connection]);
+    let updated = s.agent(stricter, Some(&id)).await.unwrap();
+    let stored: Connection = serde_json::from_value(
+        s.store
+            .get(connections::KIND, &connection)
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        stored.granted_access,
+        cairn_installation::service::policy(&updated)
+    );
+    assert_ne!(stored.revision, text(&saved, "revision"));
+
+    // Installation access can never be approved for external people.
+    let mut wider = updated.clone();
+    wider["access"]["installation"] = true.into();
+    let preview = s.agent_preview(wider.clone(), &id).await.unwrap();
+    assert!(effect(&preview)["blocked"].is_string());
+    wider["reapproveDelegations"] = json!([connection]);
+    assert!(s.agent(wider.clone(), Some(&id)).await.is_err());
+
+    // Without reapproval the save succeeds and the bot waits for the owner.
+    wider
+        .as_object_mut()
+        .unwrap()
+        .remove("reapproveDelegations");
+    let widened = s.agent(wider, Some(&id)).await.unwrap();
+    let stored = s
+        .store
+        .get(connections::KIND, &connection)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        stored["grantedAccess"],
+        cairn_installation::service::policy(&widened)
+    );
+    // A later unrelated edit reports that the bot was already suspended.
+    let mut renamed = widened.clone();
+    renamed["description"] = "Renamed".into();
+    let preview = s.agent_preview(renamed.clone(), &id).await.unwrap();
+    assert_eq!(effect(&preview)["suspended"], true);
+    assert_eq!(effect(&preview)["alreadySuspended"], true);
+
+    // A bot bound to a previous installation owner cannot be reapproved from the agent.
+    let mut previous = stored.clone();
+    previous["ownerAccessId"] = "previous-owner".into();
+    s.store.put(connections::KIND, previous).await.unwrap();
+    let mut restored = renamed.clone();
+    restored["access"] = updated["access"].clone();
+    let preview = s.agent_preview(restored, &id).await.unwrap();
+    assert_eq!(effect(&preview)["suspended"], false);
+    assert!(effect(&preview)["blocked"].is_string());
+    assert_eq!(effect(&preview)["alreadySuspended"], true);
+}
+
+#[tokio::test]
+async fn preview_reports_a_plugin_grant_that_would_stop_a_bot_anyone_can_reach() {
+    let (_root, s, agent) = service().await;
+    let mut public = agent.clone();
+    public["access"]["sandbox"] = "read-only".into();
+    let public = s.agent(public, Some(text(&agent, "id"))).await.unwrap();
+    let saved = connections::save(
+        &s,
+        "discord",
+        &json!({
+            "name": "#support on Acme",
+            "settings": { "guildId": "100", "channelId": "200" },
+            "accessMode": "everyone",
+            "agentId": public["id"],
+            "projectId": null,
+            "enabled": true,
+            "token": "synthetic_discord_token",
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    let account = connections::save(
+        &s,
+        "onepassword",
+        &json!({ "name": "Production", "enabled": true, "secrets": { "token": "ops_fixture" } }),
+        None,
+    )
+    .await
+    .unwrap();
+    let id = text(&public, "id").to_owned();
+
+    // The approved policy is unchanged, but anyone could then reach a secret.
+    let mut secret = public.clone();
+    secret["plugins"] = json!([account["id"]]);
+    let preview = s.agent_preview(secret.clone(), &id).await.unwrap();
+    let effect = &preview["delegations"][0];
+    assert_eq!(effect["id"], saved["id"]);
+    assert_eq!(effect["suspended"], true);
+    assert!(effect["blocked"].is_string());
+    secret["reapproveDelegations"] = json!([saved["id"]]);
+    assert!(s.agent(secret, Some(&id)).await.is_err());
+
+    // Without plugin grants the same preview is clean.
+    let preview = s.agent_preview(public.clone(), &id).await.unwrap();
+    assert_eq!(preview["delegations"][0]["suspended"], false);
+}

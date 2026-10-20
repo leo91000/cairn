@@ -13,6 +13,7 @@ import {
   ref,
 } from 'vue'
 import { useRoute } from 'vue-router'
+import { currentAgentIds } from '../agent-access'
 import {
   api,
   notify,
@@ -160,7 +161,6 @@ function edit(connection: PluginConnection | null) {
     name: connection?.name ?? (manifest.value?.instances ? '' : manifest.value?.name ?? ''),
     token: '',
     agentId: connection?.agentId ?? '',
-    agentIds: [...(connection?.agentIds ?? [])],
     accessMode: connection?.accessMode ?? 'requests',
     maxMessagesPerHour: connection?.maxMessagesPerHour ?? 20,
     maxPerPersonPerHour: connection?.maxPerPersonPerHour ?? 5,
@@ -232,13 +232,14 @@ async function save() {
     return
   await action(async () => {
     const agent = state.agents.find(item => item.id === form.value.agentId)
+    const agentIds = await currentAgentIds(state.agents, entry.value, editing.value, async () => (await api<Catalog>('/plugins')).connections)
     const body = {
       name: form.value.name,
       ...(form.value.token ? { token: form.value.token } : {}),
       settings: pluginSettings(storedFields.value, values.value),
       // Blank secret fields keep what is saved.
       secrets: pluginSecrets(secrets.value),
-      ...(manifest.value?.agentAccess && { agentIds: form.value.agentIds }),
+      // Agents are granted on their own page; omitting the list keeps it.
       ...(delegates.value && {
         agentId: form.value.agentId,
         projectId: agent?.access.projects?.[0] ?? null,
@@ -249,6 +250,8 @@ async function save() {
         maxPerPersonPerHour: Number(form.value.maxPerPersonPerHour),
       }),
       enabled: form.value.enabled,
+      // An older (or unknown) installation needs the granted agents back, as they are now.
+      ...(agentIds ? { agentIds } : {}),
     }
     const path = `/plugins/${id.value}/connections${editing.value ? `/${editing.value.id}` : ''}`
     await pluginOperation(path, body, editing.value ? 'PUT' : 'POST')
@@ -444,6 +447,9 @@ onBeforeUnmount(() => {
               <template v-else>
                 No agent can use it yet.
               </template>
+              <RouterLink to="/agents" class="ml-1 text-accent hover:underline">
+                Manage on agent pages ›
+              </RouterLink>
             </p>
             <section v-if="delegates">
               <h3 class="text-xs! font-semibold">
@@ -552,7 +558,7 @@ onBeforeUnmount(() => {
             <Icon :name="Terminal" :size="16" class="text-accent" />How agents use it
           </h2>
           <p class="text-xs leading-relaxed text-muted">
-            Only agents you authorize on an active {{ singular.toLowerCase() }} get these, in their conversations.
+            Only agents granted an active {{ singular.toLowerCase() }} on their page get these, in their conversations.
           </p>
           <div v-if="manifest.commands?.length" class="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
             <h3 class="text-3xs! font-semibold uppercase tracking-[.12em] text-subtle">
@@ -648,22 +654,24 @@ onBeforeUnmount(() => {
           :errors="completion?.errors"
           @refresh="complete"
         />
-        <fieldset v-if="manifest.agentAccess" class="grid gap-2" :disabled="busy">
-          <legend class="mb-1 text-xs font-semibold">
-            Authorized agents
-          </legend>
+        <section v-if="manifest.agentAccess" class="grid gap-1.5 rounded-xl border border-line bg-inset px-4 py-3" aria-label="Agents">
+          <p class="text-xs">
+            <template v-if="editing && agentNames(editing).length">
+              Authorized agents: <b>{{ agentNames(editing).join(', ') }}</b>
+            </template>
+            <template v-else>
+              No agent can use it yet.
+            </template>
+          </p>
           <p v-if="manifest.agentAccess.description" class="text-2xs leading-relaxed text-muted">
             {{ manifest.agentAccess.description }}
           </p>
-          <label v-for="agent in state.agents" :key="agent.id" class="flex flex-row! items-center gap-2! font-normal!">
-            <input
-              v-model="form.agentIds"
-              type="checkbox"
-              class="w-auto!"
-              :value="agent.id"
-            >{{ agent.name }}
-          </label>
-        </fieldset>
+          <p class="text-2xs text-muted">
+            Grant it from the Secrets &amp; plugins section of each agent. <RouterLink to="/agents" class="text-accent hover:underline">
+              Manage on agent pages ›
+            </RouterLink>
+          </p>
+        </section>
         <template v-if="delegates">
           <fieldset class="grid gap-2" :disabled="busy">
             <legend class="mb-1 text-xs font-semibold">

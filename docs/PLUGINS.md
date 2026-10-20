@@ -99,8 +99,9 @@ A manifest declares `"apiVersion": 2` (the only version Cairn loads) and:
 - `programs` (with `exec`): `[{ name, path?, installer?, description }]`; exactly
   one of an absolute administrator-installed `path` or a package-relative Luau
   `installer`. Installers also require `http` and declared `hosts`; see below;
-- `agentAccess`: `{ description }`; the owner grants agents per instance and
-  only granted agents get the package's commands, tools and instructions;
+- `agentAccess`: `{ description }`; the owner grants instances on each agent's
+  page (`plugins`) and only granted agents get the package's commands,
+  tools and instructions;
 - `commands`, `tools`, `instructions` (need `agentAccess`), `instanceView`,
   `instanceTest` and `instanceForm`: see [Contributions](#contributions).
 
@@ -326,7 +327,9 @@ Instance routes add `GET …/connections/{id}/view`, `POST …/connections/{id}/
 the generic `POST …/connections/{id}/test` and `POST /api/plugins/{id}/form`
 (`{ instance?, settings, secrets?, token?, changed? }`). Secret fields are saved with
 `secrets: { key: value }`; an empty or missing value keeps the saved one and the API
-only returns their names (`secretKeys`). Grants are saved as `agentIds`. Instances of
+only returns their names (`secretKeys`). Grants are saved on agents
+(`plugins`); each instance keeps a synchronized `agentIds` copy, and a save
+that omits `agentIds` keeps it. Instances of
 packages that need no worker (no socket, inbound messages, conversations or timers)
 start nothing and show as ready while enabled.
 

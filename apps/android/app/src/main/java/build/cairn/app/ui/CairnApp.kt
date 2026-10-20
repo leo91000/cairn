@@ -38,6 +38,7 @@ private fun focusedRoute(route: String) =
         route.startsWith("new-chat") ||
         route.startsWith("run/") ||
         route.startsWith("fil/run/") ||
+        route.startsWith("agents/") ||
         route == "search"
 
 internal fun dockSelection(route: String): String =
@@ -515,10 +516,27 @@ private fun WorkspaceApp(
                                 AtelierScreen(vm, state) { nav.navigate(it) }
                             }
                             composable("agents") {
-                                ResourcesScreen(vm, state, true) { agent, project ->
+                                ResourcesScreen(
+                                    vm,
+                                    state,
+                                    true,
+                                    openAgent = { nav.navigate("agents/${segment(it)}") },
+                                ) { agent, project ->
                                     nav.navigate("new-chat?agent=$agent&project=$project")
                                 }
                             }
+                            if (state.isOwner)
+                                composable("agents/{id}") { entry ->
+                                    val id = entry.arguments?.getString("id").orEmpty()
+                                    AgentScreen(
+                                        vm,
+                                        state,
+                                        if (id == "new") "" else id,
+                                        back = { nav.popBackStack() },
+                                        chat = { nav.navigate("new-chat?agent=$it&project=") },
+                                        navigate = { nav.navigate(it) },
+                                    )
+                                }
                             composable("projects") {
                                 ResourcesScreen(vm, state, false) { agent, project ->
                                     nav.navigate("new-chat?agent=$agent&project=$project")
@@ -543,11 +561,17 @@ private fun WorkspaceApp(
                                         state,
                                         entry.arguments?.getString("id").orEmpty(),
                                         openChat = { nav.navigate("chat/$it") },
+                                        openAgents = { nav.navigate("agents") },
                                     )
                                 }
                             if (state.isOwner)
                                 composable("nodes") {
-                                    NodesScreen(vm, state) { nav.navigate("run/$it") }
+                                    NodesScreen(
+                                        vm,
+                                        state,
+                                        openRun = { nav.navigate("run/$it") },
+                                        openAgents = { nav.navigate("agents") },
+                                    )
                                 }
                             composable("settings") { SettingsScreen(vm, state) }
                             if (state.isOwner)

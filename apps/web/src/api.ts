@@ -33,6 +33,8 @@ export const state = reactive({
   tasks: [] as Task[],
   skills: [] as Skill[],
   mcps: [] as McpView[],
+  // Whether the lists above come from a successful load: until then nothing is reported gone.
+  workspaceLoaded: false,
   toast: '',
   error: '',
 })
@@ -391,26 +393,37 @@ export function apiResourceUrl(value: string) {
 }
 
 export function ownerPage(path: string) {
-  return ['/plugins', '/mcps', '/connections', '/nodes', '/authorize'].includes(path) || path.startsWith('/plugins/')
+  return ['/plugins', '/mcps', '/connections', '/nodes', '/authorize'].includes(path) || path.startsWith('/plugins/') || path.startsWith('/agents/')
 }
 
 export async function refresh() {
   const scope = connectionScope()
-  const [agents, projects, tasks, skills, mcps] = await Promise.all([
-    api<Agent[]>('/agents'),
-    api<Project[]>('/projects'),
-    api<Task[]>('/tasks'),
-    api<Skill[]>('/skills'),
-    state.installationRole === 'owner' ? api<McpView[]>('/mcps') : Promise.resolve([]),
-  ])
+  let lists: [Agent[], Project[], Task[], Skill[], McpView[]]
+  try {
+    lists = await Promise.all([
+      api<Agent[]>('/agents'),
+      api<Project[]>('/projects'),
+      api<Task[]>('/tasks'),
+      api<Skill[]>('/skills'),
+      state.installationRole === 'owner' ? api<McpView[]>('/mcps') : Promise.resolve([]),
+    ])
+  }
+  catch (error) {
+    if (connectionScope() === scope)
+      state.workspaceLoaded = false
+    throw error
+  }
+
   if (connectionScope() !== scope || !state.authenticated || state.signingOut)
     return
+  const [agents, projects, tasks, skills, mcps] = lists
   Object.assign(state, {
     agents,
     projects,
     tasks,
     skills,
     mcps,
+    workspaceLoaded: true,
   })
 }
 

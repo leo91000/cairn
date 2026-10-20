@@ -724,12 +724,13 @@ async fn configure_node(s: &Service, node: &str, body: Value) -> Result<Value> {
                 record["nativeAccounts"] = accounts.into();
             }
             record["accepting"] = request.accepting.into();
+            // Older clients still send this list; the grants live on each agent.
             if let Some(agents) = request.exclusive_agents {
                 for agent in &agents {
                     db.get("agents", agent)?
                         .ok_or_else(|| Error::bad("Exclusive agent missing."))?;
                 }
-                record["exclusiveAgents"] = agents.into();
+                crate::agent_grants::set_node_agents(db, &mut record, &agents)?;
             }
             db.put("nodes", &record)?;
             db.audit("node.configured", &json!({ "nodeId": node }))?;
@@ -825,6 +826,10 @@ async fn delete_stale_disks(s: &Service, node: &str) -> Result<Value> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Grants {
     agent_ids: Vec<String>,
+    /// Only grants the listed agents and never revokes, for example after adding a
+    /// machine while an agent page grants it at the same time.
+    #[serde(default)]
+    add: bool,
 }
 
 async fn grant_agents(s: &Service, node: &str, body: Value) -> Result<Value> {
@@ -843,6 +848,9 @@ async fn grant_agents(s: &Service, node: &str, body: Value) -> Result<Value> {
             }
             for agent in db.list("agents")? {
                 let granted = request.agent_ids.iter().any(|id| agent["id"] == *id);
+                if request.add && !granted {
+                    continue;
+                }
                 if granted
                     && crate::native::policy::native(&agent)
                         != crate::native::policy::node_native(&record)
@@ -880,6 +888,11 @@ fn set_node_grant(db: &Db<'_>, mut agent: Value, node: &str, granted: bool) -> R
         agent["access"] = json!({});
     }
     agent["access"]["nodes"] = nodes.into();
+    // Exclusive reservations need permission to run on the node.
+    if !granted {
+        crate::agent_grants::release_node(db, &mut agent, node)?;
+    }
+    crate::service::touch(&mut agent);
     db.put("agents", &agent)?;
     Ok(())
 }
@@ -908,9 +921,12 @@ async fn revoke(s: &Service, node: &str) -> Result<Value> {
                 let before = nodes.len();
                 nodes.retain(|id| id != &node);
                 if nodes.len() != before {
+                    crate::service::touch(&mut agent);
                     db.put("agents", &agent)?;
                 }
             }
+            crate::agent_grants::forget_resource(db, crate::agent_grants::EXCLUSIVE_NODES, &node)?;
+            record["exclusiveAgents"] = json!([]);
             db.put("nodes", &record)?;
             db.audit("node.revoked", &json!({ "nodeId": node }))?;
             Ok(public(record))

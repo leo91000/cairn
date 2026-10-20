@@ -27,6 +27,12 @@ export const agentInput = z.object({
   // Zero means no time limit; positive values are an optional execution budget.
   timeoutMinutes: z.number().int().min(0).max(720).default(0),
   access: accessPolicy.default(() => accessPolicy.parse({})),
+  // Live grants, checked on every use rather than captured with a run, and kept out of
+  // `access` so earlier releases compare the same policy: nodes this agent may reserve
+  // exclusively (suspending other conversations) and plugin instances such as 1Password
+  // service accounts.
+  exclusiveNodes: z.array(id).max(100).default([]),
+  plugins: z.array(id).max(100).default([]),
 })
 export const agentUpdate = z.object({
   provider: agentInput.shape.provider.removeDefault().optional(),
@@ -42,6 +48,8 @@ export const agentUpdate = z.object({
     backend: accessPolicy.shape.backend.removeDefault().optional(),
     installation: accessPolicy.shape.installation.removeDefault().optional(),
   }).optional(),
+  exclusiveNodes: agentInput.shape.exclusiveNodes.removeDefault().optional(),
+  plugins: agentInput.shape.plugins.removeDefault().optional(),
 })
 export const projectInput = z.object({
   name,
@@ -76,6 +84,8 @@ export type Agent = z.infer<typeof agentInput> & {
   avatar?: AgentAvatar
   id: string
   createdAt: number
+  // Changes on every save; sent back so a stale editor cannot overwrite newer access.
+  revision?: string
 }
 export type Project = z.infer<typeof projectInput> & {
   origin?: string

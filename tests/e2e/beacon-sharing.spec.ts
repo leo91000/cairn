@@ -194,6 +194,7 @@ test('owner shares an installation and member works without management controls'
       await expect(member.getByRole('link', { name, exact: true })).toHaveCount(0)
     await member.getByRole('navigation', { name: 'Atelier sections' }).getByRole('link', { name: 'Agents', exact: true }).click()
     await expect(member.getByRole('button', { name: /New agent|Edit Main agent|Delete/ })).toHaveCount(0)
+    await expect(member.getByRole('link', { name: /New agent|Edit Main agent/ })).toHaveCount(0)
     await expect(member.getByRole('link', { name: 'Start chat', exact: true }).first()).toBeVisible()
     await member.getByRole('link', { name: 'Projects', exact: true }).first().click()
     await expect(member.getByRole('button', { name: /New project|Add a project/ })).toHaveCount(0)

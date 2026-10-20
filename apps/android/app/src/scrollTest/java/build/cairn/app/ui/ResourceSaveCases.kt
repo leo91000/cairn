@@ -19,7 +19,10 @@ import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
 
-/** Native editors must retain the committed identity through refresh and response failures. */
+/**
+ * Native editors must retain the committed identity through refresh and response failures. Agent
+ * creation is covered by `AgentPageCases`.
+ */
 abstract class ResourceSaveCases {
     @get:Rule val compose = createComposeRule()
 
@@ -36,8 +39,6 @@ abstract class ResourceSaveCases {
     fun lostGithubImportResponseRecoversTheRepositoryBeforeUpdatingEdits() =
         saveAfterFailure("github", true)
 
-    @Test fun agentRefreshFailureKeepsTheCreatedAgent() = saveAfterFailure("agents", false)
-
     @Test
     fun lostTaskResponseReplaysTheOriginalCreationThenUpdatesTheEditedMission() =
         saveAfterFailure("tasks", true)
@@ -45,10 +46,6 @@ abstract class ResourceSaveCases {
     @Test
     fun lostProjectResponseReplaysTheOriginalCreationThenUpdatesTheEditedProject() =
         saveAfterFailure("projects", true)
-
-    @Test
-    fun lostAgentResponseReplaysTheOriginalCreationThenUpdatesTheEditedAgent() =
-        saveAfterFailure("agents", true)
 
     @Test
     fun rejectedReplayStillAppliesTheLatestMissionEdits() =
@@ -63,10 +60,6 @@ abstract class ResourceSaveCases {
         saveAfterFailure("projects", false, rejectReplay = true)
 
     @Test
-    fun dedicatedTokenFailureDoesNotCreateAnotherAgent() =
-        saveAfterFailure("agents", false, tokenFailure = true)
-
-    @Test
     fun restoredTaskEditorKeepsItsCommittedIdentity() =
         saveAfterFailure("tasks", false, restore = true)
 
@@ -78,7 +71,6 @@ abstract class ResourceSaveCases {
         kind: String,
         loseResponse: Boolean,
         rejectReplay: Boolean = false,
-        tokenFailure: Boolean = false,
         restore: Boolean = false,
         malformedResponse: Boolean = false,
     ) {
@@ -89,7 +81,6 @@ abstract class ResourceSaveCases {
         val closed = AtomicBoolean(false)
         val created = AtomicBoolean(false)
         var committed: JsonObject? = null
-        val failedToken = AtomicBoolean(false)
         val recoveryTimeline = CopyOnWriteArrayList<String>()
         val startedAt = System.nanoTime()
 
@@ -107,13 +98,6 @@ abstract class ResourceSaveCases {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
                         val resourcePath = "/api/installations/fixture/api/$resourceKind"
-                        if (path.endsWith("/github-token") && request.method == "PUT") {
-                            if (tokenFailure && !failedToken.getAndSet(true))
-                                return MockResponse()
-                                    .setResponseCode(400)
-                                    .setBody("""{"error":"Jeton refusé"}""")
-                            return json("{}")
-                        }
                         if (
                             request.method in listOf("POST", "PUT") &&
                                 (path == resourcePath ||
@@ -134,8 +118,7 @@ abstract class ResourceSaveCases {
                             if (first && loseResponse)
                                 return MockResponse()
                                     .setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)
-                            if (first && !tokenFailure) failRefresh.set(true)
-                            else failRefresh.set(false)
+                            failRefresh.set(first)
                             val stored = if (request.method == "POST") committed!! else value
                             val projectPath =
                                 if (kind == "github")
@@ -219,16 +202,7 @@ abstract class ResourceSaveCases {
                                     ),
                                     close = { closed.set(true) },
                                 )
-                            else ->
-                                AgentEditor(
-                                    vm,
-                                    state,
-                                    Agent(
-                                        name = "Original",
-                                        access = AccessPolicy(github = !tokenFailure),
-                                    ),
-                                    close = { closed.set(true) },
-                                )
+                            else -> error("Unknown editor: $kind")
                         }
                     }
                 }
@@ -251,31 +225,14 @@ abstract class ResourceSaveCases {
                     }
                     compose.onNodeWithText("owner/repository").performScrollTo().performClick()
                 }
-                if (tokenFailure)
-                    compose
-                        .onNodeWithText("Jeton GitHub dédié (facultatif)")
-                        .performScrollTo()
-                        .performTextInput("fixture-token")
                 compose
                     .onNode(hasScrollAction() and hasAnyDescendant(hasText("Nom")))
                     .performTouchInput { swipeUp() }
                 compose.onNodeWithText("Enregistrer").performClick()
                 waitFor { mutations.isNotEmpty() && !vm.state.value.busy }
                 assertFalse(closed.get())
-                if (tokenFailure) {
-                    compose
-                        .onNodeWithText(
-                            "Agent enregistré, mais le jeton GitHub n’a pas été enregistré. Réessayez."
-                        )
-                        .assertIsDisplayed()
-                } else if (!uncertainResponse) {
-                    val label =
-                        when (kind) {
-                            "tasks" -> "Mission"
-                            "projects",
-                            "github" -> "Projet"
-                            else -> "Agent"
-                        }
+                if (!uncertainResponse) {
+                    val label = if (kind == "tasks") "Mission" else "Projet"
                     compose
                         .onNodeWithText(
                             "$label enregistré${if (kind == "tasks") "e" else ""}, mais le rechargement a échoué. Réessayez."
@@ -284,13 +241,7 @@ abstract class ResourceSaveCases {
                 }
                 if (uncertainResponse)
                     compose.onNodeWithText("Sauvegarde", substring = true).assertIsDisplayed()
-                if (kind == "agents" && !uncertainResponse)
-                    compose
-                        .onAllNodesWithText("Enregistrez l’agent pour importer un portrait.")
-                        .assertCountEquals(0)
-                captureFailure(
-                    "$kind-${if (tokenFailure) "token" else if (uncertainResponse) "uncertain" else "reload"}"
-                )
+                captureFailure("$kind-${if (uncertainResponse) "uncertain" else "reload"}")
                 if (uncertainResponse && kind == "projects")
                     compose.onNodeWithText("Dossier sur le serveur").assertIsNotEnabled()
                 if (loseResponse) {

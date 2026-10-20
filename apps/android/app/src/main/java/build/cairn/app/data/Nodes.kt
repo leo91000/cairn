@@ -1,6 +1,11 @@
 package build.cairn.app.data
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 const val LOCAL_NODE_ID = "00000000-0000-4000-8000-000000000002"
 
@@ -55,6 +60,61 @@ data class ExecutionNode(
     val staleDisks: StaleDisks = StaleDisks(),
     val storage: NodeStoragePolicy? = null,
 )
+
+/** The execution backend of native nodes and agents; the other one is "firecracker" (a VM). */
+const val NATIVE_BACKEND = "native"
+
+/** The default execution backend: a Firecracker VM. */
+const val VM_BACKEND = "firecracker"
+
+/** Whether the node runs on the agent's execution backend: the server refuses any other grant. */
+fun ExecutionNode.accepts(agent: Agent) =
+    (capabilities.backend == NATIVE_BACKEND) == (agent.access.backend == NATIVE_BACKEND)
+
+/**
+ * Agents already allowed to run on this machine without being allowed everywhere, from the node
+ * itself or from each agent's page. They are shown locked: granting more agents never revokes them.
+ */
+fun ExecutionNode.grantedAgents(agents: List<Agent> = emptyList()): Set<String> =
+    this.agents.filter { !it.allNodes }.map { it.id }.toSet() +
+        agents.filter { it.access.nodes?.contains(id) == true }.map { it.id }
+
+/**
+ * Grants a node to the agents newly [chosen] (already allowed ones in [granted] are skipped) with
+ * `PUT /nodes/{id}/agents` `{ agentIds, add: true }`, which never revokes anyone. Nothing is sent
+ * when no agent is new. An older installation rejects the unknown `add` field (400): the request is
+ * then sent once without it, with the full list, since that form replaces the node's list. Any
+ * other rejection is reported.
+ */
+suspend fun grantNodeAgents(
+    chosen: List<String>,
+    granted: Set<String>,
+    send: suspend (JsonObject) -> Unit,
+) {
+    val added = chosen.distinct().filter { it !in granted }
+    if (added.isEmpty()) return
+
+    fun body(ids: List<String>, grantOnly: Boolean) = buildJsonObject {
+        put("agentIds", buildJsonArray { ids.forEach { add(JsonPrimitive(it)) } })
+        if (grantOnly) put("add", true)
+    }
+    try {
+        send(body(added, grantOnly = true))
+    } catch (e: ApiException) {
+        if (!rejectsGrantOnly(e)) throw e
+        send(body((granted + added).toList(), grantOnly = false))
+    }
+}
+
+/**
+ * An installation that predates `add` refuses the unknown field while decoding the request, with
+ * its generic "Invalid node request." (or a serde "unknown field" message).
+ */
+private fun rejectsGrantOnly(error: ApiException): Boolean {
+    val message = error.message.orEmpty().trim()
+    return error.status == 400 &&
+        (message == "Invalid node request." || "unknown field" in message.lowercase())
+}
 
 @Serializable
 data class ExclusiveReservation(
@@ -136,7 +196,8 @@ data class NodeConfiguration(
     val tags: List<String>,
     val limits: NodeResources,
     val slots: Int = 4,
-    val exclusiveAgents: List<String>? = null,
+    // No exclusiveAgents: exclusive reservations are granted on each agent's page, and the server
+    // keeps them when the key is omitted.
     val nativeEnabled: Boolean? = null,
     val nativeAccounts: List<String>? = null,
 )
