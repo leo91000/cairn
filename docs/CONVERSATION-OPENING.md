@@ -52,7 +52,10 @@ follow; raw data is in [measurements/conversation-opening](measurements/conversa
   the start.
 - The Fil follows the list on the conversation's stream on the conversation page and on the
   list stream elsewhere, instead of polling every 30 seconds; the Fil page has no stream of
-  its own. A link by identifier to a conversation the Fil knows opens under its slug, so both
+  its own. A conversation that fails terminally or uses the finite relay fallback releases
+  list delivery to the shell, so the Fil remains available. A retry takes back its stream
+  slot before connecting, preserving the per-account capacity. A link by identifier to a
+  conversation the Fil knows opens under its slug, so both
   forms share one saved copy.
 - The finite HTTP read for installations on the first relay protocol runs only when the
   stream fails before its first batch, instead of beside every uncached opening.

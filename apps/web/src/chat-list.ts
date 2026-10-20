@@ -27,7 +27,7 @@ export function useChatList() {
   watch(live.snapshot, (value) => {
     if (value?.chats)
       publishChats(value.chats, { saved: live.restored.value })
-  })
+  }, { immediate: true })
   watch(() => state.authenticated, (signedIn) => {
     if (signedIn)
       return

@@ -123,6 +123,57 @@ for (const view of ['conversation', 'fil'] as const) {
   })
 }
 
+test('returning from the Fil restores a saved conversation before its stream responds', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  let release!: () => void
+  const pending = new Promise<void>(resolve => release = resolve)
+  try {
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Saved across the Fil' })
+    await expect.poll(() => workspace.service.chats.detail(chat.id).run?.status).toBe('succeeded')
+    const detail = await workspace.api(`/api/chats/${chat.id}`)
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto(workspacePath(`/chats/${detail.slug}`))
+    await authenticateWorkspace(page)
+    const message = page.locator('.activity-message').getByText('Saved across the Fil', { exact: true }).first()
+    await expect(message).toBeVisible()
+    await expectSavedStream(page, `/chats/${detail.slug}/stream`)
+
+    await page.getByRole('link', { name: 'Cairn home', exact: true }).click()
+    await expect(page).toHaveURL(workspacePath('/'))
+    await page.route(`**/api/chats/${detail.slug}/stream?**`, async (route) => {
+      await pending
+      await route.continue()
+    })
+    await page.getByRole('complementary', { name: 'Fil' }).locator(`button[data-fil-key="chat:${chat.id}"]`).click()
+    await expect(message).toBeVisible()
+    await expect(page.getByText('Loading conversation…', { exact: true })).toHaveCount(0)
+  }
+  finally {
+    release()
+    await page.unrouteAll({ behavior: 'wait' })
+    await workspace.api(`/api/chats/${chat.id}`, 'DELETE', { confirm: true })
+  }
+})
+
+test('the Fil keeps receiving conversations after a missing deep link fails', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const missing = randomUUID()
+  const failed = page.waitForResponse(response => response.url().endsWith(`/api/chats/${missing}`) && response.status() === 404)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(workspacePath(`/chats/${missing}`))
+  await authenticateWorkspace(page)
+  await failed
+
+  const chat = await workspace.api('/api/chats', 'POST', { title: 'Still available in the Fil' })
+  try {
+    await expect(page.getByRole('complementary', { name: 'Fil' }).locator(`[data-fil-key="chat:${chat.id}"]`)).toBeVisible()
+  }
+  finally {
+    await workspace.api(`/api/chats/${chat.id}`, 'DELETE', { confirm: true })
+  }
+})
+
 // Samples every animation frame while switching conversations: which conversation the
 // URL selects, which one the reader shows, and whether the shell stays mounted.
 async function recordFrames(page: Page) {

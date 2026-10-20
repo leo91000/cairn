@@ -136,15 +136,16 @@ watch(chatId, (key) => {
   const known = key && chats.value.find(chat => chat.id === key || chat.slug === key)
   streamPath.value = key ? `/chats/${known ? known.slug || known.id : key}/stream` : undefined
 }, { immediate: true, flush: 'sync' })
-// Its stream carries the conversation list meanwhile, so the tab keeps a single stream.
-watch(streamPath, path => chatListCarried.value = !!path, { immediate: true, flush: 'sync' })
-onBeforeUnmount(() => chatListCarried.value = false)
 const live = useLiveRun(() => streamPath.value, {
   current: savedIsCurrent,
   list: true,
   // Also saved under its slug when a link by identifier opened it: the Fil links to slugs.
   savedAs: state => state.chat ? `/chats/${state.chat.slug || state.chat.id}/stream` : undefined,
 })
+// Its stream carries the list while available; a failed open or a finite relay read
+// releases it to the shell, so the Fil keeps working even when the conversation cannot.
+watch(live.carriesList, value => chatListCarried.value = value, { immediate: true, flush: 'sync' })
+onBeforeUnmount(() => chatListCarried.value = false)
 const { events, connectionNotice, catchingUp } = live
 const deliverables = computed(() => live.snapshot.value?.artifacts ?? [])
 const draft = ref('')
@@ -442,7 +443,7 @@ watch(live.snapshot, (value) => {
   detail.value = value?.chat ?? null
   if (value?.chats)
     publishChats(value.chats, { saved: live.restored.value })
-})
+}, { immediate: true })
 // The open conversation's finished turns are read while the page is visible.
 useReadWhileOpen(() => {
   const chat = detail.value

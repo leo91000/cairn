@@ -52,6 +52,9 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
   const synced = ref(false)
   // The snapshot shown comes from the saved conversation, not yet from the server.
   const restored = ref(false)
+  // A conversation owns the shell's list while connecting, then only while its stream
+  // can deliver it. Terminal failures and finite compatibility reads release that job.
+  const carriesList = ref(false)
   const error = ref('')
   const position = ref<ReadingPosition>()
   const hasOlder = ref(false)
@@ -189,6 +192,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
     let receivedBatches = 0
     let readingSnapshot = false
     let readSnapshotOnce = false
+    let finiteRead = false
 
     // An installation on the first relay protocol cannot stream: when the stream fails
     // before its first batch, one finite read keeps it readable. Never polled.
@@ -223,6 +227,8 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
         // HTTP reads have no validated SSE history/cursor and must not replace
         // the stream's persisted snapshot or advance its replay cursor.
         complete = false
+        finiteRead = true
+        carriesList.value = false
         restored.value = false
         snapshot.value = {
           chat,
@@ -282,6 +288,8 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
       rows = next
       if (batch.state)
         detail = batch.state
+      finiteRead = false
+      carriesList.value = !!options.list && !!detail?.chats
 
       cursor = accepted
       history = batch.history
@@ -306,7 +314,12 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
       }
 
       error.value = ''
-    }, (connectionStatus) => {
+    }, (connectionStatus, opening = false) => {
+      // A finite read lets the shell carry the Fil while streaming is unavailable. Each
+      // retry takes the slot back before connecting, keeping one stream per tab even
+      // when every account slot is occupied; a failed retry gives it back again.
+      if (options.list && (opening || finiteRead))
+        carriesList.value = opening
       setStatus(connectionStatus)
       if (connectionStatus === 'live')
         return
@@ -318,7 +331,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
 
       if (connectionStatus !== 'reconnecting')
         return
-      if (state.installationId && !cached)
+      if (state.installationId && (!cached || value === '/chats/stream'))
         void readSnapshot()
       if (checking)
         return
@@ -328,6 +341,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
           complete = false
           clearTimeout(saveTimer)
           error.value = e.message
+          carriesList.value = false
           connection?.close()
           snapshot.value = undefined
           events.value = []
@@ -357,6 +371,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
     catchingUp.value = true
     setStatus('connecting')
     error.value = ''
+    carriesList.value = !!value && enabled && !!options.list
     if (!enabled) {
       void clearHistoryCache()
       return
@@ -382,6 +397,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
   return {
     snapshot,
     restored,
+    carriesList,
     hasOlder,
     loadingOlder,
     olderError,
