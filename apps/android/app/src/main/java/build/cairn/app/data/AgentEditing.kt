@@ -256,9 +256,10 @@ fun agentChanges(
         if (after.projects != before.projects) add(AgentSection.Projects)
         if (after.skills != before.skills) add(AgentSection.Skills)
         // Tool choices compare as sets: their order is not a change.
+        // Only choices of granted connections are saved; the others wait in the draft.
         val toolsChanged =
-            after.mcpTools.mapValues { it.value.toSet() } !=
-                before.mcpTools.mapValues { it.value.toSet() }
+            after.withGrantedTools().mcpTools.mapValues { it.value.toSet() } !=
+                before.withGrantedTools().mcpTools.mapValues { it.value.toSet() }
         if (after.mcps != before.mcps || toolsChanged) add(AgentSection.Mcp)
         if (after.github != before.github || draft.tokenChange(tokenSaved, newToken) != null)
             add(AgentSection.Github)
@@ -304,6 +305,11 @@ fun agentErrors(
         put(
             AgentSection.Github,
             "Saisissez le jeton dédié, ou choisissez une autre option GitHub.",
+        )
+    if (agent.access.backend == NATIVE_BACKEND && agent.access.nodes.isNullOrEmpty())
+        put(
+            AgentSection.Nodes,
+            "Choisissez au moins une node native : l’exécution native ne s’applique jamais à toutes les nodes.",
         )
 }
 
@@ -360,6 +366,25 @@ fun agentNodeChoices(nodes: List<ExecutionNode>, backend: String? = null): List<
                 !it.revoked &&
                 (backend == null ||
                     (it.capabilities.backend == NATIVE_BACKEND) == (backend == NATIVE_BACKEND))
+        }
+}
+
+/** A run permission the agent holds on a node it cannot use. */
+data class HeldNode(val id: String, val name: String?, val otherBackend: Boolean)
+
+/**
+ * Run permissions on nodes that are gone, revoked or of the other execution backend: kept by the
+ * server until removed, they never let the agent run there.
+ */
+fun Agent.unusableNodes(nodes: List<ExecutionNode>): List<HeldNode> {
+    val held = access.nodes ?: return emptyList()
+    val usable = nodeChoices(nodes).map { it.id }.toSet()
+    val known = agentNodeChoices(nodes)
+    return held
+        .filter { it !in usable }
+        .map { id ->
+            val node = known.find { it.id == id }
+            HeldNode(id, node?.name, otherBackend = node != null)
         }
 }
 
@@ -572,6 +597,16 @@ fun agentIssues(agent: Agent, resources: AgentResources): List<AgentIssue> = bui
             }
     }
     if (resources.nodes.isNotEmpty()) {
+        agent.unusableNodes(resources.nodes).forEach { held ->
+            add(
+                AgentIssue(
+                    AgentSection.Nodes,
+                    if (held.otherBackend)
+                        "« ${held.name} » utilise un autre mode d’exécution : l’agent ne peut pas s’y exécuter."
+                    else "Une node autorisée n’existe plus ou a été révoquée.",
+                )
+            )
+        }
         val choices = agent.nodeChoices(resources.nodes)
         agent.exclusiveNodes.forEach { id ->
             val node = choices.find { it.id == id }
@@ -783,6 +818,8 @@ fun agentReview(
     tokenRemoved: Boolean = false,
     /** GitHub goes through the agent's saved dedicated token once saved. */
     savedToken: Boolean = false,
+    /** Whether a dedicated token is saved is not known yet. */
+    tokenUnknown: Boolean = false,
 ): List<ReviewLine> = buildList {
     val before = original.access
     val after = edited.access
@@ -839,6 +876,13 @@ fun agentReview(
                     "Connexion GitHub partagée désactivée : l’agent utilisera son jeton dédié enregistré.",
                     opensReview = true,
                 )
+            else if (tokenUnknown)
+                // A saved token may take over: never decided silently.
+                ReviewLine(
+                    ReviewKind.Reduction,
+                    "Connexion GitHub partagée désactivée : l’agent utilisera son jeton dédié enregistré s’il en existe un.",
+                    opensReview = true,
+                )
             else
                 ReviewLine(
                     ReviewKind.Reduction,
@@ -886,11 +930,21 @@ fun needsReview(lines: List<ReviewLine>, preview: AgentPreview?): Boolean =
  * Applies the owner's edits to the newest saved agent after someone else saved it: every setting
  * the owner did not change takes the newer value.
  */
-fun rebaseAgent(base: Agent, mine: Agent, theirs: Agent): Agent {
+fun rebaseAgent(
+    base: Agent,
+    mine: Agent,
+    theirs: Agent,
+    /** Connections that still exist: tool choices of the others are dropped. Null keeps all. */
+    mcpIds: Set<String>? = null,
+): Agent {
     fun <T> pick(old: T, edited: T, newer: T) = if (edited == old) newer else edited
     val a = base.access
     val m = mine.access
     val t = theirs.access
+    val tools =
+        mergeToolChoices(a.mcpTools, m.mcpTools, t.mcpTools).filterKeys {
+            mcpIds == null || it in mcpIds
+        }
     return theirs.copy(
         name = pick(base.name, mine.name, theirs.name),
         description = pick(base.description, mine.description, theirs.description),
@@ -899,15 +953,16 @@ fun rebaseAgent(base: Agent, mine: Agent, theirs: Agent): Agent {
         provider = pick(base.provider, mine.provider, theirs.provider),
         instructions = pick(base.instructions, mine.instructions, theirs.instructions),
         timeoutMinutes = pick(base.timeoutMinutes, mine.timeoutMinutes, theirs.timeoutMinutes),
-        exclusiveNodes = pick(base.exclusiveNodes, mine.exclusiveNodes, theirs.exclusiveNodes),
-        plugins = pick(base.plugins, mine.plugins, theirs.plugins),
+        exclusiveNodes =
+            mergeList(base.exclusiveNodes, mine.exclusiveNodes, theirs.exclusiveNodes).orEmpty(),
+        plugins = mergeList(base.plugins, mine.plugins, theirs.plugins).orEmpty(),
         access =
             AccessPolicy(
-                nodes = pick(a.nodes, m.nodes, t.nodes),
-                projects = pick(a.projects, m.projects, t.projects),
-                skills = pick(a.skills, m.skills, t.skills),
-                mcps = pick(a.mcps, m.mcps, t.mcps),
-                mcpTools = pick(a.mcpTools, m.mcpTools, t.mcpTools),
+                nodes = mergeList(a.nodes, m.nodes, t.nodes),
+                projects = mergeList(a.projects, m.projects, t.projects),
+                skills = mergeList(a.skills, m.skills, t.skills),
+                mcps = mergeList(a.mcps, m.mcps, t.mcps),
+                mcpTools = tools,
                 installation = pick(a.installation, m.installation, t.installation),
                 github = pick(a.github, m.github, t.github),
                 sandbox = pick(a.sandbox, m.sandbox, t.sandbox),
@@ -917,13 +972,37 @@ fun rebaseAgent(base: Agent, mine: Agent, theirs: Agent): Agent {
 }
 
 /**
+ * A three-way merge of a selection (null means "all, including future"): untouched, it takes the
+ * newer value; switching between all and a choice wins on whichever side made it, mine first;
+ * otherwise the newer entries, without those I removed, plus those I added.
+ */
+fun mergeList(base: List<String>?, mine: List<String>?, theirs: List<String>?): List<String>? {
+    if (mine == base) return theirs
+    if (base == null || mine == null) return mine
+    if (theirs == null) return null
+    val removed = base.filter { it !in mine }
+    val added = mine.filter { it !in base }
+    return (theirs.filter { it !in removed } + added).distinct()
+}
+
+/** [mergeList] per MCP connection; an absent connection means every enabled tool. */
+fun mergeToolChoices(
+    base: Map<String, List<String>>,
+    mine: Map<String, List<String>>,
+    theirs: Map<String, List<String>>,
+): Map<String, List<String>> =
+    (base.keys + mine.keys + theirs.keys)
+        .mapNotNull { id -> mergeList(base[id], mine[id], theirs[id])?.let { id to it } }
+        .toMap()
+
+/**
  * The draft rebased on the newest saved agent ([rebaseAgent]), including the time limit text: an
  * untouched limit takes the newer value, an edited one is kept. The GitHub choice is kept.
  */
-fun AgentDraft.rebased(base: Agent, theirs: Agent): AgentDraft {
+fun AgentDraft.rebased(base: Agent, theirs: Agent, mcpIds: Set<String>? = null): AgentDraft {
     val limitEdited = timeout.trim() != base.timeoutMinutes.toString()
     return copy(
-        agent = rebaseAgent(base, agent, theirs),
+        agent = rebaseAgent(base, agent, theirs, mcpIds),
         timeout = if (limitEdited) timeout else theirs.timeoutMinutes.toString(),
     )
 }

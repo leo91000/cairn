@@ -390,6 +390,122 @@ class AgentEditingTest {
     }
 
     @Test
+    fun aReloadMergesSelectionsEntryByEntry() {
+        // Untouched: the newer value.
+        assertEquals(listOf("b"), mergeList(listOf("a"), listOf("a"), listOf("b")))
+        // Both edited: theirs without what I removed, plus what I added.
+        assertEquals(
+            listOf("c", "d", "e"),
+            mergeList(listOf("a", "b"), listOf("b", "e"), listOf("a", "b", "c", "d").minus("b")),
+        )
+        assertEquals(
+            listOf("b", "c", "x"),
+            mergeList(listOf("a", "b"), listOf("b", "x"), listOf("a", "b", "c")),
+        )
+        // All ↔ a choice: whichever side switched, mine first.
+        assertEquals(listOf("a"), mergeList(null, listOf("a"), listOf("z")))
+        assertNull(mergeList(listOf("a"), null, listOf("a", "b")))
+        assertNull(mergeList(listOf("a"), listOf("a", "x"), null))
+
+        val base =
+            agent.copy(
+                access =
+                    agent.access.copy(mcps = listOf("m"), mcpTools = mapOf("m" to listOf("t1"))),
+                plugins = listOf("prod"),
+                exclusiveNodes = listOf("gpu"),
+            )
+        val mine =
+            base.copy(
+                access =
+                    base.access.copy(
+                        projects = listOf("p1"),
+                        mcpTools = mapOf("m" to listOf("t1", "t2")),
+                    ),
+                plugins = listOf("prod", "staging"),
+            )
+        val theirs =
+            base.copy(
+                revision = "r2",
+                access = base.access.copy(projects = listOf("p1", "p2", "p3")),
+                plugins = listOf("prod", "bot"),
+                exclusiveNodes = emptyList(),
+            )
+        val rebased = rebaseAgent(base, mine, theirs, mcpIds = setOf("m"))
+        // I removed p2; they added p3.
+        assertEquals(listOf("p1", "p3"), rebased.access.projects)
+        assertEquals(listOf("prod", "bot", "staging"), rebased.plugins)
+        assertEquals(emptyList<String>(), rebased.exclusiveNodes)
+        assertEquals(mapOf("m" to listOf("t1", "t2")), rebased.access.mcpTools)
+        // Tool choices of a connection deleted meanwhile are dropped.
+        assertTrue(rebaseAgent(base, mine, theirs, mcpIds = emptySet()).access.mcpTools.isEmpty())
+    }
+
+    @Test
+    fun runPermissionsOnUnusableNodesAreReportedAndNativeNeedsANode() {
+        val desk =
+            ExecutionNode(
+                "desk",
+                "desk-native",
+                status = "online",
+                capabilities = NodeCapabilities(backend = NATIVE_BACKEND),
+            )
+        val holder = agent.copy(access = agent.access.copy(nodes = listOf("gpu", "desk", "gone")))
+        val unusable = holder.unusableNodes(nodes + desk)
+        assertEquals(listOf("desk", "gone"), unusable.map { it.id })
+        assertEquals(listOf(true, false), unusable.map { it.otherBackend })
+        val issues = agentIssues(holder, resources.copy(nodes = nodes + desk))
+        assertTrue(issues.any { "« desk-native » utilise un autre mode d’exécution" in it.text })
+        assertTrue(issues.any { it.text == "Une node autorisée n’existe plus ou a été révoquée." })
+
+        val native = agent.withBackend(native = true)
+        assertEquals(
+            "Choisissez au moins une node native : l’exécution native ne s’applique jamais à toutes les nodes.",
+            agentErrors(AgentDraft(native), false, "")[AgentSection.Nodes],
+        )
+        assertFalse(
+            AgentSection.Nodes in
+                agentErrors(AgentDraft(native.withNodeRun("desk", true)), false, "")
+        )
+    }
+
+    @Test
+    fun anUnknownTokenStillOpensTheReviewWhenSharedGithubIsTurnedOff() {
+        val shared = agent.copy(access = agent.access.copy(projects = null, github = true))
+        val restricted = AgentDraft(shared).withAllProjects(false, tokenSaved = false)
+        val lines =
+            agentReview(shared, restricted.resolved(false), resources, null, tokenUnknown = true)
+        val line = lines.single { it.text.startsWith("Connexion GitHub partagée désactivée") }
+        assertEquals(
+            "Connexion GitHub partagée désactivée : l’agent utilisera son jeton dédié enregistré s’il en existe un.",
+            line.text,
+        )
+        assertTrue(needsReview(lines, null))
+    }
+
+    @Test
+    fun toolRestrictionsWaitInTheDraftAndOnlyGrantedOnesAreSaved() {
+        val restricted =
+            agent.copy(
+                access = agent.access.copy(mcps = listOf("m"), mcpTools = mapOf("m" to listOf("t")))
+            )
+        // The connection is removed: its restriction stays in the draft but is not saved.
+        val removed = restricted.copy(access = restricted.access.copy(mcps = emptyList()))
+        assertEquals(mapOf("m" to listOf("t")), removed.access.mcpTools)
+        assertEquals(0, agentSaveBody(removed)["access"]!!.jsonObject["mcpTools"]!!.jsonObject.size)
+        // Granted again, it comes back restricted: nothing to review, no tool change.
+        val again = removed.copy(access = removed.access.copy(mcps = listOf("m")))
+        assertEquals(
+            listOf("t"),
+            agentSaveBody(again)["access"]!!
+                .jsonObject["mcpTools"]!!
+                .jsonObject["m"]!!
+                .jsonArray
+                .map { it.jsonPrimitive.content },
+        )
+        assertTrue(agentChanges(restricted, AgentDraft(again), false, "").isEmpty())
+    }
+
+    @Test
     fun nativeExecutionUsesOnlyNativeNodesAndIsReviewed() {
         val desk =
             ExecutionNode(

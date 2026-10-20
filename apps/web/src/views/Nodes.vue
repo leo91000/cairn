@@ -64,6 +64,8 @@ const active = computed(() => nodes.value.filter(node => !node.revoked))
 const revoked = computed(() => nodes.value.filter(node => node.revoked))
 const visible = computed(() => showRevoked.value ? nodes.value : active.value)
 let timer: ReturnType<typeof setInterval> | undefined
+// The newly enrolled native node whose "Who can use it?" step follows its configuration.
+let grantAfterConfigure: string | null = null
 
 async function load() {
   try {
@@ -83,10 +85,14 @@ async function load() {
     enrollment.value = null
     adding.value = false
     notify(`${connected.name} is connected`)
-    if (connected.capabilities.backend === 'native')
+    // A native machine is configured first (trusted people), then the same add-only step follows.
+    if (connected.capabilities.backend === 'native') {
+      grantAfterConfigure = connected.id
       edit(connected)
-    else
+    }
+    else {
       grant(connected)
+    }
   }
 }
 
@@ -156,7 +162,16 @@ function save() {
     })
     editing.value = null
     notify('Node saved')
+    if (grantAfterConfigure === node.id) {
+      grantAfterConfigure = null
+      grant(node)
+    }
   })
+}
+
+function closeEditor() {
+  editing.value = null
+  grantAfterConfigure = null
 }
 
 // The last step of adding a machine: nothing is granted unless the owner picks agents here.
@@ -605,7 +620,7 @@ function statusLabel(node: ExecutionNode) {
       v-if="editing"
       sheet
       title="Configure node"
-      @close="editing = null"
+      @close="closeEditor"
     >
       <form class="node-form" @submit.prevent="save">
         <UiAlert v-if="error">

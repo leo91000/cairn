@@ -716,6 +716,42 @@ abstract class AgentPageCases {
     }
 
     @Test
+    fun restrictingProjectsWithAnUnknownTokenIsReviewed() {
+        journey(
+            "agent",
+            prepare = { fixture ->
+                fixture.failToken.set(true)
+                // Only the GitHub switch can open the review here.
+                fixture.alreadySuspended.set(true)
+                fixture.agents.set(
+                    fixture.agents.get().map {
+                        if (it.id == "agent")
+                            it.copy(access = it.access.copy(projects = null, github = true))
+                        else it
+                    }
+                )
+            },
+        ) { fixture ->
+            open(AgentSection.Projects)
+            compose.onNodeWithText("Choisir").performClick()
+            compose.onNodeWithText("cairn").performScrollTo().performClick()
+            back()
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.waitUntil(15000) {
+                compose.onAllNodesWithTag("agent-review").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose
+                .onNodeWithText(
+                    "Connexion GitHub partagée désactivée : l’agent utilisera son jeton dédié enregistré s’il en existe un."
+                )
+                .assertExists()
+            confirmReview()
+            compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
+            assertTrue(fixture.tokens.isEmpty())
+        }
+    }
+
+    @Test
     fun pluginGrantsStayAsTheyAreWhenTheCatalogFailsToLoad() {
         journey(
             "agent",
@@ -732,7 +768,8 @@ abstract class AgentPageCases {
             compose.onNodeWithText("point à vérifier", substring = true).assertDoesNotExist()
             open(AgentSection.Plugins)
             waitForText("Impossible de charger les plugins", substring = true)
-            compose.onNodeWithText("1 instance accordée.").assertExists()
+            compose.onNodeWithText("1 instance accordée :").assertExists()
+            compose.onNodeWithText("prod").assertExists()
             compose.onNodeWithText("Retirer").assertDoesNotExist()
             compose.onNodeWithText("Instance supprimée").assertDoesNotExist()
 
@@ -803,9 +840,12 @@ abstract class AgentPageCases {
             compose
                 .onNodeWithContentDescription("Toutes les nodes VM, y compris futures")
                 .assertIsNotEnabled()
+            compose.onNodeWithContentDescription("Exécution native sur l’hôte").assertIsNotEnabled()
+            // What the agent holds is listed as saved, not as a guessed machine with a status.
+            compose.onNodeWithText("Exécution autorisée sur : $LOCAL_NODE_ID").assertExists()
             compose
                 .onNodeWithContentDescription("Exécuter ses conversations sur Runner actuel")
-                .assertIsNotEnabled()
+                .assertDoesNotExist()
 
             fixture.failNodes.set(false)
             compose.onNodeWithText("Réessayer").performClick()
@@ -997,6 +1037,12 @@ abstract class AgentPageCases {
             compose.onNodeWithText("Créer l’agent").performClick()
             waitForText("Agent enregistré, mais le jeton GitHub n’a pas été enregistré. Réessayez.")
             assertFalse(left.get())
+            // The agent exists: leaving only loses the pending token.
+            compose.runOnIdle { checkNotNull(backDispatcher).onBackPressed() }
+            waitForText("Quitter sans enregistrer ?")
+            compose.onNodeWithText("Cet agent ne sera pas créé.").assertDoesNotExist()
+            compose.onNodeWithText("La modification non enregistrée sera perdue.").assertExists()
+            compose.onNodeWithText("Continuer").performClick()
 
             // The last retry saves only the token of that agent.
             waitForEnabled("Créer l’agent")

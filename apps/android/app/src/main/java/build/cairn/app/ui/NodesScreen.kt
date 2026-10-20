@@ -38,6 +38,9 @@ fun NodesScreen(
     var revoking by remember { mutableStateOf<ExecutionNode?>(null) }
     // The last step of adding a machine: who may use it. Opened once, right after enrollment.
     var granting by remember { mutableStateOf<ExecutionNode?>(null) }
+    // A new native machine is configured first (native execution, trusted people), then asks
+    // who may use it.
+    var grantAfterConfigure by remember { mutableStateOf<String?>(null) }
     var cleaning by remember { mutableStateOf<ExecutionNode?>(null) }
     var advanced by remember { mutableStateOf(false) }
     var showRevoked by remember { mutableStateOf(false) }
@@ -52,7 +55,10 @@ fun NodesScreen(
                 enrollment = null
                 adding = false
                 vm.notify("${it.name} est connectée")
-                if (it.capabilities.backend == "native") editing = it else granting = it
+                if (it.capabilities.backend == NATIVE_BACKEND) {
+                    grantAfterConfigure = it.id
+                    editing = it
+                } else granting = it
             }
     }
     Poll("nodes", 10_000) {
@@ -363,11 +369,18 @@ fun NodesScreen(
         }
     }
     editing?.let { node ->
-        NodeEditor(node, state, nativeCallers, { editing = null }) { config ->
+        fun close() {
+            editing = null
+            if (grantAfterConfigure == node.id) {
+                grantAfterConfigure = null
+                granting = nodes.find { it.id == node.id } ?: node
+            }
+        }
+        NodeEditor(node, state, nativeCallers, ::close) { config ->
             vm.perform {
                 api.request("PUT", "/nodes/${node.id}", wireJson.encodeToJsonElement(config))
-                editing = null
                 load()
+                close()
             }
         }
     }

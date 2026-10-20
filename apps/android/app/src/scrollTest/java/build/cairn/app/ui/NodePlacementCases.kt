@@ -59,6 +59,132 @@ abstract class NodePlacementCases {
         }
     }
 
+    @Test
+    fun aNewNativeNodeIsConfiguredThenAsksWhichNativeAgentsMayUseIt() {
+        MockWebServer().use { server ->
+            val writes = CopyOnWriteArrayList<Pair<String, JsonObject>>()
+            val enrolled = AtomicBoolean(false)
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val path = request.path!!.substringBefore('?')
+                        if (
+                            request.method in listOf("POST", "PUT") &&
+                                path.startsWith("/api/installations/fixture/api/nodes")
+                        ) {
+                            val body = request.body.readUtf8().ifBlank { "{}" }
+                            writes += path to wireJson.parseToJsonElement(body).jsonObject
+                        }
+                        val body =
+                            when (path) {
+                                "/api/installations/fixture/api/nodes/enrollments" -> {
+                                    enrolled.set(true)
+                                    """{"code":"native-enrollment","expiresAt":4102444800000,"installCommand":"curl https://fixture.invalid/native | bash","backend":"native"}"""
+                                }
+                                "/api/installations/fixture/api/nodes/native-callers" ->
+                                    """[{"id":"trusted","email":"trusted@example.test"}]"""
+                                "/api/installations/fixture/api/nodes" ->
+                                    if (enrolled.get())
+                                        """[{"id":"desk","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]}]"""
+                                    else "[]"
+                                "/api/installations/fixture/api/agents" ->
+                                    """[{"id":"vm","name":"Agent VM","revision":"r1"},{"id":"native","name":"Agent natif","revision":"r1","access":{"backend":"native","nodes":[]}}]"""
+                                "/api/installations" -> beaconInstallationsFixture()
+                                "/api/account/session" -> beaconAccountFixture("fixture")
+                                "/api/installations/fixture/api/overview" -> "{}"
+                                else -> if (request.method == "PUT") "{}" else "[]"
+                            }
+                        return MockResponse().setBody(body)
+                    }
+                }
+            server.start()
+            val vault =
+                object : SessionVault {
+                    private val values = mutableMapOf<String, String>()
+
+                    override fun read(origin: String) = values[origin]
+
+                    override fun write(origin: String, cookie: String?) {
+                        if (cookie == null) values.remove(origin) else values[origin] = cookie
+                    }
+                }
+            val vm =
+                CairnViewModel(
+                    ApplicationProvider.getApplicationContext<Application>(),
+                    vault,
+                    beaconOrigin = "",
+                )
+            compose.setContent {
+                val state by vm.state.collectAsStateWithLifecycle()
+                LaunchedEffect(Unit) {
+                    vm.state.first { it.ready }
+                    vm.connect(server.url("/").toString())
+                }
+                CairnTheme { if (state.session.authenticated) NodesScreen(vm, state) }
+            }
+            compose.waitUntil(20000) {
+                compose.onAllNodesWithText("Ajouter une machine").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Ajouter une machine").performScrollTo().performClick()
+            compose.onNodeWithText("Nom de la machine").performTextInput("Desk")
+            compose.onNodeWithText("Exécution native sur l’hôte").performClick()
+            compose.onNodeWithText("Créer un code d’inscription").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("native-enrollment").fetchSemanticsNodes().isNotEmpty()
+            }
+            // Once the machine connects, it is configured first: native execution and people.
+            repeat(15) {
+                if (
+                    compose
+                        .onAllNodesWithText("Activer l’exécution native")
+                        .fetchSemanticsNodes()
+                        .isEmpty()
+                ) {
+                    compose.mainClock.advanceTimeBy(2_000)
+                    elapse(2_000)
+                    compose.waitForIdle()
+                }
+            }
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Activer l’exécution native")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Activer l’exécution native").performScrollTo().performClick()
+            compose.onNodeWithText("trusted@example.test").performScrollTo().performClick()
+            compose.onNodeWithText("Enregistrer").performClick()
+
+            // Then the same add-only step, offering native agents only.
+            compose.waitUntil(15000) {
+                compose
+                    .onAllNodesWithText("Qui peut utiliser « Desk » ?")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNode(isOff() and hasText("Agent VM")).assertIsNotEnabled()
+            compose.onNodeWithText("Agent en VM : réservé aux nodes VM").assertExists()
+            compose.onNode(isOff() and hasText("Agent natif")).assertIsEnabled().performClick()
+            compose.onNodeWithText("Terminer").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                writes.any { it.first == "/api/installations/fixture/api/nodes/desk/agents" }
+            }
+            val configured = writes.first {
+                it.first == "/api/installations/fixture/api/nodes/desk"
+            }
+            assertEquals(JsonPrimitive(true), configured.second["nativeEnabled"])
+            val grant =
+                writes
+                    .first { it.first == "/api/installations/fixture/api/nodes/desk/agents" }
+                    .second
+            assertEquals(
+                listOf("native"),
+                grant["agentIds"]!!.jsonArray.map { it.jsonPrimitive.content },
+            )
+            assertEquals(JsonPrimitive(true), grant["add"])
+        }
+    }
+
     @Test fun suspendedChatTimelineShowsAStaticNoticeInsteadOfWorking() = suspendedTimeline(true)
 
     @Test fun suspendedRunTimelineAndResultDescribeThePause() = suspendedTimeline(false)

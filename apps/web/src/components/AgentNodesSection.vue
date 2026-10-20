@@ -12,6 +12,7 @@ import {
   nodeName,
   nodesFor,
   nodeState,
+  runProblem,
   runsOn,
   supportsExclusive,
   unknownNode,
@@ -41,6 +42,10 @@ const visible = computed(() => {
     && (!selectedOnly.value || runsOn(access.value, node.id) || exclusiveNodes.value.includes(node.id))
     && (!unavailableOnly.value || (!unknownNode(node) && nodeState(node).state !== 'online')))
 })
+// Run permissions on nodes revoked, deleted or of the other backend: kept until removed.
+const strayRuns = computed(() => (access.value.nodes ?? [])
+  .map(id => ({ id, problem: runProblem(id, access.value, props.nodes), node: props.nodes.find(node => node.id === id) }))
+  .filter(item => item.problem))
 // Exclusive grants whose node was revoked or deleted.
 const missing = computed(() => exclusiveNodes.value.filter(id => !available.value.some(node => node.id === id)))
 const exclusiveCount = computed(() => effectiveExclusive({ access: access.value, exclusiveNodes: exclusiveNodes.value }, props.nodes).length)
@@ -212,6 +217,21 @@ function exclusiveBlocked(node: ExecutionNode) {
         </div>
       </div>
       <div
+        v-for="item in strayRuns"
+        :key="`run-${item.id}`"
+        role="listitem"
+        class="flex flex-wrap items-center gap-3 border-b border-line px-1 py-3.5"
+        :aria-label="item.problem === 'missing' ? 'Removed node' : nodeName(item.node, item.id)"
+      >
+        <span class="min-w-0 flex-1 text-sm text-muted">{{ item.problem === 'missing' ? 'Removed node' : `${nodeName(item.node, item.id)} · other execution backend` }} · can run its conversations</span>
+        <AccessChip :tone="item.problem === 'missing' ? 'missing' : 'unavailable'">
+          {{ item.problem === 'missing' ? 'Not found' : 'Unavailable' }}
+        </AccessChip>
+        <UiButton size="small" :aria-label="`Remove permission to run on ${item.problem === 'missing' ? 'a removed node' : nodeName(item.node, item.id)}`" @click="setRun(item.id, false)">
+          <Icon :name="X" :size="13" />Remove
+        </UiButton>
+      </div>
+      <div
         v-for="id in missing"
         :key="id"
         role="listitem"
@@ -225,6 +245,11 @@ function exclusiveBlocked(node: ExecutionNode) {
           <Icon :name="X" :size="13" />Remove
         </UiButton>
       </div>
+      <p v-if="backend === 'native' && !available.length" class="py-4 text-sm text-muted">
+        No native node enrolled yet. <RouterLink to="/nodes" class="text-accent hover:underline">
+          Add one in Nodes ›
+        </RouterLink>
+      </p>
       <p v-if="!visible.length && available.length" class="py-4 text-sm text-muted">
         No node matches these filters.
       </p>

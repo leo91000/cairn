@@ -242,20 +242,19 @@ for (const failure of ['refresh', 'lost response'] as const) {
       }
 
       updates++
-      if (updates === 1 && failure === 'lost response')
+      if (updates === 1)
         await route.fulfill({ status: 500, json: { error: 'Update temporarily unavailable' } })
       else
         await route.continue()
     })
     await bar.getByRole('button', { name: 'Create agent', exact: true }).click()
-    if (failure === 'lost response') {
-      await expect(bar.getByRole('alert')).toContainText('Agent saved, but the latest changes could not be saved. Update temporarily unavailable')
-      await bar.getByRole('button', { name: 'Create agent', exact: true }).click()
-    }
+    // Once the agent exists, a rejected update only concerns the newer edits.
+    await expect(bar.getByRole('alert')).toContainText('Agent saved, but the latest changes could not be saved. Update temporarily unavailable')
+    await bar.getByRole('button', { name: 'Create agent', exact: true }).click()
 
     await expect(page).toHaveURL(new RegExp(`/agents/${createdId}$`))
     // Either way the newer edits reach the created agent by an update.
-    expect(updates).toBe(failure === 'lost response' ? 2 : 1)
+    expect(updates).toBe(2)
 
     const saved = (await workspace.api('/api/agents')).filter((item: { name: string }) => item.name.startsWith(name))
     expect(saved).toHaveLength(1)
@@ -904,4 +903,132 @@ test('the execution backend chooses which nodes an agent can be granted', async 
   expect(saved.access).toMatchObject({ backend: 'native', nodes: [native] })
   await page.getByRole('link', { name: 'Overview', exact: true }).click()
   await expect(page.getByRole('button', { name: /^Execution Native process/ })).toContainText('Native process')
+})
+
+test('a rejected first creation says the agent was not saved', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  await page.goto(workspacePath('/agents/new'))
+  await authenticateWorkspace(page)
+  await page.getByLabel('Name', { exact: true }).fill('Rejected agent')
+  let rejected = false
+  await page.route('**/api/agents', async (route) => {
+    if (route.request().method() === 'POST' && !rejected) {
+      rejected = true
+      await route.fulfill({ status: 400, json: { error: 'Creation temporarily refused.' } })
+      return
+    }
+
+    await route.continue()
+  })
+  const bar = page.getByRole('region', { name: 'Unsaved changes' })
+  await bar.getByRole('button', { name: 'Create agent', exact: true }).click()
+  await expect(bar.getByRole('alert')).toContainText('Could not save the agent. Creation temporarily refused.')
+  expect((await workspace.api('/api/agents')).filter((item: { name: string }) => item.name === 'Rejected agent')).toHaveLength(0)
+  await bar.getByRole('button', { name: 'Create agent', exact: true }).click()
+  await expect(page).toHaveURL(/\/agents\/[0-9a-f-]{36}$/)
+  expect((await workspace.api('/api/agents')).filter((item: { name: string }) => item.name === 'Rejected agent')).toHaveLength(1)
+})
+
+test('reloading after a conflict keeps a node granted elsewhere and the owner\'s own additions', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const first = await enroll(page, workspace, 'merge-a', true)
+  const mine = await enroll(page, workspace, 'merge-b', true)
+  const theirs = await enroll(page, workspace, 'merge-c', true)
+  const agent = await workspace.api('/api/agents', 'POST', { name: 'Merge runner', access: { nodes: [first] } })
+  await page.goto(workspacePath(`/agents/${agent.id}?section=nodes`))
+  await authenticateWorkspace(page)
+  await page.getByRole('switch', { name: 'Can run its conversations on merge-b' }).check()
+
+  // Meanwhile, another window grants merge-c, then merge-a is revoked.
+  const current = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id)
+  await workspace.api(`/api/agents/${agent.id}`, 'PUT', { ...current, access: { ...current.access, nodes: [first, theirs] } })
+  await workspace.api(`/api/nodes/${first}/revoke`, 'POST', {})
+
+  const bar = page.getByRole('region', { name: 'Unsaved changes' })
+  await bar.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(bar.getByRole('alert')).toHaveText('This agent was changed elsewhere. Reload it before saving.')
+  await bar.getByRole('button', { name: 'Reload', exact: true }).click()
+  await expect(page.getByRole('switch', { name: 'Can run its conversations on merge-c' })).toBeChecked()
+  await expect(page.getByRole('switch', { name: 'Can run its conversations on merge-b' })).toBeChecked()
+  // The revoked node is gone from the list, or shown as removable.
+  const removed = page.getByRole('button', { name: 'Remove permission to run on a removed node' })
+  if (await removed.count())
+    await removed.click()
+  await bar.getByRole('button', { name: 'Save', exact: true }).click()
+  const review = page.getByRole('dialog', { name: 'Review before saving' })
+  if (await review.isVisible().catch(() => false))
+    await review.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(bar).toHaveCount(0)
+  const saved = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id)
+  expect([...saved.access.nodes].sort()).toEqual([mine, theirs].sort())
+})
+
+test('an unreadable GitHub token leaves the page usable and the GitHub section read-only', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const agent = await workspace.api('/api/agents', 'POST', { name: 'Token unknown', access: { projects: null, github: true } })
+  let tokenFails = true
+  const tokenSaves: string[] = []
+  await page.route(`**/api/agents/${agent.id}/github-token`, async (route) => {
+    if (route.request().method() === 'PUT')
+      tokenSaves.push(route.request().postData() ?? '')
+    if (tokenFails && route.request().method() === 'GET')
+      await route.fulfill({ status: 500, json: { error: 'Secret store unavailable' } })
+    else
+      await route.continue()
+  })
+  await page.goto(workspacePath(`/agents/${agent.id}`))
+  await authenticateWorkspace(page)
+  await expect(page.getByRole('button', { name: /^GitHub Not loaded/ })).toBeVisible()
+
+  await openAgentSection(page, 'GitHub')
+  const failure = page.getByRole('alert').filter({ hasText: 'The GitHub connection could not be loaded, so it cannot be shown or changed.' })
+  await expect(failure).toContainText('Secret store unavailable')
+  await expect(page.getByRole('radio', { name: /^No GitHub/ })).toHaveCount(0)
+
+  // Restricting projects may switch to a saved token: the review says so, and no token is sent.
+  await openAgentSection(page, 'Projects')
+  await page.getByRole('group', { name: 'Projects access' }).getByRole('button', { name: 'Choose', exact: true }).click()
+  await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
+  const review = page.getByRole('dialog', { name: 'Review before saving' })
+  await expect(review).toContainText('Shared GitHub connection turned off: the agent may use its saved dedicated token if one exists.')
+  await review.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(review).toHaveCount(0)
+  expect(tokenSaves).toEqual([])
+  expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id).access).toMatchObject({ projects: [], github: false })
+
+  tokenFails = false
+  await openAgentSection(page, 'GitHub')
+  await failure.getByRole('button', { name: 'Try again', exact: true }).click()
+  await expect(failure).toHaveCount(0)
+  await expect(page.getByRole('radio', { name: /^No GitHub/ })).toBeChecked()
+})
+
+test('reloading after a conflict never removes a token saved meanwhile', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const agent = await workspace.api('/api/agents', 'POST', { name: 'Late token', access: { projects: [], github: false } })
+  const tokenSaves: string[] = []
+  page.on('request', (request) => {
+    if (request.method() === 'PUT' && request.url().endsWith(`/api/agents/${agent.id}/github-token`))
+      tokenSaves.push(request.postData() ?? '')
+  })
+  await page.goto(workspacePath(`/agents/${agent.id}?section=github`))
+  await authenticateWorkspace(page)
+  // "No GitHub" chosen while no token exists.
+  await page.getByRole('radio', { name: /^Dedicated token/ }).check()
+  await page.getByRole('radio', { name: /^No GitHub/ }).check()
+  await openAgentSection(page, 'Identity & instructions')
+  await page.getByLabel('Description', { exact: true }).fill('Works without GitHub')
+
+  // Meanwhile a token is saved and the agent changes elsewhere.
+  await workspace.api(`/api/agents/${agent.id}/github-token`, 'PUT', { token: 'fixture-token-not-a-secret' })
+  await workspace.api(`/api/agents/${agent.id}`, 'PUT', { name: 'Late token', instructions: 'Changed elsewhere' })
+  const bar = page.getByRole('region', { name: 'Unsaved changes' })
+  await bar.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(bar.getByRole('alert')).toHaveText('This agent was changed elsewhere. Reload it before saving.')
+  await bar.getByRole('button', { name: 'Reload', exact: true }).click()
+  await bar.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(bar).toHaveCount(0)
+  expect(tokenSaves).toEqual([])
+  expect(await workspace.api(`/api/agents/${agent.id}/github-token`)).toEqual({ configured: true })
+  expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id)).toMatchObject({ description: 'Works without GitHub', instructions: 'Changed elsewhere' })
 })

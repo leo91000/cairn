@@ -191,9 +191,10 @@ impl Service {
         let accepts_agents = self.instances_accepting_agents(&draft.agent).await?;
         let creating = existing_id.is_none();
         let AgentDraft {
-            agent,
+            mut agent,
             access,
             expected_revision,
+            inherited_grants,
             ..
         } = draft;
         let (agent, created) = self
@@ -210,6 +211,12 @@ impl Service {
                     return Err(Error::conflict(
                         "This agent was changed elsewhere. Reload it before saving.",
                     ));
+                }
+                if let Some(current) = db.get("agents", text(&agent, "id"))? {
+                    for key in &inherited_grants {
+                        agent[*key] = current[*key].clone();
+                    }
+                    crate::agent_grants::normalize(&mut agent);
                 }
                 crate::agent_grants::validate(db, &agent, &accepts_agents)?;
                 let agent = save_agent(db, agent, &access)?;
@@ -275,6 +282,17 @@ impl Service {
                 "Only the installation owner can reapprove plugin delegations.",
             ));
         }
+        // Grants the editor did not send are taken from the saved agent inside the save
+        // transaction, so a concurrent revocation is never restored.
+        let inherited_grants = [
+            crate::agent_grants::EXCLUSIVE_NODES,
+            crate::agent_grants::PLUGINS,
+        ]
+        .into_iter()
+        .filter(|key| {
+            existing.is_some() && (editor == AgentEditor::Installation || input.get(*key).is_none())
+        })
+        .collect::<Vec<_>>();
         if let Some(existing) = &existing {
             inherit_agent_settings(&mut input, existing);
         }
@@ -310,6 +328,7 @@ impl Service {
             access,
             expected_revision,
             reapprove,
+            inherited_grants,
         })
     }
 
@@ -976,6 +995,7 @@ struct AgentDraft {
     access: Value,
     expected_revision: Option<Value>,
     reapprove: Vec<String>,
+    inherited_grants: Vec<&'static str>,
 }
 
 /// Marks a changed agent record so concurrent editors can detect the change.
@@ -1025,6 +1045,11 @@ fn save_agent(db: &Db<'_>, mut agent: Value, access: &Value) -> Result<Value> {
         )?;
         if record["revoked"] == true {
             return Err(Error::bad("A revoked node cannot be authorized."));
+        }
+        if crate::native::policy::node_native(&record) != (access["backend"] == "native") {
+            return Err(Error::bad(
+                "Choose nodes that use this agent's execution backend.",
+            ));
         }
     }
     // Read the latest portrait inside the save transaction: editing an agent

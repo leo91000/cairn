@@ -15,12 +15,14 @@ import {
   grantableConnection,
   grantablePackages,
   issues,
+  mergeList,
   needsReview,
   newAgentDraft,
   nodesFor,
   rebaseDraft,
   restrictedGithubMode,
   reviewLines,
+  sandboxOptionsFor,
   savedDraft,
   selectionSummary,
   skillLabel,
@@ -523,4 +525,83 @@ it('always offers the current runner to Firecracker agents, with an unknown stat
   } as ExecutionNode
   expect(nodesFor([reported, gpu], 'firecracker')).toEqual([reported, gpu])
   expect(nodesFor([gpu, desktop], 'native').map(node => node.id)).toEqual(['desktop'])
+})
+
+it('merges list edits with grants made elsewhere, entry by entry', () => {
+  // Unchanged by the owner: the newer list.
+  expect(mergeList(['a'], ['a'], ['a', 'c'])).toEqual(['a', 'c'])
+  // Added and removed entries apply to the newer list, keeping a concurrent grant.
+  expect(mergeList(['a', 'b'], ['b', 'd'], ['a', 'b', 'c'])).toEqual(['b', 'c', 'd'])
+  // A removal elsewhere stays removed unless the owner added the entry.
+  expect(mergeList(['a', 'b'], ['a', 'b', 'd'], ['b'])).toEqual(['b', 'd'])
+  // "All" ↔ a list is one change: the owner's wins, otherwise the newer one.
+  expect(mergeList(null, ['a'], null)).toEqual(['a'])
+  expect(mergeList(['a'], null, ['a', 'c'])).toBeNull()
+  expect(mergeList(['a'], ['a', 'b'], null)).toBeNull()
+  expect(mergeList(null, null, ['c'])).toEqual(['c'])
+})
+
+it('rebases every list of the agent, tool choices included', () => {
+  const base = newAgentDraft()
+  base.access.projects = ['p1']
+  base.access.nodes = [LOCAL_NODE_ID, 'gpu']
+  base.access.mcps = ['m1', 'm2']
+  base.access.mcpTools = { m1: ['echo'] }
+  base.plugins = ['prod']
+  const mine = structuredClone(base)
+  mine.access.nodes = [LOCAL_NODE_ID, 'gpu', 'box']
+  mine.access.mcpTools = { m1: ['echo', 'search'] }
+  mine.plugins = []
+  mine.exclusiveNodes = ['gpu']
+  const theirs = structuredClone(base)
+  theirs.access.projects = ['p1', 'p2']
+  theirs.access.nodes = ['gpu', 'other']
+  theirs.access.mcpTools = { m1: ['echo', 'read'], m2: ['list'] }
+  theirs.plugins = ['prod', 'staging']
+  const rebased = rebaseDraft(base, mine, theirs)
+  expect(rebased.access.projects).toEqual(['p1', 'p2'])
+  expect(rebased.access.nodes).toEqual(['gpu', 'other', 'box'])
+  expect(rebased.access.mcpTools).toEqual({ m1: ['echo', 'read', 'search'], m2: ['list'] })
+  expect(rebased.plugins).toEqual(['staging'])
+  expect(rebased.exclusiveNodes).toEqual(['gpu'])
+})
+
+it('flags run permissions on removed nodes or nodes of the other backend', () => {
+  const desktop = {
+    ...gpu,
+    id: 'desktop',
+    name: 'Native desktop',
+    capabilities: { ...gpu.capabilities, backend: 'native' },
+  } as ExecutionNode
+  const draft = newAgentDraft()
+  draft.access.nodes = [LOCAL_NODE_ID, 'gpu', 'gone', 'desktop']
+  expect(issues(draft, { ...context, nodes: [gpu, desktop] }, false).map(issue => issue.text)).toEqual([
+    'A node this agent can run on no longer exists.',
+    'Native desktop uses another execution backend: this agent cannot run there.',
+  ])
+  draft.access.backend = 'native'
+  draft.access.nodes = [LOCAL_NODE_ID, 'desktop']
+  expect(issues(draft, { ...context, nodes: [gpu, desktop] }, false).map(issue => issue.text)).toEqual([
+    'Current runner uses another execution backend: this agent cannot run there.',
+  ])
+  expect(issues(draft, { ...context, nodes: [], nodesUnavailable: true }, false)).toEqual([])
+})
+
+it('describes execution modes and the GitHub switch for what is known', () => {
+  expect(sandboxOptionsFor('firecracker')[0]!.description).toBe('Private VM with sudo and Docker. Default.')
+  expect(sandboxOptionsFor('native')[0]!.description).toBe('Native process under a managed account on the host: GPU and system tools, no sudo or Docker. Default.')
+  const saved = newAgentDraft()
+  saved.access.projects = null
+  saved.access.github = true
+  const draft = structuredClone(saved)
+  draft.access.projects = []
+  draft.access.github = false
+  expect(reviewLines(saved, draft, context, undefined, null, 'unknown').at(-1)!.text).toBe('Shared GitHub connection turned off: the agent may use its saved dedicated token if one exists.')
+})
+
+it('never sends tool choices of deleted MCP connections', () => {
+  const draft = newAgentDraft()
+  draft.access.mcps = null
+  draft.access.mcpTools = { m1: ['echo'], gone: ['x'] }
+  expect(savedDraft(draft, ['m1']).access.mcpTools).toEqual({ m1: ['echo'] })
 })

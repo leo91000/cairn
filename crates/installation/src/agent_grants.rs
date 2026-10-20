@@ -63,6 +63,12 @@ pub(crate) fn normalize(agent: &mut Value) {
     agent[PLUGINS] = json!(plugins(agent));
 }
 
+/// Exclusive reservations suspend Firecracker VMs, so only a Firecracker agent can
+/// reserve a Firecracker node.
+fn reservable(agent: &Value, node: &Value) -> bool {
+    !crate::native::policy::native(agent) && !crate::native::policy::node_native(node)
+}
+
 /// Checks the grants an owner selected: existing, not revoked, and only on plugin
 /// instances that give agents access. Instances the agent already holds stay accepted
 /// while their package awaits review, so unrelated edits still save.
@@ -84,6 +90,11 @@ pub(crate) fn validate(db: &Db<'_>, agent: &Value, accepts_agents: &[String]) ->
         })?;
         if record["revoked"] == true {
             return Err(Error::bad("A revoked node cannot be reserved."));
+        }
+        if !reservable(agent, &record) {
+            return Err(Error::bad(
+                "Exclusive reservations need a Firecracker VM node used by a Firecracker agent.",
+            ));
         }
     }
     for instance in &instances {
@@ -169,6 +180,7 @@ pub(crate) fn set_node_agents(db: &Db<'_>, node: &mut Value, agents: &[String]) 
     for agent in agents {
         let may_run = db.get("agents", agent)?.is_some_and(|saved| {
             crate::service::allowed(&crate::service::policy(&saved)["nodes"], &node_id)
+                && reservable(&saved, node)
         });
         if may_run {
             runnable.push(agent.clone());
@@ -257,7 +269,9 @@ pub(crate) fn reconcile(db: &Db<'_>) -> Result<()> {
         let (exclusive, unrunnable): (Vec<_>, Vec<_>) = lists(&nodes, "exclusiveAgents", true)
             .into_iter()
             .partition(|node| {
+                let record = nodes.iter().find(|record| record["id"] == *node);
                 crate::service::allowed(&access["nodes"], node.as_str().unwrap_or(""))
+                    && record.is_some_and(|record| reservable(&agent, record))
             });
         // A previous release can remove node access without the reservation.
         for node in &unrunnable {

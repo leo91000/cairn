@@ -58,6 +58,25 @@ export const sandboxOptions = [
   { value: 'read-only', label: 'Read only', description: 'Project files are read-only; nothing can be changed.' },
 ] as const
 
+/**
+ * The execution modes as they apply to the agent's backend: a native process runs under a managed
+ * account on the host, without sudo or Docker (see docs/NATIVE-NODES.md).
+ */
+export function sandboxOptionsFor(backend: 'firecracker' | 'native') {
+  if (backend !== 'native')
+    return sandboxOptions
+  return sandboxOptions.map(option => option.value === 'yolo'
+    ? { ...option, description: 'Native process under a managed account on the host: GPU and system tools, no sudo or Docker. Default.' }
+    : option)
+}
+
+/** Where the agent's conversations run, for the execution mode section. */
+export function isolationNote(backend: 'firecracker' | 'native') {
+  return backend === 'native'
+    ? 'This agent runs as a native process on its native nodes, with weaker isolation than a VM. Sandboxed runs never bypass denied operations or wait for unattended approvals.'
+    : 'Every agent runs in a private VM. Sandboxed runs never bypass denied operations or wait for unattended approvals.'
+}
+
 export const alwaysAvailable = 'Publish deliverables (including public links), wait for a delay or a condition, see its nodes and move the conversation between them, report its outcome.'
 
 /**
@@ -117,15 +136,51 @@ export function draftOf(agent: Agent): AgentDraft {
   }
 }
 
+function same(left: unknown, right: unknown) {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+/**
+ * Three-way merge of a list where null means "all": entries the owner added or removed apply to
+ * the newer list, so a grant made elsewhere meanwhile is kept. Switching between "all" and a list
+ * is one change: the owner's wins, otherwise the newer one.
+ */
+export function mergeList(base: string[] | null, mine: string[] | null, theirs: string[] | null): string[] | null {
+  if (same(base, mine))
+    return theirs
+  if (base === null || mine === null || theirs === null)
+    return base === null || mine === null ? mine : theirs
+  const added = mine.filter(item => !base.includes(item))
+  const removed = base.filter(item => !mine.includes(item))
+  return [...new Set([...theirs.filter(item => !removed.includes(item)), ...added])]
+}
+
+/** Tool choices per connection, merged like lists: an absent connection means all its tools. */
+function mergeTools(base: Record<string, string[]>, mine: Record<string, string[]>, theirs: Record<string, string[]>) {
+  const merged: Record<string, string[]> = {}
+  for (const id of new Set([...Object.keys(base), ...Object.keys(mine), ...Object.keys(theirs)])) {
+    const tools = mergeList(base[id] ?? null, mine[id] ?? null, theirs[id] ?? null)
+    if (tools !== null)
+      merged[id] = tools
+  }
+
+  return merged
+}
+
+const listAccess = ['nodes', 'projects', 'skills', 'mcps'] as const
+
 /**
  * Applies the owner's edits onto a newer saved agent, as Android does: a value the owner
- * changed from `base` keeps the draft value, every other value takes the newer one.
+ * changed from `base` keeps the draft value, every other value takes the newer one. Lists merge
+ * entry by entry, so neither the owner's edits nor grants made elsewhere are lost.
  */
 export function rebaseDraft(base: AgentDraft, mine: AgentDraft, theirs: AgentDraft): AgentDraft {
-  const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right)
   const pick = <T>(old: T, edited: T, newer: T): T => same(old, edited) ? newer : edited
-  const access = Object.fromEntries((Object.keys(theirs.access) as (keyof AgentAccess)[])
+  const access: Record<string, unknown> = Object.fromEntries((Object.keys(theirs.access) as (keyof AgentAccess)[])
     .map(key => [key, pick(base.access[key], mine.access[key], theirs.access[key])]))
+  for (const key of listAccess)
+    access[key] = mergeList(base.access[key], mine.access[key], theirs.access[key])
+  access.mcpTools = mergeTools(base.access.mcpTools ?? {}, mine.access.mcpTools ?? {}, theirs.access.mcpTools ?? {})
   const rebased: AgentDraft = {
     name: pick(base.name, mine.name, theirs.name),
     description: pick(base.description, mine.description, theirs.description),
@@ -134,9 +189,9 @@ export function rebaseDraft(base: AgentDraft, mine: AgentDraft, theirs: AgentDra
     model: pick(base.model, mine.model, theirs.model),
     reasoning: pick(base.reasoning, mine.reasoning, theirs.reasoning),
     timeoutMinutes: pick(base.timeoutMinutes, mine.timeoutMinutes, theirs.timeoutMinutes),
-    access: access as AgentAccess,
-    exclusiveNodes: pick(base.exclusiveNodes, mine.exclusiveNodes, theirs.exclusiveNodes),
-    plugins: pick(base.plugins, mine.plugins, theirs.plugins),
+    access: access as unknown as AgentAccess,
+    exclusiveNodes: mergeList(base.exclusiveNodes, mine.exclusiveNodes, theirs.exclusiveNodes) ?? [],
+    plugins: mergeList(base.plugins, mine.plugins, theirs.plugins) ?? [],
   }
   return JSON.parse(JSON.stringify(rebased))
 }
@@ -178,11 +233,13 @@ export function githubTokenChange(input: {
  * The draft as it is saved: tool choices only for granted MCP connections, as the server requires.
  * The page keeps the others while editing, so switching back to "All" restores them.
  */
-export function savedDraft(draft: AgentDraft): AgentDraft {
+export function savedDraft(draft: AgentDraft, existingMcps?: string[]): AgentDraft {
   const { mcps, mcpTools } = draft.access
-  if (mcps === null)
+  // Choices for deleted connections are never sent either.
+  const granted = Object.fromEntries(Object.entries(mcpTools ?? {})
+    .filter(([id]) => (mcps === null || mcps.includes(id)) && (!existingMcps || existingMcps.includes(id))))
+  if (same(granted, mcpTools ?? {}))
     return draft
-  const granted = Object.fromEntries(Object.entries(mcpTools ?? {}).filter(([id]) => mcps.includes(id)))
   return { ...draft, access: { ...draft.access, mcpTools: granted } }
 }
 
@@ -276,6 +333,20 @@ export function nodesFor(nodes: ExecutionNode[], backend: Backend) {
   if (backend === 'firecracker' && !nodes.some(node => node.local || node.id === LOCAL_NODE_ID))
     return [currentRunner(), ...matching]
   return matching
+}
+
+/**
+ * Why a node the agent may run on cannot be used: it was revoked or deleted, or it belongs to the
+ * other execution backend. The current runner counts as present even when unreported.
+ */
+export function runProblem(id: string, access: AgentAccess, nodes: ExecutionNode[]): 'missing' | 'backend' | '' {
+  const node = nodes.find(item => item.id === id)
+  const local = id === LOCAL_NODE_ID || node?.local === true
+  if (local)
+    return backendOf(access) === 'native' ? 'backend' : ''
+  if (!node || node.revoked)
+    return 'missing'
+  return nodeBackend(node) === backendOf(access) ? '' : 'backend'
 }
 
 /** Whether the agent may run on a node: listed, or every node allowed. */
@@ -429,9 +500,9 @@ function restrictedTools(saved: AgentAccess, draft: AgentAccess) {
  * What saving would grant or take away that deserves a look first: new powers and
  * secrets, and removed access when `runs` says work is affected. `githubToken` is the
  * pending change of the dedicated GitHub token, saved with the page; `dedicatedToken` says the
- * agent will use its saved dedicated token.
+ * agent will use its saved dedicated token, or 'unknown' when the token state could not be read.
  */
-export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Context, runs = { queued: 0, running: 0 }, githubToken: 'set' | 'remove' | null = null, dedicatedToken = false) {
+export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Context, runs = { queued: 0, running: 0 }, githubToken: 'set' | 'remove' | null = null, dedicatedToken: boolean | 'unknown' = false) {
   const lines: ReviewLine[] = []
   const node = (id: string) => nodeName(context.nodes.find(item => item.id === id), id)
 
@@ -488,8 +559,18 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
     lines.push({ kind: 'reduction', section: 'projects', text: `Removed: ${removed.join(', ')}.${consequence}` })
   else if (affected)
     lines.push({ kind: 'reduction', section: 'projects', text: `Changed access.${consequence}` })
-  if (saved.access.github && !draft.access.github && saved.access.projects === null && draft.access.projects !== null)
-    lines.push({ kind: 'reduction', section: 'github', text: dedicatedToken ? 'Shared GitHub connection turned off: the agent will use its saved dedicated token.' : 'Shared GitHub connection turned off: selected projects require a dedicated token.' })
+  if (saved.access.github && !draft.access.github && saved.access.projects === null && draft.access.projects !== null) {
+    lines.push({
+      kind: 'reduction',
+      section: 'github',
+      text: dedicatedToken === 'unknown'
+        ? 'Shared GitHub connection turned off: the agent may use its saved dedicated token if one exists.'
+        : dedicatedToken
+          ? 'Shared GitHub connection turned off: the agent will use its saved dedicated token.'
+          : 'Shared GitHub connection turned off: selected projects require a dedicated token.',
+    })
+  }
+
   return lines
 }
 
@@ -549,6 +630,14 @@ export function issues(draft: AgentDraft, context: Context, isMain: boolean, age
       if (!connection.enabled && (access.mcps === null || access.mcps.includes(connection.id)))
         found.push({ section: 'mcps', text: `The MCP connection “${connection.name}” is disabled on the installation. The agent keeps it but cannot use it until it is enabled again.` })
     }
+  }
+
+  for (const id of context.nodesUnavailable ? [] : access.nodes ?? []) {
+    const problem = runProblem(id, access, context.nodes)
+    if (problem === 'missing')
+      found.push({ section: 'nodes', text: 'A node this agent can run on no longer exists.' })
+    else if (problem === 'backend')
+      found.push({ section: 'nodes', text: `${nodeName(context.nodes.find(item => item.id === id), id)} uses another execution backend: this agent cannot run there.` })
   }
 
   for (const id of context.nodesUnavailable ? [] : draft.exclusiveNodes ?? []) {

@@ -347,7 +347,31 @@ test('finishing the first step keeps an agent allowed while it was open', async 
 })
 
 test('native enrollment requires explicit people and native agent grants', async ({ page, workspace }) => {
-  test.setTimeout(60000)
+  test.setTimeout(90000)
+  const nativeCapabilities = {
+    backend: 'native',
+    os: 'linux',
+    arch: 'x86_64',
+    cpu: 8,
+    memoryMiB: 16384,
+    diskMiB: 65536,
+    kvm: false,
+    fuse: false,
+  }
+  // A native agent already runs on another native machine.
+  const laptopInvitation = await workspace.api('/api/nodes/enrollments', 'POST', { name: 'Native laptop', backend: 'native' })
+  const laptop = await page.request.post(`${workspace.installationUrl}/internal/nodes/enroll`, {
+    data: {
+      code: laptopInvitation.code,
+      name: 'Native laptop',
+      protocol: 1,
+      runtimeId: 'fixture',
+      capabilities: nativeCapabilities,
+    },
+  })
+  expect(laptop.ok()).toBe(true)
+  const agent = await workspace.api('/api/agents', 'POST', { name: 'Native worker', access: { backend: 'native', nodes: [(await laptop.json()).nodeId] } })
+  await useRelayForHttpMocks(page)
   await page.goto(workspacePath('/nodes'))
   await authenticateWorkspace(page)
   await page.getByRole('button', { name: 'Add a machine', exact: true }).click()
@@ -365,25 +389,15 @@ test('native enrollment requires explicit people and native agent grants', async
       name: 'Native desktop',
       protocol: 1,
       runtimeId: 'fixture',
-      capabilities: {
-        backend: 'native',
-        os: 'linux',
-        arch: 'x86_64',
-        cpu: 8,
-        memoryMiB: 16384,
-        diskMiB: 65536,
-        kvm: false,
-        fuse: false,
-      },
+      capabilities: nativeCapabilities,
     },
   })
   expect(response.ok()).toBe(true)
-  await page.reload()
-  const node = page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'Native desktop' }) })
-  await expect(node).toContainText('Native process')
-  await expect(node.getByRole('button', { name: 'Storage', exact: true })).toHaveCount(0)
-  await node.getByRole('button', { name: 'Configure', exact: true }).click()
+  const desktop = (await response.json()).nodeId as string
+
+  // Once connected, the machine is configured first: trusted people, then who may use it.
   const dialog = page.getByRole('dialog', { name: 'Configure node' })
+  await expect(dialog).toBeVisible({ timeout: 20000 })
   await expect(dialog.getByLabel('Execution slots')).toBeDisabled()
   await expect(dialog.getByRole('group', { name: 'Exclusive reservations' })).toHaveCount(0)
   await expect(dialog.getByLabel('Enable native execution')).not.toBeChecked()
@@ -393,15 +407,32 @@ test('native enrollment requires explicit people and native agent grants', async
   await dialog.getByLabel('Enable native execution').check()
   await dialog.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(dialog).toHaveCount(0)
-  const configured = (await workspace.api('/api/nodes')).find((value: { name: string }) => value.name === 'Native desktop')
+  const configured = (await workspace.api('/api/nodes')).find((value: { id: string }) => value.id === desktop)
   expect(configured).toMatchObject({ nativeEnabled: true, nativeAccounts: [callers[0].id], slots: 1 })
-  const agent = await workspace.api('/api/agents', 'POST', { name: 'Native worker', access: { backend: 'native', nodes: [configured.id] } })
-  await page.reload()
+
+  const grant = page.getByRole('dialog', { name: 'Who can use “Native desktop”?' })
+  await expect(grant).toBeVisible()
+  const main = grant.getByRole('checkbox', { name: /^Main agent/ })
+  await expect(main).toBeDisabled()
+  await expect(grant.locator('label').filter({ hasText: 'Main agent' })).toContainText('Runs in a Firecracker VM: set it to native execution on its page first')
+  const finishing = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/nodes/${desktop}/agents`))
+  await grant.getByRole('checkbox', { name: /^Native worker/ }).check()
+  await grant.getByRole('button', { name: 'Finish', exact: true }).click()
+  await expect(grant).toHaveCount(0)
+  expect((await finishing).postDataJSON()).toEqual({ agentIds: [agent.id], add: true })
+  const node = page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'Native desktop' }) })
+  await expect(node).toContainText('Native process')
+  await expect(node.getByRole('button', { name: 'Storage', exact: true })).toHaveCount(0)
   // Agents are granted on their own page; the card lists them read-only.
   await expect(node).toContainText(`1 agent can run here: ${agent.name}`)
+  expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id).access.nodes).toContain(desktop)
+
   await node.getByRole('button', { name: 'Configure', exact: true }).click()
   await expect(dialog.getByLabel(callers[0].email, { exact: true })).toBeChecked()
   await dialog.getByLabel('Enable native execution').uncheck()
   await dialog.getByRole('button', { name: 'Save', exact: true }).click()
-  expect((await workspace.api('/api/nodes')).find((value: { id: string }) => value.id === configured.id).nativeEnabled).toBe(false)
+  await expect(dialog).toHaveCount(0)
+  // Configuring it again does not ask who may use it.
+  await expect(grant).toHaveCount(0)
+  expect((await workspace.api('/api/nodes')).find((value: { id: string }) => value.id === desktop).nativeEnabled).toBe(false)
 })

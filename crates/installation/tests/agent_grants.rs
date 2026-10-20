@@ -756,3 +756,74 @@ async fn startup_drops_reservations_an_older_release_left_without_node_access() 
     let node = restarted.store.get("nodes", NODE).await.unwrap().unwrap();
     assert_eq!(node["exclusiveAgents"], json!([]));
 }
+
+#[tokio::test]
+async fn grants_follow_the_agent_execution_backend() {
+    let owner = Owner::new().await;
+    owner.add_node().await;
+    let native = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d";
+    owner
+        .service
+        .store
+        .put(
+            "nodes",
+            json!({
+                "id": native, "name": "desk", "revoked": false, "accepting": true, "tags": [],
+                "capabilities": { "backend": "native", "cpu": 4, "memoryMiB": 8192, "diskMiB": 16384 },
+                "limits": { "cpu": 2, "memoryMiB": 4096, "diskMiB": 8192 },
+            }),
+        )
+        .await
+        .unwrap();
+    let agent = owner.create_agent("VM agent").await;
+
+    // A Firecracker agent cannot run on, nor reserve, a native node.
+    let mut cross = agent.clone();
+    cross["access"]["nodes"] = json!([LOCAL_NODE_ID, native]);
+    let (status, _) = owner.send("PUT", &path(&agent), cross).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let mut reserve = agent.clone();
+    reserve["access"]["nodes"] = Value::Null;
+    reserve["exclusiveNodes"] = json!([native]);
+    let (status, _) = owner.send("PUT", &path(&agent), reserve).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        owner.stored("nodes", native).await["exclusiveAgents"],
+        Value::Null
+    );
+
+    // A Firecracker node it may run on stays reservable.
+    let mut vm = agent.clone();
+    vm["access"]["nodes"] = json!([LOCAL_NODE_ID, NODE]);
+    vm["exclusiveNodes"] = json!([NODE]);
+    let (status, saved) = owner.send("PUT", &path(&agent), vm).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+}
+
+#[tokio::test]
+async fn a_save_without_grants_never_restores_a_concurrent_revocation() {
+    let owner = Owner::new().await;
+    let account = owner.add_service_account(json!([])).await;
+    let mut agent = owner.create_agent("Older client").await;
+    agent["plugins"] = json!([account]);
+    let (_, agent) = owner.send("PUT", &path(&agent), agent).await;
+
+    // The owner revokes the account while an older client edits the agent.
+    let mut revoked = agent.clone();
+    revoked["plugins"] = json!([]);
+    let (status, _) = owner.send("PUT", &path(&agent), revoked).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let mut older = agent.clone();
+    for key in ["plugins", "exclusiveNodes", "revision"] {
+        older.as_object_mut().unwrap().remove(key);
+    }
+    older["description"] = "Edited by an older client".into();
+    let (status, saved) = owner.send("PUT", &path(&agent), older).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["plugins"], json!([]));
+    assert_eq!(
+        owner.stored(connections::KIND, &account).await["agentIds"],
+        json!([])
+    );
+}

@@ -213,9 +213,10 @@ private fun AgentPage(
         saveError = null
         conflict = false
     }
-    // Tool choices of connections no longer granted are dropped: the server rejects them.
+    // Tool choices of connections no longer granted stay in the draft, so granting the connection
+    // again restores them; only granted ones are saved.
     fun access(change: (AccessPolicy) -> AccessPolicy) = update {
-        it.copy(access = change(it.access).withGrantedTools())
+        it.copy(access = change(it.access))
     }
     fun leave() {
         when {
@@ -348,7 +349,15 @@ private fun AgentPage(
                 val tokenRemoved = draft.tokenChange(tokenSaved, newToken) == ""
                 val savedToken = draft.githubMode(tokenSaved) == GithubMode.Dedicated && tokenSaved
                 val lines =
-                    agentReview(baseline, edited, resources, preview, tokenRemoved, savedToken)
+                    agentReview(
+                        baseline,
+                        edited,
+                        resources,
+                        preview,
+                        tokenRemoved,
+                        savedToken,
+                        tokenUnknown = !tokenKnown,
+                    )
                 if (needsReview(lines, preview)) {
                     val suspended = preview?.suspendedDelegations().orEmpty()
                     reapprove = preview?.preselectedReapprovals().orEmpty()
@@ -368,10 +377,14 @@ private fun AgentPage(
                 val theirs =
                     vm.api.get<List<Agent>>("/agents").find { it.id == agentId }
                         ?: error("Cet agent n’existe plus.")
-                draft = draft.rebased(baseline, theirs)
+                // Tool choices of connections deleted meanwhile cannot be saved.
+                val mcpIds = state.mcps.map { it.id }.toSet().takeIf { state.isOwner }
+                draft = draft.rebased(baseline, theirs, mcpIds)
                 baseline = theirs
-                // The token may have been set or removed elsewhere too.
+                // The token, machines and plugin instances may have changed elsewhere too.
                 loadToken()
+                nodesAttempt++
+                catalogAttempt++
                 saveError = null
                 conflict = false
                 runCatching { vm.refresh() }
@@ -557,7 +570,8 @@ private fun AgentPage(
             text = {
                 Text(
                     when {
-                        creating -> "Cet agent ne sera pas créé."
+                        creating && baseline.id.isBlank() -> "Cet agent ne sera pas créé."
+                        changes.isEmpty() -> "Les modifications non enregistrées seront perdues."
                         changes.size == 1 -> "La modification non enregistrée sera perdue."
                         else -> "Les ${changes.size} modifications non enregistrées seront perdues."
                     }
@@ -1647,11 +1661,13 @@ private fun PluginsSection(
             )
             TextButton(onClick = retry) { Text("Réessayer") }
         }
-        if (agent.plugins.isNotEmpty())
+        if (agent.plugins.isNotEmpty()) {
             Note(
-                if (agent.plugins.size == 1) "1 instance accordée."
-                else "${agent.plugins.size} instances accordées."
+                if (agent.plugins.size == 1) "1 instance accordée :"
+                else "${agent.plugins.size} instances accordées :"
             )
+            agent.plugins.forEach { Text(it, style = MaterialTheme.typography.bodyMedium) }
+        }
         return
     }
     val granted = agent.plugins
@@ -1837,6 +1853,7 @@ private fun NodesSection(
             "Partage le GPU et les outils de l’hôte, avec une isolation plus faible qu’une VM. Chaque node doit aussi autoriser les personnes qui dirigent cet agent."
         else "Dans une VM Firecracker isolée.",
         native,
+        enabled = editable,
         power = true,
     ) { on ->
         change { it.withBackend(on) }
@@ -1853,8 +1870,44 @@ private fun NodesSection(
         }
     if (native && loaded && choices.isEmpty())
         Note("Aucune node native. Inscrivez une machine en exécution native depuis Nodes.")
-    if (choices.size >= 8) SearchField("Rechercher une node ou un tag", query) { query = it }
-    choices
+    if (!loaded) {
+        // The machines are unknown: what the agent holds is listed as saved, read-only.
+        Note(
+            when {
+                access.nodes == null -> "Exécution autorisée sur toutes les nodes VM."
+                access.nodes.isEmpty() -> "Exécution autorisée sur aucune node."
+                else -> "Exécution autorisée sur : ${access.nodes.joinToString(", ")}"
+            }
+        )
+        if (agent.exclusiveNodes.isNotEmpty())
+            Note("Réservation exclusive sur : ${agent.exclusiveNodes.joinToString(", ")}")
+    }
+    if (loaded)
+        agent.unusableNodes(nodes).forEach { held ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (held.otherBackend) "« ${held.name} » · autre mode d’exécution"
+                    else "Node supprimée ou révoquée",
+                    Modifier.weight(1f),
+                )
+                ToneChip(
+                    if (held.otherBackend) PluginBadge("Indisponible", PluginTone.ATTENTION)
+                    else PluginBadge("Introuvable", PluginTone.ATTENTION)
+                )
+                TextButton(
+                    onClick = { change { it.withNodeRun(held.id, false) } },
+                    modifier =
+                        Modifier.semantics {
+                            contentDescription = "Retirer ${held.name ?: held.id}"
+                        },
+                ) {
+                    Text("Retirer")
+                }
+            }
+        }
+    if (loaded && choices.size >= 8)
+        SearchField("Rechercher une node ou un tag", query) { query = it }
+    (if (loaded) choices else emptyList())
         .filter {
             query.isBlank() ||
                 "${it.name} ${it.tags.joinToString(" ")} ${it.capabilities.os}"
