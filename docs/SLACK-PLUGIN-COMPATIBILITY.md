@@ -13,9 +13,10 @@ manifest parser. An older host also lacks the requester and resource-authority
 checks required by newly admitted work. Treat starting that host on this data as
 an unsafe downgrade, even when some JSON records are syntactically readable.
 
-The installation epoch advances to **7**. PR #226 inherited epoch 4; integrated
+The installation epoch advances to **8**. PR #226 inherited epoch 4; integrated
 main `176969f5` reserves epoch 5 for durable session restart and epoch 6 for trusted
-native execution. This plugin boundary uses a distinct higher epoch rather than
+native execution. Main through `19300c12` reserves epoch 7 for native ublk
+workspaces and idle eviction. This plugin boundary uses a distinct higher epoch rather than
 reusing those numbers. `legacyTree` remains unchanged. The production release gate
 must refuse an unequal served/candidate epoch. This metadata is an operational deployment
 fence, not a runtime promise that an old executable cannot open the directory.
@@ -39,6 +40,15 @@ by explicitly authorized configuration/admission. Existing integrations must be
 checked with the candidate before a separately reviewed transition. This does
 not certify every future Slack format or every previous production binary.
 
+Remote-choice fields add a boolean inside the existing untyped settings schema;
+earlier API-v2 form readers retain it while ignoring its semantics. Lookup query,
+cursor and page/echo metadata use the existing opaque configuration-operation
+payload/result, with its existing lifetime; no new stored kind or envelope is
+added. A recovered old-host operation may produce a full-form result instead;
+new clients reject its missing lookup echo. This addition therefore keeps epoch 8
+and the legacy tree unchanged. It does not relax the already incompatible
+pre-epoch-8 downgrade boundary or authorize a production transition.
+
 ## Separately reviewed transition and recovery
 
 Before release, inventory the served epoch and installed plugin versions, verify
@@ -57,7 +67,7 @@ data and deploy a reviewed forward fix. Repair an incompatible package as a new
 version under its existing ID, explicitly review/approve it, and retain its
 instance/resource IDs and secrets. Reconnect a provider after an uncertain
 exchange or interrupted rotation; do not replay a consumed code/token. Restoring
-an earlier image is not a supported recovery once epoch-7 data has been written.
+an earlier image is not a supported recovery once epoch-8 data has been written.
 No automatic data restore point or reversible provider-side transaction exists.
 
 ## Evidence and remaining qualification

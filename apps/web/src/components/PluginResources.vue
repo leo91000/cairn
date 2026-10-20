@@ -13,6 +13,7 @@ import {
   watch,
 } from 'vue'
 import { api, ApiError } from '../api'
+import { pluginFormLookup } from '../plugin-form-lookups'
 import {
   pluginFormSecrets,
   pluginFormValue,
@@ -210,6 +211,24 @@ function cancelCompletion() {
   formFailure.value = ''
 }
 
+function formBody() {
+  if (!editing.value)
+    return {}
+  const { collection, resource } = editing.value!
+  return {
+    settings: pluginSettings(collection.settings ?? [], values.value),
+    secrets: pluginSecrets(secrets.value),
+    ...(resource && { resource: resource.id, revision: resource.revision }),
+    ...(collection.parent && parent.value && { parentId: parent.value }),
+    ...(props.setupRevision && { setupRevision: props.setupRevision }),
+  }
+}
+
+const lookup = pluginFormLookup(() => editing.value ? `${path.value}/${editing.value.collection.name}/form` : '', formBody, () => ({
+  version: props.manifest.version,
+  parentRevision: pages.value[editing.value?.collection.parent ?? '']?.items.find(item => item.id === parent.value)?.revision,
+}))
+
 async function complete(changed?: string) {
   const editor = editing.value
   if (!editor?.collection.form)
@@ -219,13 +238,9 @@ async function complete(changed?: string) {
   completing.value = true
   formFailure.value = ''
   try {
-    const { collection, resource } = editor
+    const { collection } = editor
     const result = formResult(await pluginOperation<FormResult | null>(`${path.value}/${collection.name}/form`, {
-      settings: pluginSettings(collection.settings ?? [], values.value),
-      secrets: pluginSecrets(secrets.value),
-      ...(resource && { resource: resource.id, revision: resource.revision }),
-      ...(collection.parent && parent.value && { parentId: parent.value }),
-      ...(props.setupRevision && { setupRevision: props.setupRevision }),
+      ...formBody(),
       changed,
     }))
     if (request !== asked)
@@ -481,6 +496,7 @@ onBeforeUnmount(() => {
             v-model:values="values"
             v-model:secrets="secrets"
             :fields="(collection.settings ?? []).map(field => setupRevision ? { ...field, required: false } : field)"
+            :lookup="lookup"
             :saved="editing.resource?.secretKeys"
             :disabled="blocked"
             :options="completion?.options"

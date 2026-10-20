@@ -13,7 +13,7 @@ mod view;
 mod webhooks;
 
 pub use arguments::{parse_arguments, usage};
-pub use form::{validate_form_fields, validate_form_result};
+pub use form::{FormLookup, validate_form_fields, validate_form_result, validate_lookup_result};
 pub use oauth::{OAuth, OAuthPersonal, OAuthTokenResponse};
 pub use operations::{Operation, Profile, RequestRule};
 pub use resources::ResourceCollection;
@@ -387,6 +387,9 @@ impl Manifest {
             return Err("Plugin manifest has an invalid credential rule.");
         }
         validate_settings_schema(&self.settings)?;
+        if !self.instance_form && self.settings.iter().any(|field| field["remote"] == true) {
+            return Err("Remote choices require instanceForm.");
+        }
         webhooks::validate(self)?;
         resources::validate(self)?;
         operations::validate(self)?;

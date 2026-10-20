@@ -47,6 +47,7 @@ import {
   X,
   Zap,
 } from '../icons'
+import { pluginFormLookup } from '../plugin-form-lookups'
 import {
   pluginFormSecrets,
   pluginFormValue,
@@ -224,6 +225,17 @@ async function discard(draft: PluginSetupDraft) {
  * Asks the package's form handler for choices, derived values, errors and guidance.
  * Only the latest answer counts.
  */
+function formBody() {
+  return {
+    instance: editing.value?.id,
+    settings: pluginSettings(storedFields.value, values.value),
+    secrets: pluginSecrets(secrets.value),
+    ...(form.value.token ? { token: form.value.token } : {}),
+  }
+}
+
+const lookup = pluginFormLookup(() => `/plugins/${id.value}/form`, formBody, () => manifest.value?.version)
+
 async function complete(changed?: string) {
   if (!manifest.value?.instanceForm)
     return
@@ -231,10 +243,7 @@ async function complete(changed?: string) {
   completing.value = true
   try {
     const result = formResult(await pluginOperation<FormResult | null>(`/plugins/${id.value}/form`, {
-      instance: editing.value?.id,
-      settings: pluginSettings(storedFields.value, values.value),
-      secrets: pluginSecrets(secrets.value),
-      ...(form.value.token ? { token: form.value.token } : {}),
+      ...formBody(),
       ...(changed ? { changed } : {}),
     }))
     if (ask !== asked)
@@ -780,6 +789,7 @@ onBeforeUnmount(() => {
           v-model:values="values"
           v-model:secrets="secrets"
           :fields="fields"
+          :lookup="lookup"
           :saved="editing?.secretKeys ?? []"
           :disabled="busy"
           :options="completion?.options"

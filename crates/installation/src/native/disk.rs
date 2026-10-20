@@ -18,26 +18,65 @@ pub(crate) async fn bytes_if_present(path: &Path) -> Result<u64> {
 }
 
 pub(crate) async fn used(data: &Path, state: &Path) -> Result<u64> {
-    let mut used = bytes_if_present(data).await?;
-    let mut entries = tokio::fs::read_dir(state).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        // Sandbox mount points refer to public host libraries in the workload's
-        // private mount namespace. They are not retained Cairn payloads.
-        if entry.file_name() == "roots" {
-            let mut plans = tokio::fs::read_dir(entry.path()).await?;
-            while let Some(plan) = plans.next_entry().await? {
-                let metadata = plan.metadata().await?;
-                if metadata.is_file() {
-                    used = used.saturating_add(metadata.len());
+    let (data, state) = (data.to_owned(), state.to_owned());
+    tokio::task::spawn_blocking(move || usage_sync(&data, &state))
+        .await
+        .map_err(Error::internal)?
+}
+
+/// Count file-backed legacy work conservatively, but charge journal/cache blocks
+/// by allocated bytes. Mounted views refer to those same blocks and add no charge.
+pub(crate) fn usage_sync(data: &Path, state: &Path) -> Result<u64> {
+    fn size(path: &Path, physical: bool) -> Result<u64> {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_dir() => super::workspace::measure(path, physical),
+            Ok(metadata) if metadata.is_file() => Ok(if physical {
+                metadata.blocks().saturating_mul(512)
+            } else {
+                metadata.len()
+            }),
+            Ok(_) => Ok(0),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(error) => Err(error.into()),
+        }
+    }
+    let mut used = size(data, false)?;
+    for entry in std::fs::read_dir(state)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == "roots" {
+            for plan in std::fs::read_dir(entry.path())? {
+                let plan = plan?;
+                if plan.file_type()?.is_file() {
+                    used = used.saturating_add(size(&plan.path(), false)?);
                 }
             }
-            continue;
-        }
-        let metadata = entry.metadata().await?;
-        if metadata.is_dir() && !entry.file_type().await?.is_symlink() {
-            used = used.saturating_add(bytes_if_present(&entry.path()).await?);
-        } else if metadata.is_file() {
-            used = used.saturating_add(metadata.len());
+        } else if name == "native" {
+            for conversation in std::fs::read_dir(entry.path())? {
+                let conversation = conversation?;
+                if !conversation.file_type()?.is_dir() {
+                    continue;
+                }
+                let root = conversation.path();
+                let block =
+                    root.join("block-initialized").exists() || root.join("block-seeding").exists();
+                if block {
+                    for file in std::fs::read_dir(&root)? {
+                        let file = file?;
+                        if file.file_name() != "data" {
+                            used = used.saturating_add(size(&file.path(), false)?);
+                        }
+                    }
+                } else {
+                    used = used.saturating_add(size(&root, false)?);
+                }
+            }
+        } else {
+            let physical = super::super::storage::environment::ROOTS
+                .iter()
+                .any(|root| name == *root);
+            used = used.saturating_add(size(&entry.path(), physical)?);
         }
     }
     Ok(used)
@@ -109,6 +148,53 @@ pub(crate) async fn staging_budget() -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_block_pool_counts_retained_journals_and_staging_without_scanning_the_mounted_view()
+     {
+        use std::os::unix::fs::MetadataExt;
+        let fixture = tempfile::tempdir().unwrap();
+        let (data, state) = (fixture.path().join("data"), fixture.path().join("state"));
+        crate::skills::private_dir(&data).await.unwrap();
+        crate::skills::private_dir(&state).await.unwrap();
+        for _ in 0..2 {
+            let run = crate::config::id();
+            let journal = state.join("disks").join(&run).join("lazy");
+            crate::skills::private_dir(&journal).await.unwrap();
+            tokio::fs::write(journal.join("segment"), vec![1; 20 * MIB as usize])
+                .await
+                .unwrap();
+            let root = super::super::workspace::directory(&state, &run).unwrap();
+            crate::skills::private_dir(&root.join("data"))
+                .await
+                .unwrap();
+            tokio::fs::write(root.join("block-initialized"), b"1")
+                .await
+                .unwrap();
+            let view = root.join("data/virtual-model");
+            tokio::fs::File::create(&view)
+                .await
+                .unwrap()
+                .set_len(20 * 1024 * MIB)
+                .await
+                .unwrap();
+            assert_eq!(std::fs::metadata(view).unwrap().blocks(), 0);
+        }
+        let retained = used(&data, &state).await.unwrap();
+        assert!((40 * MIB..41 * MIB).contains(&retained));
+        assert_eq!(
+            available(32 * MIB, retained),
+            0,
+            "both retained conversations must be charged"
+        );
+        crate::skills::private_dir(&data.join("seed"))
+            .await
+            .unwrap();
+        tokio::fs::write(data.join("seed/incoming"), vec![2; MIB as usize])
+            .await
+            .unwrap();
+        assert!(used(&data, &state).await.unwrap() >= retained + MIB);
+    }
 
     #[tokio::test]
     async fn concurrent_conversation_transfers_share_one_retained_disk_pool() {

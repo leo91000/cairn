@@ -834,6 +834,19 @@ private fun InstanceEditor(
     fun refresh(key: String?) {
         asking = (asking.first + 1) to key
     }
+    fun formBody() = buildJsonObject {
+        if (!creating) put("instance", initial.id)
+        put("settings", pluginSettings(stored, values))
+        put("secrets", pluginSecrets(secrets))
+        if (token.isNotBlank()) put("token", token.trim())
+    }
+    val lookup =
+        PluginChoiceLookup(
+            vm.api,
+            "/plugins/${segment(pluginId)}/form",
+            formBody(),
+            manifest.version,
+        )
     if (manifest.instanceForm)
         LaunchedEffect(initial.id, asking) {
             completing = true
@@ -843,13 +856,7 @@ private fun InstanceEditor(
                     vm.api.pluginOperation(
                         "/plugins/${segment(pluginId)}/form",
                         buildJsonObject {
-                            if (!creating) put("instance", initial.id)
-                            put("settings", pluginSettings(stored, values))
-                            put(
-                                "secrets",
-                                pluginSecrets(secrets),
-                            )
-                            if (token.isNotBlank()) put("token", token.trim())
+                            formBody().forEach { (key, value) -> put(key, value) }
                             asking.second?.let { put("changed", it) }
                         },
                     )
@@ -1021,6 +1028,7 @@ private fun InstanceEditor(
             options = completion?.options.orEmpty(),
             errors = completion?.errors.orEmpty(),
             refresh = ::refresh,
+            lookup = lookup,
         )
         manifest.agentAccess?.let { access ->
             Text(
@@ -1256,6 +1264,7 @@ internal fun PluginFields(
     options: Map<String, List<PluginOption>> = emptyMap(),
     errors: Map<String, String> = emptyMap(),
     refresh: (String) -> Unit = {},
+    lookup: PluginChoiceLookup? = null,
 ) {
     var section = ""
     fields
@@ -1263,84 +1272,92 @@ internal fun PluginFields(
         .forEach { field ->
             fun update(value: String) {
                 change(field.key, value)
-                if (field.refresh) refresh(field.key)
+                if (field.refresh || field.remote) refresh(field.key)
             }
             val choices = (if (field.dynamic) options[field.key] else null) ?: field.options
             if (field.section.isNotBlank() && field.section != section) {
                 section = field.section
                 Eyebrow(field.section, Modifier.padding(top = 4.dp))
             }
-            when (field.type) {
-                "boolean" ->
-                    Toggle(field.title, values[field.key] == "true") {
-                        if (enabled) update(it.toString())
-                    }
-                "select" ->
-                    // Dynamic and self-explaining choices read better as a list.
-                    if (field.dynamic || choices.any { it.description.isNotBlank() || it.disabled })
-                        ChoiceList(field.title, values[field.key].orEmpty(), choices, enabled) {
-                            update(it)
+            if (field.remote)
+                PluginRemoteChoice(field, values[field.key].orEmpty(), ::update, lookup, enabled)
+            else
+                when (field.type) {
+                    "boolean" ->
+                        Toggle(field.title, values[field.key] == "true") {
+                            if (enabled) update(it.toString())
                         }
-                    else
-                        Choice(
-                            field.title,
-                            values[field.key].orEmpty(),
-                            choices.map { it.value to it.label },
-                        ) {
-                            update(it)
-                        }
-                "multiselect" -> {
-                    val chosen =
-                        multiselect(values[field.key].orEmpty()).mapNotNull {
-                            it.jsonPrimitive.contentOrNull
-                        }
-                    Text(field.title, style = MaterialTheme.typography.labelLarge)
-                    choices.forEach { option ->
-                        Toggle(option.label, option.value in chosen) { checked ->
-                            if (enabled && !option.disabled) {
-                                val next =
-                                    if (checked) chosen + option.value else chosen - option.value
-                                update(JsonArray(next.map(::JsonPrimitive)).toString())
+                    "select" ->
+                        // Dynamic and self-explaining choices read better as a list.
+                        if (
+                            field.dynamic ||
+                                choices.any { it.description.isNotBlank() || it.disabled }
+                        )
+                            ChoiceList(field.title, values[field.key].orEmpty(), choices, enabled) {
+                                update(it)
+                            }
+                        else
+                            Choice(
+                                field.title,
+                                values[field.key].orEmpty(),
+                                choices.map { it.value to it.label },
+                            ) {
+                                update(it)
+                            }
+                    "multiselect" -> {
+                        val chosen =
+                            multiselect(values[field.key].orEmpty()).mapNotNull {
+                                it.jsonPrimitive.contentOrNull
+                            }
+                        Text(field.title, style = MaterialTheme.typography.labelLarge)
+                        choices.forEach { option ->
+                            Toggle(option.label, option.value in chosen) { checked ->
+                                if (enabled && !option.disabled) {
+                                    val next =
+                                        if (checked) chosen + option.value
+                                        else chosen - option.value
+                                    update(JsonArray(next.map(::JsonPrimitive)).toString())
+                                }
                             }
                         }
                     }
-                }
-                "secret" ->
-                    OutlinedTextField(
-                        secrets[field.key].orEmpty(),
-                        {
-                            changeSecret(field.key, it)
-                            if (field.refresh) refresh(field.key)
-                        },
-                        Modifier.fillMaxWidth(),
-                        label = { Text(field.title) },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = InputKeyboards.Password,
-                        enabled = enabled,
-                        isError = field.key in errors,
-                        placeholder = {
-                            Text(
-                                if (field.key in saved) "Enregistré · laissez vide pour le garder"
-                                else field.placeholder
-                            )
-                        },
-                    )
-                else ->
-                    Field(
-                        field.title,
-                        values[field.key].orEmpty(),
-                        { update(it) },
-                        lines = if (field.type == "text") 4 else 1,
-                        enabled = enabled,
-                        keyboardOptions =
-                            when (field.type) {
-                                "number" -> KeyboardOptions(keyboardType = KeyboardType.Number)
-                                "url" -> KeyboardOptions(keyboardType = KeyboardType.Uri)
-                                else -> InputKeyboards.Sentences
+                    "secret" ->
+                        OutlinedTextField(
+                            secrets[field.key].orEmpty(),
+                            {
+                                changeSecret(field.key, it)
+                                if (field.refresh) refresh(field.key)
                             },
-                    )
-            }
+                            Modifier.fillMaxWidth(),
+                            label = { Text(field.title) },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = InputKeyboards.Password,
+                            enabled = enabled,
+                            isError = field.key in errors,
+                            placeholder = {
+                                Text(
+                                    if (field.key in saved)
+                                        "Enregistré · laissez vide pour le garder"
+                                    else field.placeholder
+                                )
+                            },
+                        )
+                    else ->
+                        Field(
+                            field.title,
+                            values[field.key].orEmpty(),
+                            { update(it) },
+                            lines = if (field.type == "text") 4 else 1,
+                            enabled = enabled,
+                            keyboardOptions =
+                                when (field.type) {
+                                    "number" -> KeyboardOptions(keyboardType = KeyboardType.Number)
+                                    "url" -> KeyboardOptions(keyboardType = KeyboardType.Uri)
+                                    else -> InputKeyboards.Sentences
+                                },
+                        )
+                }
             val note = errors[field.key] ?: field.description.takeIf { it.isNotBlank() }
             if (note != null)
                 Text(

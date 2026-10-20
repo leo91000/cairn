@@ -122,7 +122,7 @@ and Android, including exact choice IDs, numeric values, empty values and secret
 whitespace. Web dictionaries for plugin-defined collection and field names have
 no inherited entries.
 
-The current integration includes main through `23ead10f`, including agent-centric
+The current integration includes main through `19300c12`, including agent-centric
 instance grants. Saved resource rules remain separate and never grant instance
 access themselves. Both clients retain existing plugin editing on hosts without
 the served `setupDrafts` marker; supporting hosts still load every setup page.
@@ -134,14 +134,17 @@ retries acknowledge an existing answer without recapturing a later turn's author
 reusing that receipt ID for a new question is refused.
 
 New persisted plugin
-manifests require a separate compatibility boundary: epoch 7, above the inherited
-epoch 4 and upstream main's reserved epochs 5 and 6. The [persistent-format inventory and
+manifests require a separate compatibility boundary: epoch 8, above the inherited
+epoch 4 and upstream main's reserved epochs 5, 6 and 7. The [persistent-format inventory and
 forward recovery plan](SLACK-PLUGIN-COMPATIBILITY.md) retain the unchanged legacy
 tree and require a separately reviewed production transition. The route-authority
 measurements document bounded record shape and their limits; full native/storage
-and release qualification remains open. Catalogue totals, route usage summaries, guided selectors and scoped
-resource forms are still pending, along with the remaining Slack delivery list.
-Validation and independent review of this checkpoint are still in progress.
+and release qualification remains open. Scoped resource forms retain their app,
+parent, owner and OAuth authority on both clients. Remote query/cursor choices
+are being qualified in all four configuration contexts, with bounded page windows,
+independent selected IDs and a host-owned lookup echo. Catalogue totals and route
+usage summaries remain pending, along with the remaining Slack delivery list.
+Android route drafts also use the bounded local input store instead of accumulating complete routes and people directories in activity state. Recovered edits require a fresh matching route revision; missing snapshots cannot become broader writes. Validation and independent review of this checkpoint are still in progress.
 
 ## Foundation checkpoint
 
@@ -1160,8 +1163,10 @@ Changing parents invalidates pending results; restored Android drafts must
 revalidate and never restore typed secrets. Unknown save outcomes retain the
 existing read-before-another-write recovery. The new native, browser and shared
 JVM/device scenarios qualify this slice; final checkpoint results are recorded
-separately. Guided search/pagination, catalogue/route summaries and the actual
-Slack package remain subsequent work. This does not complete Q1–Q20.
+separately. Guided query/cursor choices now have a shared host contract and web/
+Android renderers; current checkpoint qualification is in progress. Catalogue/
+route summaries and the actual Slack package remain subsequent work. This does
+not complete Q1–Q20.
 
 Unchanged catalog refreshes preserve resource editors and pending owner consent;
 only changes to the namespace, setup revision, package version or collection
@@ -1181,6 +1186,16 @@ missing optional fields stay absent before Luau runs; final server save/default
 completion retains its existing behavior. The HTTP regression compares the same
 installed Luau handler on root and collection forms for active and inert setups,
 including omitted/null/defaulted scalar fields and explicit zero values.
+
+Ordinary saved-instance previews and remote lookups retain the same configuration
+target as resource forms. Root edits and deletion invalidate captured credentials
+before and after provider I/O and before the handler result is returned. Saving
+also rechecks that root in its publication transaction, so a stale form cannot
+overwrite a newer root. New unsaved instances have no persisted root to borrow.
+
+Closed Android grant widgets retire their local snapshots. Only an active rule
+editor saves scope inputs, so closed widgets cannot consume the shared bounded
+store and evict an unrelated editor during activity-state saving.
 
 ## Unattributed questions at the persisted-format transition
 

@@ -401,6 +401,23 @@ private fun ResourceEditor(
     var asking by remember { mutableIntStateOf(0) }
     val formGeneration = remember { AtomicInteger() }
     var changed by remember { mutableStateOf<String?>(null) }
+    fun formBody() = buildJsonObject {
+        put("settings", pluginSettings(collection.settings, values))
+        put("secrets", pluginSecrets(secrets))
+        if (parent.isNotBlank()) put("parentId", parent)
+        initial?.let {
+            put("resource", it.id)
+            put("revision", it.revision)
+        }
+        location.setupRevision?.let { put("setupRevision", it) }
+    }
+    val lookup =
+        PluginChoiceLookup(
+            vm.api,
+            "${location.path}/${segment(collection.name)}/form",
+            formBody(),
+            parents.find { it.id == parent }?.revision.orEmpty(),
+        )
     fun refresh(key: String? = null) {
         if (!collection.form) return
         changed = key
@@ -423,14 +440,7 @@ private fun ResourceEditor(
                         vm.api.pluginOperation(
                             "${location.path}/${segment(collection.name)}/form",
                             buildJsonObject {
-                                put("settings", pluginSettings(collection.settings, values))
-                                put("secrets", pluginSecrets(secrets))
-                                if (parent.isNotBlank()) put("parentId", parent)
-                                initial?.let {
-                                    put("resource", it.id)
-                                    put("revision", it.revision)
-                                }
-                                location.setupRevision?.let { put("setupRevision", it) }
+                                formBody().forEach { (key, value) -> put(key, value) }
                                 changed?.let { put("changed", it) }
                             },
                         )
@@ -551,6 +561,7 @@ private fun ResourceEditor(
             enabled = controls,
             options = completion?.options.orEmpty(),
             errors = completion?.errors.orEmpty(),
+            lookup = lookup,
         )
         completion?.let { result ->
             result.errors

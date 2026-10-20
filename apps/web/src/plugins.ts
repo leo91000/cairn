@@ -43,6 +43,8 @@ export interface SettingField {
   options?: FieldOption[]
   /** Choices come from the package's form handler while the owner edits. */
   dynamic?: boolean
+  /** Choices are looked up by query/cursor rather than assumed to be exhaustive. */
+  remote?: boolean
   /** Changing this field asks the package's form handler again. */
   refresh?: boolean
   default?: unknown
@@ -54,6 +56,15 @@ export interface FormResult {
   values: Record<string, unknown>
   errors: Record<string, string>
   view: any[]
+  pages?: Record<string, { nextCursor: string | null }>
+  /** Added by the host after validating a choice-only result. */
+  lookup?: FormLookup
+}
+
+export interface FormLookup {
+  field: string
+  query: string
+  cursor?: string
 }
 
 /** Omitted or null guidance is a successful form with nothing to add. */
@@ -63,6 +74,8 @@ export function formResult(value: Partial<FormResult> | null): FormResult {
     values: value?.values ?? {},
     errors: value?.errors ?? {},
     view: value?.view ?? [],
+    ...(value?.pages && { pages: value.pages }),
+    ...(value?.lookup && { lookup: value.lookup }),
   }
 }
 

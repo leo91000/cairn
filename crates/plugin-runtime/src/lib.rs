@@ -213,6 +213,9 @@ impl Runtime {
         )?;
         api.set("array_metatable", lua.array_metatable())?;
         let json = lua.create_table()?;
+        // Incoming JSON null still becomes nil. This explicit sentinel lets a
+        // package return a present null field (which a Lua nil would remove).
+        json.set("null", lua.null())?;
         json.set(
             "decode",
             lua.create_function(|lua, text: mlua::LuaString| {
@@ -582,6 +585,16 @@ mod tests {
             .dispatch("probe", Value::Null, |_, _| unreachable!())
             .unwrap();
         assert_eq!(output, json!({ "empty": [], "map": {} }));
+        let runtime = load(
+            "return { probe = function() return { page = {nextCursor = cairn.json.null}, encoded = cairn.json.encode({key = cairn.json.null}) } end }",
+        );
+        let output = runtime
+            .dispatch("probe", Value::Null, |_, _| unreachable!())
+            .unwrap();
+        assert_eq!(
+            output,
+            json!({"page": {"nextCursor": null}, "encoded": "{\"key\":null}"})
+        );
     }
 
     #[test]

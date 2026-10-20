@@ -214,11 +214,22 @@ pub fn disk_bytes(state: &Path) -> io::Result<u64> {
         return Ok(value.bytes);
     }
     let mut bytes = 0_u64;
-    for root in crate::storage::environment::ROOTS
-        .into_iter()
-        .chain(["images"])
-    {
-        bytes = bytes.saturating_add(allocated(&state.join(root))?);
+    if state.join("native-accounting.json").exists() {
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(state.join("native-accounting.json"))?)
+                .map_err(io::Error::other)?;
+        let data = value["data"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("Missing native data root"))?;
+        bytes =
+            crate::native::disk::usage_sync(Path::new(data), state).map_err(io::Error::other)?;
+    } else {
+        for root in crate::storage::environment::ROOTS
+            .into_iter()
+            .chain(["images"])
+        {
+            bytes = bytes.saturating_add(allocated(&state.join(root))?);
+        }
     }
     usage.insert(
         state.to_owned(),

@@ -54,8 +54,12 @@ internal fun PluginResourceGrants(
         profile = null
         overrides = emptyMap()
         limitsDraft.clear()
+        limitsDraft.discard()
         lostDraft = false
     }
+    // Closed widgets remain composed. Only an active new rule may reserve a
+    // snapshot in the shared bounded store.
+    if (!adding && !limitsDraft.discarded) SideEffect { limitsDraft.discard() }
 
     fun currentRule() =
         PluginResourceGrant(
@@ -275,6 +279,7 @@ internal fun PluginResourceGrants(
                 }
                 SignalButton("Ajouter une règle", enabled = controls && rules.size < 64) {
                     clearDraft()
+                    limitsDraft.discarded = false
                     adding = true
                 }
             }

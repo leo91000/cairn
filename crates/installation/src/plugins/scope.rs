@@ -109,6 +109,10 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
             if let Some(owner) = &values.owner {
                 owner.recheck(s).await?;
             }
+            if let Some(root) = &values.root {
+                let root = root.clone();
+                s.store.read(move |db| root.current(db)).await?;
+            }
         }
         Scope::Agent(agent) => {
             if let Some(requester) = &agent.requester {
@@ -272,7 +276,7 @@ pub async fn call(
     })
     .await?;
     // Revocation or a changed secret during slow I/O must not deliver its result.
-    let bound_form = matches!(scope, Scope::Draft(_, values) if values.setup.is_some() || values.resource.is_some());
+    let bound_form = matches!(scope, Scope::Draft(_, values) if values.setup.is_some() || values.resource.is_some() || values.root.is_some());
     if (matches!(scope, Scope::Agent(_)) || bound_form)
         && matches!(method, "exec.run" | "http.request")
     {

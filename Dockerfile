@@ -35,6 +35,7 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharin
     && printf '' > crates/plugin-runtime/src/lib.rs \
     && printf 'fn main() {}\n' > crates/installation/src/main.rs \
     && printf 'fn main() {}\n' > crates/installation/examples/ublk_probe.rs \
+    && printf 'fn main() {}\n' > crates/installation/examples/native_storage_qualifier.rs \
     && printf '' > crates/installation/src/lib.rs \
     && printf 'fn main() {}\n' > crates/beacon/src/main.rs \
     && printf '' > crates/protocol/src/lib.rs \
@@ -72,6 +73,7 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharin
     && printf 'fn main() {}\n' > crates/installation/src/main.rs \
     && printf '' > crates/installation/src/lib.rs \
     && printf 'fn main() {}\n' > crates/installation/examples/ublk_probe.rs \
+    && printf 'fn main() {}\n' > crates/installation/examples/native_storage_qualifier.rs \
     && printf 'fn main() {}\n' > crates/beacon/src/main.rs \
     && printf '' > crates/beacon/src/lib.rs \
     && printf '' > crates/protocol/src/lib.rs \

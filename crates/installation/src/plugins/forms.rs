@@ -13,7 +13,7 @@ use crate::{
     service::Service,
     validation::text,
 };
-use cairn_plugin_api::{Manifest, validate_form_result};
+use cairn_plugin_api::{FormLookup, Manifest, validate_form_fields, validate_lookup_result};
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
 
@@ -25,6 +25,7 @@ pub struct Draft {
     pub urls: Option<Value>,
     pub(crate) owner: Option<Arc<super::operations::Owner>>,
     pub(crate) resource: Option<Arc<super::resources::forms::Form>>,
+    pub(crate) root: Option<Arc<super::resources::target::Target>>,
 }
 
 /// A credential entered during setup; incomplete drafts may omit it.
@@ -77,29 +78,104 @@ fn secrets(manifest: &Manifest, input: &Value, saved: Map<String, Value>) -> Map
     output
 }
 
+/// A preview/choice lookup cannot weaken the final submit evaluation.
+pub(super) struct Evaluation {
+    changed: Option<String>,
+    lookup: Option<FormLookup>,
+    submit: bool,
+}
+
+impl Evaluation {
+    pub(super) fn preview(fields: &[Value], globals: &[&str], input: &Value) -> Result<Self> {
+        let lookup = FormLookup::parse(fields, input.get("lookup")).map_err(Error::bad)?;
+        if lookup.is_some() && !input["changed"].is_null() {
+            return Err(Error::bad(
+                "A choice lookup is separate from a changed-field evaluation.",
+            ));
+        }
+        let changed = input["changed"]
+            .as_str()
+            .filter(|key| globals.contains(key) || fields.iter().any(|field| field["key"] == *key))
+            .map(str::to_owned);
+        Ok(Self {
+            changed,
+            lookup,
+            submit: false,
+        })
+    }
+
+    pub(super) fn submit() -> Self {
+        Self {
+            changed: None,
+            lookup: None,
+            submit: true,
+        }
+    }
+
+    pub(super) fn finish(
+        &self,
+        fields: &[Value],
+        globals: &[&str],
+        mut result: Value,
+    ) -> Result<Value> {
+        if let Some(lookup) = &self.lookup {
+            validate_lookup_result(fields, globals, lookup, &result).map_err(Error::bad_gateway)?;
+            if result.is_null() {
+                result = json!({});
+            }
+            // Host-owned echo distinguishes lookups from older hosts' full forms.
+            result["lookup"] = serde_json::to_value(lookup)?;
+        } else {
+            validate_form_fields(fields, globals, &result).map_err(Error::bad_gateway)?;
+        }
+        Ok(result)
+    }
+
+    pub(super) fn fields(&self) -> Value {
+        json!({ "changed": self.changed, "lookup": self.lookup, "submit": self.submit })
+    }
+}
+
+/// Keep optional pagination while preserving ordinary response shapes.
+pub(super) fn response(result: &Value) -> Value {
+    let mut response = json!({
+        "options": result.get("options").cloned().unwrap_or_else(|| json!({})),
+        "values": result.get("values").cloned().unwrap_or_else(|| json!({})),
+        "errors": result.get("errors").cloned().unwrap_or_else(|| json!({})),
+        "view": result.get("view").cloned().unwrap_or_else(|| json!([])),
+    });
+    for key in ["pages", "lookup"] {
+        if let Some(value) = result.get(key) {
+            response[key] = value.clone();
+        }
+    }
+    response
+}
+
 async fn run(
     s: &Service,
     package: &Package,
     instance: Option<&str>,
     settings: Value,
     draft: Draft,
-    changed: Option<&str>,
-    submit: bool,
+    evaluation: &Evaluation,
 ) -> Result<Value> {
     let secret_keys = draft.secrets.keys().cloned().collect::<Vec<_>>();
-    let payload = json!({
+    let mut payload = json!({
         "values": settings,
         "credential": draft.credential.is_some(),
         "secrets": secret_keys,
         "instance": instance,
-        "changed": changed,
-        "submit": submit,
         "setup": draft.setup.as_ref().map(|setup| json!({
             "revision": setup.revision,
             "expiresAt": setup.expires_at,
             "urls": draft.urls,
         })),
     });
+    payload
+        .as_object_mut()
+        .unwrap()
+        .extend(evaluation.fields().as_object().unwrap().clone());
     let connection = Connection::draft(
         &instance.map_or_else(id, str::to_owned),
         &package.manifest.id,
@@ -108,8 +184,7 @@ async fn run(
     );
     let scope = Scope::Draft(Box::new(connection), Arc::new(draft));
     let result = scope::invoke(s, package, "form", payload, &scope).await?;
-    validate_form_result(&package.manifest, &result).map_err(Error::bad_gateway)?;
-    Ok(result)
+    evaluation.finish(&package.manifest.settings, &["credential", "form"], result)
 }
 
 /// `POST /api/plugins/{id}/form`: `{ instance?, settings, secrets?, token?, changed? }`
@@ -130,17 +205,25 @@ pub(crate) async fn form_owned(
     if !manifest.instance_form {
         return Err(Error::not_found("This plugin has no instance form."));
     }
-    let instance = match input["instance"].as_str() {
-        Some(id) => Some(connections::get(s, plugin_id, id).await?.id),
+    let evaluation = Evaluation::preview(&manifest.settings, &["credential"], input)?;
+    let root = match input["instance"].as_str() {
+        Some(id) => Some(super::resources::target::Target::active(s, plugin_id, id).await?),
         None => None,
     };
+    let instance = root.as_ref().map(|root| root.instance().to_owned());
     let token = text(input, "token").trim();
     if token.len() > 4096 || token.chars().any(|c| c.is_whitespace() || c.is_control()) {
         let label = manifest
             .credential
             .as_ref()
             .map_or("credential", |credential| credential.label.as_str());
-        return Ok(json!({ "errors": { "credential": format!("Enter a valid {label}.") } }));
+        return evaluation
+            .finish(
+                &manifest.settings,
+                &["credential", "form"],
+                json!({ "errors": { "credential": format!("Enter a valid {label}.") } }),
+            )
+            .map(|result| response(&result));
     }
     let credential = match (&instance, token.is_empty()) {
         (_, false) => Some(token.to_owned()),
@@ -162,10 +245,8 @@ pub(crate) async fn form_owned(
         urls: None,
         owner: Some(owner),
         resource: None,
+        root,
     };
-    let changed = input["changed"].as_str().filter(|key| {
-        *key == "credential" || manifest.settings.iter().any(|field| field["key"] == *key)
-    });
     let settings = partial_values(&manifest.settings, &input["settings"])?;
     let result = run(
         s,
@@ -173,16 +254,10 @@ pub(crate) async fn form_owned(
         instance.as_deref(),
         settings,
         draft,
-        changed,
-        false,
+        &evaluation,
     )
     .await?;
-    Ok(json!({
-        "options": result.get("options").cloned().unwrap_or_else(|| json!({})),
-        "values": result.get("values").cloned().unwrap_or_else(|| json!({})),
-        "errors": result.get("errors").cloned().unwrap_or_else(|| json!({})),
-        "view": result.get("view").cloned().unwrap_or_else(|| json!([])),
-    }))
+    Ok(response(&result))
 }
 
 /// Owner-only form for a persisted, still-inert setup draft. Typed values are
@@ -201,14 +276,7 @@ pub(crate) async fn setup_form(
         &package.manifest.settings,
         input.get("settings").unwrap_or(&setup.settings),
     )?;
-    let changed = input["changed"].as_str().filter(|key| {
-        *key == "credential"
-            || package
-                .manifest
-                .settings
-                .iter()
-                .any(|field| field["key"] == *key)
-    });
+    let evaluation = Evaluation::preview(&package.manifest.settings, &["credential"], input)?;
     let instance = setup.id.clone();
     let urls = setup_urls(s, &package.manifest, &instance, input).await?;
     let credential = match typed_credential(&package.manifest, &input["token"])? {
@@ -226,8 +294,9 @@ pub(crate) async fn setup_form(
         urls: Some(urls),
         owner: None,
         resource: None,
+        root: None,
     };
-    run(s, package, Some(&instance), settings, draft, changed, false).await
+    run(s, package, Some(&instance), settings, draft, &evaluation).await
 }
 
 pub(crate) async fn setup_urls(
@@ -272,7 +341,15 @@ pub(crate) async fn submit(
             .await?
             .map(|_| instance)
     };
-    let result = run(s, package, existing, settings.clone(), draft, None, true).await?;
+    let result = run(
+        s,
+        package,
+        existing,
+        settings.clone(),
+        draft,
+        &Evaluation::submit(),
+    )
+    .await?;
     require_valid(&package.manifest.settings, &result)?;
     let mut merged = settings;
     merge_values(&mut merged, &result);

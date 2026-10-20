@@ -76,6 +76,8 @@ impl Worker {
             .spawn(crate::nodes::shared_blocks::maintain(s.clone()));
         self.tasks.spawn(crate::nodes::storage::monitor(s.clone()));
         self.tasks
+            .spawn(crate::nodes::eviction::maintain(s.clone()));
+        self.tasks
             .spawn(crate::nodes::exclusive::maintain(s.clone()));
         self.tasks.spawn(clean_conversations(s.clone()));
         self.tasks.spawn(schedule_tasks(s.clone()));

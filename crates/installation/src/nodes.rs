@@ -4,6 +4,7 @@ pub mod checkpoint;
 pub mod connector;
 pub mod coordination;
 pub mod disk_grants;
+pub(crate) mod eviction;
 pub mod exclusive;
 pub mod executor;
 pub mod files;
@@ -252,6 +253,8 @@ struct Capabilities {
     kvm: bool,
     #[serde(default)]
     fuse: bool,
+    #[serde(default)]
+    ublk: bool,
     cpu: u32,
     memory_mi_b: u64,
     disk_mi_b: u64,

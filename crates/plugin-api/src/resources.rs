@@ -41,6 +41,14 @@ pub(crate) fn validate(manifest: &Manifest) -> Result<(), &'static str> {
             return Err("Plugin manifest has an invalid resource collection.");
         }
         validate_settings_schema(&collection.settings)?;
+        if !collection.form
+            && collection
+                .settings
+                .iter()
+                .any(|field| field["remote"] == true)
+        {
+            return Err("Remote choices require the collection's form handler.");
+        }
     }
     for collection in &manifest.resources {
         let mut current = collection;

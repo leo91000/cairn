@@ -14,6 +14,8 @@ from moto.server import ThreadedMotoServer
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument('--native-runtime', type=Path)
+    parser.add_argument('--qualifier', type=Path)
     parser.add_argument('--benchmark', action='store_true')
     parser.add_argument('--compression-benchmark', action='store_true')
     parser.add_argument('--migration-tests', action='store_true')
@@ -41,6 +43,15 @@ def main():
         env['AWS_EC2_METADATA_DISABLED'] = 'true'
         env['AWS_CONFIG_FILE'] = '/dev/null'
         env['AWS_SHARED_CREDENTIALS_FILE'] = '/dev/null'
+        if args.native_runtime:
+            if not args.qualifier:
+                parser.error('--native-runtime requires --qualifier')
+            subprocess.run([os.sys.executable, 'scripts/tests/native_runtime_test.py',
+                            str(args.native_runtime.resolve()), str(args.qualifier.resolve())],
+                           cwd=args.repo, env=env, check=True)
+            remaining = client.list_objects_v2(Bucket='cairn-node-test')
+            assert remaining.get('KeyCount', 0) == 0, 'Native purge left remote objects'
+            return
         if args.migration_tests:
             client.put_bucket_versioning(Bucket='cairn-node-test', VersioningConfiguration={'Status': 'Enabled'})
             subprocess.run(['node', 'scripts/test-backend.mjs', '-p', 'cairn-installation', '--test', 'storage_startup_migration',

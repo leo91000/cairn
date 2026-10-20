@@ -4,6 +4,7 @@ import { readFile, rm, writeFile } from 'node:fs/promises'
 import http from 'node:http'
 import path from 'node:path'
 import process from 'node:process'
+import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import {
   afterEach,
@@ -332,7 +333,7 @@ describe('durable conversation recovery', () => {
     expect(await readFile(path.join(ctx.projectPath, 'README.md'), 'utf8')).toBe('unrelated dirty source')
   })
 
-  it('preserves an incomplete workspace preparation and uses a new generation', async () => {
+  it.each([0, 1250])('preserves an incomplete preparation with a %ims process start delay and uses a new generation', async (startupDelay) => {
     await initializeGit()
     ctx.service.task({ ...ctx.task, prompt: 'Complete fixture task', worktree: true }, ctx.task.id)
     const run = await ctx.service.enqueue(ctx.task.id)
@@ -340,8 +341,19 @@ describe('durable conversation recovery', () => {
     await writeFile(path.join(abandoned.cwd, 'partial-work.txt'), 'preserve incomplete attempt')
     ctx.worker.recovery.save(run.id, { launched: false, remainingMs: 60000 })
     ctx.service.store.updateRun(run.id, { status: 'running', startedAt: Date.now() })
+    if (startupDelay) {
+      const delayed = path.join(ctx.directory, 'delayed-generation-codex.mjs')
+      await writeFile(delayed, `#!/usr/bin/env node
+await new Promise(resolve => setTimeout(resolve, ${startupDelay}));
+await import(${JSON.stringify(pathToFileURL(path.resolve('tests/fixtures/codex.mjs')).href)});
+`, { mode: 0o755 })
+      ctx.service.config.codexBin = delayed
+    }
+
     const worker = await restart()
-    await expect.poll(() => ctx.service.store.run(run.id)?.status).toBe('succeeded')
+    // Recovery includes asynchronous workspace preparation and process startup.
+    await Promise.all(worker.executions)
+    expect(ctx.service.store.run(run.id)?.status).toBe('succeeded')
     expect(ctx.service.store.run(run.id)?.workspace).not.toBe(abandoned.cwd)
     expect(await readFile(path.join(abandoned.cwd, 'partial-work.txt'), 'utf8')).toBe('preserve incomplete attempt')
     await expect.poll(() => worker.active.size).toBe(0)

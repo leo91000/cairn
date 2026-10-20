@@ -117,7 +117,10 @@ async fn configured_form_fixture(
     if resource_forms {
         manifest["resources"].as_array_mut().unwrap().push(json!({
             "name": "channel", "title": "Channels", "singular": "Channel", "parent": "workspace", "form": true,
-            "settings": [{"key": "verified", "title": "Verified status", "type": "string", "hidden": true}]
+            "settings": [
+                {"key": "verified", "title": "Verified status", "type": "string", "hidden": true},
+                {"key": "channel", "title": "Channel", "type": "select", "dynamic": true, "remote": true},
+            ]
         }));
     }
     let source = r#"local function read(resource)
@@ -130,10 +133,15 @@ async fn configured_form_fixture(
     end, tool = function(event) return read(event.input.resource).json end,
     command = function(event) return read(event.arguments.resource).json end}"#;
     let source = if resource_forms {
-        format!(
-            "{}, form = function(event)\n local response = cairn.http.request({{url = 'https://api.example.test/messages', auth = {{configuration = 'parent', oauth = 'bot'}}}})\n return {{values = {{verified = response.json.ok and 'Authorized' or 'Denied'}}}}\n end}}",
-            source.strip_suffix('}').unwrap()
-        )
+        let form = r#"form = function(event)
+            local response = cairn.http.request({url = 'https://api.example.test/messages', auth = {configuration = 'parent', oauth = 'bot'}})
+            local label = response.json.ok and 'Authorized' or 'Denied'
+            if event.lookup then
+                return {options = {channel = {{value = 'C1', label = label}}}, pages = {channel = {nextCursor = cairn.json.null}}}
+            end
+            return {values = {verified = label}}
+        end}"#;
+        format!("{}, {form}", source.strip_suffix('}').unwrap())
     } else {
         source.to_owned()
     };
@@ -449,10 +457,12 @@ async fn resource_form_parent_refresh(inert: bool, uncertain: bool) {
     if let Some(revision) = &setup_revision {
         body["setupRevision"] = revision.clone();
     }
+    let mut lookup = body.clone();
+    lookup["lookup"] = json!({"field": "channel", "query": ""});
     let (first, second) = tokio::join!(
         common::send(
             &app,
-            request("POST", &form, body.clone(), Some("fixture-owner"))
+            request("POST", &form, lookup.clone(), Some("fixture-owner"))
         ),
         common::send(
             &app,
@@ -472,10 +482,14 @@ async fn resource_form_parent_refresh(inert: bool, uncertain: bool) {
                 "{}",
                 common::read_text(response).await
             );
-            assert_eq!(
-                common::read_json(response).await["values"]["verified"],
-                "Authorized"
-            );
+            let result = common::read_json(response).await;
+            if result.get("lookup").is_some() {
+                assert_eq!(result["lookup"], lookup["lookup"]);
+                assert_eq!(result["options"]["channel"][0]["label"], "Authorized");
+                assert_eq!(result["pages"]["channel"]["nextCursor"], Value::Null);
+            } else {
+                assert_eq!(result["values"]["verified"], "Authorized");
+            }
         }
     }
     if uncertain {
@@ -511,23 +525,25 @@ async fn owner_resource_forms_cannot_borrow_personal_oauth() {
     let (origin, server) = common::serve_locally(provider).await;
     s.plugins.route_http_to(Some(origin));
     let path = format!("/api/plugins/example/connections/{instance}/resources/channel/form");
-    let response = common::send(
-        &app,
-        request(
-            "POST",
-            &path,
-            json!({"parentId": resource}),
-            Some("fixture-owner"),
-        ),
-    )
-    .await;
-    assert_eq!(
-        response.status(),
-        StatusCode::FORBIDDEN,
-        "{}",
-        common::read_text(response).await
-    );
-    assert!(common::read_text(response).await.contains("personal OAuth"));
+    for lookup in [Value::Null, json!({"field": "channel", "query": ""})] {
+        let response = common::send(
+            &app,
+            request(
+                "POST",
+                &path,
+                json!({"parentId": resource, "lookup": lookup}),
+                Some("fixture-owner"),
+            ),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "{}",
+            common::read_text(response).await
+        );
+        assert!(common::read_text(response).await.contains("personal OAuth"));
+    }
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     server.abort();
 }

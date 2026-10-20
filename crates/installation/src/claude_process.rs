@@ -1057,9 +1057,13 @@ pub async fn run(
     } else {
         initial_id.to_owned()
     };
-    // Managed runs keep access-only credentials from their broker next to their session.
+    // Native nodes put the writable secure store outside their journal, while
+    // the full user/session directory stays durable. VM runs retain their home.
+    let credentials = plan["claudeCredentialsDirectory"]
+        .as_str()
+        .map_or_else(|| directory.clone(), PathBuf::from);
     let mut auth = if plan["claudeManagedAuth"] == true {
-        let mut client = crate::accounts::claude::Client::new(&directory);
+        let mut client = crate::accounts::claude::Client::new(&credentials);
         client.sync().await?;
         Some(client)
     } else {
@@ -1077,7 +1081,7 @@ pub async fn run(
         Some(Path::new(text(&plan, "cwd"))),
     );
     if auth.is_some() {
-        cmd.env("CLAUDE_SECURESTORAGE_CONFIG_DIR", &directory);
+        cmd.env("CLAUDE_SECURESTORAGE_CONFIG_DIR", &credentials);
     }
     cmd.stdin(std::process::Stdio::piped()).process_group(0);
     let mut child = cmd.spawn().map_err(|error| {

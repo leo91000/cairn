@@ -65,6 +65,12 @@ where
         eprintln!("{error}");
         return ExitCode::FAILURE;
     }
+    if args.first().is_some_and(|arg| arg == "native-controller")
+        && let Err(error) = cairn_installation::native::prepare_storage_process()
+    {
+        eprintln!("Could not initialize native ublk storage: {error}");
+        return ExitCode::FAILURE;
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

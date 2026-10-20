@@ -17,7 +17,38 @@ use std::{
 };
 use tempfile::TempDir;
 
-const SOURCE: &str = r#"return {form = function(event)
+const SOURCE: &str = r#"local function choices(event)
+    assert(event.submit == false and event.changed == nil)
+    assert(event.lookup.field == 'channel')
+    local query = event.lookup.query
+    if query == 'derive' then return {values = {label = 'must not apply'}} end
+    if query == 'oversize' then
+        local items = {}
+        for index = 1, 201 do table.insert(items, {value = tostring(index), label = 'Channel'}) end
+        return {options = {channel = items}}
+    end
+    if query == 'unknown' then return {options = {channel = cairn.array()}} end
+    if query ~= '' then
+        return {options = {channel = {{value = 'found', label = query}}}, pages = {channel = {nextCursor = cairn.json.null}}}
+    end
+    if event.lookup.cursor == nil then
+        return {options = {channel = {{value = 'C1', label = 'General'}}}, pages = {channel = {nextCursor = 'empty'}}}
+    end
+    if event.lookup.cursor == 'empty' then
+        return {options = {channel = cairn.array()}, pages = {channel = {nextCursor = 'last'}}}
+    end
+    assert(event.lookup.cursor == 'last')
+    return {options = {channel = {{value = 'C2', label = 'Engineering'}}}, pages = {channel = {nextCursor = cairn.json.null}}}
+end
+return {form = function(event)
+    if event.resource == nil then
+        if event.values.channel == 'hold-root' then
+            local response = cairn.http.request({url = 'https://api.example.test/root-form', auth = true})
+            assert(response.json.ok, 'The host injected the wrong root credential')
+        end
+        if event.lookup then return choices(event) end
+        return nil
+    end
     assert(event.app.id == event.instance and event.app.settings.token == nil)
     assert(event.resource.collection == 'channels')
     assert(event.values.token == nil)
@@ -34,6 +65,7 @@ const SOURCE: &str = r#"return {form = function(event)
     check('app', {secret = 'token', prefix = 'App '})
     local parent = check('parent', {configuration = 'parent', secret = 'token', prefix = 'Parent '})
     check('child', {configuration = 'self', secret = 'token', prefix = 'Child '})
+    if event.lookup then return choices(event) end
     if event.values.channel == 'forbidden' then
         return {errors = {channel = 'This channel is not available.'}}
     end
@@ -81,6 +113,10 @@ impl Fixture {
     }
 
     async fn with_program(inert: bool, cold: bool) -> Self {
+        Self::with_features(inert, cold, false).await
+    }
+
+    async fn with_features(inert: bool, cold: bool, remote: bool) -> Self {
         let root = TempDir::new().unwrap();
         let s = Service::new(common::config(root.path())).await.unwrap();
         common::relay_fixture::claimed(&s).await.unwrap();
@@ -150,6 +186,17 @@ impl Fixture {
             },
             "source": SOURCE,
         });
+        if remote {
+            package_input["manifest"]["instanceForm"] = json!(true);
+            let choice = json!({
+                "key": "channel", "title": "Channel", "type": "select", "dynamic": true, "remote": true,
+            });
+            package_input["manifest"]["settings"]
+                .as_array_mut()
+                .unwrap()
+                .push(choice);
+            package_input["manifest"]["resources"][1]["settings"][0]["remote"] = json!(true);
+        }
         if cold {
             package_input["manifest"]["capabilities"]
                 .as_array_mut()
@@ -213,12 +260,12 @@ impl Fixture {
         let provider = Router::new().route("/{part}", axum::routing::get(move |axum::extract::Path(part): axum::extract::Path<String>, headers: axum::http::HeaderMap| {
             let (hold, entered, release) = (h.clone(), e.clone(), r.clone());
             async move {
-                if part == "parent" && hold.load(Ordering::SeqCst) {
+                if (part == "parent" || part == "root-form") && hold.load(Ordering::SeqCst) {
                     entered.notify_one();
                     release.notified().await;
                 }
                 let expected = match part.as_str() {
-                    "root" => "Root root-fixture", "app" => "App app-fixture",
+                    "root" | "root-form" => "Root root-fixture", "app" => "App app-fixture",
                     "parent" => "Parent parent-fixture", "child" => "Child child-fixture", _ => "",
                 };
                 axum::Json(json!({"ok": headers.get("authorization").is_some_and(|value| value == expected), "name": "General"}))
@@ -269,6 +316,247 @@ impl Fixture {
 
     fn input(&self) -> Value {
         self.body(json!({"name": "Channel", "parentId": self.parent["id"], "settings": {"channel": "C1", "label": "untrusted client label"}, "secrets": {"token": "child-fixture"}}))
+    }
+}
+
+#[tokio::test]
+async fn ordinary_root_changes_during_provider_io_refuse_forms_and_stale_saves() {
+    for mode in ["preview", "lookup", "submit"] {
+        for remove in [false, true] {
+            let f = Fixture::with_features(false, false, true).await;
+            f.hold.store(true, Ordering::SeqCst);
+            let root_path = format!(
+                "/api/plugins/resourceforms/connections/{}",
+                text(&f.root, "id")
+            );
+            let mut body = json!({"instance": f.root["id"], "settings": {"channel": "hold-root"}});
+            if mode == "lookup" {
+                body["lookup"] = json!({"field": "channel", "query": "needle"});
+            }
+            if mode == "submit" {
+                body["name"] = json!("Stale root form");
+                body["enabled"] = json!(false);
+            }
+            let app = f.app.clone();
+            let path = if mode == "submit" {
+                root_path.clone()
+            } else {
+                "/api/plugins/resourceforms/form".to_owned()
+            };
+            let pending = tokio::spawn(async move {
+                request(
+                    &app,
+                    &path,
+                    if mode == "submit" { "PUT" } else { "POST" },
+                    body,
+                    InstallationRole::Owner,
+                )
+                .await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(5), f.entered.notified())
+                .await
+                .unwrap();
+            let changed = if remove {
+                json!({})
+            } else {
+                json!({
+                    "name": "Changed root",
+                    "enabled": false,
+                    "token": "replacement-fixture",
+                })
+            };
+            let response = request(
+                &f.app,
+                &root_path,
+                if remove { "DELETE" } else { "PUT" },
+                changed,
+                InstallationRole::Owner,
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{}",
+                common::read_text(response).await
+            );
+            f.hold.store(false, Ordering::SeqCst);
+            f.release.notify_one();
+            let response = pending.await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::CONFLICT,
+                "mode={mode}, remove={remove}: {}",
+                common::read_text(response).await
+            );
+            let current = f
+                ._service
+                .store
+                .get(connections::KIND, text(&f.root, "id"))
+                .await
+                .unwrap();
+            if remove {
+                assert!(
+                    current.is_none(),
+                    "A stale form must not recreate the removed root"
+                );
+            } else {
+                assert_eq!(current.unwrap()["name"], "Changed root");
+            }
+            f.server.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn remote_choice_lookups_work_in_all_four_configuration_scopes_without_deriving_values() {
+    for inert in [false, true] {
+        let f = Fixture::with_features(inert, false, true).await;
+        let root_path = if inert {
+            format!(
+                "/api/plugins/resourceforms/setup-drafts/{}/form",
+                text(&f.root, "id")
+            )
+        } else {
+            "/api/plugins/resourceforms/form".to_owned()
+        };
+        let mut root_input = json!({"settings": {"channel": "saved-off-page"}});
+        if inert {
+            root_input["revision"] = f.root["revision"].clone();
+        } else {
+            root_input["instance"] = f.root["id"].clone();
+        }
+        for (path, base) in [
+            (root_path, root_input),
+            (format!("{}/channels/form", f.path), f.input()),
+        ] {
+            for (lookup, choice, next) in [
+                (
+                    json!({"field": "channel", "query": ""}),
+                    json!("C1"),
+                    json!("empty"),
+                ),
+                (
+                    json!({"field": "channel", "query": "", "cursor": "empty"}),
+                    Value::Null,
+                    json!("last"),
+                ),
+                (
+                    json!({"field": "channel", "query": "", "cursor": "last"}),
+                    json!("C2"),
+                    Value::Null,
+                ),
+                (
+                    json!({"field": "channel", "query": "needle"}),
+                    json!("found"),
+                    Value::Null,
+                ),
+            ] {
+                let mut input = base.clone();
+                input["lookup"] = lookup.clone();
+                let denied = request(
+                    &f.app,
+                    &path,
+                    "POST",
+                    input.clone(),
+                    InstallationRole::Member,
+                )
+                .await;
+                assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+                let response = request(&f.app, &path, "POST", input, InstallationRole::Owner).await;
+                assert_eq!(
+                    response.status(),
+                    StatusCode::OK,
+                    "{}",
+                    common::read_text(response).await
+                );
+                let response = common::read_json(response).await;
+                assert_eq!(response["lookup"], lookup);
+                assert_eq!(response["options"]["channel"][0]["value"], choice);
+                assert_eq!(response["pages"]["channel"]["nextCursor"], next);
+                assert!(response["pages"]["channel"].get("nextCursor").is_some());
+                assert!(response["values"].is_null() || response["values"] == json!({}));
+                assert!(!response.to_string().contains("fixture"));
+            }
+            let mut input = base.clone();
+            input["lookup"] = json!({"field": "channel", "query": "unknown"});
+            let response = request(&f.app, &path, "POST", input, InstallationRole::Owner).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(common::read_json(response).await.get("pages").is_none());
+            for (lookup, changed, status) in [
+                (
+                    json!({"field": "token", "query": ""}),
+                    Value::Null,
+                    StatusCode::BAD_REQUEST,
+                ),
+                (
+                    json!({"field": "channel", "query": "x", "cursor": ""}),
+                    Value::Null,
+                    StatusCode::BAD_REQUEST,
+                ),
+                (
+                    json!({"field": "channel", "query": "x".repeat(201)}),
+                    Value::Null,
+                    StatusCode::BAD_REQUEST,
+                ),
+                (
+                    json!({"field": "channel", "query": ""}),
+                    json!("channel"),
+                    StatusCode::BAD_REQUEST,
+                ),
+                (
+                    json!({"field": "channel", "query": "derive"}),
+                    Value::Null,
+                    StatusCode::BAD_GATEWAY,
+                ),
+                (
+                    json!({"field": "channel", "query": "oversize"}),
+                    Value::Null,
+                    StatusCode::BAD_GATEWAY,
+                ),
+            ] {
+                let mut input = base.clone();
+                input["lookup"] = lookup;
+                input["changed"] = changed;
+                let response = request(&f.app, &path, "POST", input, InstallationRole::Owner).await;
+                assert_eq!(
+                    response.status(),
+                    status,
+                    "{}",
+                    common::read_text(response).await
+                );
+            }
+        }
+        // A caller cannot turn final validation into a lookup by adding metadata.
+        let mut input = f.input();
+        input["lookup"] = json!({"field": "channel", "query": "derive"});
+        let response = request(
+            &f.app,
+            &format!("{}/channels", f.path),
+            "POST",
+            input,
+            InstallationRole::Owner,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response = request(
+            &f.app,
+            &format!("{}/channels", f.path),
+            "POST",
+            f.input(),
+            InstallationRole::Owner,
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{}",
+            common::read_text(response).await
+        );
+        assert_eq!(
+            common::read_json(response).await["settings"]["label"],
+            "General verified"
+        );
+        f.server.abort();
     }
 }
 
@@ -348,63 +636,72 @@ async fn active_and_inert_resource_forms_bind_app_parent_and_temporary_self_cred
 #[tokio::test]
 async fn parent_replacement_during_provider_io_refuses_atomic_resource_publication() {
     for inert in [false, true] {
-        let f = Fixture::new(inert).await;
-        f.hold.store(true, Ordering::SeqCst);
-        let (app, path, body) = (f.app.clone(), format!("{}/channels", f.path), f.input());
-        let pending = tokio::spawn(async move {
-            request(&app, &path, "POST", body, InstallationRole::Owner).await
-        });
-        tokio::time::timeout(std::time::Duration::from_secs(5), f.entered.notified())
-            .await
-            .unwrap();
-        let changed = f.body(json!({"name": "Workspace changed", "enabled": false, "revision": f.parent["revision"]}));
-        let response = request(
-            &f.app,
-            &format!("{}/workspaces/{}", f.path, text(&f.parent, "id")),
-            "PUT",
-            changed,
-            InstallationRole::Owner,
-        )
-        .await;
-        assert_eq!(
-            response.status(),
-            StatusCode::OK,
-            "{}",
-            common::read_text(response).await
-        );
-        f.hold.store(false, Ordering::SeqCst);
-        f.release.notify_one();
-        let response = pending.await.unwrap();
-        assert_eq!(
-            response.status(),
-            StatusCode::CONFLICT,
-            "{}",
-            common::read_text(response).await
-        );
-        let listed = request(
-            &f.app,
-            &format!("{}/channels", f.path),
-            "GET",
-            json!({}),
-            InstallationRole::Owner,
-        )
-        .await;
-        assert_eq!(common::read_json(listed).await["items"], json!([]));
-        let fresh = request(
-            &f.app,
-            &format!("{}/channels", f.path),
-            "POST",
-            f.input(),
-            InstallationRole::Owner,
-        )
-        .await;
-        assert_eq!(
-            fresh.status(),
-            StatusCode::OK,
-            "{}",
-            common::read_text(fresh).await
-        );
-        f.server.abort();
+        for lookup in [false, true] {
+            let f = Fixture::with_features(inert, false, lookup).await;
+            f.hold.store(true, Ordering::SeqCst);
+            let (app, path, mut body) = (
+                f.app.clone(),
+                format!("{}/channels{}", f.path, if lookup { "/form" } else { "" }),
+                f.input(),
+            );
+            if lookup {
+                body["lookup"] = json!({"field": "channel", "query": ""});
+            }
+            let pending = tokio::spawn(async move {
+                request(&app, &path, "POST", body, InstallationRole::Owner).await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(5), f.entered.notified())
+                .await
+                .unwrap();
+            let changed = f.body(json!({"name": "Workspace changed", "enabled": false, "revision": f.parent["revision"]}));
+            let response = request(
+                &f.app,
+                &format!("{}/workspaces/{}", f.path, text(&f.parent, "id")),
+                "PUT",
+                changed,
+                InstallationRole::Owner,
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{}",
+                common::read_text(response).await
+            );
+            f.hold.store(false, Ordering::SeqCst);
+            f.release.notify_one();
+            let response = pending.await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::CONFLICT,
+                "{}",
+                common::read_text(response).await
+            );
+            let listed = request(
+                &f.app,
+                &format!("{}/channels", f.path),
+                "GET",
+                json!({}),
+                InstallationRole::Owner,
+            )
+            .await;
+            assert_eq!(common::read_json(listed).await["items"], json!([]));
+            let fresh = request(
+                &f.app,
+                &format!("{}/channels", f.path),
+                "POST",
+                f.input(),
+                InstallationRole::Owner,
+            )
+            .await;
+            assert_eq!(
+                fresh.status(),
+                StatusCode::OK,
+                "{}",
+                common::read_text(fresh).await
+            );
+            f.server.abort();
+        }
     }
 }
 
@@ -478,122 +775,131 @@ async fn scoped_forms_never_resolve_another_root_or_the_other_namespace() {
 #[tokio::test]
 async fn forms_discard_provider_results_after_root_package_owner_or_setup_expiry_changes() {
     for inert in [false, true] {
-        for change in ["root", "package", "owner", "expiry"] {
-            if change == "expiry" && !inert {
-                continue;
-            }
-            let f = Fixture::new(inert).await;
-            let changed = Arc::new(AtomicBool::new(false));
-            let signal = changed.clone();
-            let authority = Router::new().route("/api/relay/00000000-0000-4000-8000-000000000055/task-authors", axum::routing::get(move || {
+        for lookup in [false, true] {
+            for change in ["root", "package", "owner", "expiry"] {
+                if change == "expiry" && !inert {
+                    continue;
+                }
+                let f = Fixture::with_features(inert, false, lookup).await;
+                let changed = Arc::new(AtomicBool::new(false));
+                let signal = changed.clone();
+                let authority = Router::new().route("/api/relay/00000000-0000-4000-8000-000000000055/task-authors", axum::routing::get(move || {
                 let signal = signal.clone();
                 async move { axum::Json(json!({"owner":{"account_id":"fixture-owner","access_id":if signal.load(Ordering::SeqCst) {"replacement-access"} else {"fixture-owner"}},"members":[]})) }
             }));
-            let (origin, authority_server) = common::serve_locally(authority).await;
-            let identity_path = f
-                ._service
-                .config
-                .data_dir
-                .join("installation-relay/identity.json");
-            let mut identity: Value =
-                serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
-            identity["origin"] = json!(origin);
-            std::fs::write(identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
-            f.hold.store(true, Ordering::SeqCst);
-            let (app, path, input) = (f.app.clone(), format!("{}/channels", f.path), f.input());
-            let pending = tokio::spawn(async move {
-                request(&app, &path, "POST", input, InstallationRole::Owner).await
-            });
-            tokio::time::timeout(std::time::Duration::from_secs(5), f.entered.notified())
-                .await
-                .unwrap();
-            match change {
-                "root" => {
-                    if inert {
-                        setup::save(
+                let (origin, authority_server) = common::serve_locally(authority).await;
+                let identity_path = f
+                    ._service
+                    .config
+                    .data_dir
+                    .join("installation-relay/identity.json");
+                let mut identity: Value =
+                    serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+                identity["origin"] = json!(origin);
+                std::fs::write(identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+                f.hold.store(true, Ordering::SeqCst);
+                let (app, path, mut input) = (
+                    f.app.clone(),
+                    format!("{}/channels{}", f.path, if lookup { "/form" } else { "" }),
+                    f.input(),
+                );
+                if lookup {
+                    input["lookup"] = json!({"field": "channel", "query": ""});
+                }
+                let pending = tokio::spawn(async move {
+                    request(&app, &path, "POST", input, InstallationRole::Owner).await
+                });
+                tokio::time::timeout(std::time::Duration::from_secs(5), f.entered.notified())
+                    .await
+                    .unwrap();
+                match change {
+                    "root" => {
+                        if inert {
+                            setup::save(
+                                &f._service,
+                                "resourceforms",
+                                "fixture-owner",
+                                &json!({"name":"Replaced", "revision": f.root["revision"]}),
+                                Some(text(&f.root, "id")),
+                            )
+                            .await
+                            .unwrap();
+                        } else {
+                            connections::save(
+                                &f._service,
+                                "resourceforms",
+                                &json!({"name":"Replaced", "enabled": false}),
+                                Some(text(&f.root, "id")),
+                            )
+                            .await
+                            .unwrap();
+                        }
+                    }
+                    "package" => {
+                        let original = registry::active(&f._service, "resourceforms")
+                            .await
+                            .unwrap();
+                        let mut manifest = serde_json::to_value(&original.manifest).unwrap();
+                        manifest["version"] = json!("2");
+                        let installed = registry::install(
                             &f._service,
-                            "resourceforms",
-                            "fixture-owner",
-                            &json!({"name":"Replaced", "revision": f.root["revision"]}),
-                            Some(text(&f.root, "id")),
+                            &json!({"manifest":manifest,"source":original.source.main}),
                         )
                         .await
                         .unwrap();
-                    } else {
-                        connections::save(
+                        registry::approve(
                             &f._service,
                             "resourceforms",
-                            &json!({"name":"Replaced", "enabled": false}),
-                            Some(text(&f.root, "id")),
+                            "2",
+                            text(&installed, "digest"),
                         )
                         .await
                         .unwrap();
                     }
+                    "owner" => {
+                        changed.store(true, Ordering::SeqCst);
+                    }
+                    "expiry" => {
+                        f._service
+                            .store
+                            .delete(&format!("plugin-setup:{}", text(&f.root, "id")))
+                            .await
+                            .unwrap();
+                    }
+                    _ => unreachable!(),
                 }
-                "package" => {
-                    let original = registry::active(&f._service, "resourceforms")
-                        .await
-                        .unwrap();
-                    let mut manifest = serde_json::to_value(&original.manifest).unwrap();
-                    manifest["version"] = json!("2");
-                    let installed = registry::install(
-                        &f._service,
-                        &json!({"manifest":manifest,"source":original.source.main}),
-                    )
-                    .await
-                    .unwrap();
-                    registry::approve(
-                        &f._service,
-                        "resourceforms",
-                        "2",
-                        text(&installed, "digest"),
-                    )
-                    .await
-                    .unwrap();
-                }
-                "owner" => {
-                    changed.store(true, Ordering::SeqCst);
-                }
-                "expiry" => {
+                f.hold.store(false, Ordering::SeqCst);
+                f.release.notify_one();
+                let response = pending.await.unwrap();
+                let expected = if change == "owner" {
+                    StatusCode::FORBIDDEN
+                } else if inert && change != "package" {
+                    StatusCode::NOT_FOUND
+                } else {
+                    StatusCode::CONFLICT
+                };
+                assert_eq!(
+                    response.status(),
+                    expected,
+                    "{inert}/{change}: {}",
+                    common::read_text(response).await
+                );
+                let children = if inert {
                     f._service
                         .store
-                        .delete(&format!("plugin-setup:{}", text(&f.root, "id")))
+                        .keys(&format!("plugin-setup-resource:{}:", text(&f.root, "id")))
                         .await
-                        .unwrap();
-                }
-                _ => unreachable!(),
+                        .unwrap()
+                        .into_iter()
+                        .map(|(_, v)| v)
+                        .collect::<Vec<_>>()
+                } else {
+                    f._service.store.list(resources::KIND).await.unwrap()
+                };
+                assert!(children.iter().all(|v| v["collection"] != "channels"));
+                authority_server.abort();
+                f.server.abort();
             }
-            f.hold.store(false, Ordering::SeqCst);
-            f.release.notify_one();
-            let response = pending.await.unwrap();
-            let expected = if change == "owner" {
-                StatusCode::FORBIDDEN
-            } else if inert && change != "package" {
-                StatusCode::NOT_FOUND
-            } else {
-                StatusCode::CONFLICT
-            };
-            assert_eq!(
-                response.status(),
-                expected,
-                "{inert}/{change}: {}",
-                common::read_text(response).await
-            );
-            let children = if inert {
-                f._service
-                    .store
-                    .keys(&format!("plugin-setup-resource:{}:", text(&f.root, "id")))
-                    .await
-                    .unwrap()
-                    .into_iter()
-                    .map(|(_, v)| v)
-                    .collect::<Vec<_>>()
-            } else {
-                f._service.store.list(resources::KIND).await.unwrap()
-            };
-            assert!(children.iter().all(|v| v["collection"] != "channels"));
-            authority_server.abort();
-            f.server.abort();
         }
     }
 }
@@ -773,8 +1079,8 @@ async fn installed_files_are_rechecked_after_the_last_configuration_owner_lookup
     use std::sync::atomic::AtomicUsize;
 
     for inert in [false, true] {
-        for operation in ["preview", "resource", "root"] {
-            let f = Fixture::new(inert).await;
+        for operation in ["preview", "lookup", "resource", "root"] {
+            let f = Fixture::with_features(inert, false, operation == "lookup").await;
             let calls = Arc::new(AtomicUsize::new(0));
             let hold_at = Arc::new(AtomicUsize::new(usize::MAX));
             let entered = Arc::new(tokio::sync::Notify::new());
@@ -838,12 +1144,19 @@ async fn installed_files_are_rechecked_after_the_last_configuration_owner_lookup
                     format!(
                         "{}/channels{}",
                         f.path,
-                        if operation == "preview" { "/form" } else { "" }
+                        if matches!(operation, "preview" | "lookup") {
+                            "/form"
+                        } else {
+                            ""
+                        }
                     ),
                     "POST",
                     f.input(),
                 )
             };
+            if operation == "lookup" {
+                body["lookup"] = json!({"field": "channel", "query": ""});
+            }
             // Calibrate through the real endpoint, so this gate follows its last
             // owner lookup rather than a hard-coded implementation call count.
             let baseline =

@@ -147,7 +147,9 @@ impl<'a> Request<'a> {
         let existing = self.moving || self.checkpoint["nodeId"].as_str().is_none_or(|p| p == id);
         let local_unconfigured = node["local"] == true && !configured;
         let native = crate::native::policy::native(&self.run["snapshot"]["agent"]);
-        if native != crate::native::policy::node_native(node) {
+        if native != crate::native::policy::node_native(node)
+            || native && node["capabilities"]["ublk"] != true
+        {
             return false;
         }
         let ready = (native
@@ -458,7 +460,9 @@ fn claim_reservation(
         .find(|n| n["id"] == node.as_str())
         .ok_or_else(|| Error::conflict("Destination removed."))?;
     let native = crate::native::policy::native(&request.run["snapshot"]["agent"]);
-    if native != crate::native::policy::node_native(record) {
+    if native != crate::native::policy::node_native(record)
+        || native && record["capabilities"]["ublk"] != true
+    {
         return Err(Error::conflict("Destination execution backend changed."));
     }
     if !native && record["capabilities"]["fuse"] != true {

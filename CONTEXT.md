@@ -153,6 +153,14 @@ commandes et outils donnés aux agents autorisés, leurs instructions, le pannea
 instance et son test. Le code du package ne fait que répondre ; il ne reçoit jamais les
 secrets.
 
+**Recherche de choix d’un formulaire de plugin** :
+Une prévisualisation bornée pour un seul champ distant, avec un texte de recherche
+et un curseur opaque facultatif. Elle conserve les mêmes preuves d’autorité que le
+formulaire complet et ne peut pas modifier ses valeurs. Une page vide peut encore
+avoir une suite ; sans information de pagination, la complétude reste inconnue.
+La sélection demeure indépendante de la page affichée et la sauvegarde exécute
+toujours la validation complète du package.
+
 **Autorisation personnelle d’un plugin** :
 L’accord d’une personne pour qu’un plugin agisse avec son identité et les droits
 qu’elle lui a confiés sur un service externe. Cette autorisation reste propre à

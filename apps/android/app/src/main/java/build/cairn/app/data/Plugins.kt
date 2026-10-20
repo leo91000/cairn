@@ -41,6 +41,8 @@ data class PluginSetting(
     val options: List<PluginOption> = emptyList(),
     /** Choices come from the package's form handler while the owner edits. */
     val dynamic: Boolean = false,
+    /** Bounded query/cursor lookups, independent of the full form. */
+    val remote: Boolean = false,
     /** Changing this field asks the package's form handler again. */
     val refresh: Boolean = false,
     val default: JsonElement? = null,
@@ -53,7 +55,15 @@ data class PluginForm(
     val values: JsonObject = JsonObject(emptyMap()),
     val errors: Map<String, String> = emptyMap(),
     val view: JsonArray = JsonArray(emptyList()),
+    val pages: Map<String, PluginChoicePage>? = null,
+    val lookup: PluginFormLookup? = null,
 )
+
+@Serializable data class PluginChoicePage(val nextCursor: String?)
+
+/** Host-owned echo proves this was evaluated as a choice-only request. */
+@Serializable
+data class PluginFormLookup(val field: String, val query: String, val cursor: String? = null)
 
 private val pluginFormJson = Json(wireJson) { coerceInputValues = true }
 

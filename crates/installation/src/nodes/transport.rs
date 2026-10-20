@@ -368,6 +368,7 @@ fn head_timeout(method: &str, path: &str, native: bool) -> Duration {
     } else if path.starts_with("/prepare/")
         || path.ends_with("snapshot")
         || path.ends_with("snapshot-completed")
+        || path.ends_with("/evict")
         || native
             && method == "DELETE"
             && path.starts_with("/runs/")

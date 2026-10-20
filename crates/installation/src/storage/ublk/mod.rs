@@ -235,7 +235,7 @@ fn vm_alive(state: &Path, record: &Record) -> stdio::Result<bool> {
     Ok(false)
 }
 
-fn retire(
+fn stop_owned(
     state: &Path,
     record: &Record,
     control: &libublk::ctrl::UblkCtrl,
@@ -265,6 +265,16 @@ fn retire(
             return Err(stdio::Error::other("ublk stop is not confirmed"));
         }
     }
+    Ok(())
+}
+
+fn retire(
+    state: &Path,
+    record: &Record,
+    control: &libublk::ctrl::UblkCtrl,
+    reaped: bool,
+) -> stdio::Result<()> {
+    stop_owned(state, record, control, reaped)?;
     control.del_dev().map_err(error).map(|_| ())
 }
 
@@ -327,15 +337,14 @@ fn cleanup(state: &Path, record: &Record, joined: bool) -> stdio::Result<()> {
     forget(state, record)
 }
 
-/// Called only under the controller lock, before removing old jail directories.
-/// Never deletes an unrecorded owner or stops a live crates/installation/VMM.
-pub fn cleanup_stale(state: &Path) -> stdio::Result<()> {
+fn records(state: &Path) -> stdio::Result<Vec<Record>> {
     let directory = state.join("ublk-devices");
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == stdio::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == stdio::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error),
     };
+    let mut records = Vec::new();
     for entry in entries {
         let entry = entry?;
         if entry
@@ -359,6 +368,57 @@ pub fn cleanup_stale(state: &Path) -> stdio::Result<()> {
                 "ublk registry identity does not match its path",
             ));
         }
+        record.validate()?;
+        records.push(record);
+    }
+    Ok(records)
+}
+
+/// Native recovery owns both disk leases and has requested workload termination.
+/// Abort only dead, nonce-verified backends so blocked consumers can finish exiting;
+/// keep kernel devices and receipts until fencing and unmount are confirmed.
+pub(crate) fn quiesce_stale_host_disk(state: &Path, run: &str) -> stdio::Result<()> {
+    let current_boot = boot_id()?;
+    let mut owned = false;
+    for record in records(state)? {
+        if record.vm_id != run || record.boot_id != current_boot {
+            continue;
+        }
+        let Some(id) = record.device_id else { continue };
+        if record.owner.alive()? || vm_alive(state, &record)? {
+            return Err(stdio::Error::new(
+                stdio::ErrorKind::WouldBlock,
+                "ublk backend or VMM is still active",
+            ));
+        }
+        owned = true;
+        let control = match UblkCtrlBuilder::default().id(id).build() {
+            Ok(control) => control,
+            Err(failure) => {
+                let failure = error(failure);
+                if matches!(failure.raw_os_error(), Some(libc::ENOENT | libc::ENODEV)) {
+                    continue;
+                }
+                return Err(failure);
+            }
+        };
+        if control.dev_info().ublksrv_flags != record.token {
+            return Err(stdio::Error::other("Native ublk ownership changed"));
+        }
+        stop_owned(state, &record, &control, false)?;
+    }
+    if !owned {
+        return Err(stdio::Error::other(
+            "Mounted native disk has no current ownership receipt",
+        ));
+    }
+    Ok(())
+}
+
+/// Called only under the controller lock, after fencing consumers and unmounting
+/// host filesystems. Never retires an unrecorded owner or a live backend/VMM.
+pub fn cleanup_stale(state: &Path) -> stdio::Result<()> {
+    for record in records(state)? {
         cleanup(state, &record, false)?;
     }
     Ok(())
@@ -393,11 +453,25 @@ impl MountedDisk {
         Ok(())
     }
 
+    /// Abort only this nonce-verified device to release blocked I/O after a
+    /// failed consumer fence. Registration stays owned until normal retirement.
+    pub(crate) fn abort_io(&self) -> stdio::Result<()> {
+        self.stop()
+    }
+
     /// Caller has already awaited its VMM exit and cancelled blocked source reads.
     pub fn close(mut self) -> stdio::Result<()> {
-        self.stop()?;
-        if let Some(thread) = self.thread.take() {
-            thread
+        self.close_in_place()
+    }
+
+    /// The caller has fenced all consumers and unmounted any host filesystem.
+    /// Retaining the handle on error permits safe retry of kernel retirement.
+    pub(crate) fn close_in_place(&mut self) -> stdio::Result<()> {
+        if self.thread.is_some() {
+            self.stop()?;
+            self.thread
+                .take()
+                .unwrap()
                 .join()
                 .map_err(|_| stdio::Error::other("ublk backend panicked"))??;
         }
@@ -435,6 +509,47 @@ pub(crate) fn mount_named_disk(
     uid: u32,
     name: &str,
 ) -> stdio::Result<MountedDisk> {
+    mount_named(disk, state, jail, uid, name, false)
+}
+
+/// Host consumers must not share the backend's mount namespace: namespace exit
+/// could otherwise flush a filesystem through the very backend that is exiting.
+/// The backend unshares before the caller mounts its new block device.
+pub(crate) fn mount_host_disk(
+    disk: Arc<dyn Disk>,
+    state: &Path,
+    jail: &Path,
+) -> stdio::Result<MountedDisk> {
+    mount_named(disk, state, jail, 0, "disk.blk", true)
+}
+
+pub(crate) fn private_mount_namespace() -> stdio::Result<()> {
+    if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
+        return Err(stdio::Error::last_os_error());
+    }
+    if unsafe {
+        libc::mount(
+            std::ptr::null(),
+            c"/".as_ptr(),
+            std::ptr::null(),
+            libc::MS_REC | libc::MS_PRIVATE,
+            std::ptr::null(),
+        )
+    } != 0
+    {
+        return Err(stdio::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn mount_named(
+    disk: Arc<dyn Disk>,
+    state: &Path,
+    jail: &Path,
+    uid: u32,
+    name: &str,
+    private_namespace: bool,
+) -> stdio::Result<MountedDisk> {
     if !matches!(name, "disk.blk" | "workspace.blk") {
         return Err(stdio::Error::other("Invalid VM block node name"));
     }
@@ -462,6 +577,9 @@ pub(crate) fn mount_named_disk(
             // Fail before ADD without the required capability. All newly
             // created I/O threads inherit the validated flusher state.
             io::enable_io_flusher()?;
+            if private_namespace {
+                private_mount_namespace()?;
+            }
             let token = (uuid::Uuid::new_v4().as_u128() as u64).max(1);
             let mut record = Record {
                 version: 1,

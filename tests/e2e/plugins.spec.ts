@@ -2110,6 +2110,221 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
 })
 
 for (const prepared of [false, true]) {
+  for (const resource of [false, true]) {
+    test(`remote choices preserve selections and discard old queries in ${prepared ? 'prepared' : 'active'} ${resource ? 'resource' : 'instance'} forms`, async ({ page, workspace }) => {
+      test.setTimeout(90000)
+      await useRelayForHttpMocks(page)
+      const id = `remote-${prepared ? 'prepared' : 'active'}-${resource ? 'resource' : 'root'}`
+      const fields = [
+        {
+          key: 'channel',
+          title: 'Channel',
+          type: 'select',
+          dynamic: true,
+          remote: true,
+        },
+        {
+          key: 'members',
+          title: 'Members',
+          type: 'multiselect',
+          dynamic: true,
+          remote: true,
+        },
+        { key: 'token', title: 'Access secret', type: 'secret' },
+      ]
+      const manifest = {
+        id,
+        name: 'Remote service',
+        version: '1',
+        apiVersion: 2,
+        capabilities: ['resources'],
+        instanceForm: true,
+        settings: fields,
+        resources: [
+          { name: 'workspace', title: 'Workspaces', singular: 'Workspace' },
+          {
+            name: 'channel',
+            title: 'Channels',
+            singular: 'Channel',
+            parent: 'workspace',
+            form: true,
+            settings: fields,
+          },
+        ],
+      }
+      const source = `return {form = function(event)
+        if event.resource and event.resource.parent == nil then return {errors = {parentId = 'Choose a workspace first.'}} end
+        if not event.lookup then return nil end
+        local lookup = event.lookup
+        local function page(items, next, known)
+          local options = {}; options[lookup.field] = items
+          if not known then return {options = options} end
+          local pages = {}; pages[lookup.field] = {nextCursor = next}
+          return {options = options, pages = pages}
+        end
+        if lookup.query == 'unknown' then return page(cairn.array(), nil, false) end
+        local label = 'General'
+        local value = 'C1'
+        local next = cairn.json.null
+        if lookup.query ~= '' then label = lookup.query .. ' choice'; value = lookup.query
+        elseif lookup.cursor == nil then next = 'empty'
+        elseif lookup.cursor == 'empty' then return page(cairn.array(), 'last', true)
+        else label = 'Engineering'; value = 'C2' end
+        if lookup.field == 'members' then label ..= ' member'; value = 'M' .. value end
+        return page({{value = value, label = label}}, next, true)
+      end}`
+      const installed = await workspace.api('/api/plugins/packages', 'POST', { manifest, source })
+      await workspace.api(`/api/plugins/packages/${id}/approve`, 'POST', { version: '1', digest: installed.digest })
+      const base = `/api/plugins/${id}/${prepared ? 'setup-drafts' : 'connections'}`
+      const instance = await workspace.api(base, 'POST', {
+        name: 'Remote app',
+        settings: { channel: 'saved-off-page', members: [] },
+        secrets: { token: 'synthetic-saved-secret' },
+        ...(!prepared && { enabled: false }),
+      })
+      const root = `${base}/${instance.id}`
+      if (resource)
+        await workspace.api(`${root}/resources/workspace`, 'POST', { name: 'Workspace', ...(prepared && { setupRevision: instance.revision }) })
+      let release!: () => void
+      const gate = new Promise<void>(resolve => release = resolve)
+      let started!: () => void
+      const entered = new Promise<void>(resolve => started = resolve)
+      let releaseCurrent!: () => void
+      const currentGate = new Promise<void>(resolve => releaseCurrent = resolve)
+      let currentStarted!: () => void
+      const currentEntered = new Promise<void>(resolve => currentStarted = resolve)
+      const endpoint = resource ? `${root}/resources/channel/form` : prepared ? `${root}/form` : `/api/plugins/${id}/form`
+      await page.route(`**${endpoint.replace('/api', '')}`, async (route) => {
+        const response = await route.fetch()
+        const body = route.request().postDataJSON()
+        if (body.lookup?.query === 'old') {
+          started()
+          await gate
+        }
+
+        if (prepared && !resource && body.lookup?.query === 'new') {
+          currentStarted()
+          await currentGate
+        }
+
+        await route.fulfill({ response })
+      })
+      try {
+        await page.goto(workspacePath(`/plugins/${id}`))
+        await signIn(page)
+        if (prepared)
+          await page.getByRole('button', { name: 'Continue Remote app', exact: true }).click()
+        const owner = prepared ? page.getByRole('dialog', { name: 'Set up Remote service', exact: true }) : page.getByRole('article', { name: 'Remote app', exact: true })
+        if (resource)
+          await owner.getByRole('button', { name: 'Add channel', exact: true }).click()
+        else if (!prepared)
+          await owner.getByRole('button', { name: 'Edit Remote app', exact: true }).click()
+        const form = resource ? owner.getByRole('form', { name: 'New channel', exact: true }) : prepared ? owner : page.getByRole('dialog', { name: 'Edit Remote app', exact: true })
+        if (resource) {
+          await form.getByLabel('Name', { exact: true }).fill('Support')
+          await selectField(form, 'Parent', 'Workspace')
+        }
+
+        const choice = form.getByRole('combobox', { name: 'Channel', exact: true })
+        const channelPicker = form.locator('.virtual-select').filter({ has: page.getByRole('combobox', { name: 'Channel', exact: true }) })
+        await choice.click()
+        const channelChecked = page.waitForResponse(response => response.url().endsWith('/form') && response.request().postDataJSON().changed === 'channel')
+        await page.getByRole('option', { name: 'General', exact: true }).click()
+        await channelChecked
+        await expect(choice).toHaveValue('General')
+        if (prepared && !resource)
+          await expect(form.getByRole('button', { name: 'Save setup', exact: true })).toBeEnabled()
+        await choice.click()
+        const nextPage = channelPicker.getByRole('button', { name: 'Next page', exact: true })
+        await expect(nextPage).toBeEnabled()
+        await choice.press('Tab')
+        await expect(nextPage).toBeFocused()
+        await nextPage.press('Shift+Tab')
+        await expect(choice).toBeFocused()
+        await expect(choice).toHaveAttribute('aria-expanded', 'true')
+        await choice.press('Tab')
+        await nextPage.press('Enter')
+        await expect(channelPicker.getByText('0 choices on this page · More available', { exact: true }).first()).toBeVisible()
+        await choice.press('Tab')
+        await expect(nextPage).toBeFocused()
+        await nextPage.press('Enter')
+        await expect(page.getByRole('option', { name: 'Engineering', exact: true })).toBeVisible()
+        await choice.press('Escape')
+        await expect(choice).toHaveValue('General')
+        const unknown = page.waitForResponse(response => response.url().endsWith('/form') && response.request().postDataJSON().lookup?.field === 'channel' && response.request().postDataJSON().lookup?.query === 'unknown')
+        await choice.fill('unknown')
+        await unknown
+        await expect(page.getByText('Loading options…', { exact: true })).toHaveCount(0)
+        await expect(channelPicker.getByText('0 choices on this page · Completeness unknown', { exact: true }).first()).toBeVisible()
+        await choice.fill('old')
+        await entered
+        await choice.fill('new')
+        if (prepared && !resource) {
+          await currentEntered
+          // Name changes rerender the schema without changing the lookup scope.
+          await form.getByLabel('Name', { exact: true }).fill('Renamed remote app')
+          releaseCurrent()
+        }
+
+        const currentChoice = page.getByRole('option', { name: 'new choice', exact: true, includeHidden: true })
+        await expect(currentChoice).toBeAttached()
+        if (!prepared || resource)
+          await expect(currentChoice).toBeVisible()
+        const oldAnswer = page.waitForResponse(response => response.url().endsWith('/form') && response.request().postDataJSON().lookup?.query === 'old')
+        release()
+        await oldAnswer
+        await expect(page.getByRole('option', { name: 'old choice', exact: true, includeHidden: true })).toHaveCount(0)
+        if (prepared && !resource)
+          await expect(choice).toHaveAttribute('aria-expanded', 'false')
+        else
+          await choice.press('Escape')
+        await expect(choice).toHaveValue('General')
+        const members = form.getByRole('group', { name: 'Members', exact: true })
+        const membersChecked = page.waitForResponse(response => response.url().endsWith('/form') && response.request().postDataJSON().changed === 'members')
+        const channelRefreshed = page.waitForResponse((response) => {
+          if (!response.url().endsWith('/form'))
+            return false
+          const body = response.request().postDataJSON()
+          return body.lookup?.field === 'channel' && body.settings.members?.includes('MC1')
+        })
+        await members.getByRole('checkbox', { name: 'General member', exact: true }).check()
+        // The dependent channel lookup can change the layout above this button.
+        // Finish that update before exercising pointer pagination.
+        await Promise.all([membersChecked, channelRefreshed])
+        await expect(page.getByText('Loading options…', { exact: true })).toHaveCount(0)
+        await expect(members.getByRole('button', { name: 'Next page', exact: true })).toBeEnabled()
+        await members.getByRole('button', { name: 'Next page', exact: true }).click()
+        await expect(members.getByText('0 choices on this page · More available', { exact: true })).toBeVisible()
+        await expect(members.getByRole('button', { name: 'Remove General member', exact: true })).toBeVisible()
+        await members.getByRole('button', { name: 'Next page', exact: true }).click()
+        const membersUnknown = page.waitForResponse(response => response.url().endsWith('/form') && response.request().postDataJSON().lookup?.field === 'members' && response.request().postDataJSON().lookup?.query === 'unknown')
+        await members.getByRole('searchbox', { name: 'Search members', exact: true }).fill('unknown')
+        await membersUnknown
+        await expect(members.getByText('Loading choices…', { exact: true })).toHaveCount(0)
+        await expect(members.getByText('0 choices on this page · Completeness unknown', { exact: true })).toBeVisible()
+        const save = form.getByRole('button', { name: resource ? 'Save channel' : prepared ? 'Save setup' : 'Save instance', exact: true })
+        await expect(save).toBeEnabled()
+        const persisted = page.waitForResponse(response => response.url().endsWith(resource ? `${root}/resources/channel` : root) && response.request().method() === (resource ? 'POST' : prepared ? 'PATCH' : 'PUT'))
+        await save.click()
+        const response = await persisted
+        expect(response.ok()).toBe(true)
+        const saved = await response.json()
+        expect(saved.name).toBe(resource ? 'Support' : prepared ? 'Renamed remote app' : 'Remote app')
+        expect(saved.settings.channel).toBe('C1')
+        expect(saved.settings.members).toEqual(['MC1'])
+        expect(saved.secretKeys).toEqual(resource ? [] : ['token'])
+      }
+      finally {
+        release()
+        releaseCurrent()
+        // Keep the page alive until intercepted requests from this scenario finish.
+        await page.unrouteAll({ behavior: 'wait' })
+      }
+    })
+  }
+}
+
+for (const prepared of [false, true]) {
   test(`scoped ${prepared ? 'prepared' : 'active'} resource forms discard stale parents and reconcile an uncertain save`, async ({ page, workspace }) => {
     await useRelayForHttpMocks(page)
     const id = `scoped-form-${prepared ? 'prepared' : 'active'}`

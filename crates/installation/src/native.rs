@@ -1,6 +1,9 @@
 //! Host execution. Permissions and lifecycle are separate from coding-engine adapters.
+pub(crate) mod block;
 pub(crate) mod disk;
+mod home;
 pub mod policy;
+mod protection;
 pub mod releases;
 mod service;
 mod systemd;
@@ -36,4 +39,27 @@ pub(crate) fn controller_client(path: &std::path::Path) -> crate::error::Result<
         .unix_socket(path.to_owned())
         .build()
         .map_err(crate::error::Error::internal)
+}
+
+/// Run before runtime threads start. systemd must resolve stable host paths;
+/// only the ublk backend gets a private mount namespace before its device exists.
+/// Every journal/control worker must inherit writeback progress.
+pub fn prepare_storage_process() -> std::io::Result<()> {
+    #[cfg(feature = "ublk")]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        if std::fs::metadata("/proc/self/ns/mnt")?.ino()
+            != std::fs::metadata("/proc/1/ns/mnt")?.ino()
+        {
+            return Err(std::io::Error::other(
+                "Native controller must share the system manager's mount namespace.",
+            ));
+        }
+        crate::storage::ublk::prepare_io_threads()
+    }
+    #[cfg(not(feature = "ublk"))]
+    Err(std::io::Error::other(
+        "Native execution requires a Cairn binary built with ublk support.",
+    ))
 }

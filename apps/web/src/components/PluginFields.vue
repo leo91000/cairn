@@ -1,7 +1,9 @@
 <script setup lang="ts">
+import type { PluginFormLookup } from '../plugin-form-lookups'
 import type { FieldOption, SettingField } from '../plugins'
 import { computed, useId } from 'vue'
 import { pluginFieldAnswer, pluginFormSecrets } from '../plugin-form-values'
+import PluginRemoteChoice from './PluginRemoteChoice.vue'
 
 // Renders a package's declarative fields. Secret values live in their own model and
 // are never prefilled: a saved secret shows as a placeholder and stays when left blank.
@@ -13,6 +15,7 @@ const props = defineProps<{
   disabled?: boolean
   options?: Record<string, FieldOption[]>
   errors?: Record<string, string>
+  lookup?: PluginFormLookup
 }>()
 const emit = defineEmits<{ refresh: [key: string] }>()
 const values = defineModel<Record<string, any>>('values', { required: true })
@@ -45,7 +48,7 @@ function explained(field: SettingField) {
 }
 
 function changed(field: SettingField) {
-  if (field.refresh)
+  if (field.refresh || field.remote)
     emit('refresh', field.key)
 }
 
@@ -66,7 +69,15 @@ function toggle(key: string, value: string, checked: boolean) {
       {{ section.title }}
     </legend>
     <template v-for="field in section.fields" :key="field.key">
-      <label v-if="field.type === 'boolean'" class="grid! grid-cols-[auto_1fr] items-start gap-x-2! gap-y-0.5!">
+      <PluginRemoteChoice
+        v-if="field.remote"
+        v-model="values[field.key]"
+        :field="field"
+        :lookup="lookup"
+        :disabled="disabled"
+        @change="changed(field)"
+      />
+      <label v-else-if="field.type === 'boolean'" class="grid! grid-cols-[auto_1fr] items-start gap-x-2! gap-y-0.5!">
         <input
           v-model="values[field.key]"
           type="checkbox"

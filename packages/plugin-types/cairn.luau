@@ -118,6 +118,7 @@ export type ExecutableHandle = { id: string }
 export type Component = { type: string, [string]: Json }
 
 export type FieldOption = { value: string, label: string, description: string?, disabled: boolean? }
+export type FormLookup = { field: string, query: string, cursor: string? }
 
 -- What the `form` handler returns. `values` may set any declared non-secret setting,
 -- hidden ones included. Root errors also allow "credential"/"form"; resource
@@ -127,6 +128,8 @@ export type FormResult = {
     values: { [string]: Json }?,
     errors: { [string]: string }?,
     view: { Component }?,
+    -- Missing page metadata means completeness unknown; use cairn.json.null at the end.
+    pages: { [string]: { nextCursor: Json } }?,
 }
 
 -- capability "inbound": something an allowed person wrote, received by the package.
@@ -160,6 +163,7 @@ export type ResourceFormInput = {
     resource: { collection: string, id: string?, parent: Resource?, secrets: { string } },
     values: { [string]: Json },
     changed: string?,
+    lookup: FormLookup?, -- choice-only preview: no values/view or another field's options/errors
     submit: boolean,
 }
 
@@ -248,7 +252,8 @@ export type Cairn = {
     },
     -- With "socket" or "inbound": the state the owner sees, "connecting" or "connected".
     instance: { status: (state: string, message: string?) -> () },
-    json: { decode: (text: string) -> Json, encode: (value: Json) -> string },
+    -- Explicit null survives in an outgoing object. Incoming null still becomes nil.
+    json: { null: Json, decode: (text: string) -> Json, encode: (value: Json) -> string },
     -- Stops the handler with a message for the person (300 characters at most). In the
     -- transport worker it stops the connection until the owner reviews the instance.
     fail: (message: string) -> never,

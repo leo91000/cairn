@@ -89,7 +89,7 @@ A manifest declares `"apiVersion": 2` (the only version Cairn loads) and:
   (header and prefix); the script only sets `auth = true`;
 - `settings`: the instance form, in order (`key`, `title`, `type`, `required`,
   `hidden`, `description`, `placeholder`, `section`, `default`, `maxLength`,
-  `minimum`, `maximum`, `pattern`, `options`, `dynamic` and `refresh`).
+  `minimum`, `maximum`, `pattern`, `options`, `dynamic`, `remote` and `refresh`).
   Types: `string`, `number`, `boolean`, `text`, `url`, `select`,
   `multiselect` (with `options`, or `dynamic: true` for choices the package's form
   handler provides) and `secret`;
@@ -944,6 +944,29 @@ capability gate as long-lived workers).
   save it runs once more with `submit = true`: its values are applied and checked
   again, and any error refuses the save with its message. Dynamic choices are checked
   as text (`pattern`, `maxLength`) by Cairn and by the package itself.
+- **Remote choices** add `remote: true` to a dynamic `select` or `multiselect` in
+  an instance or resource configuration form. The manifest must enable that form
+  (`instanceForm` or the collection's `form`). These fields are not available in
+  a panel's action form. The same preview endpoint accepts
+  `lookup: {field, query, cursor?}` instead of `changed`. Queries have at most 200
+  characters; opaque cursors are nonblank, control-free and at most 4,096 bytes.
+  The handler receives `event.lookup` with `submit = false`, under the same
+  owner, package, root/parent, revision and OAuth fences as full form previews.
+  It may return only that field's `options`, `pages` and errors (plus global form,
+  credential or parent errors appropriate to its scope). Returning `values`,
+  `view`, another field's options/errors or more than 200 choices is refused.
+  Duplicate option IDs are refused; the complete result remains bounded to 256 KiB.
+  Return `pages = {channel = {nextCursor = "opaque"}}` when another page exists,
+  including after an empty or short page. Use `nextCursor = cairn.json.null` at the
+  end. Omitted page metadata means **completeness unknown**, never “all choices”.
+  Cairn adds a `lookup` echo after validation; clients reject an absent/mismatched
+  echo, including an older host's ordinary full-form answer. Both clients show one
+  bounded page, search, continuation/retry and selected names separately. IDs stay
+  selected when absent from the page. Only selected names (at most 100) are kept
+  across queries; scope/credential changes discard them. Late responses after an
+  edit, scope change or editor dismissal are ignored. Selecting a remote choice
+  refreshes the full form; searching does not. Final save always invokes the full
+  handler with `submit = true`, even if a caller sends lookup metadata.
 - A script may call `cairn.fail(message)` to stop with a message for the person
   (300 characters at most). Any other error stays in the worker.
 
@@ -959,7 +982,9 @@ More capabilities:
   installer.
 - `cairn.http.request{ …, auth = { secret = "<setting key>", header?, prefix? } }`
   adds a secret field to one header of a declared host.
-- `cairn.json.decode(text)` and `cairn.json.encode(value)` convert JSON.
+- `cairn.json.decode(text)` and `cairn.json.encode(value)` convert JSON. Incoming
+  JSON null becomes Lua nil. Use the explicit `cairn.json.null` sentinel to include
+  a present null member in an outgoing table; a Lua nil would remove the member.
 
 Instance routes add `GET …/connections/{id}/view`, `POST …/connections/{id}/actions`,
 the generic `POST …/connections/{id}/test` and `POST /api/plugins/{id}/form`

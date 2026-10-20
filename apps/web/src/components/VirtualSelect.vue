@@ -38,14 +38,19 @@ const props = withDefaults(defineProps<{
   variant?: 'default' | 'ghost'
   hideLabel?: boolean
   actionLabel?: string
+  remote?: boolean
+  selectedOption?: SelectOption
+  pageStatus?: string
+  nextPage?: boolean
 }>(), { placeholder: 'Select an option', emptyText: 'No options available' })
-const emit = defineEmits<{ action: [] }>()
+const emit = defineEmits<{ action: [], search: [query: string], next: [] }>()
 const model = defineModel<string>({ default: '' })
 const id = useId()
 const root = ref<HTMLElement>()
 const input = ref<HTMLInputElement>()
 const popup = ref<HTMLElement>()
 const action = ref<HTMLButtonElement>()
+const nextPageButton = ref<HTMLButtonElement>()
 const viewport = ref<HTMLElement>()
 const open = ref(false)
 const query = ref('')
@@ -54,8 +59,9 @@ const scrollTop = ref(0)
 const viewportHeight = ref(280)
 const position = ref<CSSProperties>({ visibility: 'hidden' })
 const invalid = ref(false)
-const selected = computed(() => props.options.find(option => option.value === model.value))
-const filtered = computed(() => filterOptions(props.options, query.value))
+const selected = computed(() => props.options.find(option => option.value === model.value)
+  ?? (props.selectedOption?.value === model.value ? props.selectedOption : undefined))
+const filtered = computed(() => props.remote ? props.options : filterOptions(props.options, query.value))
 const layout = computed(() => selectRows(filtered.value))
 const rows = computed(() => visibleRows(layout.value.rows, scrollTop.value, viewportHeight.value))
 const activeId = computed(() => rows.value.some(row => row.optionIndex === active.value) ? `${id}-option-${active.value}` : undefined)
@@ -76,7 +82,7 @@ function positionPopup() {
   const popupWidth = Math.min(Math.max(anchor.width, 290), width - 24)
   const below = top + height - anchor.bottom - 14
   const above = anchor.top - top - 14
-  const fixedHeight = 78 + (props.actionLabel ? 52 : 0)
+  const fixedHeight = 78 + (props.actionLabel ? 52 : 0) + (props.nextPage ? 48 : 0)
   const desired = Math.min(layout.value.height || 96, 280) + fixedHeight
   const upwards = below < Math.min(desired, 210) && above > below
   const available = Math.max(90, upwards ? above : below)
@@ -116,6 +122,8 @@ async function show(initialQuery = '') {
     return
   query.value = initialQuery
   open.value = true
+  if (props.remote)
+    emit('search', initialQuery)
   await nextTick()
   if (!open.value || !popup.value?.isConnected)
     return
@@ -144,25 +152,31 @@ function choose(option: SelectOption) {
 
 function clear() {
   model.value = ''
-  query.value = ''
+  if (!props.remote || !open.value)
+    query.value = ''
   input.value?.focus({ preventScroll: true })
 }
 
 function updateQuery(event: Event) {
   const value = (event.target as HTMLInputElement).value
-  if (!open.value)
+  if (!open.value) {
     void show(value)
-  else
+  }
+  else {
     query.value = value
+    if (props.remote)
+      emit('search', value)
+  }
 }
 
 function keydown(event: KeyboardEvent) {
   if (event.isComposing)
     return
   if (event.key === 'Tab') {
-    if (open.value && props.actionLabel && !event.shiftKey) {
+    const continuation = nextPageButton.value ?? action.value
+    if (open.value && continuation && !continuation.disabled && !event.shiftKey) {
       event.preventDefault()
-      action.value?.focus({ preventScroll: true })
+      continuation.focus({ preventScroll: true })
       return
     }
 
@@ -209,6 +223,21 @@ function keydown(event: KeyboardEvent) {
   }
 }
 
+function pageTab(event: KeyboardEvent) {
+  if (event.shiftKey) {
+    event.preventDefault()
+    input.value?.focus({ preventScroll: true })
+  }
+  else if (action.value && !action.value.disabled) {
+    event.preventDefault()
+    action.value.focus({ preventScroll: true })
+  }
+  else {
+    close()
+    input.value?.focus({ preventScroll: true })
+  }
+}
+
 function outside(event: Event) {
   if (open.value && event.target instanceof Node && !root.value?.contains(event.target))
     close()
@@ -235,6 +264,7 @@ watch(() => props.options, async () => {
   positionPopup()
   revealActive()
 })
+watch(() => props.nextPage, () => nextTick(positionPopup))
 watch(() => props.disabled, disabled => disabled && close())
 watch(model, () => invalid.value = false)
 onMounted(() => {
@@ -276,6 +306,7 @@ onBeforeUnmount(() => {
         :id="`${id}-input`"
         ref="input"
         :value="value"
+        :maxlength="remote ? 200 : undefined"
         role="combobox"
         :aria-label="label"
         :aria-description="selected?.status?.label"
@@ -343,7 +374,7 @@ onBeforeUnmount(() => {
       @keydown.esc.prevent.stop="close(); input?.focus({ preventScroll: true })"
     >
       <header class="vs-popup-header h-9.5 flex items-center justify-between gap-3 text-3xs font-semibold text-muted bg-raised [border-bottom:1px_solid_light-dark(#e7e6f0,_var(--dark-border))] px-[13px] py-0">
-        <span>{{ query ? 'Search results' : label }}</span><span class="vs-count text-micro font-normal rounded-[5px] bg-surface text-muted px-1.5 py-[3px]">{{ filtered.length.toLocaleString() }} {{ filtered.length === 1 ? 'option' : 'options' }}</span>
+        <span v-if="!remote">{{ query ? 'Search results' : label }}</span><span class="vs-count min-w-0 truncate text-micro font-normal rounded-[5px] bg-surface text-muted px-1.5 py-[3px]" :title="remote ? pageStatus : undefined">{{ remote ? pageStatus : `${filtered.length.toLocaleString()} ${filtered.length === 1 ? 'option' : 'options'}` }}</span>
       </header>
       <div
         :id="`${id}-list`"
@@ -359,7 +390,7 @@ onBeforeUnmount(() => {
           <Icon :name="LoaderCircle" class="vs-spin animate-spin [@media(prefers-reduced-motion:_reduce)]:[animation:none]" :size="22" /><strong>Loading options…</strong>
         </div>
         <div v-else-if="!filtered.length" class="vs-empty flex flex-col gap-[7px] items-center justify-center h-full text-muted text-center p-2.5">
-          <Icon :name="SearchX" :size="23" /><strong>{{ query ? 'No matches found' : emptyText }}</strong><span v-if="query">Try another name or keyword.</span>
+          <Icon :name="SearchX" :size="23" /><strong>{{ remote ? 'No choices on this page' : query ? 'No matches found' : emptyText }}</strong><span v-if="query">Try another name or keyword.</span>
         </div>
         <div v-else class="vs-spacer relative w-full" :style="{ height: `${layout.height}px` }">
           <template v-for="row in rows" :key="row.key">
@@ -376,7 +407,7 @@ onBeforeUnmount(() => {
               :id="`${id}-option-${row.optionIndex}`"
               role="option"
               class="vs-option absolute inset-x-[5px] flex items-center gap-2.5 rounded-[7px] cursor-pointer border-3 border-transparent bg-clip-padding px-2.5 py-[7px]"
-              :aria-setsize="layout.options.length"
+              :aria-setsize="remote ? -1 : layout.options.length"
               :aria-posinset="row.optionIndex! + 1"
               :aria-selected="row.option.value === model"
               :aria-disabled="row.option.disabled || undefined"
@@ -411,7 +442,7 @@ onBeforeUnmount(() => {
           v-if="query"
           type="button"
           @mousedown.prevent
-          @click="query = ''; input?.focus({ preventScroll: true })"
+          @click="query = ''; remote && emit('search', ''); input?.focus({ preventScroll: true })"
         >
           Clear search
         </button><button
@@ -424,6 +455,18 @@ onBeforeUnmount(() => {
           <kbd>esc</kbd> Close
         </button>
       </footer>
+      <div v-if="remote && nextPage" class="border-t border-line p-1">
+        <button
+          ref="nextPageButton"
+          type="button"
+          class="min-h-10 w-full text-sm text-accent"
+          :disabled="loading || disabled"
+          @keydown.tab="pageTab"
+          @click="input?.focus({ preventScroll: true }); emit('next')"
+        >
+          Next page
+        </button>
+      </div>
       <div v-if="actionLabel" class="border-t border-line p-1">
         <button
           ref="action"
@@ -436,7 +479,7 @@ onBeforeUnmount(() => {
           <Icon :name="Plus" :size="17" />{{ actionLabel }}
         </button>
       </div>
-      <span class="sr-only" role="status">{{ loading ? 'Loading options' : `${filtered.length} options available` }}</span>
+      <span class="sr-only" role="status">{{ loading ? 'Loading options' : remote ? pageStatus : `${filtered.length} options available` }}</span>
     </div>
   </div>
 </template>

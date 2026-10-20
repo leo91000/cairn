@@ -226,12 +226,11 @@ impl Form {
         })
     }
 
-    pub(crate) async fn run(
+    pub(in crate::plugins) async fn run(
         self: &Arc<Self>,
         s: &Service,
         values: Value,
-        changed: Option<&str>,
-        submit: bool,
+        evaluation: &super::super::forms::Evaluation,
     ) -> Result<Value> {
         let values = super::super::forms::partial_values(&self.collection.settings, &values)?;
         let connection = self.target.connection();
@@ -247,25 +246,20 @@ impl Form {
             urls: None,
             owner: None,
             resource: Some(self.clone()),
+            root: None,
         };
         let scope = super::super::scope::Scope::Draft(Box::new(connection), Arc::new(draft));
-        let result = super::super::scope::invoke(
-            s,
-            self.target.package(),
-            "form",
-            json!({
-                "instance": self.target.instance(), "app": app, "resource": self.metadata(),
-                "values": values, "changed": changed, "submit": submit,
-            }),
-            &scope,
-        )
-        .await?;
-        cairn_plugin_api::validate_form_fields(
-            &self.collection.settings,
-            &["form", "parentId"],
-            &result,
-        )
-        .map_err(Error::bad_gateway)?;
+        let mut payload = json!({
+            "instance": self.target.instance(), "app": app, "resource": self.metadata(),
+            "values": values,
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(evaluation.fields().as_object().unwrap().clone());
+        let result =
+            super::super::scope::invoke(s, self.target.package(), "form", payload, &scope).await?;
+        let result = evaluation.finish(&self.collection.settings, &["form", "parentId"], result)?;
         self.recheck(s).await?;
         Ok(result)
     }
@@ -284,21 +278,8 @@ pub(crate) async fn preview(
         None => None,
     };
     let form = Form::load(s, target, collection, resource, input, false, owner).await?;
-    let changed = input["changed"].as_str().filter(|key| {
-        *key == "parentId"
-            || form
-                .collection
-                .settings
-                .iter()
-                .any(|field| field["key"] == *key)
-    });
-    let result = form
-        .run(s, input["settings"].clone(), changed, false)
-        .await?;
-    Ok(json!({
-        "options": result.get("options").cloned().unwrap_or_else(|| json!({})),
-        "values": result.get("values").cloned().unwrap_or_else(|| json!({})),
-        "errors": result.get("errors").cloned().unwrap_or_else(|| json!({})),
-        "view": result.get("view").cloned().unwrap_or_else(|| json!([])),
-    }))
+    let evaluation =
+        super::super::forms::Evaluation::preview(&form.collection.settings, &["parentId"], input)?;
+    let result = form.run(s, input["settings"].clone(), &evaluation).await?;
+    Ok(super::super::forms::response(&result))
 }

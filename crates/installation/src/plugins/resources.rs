@@ -227,7 +227,9 @@ pub(super) async fn save_for(
     };
     let mut settings = input["settings"].clone();
     if let Some(form) = &form {
-        let result = form.run(s, settings.clone(), None, true).await?;
+        let result = form
+            .run(s, settings.clone(), &super::forms::Evaluation::submit())
+            .await?;
         super::forms::require_valid(&collection.settings, &result)?;
         super::forms::merge_values(&mut settings, &result);
     }

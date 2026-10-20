@@ -31,20 +31,70 @@ internal fun PluginResourceRoutes(
     var error by remember { mutableStateOf<String?>(null) }
     var routes by remember { mutableStateOf(emptyList<PluginRoute>()) }
     var editing by rememberForm(false, path)
-    var original by rememberForm<PluginRoute?>(null, path)
     var removing by remember { mutableStateOf<PluginRoute?>(null) }
     var people by remember { mutableStateOf<PluginRoute?>(null) }
     var requests by remember { mutableStateOf(emptyList<PluginRouteRequest>()) }
-    var name by rememberForm("", path)
-    var routeEnabled by rememberForm(true, path)
-    var conditions by rememberForm(emptyList<Pair<String, String>>(), path)
-    var catchAll by rememberForm(false, path)
-    var agentId by rememberForm("", path)
-    var projectId by rememberForm("", path)
-    var mode by rememberForm("requests", path)
-    var personIds by rememberForm("", path)
-    var hourly by rememberForm("20", path)
-    var personalHourly by rememberForm("5", path)
+    val inputKeys =
+        setOf(
+            "name",
+            "enabled",
+            "conditions",
+            "catchAll",
+            "agent",
+            "project",
+            "mode",
+            "people",
+            "hourly",
+            "personalHourly",
+        )
+    val draft =
+        rememberPluginSettingsDraft(
+            inputKeys + setOf("id", "revision"),
+            emptyMap(),
+            wireJson.encodeToString(
+                listOf(
+                    state.origin,
+                    state.session.account?.id,
+                    state.installation?.id,
+                    path,
+                    "routes",
+                )
+            ),
+        )
+    var inputs by draft.state
+    var lostDraft by remember(draft) { mutableStateOf(editing && draft.notice != null) }
+    val name = inputs["name"].orEmpty()
+    val routeEnabled = inputs["enabled"] == "true"
+    val decodedConditions =
+        inputs["conditions"]?.let { value ->
+            runCatching { wireJson.decodeFromString<List<Pair<String, String>>>(value) }.getOrNull()
+        }
+    val conditions = decodedConditions.orEmpty()
+    val catchAll = inputs["catchAll"] == "true"
+    val agentId = inputs["agent"].orEmpty()
+    val projectId = inputs["project"].orEmpty()
+    val mode = inputs["mode"] ?: "requests"
+    val personIds = inputs["people"].orEmpty()
+    val hourly = inputs["hourly"] ?: "20"
+    val personalHourly = inputs["personalHourly"] ?: "5"
+    val originalId = inputs["id"]
+    val originalRevision = inputs["revision"]
+    val original = routes.find { it.id == originalId && it.revision == originalRevision }
+    fun input(key: String, value: String) {
+        inputs = inputs + (key to value)
+    }
+    fun sourceConditions(value: List<Pair<String, String>>) {
+        input("conditions", wireJson.encodeToString(value))
+    }
+    fun clearDraft() {
+        editing = false
+        draft.clear()
+        draft.discard()
+        lostDraft = false
+    }
+    // Closed resource widgets stay composed. They must neither retain inputs nor
+    // create empty snapshots that could evict another editor's active draft.
+    if (!editing && !draft.discarded) SideEffect { draft.discard() }
     var eligibility by remember { mutableStateOf(emptyList<RouteEligibility>()) }
     var previewFor by remember { mutableStateOf<String?>(null) }
     var previewError by remember { mutableStateOf<String?>(null) }
@@ -53,7 +103,7 @@ internal fun PluginResourceRoutes(
     val previewKey = "$projectId/$mode"
     val trimmedName = name.trim()
     val userIds = personIds.lines().map { it.trim() }.filter { it.isNotEmpty() }.distinct()
-    val controls = enabled && ready && !busy
+    val controls = enabled && ready && !busy && !lostDraft
     val conditionsValid =
         if (conditions.isEmpty()) catchAll
         else
@@ -68,6 +118,9 @@ internal fun PluginResourceRoutes(
     val canSave =
         controls &&
             editing &&
+            inputs.keys.containsAll(inputKeys) &&
+            decodedConditions != null &&
+            ((originalId == null && originalRevision == null) || original != null) &&
             previewFor == previewKey &&
             eligibility.any { it.agentId == agentId && it.eligible } &&
             trimmedName.isNotEmpty() &&
@@ -85,11 +138,10 @@ internal fun PluginResourceRoutes(
         val result = vm.api.pluginManagementItems<PluginRoute>("$path/routes")
         if (current == generation) {
             routes = result
-            val expected = original
             val unchanged =
                 !editing ||
-                    expected == null ||
-                    result.any { it.id == expected.id && it.revision == expected.revision }
+                    (originalId == null && originalRevision == null) ||
+                    result.any { it.id == originalId && it.revision == originalRevision }
             if (unchanged) {
                 ready = true
                 pendingWrite = false
@@ -127,24 +179,31 @@ internal fun PluginResourceRoutes(
         busy = false
         ready = false
         opened = false
-        editing = false
+        clearDraft()
         removing = null
         people = null
         activity(false)
     }
     fun edit(route: PluginRoute? = null) {
         if (!enabled || !ready || busy) return
-        original = route
-        name = route?.name.orEmpty()
-        routeEnabled = route?.enabled ?: true
-        conditions = route?.match?.toList().orEmpty()
-        catchAll = route != null && conditions.isEmpty()
-        agentId = route?.agentId.orEmpty()
-        projectId = route?.projectId.orEmpty()
-        mode = route?.accessMode ?: "requests"
-        personIds = route?.userIds.orEmpty().joinToString("\n")
-        hourly = (route?.maxMessagesPerHour ?: 20).toString()
-        personalHourly = (route?.maxPerPersonPerHour ?: 5).toString()
+        draft.discarded = false
+        inputs = buildMap {
+            route?.let {
+                put("id", it.id)
+                put("revision", it.revision)
+            }
+            put("name", route?.name.orEmpty())
+            put("enabled", (route?.enabled ?: true).toString())
+            put("conditions", wireJson.encodeToString(route?.match?.toList().orEmpty()))
+            put("catchAll", (route != null && route.match.isEmpty()).toString())
+            put("agent", route?.agentId.orEmpty())
+            put("project", route?.projectId.orEmpty())
+            put("mode", route?.accessMode ?: "requests")
+            put("people", route?.userIds.orEmpty().joinToString("\n"))
+            put("hourly", (route?.maxMessagesPerHour ?: 20).toString())
+            put("personalHourly", (route?.maxPerPersonPerHour ?: 5).toString())
+        }
+        lostDraft = false
         previewFor = null
         previewError = null
         people = null
@@ -163,7 +222,7 @@ internal fun PluginResourceRoutes(
                 vm.api.request(method, target, body)
                 if (current != generation) return@launch
                 pendingWrite = false
-                editing = false
+                clearDraft()
                 removing = null
                 people = null
                 writing = false
@@ -171,7 +230,7 @@ internal fun PluginResourceRoutes(
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 if (current == generation) {
-                    editing = false
+                    clearDraft()
                     removing = null
                     people = null
                     error = "${e.message} Actualisez les routes avant une autre modification."
@@ -277,7 +336,7 @@ internal fun PluginResourceRoutes(
         if (opened) {
             activity(true)
             if (pendingWrite) {
-                editing = false
+                clearDraft()
                 error = "Actualisez les routes avant une autre modification."
             } else reload()
         }
@@ -433,9 +492,16 @@ internal fun PluginResourceRoutes(
                 }
             }
             if (editing) {
-                Field("Nom de la route", name, { name = it }, enabled = controls)
+                if (lostDraft)
+                    Text(
+                        "Les saisies de la route n’ont pas pu être récupérées. Annulez la modification puis recommencez depuis la route enregistrée.",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                Field("Nom de la route", name, { input("name", it) }, enabled = controls)
                 Text("Jusqu’à 100 caractères.", style = MaterialTheme.typography.bodySmall)
-                Toggle("Route activée", routeEnabled) { if (controls) routeEnabled = it }
+                Toggle("Route activée", routeEnabled) {
+                    if (controls) input("enabled", it.toString())
+                }
                 ChoiceList(
                     "Projet",
                     projectId,
@@ -443,7 +509,7 @@ internal fun PluginResourceRoutes(
                         state.projects.map { PluginOption(it.id, it.name) },
                     controls,
                 ) {
-                    projectId = it
+                    input("project", it)
                 }
                 ChoiceList(
                     "Qui peut participer",
@@ -455,7 +521,7 @@ internal fun PluginResourceRoutes(
                     ),
                     controls,
                 ) {
-                    mode = it
+                    input("mode", it)
                 }
                 if (previewError != null)
                     Text(previewError!!, color = MaterialTheme.colorScheme.error)
@@ -475,7 +541,7 @@ internal fun PluginResourceRoutes(
                     },
                     controls && previewFor == previewKey,
                 ) {
-                    agentId = it
+                    input("agent", it)
                 }
                 Text(
                     "L’agent doit être dédié au projet choisi. Tout le monde exige un agent en lecture seule sans accès installation, GitHub, MCP ou plugin.",
@@ -492,9 +558,11 @@ internal fun PluginResourceRoutes(
                             "Clé de la condition ${index + 1}",
                             condition.first,
                             { value ->
-                                conditions = conditions.mapIndexed { i, item ->
-                                    if (i == index) value to item.second else item
-                                }
+                                sourceConditions(
+                                    conditions.mapIndexed { i, item ->
+                                        if (i == index) value to item.second else item
+                                    }
+                                )
                             },
                             enabled = controls,
                         )
@@ -502,16 +570,18 @@ internal fun PluginResourceRoutes(
                             "Valeur de la condition ${index + 1}",
                             condition.second,
                             { value ->
-                                conditions = conditions.mapIndexed { i, item ->
-                                    if (i == index) item.first to value else item
-                                }
+                                sourceConditions(
+                                    conditions.mapIndexed { i, item ->
+                                        if (i == index) item.first to value else item
+                                    }
+                                )
                             },
                             enabled = controls,
                         )
                         TextButton(
                             onClick = {
-                                conditions = conditions.filterIndexed { i, _ -> i != index }
-                                catchAll = false
+                                sourceConditions(conditions.filterIndexed { i, _ -> i != index })
+                                input("catchAll", "false")
                             },
                             enabled = controls,
                         ) {
@@ -521,8 +591,8 @@ internal fun PluginResourceRoutes(
                 }
                 TextButton(
                     onClick = {
-                        conditions = conditions + ("" to "")
-                        catchAll = false
+                        sourceConditions(conditions + ("" to ""))
+                        input("catchAll", "false")
                     },
                     enabled = controls && conditions.size < 8,
                 ) {
@@ -530,12 +600,12 @@ internal fun PluginResourceRoutes(
                 }
                 if (conditions.isEmpty())
                     Toggle("Toutes les sources de cette ressource", catchAll) {
-                        if (controls) catchAll = it
+                        if (controls) input("catchAll", it.toString())
                     }
                 Field(
                     "Identifiants des personnes autorisées",
                     personIds,
-                    { personIds = it },
+                    { input("people", it) },
                     lines = 3,
                     enabled = controls,
                 )
@@ -546,14 +616,14 @@ internal fun PluginResourceRoutes(
                 Field(
                     "Messages par heure",
                     hourly,
-                    { hourly = it },
+                    { input("hourly", it) },
                     enabled = controls,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 )
                 Field(
                     "Messages par personne et par heure",
                     personalHourly,
-                    { personalHourly = it },
+                    { input("personalHourly", it) },
                     enabled = controls,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 )
@@ -561,7 +631,7 @@ internal fun PluginResourceRoutes(
                     "Le plafond par personne s’applique à Tout le monde.",
                     style = MaterialTheme.typography.bodySmall,
                 )
-                TextButton(onClick = { editing = false }, enabled = !busy) {
+                TextButton(onClick = { clearDraft() }, enabled = !busy) {
                     Text("Annuler la modification")
                 }
             }

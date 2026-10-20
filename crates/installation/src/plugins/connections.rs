@@ -653,6 +653,7 @@ pub(crate) struct Prepared {
     encrypted_secrets: Option<Value>,
     updating: bool,
     keep_agents: bool,
+    root: Option<std::sync::Arc<super::resources::target::Target>>,
 }
 
 pub async fn save(
@@ -702,6 +703,11 @@ pub(crate) async fn prepare(
         SaveSource::Setup(draft) => (Some(draft.id.as_str()), Some(draft), false),
     };
     let plugin_id = package.manifest.id.as_str();
+    let root = if updating {
+        Some(super::resources::target::Target::active(s, plugin_id, existing.unwrap()).await?)
+    } else {
+        None
+    };
     let manifest = package.manifest.clone();
     let owner = crate::relay::task_author_policy(s).await?;
     let name = text(input, "name").trim();
@@ -840,6 +846,7 @@ pub(crate) async fn prepare(
             setup: setup.cloned().map(Box::new),
             owner: request_owner,
             resource: None,
+            root: root.clone(),
             urls: if setup.is_some() {
                 Some(forms::setup_urls(s, &package.manifest, &connection_id, input).await?)
             } else {
@@ -891,6 +898,7 @@ pub(crate) async fn prepare(
         encrypted_secrets,
         updating,
         keep_agents,
+        root,
     })
 }
 
@@ -902,7 +910,11 @@ impl Prepared {
             encrypted_secrets,
             updating,
             keep_agents,
+            root,
         } = self;
+        if let Some(root) = root {
+            root.current(db)?;
+        }
         if let Some(current) = db.get(KIND, &connection.id)? {
             if !updating || current["pluginId"] != connection.plugin_id {
                 return Err(Error::not_found("Plugin connection not found."));

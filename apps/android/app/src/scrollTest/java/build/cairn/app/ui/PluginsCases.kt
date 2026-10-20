@@ -3355,6 +3355,347 @@ abstract class PluginsCases {
     }
 
     @Test
+    fun closedLargeRouteEditorsKeepActivityStateSmall() {
+        val root = "/plugins/large-routes/connections/app/resources/workspace"
+        val users = (0 until 100).map { it.toString().padStart(64, '0') }
+        val routes =
+            (0 until 16).map { index ->
+                PluginRoute(
+                    id = "route$index",
+                    resourceId = "resource$index",
+                    name = "Route $index",
+                    match = mapOf("channel" to "C$index"),
+                    agentId = "helper",
+                    userIds = users,
+                    people = users.map { PluginLabel(it, "😀".repeat(100)) },
+                    revision = "revision$index",
+                )
+            }
+        val writes = CopyOnWriteArrayList<String>()
+        val restoration = StateRestorationTester(compose)
+        val registry = AtomicReference<androidx.compose.runtime.saveable.SaveableStateRegistry>()
+        MockWebServer().use { server ->
+            server.dispatcher =
+                dispatcher(
+                    read = { requested ->
+                        val route = routes.find {
+                            requested.endsWith("$root/${it.resourceId}/routes")
+                        }
+                        when {
+                            route != null -> wireJson.encodeToString(PluginPage(listOf(route)))
+                            requested.contains(root) && requested.contains("/route-eligibility?") ->
+                                wireJson.encodeToString(
+                                    PluginPage(listOf(RouteEligibility("helper", true)))
+                                )
+                            else -> null
+                        }
+                    }
+                ) { requested, _ ->
+                    if (requested.contains(root)) writes += requested
+                    null
+                }
+            server.start()
+            val vm =
+                show(server, restoration) { model, state ->
+                    val current =
+                        androidx.compose.runtime.saveable.LocalSaveableStateRegistry.current
+                    SideEffect { registry.set(checkNotNull(current)) }
+                    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                        routes.forEach { route ->
+                            key(route.resourceId) {
+                                PluginResourceRoutes(
+                                    model,
+                                    state,
+                                    "$root/${route.resourceId}",
+                                    route.resourceId,
+                                    true,
+                                ) {}
+                            }
+                        }
+                    }
+                }
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            try {
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("Routes de conversation")
+                        .fetchSemanticsNodes()
+                        .size == routes.size
+                }
+                routes.forEachIndexed { index, route ->
+                    compose
+                        .onAllNodesWithText("Routes de conversation")[index]
+                        .performScrollTo()
+                        .performClick()
+                    compose.waitUntil(10000) {
+                        compose
+                            .onAllNodes(hasText("Modifier la route ${route.name}") and isEnabled())
+                            .fetchSemanticsNodes()
+                            .isNotEmpty()
+                    }
+                    compose
+                        .onNodeWithText("Modifier la route ${route.name}")
+                        .performScrollTo()
+                        .performClick()
+                    compose.onNodeWithText("Nom de la route").assertTextContains(route.name)
+                    if (index % 2 == 0)
+                        compose
+                            .onNodeWithText("Annuler la modification")
+                            .performScrollTo()
+                            .performClick()
+                    compose.onNodeWithContentDescription("Fermer").performClick()
+                    compose.waitForIdle()
+                }
+                val bytes = compose.runOnIdle {
+                    val parcel = android.os.Parcel.obtain()
+                    try {
+                        parcel.writeValue(registry.get().performSave())
+                        parcel.dataSize()
+                    } finally {
+                        parcel.recycle()
+                    }
+                }
+                println("Activity state after closing 16 large route editors: $bytes bytes")
+                assertTrue(
+                    "Closed route editors must not inflate activity state: $bytes",
+                    bytes < 65536,
+                )
+                restoration.emulateSavedInstanceStateRestore()
+                compose.onAllNodesWithText("Routes de conversation").assertCountEquals(routes.size)
+                assertTrue("Restoration must not submit a route", writes.isEmpty())
+            } finally {
+                models.clear()
+            }
+        }
+    }
+
+    @Test
+    fun largeRouteInputsRestoreWithoutSavingThePeopleDirectory() = routeInputRestoration("saved")
+
+    @Test fun missingLocalRouteInputsRequireAnExplicitRestart() = routeInputRestoration("missing")
+
+    @Test fun replacedRouteRevisionCannotRestoreAnEditableDraft() = routeInputRestoration("changed")
+
+    @Test fun deletedRouteCannotRestoreAsANewRoute() = routeInputRestoration("deleted")
+
+    @Test
+    fun closedPermissionWidgetsDoNotEvictActiveRouteInputs() =
+        routeInputRestoration("closed-grants")
+
+    private fun routeInputRestoration(recovery: String) {
+        if (recovery == "closed-grants")
+            PluginSettingsDraftStore.clear(ApplicationProvider.getApplicationContext())
+        val root = "/plugins/route-inputs/connections/app/resources/workspace/engineering"
+        val users = (0 until 100).map { it.toString().padStart(64, '0') }
+        val initial =
+            PluginRoute(
+                id = "route",
+                resourceId = "engineering",
+                name = "Existing route",
+                match = mapOf("channel" to "original"),
+                agentId = "helper",
+                userIds = users,
+                people = users.map { PluginLabel(it, "😀".repeat(100)) },
+                revision = "r1",
+            )
+        val current = AtomicReference<PluginRoute?>(initial)
+        val writes = CopyOnWriteArrayList<Pair<String, JsonObject>>()
+        val restoration = StateRestorationTester(compose)
+        val registry = AtomicReference<androidx.compose.runtime.saveable.SaveableStateRegistry>()
+        MockWebServer().use { server ->
+            server.dispatcher =
+                dispatcher(
+                    read = { path ->
+                        when {
+                            path.endsWith("$root/routes") ->
+                                wireJson.encodeToString(PluginPage(listOfNotNull(current.get())))
+                            path.contains("$root/route-eligibility?") ->
+                                wireJson.encodeToString(
+                                    PluginPage(listOf(RouteEligibility("helper", true)))
+                                )
+                            else -> null
+                        }
+                    }
+                ) { path, body ->
+                    if (path.contains("$root/routes")) {
+                        writes += path to wireJson.parseToJsonElement(body).jsonObject
+                        "{}"
+                    } else null
+                }
+            server.start()
+            val vm =
+                show(server, restoration) { model, state ->
+                    val owner = androidx.compose.runtime.saveable.LocalSaveableStateRegistry.current
+                    SideEffect { registry.set(checkNotNull(owner)) }
+                    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                        PluginResourceRoutes(model, state, root, "Engineering", true) {}
+                        if (recovery == "closed-grants")
+                            repeat(96) { index ->
+                                key(index) {
+                                    PluginResourceGrants(
+                                        model,
+                                        state,
+                                        "$root/closed$index/grants",
+                                        "Closed $index",
+                                        listOf(
+                                            PluginOperation(
+                                                "read",
+                                                "workspace",
+                                                PluginAccessProfile.Read,
+                                                listOf("channel"),
+                                            )
+                                        ),
+                                        true,
+                                    ) {}
+                                }
+                            }
+                    }
+                }
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            fun waitEnabled(label: String) =
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodes(hasText(label) and isEnabled())
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+            try {
+                waitEnabled("Routes de conversation")
+                compose.onNodeWithText("Routes de conversation").performClick()
+                waitEnabled("Modifier la route Existing route")
+                compose
+                    .onNodeWithText("Modifier la route Existing route")
+                    .performScrollTo()
+                    .performClick()
+                compose.onNodeWithText("Nom de la route").performTextReplacement("Draft route")
+                compose
+                    .onNodeWithText("Valeur de la condition 1")
+                    .performScrollTo()
+                    .performTextReplacement("support")
+                compose
+                    .onNodeWithText("Identifiants des personnes autorisées")
+                    .performScrollTo()
+                    .performTextReplacement(users.dropLast(1).joinToString("\n"))
+                waitEnabled("Enregistrer")
+                val bytes = compose.runOnIdle {
+                    val parcel = android.os.Parcel.obtain()
+                    try {
+                        parcel.writeValue(registry.get().performSave())
+                        parcel.dataSize()
+                    } finally {
+                        parcel.recycle()
+                    }
+                }
+                assertTrue(
+                    "Active route inputs must not inflate activity state: $bytes",
+                    bytes < if (recovery == "closed-grants") 262144 else 65536,
+                )
+                println("Active route input activity state ($recovery): $bytes bytes")
+                if (recovery == "closed-grants") {
+                    val snapshots =
+                        ApplicationProvider.getApplicationContext<android.content.Context>()
+                            .noBackupFilesDir
+                            .resolve("plugin-setup-drafts")
+                            .listFiles()
+                            .orEmpty()
+                            .filter { it.isFile && it.name.endsWith(".json") }
+                    assertEquals(
+                        "Only the active editor may save ordinary inputs",
+                        1,
+                        snapshots.size,
+                    )
+                }
+                when (recovery) {
+                    "missing" ->
+                        PluginSettingsDraftStore.clear(ApplicationProvider.getApplicationContext())
+                    "changed" -> current.set(initial.copy(revision = "r2", name = "Remote change"))
+                    "deleted" -> current.set(null)
+                }
+                restoration.emulateSavedInstanceStateRestore()
+                compose.onNodeWithText("Nom de la route").assertExists()
+                if (recovery == "missing") {
+                    compose
+                        .onNodeWithText(
+                            "Les saisies de la route n’ont pas pu être récupérées. Annulez la modification puis recommencez depuis la route enregistrée."
+                        )
+                        .assertExists()
+                    compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                    compose
+                        .onNodeWithText("Annuler la modification")
+                        .performScrollTo()
+                        .performClick()
+                    waitEnabled("Modifier la route Existing route")
+                    compose
+                        .onNodeWithText("Modifier la route Existing route")
+                        .performScrollTo()
+                        .performClick()
+                    compose.onNodeWithText("Nom de la route").assertTextContains("Existing route")
+                    compose
+                        .onNodeWithText("Valeur de la condition 1")
+                        .assertTextContains("original")
+                    compose
+                        .onNodeWithText("Identifiants des personnes autorisées")
+                        .assertTextContains(users.joinToString("\n"))
+                    assertTrue(
+                        "Losing local inputs must never save a broader route",
+                        writes.isEmpty(),
+                    )
+                    return
+                }
+                if (recovery == "changed" || recovery == "deleted") {
+                    compose.waitUntil(10000) {
+                        compose
+                            .onAllNodesWithText(
+                                "La route a changé. Fermez cet éditeur puis actualisez les routes."
+                            )
+                            .fetchSemanticsNodes()
+                            .isNotEmpty()
+                    }
+                    compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                    assertTrue(
+                        "An obsolete edit must not become a fresh route creation",
+                        writes.isEmpty(),
+                    )
+                    return
+                }
+                compose.onNodeWithText("Nom de la route").assertTextContains("Draft route")
+                waitEnabled("Enregistrer")
+                compose.onNodeWithText("Valeur de la condition 1").assertTextContains("support")
+                compose
+                    .onNodeWithText("Identifiants des personnes autorisées")
+                    .assertTextContains(users.dropLast(1).joinToString("\n"))
+                assertTrue("Restoration must not submit a route", writes.isEmpty())
+                compose.onNodeWithText("Enregistrer").performClick()
+                compose.waitUntil(10000) {
+                    writes.size == 1 &&
+                        compose
+                            .onAllNodesWithText("Modifier la route Existing route")
+                            .fetchSemanticsNodes()
+                            .isNotEmpty()
+                }
+                val (target, body) = writes.single()
+                assertTrue(target.endsWith("$root/routes/route"))
+                assertEquals("r1", body["revision"]!!.jsonPrimitive.content)
+                assertEquals("Draft route", body["name"]!!.jsonPrimitive.content)
+                assertEquals(
+                    "support",
+                    body["match"]!!.jsonObject["channel"]!!.jsonPrimitive.content,
+                )
+                assertEquals(
+                    users.dropLast(1),
+                    wireJson.decodeFromJsonElement<List<String>>(body["userIds"]!!),
+                )
+                assertEquals(
+                    initial.people.dropLast(1),
+                    wireJson.decodeFromJsonElement<List<PluginLabel>>(body["people"]!!),
+                )
+            } finally {
+                models.clear()
+            }
+        }
+    }
+
+    @Test
     fun largeGrantInputsUseSmallSavedStateAndRetainExactLimits() = grantInputRestoration(false)
 
     @Test fun missingLocalGrantInputsCannotRestoreAnUnrestrictedRule() = grantInputRestoration(true)
@@ -3766,6 +4107,304 @@ abstract class PluginsCases {
         }
     }
 
+    @Test fun activeRemoteInstanceChoicesAreBoundToTheEditor() = remoteInstanceChoices(false)
+
+    @Test fun preparedRemoteInstanceChoicesAreBoundToTheEditor() = remoteInstanceChoices(true)
+
+    private fun remoteInstanceChoices(prepared: Boolean) {
+        val manifest =
+            PluginManifest(
+                id = "remote-root",
+                name = "Remote service",
+                version = "1",
+                instanceForm = true,
+                settings =
+                    listOf(
+                        PluginSetting(
+                            "channel",
+                            "Channel",
+                            type = "select",
+                            dynamic = true,
+                            remote = true,
+                        )
+                    ),
+            )
+        val connection =
+            PluginConnection(
+                id = "app",
+                pluginId = manifest.id,
+                name = "Remote app",
+                settings = buildJsonObject { put("channel", "saved-off-page") },
+            )
+        val draft =
+            PluginSetupDraft(
+                id = "app",
+                pluginId = manifest.id,
+                name = connection.name,
+                revision = "r1",
+                settings = connection.settings,
+                expiresAt = System.currentTimeMillis() + 86400000,
+            )
+        val previews = CopyOnWriteArrayList<JsonObject>()
+        val writes = CopyOnWriteArrayList<JsonObject>()
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val released = CountDownLatch(1)
+        fun waitText(text: String) =
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty()
+            }
+        MockWebServer().use { server ->
+            server.dispatcher =
+                dispatcher(
+                    read = { path ->
+                        when {
+                            path.endsWith("/plugins") ->
+                                wireJson.encodeToString(
+                                    PluginCatalog(
+                                        setupDrafts = true,
+                                        packages =
+                                            listOf(
+                                                PluginEntry(
+                                                    id = manifest.id,
+                                                    active = "1",
+                                                    manifest = manifest,
+                                                )
+                                            ),
+                                        connections =
+                                            if (prepared) emptyList() else listOf(connection),
+                                    )
+                                )
+                            path.endsWith("/setup-drafts/app") -> wireJson.encodeToString(draft)
+                            else -> null
+                        }
+                    }
+                ) { path, body ->
+                    if (!path.contains("/remote-root/")) return@dispatcher null
+                    val input = wireJson.parseToJsonElement(body).jsonObject
+                    if (!path.endsWith("/form")) {
+                        writes += input
+                        return@dispatcher if (prepared)
+                            wireJson.encodeToString(
+                                draft.copy(
+                                    revision = "r2",
+                                    settings = input.getValue("settings").jsonObject,
+                                )
+                            )
+                        else
+                            wireJson.encodeToString(
+                                connection.copy(settings = input.getValue("settings").jsonObject)
+                            )
+                    }
+                    previews += input
+                    val lookup =
+                        input["lookup"]?.let {
+                            wireJson.decodeFromJsonElement<PluginFormLookup>(it)
+                        } ?: return@dispatcher "null"
+                    if (lookup.query == "old") {
+                        entered.countDown()
+                        check(release.await(20, TimeUnit.SECONDS))
+                        released.countDown()
+                    }
+                    val options =
+                        when {
+                            lookup.query == "unknown" || lookup.cursor == "empty" -> emptyList()
+                            lookup.query.isNotEmpty() ->
+                                listOf(PluginOption(lookup.query, "${lookup.query} choice"))
+                            lookup.cursor == "last" -> listOf(PluginOption("C2", "Engineering"))
+                            else -> listOf(PluginOption("C1", "General"))
+                        }
+                    wireJson.encodeToString(
+                        PluginForm(
+                            options = mapOf("channel" to options),
+                            lookup = lookup,
+                            pages =
+                                if (lookup.query == "unknown") null
+                                else
+                                    mapOf(
+                                        "channel" to
+                                            PluginChoicePage(
+                                                when (lookup.cursor) {
+                                                    null -> "empty"
+                                                    "empty" -> "last"
+                                                    else -> null
+                                                }
+                                            )
+                                    ),
+                        )
+                    )
+                }
+            server.start()
+            val vm =
+                show(server) { model, state ->
+                    if (prepared) PluginSetup(model, state, manifest, draft, {}, {}, {})
+                    else PluginScreen(model, state, manifest.id) {}
+                }
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            try {
+                if (!prepared) {
+                    waitText("Modifier")
+                    compose.onNodeWithText("Modifier").performScrollTo().performClick()
+                }
+                waitText("General")
+                compose.onNodeWithContentDescription("General").performScrollTo().performClick()
+                waitText("Page suivante")
+                compose.onNodeWithText("Page suivante").performScrollTo().performClick()
+                waitText("0 choix sur cette page · D’autres choix sont disponibles")
+                compose.onNodeWithText("General").assertExists()
+                compose.onNodeWithText("Page suivante").performScrollTo().performClick()
+                waitText("1 choix sur cette page · Fin des résultats")
+                compose.onNodeWithText("General").assertExists()
+                compose
+                    .onNodeWithText("Rechercher · Channel")
+                    .performScrollTo()
+                    .performTextReplacement("unknown")
+                waitText("0 choix sur cette page · Complétude inconnue")
+                compose.waitUntil(10000) {
+                    previews.any {
+                        it["lookup"]?.jsonObject?.get("query") == JsonPrimitive("unknown")
+                    } &&
+                        compose
+                            .onAllNodesWithText("Chargement des choix…")
+                            .fetchSemanticsNodes()
+                            .isEmpty()
+                }
+                compose.onNodeWithText("Rechercher · Channel").performTextReplacement("old")
+                compose.waitUntil(10000) { entered.count == 0L }
+                compose.onNodeWithText("Rechercher · Channel").performTextReplacement("new")
+                waitText("new choice")
+                release.countDown()
+                compose.waitUntil(10000) { released.count == 0L }
+                compose.onNodeWithText("old choice").assertDoesNotExist()
+                val save = if (prepared) "Enregistrer la configuration" else "Enregistrer"
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodes(hasText(save) and isEnabled())
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                val saveButton = compose.onNodeWithText(save)
+                if (prepared) saveButton.performScrollTo()
+                saveButton.performClick()
+                compose.waitUntil(10000) { writes.isNotEmpty() }
+                assertEquals(
+                    "C1",
+                    writes.last()["settings"]?.jsonObject?.get("channel")?.jsonPrimitive?.content,
+                )
+                val lookups = previews.filter { it["lookup"] != null }
+                assertTrue(lookups.isNotEmpty())
+                assertTrue(
+                    lookups.all {
+                        if (prepared) it["revision"] == JsonPrimitive("r1")
+                        else it["instance"] == JsonPrimitive("app")
+                    }
+                )
+                assertTrue(lookups.none { it.containsKey("changed") })
+            } finally {
+                release.countDown()
+                models.clear()
+            }
+        }
+    }
+
+    @Test
+    fun remoteMultipleChoicesKeepOffPageIdsAndAllowRemoval() {
+        val field =
+            PluginSetting("channel", "Members", type = "multiselect", dynamic = true, remote = true)
+        val current = AtomicReference<String>()
+        val requests = CopyOnWriteArrayList<JsonObject>()
+        fun waitText(text: String) =
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty()
+            }
+        MockWebServer().use { server ->
+            server.dispatcher = dispatcher { path, body ->
+                if (!path.endsWith("/plugins/remote-multi/form")) return@dispatcher null
+                val input = wireJson.parseToJsonElement(body).jsonObject
+                requests += input
+                val lookup =
+                    wireJson.decodeFromJsonElement<PluginFormLookup>(input.getValue("lookup"))
+                wireJson.encodeToString(
+                    PluginForm(
+                        lookup = lookup,
+                        options =
+                            mapOf(
+                                "channel" to
+                                    if (lookup.cursor == "empty") emptyList()
+                                    else listOf(PluginOption("M1", "General member"))
+                            ),
+                        pages =
+                            mapOf(
+                                "channel" to
+                                    PluginChoicePage(
+                                        when (lookup.cursor) {
+                                            null -> "empty"
+                                            "empty" -> "last"
+                                            else -> null
+                                        }
+                                    )
+                            ),
+                    )
+                )
+            }
+            server.start()
+            val vm =
+                show(server) { model, _ ->
+                    var value by remember { mutableStateOf("[\"M0\"]") }
+                    val values = mapOf("channel" to value)
+                    val lookup =
+                        PluginChoiceLookup(
+                            model.api,
+                            "/plugins/remote-multi/form",
+                            buildJsonObject {
+                                put("settings", pluginSettings(listOf(field), values))
+                            },
+                        )
+                    Page {
+                        PluginFields(
+                            listOf(field),
+                            values,
+                            { _, next -> value = next },
+                            emptyMap(),
+                            { _, _ -> },
+                            lookup = lookup,
+                        )
+                    }
+                    SideEffect { current.set(value) }
+                }
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            try {
+                waitText("General member")
+                compose
+                    .onNodeWithContentDescription("General member")
+                    .performScrollTo()
+                    .performClick()
+                compose.waitUntil(10000) { current.get() == "[\"M0\",\"M1\"]" }
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodes(hasText("Page suivante") and isEnabled())
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.onNodeWithText("Page suivante").performScrollTo().performClick()
+                waitText("0 choix sur cette page · D’autres choix sont disponibles")
+                compose.onNodeWithText("Retirer General member").performScrollTo().performClick()
+                compose.waitUntil(10000) { current.get() == "[\"M0\"]" }
+                assertTrue(
+                    requests.any {
+                        it["settings"]?.jsonObject?.get("channel") ==
+                            buildJsonArray {
+                                add("M0")
+                                add("M1")
+                            }
+                    }
+                )
+            } finally {
+                models.clear()
+            }
+        }
+    }
+
     @Test
     fun activeResourceFormsDiscardStaleParentsAndRestoreWithoutSecrets() = scopedResourceForm(false)
 
@@ -3773,7 +4412,13 @@ abstract class PluginsCases {
     fun preparedResourceFormsDiscardStaleParentsAndRestoreWithoutSecrets() =
         scopedResourceForm(true)
 
-    private fun scopedResourceForm(prepared: Boolean) {
+    @Test
+    fun activeRemoteResourceChoicesRetainSelectionAcrossPages() = scopedResourceForm(false, true)
+
+    @Test
+    fun preparedRemoteResourceChoicesRetainSelectionAcrossPages() = scopedResourceForm(true, true)
+
+    private fun scopedResourceForm(prepared: Boolean, remote: Boolean = false) {
         val workspaces = PluginResourceCollection("workspace", "Workspaces", "Workspace")
         val channels =
             PluginResourceCollection(
@@ -3789,6 +4434,7 @@ abstract class PluginsCases {
                             "Channel",
                             type = "select",
                             dynamic = true,
+                            remote = remote,
                             required = true,
                         ),
                         PluginSetting("verified", "Verified name", hidden = true),
@@ -3844,6 +4490,32 @@ abstract class PluginsCases {
                             entered.countDown()
                             check(release.await(20, TimeUnit.SECONDS))
                             released.countDown()
+                        }
+                        val lookup =
+                            input["lookup"]?.let {
+                                wireJson.decodeFromJsonElement<PluginFormLookup>(it)
+                            }
+                        if (lookup != null) {
+                            val choices =
+                                if (parent == null || lookup.cursor == "empty") emptyList()
+                                else listOf(PluginOption("$parent-general", "$parent general"))
+                            return@dispatcher wireJson.encodeToString(
+                                PluginForm(
+                                    options = mapOf("channel" to choices),
+                                    lookup = lookup,
+                                    pages =
+                                        mapOf(
+                                            "channel" to
+                                                PluginChoicePage(
+                                                    when (lookup.cursor) {
+                                                        null -> "empty"
+                                                        "empty" -> "last"
+                                                        else -> null
+                                                    }
+                                                )
+                                        ),
+                                )
+                            )
                         }
                         if (parent == null)
                             """{"errors":{"parentId":"Choose a workspace first."}}"""
@@ -3925,6 +4597,35 @@ abstract class PluginsCases {
                 compose.waitForIdle()
                 compose.onNodeWithText("Only sales is queried.").assertExists()
                 compose.onNodeWithText("engineering general").assertDoesNotExist()
+                if (remote) {
+                    waitEnabled("Page suivante")
+                    compose.onNodeWithText("Page suivante").performScrollTo().performClick()
+                    compose.waitUntil(10000) {
+                        compose
+                            .onAllNodesWithText(
+                                "0 choix sur cette page · D’autres choix sont disponibles"
+                            )
+                            .fetchSemanticsNodes()
+                            .isNotEmpty()
+                    }
+                    compose.onNodeWithText("sales general").assertExists()
+                    compose.onNodeWithText("Page suivante").performScrollTo().performClick()
+                    compose.waitUntil(10000) {
+                        compose
+                            .onAllNodesWithText("1 choix sur cette page · Fin des résultats")
+                            .fetchSemanticsNodes()
+                            .isNotEmpty()
+                    }
+                    compose.onNodeWithText("Page suivante").assertDoesNotExist()
+                    val selected =
+                        previews
+                            .last()["settings"]
+                            ?.jsonObject
+                            ?.get("channel")
+                            ?.jsonPrimitive
+                            ?.content
+                    assertEquals("sales-general", selected)
+                }
                 compose
                     .onNodeWithText("Credential")
                     .performScrollTo()

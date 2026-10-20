@@ -620,7 +620,13 @@ async fn recheck_http_access(
         .draft
         .as_ref()
         .and_then(|draft| draft.resource.clone());
-    if resource.is_some() || oauth.is_some() || context.resource_grant.is_some() || form.is_some() {
+    let root = context.draft.as_ref().and_then(|draft| draft.root.clone());
+    if resource.is_some()
+        || oauth.is_some()
+        || context.resource_grant.is_some()
+        || form.is_some()
+        || root.is_some()
+    {
         let connection = context.connection.clone();
         let resource = resource.cloned();
         let oauth = oauth.cloned();
@@ -638,6 +644,9 @@ async fn recheck_http_access(
                 }
                 if let Some(form) = &form {
                     form.current(db)?;
+                }
+                if let Some(root) = &root {
+                    root.current(db)?;
                 }
                 if let Some(oauth) = &oauth {
                     super::oauth::recheck_in(&vault, db, oauth)?;

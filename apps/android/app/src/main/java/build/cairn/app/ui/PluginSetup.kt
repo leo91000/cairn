@@ -91,6 +91,13 @@ internal fun PluginSetup(
         }
     }
     val resourceWork = resources.busy || resources.pending || resources.editing
+    fun formBody() = buildJsonObject {
+        put("revision", revision)
+        put("settings", pluginSettings(manifest.settings, values))
+        put("secrets", JsonObject(secrets.mapValues { JsonPrimitive(it.value) }))
+        if (token.isNotBlank()) put("token", token.trim())
+    }
+    val lookup = PluginChoiceLookup(vm.api, "$path/form", formBody(), manifest.version)
     fun refresh(changed: String? = null) {
         if (manifest.instanceForm) {
             changedField = changed
@@ -115,13 +122,7 @@ internal fun PluginSetup(
                         vm.api.pluginOperation(
                             "$path/form",
                             buildJsonObject {
-                                put("revision", revision)
-                                put("settings", pluginSettings(manifest.settings, values))
-                                put(
-                                    "secrets",
-                                    JsonObject(secrets.mapValues { JsonPrimitive(it.value) }),
-                                )
-                                if (token.isNotBlank()) put("token", token.trim())
+                                formBody().forEach { (key, value) -> put(key, value) }
                                 changedField?.let { put("changed", it) }
                             },
                         )
@@ -241,6 +242,7 @@ internal fun PluginSetup(
                     options = completion?.options.orEmpty(),
                     errors = completion?.errors.orEmpty(),
                     refresh = { refresh(it) },
+                    lookup = lookup,
                 )
                 completion?.let { form ->
                     form.errors["form"]?.let { FormError(it) }

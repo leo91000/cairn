@@ -8,6 +8,7 @@ import {
   useId,
 } from 'vue'
 import { api, state } from '../api'
+import { pluginFormLookup } from '../plugin-form-lookups'
 import {
   pluginFormSecrets,
   pluginFormValue,
@@ -68,6 +69,17 @@ const dirty = computed(() => name.value.trim() !== draft.value.name
 const available = computed(() => draft.value.status === 'setup' && !expired.value)
 const eligible = computed(() => state.agents.filter(eligibleAgent))
 
+function formBody() {
+  return {
+    revision: draft.value.revision,
+    settings: settings(),
+    secrets: secrets.value,
+    ...(token.value ? { token: token.value } : {}),
+  }
+}
+
+const lookup = pluginFormLookup(() => `${path}/form`, formBody, () => props.manifest.version)
+
 async function complete(changed?: string) {
   if (!props.manifest.instanceForm)
     return
@@ -77,10 +89,7 @@ async function complete(changed?: string) {
   completing.value = true
   try {
     const result = formResult(await pluginOperation<FormResult | null>(`${path}/form`, {
-      revision: draft.value.revision,
-      settings: settings(),
-      secrets: secrets.value,
-      ...(token.value ? { token: token.value } : {}),
+      ...formBody(),
       changed,
     }))
     if (request !== asked)
@@ -219,6 +228,7 @@ onBeforeUnmount(() => {
           v-model:values="values"
           v-model:secrets="secrets"
           :fields="(manifest.settings ?? []).map(field => ({ ...field, required: false }))"
+          :lookup="lookup"
           :saved="draft.secretKeys"
           :disabled="busy || resourceWork || !available"
           :options="completion?.options"

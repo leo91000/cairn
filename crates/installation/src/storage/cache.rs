@@ -209,6 +209,17 @@ pub(super) fn retire(
     Ok(removed)
 }
 
+/// An idle, acknowledged volume can discard all immutable local block copies.
+/// Its journal, manifest and scoped base authorization remain authoritative.
+/// Caller owns the stopped filesystem and excludes publication/restore changes.
+pub(crate) fn evict_clean(state: &Path, directory: &Path) -> io::Result<u64> {
+    retire(
+        Some(state),
+        &directory.join("lazy/cache"),
+        &std::collections::HashSet::default(),
+    )
+}
+
 pub fn make_room(state: &Path, policy: &Policy, incoming: u64) -> io::Result<bool> {
     Ok(reserve(state, policy, incoming)?.is_some())
 }
