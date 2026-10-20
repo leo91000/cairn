@@ -1876,7 +1876,7 @@ private fun NodesSection(
         enabled = editable,
         power = true,
     ) { on ->
-        change { it.withBackend(on) }
+        change { it.withBackend(on, legacy) }
     }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     if (!native)
@@ -1915,7 +1915,7 @@ private fun NodesSection(
                     else PluginBadge("Introuvable", PluginTone.ATTENTION)
                 )
                 TextButton(
-                    onClick = { change { it.withNodeRun(held.id, false) } },
+                    onClick = { change { it.withNodeRun(held.id, false, legacy) } },
                     modifier =
                         Modifier.semantics {
                             contentDescription = "Retirer ${held.name ?: held.id}"
@@ -1967,7 +1967,7 @@ private fun NodesSection(
                     enabled = editable && access.nodes != null,
                     description = "Exécuter ses conversations sur ${node.name}",
                 ) { on ->
-                    change { it.withNodeRun(node.id, on) }
+                    change { it.withNodeRun(node.id, on, legacy) }
                 }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 val supported = node.exclusiveReservations

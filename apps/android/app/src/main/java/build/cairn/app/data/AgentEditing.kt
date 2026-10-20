@@ -407,12 +407,12 @@ fun Agent.nodeChoices(nodes: List<ExecutionNode>) = agentNodeChoices(nodes, acce
  * Switches between a VM and native execution on the host. Nodes of the other backend no longer
  * apply, so node execution and exclusive reservations start again from none.
  */
-fun Agent.withBackend(native: Boolean): Agent {
+fun Agent.withBackend(native: Boolean, readOnlyGrants: Boolean = false): Agent {
     val backend = if (native) NATIVE_BACKEND else VM_BACKEND
     if (backend == access.backend) return this
     return copy(
         access = access.copy(backend = backend, nodes = emptyList()),
-        exclusiveNodes = emptyList(),
+        exclusiveNodes = if (readOnlyGrants) exclusiveNodes else emptyList(),
     )
 }
 
@@ -428,11 +428,11 @@ fun Agent.effectiveExclusive(nodes: List<ExecutionNode>): List<ExecutionNode> =
     }
 
 /** Allows or stops running on one node. Stopping also drops the exclusive grant there. */
-fun Agent.withNodeRun(node: String, run: Boolean): Agent {
+fun Agent.withNodeRun(node: String, run: Boolean, readOnlyGrants: Boolean = false): Agent {
     val current = access.nodes ?: return this
     return copy(
         access = access.copy(nodes = if (run) (current + node).distinct() else current - node),
-        exclusiveNodes = if (run) exclusiveNodes else exclusiveNodes - node,
+        exclusiveNodes = if (run || readOnlyGrants) exclusiveNodes else exclusiveNodes - node,
     )
 }
 

@@ -35,8 +35,9 @@ agent natif, ou une node native, ne peut pas en recevoir.
 
 Ces deux droits restent appliqués en direct, pas figés au moment de la mise en file :
 ils ne font pas partie de `access`, donc de `policy()`. Les retirer n’interrompt donc pas le travail en file et ne
-suspend pas une délégation externe ; en accorder un à l’agent d’une délégation
-ouverte à tout le monde la suspend, et l’aperçu l’indique. Le catalogue MCP de
+suspend pas une délégation externe ; accorder un compte 1Password (ou une autre
+instance de plugin) à l’agent d’une délégation ouverte à tout le monde la suspend,
+et l’aperçu l’indique. Une réservation exclusive ne la suspend pas, comme avant. Le catalogue MCP de
 gestion ne les expose pas :
 un agent qui gère l’installation ne peut pas s’accorder un compte 1Password ni une
 réservation exclusive, et ses modifications conservent ceux que le propriétaire a

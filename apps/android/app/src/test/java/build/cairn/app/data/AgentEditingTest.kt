@@ -702,6 +702,16 @@ class AgentEditingTest {
         assertEquals(emptyList<String>(), native.exclusiveNodes)
         assertEquals(listOf("desk"), native.nodeChoices(all).map { it.id })
         assertEquals(native, native.withBackend(native = true))
+        // An older installation keeps reservations on its nodes: they stay as shown.
+        assertEquals(
+            listOf("gpu"),
+            reserved.withBackend(native = true, readOnlyGrants = true).exclusiveNodes,
+        )
+        assertEquals(
+            listOf("gpu"),
+            reserved.withNodeRun("gpu", false, readOnlyGrants = true).exclusiveNodes,
+        )
+        assertEquals(emptyList<String>(), reserved.withNodeRun("gpu", false).exclusiveNodes)
 
         val running = native.withNodeRun("desk", true)
         assertEquals("Exécution native · 1 sur 1", nodesSummary(running, all))
