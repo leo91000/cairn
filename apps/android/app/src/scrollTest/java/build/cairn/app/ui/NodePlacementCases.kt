@@ -25,6 +25,53 @@ abstract class NodePlacementCases {
     @get:Rule val compose = createComposeRule()
 
     @Test
+    fun retiringASwitchedNodeExplainsAgentsPlacementsAndTheOldRuntime() {
+        var revoked = false
+        var kept = false
+        val previous =
+            ExecutionNode(
+                id = "vm",
+                name = "Workstation",
+                status = "online",
+                agents = listOf(NodeAgent("a", "Builder"), NodeAgent("b", "Everywhere", true)),
+            )
+        val next =
+            ExecutionNode(
+                id = "native",
+                name = "Workstation GPU",
+                status = "online",
+                slots = 1,
+                capabilities = NodeCapabilities(backend = NATIVE_BACKEND, ublk = true),
+            )
+        compose.setContent {
+            CairnTheme {
+                RetireNode(previous, next, Workspace(), { kept = true }) { revoked = true }
+            }
+        }
+        compose
+            .onNodeWithText("Workstation GPU tourne maintenant comme node native", substring = true)
+            .assertExists()
+        // Only agents granted this node by name lose it; "all nodes" agents keep others.
+        compose
+            .onNodeWithText("Agents autorisés sur l’ancienne node : Builder.", substring = true)
+            .assertExists()
+        compose
+            .onNodeWithText("reviennent au placement automatique", substring = true)
+            .assertExists()
+        compose
+            .onNodeWithText("sudo docker rm -f cairn-execution-node", substring = true)
+            .performScrollTo()
+            .assertExists()
+        capture("retire-switched-node")
+        compose.onNodeWithText("Garder les deux pour l’instant").performScrollTo().performClick()
+        compose.onNodeWithText("Révoquer l’ancienne node").performScrollTo().performClick()
+        compose.runOnIdle {
+            assertTrue(kept)
+            assertTrue(revoked)
+        }
+    }
+
+    @Test
     fun nativeNodeEditorRequiresExplicitPeopleAndKeepsOneExecutionSlot() {
         var saved: NodeConfiguration? = null
         val node =

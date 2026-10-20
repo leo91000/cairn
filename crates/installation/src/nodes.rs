@@ -550,7 +550,7 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
         ("POST", ["nodes", "enrollments"]) => invite(s, input.body.clone()).await,
         ("POST", ["nodes", node, "stale-disks", "delete"]) => delete_stale_disks(s, node).await,
         ("PUT", ["nodes", node, "agents"]) => grant_agents(s, node, input.body.clone()).await,
-        ("POST", ["nodes", node, "revoke"]) => revoke(s, node).await,
+        ("POST", ["nodes", node, "revoke"]) => revoke(s, node, input.body.clone()).await,
         _ => Err(Error::not_found("Not found")),
     }
 }
@@ -900,7 +900,20 @@ fn set_node_grant(db: &Db<'_>, mut agent: Value, node: &str, granted: bool) -> R
     Ok(())
 }
 
-async fn revoke(s: &Service, node: &str) -> Result<Value> {
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
+struct Revocation {
+    /// Return conversations fixed to or preferring this node to automatic placement,
+    /// as when the machine re-enrolls under another execution backend.
+    release_placements: bool,
+}
+
+async fn revoke(s: &Service, node: &str, body: Value) -> Result<Value> {
+    let request: Revocation = if body.is_null() {
+        Revocation::default()
+    } else {
+        decode(body)?
+    };
     let node = node.to_owned();
     s.store
         .transaction(move |db| {
@@ -931,10 +944,43 @@ async fn revoke(s: &Service, node: &str) -> Result<Value> {
             crate::agent_grants::forget_resource(db, crate::agent_grants::EXCLUSIVE_NODES, &node)?;
             record["exclusiveAgents"] = json!([]);
             db.put("nodes", &record)?;
-            db.audit("node.revoked", &json!({ "nodeId": node }))?;
-            Ok(public(record))
+
+            let mut released = 0_u64;
+            if request.release_placements {
+                released = release_placements(db, &node)?;
+            }
+
+            db.audit(
+                "node.revoked",
+                &json!({ "nodeId": node, "releasedPlacements": released }),
+            )?;
+            let mut value = public(record);
+            value["releasedPlacements"] = released.into();
+            Ok(value)
         })
         .await
+}
+
+/// Clears pins and preferences naming `node`. A pinned conversation otherwise waits
+/// for a machine that can never return under this identity.
+fn release_placements(db: &Db<'_>, node: &str) -> Result<u64> {
+    let runs = db.json_rows(
+        "SELECT data FROM runs
+         WHERE json_extract(data,'$.pinnedNodeId')=?1 OR json_extract(data,'$.preferredNodeId')=?1",
+        [node],
+    )?;
+    let mut released = 0;
+    for run in runs {
+        let mut patch = json!({});
+        for field in ["pinnedNodeId", "preferredNodeId"] {
+            if run[field] == node {
+                patch[field] = Value::Null;
+            }
+        }
+        db.patch_run(text(&run, "id"), &patch)?;
+        released += 1;
+    }
+    Ok(released)
 }
 
 pub async fn internal(State(app): State<App>, request: Request) -> Result<Json<Value>> {
@@ -1137,6 +1183,19 @@ fn record_heartbeat(
     node["budgetError"] = body["budgetError"].clone();
     node["exclusiveReservations"] = body["exclusiveReservations"].clone();
     if let Some(capabilities) = capabilities {
+        // The installer fixes the execution backend at enrollment. Another runtime on the
+        // same machine enrolls as a new node, so its grants and checkpoints never mix.
+        let backend = |value: &Value| {
+            value["backend"]
+                .as_str()
+                .unwrap_or("firecracker")
+                .to_owned()
+        };
+        if backend(&capabilities) != backend(&node["capabilities"]) {
+            return Err(Error::conflict(
+                "A node cannot change its execution backend. Enroll the machine again as a new node.",
+            ));
+        }
         node["capabilities"] = capabilities;
     }
     node["storage"] = serde_json::to_value(Policy::for_node(&node["storage"])?)?;
