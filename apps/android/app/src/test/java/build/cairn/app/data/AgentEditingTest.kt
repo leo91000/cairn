@@ -471,6 +471,59 @@ class AgentEditingTest {
     }
 
     @Test
+    fun grantsSentBackAreReadAgainJustBeforeSaving() = runBlocking {
+        val account = catalog.connections.first { it.id == "prod" }.copy(agentIds = listOf("agent"))
+        val access = catalog.packages.first { it.id == "onepassword" }.manifest!!
+        // Revoked meanwhile: nothing to send back.
+        assertNull(account.agentIdsToSend(emptyList(), access) { emptyList() })
+        assertEquals(
+            listOf("other"),
+            account.agentIdsToSend(emptyList(), access) { listOf("other") },
+        )
+        assertNull(account.agentIdsToSend(emptyList(), access) { null })
+        // A current installation keeps them itself: no extra read.
+        var read = false
+        assertNull(
+            account.agentIdsToSend(listOf(agent.copy(grantsOnAgent = true)), access) {
+                read = true
+                listOf("agent")
+            }
+        )
+        assertFalse(read)
+    }
+
+    @Test
+    fun olderInstallationsCheckAndReviewTheGrantsAsShown() {
+        val shownCatalog =
+            catalog.copy(
+                connections =
+                    catalog.connections.map {
+                        if (it.id == "prod") it.copy(agentIds = listOf("agent")) else it
+                    }
+            )
+        val shownNodes = nodes.map {
+            if (it.id == "mac") it.copy(exclusiveAgents = listOf("agent")) else it
+        }
+        val shown = agent.withResourceGrants(shownCatalog, shownNodes)
+        assertEquals(listOf("prod"), shown.plugins)
+        // The exclusive reservation on a machine it cannot run on is reported from the resources.
+        assertTrue(
+            agentIssues(shown, resources.copy(nodes = shownNodes, catalog = shownCatalog)).any {
+                it.section == AgentSection.Nodes
+            }
+        )
+
+        // Live-grant differences are not reviewed: they are never saved from the agent there.
+        val edited = agent.copy(plugins = listOf("prod"), exclusiveNodes = listOf("gpu"))
+        val legacyLines =
+            agentReview(reviewBaseline(agent, edited, legacy = true), edited, resources, null)
+        assertTrue(legacyLines.isEmpty())
+        val currentLines =
+            agentReview(reviewBaseline(agent, edited, legacy = false), edited, resources, null)
+        assertEquals(2, currentLines.size)
+    }
+
+    @Test
     fun aBackendSwitchOnEitherSideKeepsThatSidesNodesWhole() {
         val base = agent.withExclusive("gpu", true)
         // I switched to native and chose desk; they added mac meanwhile.

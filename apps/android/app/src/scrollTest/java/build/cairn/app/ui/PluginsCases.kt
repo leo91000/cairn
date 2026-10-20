@@ -802,20 +802,38 @@ abstract class PluginsCases {
     @Test
     fun anOlderInstallationKeepsTheGrantsOfAnEditedInstance() = editExistingAccount(older = true)
 
+    @Test
+    fun aGrantRevokedWhileEditingIsNotRestored() =
+        editExistingAccount(older = true, revokedMeanwhile = true)
+
     /**
      * An older installation (agents without `grantsOnAgent`) reads a missing `agentIds` as "no
      * agents": the editor then sends the instance's current grants unchanged. A current one keeps
      * them.
      */
-    private fun editExistingAccount(older: Boolean) {
+    private fun editExistingAccount(older: Boolean, revokedMeanwhile: Boolean = false) {
         MockWebServer().use { server ->
             val saved = CopyOnWriteArrayList<String>()
+            val editing = java.util.concurrent.atomic.AtomicBoolean(false)
             server.dispatcher =
-                dispatcher(current = !older) { path, body ->
-                    if (path.endsWith("/plugins/onepassword/connections/op1")) {
-                        saved += body
-                        "{}"
-                    } else null
+                dispatcher(includeGet = true, current = !older) { path, body ->
+                    when {
+                        path.endsWith("/plugins/onepassword/connections/op1") -> {
+                            saved += body
+                            "{}"
+                        }
+                        // Revoked from an agent page while the editor is open.
+                        path == "/api/installations/fixture/api/plugins" &&
+                            revokedMeanwhile &&
+                            editing.get() ->
+                            wireJson.encodeToString(
+                                PluginCatalog(
+                                    packages = listOf(onePassword, discord, notes),
+                                    connections = listOf(bot, account.copy(agentIds = emptyList())),
+                                )
+                            )
+                        else -> null
+                    }
                 }
             server.start()
             show(server) { vm, state -> PluginScreen(vm, state, "onepassword") {} }
@@ -826,10 +844,21 @@ abstract class PluginsCases {
             compose.waitUntil(10000) {
                 compose.onAllNodesWithText("Enregistrer").fetchSemanticsNodes().isNotEmpty()
             }
+            editing.set(true)
             compose.onNodeWithText("Enregistrer").performClick()
+            // The save reads the instance again first; keep the clock moving for its reply.
+            repeat(100) {
+                if (saved.isEmpty()) {
+                    compose.mainClock.advanceTimeBy(100)
+                    androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+                        .waitForIdleSync()
+                    Thread.sleep(50)
+                }
+            }
             compose.waitUntil(10000) { saved.isNotEmpty() }
             val payload = wireJson.parseToJsonElement(saved.single()).jsonObject
-            if (older)
+            if (revokedMeanwhile) assertFalse("agentIds" in payload)
+            else if (older)
                 assertEquals(JsonArray(listOf(JsonPrimitive(MAIN_AGENT_ID))), payload["agentIds"])
             else assertFalse("agentIds" in payload)
         }

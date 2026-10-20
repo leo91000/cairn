@@ -13,7 +13,7 @@ import {
   ref,
 } from 'vue'
 import { useRoute } from 'vue-router'
-import { keptAgentIds } from '../agent-access'
+import { currentAgentIds } from '../agent-access'
 import {
   api,
   notify,
@@ -232,6 +232,7 @@ async function save() {
     return
   await action(async () => {
     const agent = state.agents.find(item => item.id === form.value.agentId)
+    const agentIds = await currentAgentIds(state.agents, entry.value, editing.value, async () => (await api<Catalog>('/plugins')).connections)
     const body = {
       name: form.value.name,
       ...(form.value.token ? { token: form.value.token } : {}),
@@ -249,8 +250,8 @@ async function save() {
         maxPerPersonPerHour: Number(form.value.maxPerPersonPerHour),
       }),
       enabled: form.value.enabled,
-      // An older installation needs the granted agents back, or it would revoke them.
-      ...(keptAgentIds(state.agents, entry.value, editing.value) ? { agentIds: keptAgentIds(state.agents, entry.value, editing.value) } : {}),
+      // An older (or unknown) installation needs the granted agents back, as they are now.
+      ...(agentIds ? { agentIds } : {}),
     }
     const path = `/plugins/${id.value}/connections${editing.value ? `/${editing.value.id}` : ''}`
     await pluginOperation(path, body, editing.value ? 'PUT' : 'POST')

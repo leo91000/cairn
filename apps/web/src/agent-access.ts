@@ -287,6 +287,22 @@ export function keptAgentIds(agents: object[], entry: Pick<PluginEntry, 'manifes
   return [...connection.agentIds]
 }
 
+/**
+ * `keptAgentIds` from the instance as it is now, re-read right before saving: an agent revoked
+ * meanwhile from its page is not granted back. Undefined when nothing has to be sent.
+ */
+export async function currentAgentIds(
+  agents: object[],
+  entry: Pick<PluginEntry, 'manifest'> | undefined,
+  connection: Pick<PluginConnection, 'id' | 'agentIds'> | null | undefined,
+  connections: () => Promise<Pick<PluginConnection, 'id' | 'agentIds'>[]>,
+) {
+  if (!connection || keptAgentIds(agents, entry, { agentIds: ['?'] }) === undefined)
+    return undefined
+  const fresh = (await connections()).find(item => item.id === connection.id)
+  return keptAgentIds(agents, entry, fresh ?? connection)
+}
+
 export const updateForGrants = 'Update the installation to grant these from the agent page.'
 
 /** "All, including future" | "3 of 12" | "None". */

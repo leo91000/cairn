@@ -142,6 +142,14 @@ fun newAgent() =
  */
 fun olderInstallation(agents: List<Agent>) = agents.isNotEmpty() && agents.none { it.grantsOnAgent }
 
+/**
+ * What the review compares against: on an older installation live grants are read-only and never
+ * saved from the agent, so their differences are not reviewed.
+ */
+fun reviewBaseline(baseline: Agent, edited: Agent, legacy: Boolean): Agent =
+    if (legacy) baseline.copy(exclusiveNodes = edited.exclusiveNodes, plugins = edited.plugins)
+    else baseline
+
 /** On an older installation, the agent's live grants as its resources record them. */
 fun Agent.withResourceGrants(catalog: PluginCatalog?, nodes: List<ExecutionNode>): Agent =
     copy(

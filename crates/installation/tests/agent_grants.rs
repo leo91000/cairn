@@ -853,9 +853,24 @@ async fn native_agents_cannot_newly_get_the_current_runner_and_drop_reservations
     let (_, agent) = owner.send("PUT", &path(&agent), agent).await;
     assert_eq!(agent["exclusiveNodes"], json!([NODE]));
 
-    // A native switch that keeps held nodes saves and drops the reservation.
+    // A native switch (here with a native node) drops the reservation it cannot keep.
+    let desk = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d";
+    owner
+        .service
+        .store
+        .put(
+            "nodes",
+            json!({
+                "id": desk, "name": "desk", "revoked": false, "accepting": true, "tags": [],
+                "capabilities": { "backend": "native", "cpu": 4, "memoryMiB": 8192, "diskMiB": 16384 },
+                "limits": { "cpu": 2, "memoryMiB": 4096, "diskMiB": 8192 },
+            }),
+        )
+        .await
+        .unwrap();
     let mut native = agent.clone();
     native["access"]["backend"] = "native".into();
+    native["access"]["nodes"] = json!([desk]);
     native.as_object_mut().unwrap().remove("exclusiveNodes");
     let (status, saved) = owner.send("PUT", &path(&agent), native).await;
     assert_eq!(status, StatusCode::OK, "{saved}");
@@ -864,6 +879,15 @@ async fn native_agents_cannot_newly_get_the_current_runner_and_drop_reservations
         owner.stored("nodes", NODE).await["exclusiveAgents"],
         json!([])
     );
+
+    // Switching backend never keeps nodes of the previous backend.
+    let mut kept = owner.create_agent("Kept").await;
+    kept["access"]["nodes"] = json!([LOCAL_NODE_ID, NODE]);
+    let (_, kept) = owner.send("PUT", &path(&kept), kept).await;
+    let mut switched = kept.clone();
+    switched["access"]["backend"] = "native".into();
+    let (status, _) = owner.send("PUT", &path(&kept), switched).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 
     // A native agent cannot newly be given the current runner.
     let mut fresh = owner.create_agent("Fresh").await;

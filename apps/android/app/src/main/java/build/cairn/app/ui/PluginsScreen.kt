@@ -787,6 +787,17 @@ private fun InstanceEditor(
                 !completing,
         save = {
             vm.perform {
+                // Grants to send back (older or unknown installation), as saved right now.
+                val keptGrants =
+                    if (creating) null
+                    else
+                        initial.agentIdsToSend(state.agents, manifest) {
+                            wireJson
+                                .decodeFromString<PluginCatalog>(api.request("GET", "/plugins"))
+                                .connections
+                                .find { it.id == initial.id }
+                                ?.agentIds
+                        }
                 api.pluginOperation(
                     "/plugins/${segment(pluginId)}/connections" +
                         if (creating) "" else "/${segment(initial.id)}",
@@ -824,10 +835,9 @@ private fun InstanceEditor(
                             put("maxPerPersonPerHour", perPerson.toIntOrNull() ?: 5)
                         }
                         put("enabled", enabled)
-                        if (!creating)
-                            initial.agentIdsToKeep(state.agents, manifest)?.let { ids ->
-                                put("agentIds", JsonArray(ids.map(::JsonPrimitive)))
-                            }
+                        keptGrants?.let { ids ->
+                            put("agentIds", JsonArray(ids.map(::JsonPrimitive)))
+                        }
                     },
                     method = if (creating) "POST" else "PUT",
                 )

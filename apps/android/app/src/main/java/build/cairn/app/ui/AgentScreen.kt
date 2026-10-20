@@ -205,12 +205,12 @@ private fun AgentPage(
             skillsLoaded = state.agents.isNotEmpty(),
         )
     val errors = agentErrors(draft, tokenSaved, newToken)
-    val issues = agentIssues(draft.agent, resources)
     // An older installation keeps live grants on its resources and ignores them on the agent:
-    // they are shown from there, read-only.
+    // they are shown from there, read-only, and checked as shown.
     val legacy = olderInstallation(state.agents)
     val shown =
         if (legacy) draft.copy(agent = draft.agent.withResourceGrants(catalog, nodes)) else draft
+    val issues = agentIssues(shown.agent, resources)
     val current = AgentSection.entries.find { it.name == section }
 
     fun update(change: (Agent) -> Agent) {
@@ -357,7 +357,7 @@ private fun AgentPage(
                 val savedToken = draft.switchedToSavedToken(tokenSaved)
                 val lines =
                     agentReview(
-                        baseline,
+                        reviewBaseline(baseline, edited, legacy),
                         edited,
                         resources,
                         preview,

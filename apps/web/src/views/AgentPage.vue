@@ -517,12 +517,25 @@ async function loadCatalog() {
   }
 }
 
+/**
+ * On an older installation, the live grants are read from resources: once `part` loads, the saved
+ * and edited agent take them from there (they are read-only, never edited here).
+ */
+function regrant(part: 'plugins' | 'exclusiveNodes') {
+  if (!legacy.value || !agent.value)
+    return
+  const fromResources = withResourceGrants(saved.value, agent.value.id, catalog.value.connections, nodes.value)[part]
+  saved.value = { ...saved.value, [part]: fromResources }
+  draft.value = { ...draft.value, [part]: [...fromResources] }
+}
+
 async function retryCatalog() {
   catalogLoading.value = true
   try {
     const plugins = await loadCatalog()
     if (plugins) {
       catalog.value = plugins
+      regrant('plugins')
       void loadSuspension()
     }
   }
@@ -548,8 +561,10 @@ async function retryNodes() {
   nodesLoading.value = true
   try {
     const nodeList = await loadNodes()
-    if (nodeList)
+    if (nodeList) {
       nodes.value = nodeList
+      regrant('exclusiveNodes')
+    }
   }
   finally {
     nodesLoading.value = false

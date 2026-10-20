@@ -8,6 +8,7 @@ import {
   accessSummary,
   backendOf,
   changes,
+  currentAgentIds,
   draftOf,
   effectiveExclusive,
   errorSection,
@@ -702,4 +703,20 @@ it('never reports the current runner missing when the node list omits it', () =>
   const draft = newAgentDraft()
   draft.exclusiveNodes = [LOCAL_NODE_ID]
   expect(issues(draft, { ...context, nodes: [gpu] }, false)).toEqual([])
+})
+
+it('re-reads an instance\'s agents right before sending them back', async () => {
+  let reads = 0
+  const fresh = async () => {
+    reads++
+    return [{ id: 'prod', agentIds: ['b'] }]
+  }
+
+  // Revoked meanwhile from an agent page: the current list is sent, not the editor's snapshot.
+  expect(await currentAgentIds([], onePassword, { id: 'prod', agentIds: ['a', 'b'] }, fresh)).toEqual(['b'])
+  expect(await currentAgentIds([], onePassword, { id: 'prod', agentIds: ['a'] }, async () => [{ id: 'prod', agentIds: [] }])).toBeUndefined()
+  // A current installation keeps grants itself: nothing is read nor sent.
+  expect(await currentAgentIds([{ grantsOnAgent: true }], onePassword, { id: 'prod', agentIds: ['a'] }, fresh)).toBeUndefined()
+  expect(await currentAgentIds([], { manifest: null }, { id: 'prod', agentIds: ['a'] }, fresh)).toBeUndefined()
+  expect(reads).toBe(1)
 })

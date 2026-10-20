@@ -1033,8 +1033,10 @@ fn validate_access(agent: &Value, access: &Value) -> Result<()> {
 }
 
 fn save_agent(db: &Db<'_>, mut agent: Value, access: &Value) -> Result<Value> {
+    // Nodes held before stay accepted only while the execution backend is unchanged.
     let previous_nodes = db
         .get("agents", text(&agent, "id"))?
+        .filter(|saved| policy(saved)["backend"] == access["backend"])
         .and_then(|saved| policy(&saved)["nodes"].as_array().cloned());
     // Serialize grants with revocation; a concurrent editor must never
     // restore a grant that the revocation transaction just removed.

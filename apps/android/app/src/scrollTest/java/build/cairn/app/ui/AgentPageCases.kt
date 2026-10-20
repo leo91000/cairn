@@ -827,7 +827,7 @@ abstract class AgentPageCases {
             open(AgentSection.Identity)
             compose.onNodeWithText("Nom").performTextReplacement("Release bot")
             back()
-            compose.onNodeWithContentDescription("GitHub, ${GithubMode.None.label}").assertExists()
+            waitForDescription("GitHub, ${GithubMode.None.label}")
             fixture.conflict.set(true)
             fixture.failToken.set(true)
             fixture.failPlugins.set(true)

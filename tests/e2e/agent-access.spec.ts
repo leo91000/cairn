@@ -1193,3 +1193,73 @@ test('while the workspace lists cannot load, MCP access is read-only and not rep
   await expect(failure).toHaveCount(0)
   await expect(page.getByRole('group', { name: 'MCP connections access' })).toBeVisible()
 })
+
+test('on an older installation, grants read from resources appear once plugins load', async ({ page, workspace }) => {
+  await workspace.restart()
+  await useRelayForHttpMocks(page)
+  const agent = await workspace.api('/api/agents', 'POST', { name: 'Older retry' })
+  await page.route('**/api/agents', async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.continue()
+      return
+    }
+
+    const response = await route.fetch()
+    const agents = await response.json()
+    await route.fulfill({
+      response,
+      json: agents.map(({
+        grantsOnAgent: _marker,
+        exclusiveNodes: _nodes,
+        plugins: _plugins,
+        ...item
+      }: Record<string, unknown>) => item),
+    })
+  })
+  let pluginsFail = true
+  await page.route('**/api/plugins', async (route) => {
+    if (pluginsFail) {
+      await route.fulfill({ status: 500, json: { error: 'Plugin host unavailable' } })
+      return
+    }
+
+    const response = await route.fetch()
+    const catalog = await response.json()
+    // The older installation records the grant on the instance.
+    await route.fulfill({
+      response,
+      json: {
+        ...catalog,
+        connections: [{
+          id: 'queue',
+          pluginId: 'onepassword',
+          name: 'Support queue',
+          enabled: true,
+          settings: {},
+          agentIds: [agent.id],
+          userIds: [],
+          people: [],
+          accessMode: 'allowlist',
+          agentId: '',
+          projectId: null,
+          maxMessagesPerHour: 0,
+          status: { state: 'ready' },
+          usage: { hour: 0 },
+          requests: [],
+          activity: [],
+        }],
+      },
+    })
+  })
+  await page.goto(workspacePath(`/agents/${agent.id}?section=plugins`))
+  await authenticateWorkspace(page)
+  const failure = page.getByRole('alert').filter({ hasText: 'Plugins could not be loaded' })
+  await expect(failure).toBeVisible()
+  pluginsFail = false
+  await failure.getByRole('button', { name: 'Try again', exact: true }).click()
+  const grant = page.getByRole('switch', { name: 'Access to 1Password Support queue' })
+  await expect(grant).toBeChecked()
+  await expect(grant).toBeDisabled()
+  await expect(page.getByRole('region', { name: 'Unsaved changes' })).toHaveCount(0)
+  await page.unrouteAll({ behavior: 'ignoreErrors' })
+})
