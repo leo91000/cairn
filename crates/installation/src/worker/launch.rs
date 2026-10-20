@@ -253,9 +253,9 @@ impl Execution<'_> {
         let mut timing = Operation::new("workspace_prepare", &self.id, "execution");
         let (prepared, credentials) = self.prepare_execution(existing).await?;
         // Plugin credentials written into the run are masked wherever they appear.
-        for git in &credentials.git {
-            if !self.sensitive.contains(&git.password) {
-                self.sensitive.push(git.password.clone());
+        for secret in &credentials.secrets {
+            if !self.sensitive.contains(secret) {
+                self.sensitive.push(secret.clone());
             }
         }
         timing.next("account_home");

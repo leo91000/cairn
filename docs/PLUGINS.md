@@ -396,12 +396,16 @@ grant), the host renders these templates when a run is prepared and each time it
 resumes. Placeholders are `{{credential}}`, `{{secrets.KEY}}` and `{{settings.KEY}}`;
 a value with control characters, or a missing one, leaves its item out.
 
-- Files land in the run's home, private (0600 in 0700 directories). Paths are
-  relative, visible-segment names, outside provider state, skills, `.gitconfig`,
-  `.ssh` and `.config/cairn`. At most eight files of 8 KB.
+- Files land in the run's home, private (0600 in 0700 directories), under a tool's
+  configuration directory: `.config/<tool>/…` (two to five more segments of letters,
+  digits, `.`, `_` and `-`), never `.config/git` or `.config/cairn`. Shell start-up
+  files, `.gitconfig` and provider state are out of reach. When two packages name the
+  same path, the first one keeps it. At most eight files of 8 KB.
 - Git credentials go to `~/.config/cairn/git-credentials`, a credential-store file
-  Cairn owns, with one `credential.<url>.helper` line per prefix in the run's
-  `.gitconfig`. URLs are HTTPS prefixes on declared hosts.
+  Cairn owns. One `credential.<url>.helper` line per prefix, and the identity, live in
+  `~/.config/cairn/gitconfig`, which the run's `.gitconfig` includes, so a resumed run
+  follows the current grants. URLs are HTTPS prefixes on declared hosts.
+- The instance's credential and secret values are masked in the run's output.
 - `gitIdentity` is the commit author when the installation has no global Git
   identity; empty values leave it out.
 - A withdrawn grant empties the files it wrote on the next resumption, including in a
@@ -417,8 +421,9 @@ a value with control characters, or a missing one, leaves its item out.
 ### Secret patterns
 
 `secretPatterns` lists up to eight regular expressions of the service's token
-formats. Cairn masks matches in run output and tool payloads, like its own formats.
-A pattern matching empty or ordinary text is refused.
+formats. Cairn masks matches in run output and tool payloads, like its own formats,
+from the first output of runs resumed at startup. A pattern matching empty or
+ordinary text (numbers, dates, words, paths, hashes) is refused.
 
 ### Project sources
 
@@ -456,8 +461,8 @@ required = [ "sha" ]
 properties.sha = { type = "string", pattern = "^[0-9a-f]{40}$" }
 ```
 
-Granted agents see each condition in `wait_for` as type `<plugin>_<name>` (with `-`
-as `_`), with `projectId` when `project = true`; Cairn records the plugin
+Granted agents see each condition in `wait_for` as type `<plugin>_<name>` (plugin
+IDs have no `_`, so types never collide), with `projectId` when `project = true`; Cairn records the plugin
 (`pluginId`) and checks, before every observation, that the agent still holds an
 enabled instance and that the project still has the origin the run was granted.
 
@@ -652,7 +657,8 @@ The bundled GitHub package (`plugins/github/`) is an ordinary package built on t
   agent. Token formats are masked in run output.
 - **Projects.** Projects → import from “GitHub repository” lists the account's
   repositories (owned, collaborations, organizations; 50 per page).
-- **Waits.** `github_workflow` (project, run ID, full commit SHA) and
+- **Waits.** `github_workflow` (project, run ID, full commit SHA; a run GitHub does
+  not show is retried until the deadline, since it may hide a private repository) and
   `github_pr_checks` (project, PR number, full head SHA), with the same results as
   before: required checks from classic branch protection and rulesets, `superseded`,
   `closed`, `no_required_checks`, limits of 500 checks. SSH remotes in every spelling
@@ -661,6 +667,10 @@ The bundled GitHub package (`plugins/github/`) is an ordinary package built on t
   `repository` also accepts a `https://github.com/owner/name/tree/<ref>/<folder>`
   address. Large repositories need the folder: a recursive listing over 1 MB is
   reported as partial.
+
+Plugin HTTP follows no redirects: a repository renamed or transferred on GitHub answers
+with a redirect, which the package reports as unavailable. Register the project again
+with its new name.
 
 Installations that had the earlier built-in GitHub move into this package at startup:
 see the [migration](GITHUB-PLUGIN-MIGRATION.md).

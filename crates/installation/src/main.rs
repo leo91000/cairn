@@ -397,6 +397,8 @@ where
     }
 
     if service.config.worker_enabled {
+        // Resumed runs mask plugin token formats from their first line of output.
+        cairn_installation::plugins::runtime::load_secret_patterns(&service).await;
         service.worker.start(service.clone()).await?;
         background.push(tokio::spawn(service.plugins.clone().start(service.clone())));
         background.push(spawn_periodic(

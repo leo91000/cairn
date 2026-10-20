@@ -99,22 +99,17 @@ pub struct SkillSource {
     pub fields: Vec<Value>,
 }
 
-/// `.config/tool/hosts.yml`: visible segments of letters, digits, `.`, `_` and `-`.
+/// `.config/tool/hosts.yml`: a file in a tool's own configuration directory, with
+/// segments of letters, digits, `.`, `_` and `-`. Shell start-up files, provider state
+/// and Git's configuration stay out of reach: they could run commands or read other
+/// packages' credentials.
 pub fn home_path(path: &str) -> bool {
     let segments = path.split('/').collect::<Vec<_>>();
-    // Provider state, skills and Cairn's own files stay under the host's control.
-    let reserved = [
-        ".codex",
-        ".claude",
-        ".claude.json",
-        ".agents",
-        ".gitconfig",
-        ".cairn",
-        ".config/cairn",
-        ".ssh",
-    ];
+    let reserved = ["cairn", "git"];
     path.len() <= 200
-        && segments.len() <= 6
+        && (3..=6).contains(&segments.len())
+        && segments[0] == ".config"
+        && !reserved.contains(&segments[1])
         && segments.iter().all(|segment| {
             !segment.is_empty()
                 && *segment != "."
@@ -123,9 +118,6 @@ pub fn home_path(path: &str) -> bool {
                     .bytes()
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
         })
-        && !reserved
-            .iter()
-            .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
 }
 
 /// Placeholders a template may use. Anything else between braces is refused.
@@ -214,9 +206,10 @@ fn name(value: &str) -> bool {
 }
 
 impl super::Manifest {
-    /// `wait_for` type of a condition: `<plugin>_<name>`, with `-` as `_`.
+    /// `wait_for` type of a condition: `<plugin>_<name>`. Plugin IDs have no `_`, so
+    /// two packages never share a type.
     pub fn condition_type(&self, condition: &Condition) -> String {
-        format!("{}_{}", self.id.replace('-', "_"), condition.name)
+        format!("{}_{}", self.id, condition.name)
     }
 
     /// The condition this package declares under a `wait_for` type, if any.
@@ -377,8 +370,23 @@ fn secret_pattern(source: &str) -> Option<regex::Regex> {
         .size_limit(1 << 20)
         .build()
         .ok()?;
-    // A pattern matching nothing specific would erase ordinary output.
-    (!regex.is_match("") && !regex.is_match("a") && !regex.is_match("the")).then_some(regex)
+    // A pattern matching ordinary output would erase it for every run.
+    let ordinary = [
+        "",
+        "a",
+        "the",
+        "0",
+        "42",
+        "2026-10-20",
+        "12:30:45",
+        "hello world",
+        "The quick brown fox jumps over the lazy dog.",
+        "src/main.rs:12:5",
+        "error: could not compile",
+        "https://example.com/path?query=1",
+        "0123456789abcdef0123456789abcdef01234567",
+    ];
+    (!ordinary.iter().any(|text| regex.is_match(text))).then_some(regex)
 }
 
 #[cfg(test)]
@@ -441,9 +449,15 @@ mod tests {
             "/etc/passwd",
             ".codex/auth.json",
             ".gitconfig",
+            ".bashrc",
+            ".netrc",
+            ".config",
+            ".config/hosts.yml",
             ".config/cairn/x",
-            "a//b",
-            "a/./b",
+            ".config/git/config",
+            ".config/tool/../x",
+            ".config//x",
+            ".config/./x/y",
         ] {
             let mut invalid = run.clone();
             invalid["files"][0]["path"] = json!(path);
@@ -530,7 +544,16 @@ mod tests {
     #[test]
     fn secret_patterns_must_be_specific() {
         manifest(json!({ "secretPatterns": ["\\bfrg_[A-Za-z0-9]{20,}\\b"] })).unwrap();
-        for pattern in [".*", "a", "[", ""] {
+        for pattern in [
+            ".*",
+            "a",
+            "[",
+            "",
+            "\\d",
+            "[0-9]{2}",
+            "[a-f0-9]{40}",
+            "\\w+",
+        ] {
             assert!(
                 manifest(json!({ "secretPatterns": [pattern] })).is_err(),
                 "{pattern}"

@@ -5,11 +5,14 @@ local github = require("./lib/github")
 
 local TOKENS = "https://github.com/settings/personal-access-tokens/new"
 
+-- At most `limit` bytes, never splitting a UTF-8 character.
 local function truncate(value: string, limit: number): string
     if #value <= limit then
         return value
     end
-    return string.sub(value, 1, limit)
+    -- The start of the character holding the first byte past the limit.
+    local cut = utf8.offset(value, 0, limit + 1) or (limit + 1)
+    return string.sub(value, 1, cut - 1)
 end
 
 -- The account behind the token and the scopes of an OAuth token. Fine-grained tokens

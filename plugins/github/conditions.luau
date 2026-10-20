@@ -96,8 +96,9 @@ local function workflow(event: any, instance: string?): any?
     local name = repository(event)
     local run, failure, status = github.get("/repos/" .. name .. "/actions/runs/" .. string.format("%d", input.runId), instance)
     if not run then
+        -- A 404 also hides a private repository from an account without access: retry.
         if status == 404 then
-            unavailable("The workflow run does not match the requested run ID and commit SHA.")
+            cairn.fail("GitHub could not find this workflow run. Check that the account can read the repository.")
         end
         cairn.fail(failure or "GitHub could not be checked. Verify the connection and retry.")
     end

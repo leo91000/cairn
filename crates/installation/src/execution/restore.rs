@@ -1,6 +1,6 @@
 //! Validation and upgrade of a saved execution descriptor before a run resumes.
 use super::{
-    home::run_credentials,
+    home::{configure_git, run_credentials},
     prepare_execution,
     prepared::{Backend, Mount, Prepared},
     read_only_workspaces, run_directory, uses_vm,
@@ -74,6 +74,8 @@ pub(super) async fn restore(
     if is_isolated {
         let root = run_directory(run, config);
         run_credentials(&root.join("home"), &root, credentials).await?;
+        // Helpers and identity follow the current grants too.
+        configure_git(&root.join("home"), config, credentials).await?;
     }
     Ok(prepared)
 }

@@ -40,11 +40,19 @@ pub(super) async fn run_credentials(
     credentials: &RunCredentials,
 ) -> Result<()> {
     let mut written = credential_files(run_directory).await;
-    for (relative, content) in &credentials.files {
-        write_private(home, relative, content.as_bytes()).await?;
+    for (relative, _) in &credentials.files {
         if !written.contains(relative) {
             written.push(relative.clone());
         }
+    }
+    // Recorded first: a failed write still leaves every file for the run's end to remove.
+    atomic_write(
+        &run_directory.join(CREDENTIAL_RECORD),
+        &serde_json::to_vec(&written)?,
+    )
+    .await?;
+    for (relative, content) in &credentials.files {
+        write_private(home, relative, content.as_bytes()).await?;
     }
     for relative in &written {
         if !credentials.files.iter().any(|(path, _)| path == relative) {
@@ -57,12 +65,7 @@ pub(super) async fn run_credentials(
         .filter_map(GitAccess::store_line)
         .map(|line| format!("{line}\n"))
         .collect::<String>();
-    write_private(home, GIT_CREDENTIALS, store.as_bytes()).await?;
-    atomic_write(
-        &run_directory.join(CREDENTIAL_RECORD),
-        &serde_json::to_vec(&written)?,
-    )
-    .await
+    write_private(home, GIT_CREDENTIALS, store.as_bytes()).await
 }
 
 async fn write_private(home: &Path, relative: &str, bytes: &[u8]) -> Result<()> {
@@ -134,11 +137,24 @@ async fn host_git_identity(env: &crate::process::Environment) -> Option<(String,
     Some((name.clone(), email.clone()))
 }
 
-async fn configure_git(home: &Path, config: &Config, credentials: &RunCredentials) -> Result<()> {
-    let git_config = home.join(".gitconfig");
+/// Identity and credential helpers, included by the run's `.gitconfig`. It lives with
+/// the credential store so a resumed guest receives the current grants.
+const GIT_INCLUDE: &str = ".config/cairn/gitconfig";
+
+pub(super) async fn configure_git(
+    home: &Path,
+    config: &Config,
+    credentials: &RunCredentials,
+) -> Result<()> {
     // Re-preparing a run must also remove the old synthetic agent identity.
-    atomic_write(&git_config, b"[user]\n\tuseConfigOnly = true\n").await?;
-    let file = path(&git_config)?;
+    atomic_write(
+        &home.join(".gitconfig"),
+        format!("[user]\n\tuseConfigOnly = true\n[include]\n\tpath = {GIT_INCLUDE}\n").as_bytes(),
+    )
+    .await?;
+    write_private(home, GIT_INCLUDE, b"").await?;
+    let included = home.join(GIT_INCLUDE);
+    let file = path(&included)?;
     // Copy only the identity, never the host's credential helpers or other config.
     let env = codex_environment(config, &config.home.join(".codex"));
     let identity = match host_git_identity(&env).await {

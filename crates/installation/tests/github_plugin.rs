@@ -180,7 +180,14 @@ async fn granted_runs_receive_the_account_and_lose_it_with_the_grant() {
         store,
         "https://x-access-token:gho_fixture_run_token_1234567890@github.com\n"
     );
-    let gitconfig = std::fs::read_to_string(home.join(".gitconfig")).unwrap();
+    assert!(
+        credentials
+            .secrets
+            .contains(&"gho_fixture_run_token_1234567890".to_owned())
+    );
+    let main = std::fs::read_to_string(home.join(".gitconfig")).unwrap();
+    assert!(main.contains("path = .config/cairn/gitconfig"));
+    let gitconfig = std::fs::read_to_string(home.join(".config/cairn/gitconfig")).unwrap();
     assert!(gitconfig.contains("[credential \"https://github.com\"]"));
     assert!(gitconfig.contains("helper = store --file ~/.config/cairn/git-credentials"));
     assert!(gitconfig.contains("name = Octo Cat"));
@@ -246,6 +253,10 @@ async fn granted_runs_receive_the_account_and_lose_it_with_the_grant() {
         std::fs::read_to_string(home.join(".config/gh/hosts.yml")).unwrap(),
         ""
     );
+    // The resumed run's Git loses the helper and the account's identity with it.
+    let gitconfig = std::fs::read_to_string(home.join(".config/cairn/gitconfig")).unwrap();
+    assert!(!gitconfig.contains("helper"), "{gitconfig}");
+    assert!(!gitconfig.contains("Octo Cat"), "{gitconfig}");
     assert_eq!(
         execution::credential_files(&directory).await,
         [".config/gh/hosts.yml"]
@@ -274,6 +285,23 @@ async fn each_agent_runs_with_one_account_and_tokens_are_masked() {
     );
     edited["plugins"] = json!([first]);
     f.s.agent(edited, Some(text(&agent, "id"))).await.unwrap();
+    // Granting from the instance side is refused the same way.
+    let refused = connections::save(
+        &f.s,
+        "github",
+        &json!({ "name": "Second", "enabled": true, "agentIds": [agent["id"]] }),
+        Some(&second),
+    )
+    .await
+    .unwrap_err();
+    assert!(refused.message.contains("one GitHub instance per agent"));
+
+    // Long display names are cut on character boundaries.
+    f.github
+        .state(&json!({ "user": { "id": 7, "login": "long", "name": "é".repeat(150) } }));
+    let long = github::instance(&f.s, "Long", "fixture-long", &[]).await;
+    let saved = f.s.get(connections::KIND, &long).await.unwrap();
+    assert_eq!(saved["settings"]["gitName"], "é".repeat(100));
 
     let package = registry::builtin("github").unwrap();
     run_output::set_plugin_secret_patterns(package.manifest.secret_regexes());
@@ -504,6 +532,14 @@ async fn data_saved_before_the_package_moves_into_instances() {
         )
         .await
         .unwrap();
+    // The scoped agent answers anyone in a channel: it must hold no plugin grant.
+    s.store
+        .put(
+            connections::KIND,
+            json!({ "id": id(), "pluginId": "discord", "name": "#support", "enabled": true, "agentId": scoped_id, "accessMode": "everyone", "agentIds": [], "grantedAccess": { "github": false } }),
+        )
+        .await
+        .unwrap();
     let chat = id();
     s.store
         .put(
@@ -515,7 +551,14 @@ async fn data_saved_before_the_package_moves_into_instances() {
     drop(s);
 
     let s = Service::new(config.clone()).await.unwrap();
-    let mut instances = s.store.list(connections::KIND).await.unwrap();
+    let mut instances = s
+        .store
+        .list(connections::KIND)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|instance| instance["pluginId"] == "github")
+        .collect::<Vec<_>>();
     instances.sort_by_key(|instance| text(instance, "name").to_owned());
     let names = instances
         .iter()
@@ -535,7 +578,7 @@ async fn data_saved_before_the_package_moves_into_instances() {
     assert!(shared_agents.remove(MAIN_AGENT_ID));
     assert!(shared_agents.remove(&unused_id));
     assert!(shared_agents.is_empty());
-    assert_eq!(instances[1]["agentIds"], json!([scoped_id]));
+    assert_eq!(instances[1]["agentIds"], json!([]));
     assert_eq!(instances[2]["agentIds"], json!([]));
     let token = |instance: &Value| {
         let id = text(instance, "id").to_owned();
@@ -562,7 +605,7 @@ async fn data_saved_before_the_package_moves_into_instances() {
         assert!(record["access"].get("github").is_none(), "{record}");
     }
     let scoped = s.get("agents", &scoped_id).await.unwrap();
-    assert_eq!(scoped["plugins"], json!([instances[1]["id"]]));
+    assert_eq!(scoped["plugins"], json!([]));
     // A GitHub-only restriction keeps restricting MCP connections.
     assert_eq!(scoped["access"]["mcps"], json!([]));
 
@@ -589,7 +632,7 @@ async fn data_saved_before_the_package_moves_into_instances() {
     // A second start changes nothing.
     drop(s);
     let s = Service::new(config).await.unwrap();
-    assert_eq!(s.store.list(connections::KIND).await.unwrap().len(), 3);
+    assert_eq!(s.store.list(connections::KIND).await.unwrap().len(), 4);
 }
 
 /// The bundled package against the real GitHub: run with `CAIRN_LIVE_GITHUB=<file>`;

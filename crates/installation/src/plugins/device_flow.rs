@@ -114,12 +114,14 @@ async fn post(s: &Service, url: &str, body: String) -> Result<Value> {
         .send()
         .await
         .map_err(|_| Error::bad_gateway("The sign-in service is unavailable."))?;
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|_| Error::bad_gateway("The sign-in service is unavailable."))?;
-    if bytes.len() > 65_536 {
-        return Err(Error::bad_gateway("Invalid sign-in response."));
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = futures_util::StreamExt::next(&mut stream).await {
+        let chunk = chunk.map_err(|_| Error::bad_gateway("The sign-in service is unavailable."))?;
+        if bytes.len() + chunk.len() > 65_536 {
+            return Err(Error::bad_gateway("Invalid sign-in response."));
+        }
+        bytes.extend_from_slice(&chunk);
     }
     serde_json::from_slice(&bytes).map_err(|_| Error::bad_gateway("Invalid sign-in response."))
 }
@@ -197,12 +199,21 @@ pub async fn start(s: &std::sync::Arc<Service>, plugin_id: &str) -> Result<Value
         updated_at: now(),
     };
     let public = record.public(&flow_id);
-    s.plugins
-        .device_flows
-        .flows
-        .lock()
-        .unwrap()
-        .insert(flow_id.clone(), record);
+    {
+        // Rechecked as it is kept: sign-ins started concurrently cannot pass the limit.
+        let mut flows = s.plugins.device_flows.flows.lock().unwrap();
+        if flows
+            .values()
+            .filter(|flow| flow.state == "pending")
+            .count()
+            >= MAX_FLOWS
+        {
+            return Err(Error::too_many_requests(
+                "Too many sign-ins are waiting. Retry shortly.",
+            ));
+        }
+        flows.insert(flow_id.clone(), record);
+    }
     let token_url = target(s, manifest, &flow.token_url, "https")?;
     let service = s.clone();
     tokio::spawn(async move {

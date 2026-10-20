@@ -58,6 +58,15 @@ fn package(format: &str, manifest: &str, source: Sources, builtin: bool) -> Resu
             Error::bad(message)
         }
     })?;
+    if manifest
+        .conditions
+        .iter()
+        .any(|condition| jsonschema::validator_for(&condition.input_schema).is_err())
+    {
+        return Err(Error::bad(
+            "A plugin condition has an invalid input schema.",
+        ));
+    }
     for program in &manifest.programs {
         if !program.installer.is_empty() && !source.modules.contains_key(&program.installer) {
             return Err(Error::bad(

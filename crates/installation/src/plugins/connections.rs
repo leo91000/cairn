@@ -686,6 +686,8 @@ pub async fn save(
         updated_at: now(),
     };
     let updating = existing.is_some();
+    let one_per_agent = super::run_credentials::one_per_package(&manifest);
+    let package_name = manifest.name.clone();
     let result = s
         .store
         .transaction(move |db| {
@@ -704,6 +706,22 @@ pub async fn save(
             for agent in &connection.agent_ids {
                 if db.get("agents", agent)?.is_none() {
                     return Err(Error::bad("A selected agent no longer exists."));
+                }
+            }
+            // Runs receive the credentials of one instance per package.
+            if one_per_agent && !keep_agents {
+                let held = db.list(KIND)?.into_iter().any(|other| {
+                    other["pluginId"] == connection.plugin_id
+                        && other["id"] != connection.id.as_str()
+                        && other["agentIds"].as_array().is_some_and(|ids| {
+                            ids.iter()
+                                .any(|id| connection.agent_ids.iter().any(|agent| id == agent))
+                        })
+                });
+                if held {
+                    return Err(Error::bad(format!(
+                        "Grant one {package_name} instance per agent: its runs use that instance's credentials."
+                    )));
                 }
             }
             if !connection.agent_id.is_empty() {

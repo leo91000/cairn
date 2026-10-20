@@ -116,6 +116,16 @@ pub async fn migrate(s: &Service) -> Result<()> {
             .collect();
         (instance("GitHub", agent_ids), token.clone())
     });
+    // An agent answering anyone in a channel must hold no plugin grant: its token is
+    // kept without one rather than suspending the delegation.
+    let public_agents = s
+        .store
+        .list(connections::KIND)
+        .await?
+        .into_iter()
+        .filter(|connection| connection["accessMode"] == "everyone")
+        .map(|connection| text(&connection, "agentId").to_owned())
+        .collect::<Vec<_>>();
     let mut created = shared.iter().cloned().collect::<Vec<_>>();
     for (key, token) in &dedicated {
         let agent_id = key.trim_start_matches(DEDICATED);
@@ -130,7 +140,8 @@ pub async fn migrate(s: &Service) -> Result<()> {
             continue;
         };
         // An agent using the shared connection never used its token: keep it, ungranted.
-        let unused = shared.is_some() && shared_access(agent);
+        let unused = (shared.is_some() && shared_access(agent))
+            || public_agents.iter().any(|public| public == agent_id);
         let name = format!("GitHub ({})", text(agent, "name"));
         let grants = if unused {
             Vec::new()

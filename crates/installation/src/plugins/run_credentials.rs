@@ -47,6 +47,8 @@ pub struct RunCredentials {
     pub identity: Option<(String, String)>,
     /// Credentials for the host's own fetches of the run's projects, by project ID.
     pub fetch: std::collections::BTreeMap<String, Vec<GitAccess>>,
+    /// Credential and secret values of the granted instances, masked in run output.
+    pub secrets: Vec<String>,
 }
 
 impl RunCredentials {
@@ -61,6 +63,7 @@ struct Rendered {
     files: Vec<(String, String)>,
     git: Vec<GitAccess>,
     identity: Option<(String, String)>,
+    secrets: Vec<String>,
 }
 
 async fn values(s: &Service, connection: &Connection) -> Result<(Option<String>, Value)> {
@@ -85,6 +88,7 @@ async fn render_instance(
             files: Vec::new(),
             git: Vec::new(),
             identity: None,
+            secrets: Vec::new(),
         });
     };
     let (credential, secrets) = values(s, connection).await?;
@@ -119,10 +123,22 @@ async fn render_instance(
         let email = fill(&identity.email)?.trim().to_owned();
         (!name.is_empty() && !email.is_empty()).then_some((name, email))
     });
+    let values = credential
+        .iter()
+        .cloned()
+        .chain(
+            secrets
+                .values()
+                .filter_map(Value::as_str)
+                .map(str::to_owned),
+        )
+        .filter(|value| value.len() >= 8)
+        .collect();
     Ok(Rendered {
         files,
         git,
         identity,
+        secrets: values,
     })
 }
 
@@ -163,7 +179,13 @@ pub async fn for_run(s: &Service, agent_id: &str, projects: &[Value]) -> Result<
         let granted = owned.iter().find(|connection| connection.grants(agent_id));
         if let Some(connection) = granted {
             let rendered = render_instance(s, &package, connection).await?;
-            credentials.files.extend(rendered.files);
+            // Packages never overwrite each other's files: the first one keeps a path.
+            for (path, content) in rendered.files {
+                if !credentials.files.iter().any(|(known, _)| *known == path) {
+                    credentials.files.push((path, content));
+                }
+            }
+            credentials.secrets.extend(rendered.secrets);
             credentials.git.extend(rendered.git.iter().cloned());
             if credentials.identity.is_none() {
                 credentials.identity = rendered.identity;
