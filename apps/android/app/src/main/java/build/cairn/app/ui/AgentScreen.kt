@@ -499,6 +499,7 @@ private fun AgentPage(
                             shown.agent,
                             catalog,
                             legacy,
+                            !liveGrants,
                             catalogFailed,
                             retry = { catalogAttempt++ },
                             navigate = { navigate(it) },
@@ -509,6 +510,7 @@ private fun AgentPage(
                             shown.agent,
                             nodes,
                             legacy,
+                            !liveGrants,
                             nodesLoaded,
                             nodesFailed,
                             retry = { nodesAttempt++ },
@@ -1661,6 +1663,7 @@ private fun PluginsSection(
     agent: Agent,
     catalog: PluginCatalog?,
     legacy: Boolean,
+    locked: Boolean,
     failed: Boolean,
     retry: () -> Unit,
     navigate: (String) -> Unit,
@@ -1728,7 +1731,7 @@ private fun PluginsSection(
                             else -> "Non accordé"
                         },
                         on,
-                        enabled = !legacy,
+                        enabled = !locked,
                         description = "Accès à ${connection.name}",
                     ) { allowed ->
                         change {
@@ -1775,7 +1778,7 @@ private fun PluginsSection(
                     style = MaterialTheme.typography.titleSmall,
                 )
                 ToneChip(PluginBadge("Indisponible", PluginTone.ATTENTION))
-                if (!legacy)
+                if (!locked)
                     TextButton(
                         onClick = { change { it.copy(plugins = it.plugins - connection.id) } },
                         modifier =
@@ -1796,7 +1799,7 @@ private fun PluginsSection(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Instance supprimée", Modifier.weight(1f))
             ToneChip(PluginBadge("Introuvable", PluginTone.ATTENTION))
-            if (!legacy)
+            if (!locked)
                 TextButton(onClick = { change { it.copy(plugins = it.plugins - id) } }) {
                     Text("Retirer")
                 }
@@ -1843,6 +1846,7 @@ private fun NodesSection(
     agent: Agent,
     nodes: List<ExecutionNode>,
     legacy: Boolean,
+    locked: Boolean,
     loaded: Boolean,
     failed: Boolean,
     retry: () -> Unit,
@@ -1876,7 +1880,7 @@ private fun NodesSection(
         enabled = editable,
         power = true,
     ) { on ->
-        change { it.withBackend(on, legacy) }
+        change { it.withBackend(on, locked) }
     }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     if (!native)
@@ -1915,7 +1919,7 @@ private fun NodesSection(
                     else PluginBadge("Introuvable", PluginTone.ATTENTION)
                 )
                 TextButton(
-                    onClick = { change { it.withNodeRun(held.id, false, legacy) } },
+                    onClick = { change { it.withNodeRun(held.id, false, locked) } },
                     modifier =
                         Modifier.semantics {
                             contentDescription = "Retirer ${held.name ?: held.id}"
@@ -1967,7 +1971,7 @@ private fun NodesSection(
                     enabled = editable && access.nodes != null,
                     description = "Exécuter ses conversations sur ${node.name}",
                 ) { on ->
-                    change { it.withNodeRun(node.id, on, legacy) }
+                    change { it.withNodeRun(node.id, on, locked) }
                 }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 val supported = node.exclusiveReservations
@@ -1979,7 +1983,7 @@ private fun NodesSection(
                         else -> "Suspend les autres conversations"
                     },
                     exclusive,
-                    enabled = editable && !legacy && runs && supported,
+                    enabled = editable && !locked && runs && supported,
                     power = true,
                     description = "Réserver ${node.name} en exclusivité",
                 ) { on ->
@@ -1992,7 +1996,7 @@ private fun NodesSection(
                             else "Inactif tant que le runtime n’est pas mis à jour.",
                             Modifier.weight(1f),
                         )
-                        if (!legacy)
+                        if (!locked)
                             TextButton(onClick = { change { it.withExclusive(node.id, false) } }) {
                                 Text("Retirer")
                             }
@@ -2007,7 +2011,7 @@ private fun NodesSection(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Node supprimée ou révoquée", Modifier.weight(1f))
                     ToneChip(PluginBadge("Introuvable", PluginTone.ATTENTION))
-                    if (!legacy)
+                    if (!locked)
                         TextButton(onClick = { change { it.withExclusive(id, false) } }) {
                             Text("Retirer")
                         }

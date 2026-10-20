@@ -125,6 +125,8 @@ abstract class AgentPageCases {
         val failToken: AtomicBoolean = AtomicBoolean(false),
         /** The installation's MCP connections, as `GET /mcps` returns them. */
         val mcps: AtomicReference<String> = AtomicReference("[]"),
+        /** No agent is listed yet, so the installation's version is unknown. */
+        val noAgents: AtomicBoolean = AtomicBoolean(false),
     )
 
     private fun fixture(): Fixture {
@@ -143,6 +145,7 @@ abstract class AgentPageCases {
         val older = AtomicBoolean(false)
         val failToken = AtomicBoolean(false)
         val mcps = AtomicReference("[]")
+        val noAgents = AtomicBoolean(false)
         val server = MockWebServer()
         server.dispatcher =
             object : Dispatcher() {
@@ -222,6 +225,7 @@ abstract class AgentPageCases {
                         return response
                             .setResponseCode(409)
                             .setBody("""{"error":"Jeton illisible"}""")
+                    if (path == "/agents" && noAgents.get()) return response.setBody("[]")
                     if (path == "/nodes" && failNodes.get())
                         return response
                             .setResponseCode(409)
@@ -287,6 +291,7 @@ abstract class AgentPageCases {
             older,
             failToken,
             mcps,
+            noAgents,
         )
     }
 
@@ -300,6 +305,7 @@ abstract class AgentPageCases {
     private fun journey(
         agentId: String,
         prepare: (Fixture) -> Unit = {},
+        beforeAgents: Boolean = false,
         body: (Fixture) -> Unit,
     ) {
         val fixture = fixture().also(prepare)
@@ -328,7 +334,7 @@ abstract class AgentPageCases {
                 CairnTheme {
                     Surface(Modifier.fillMaxSize()) {
                         Box(Modifier.systemBarsPadding()) {
-                            if (mounted && loaded)
+                            if (mounted && (loaded || beforeAgents && state.installation != null))
                                 AgentScreen(
                                     vm,
                                     state,
@@ -647,6 +653,24 @@ abstract class AgentPageCases {
             compose
                 .onNodeWithContentDescription("Exécuter ses conversations sur gpu-box")
                 .assertIsEnabled()
+        }
+    }
+
+    @Test
+    fun liveGrantsStayReadOnlyUntilTheInstallationIsKnown() {
+        journey("", prepare = { it.noAgents.set(true) }, beforeAgents = true) { _ ->
+            // They would not be sent before the agent list says where the installation keeps them.
+            open(AgentSection.Plugins)
+            waitForDescription("Accès à Production")
+            compose
+                .onNodeWithContentDescription("Accès à Production")
+                .assertIsOff()
+                .assertIsNotEnabled()
+            compose
+                .onNodeWithText(
+                    "Mettez à jour l’installation pour accorder ces accès depuis la fiche de l’agent."
+                )
+                .assertDoesNotExist()
         }
     }
 

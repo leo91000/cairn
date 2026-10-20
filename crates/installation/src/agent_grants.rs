@@ -10,7 +10,9 @@
 //! These grants are live, not part of a run's snapshot. They sit beside `access`
 //! rather than in it: [`crate::service::policy`] (and the previous release's, which
 //! merges every `access` key) never sees them, so changing them neither blocks queued
-//! work nor suspends a plugin delegation, before or after a rollback.
+//! work nor changes the access a plugin delegation approved, before or after a
+//! rollback. Granting a plugin instance still suspends a delegation open to everyone,
+//! which must never reach secrets.
 
 use crate::{
     error::{Error, Result},
