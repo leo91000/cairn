@@ -34,6 +34,7 @@ class BlockedMissionJourneyTest {
     @get:Rule val compose = createComposeRule()
 
     private val calls = CopyOnWriteArrayList<Triple<String, String, String>>()
+    private val activityReads = CopyOnWriteArrayList<List<Run>>()
     private val now = System.currentTimeMillis()
     private val claude = Agent("claude", "Claude", provider = "claude")
     private val proof = Task("proof", "Preuve appareil F8", agentId = "claude")
@@ -160,8 +161,11 @@ class BlockedMissionJourneyTest {
                             path == "$api/agents" -> json(wireJson.encodeToString(listOf(claude)))
                             path == "$api/tasks" && request.method == "GET" ->
                                 json(wireJson.encodeToString(listOf(proof, notes, checks, deploy)))
-                            path == "$api/tasks/activity" ->
-                                json(wireJson.encodeToString(activity()))
+                            path == "$api/tasks/activity" -> {
+                                val snapshot = activity()
+                                activityReads += snapshot
+                                json(wireJson.encodeToString(snapshot))
+                            }
                             path == "$api/dismissals" -> {
                                 setAside(text)
                                 json("{\"updated\":1}")
@@ -287,6 +291,45 @@ class BlockedMissionJourneyTest {
         waitText("Me le rappeler demain")
         assertTrue(!dismissals.containsKey("proof"))
     }
+
+    @Test
+    fun `server changes from another device remain visible after local dismiss and restore`() =
+        journey {
+            waitText("Preuve appareil F8")
+            compose.onNodeWithContentDescription("Écarter Preuve appareil F8").performClick()
+            waitText("Tâche bloquée · Écartée")
+            compose.waitUntil(15000) {
+                activityReads.any { snapshot ->
+                    snapshot.first { it.taskId == proof.id }.dismissal != null
+                }
+            }
+
+            // The same account restores the outcome from another device.
+            dismissals.remove(proof.id)
+            compose.waitUntil(15000) {
+                compose
+                    .onAllNodesWithContentDescription("Écarter Preuve appareil F8")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+
+            dismissals[proof.id] = OutcomeDismissal(tomorrowMorning())
+            waitText("Rappel prévu · Tâche bloquée")
+            compose.onNodeWithText("Preuve appareil F8").performClick()
+            waitText("Remettre dans Pour vous")
+            val beforeRestore = activityReads.size
+            compose.onNodeWithText("Remettre dans Pour vous").performClick()
+            waitText("Me le rappeler demain")
+            compose.waitUntil(15000) {
+                activityReads.drop(beforeRestore).any { snapshot ->
+                    snapshot.first { it.taskId == proof.id }.dismissal == null
+                }
+            }
+
+            // A later dismissal elsewhere supersedes Android's local restore too.
+            dismissals[proof.id] = OutcomeDismissal()
+            waitText("Écartée : elle reste hors de Pour vous jusqu’au prochain résultat.")
+        }
 
     @Test
     fun `a run handed back to its requester links the conversation that started it`() = journey {

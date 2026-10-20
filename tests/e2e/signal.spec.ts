@@ -6,6 +6,7 @@ import {
   expect,
   expectSingleScroll,
   test,
+  useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
 
@@ -240,6 +241,7 @@ async function blockedMission(workspace: Workspace, agentId: string, name: strin
 
 test('blocked missions ask only when they wait on the user, and can be set aside', async ({ page, workspace }, testInfo) => {
   test.setTimeout(180000)
+  await useRelayForHttpMocks(page)
   const { id: agent } = workspace.service.agent({ name: 'Claude' })
   const parent = await workspace.api('/api/chats', 'POST', {})
   workspace.service.store.put('chats', { ...parent, title: 'Orchestrate the F8 architecture work' })
@@ -278,6 +280,18 @@ test('blocked missions ask only when they wait on the user, and can be set aside
   await expect(recent.locator(`[data-fil-key="task:${handedBack.task.id}"]`)).toContainText('Waiting on Orchestrate the F8 architecture work')
   await expect(recent.locator(`[data-fil-key="task:${external.task.id}"]`)).toContainText('Waiting on an outside check')
   await capture(page, testInfo, 'blocked-fil-for-you')
+
+  // A refused write must roll back even when the following activity read is unavailable.
+  const dismissalsRoute = '**/api/dismissals'
+  const activityRoute = '**/api/tasks/activity'
+  await page.route(dismissalsRoute, route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Dismissal unavailable' }) }))
+  await page.route(activityRoute, route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Activity unavailable' }) }))
+  const refusedDismissal = page.waitForResponse(response => response.url().endsWith('/api/dismissals') && response.status() === 503)
+  await card(proof.task).getByRole('button', { name: `Dismiss “${proof.task.name}”` }).click()
+  await refusedDismissal
+  await expect(card(proof.task)).toBeVisible()
+  await page.unroute(dismissalsRoute)
+  await page.unroute(activityRoute)
 
   await card(scope.task).getByRole('button', { name: `More actions for “${scope.task.name}”` }).click()
   const menu = page.getByRole('menu')

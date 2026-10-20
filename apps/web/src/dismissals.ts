@@ -6,12 +6,13 @@ type Outcome = Pick<RunListItem, 'id' | 'taskId' | 'finishedAt'>
 
 // Shown at once; the refresh that follows confirms it, or restores the server's state on failure.
 async function send(run: Outcome, item: Record<string, unknown>, dismissal: RunListItem['dismissal'], message: string) {
-  patchMissionRun(run.id, { dismissal })
+  const rollback = patchMissionRun(run.id, { dismissal })
   try {
     await api('/dismissals', { method: 'POST', body: JSON.stringify({ items: [{ key: `task:${run.taskId}`, ...item }] }) })
     notify(message)
   }
   catch (error) {
+    rollback()
     notify((error as Error).message)
   }
 

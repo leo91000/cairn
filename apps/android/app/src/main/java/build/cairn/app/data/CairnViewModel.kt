@@ -256,11 +256,33 @@ constructor(
      * null value brings one back.
      */
     val localDismissals = androidx.compose.runtime.mutableStateMapOf<String, OutcomeDismissal?>()
+    private val dismissalRequests = mutableMapOf<String, Any>()
+    private val savedDismissals = mutableMapOf<String, Any>()
 
     private fun clearReads() {
         readsGeneration++
         localReads.clear()
         localDismissals.clear()
+        dismissalRequests.clear()
+        savedDismissals.clear()
+    }
+
+    /** A poll started after a successful write supersedes its optimistic value. */
+    suspend fun missionActivity(): List<Run> {
+        val target = api
+        val generation = readsGeneration
+        val saved = savedDismissals.toMap()
+        val activity = target.get<List<Run>>("/tasks/activity")
+        if (generation == readsGeneration && connection === target) {
+            for ((runId, request) in saved) {
+                if (dismissalRequests[runId] === request) {
+                    localDismissals.remove(runId)
+                    dismissalRequests.remove(runId)
+                    savedDismissals.remove(runId)
+                }
+            }
+        }
+        return activity
     }
 
     /**
@@ -301,6 +323,9 @@ constructor(
         val target = connection ?: return
         if (!state.value.session.authenticated || state.value.signingOut) return
         val generation = readsGeneration
+        val request = Any()
+        dismissalRequests[runId] = request
+        savedDismissals.remove(runId)
         localDismissals[runId] = value
         viewModelScope.launch {
             try {
@@ -309,11 +334,16 @@ constructor(
                     "/dismissals",
                     buildJsonObject { putJsonArray("items") { add(item) } },
                 )
+                if (generation != readsGeneration || connection !== target) return@launch
+                if (dismissalRequests[runId] === request) savedDismissals[runId] = request
                 notify(message)
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 if (generation != readsGeneration || connection !== target) return@launch
+                if (dismissalRequests[runId] !== request) return@launch
                 localDismissals.remove(runId)
+                dismissalRequests.remove(runId)
+                savedDismissals.remove(runId)
                 report(e)
             }
         }

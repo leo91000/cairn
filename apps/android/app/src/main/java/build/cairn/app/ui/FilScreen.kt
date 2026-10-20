@@ -364,7 +364,7 @@ internal fun rememberFilActivity(vm: CairnViewModel): List<Run>? {
     var activity by remember { mutableStateOf<List<Run>?>(null) }
     Poll("fil-activity", 5000) {
         try {
-            activity = vm.api.get("/tasks/activity")
+            activity = vm.missionActivity()
         } catch (e: Exception) {
             vm.report(e)
         }

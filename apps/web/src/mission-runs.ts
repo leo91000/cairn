@@ -36,7 +36,14 @@ export async function refreshMissionRuns() {
 
 /** Shows a change made here before the next poll confirms it. */
 export function patchMissionRun(id: string, patch: Partial<RunListItem>) {
+  const previous = runs.value.find(run => run.id === id)
   runs.value = runs.value.map(run => run.id === id ? { ...run, ...patch } : run)
+  const optimistic = runs.value.find(run => run.id === id)
+  // A newer action, server response or session change owns its own state.
+  return () => {
+    if (previous)
+      runs.value = runs.value.map(run => run === optimistic ? previous : run)
+  }
 }
 
 /** Views showing missions load them at once; the shell's badges wait so pages load first. */
