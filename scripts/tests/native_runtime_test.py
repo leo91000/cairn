@@ -86,7 +86,11 @@ def main():
                             memory=Path('/proc/meminfo').read_text().splitlines()[0]),
                    conditions='Disposable hosted Linux VM; loopback Moto S3, synthetic credentials; no WAN latency. '
                               'Cold file reads use advisory POSIX_FADV_DONTNEED; post-eviction controller restart clears userspace cache.',
-                   workload='Seeded random42 8MiB asset +128 fsynced 4KiB text writes, per-process wall/CPU milliseconds.')
+                   workload='Seeded random42 8MiB asset +128 fsynced 4KiB text writes, per-process wall/CPU milliseconds.',
+                   resources=dict(nativeCpu=1, nativeMemoryMiB=512, nativeDiskMiB=256,
+                                  reference='Host root process without workload cgroup limits',
+                                  native='Unprivileged systemd workload, journal-backed ext4 on ublk',
+                                  build='Cargo development profile, debug info disabled'))
     with tempfile.TemporaryDirectory(prefix='cairn-native-smoke-', dir='/var/tmp') as temporary:
         root = Path(temporary)
         root.chmod(0o700)

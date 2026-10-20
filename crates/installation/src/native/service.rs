@@ -1607,7 +1607,7 @@ mod tests {
             private_dir(&directory).await.unwrap();
         }
         let plan = json!({
-            "id": attempt, "runId": run, "backend": "native", "nodeLeaseRequired": true,
+            "id": attempt, "runId": run, "backend": "native", "nodeLeaseRequired": true, "expires": null,
             "cwd": stage.join("workspace"), "projectRoot": stage.join("workspace"),
             "sandbox": "workspace-write", "args": [], "prompt": "fixture",
             "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
