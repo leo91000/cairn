@@ -8,6 +8,7 @@ import {
   notify,
   state,
 } from '../api'
+import { chatList } from '../chat-list'
 import {
   ArrowLeft,
   CalendarClock,
@@ -17,9 +18,11 @@ import {
   Square,
   Terminal,
 } from '../icons'
-import { useReadWhileOpen } from '../reads'
+import { useMissionRuns } from '../mission-runs'
+import { localReads, useReadWhileOpen } from '../reads'
 import { useRetryNotice } from '../run-retry'
 import { exclusiveSuspensionLabel, isExclusivelySuspended, runDisplayStatus } from '../run-status'
+import { filOf } from '../signal'
 import { useLiveRun } from '../use-live-run'
 import ActivityFeed from './ActivityFeed.vue'
 import ArtifactGallery from './ArtifactGallery.vue'
@@ -27,6 +30,7 @@ import ArtifactViewer from './ArtifactViewer.vue'
 import FilMission from './FilMission.vue'
 import Icon from './Icon.vue'
 import Markdown from './Markdown.vue'
+import MissionOutcomeActions from './MissionOutcomeActions.vue'
 import Modal from './Modal.vue'
 import Outcome from './Outcome.vue'
 import RunDetails from './RunDetails.vue'
@@ -61,6 +65,14 @@ const error = ref('')
 const tab = ref('events')
 // Only acknowledge output that is displayed, including a mission finishing while it is open.
 useReadWhileOpen(() => ['events', 'result'].includes(tab.value) && live.synced.value && !loading.value && run.value?.trigger !== 'chat' && run.value?.status === 'succeeded' && run.value.finishedAt ? { key: `task:${run.value.taskId}`, at: run.value.finishedAt } : null)
+// Where the Fil holds this run's blocked outcome, while it is its mission's latest.
+const missionRuns = useMissionRuns()
+const outcomeItem = computed(() => {
+  if (!run.value || run.value.trigger === 'chat' || !run.value.outcome || run.value.outcome.status === 'completed')
+    return undefined
+  const fil = filOf(chatList.value, state.tasks, missionRuns.value, localReads)
+  return [...fil.forYou, ...fil.waiting, ...fil.recent].find(item => item.runId === run.value!.id)
+})
 const confirm = ref(false)
 const confirmCleanup = ref(false)
 const active = computed(
@@ -229,7 +241,11 @@ async function copy() {
           :outcome="run.status === 'succeeded' ? run.outcome : null"
           @load="live.loadOlder"
           @position="live.savePosition"
-        />
+        >
+          <template v-if="outcomeItem" #outcome>
+            <MissionOutcomeActions :item="outcomeItem" />
+          </template>
+        </ActivityFeed>
         <div v-else-if="tab === 'files'" class="result-content flex-1 min-h-0 overflow-auto p-5">
           <ArtifactGallery v-if="deliverables.length" :items="latestArtifacts(deliverables)" @open="artifactViewer = $event.id" />
           <p v-else class="text-sm text-muted">

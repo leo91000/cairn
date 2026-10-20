@@ -192,7 +192,11 @@ internal fun outcomeLabel(outcome: TaskOutcome) =
     }
 
 @Composable
-internal fun CompletionEvidence(outcome: TaskOutcome, agent: String) {
+internal fun CompletionEvidence(
+    outcome: TaskOutcome,
+    agent: String,
+    actions: (@Composable () -> Unit)? = null,
+) {
     var expanded by
         rememberSaveable(outcome.messageId, outcome.reportedAt) { mutableStateOf(false) }
     val attention = outcome.status != "completed"
@@ -230,6 +234,7 @@ internal fun CompletionEvidence(outcome: TaskOutcome, agent: String) {
                 }
             }
             if (attention) Markdown(outcome.reason)
+            if (attention) actions?.invoke()
             if (expanded) {
                 if (!attention) Markdown(outcome.reason)
                 outcome.evidence.forEach { evidence ->

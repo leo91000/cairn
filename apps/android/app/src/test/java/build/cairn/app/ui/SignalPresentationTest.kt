@@ -165,6 +165,110 @@ class SignalPresentationTest {
     }
 
     @Test
+    fun `blocked missions ask only when they wait on the user`() {
+        val tasks =
+            listOf(
+                Task("proof", "Preuve appareil"),
+                Task("ci", "Checks PR315"),
+                Task("deploy", "Déploiement staging"),
+                Task("orphan", "Orpheline"),
+            )
+        fun blocked(waitingOn: String? = null) =
+            TaskOutcome("blocked", "La CI revient au parent", waitingOn = waitingOn)
+        val activity =
+            listOf(
+                Run("proof-1", taskId = "proof", status = "succeeded", outcome = blocked("user")),
+                Run(
+                    "ci-1",
+                    taskId = "ci",
+                    status = "succeeded",
+                    finishedAt = 3,
+                    outcome = blocked("requester"),
+                    requestedBy = RunRequester("parent-run", chatId = "parent"),
+                ),
+                Run(
+                    "deploy-1",
+                    taskId = "deploy",
+                    status = "succeeded",
+                    outcome = blocked("external"),
+                ),
+                // Its requester is gone: the user is the one left to act.
+                Run(
+                    "orphan-1",
+                    taskId = "orphan",
+                    status = "succeeded",
+                    outcome = blocked("requester"),
+                    requestedBy = RunRequester("gone", chatId = "deleted"),
+                ),
+            )
+        val feed =
+            buildFeed(
+                listOf(Chat("parent", title = "Orchestrer F8", updatedAt = 1)),
+                activity,
+                tasks,
+            )
+        assertEquals(listOf("run:proof-1", "run:orphan-1"), feed.forYou.map { it.key })
+        assertTrue(feed.forYou.first().dismissible)
+        val ci = feed.recent.first { it.key == "run:ci-1" }
+        assertEquals(FeedKind.SET_ASIDE_TASK, ci.kind)
+        assertEquals(SetAside.REQUESTER, ci.setAside)
+        assertEquals("Tâche bloquée · En attente de Orchestrer F8", ci.subtitle)
+        assertEquals(FeedRequester("Orchestrer F8", "parent", null), ci.requester)
+        assertEquals(
+            SetAside.EXTERNAL,
+            feed.recent.first { it.key == "run:deploy-1" }.setAside,
+        )
+    }
+
+    @Test
+    fun `a dismissed mission leaves For you and a snoozed one waits for its time`() {
+        val tasks = listOf(Task("a", "Preuve"), Task("b", "Notes"))
+        val activity =
+            listOf(
+                Run(
+                    "r1",
+                    taskId = "a",
+                    status = "succeeded",
+                    outcome = TaskOutcome("blocked", "CI"),
+                    dismissal = OutcomeDismissal(),
+                ),
+                Run(
+                    "r2",
+                    taskId = "b",
+                    status = "succeeded",
+                    outcome = TaskOutcome("needs_input", "Choisir"),
+                    dismissal = OutcomeDismissal(until = 100),
+                ),
+            )
+        val before = buildFeed(emptyList(), activity, tasks, now = 50)
+        assertTrue(before.forYou.isEmpty())
+        assertEquals(SetAside.DISMISSED, before.recent.single().setAside)
+        val snoozed = before.waiting.single()
+        assertEquals(FeedKind.SNOOZED_TASK, snoozed.kind)
+        assertEquals(100L, snoozed.wakeAt)
+        val after = buildFeed(emptyList(), activity, tasks, now = 100)
+        assertEquals(listOf("run:r2"), after.forYou.map { it.key })
+        // Input the agent asked for can only be snoozed.
+        assertTrue(!after.forYou.single().dismissible)
+        // A local change shows before the next poll confirms it.
+        val restored = withLocalDismissals(activity, mapOf("r1" to null))
+        assertEquals(
+            listOf("run:r1", "run:r2"),
+            buildFeed(emptyList(), restored, tasks, now = 100).forYou.map { it.key },
+        )
+    }
+
+    @Test
+    fun `a snoozed mission asks again tomorrow at nine, local time`() {
+        val zone = ZoneId.of("Europe/Paris")
+        val evening = LocalDateTime.of(2026, 10, 20, 22, 30).atZone(zone).toInstant().toEpochMilli()
+        assertEquals(
+            LocalDateTime.of(2026, 10, 21, 9, 0).atZone(zone).toInstant().toEpochMilli(),
+            tomorrowMorning(evening, zone),
+        )
+    }
+
+    @Test
     fun `finished work not read yet waits in For you below what needs an answer`() {
         val chats =
             listOf(

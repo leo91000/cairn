@@ -102,9 +102,12 @@ export type Task = z.infer<typeof taskInput> & {
 }
 export type RunStatus
   = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'
+/** Who must act next on work that is blocked or needs input; the user when absent. */
+export type OutcomeWaitingOn = 'user' | 'requester' | 'external'
 export interface TaskOutcome {
   status: 'completed' | 'blocked' | 'needs_input'
   reason: string
+  waitingOn?: OutcomeWaitingOn
   evidence: string[]
   reportedAt: number
   messageId?: string | null
@@ -144,6 +147,8 @@ export interface Run {
   }
 
   outcome?: TaskOutcome | null
+  /** The conversation or mission whose agent started this run. */
+  requestedBy?: { runId: string, chatId?: string, taskId?: string } | null
   chatExecution?: import('./chats').ChatExecution
   recoveryPending?: boolean
   resumeAvailable?: boolean
@@ -293,6 +298,8 @@ export type RunListItem = Omit<Run, 'snapshot' | 'summary'> & {
   unread?: boolean
   /** The opening of the agent's final message, while unread. */
   preview?: string | null
+  /** The signed-in account set this run's outcome aside: dismissed, or snoozed `until`. */
+  dismissal?: { until: number | null } | null
 }
 
 export interface GithubRepository {

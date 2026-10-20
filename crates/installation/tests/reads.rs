@@ -61,6 +61,22 @@ impl App {
         body
     }
 
+    /// How the account set the mission run aside, as the Fil lists it.
+    async fn dismissal(&self, who: &RelayContext, run: &str) -> Value {
+        let runs = self.get(who, "/api/tasks/activity").await;
+        find(&runs, "id", run)["dismissal"].clone()
+    }
+
+    async fn dismiss(&self, items: Value) -> (StatusCode, Value) {
+        self.request(
+            &self.owner,
+            "POST",
+            "/api/dismissals",
+            json!({ "items": items }),
+        )
+        .await
+    }
+
     async fn read(&self, who: &RelayContext, items: &[String]) -> (StatusCode, Value) {
         self.request(who, "POST", "/api/reads", json!({ "items": items }))
             .await
@@ -462,5 +478,212 @@ async fn read_watermark_measurements() {
         println!(
             "monotonic={monotonic} marks=200 encoded_bytes={encoded_bytes} cold_ms={cold_ms:.3} warm_ms={warm_ms:.3} write_ms={write_ms:.3} read_cpu_ms={read_cpu_ms:.3} write_cpu_ms={write_cpu_ms:.3}"
         );
+    }
+}
+
+#[tokio::test]
+#[ignore = "manual storage measurements"]
+async fn dismissal_storage_measurements() {
+    use cairn_installation::store::Store;
+    use std::time::Instant;
+
+    #[derive(serde::Serialize, serde::Deserialize, Clone)]
+    #[serde(rename_all = "camelCase")]
+    struct Dismissal {
+        finished_at: i64,
+        until: Option<i64>,
+    }
+
+    fn cpu_ms() -> f64 {
+        let mut time = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut time) },
+            0
+        );
+        time.tv_sec as f64 * 1000.0 + time.tv_nsec as f64 / 1_000_000.0
+    }
+
+    async fn read(store: &Store, dismissals: bool) {
+        store
+            .read(move |db| {
+                assert!(db.kv_as::<i64>("read-since:account")?.is_some());
+                assert_eq!(db.keys_as::<i64>("read:account:")?.len(), 200);
+                if dismissals {
+                    assert_eq!(db.keys_as::<Dismissal>("dismissed:account:")?.len(), 200);
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    for dismissals in [false, true] {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let finished_at = 1_792_000_000_000_i64;
+        let marks: Vec<String> = (0..200)
+            .map(|n| format!("read:account:task:{n:08x}-0000-4000-8000-000000000000"))
+            .collect();
+        let outcomes: Vec<(String, Dismissal)> = (0..200)
+            .map(|n| {
+                (
+                    format!("dismissed:account:task:{n:08x}-0000-4000-8000-000000000000"),
+                    Dismissal {
+                        finished_at,
+                        until: (n % 2 == 0).then_some(finished_at + 86_400_000),
+                    },
+                )
+            })
+            .collect();
+        let seed_marks = marks.clone();
+        store
+            .transaction(move |db| {
+                db.set("read-since:account", &finished_at.into(), None)?;
+                for key in seed_marks {
+                    db.set(&key, &finished_at.into(), None)?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let cpu_start = cpu_ms();
+        let start = Instant::now();
+        for _ in 0..100 {
+            let marks = marks.clone();
+            let outcomes = outcomes.clone();
+            store
+                .transaction(move |db| {
+                    if dismissals {
+                        for (key, value) in outcomes {
+                            db.set_as(&key, &value, None)?;
+                        }
+                    } else {
+                        for key in marks {
+                            let at = db.kv_as::<i64>(&key)?.unwrap_or(0).max(finished_at);
+                            db.set(&key, &at.into(), None)?;
+                        }
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        let write_ms = start.elapsed().as_secs_f64() * 10.0;
+        let write_cpu_ms = (cpu_ms() - cpu_start) / 100.0;
+        drop(store);
+
+        // Empty SQLite connection/statement caches; OS page cache stays warm.
+        let store = Store::open(root.path()).unwrap();
+        let start = Instant::now();
+        read(&store, dismissals).await;
+        let cold_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let cpu_start = cpu_ms();
+        let start = Instant::now();
+        for _ in 0..100 {
+            read(&store, dismissals).await;
+        }
+        let warm_ms = start.elapsed().as_secs_f64() * 10.0;
+        let read_cpu_ms = (cpu_ms() - cpu_start) / 100.0;
+        let watermark_bytes = "read-since:account".len() + finished_at.to_string().len();
+        let mark_bytes: usize = marks
+            .iter()
+            .map(|key| key.len() + finished_at.to_string().len())
+            .sum();
+        let dismissal_bytes: usize = if dismissals {
+            outcomes
+                .iter()
+                .map(|(key, value)| key.len() + serde_json::to_vec(value).unwrap().len())
+                .sum()
+        } else {
+            0
+        };
+        let encoded_bytes = watermark_bytes + mark_bytes + dismissal_bytes;
+        println!(
+            "dismissals={dismissals} marks=200 outcomes={} encoded_bytes={encoded_bytes} cold_ms={cold_ms:.3} warm_ms={warm_ms:.3} write_ms={write_ms:.3} read_cpu_ms={read_cpu_ms:.3} write_cpu_ms={write_cpu_ms:.3}",
+            if dismissals { 200 } else { 0 }
+        );
+    }
+}
+
+#[tokio::test]
+async fn blocked_missions_stay_set_aside_for_each_account_until_they_finish_again() {
+    let app = App::new().await;
+    let task = app
+        .service
+        .task(
+            json!({ "name": "Device proof", "prompt": "Prove it", "agentId": MAIN_AGENT_ID }),
+            None,
+        )
+        .await
+        .unwrap();
+    let task_id = text(&task, "id");
+    let key = format!("task:{task_id}");
+    let blocked =
+        |status: &str| json!({ "outcome": { "status": status, "reason": "CI is the parent's." } });
+    let run = app.finished_run(task_id, "mcp", RunStatus::Succeeded).await;
+    let stored = app
+        .service
+        .store
+        .patch_run(&run, blocked("blocked"))
+        .await
+        .unwrap();
+    let finished_at = stored["finishedAt"].as_i64().unwrap();
+    assert!(app.dismissal(&app.owner, &run).await.is_null());
+
+    let (status, body) = app
+        .dismiss(json!([{ "key": key, "finishedAt": finished_at }]))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        app.dismissal(&app.owner, &run).await,
+        json!({ "until": null })
+    );
+    // Each member sets work aside on their own.
+    assert!(app.dismissal(&app.member, &run).await.is_null());
+
+    // Input the agent asked for can only be snoozed.
+    app.service
+        .store
+        .patch_run(&run, blocked("needs_input"))
+        .await
+        .unwrap();
+    assert!(app.dismissal(&app.owner, &run).await.is_null());
+    let until = now() + 60_000;
+    app.dismiss(json!([{ "key": key, "finishedAt": finished_at, "until": until }]))
+        .await;
+    assert_eq!(
+        app.dismissal(&app.owner, &run).await,
+        json!({ "until": until })
+    );
+
+    let (status, _) = app.dismiss(json!([{ "key": key, "restore": true }])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(app.dismissal(&app.owner, &run).await.is_null());
+
+    // A later finish asks again.
+    app.dismiss(json!([{ "key": key, "finishedAt": finished_at }]))
+        .await;
+    let next = app.finished_run(task_id, "mcp", RunStatus::Succeeded).await;
+    app.service
+        .store
+        .patch_run(&next, blocked("blocked"))
+        .await
+        .unwrap();
+    let runs = app.get(&app.owner, "/api/tasks/activity").await;
+    assert!(find(&runs, "id", &next)["dismissal"].is_null());
+
+    for items in [
+        json!([]),
+        json!([{ "key": format!("chat:{}", id()), "finishedAt": finished_at }]),
+        json!([{ "key": key }]),
+        json!([{ "key": key, "finishedAt": finished_at, "until": now() - 1 }]),
+        json!([{ "key": key, "finishedAt": finished_at, "until": now() + 31 * 24 * 60 * 60 * 1000 }]),
+    ] {
+        let (status, body) = app.dismiss(items.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{items}: {body}");
     }
 }
