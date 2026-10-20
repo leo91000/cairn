@@ -84,7 +84,7 @@ impl Service {
                 && (input["archived"] == previous_input["archived"] || input["archived"] == true)
                 && unchanged_content == previous_input;
             if only_reduces_execution {
-                return self.save_task(input, existing, None, bearer).await;
+                return self.save_task(input, existing, None, bearer, true).await;
             }
 
             if let Some(identity) = identity
@@ -109,7 +109,7 @@ impl Service {
             None
         };
 
-        self.save_task(input, existing, author, bearer).await
+        self.save_task(input, existing, author, bearer, false).await
     }
 
     pub async fn synchronize_task_authors(&self) -> Result<()> {

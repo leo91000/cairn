@@ -5597,3 +5597,154 @@ async fn slot_shortage_reports_free_slots_and_check_reserves_nothing() {
     assert_eq!(node["availableSlots"], 1);
     assert!(node.get("reserved").is_none());
 }
+
+#[tokio::test]
+#[ignore = "requires loopback S3; run scripts/tests/node_s3_test.py --case native_stopped_publications"]
+async fn native_stopped_publications_preserve_the_archive_and_restore_through_encrypted_s3() {
+    let (listener, address) = common::bind().await;
+    let owner = Owner::with_runner(common::HOST.into(), format!("http://{address}")).await;
+    let endpoint = std::env::var("CAIRN_NODE_TEST_S3_ENDPOINT").unwrap();
+    configure_loopback_s3(&owner, &endpoint).await;
+    let (run, attempt, snapshot) = (id(), id(), id());
+    let source = owner.root().join("native-source");
+    std::fs::create_dir_all(source.join("workspaces/project")).unwrap();
+    std::fs::write(
+        source.join("workspaces/project/untracked.txt"),
+        b"native unpublished work",
+    )
+    .unwrap();
+    let archive = owner.root().join("native-files");
+    let mut file = tokio::fs::File::create(&archive).await.unwrap();
+    files::send(&source, &mut file).await.unwrap();
+    file.sync_all().await.unwrap();
+    drop(file);
+    let mut manifest = snapshots::index(&archive).await.unwrap();
+    manifest["kind"] = "native-files-v1".into();
+    manifest["runtime"] = json!({
+        "backend": "native",
+        "os": "linux",
+        "arch": "x86_64",
+        "runtimeId": "fixture",
+    });
+    manifest["attempt"] = attempt.clone().into();
+    let current = Arc::new(tokio::sync::Mutex::new(manifest));
+    let acknowledged = Arc::new(AtomicUsize::new(0));
+    let discarded = Arc::new(AtomicUsize::new(0));
+    let controller = Router::new().fallback({
+        let (current, acknowledged, discarded, archive, snapshot) = (
+            current.clone(),
+            acknowledged.clone(),
+            discarded.clone(),
+            archive.clone(),
+            snapshot.clone(),
+        );
+        move |request: Request<Body>| {
+            let (current, acknowledged, discarded, archive, snapshot) = (
+                current.clone(),
+                acknowledged.clone(),
+                discarded.clone(),
+                archive.clone(),
+                snapshot.clone(),
+            );
+            async move {
+                let path = request.uri().path().to_owned();
+                if request.method() == "DELETE" {
+                    discarded.fetch_add(1, Ordering::SeqCst);
+                    return Json(json!({ "ok": true })).into_response();
+                }
+                if path.ends_with("/snapshot") || path.ends_with("/snapshot-completed") {
+                    return Json(
+                        json!({ "id": snapshot, "manifest": current.lock().await.clone() }),
+                    )
+                    .into_response();
+                }
+                if path.ends_with("/published") {
+                    let value: Value =
+                        serde_json::from_slice(&to_bytes(request.into_body(), 4096).await.unwrap())
+                            .unwrap();
+                    assert_eq!(value["snapshotId"], snapshot);
+                    acknowledged.fetch_add(1, Ordering::SeqCst);
+                    return Json(json!({ "committed": true })).into_response();
+                }
+                if path.ends_with("/storage-status") {
+                    return Json(json!({
+                        "mode": "native",
+                        "localBytes": 4096,
+                        "activeLocalBytes": 4096,
+                        "dirtyBytes": 0,
+                    }))
+                    .into_response();
+                }
+                if path.ends_with("/blocks") || path.ends_with("/publication") {
+                    let batch: Value =
+                        serde_json::from_slice(&to_bytes(request.into_body(), 4096).await.unwrap())
+                            .unwrap();
+                    let manifest = current.lock().await;
+                    let mut bytes = Vec::new();
+                    for hash in batch["hashes"].as_array().unwrap() {
+                        bytes.extend(
+                            snapshots::block(&archive, &manifest, hash.as_str().unwrap())
+                                .await
+                                .unwrap(),
+                        );
+                    }
+                    return bytes.into_response();
+                }
+                StatusCode::NOT_FOUND.into_response()
+            }
+        }
+    });
+    let controller_task = common::serve(listener, controller);
+    let record = run_record(&run, RunStatus::Succeeded);
+    owner.add_run(&record).await;
+    owner
+        .set_checkpoint(
+            &run,
+            json!({ "nodeId": LOCAL_NODE_ID, "runnerId": attempt }),
+        )
+        .await;
+    let point = publication::capture(&owner.service, &record).await.unwrap();
+    assert_eq!(acknowledged.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        discarded.load(Ordering::SeqCst),
+        0,
+        "completed native capture must remain available after publication"
+    );
+    let saved = owner
+        .stored("node-backups", point["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    let saved_manifest = publication::manifest(&owner.service, &saved).await.unwrap();
+    assert_eq!(saved_manifest["kind"], "native-files-v1");
+    let restored_archive = owner.root().join("restored-native-files");
+    snapshots::restore(&restored_archive, &saved_manifest, |hash| {
+        let (service, saved) = (owner.service.clone(), saved.clone());
+        async move { publication::read_block(&service, &saved, &hash).await }
+    })
+    .await
+    .unwrap();
+    let restored = owner.root().join("restored-native-workspace");
+    files::receive(
+        &mut BufReader::new(tokio::fs::File::open(restored_archive).await.unwrap()),
+        &restored,
+        MIB as u64,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read(restored.join("workspaces/project/untracked.txt")).unwrap(),
+        b"native unpublished work"
+    );
+    current.lock().await["attempt"] = id().into();
+    assert_eq!(
+        publication::capture(&owner.service, &record)
+            .await
+            .unwrap_err()
+            .status,
+        425
+    );
+    assert_eq!(acknowledged.load(Ordering::SeqCst), 1);
+    assert_eq!(discarded.load(Ordering::SeqCst), 0);
+    publication::purge(&owner.service, &run).await.unwrap();
+    controller_task.abort();
+}

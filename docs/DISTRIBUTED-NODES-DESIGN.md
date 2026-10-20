@@ -4,6 +4,10 @@
 
 # Nodes d’exécution distribuées
 
+Une [proposition distincte d’exécution native](NATIVE-NODES-DESIGN.md) explore
+l’accès GPU pour des agents sélectionnés utilisés par des personnes de confiance.
+Elle reste à examiner et ne modifie pas les garanties Firecracker ci-dessous.
+
 Conception issue de l’entretien. Les choix produit ci-dessous sont confirmés ;
 les réglages et garanties proposés dans la synthèse finale restent à valider
 avant l’implémentation. Voir [la synthèse](DISTRIBUTED-NODES-SPEC.md).

@@ -367,6 +367,10 @@ pub async fn router_with_installation_hosts(
                 )
                 .route("/api/relay/claim", post(installations::claim))
                 .route(
+                    "/api/relay/{installation}/native-authority",
+                    get(sharing::native_authority),
+                )
+                .route(
                     "/api/relay/{installation}/task-authors",
                     get(sharing::task_authors),
                 )

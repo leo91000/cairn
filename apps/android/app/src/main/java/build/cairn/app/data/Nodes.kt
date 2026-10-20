@@ -23,6 +23,7 @@ data class NodeCapabilities(
     val os: String = "",
     val arch: String = "",
     val kvm: Boolean = false,
+    val backend: String = "firecracker",
 )
 
 @Serializable
@@ -31,6 +32,8 @@ data class ExecutionNode(
     val name: String,
     val local: Boolean = false,
     val accepting: Boolean = false,
+    val nativeEnabled: Boolean = false,
+    val nativeAccounts: List<String> = emptyList(),
     val exclusiveAgents: List<String> = emptyList(),
     val exclusiveReservations: Boolean = false,
     val exclusiveReservation: ExclusiveReservation? = null,
@@ -57,6 +60,16 @@ data class ExecutionNode(
     val staleDisks: StaleDisks = StaleDisks(),
     val storage: NodeStoragePolicy? = null,
 )
+
+/** The execution backend of native nodes and agents; the other one is "firecracker" (a VM). */
+const val NATIVE_BACKEND = "native"
+
+/** The default execution backend: a Firecracker VM. */
+const val VM_BACKEND = "firecracker"
+
+/** Whether the node runs on the agent's execution backend: the server refuses any other grant. */
+fun ExecutionNode.accepts(agent: Agent) =
+    (capabilities.backend == NATIVE_BACKEND) == (agent.access.backend == NATIVE_BACKEND)
 
 /**
  * Agents already allowed to run on this machine without being allowed everywhere, from the node
@@ -167,7 +180,14 @@ fun NodeAlert.localized(): Pair<String, String> =
     }
 
 @Serializable
-data class NodeEnrollment(val code: String, val expiresAt: Long, val installCommand: String? = null)
+data class NodeEnrollment(
+    val code: String,
+    val expiresAt: Long,
+    val installCommand: String? = null,
+    val backend: String = "firecracker",
+)
+
+@Serializable data class NativeCaller(val id: String, val email: String)
 
 @Serializable
 data class NodeConfiguration(
@@ -178,6 +198,8 @@ data class NodeConfiguration(
     val slots: Int = 4,
     // No exclusiveAgents: exclusive reservations are granted on each agent's page, and the server
     // keeps them when the key is omitted.
+    val nativeEnabled: Boolean? = null,
+    val nativeAccounts: List<String>? = null,
 )
 
 @Serializable
@@ -228,7 +250,7 @@ fun nodeDiagnostics(node: ExecutionNode, now: Long = System.currentTimeMillis())
             node.lastSeen?.let {
                 "Aucun contact depuis ${relativeAge(it, now).removePrefix("il y a ")} : vérifiez que la machine est allumée, connectée et que le service cairn-node tourne."
             } ?: "La machine ne s’est jamais connectée : lancez la commande d’installation dessus."
-    if (!node.capabilities.kvm)
+    if (node.capabilities.backend != "native" && !node.capabilities.kvm)
         reasons +=
             "KVM indisponible : activez la virtualisation dans le BIOS et chargez le module kvm."
     if (node.status != "offline" && !node.executionReady)
@@ -246,6 +268,12 @@ fun nodeDiagnostics(node: ExecutionNode, now: Long = System.currentTimeMillis())
     if (!node.accepting)
         reasons +=
             "Nouveaux travaux suspendus sur cette machine (Configurer → Accepter de nouveaux travaux)."
+    if (
+        node.capabilities.backend == "native" &&
+            (!node.nativeEnabled || node.nativeAccounts.isEmpty())
+    )
+        reasons +=
+            "Activez l’exécution native et choisissez les personnes de confiance dans Configurer."
     if (node.agents.isEmpty()) reasons += "Aucun agent ne peut encore utiliser cette machine."
     return reasons
 }

@@ -1,20 +1,27 @@
 <script setup lang="ts">
 import type { ExecutionNode } from '../../../../packages/contracts/nodes'
-import type { AgentAccess, ChipTone } from '../agent-access'
+import type { AgentAccess, Backend, ChipTone } from '../agent-access'
 import { computed, ref } from 'vue'
 import { formatMiB } from '../../../../packages/contracts/nodes'
 import {
+  backendOf,
+  backendOptions,
   effectiveExclusive,
+  nativeHelp,
+  nodeBackend,
   nodeName,
+  nodesFor,
   nodeState,
   runsOn,
   supportsExclusive,
+  unknownNode,
 } from '../agent-access'
 import { Info, Search, X } from '../icons'
 import AccessChip from './AccessChip.vue'
 import Icon from './Icon.vue'
 import UiButton from './UiButton.vue'
 import UiSwitch from './UiSwitch.vue'
+import VirtualSelect from './VirtualSelect.vue'
 
 // Per node: may the agent run there, and may it reserve the node exclusively.
 const props = defineProps<{ nodes: ExecutionNode[] }>()
@@ -24,13 +31,15 @@ const exclusiveNodes = defineModel<string[]>('exclusiveNodes', { required: true 
 const query = ref('')
 const selectedOnly = ref(false)
 const unavailableOnly = ref(false)
-const available = computed(() => props.nodes.filter(node => !node.revoked))
+const backend = computed(() => backendOf(access.value))
+// Only nodes of the agent's backend: the server never grants an agent a node of another backend.
+const available = computed(() => nodesFor(props.nodes, backend.value))
 const searchable = computed(() => available.value.length >= 8)
 const visible = computed(() => {
   const words = query.value.trim().toLowerCase()
   return available.value.filter(node => (!words || [nodeName(node, node.id), ...node.tags, ...(node.systemTags ?? [])].join(' ').toLowerCase().includes(words))
     && (!selectedOnly.value || runsOn(access.value, node.id) || exclusiveNodes.value.includes(node.id))
-    && (!unavailableOnly.value || nodeState(node).state !== 'online'))
+    && (!unavailableOnly.value || (!unknownNode(node) && nodeState(node).state !== 'online')))
 })
 // Exclusive grants whose node was revoked or deleted.
 const missing = computed(() => exclusiveNodes.value.filter(id => !available.value.some(node => node.id === id)))
@@ -42,6 +51,18 @@ const stateTones: Record<string, ChipTone> = {
   update: 'unavailable',
 }
 
+// A different backend runs elsewhere: the node choices and exclusive reservations start over.
+const backendChoice = computed({
+  get: () => backend.value,
+  set: (value: string) => {
+    if (value === backend.value)
+      return
+    access.value.backend = value as Backend
+    access.value.nodes = []
+    exclusiveNodes.value = []
+  },
+})
+
 const allNodes = computed({
   get: () => access.value.nodes === null,
   // "Choose" starts from the nodes it can use today, so turning "All" off only stops future nodes.
@@ -51,6 +72,8 @@ const allNodes = computed({
 })
 
 function details(node: ExecutionNode) {
+  if (unknownNode(node))
+    return 'local'
   return [
     node.local ? 'local' : '',
     [...node.tags, ...(node.systemTags ?? [])].join(', '),
@@ -75,6 +98,8 @@ function setExclusive(node: string, on: boolean) {
 function exclusiveBlocked(node: ExecutionNode) {
   if (!runsOn(access.value, node.id))
     return 'Requires permission to run'
+  if (nodeBackend(node) === 'native')
+    return 'Unavailable for native execution'
   if (!supportsExclusive(node))
     return 'Unavailable on this runtime'
   return ''
@@ -83,13 +108,20 @@ function exclusiveBlocked(node: ExecutionNode) {
 
 <template>
   <div class="grid min-w-0 gap-5">
-    <div class="flex items-center justify-between gap-4 rounded-xl border border-line bg-surface px-5 py-4 phone:px-4">
+    <div class="grid gap-2">
+      <VirtualSelect v-model="backendChoice" label="Agent execution backend" :options="[...backendOptions]" />
+      <p v-if="backend === 'native'" class="rounded-xl bg-power-surface px-5 py-3 text-xs text-power" role="note">
+        {{ nativeHelp }}
+      </p>
+    </div>
+
+    <div v-if="backend === 'firecracker'" class="flex items-center justify-between gap-4 rounded-xl border border-line bg-surface px-5 py-4 phone:px-4">
       <div class="min-w-0">
         <p class="text-sm font-semibold">
           All nodes, including future
         </p>
         <p class="text-xs text-muted">
-          New machines become usable by this agent as soon as they are enrolled.
+          New VM machines become usable by this agent as soon as they are enrolled. Native nodes are always chosen one by one.
         </p>
       </div>
       <UiSwitch v-model="allNodes" label="All nodes, including future" />
@@ -142,7 +174,7 @@ function exclusiveBlocked(node: ExecutionNode) {
           </p>
         </div>
         <div>
-          <AccessChip :tone="stateTones[nodeState(node).state]!">
+          <AccessChip v-if="!unknownNode(node)" :tone="stateTones[nodeState(node).state]!">
             {{ nodeState(node).label }}
           </AccessChip>
         </div>

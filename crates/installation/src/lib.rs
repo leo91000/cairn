@@ -34,6 +34,7 @@ pub mod mcp_server;
 pub mod mcps;
 pub mod microvm;
 pub mod models;
+pub mod native;
 pub mod network;
 pub mod nodes;
 pub mod notifications;

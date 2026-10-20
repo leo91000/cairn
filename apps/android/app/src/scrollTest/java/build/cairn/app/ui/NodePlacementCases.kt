@@ -24,6 +24,41 @@ abstract class NodePlacementCases {
 
     @get:Rule val compose = createComposeRule()
 
+    @Test
+    fun nativeNodeEditorRequiresExplicitPeopleAndKeepsOneExecutionSlot() {
+        var saved: NodeConfiguration? = null
+        val node =
+            ExecutionNode(
+                id = "native",
+                name = "Desktop",
+                status = "online",
+                slots = 1,
+                capabilities = NodeCapabilities(backend = "native"),
+            )
+        compose.setContent {
+            CairnTheme {
+                NodeEditor(
+                    node,
+                    Workspace(),
+                    listOf(NativeCaller("trusted", "trusted@example.test")),
+                    {},
+                    { saved = it },
+                )
+            }
+        }
+        compose.onNodeWithText("Slots d’exécution").assertIsNotEnabled()
+        compose.onNodeWithText("Réservation exclusive").assertDoesNotExist()
+        compose.onNodeWithText("Activer l’exécution native").performScrollTo().performClick()
+        compose.onNodeWithText("trusted@example.test").performScrollTo().performClick()
+        capture("native-node-trust")
+        compose.onNodeWithText("Enregistrer").performClick()
+        compose.runOnIdle {
+            assertEquals(true, saved?.nativeEnabled)
+            assertEquals(listOf("trusted"), saved?.nativeAccounts)
+            assertEquals(1, saved?.slots)
+        }
+    }
+
     @Test fun suspendedChatTimelineShowsAStaticNoticeInsteadOfWorking() = suspendedTimeline(true)
 
     @Test fun suspendedRunTimelineAndResultDescribeThePause() = suspendedTimeline(false)
@@ -449,7 +484,7 @@ abstract class NodePlacementCases {
                                 path == "/api/installations/fixture/api/nodes" ->
                                     """[{"id":"node","name":"Serveur test","status":"${if (revoked) "revoked" else "online"}","revoked":$revoked,"accepting":true,"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536},"agents":[],"exclusiveAgents":[],"staleDisks":{"count":${if (cleaned) 0 else 1},"diskMiB":2048}}${if (enrolled) """,{"id":"fresh","name":"Nouvelle node","status":"online","accepting":true,"agents":[{"id":"other","name":"Agent autorisé"},{"id":"main","name":"Agent global","allNodes":true}${if (grantedElsewhere) """,{"id":"late","name":"Agent tardif"}""" else ""}${if (granted) """,{"id":"agent","name":"Agent test"}""" else ""}]}""" else ""}]"""
                                 path == "/api/installations/fixture/api/agents" ->
-                                    """[{"id":"agent","name":"Agent test"},{"id":"other","name":"Agent autorisé","access":{"nodes":["fresh"]}},{"id":"late","name":"Agent tardif"},{"id":"main","name":"Agent global","access":{"nodes":null}}]"""
+                                    """[{"id":"agent","name":"Agent test"},{"id":"other","name":"Agent autorisé","access":{"nodes":["fresh"]}},{"id":"late","name":"Agent tardif"},{"id":"main","name":"Agent global","access":{"nodes":null}},{"id":"native","name":"Agent natif","access":{"backend":"native","nodes":[]}}]"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path == "/api/installations/fixture/api/overview" -> "{}"
@@ -662,6 +697,11 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Déjà autorisé sur cette machine").assertExists()
             compose.onNode(isOn() and hasText("Agent autorisé")).assertIsNotEnabled()
             compose.onNodeWithText("Plus tard").assertExists()
+            // An agent of another execution backend cannot run on this VM node.
+            compose.onNode(isOff() and hasText("Agent natif")).assertIsNotEnabled()
+            compose
+                .onNodeWithText("Agent en exécution native : réservé aux nodes natives")
+                .assertExists()
             compose.onNodeWithText("Agent test").performScrollTo().performClick()
             // Another window grants an agent meanwhile; the next refresh brings it in.
             grantedElsewhere = true

@@ -129,6 +129,7 @@ fun newAgent() =
                 installation = false,
                 github = false,
                 sandbox = "yolo",
+                backend = VM_BACKEND,
             ),
         exclusiveNodes = emptyList(),
         plugins = emptyList(),
@@ -262,6 +263,7 @@ fun agentChanges(
         if (after.github != before.github || draft.tokenChange(tokenSaved, newToken) != null)
             add(AgentSection.Github)
         if (edited.plugins.toSet() != original.plugins.toSet()) add(AgentSection.Plugins)
+        if (after.backend != before.backend) add(AgentSection.Nodes)
         if (after.nodes?.toSet() != before.nodes?.toSet()) add(AgentSection.Nodes)
         if (edited.exclusiveNodes.toSet() != original.exclusiveNodes.toSet())
             add(AgentSection.Nodes)
@@ -332,8 +334,12 @@ fun selectionSummary(selected: List<String>?, total: Int, feminine: Boolean = fa
         else -> "${selected.size} sur $total"
     }
 
-/** The node list of the agent page: the current runner first, then enrolled machines. */
-fun agentNodeChoices(nodes: List<ExecutionNode>): List<ExecutionNode> {
+/**
+ * The node list of the agent page: the current runner first, then enrolled machines. With a
+ * [backend], only machines of that execution backend (the server refuses the others); the current
+ * runner is a VM runner.
+ */
+fun agentNodeChoices(nodes: List<ExecutionNode>, backend: String? = null): List<ExecutionNode> {
     val local =
         nodes.find { it.local || it.id == LOCAL_NODE_ID }
             ?: ExecutionNode(
@@ -343,15 +349,44 @@ fun agentNodeChoices(nodes: List<ExecutionNode>): List<ExecutionNode> {
                 accepting = true,
                 status = "online",
             )
-    return listOf(local.copy(id = LOCAL_NODE_ID, name = "Runner actuel")) +
-        nodes.filter { !it.local && it.id != LOCAL_NODE_ID && !it.revoked }
+    val runner =
+        listOf(local.copy(id = LOCAL_NODE_ID, name = "Runner actuel")).filter {
+            backend == null || backend != NATIVE_BACKEND
+        }
+    return runner +
+        nodes.filter {
+            !it.local &&
+                it.id != LOCAL_NODE_ID &&
+                !it.revoked &&
+                (backend == null ||
+                    (it.capabilities.backend == NATIVE_BACKEND) == (backend == NATIVE_BACKEND))
+        }
 }
+
+/** The node list for this agent's execution backend. */
+fun Agent.nodeChoices(nodes: List<ExecutionNode>) = agentNodeChoices(nodes, access.backend)
+
+/**
+ * Switches between a VM and native execution on the host. Nodes of the other backend no longer
+ * apply, so node execution and exclusive reservations start again from none.
+ */
+fun Agent.withBackend(native: Boolean): Agent {
+    val backend = if (native) NATIVE_BACKEND else VM_BACKEND
+    if (backend == access.backend) return this
+    return copy(
+        access = access.copy(backend = backend, nodes = emptyList()),
+        exclusiveNodes = emptyList(),
+    )
+}
+
+/** "VM" or "Native", as the overview shows the execution backend. */
+fun backendLabel(backend: String) = if (backend == NATIVE_BACKEND) "Exécution native" else "VM"
 
 fun AccessPolicy.runsOn(node: String) = nodes == null || node in nodes
 
 /** Exclusive grants that take effect: the agent may also run there and the runtime supports it. */
 fun Agent.effectiveExclusive(nodes: List<ExecutionNode>): List<ExecutionNode> =
-    agentNodeChoices(nodes).filter {
+    nodeChoices(nodes).filter {
         it.id in exclusiveNodes && access.runsOn(it.id) && it.exclusiveReservations
     }
 
@@ -374,7 +409,7 @@ fun AccessPolicy.withAllNodes(all: Boolean, nodes: List<ExecutionNode>): AccessP
         all -> copy(nodes = null)
         this.nodes != null -> this
         nodes.isEmpty() -> this
-        else -> copy(nodes = agentNodeChoices(nodes).map { it.id })
+        else -> copy(nodes = agentNodeChoices(nodes, backend).map { it.id })
     }
 
 fun Agent.withExclusive(node: String, granted: Boolean): Agent =
@@ -473,7 +508,7 @@ val SANDBOX_CHOICES =
 /** "2 sur 4 · exclusivité sur 1", "Runner actuel seulement", "Toutes, y compris futures". */
 fun nodesSummary(agent: Agent, nodes: List<ExecutionNode>): String {
     val access = agent.access
-    val choices = agentNodeChoices(nodes)
+    val choices = agent.nodeChoices(nodes)
     val run =
         when {
             access.nodes == null -> "Toutes, y compris futures"
@@ -483,7 +518,9 @@ fun nodesSummary(agent: Agent, nodes: List<ExecutionNode>): String {
                 "${access.nodes.count { id -> choices.any { it.id == id } }} sur ${choices.size}"
         }
     val exclusive = agent.effectiveExclusive(nodes).size
-    return if (exclusive > 0) "$run · exclusivité sur $exclusive" else run
+    val summary = if (exclusive > 0) "$run · exclusivité sur $exclusive" else run
+    return if (access.backend == NATIVE_BACKEND) "${backendLabel(access.backend)} · $summary"
+    else summary
 }
 
 fun timeoutSummary(minutes: Int) =
@@ -535,7 +572,7 @@ fun agentIssues(agent: Agent, resources: AgentResources): List<AgentIssue> = bui
             }
     }
     if (resources.nodes.isNotEmpty()) {
-        val choices = agentNodeChoices(resources.nodes)
+        val choices = agent.nodeChoices(resources.nodes)
         agent.exclusiveNodes.forEach { id ->
             val node = choices.find { it.id == id }
             when {
@@ -750,6 +787,13 @@ fun agentReview(
     val before = original.access
     val after = edited.access
     val nodes = agentNodeChoices(resources.nodes)
+    if (after.backend == NATIVE_BACKEND && before.backend != NATIVE_BACKEND)
+        add(
+            ReviewLine(
+                ReviewKind.Power,
+                "Ajout : exécution native sur l’hôte. Cet agent partagera le GPU et les outils de l’hôte, avec une isolation plus faible qu’une VM.",
+            )
+        )
     edited.exclusiveNodes
         .filter { it !in original.exclusiveNodes }
         .forEach { id ->
@@ -867,6 +911,7 @@ fun rebaseAgent(base: Agent, mine: Agent, theirs: Agent): Agent {
                 installation = pick(a.installation, m.installation, t.installation),
                 github = pick(a.github, m.github, t.github),
                 sandbox = pick(a.sandbox, m.sandbox, t.sandbox),
+                backend = pick(a.backend, m.backend, t.backend),
             ),
     )
 }

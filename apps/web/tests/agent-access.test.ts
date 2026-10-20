@@ -6,6 +6,7 @@ import { expect, it } from 'vitest'
 import { LOCAL_NODE_ID } from '../../../packages/contracts/nodes'
 import {
   accessSummary,
+  backendOf,
   changes,
   draftOf,
   effectiveExclusive,
@@ -16,12 +17,14 @@ import {
   issues,
   needsReview,
   newAgentDraft,
+  nodesFor,
   rebaseDraft,
   restrictedGithubMode,
   reviewLines,
   savedDraft,
   selectionSummary,
   skillLabel,
+  unknownNode,
 } from '../src/agent-access'
 
 const gpu = {
@@ -129,6 +132,7 @@ it('summarizes an agent for the list and places server errors in their section',
 
 it('starts new agents restricted until the owner widens their access', () => {
   expect(newAgentDraft().access).toEqual({
+    backend: 'firecracker',
     nodes: [LOCAL_NODE_ID],
     projects: [],
     skills: [],
@@ -458,4 +462,65 @@ it('saves tool choices only for granted MCP connections', () => {
   expect(savedDraft(draft).access.mcpTools).toEqual({ m2: [] })
   // The draft itself is unchanged.
   expect(draft.access.mcpTools).toEqual({ m1: ['echo'], m2: [] })
+})
+
+it('runs agents in Firecracker VMs unless native execution is chosen, and only on nodes of their backend', () => {
+  expect(backendOf(draftOf({ id: 'a', name: 'Agent', access: {} } as unknown as Agent).access)).toBe('firecracker')
+  const local = {
+    ...gpu,
+    id: LOCAL_NODE_ID,
+    name: 'local',
+    local: true,
+  } as ExecutionNode
+  const desktop = {
+    ...gpu,
+    id: 'desktop',
+    name: 'Native desktop',
+    capabilities: { ...gpu.capabilities, backend: 'native' },
+  } as ExecutionNode
+  const revoked = { ...desktop, id: 'old', revoked: true } as ExecutionNode
+  const nodes = [local, gpu, desktop, revoked]
+  expect(nodesFor(nodes, 'firecracker').map(node => node.id)).toEqual([LOCAL_NODE_ID, 'gpu'])
+  // The current runner is a VM runner: native agents choose native nodes one by one.
+  expect(nodesFor(nodes, 'native').map(node => node.id)).toEqual(['desktop'])
+
+  const saved = newAgentDraft()
+  const native = structuredClone(saved)
+  native.access.backend = 'native'
+  native.access.nodes = ['desktop']
+  const withNodes = { ...context, nodes }
+  // The backend, the current runner removed and the native node added.
+  expect(changes(saved, native)).toEqual(['nodes', 'nodes', 'nodes'])
+  // Weaker isolation is reviewed like a power; going back to VMs is a reduction.
+  expect(reviewLines(saved, native, withNodes)[0]).toEqual({
+    kind: 'power',
+    section: 'nodes',
+    text: 'Added: native execution. Uses the host GPU and OS tools with weaker isolation. Choose native nodes explicitly; each node must also authorize the people directing this agent.',
+  })
+  expect(reviewLines(native, saved, withNodes).map(line => line.text)).toEqual(['Removed: node Native desktop, native execution.'])
+  const agent = { id: 'a', name: 'Agent', access: { projects: [], backend: 'native', nodes: ['desktop'] } } as unknown as Agent
+  expect(accessSummary(agent, context)).toBe('No projects · 1 node · Native process')
+})
+
+it('always offers the current runner to Firecracker agents, with an unknown state when unreported', () => {
+  const desktop = {
+    ...gpu,
+    id: 'desktop',
+    name: 'Native desktop',
+    capabilities: { ...gpu.capabilities, backend: 'native' },
+  } as ExecutionNode
+  const offered = nodesFor([gpu, desktop], 'firecracker')
+  expect(offered.map(node => node.id)).toEqual([LOCAL_NODE_ID, 'gpu'])
+  expect(offered[0]).toMatchObject({ name: 'Current runner', local: true })
+  expect(unknownNode(offered[0]!)).toBe(true)
+  expect(unknownNode(gpu)).toBe(false)
+  // A reported runner is used as is; native agents never get it.
+  const reported = {
+    ...gpu,
+    id: LOCAL_NODE_ID,
+    name: 'local',
+    local: true,
+  } as ExecutionNode
+  expect(nodesFor([reported, gpu], 'firecracker')).toEqual([reported, gpu])
+  expect(nodesFor([gpu, desktop], 'native').map(node => node.id)).toEqual(['desktop'])
 })

@@ -37,7 +37,7 @@ const emit = defineEmits<{ relevance: [relevant: boolean] }>()
 const nodes = ref<ExecutionNode[]>([])
 const nodeOptions = computed(() => nodes.value.map(node => ({ value: node.id, label: node.name })))
 const labels: Record<string, string> = {
-  'pausing': 'Pausing the VM',
+  'pausing': 'Pausing execution',
   'saving': 'Saving the environment',
   'restoring': 'Restoring the environment',
   'resuming': 'Resuming the conversation',
@@ -113,6 +113,8 @@ const status = computed((): { tone: 'bad' | 'warn' | 'busy' | 'ok' | 'idle', lab
     return { tone: 'warn', label: 'Saving…' }
   if (dirtyBytes.value)
     return { tone: 'warn', label: `${formatBytes(dirtyBytes.value)} unsaved` }
+  if (run.executionBackend === 'native' && run.status === 'running')
+    return { tone: 'warn', label: 'Local work · saved when execution stops' }
   if (run.backup?.capturedAt)
     return { tone: 'ok', label: `Synced ${relativeAge(run.backup.capturedAt, now.value)}` }
   return { tone: 'idle', label: 'No sync yet' }
@@ -310,7 +312,10 @@ onUnmounted(() => {
               {{ nodeName }}
             </h2>
             <p class="m-0! mt-0.5!">
-              <template v-if="run.storage?.mode === 'on-demand'">
+              <template v-if="run.executionBackend === 'native'">
+                Native process · shared host GPU · checkpoints between turns
+              </template>
+              <template v-else-if="run.storage?.mode === 'on-demand'">
                 Files load on demand
               </template>
             </p>

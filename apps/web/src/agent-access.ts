@@ -74,6 +74,7 @@ export function newAgentDraft(): AgentDraft {
     reasoning: '',
     timeoutMinutes: 0,
     access: {
+      backend: 'firecracker',
       nodes: [LOCAL_NODE_ID],
       projects: [],
       skills: [],
@@ -100,6 +101,7 @@ export function draftOf(agent: Agent): AgentDraft {
     reasoning: agent.reasoning ?? '',
     timeoutMinutes: agent.timeoutMinutes ?? 0,
     access: {
+      backend: access.backend ?? 'firecracker',
       nodes: access.nodes === undefined ? [LOCAL_NODE_ID] : access.nodes === null ? null : [...access.nodes],
       projects: access.projects ? [...access.projects] : null,
       skills: access.skills ? [...access.skills] : null,
@@ -210,6 +212,70 @@ export function nodeName(node: Pick<ExecutionNode, 'id' | 'name' | 'local'> | un
   if (id === LOCAL_NODE_ID || node?.local)
     return 'Current runner'
   return node?.name ?? 'Removed node'
+}
+
+export type Backend = 'firecracker' | 'native'
+
+export const backendOptions = [
+  { value: 'firecracker', label: 'Firecracker VM' },
+  { value: 'native', label: 'Native process · trusted people only' },
+] as const
+
+export const nativeHelp = 'Uses the host GPU and OS tools with weaker isolation. Choose native nodes explicitly; each node must also authorize the people directing this agent.'
+
+/** The agent's execution backend; records from before native execution run in Firecracker VMs. */
+export function backendOf(access: Pick<AgentAccess, 'backend'> | undefined): Backend {
+  return access?.backend === 'native' ? 'native' : 'firecracker'
+}
+
+export function nodeBackend(node: Pick<ExecutionNode, 'capabilities'>): Backend {
+  return node.capabilities.backend === 'native' ? 'native' : 'firecracker'
+}
+
+const placeholders = new WeakSet<ExecutionNode>()
+
+/** The current runner when the node list does not report it: its state is unknown. */
+function currentRunner(): ExecutionNode {
+  const node: ExecutionNode = {
+    id: LOCAL_NODE_ID,
+    name: 'Current runner',
+    local: true,
+    accepting: true,
+    revoked: false,
+    status: 'local',
+    tags: [],
+    capabilities: {
+      cpu: 0,
+      memoryMiB: 0,
+      diskMiB: 0,
+      os: '',
+      arch: '',
+      kvm: false,
+    },
+    limits: { cpu: 0, memoryMiB: 0, diskMiB: 0 },
+    slots: 0,
+    runtimeId: '',
+    lastSeen: null,
+  }
+  placeholders.add(node)
+  return node
+}
+
+/** A node only known by its grant, such as the current runner missing from the node list. */
+export function unknownNode(node: ExecutionNode) {
+  return placeholders.has(node)
+}
+
+/**
+ * Nodes an agent of `backend` can be granted: those of the same backend. The current runner is a
+ * VM runner, always offered to Firecracker agents as Android does, even when the node list omits
+ * it. A native agent never runs on "all nodes": its nodes are chosen one by one.
+ */
+export function nodesFor(nodes: ExecutionNode[], backend: Backend) {
+  const matching = nodes.filter(node => !node.revoked && nodeBackend(node) === backend && !(backend === 'native' && (node.local || node.id === LOCAL_NODE_ID)))
+  if (backend === 'firecracker' && !nodes.some(node => node.local || node.id === LOCAL_NODE_ID))
+    return [currentRunner(), ...matching]
+  return matching
 }
 
 /** Whether the agent may run on a node: listed, or every node allowed. */
@@ -325,6 +391,7 @@ export function changes(saved: AgentDraft, draft: AgentDraft) {
   add('github', Number(saved.access.github !== draft.access.github))
   add('sandbox', Number(saved.access.sandbox !== draft.access.sandbox))
   add('powers', Number(saved.access.installation !== draft.access.installation))
+  add('nodes', Number(backendOf(saved.access) !== backendOf(draft.access)))
   add('nodes', listCount(saved.access.nodes, draft.access.nodes))
   // Responses omit empty live grants: absent means none.
   add('nodes', listCount(saved.exclusiveNodes ?? [], draft.exclusiveNodes ?? []))
@@ -370,6 +437,8 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
 
   for (const id of listChanges(saved.exclusiveNodes ?? [], draft.exclusiveNodes ?? []).added)
     lines.push({ kind: 'power', section: 'nodes', text: `Added: exclusive reservation on ${node(id)}. This agent will be able to suspend other agents’ conversations on this machine.` })
+  if (backendOf(draft.access) === 'native' && backendOf(saved.access) !== 'native')
+    lines.push({ kind: 'power', section: 'nodes', text: `Added: native execution. ${nativeHelp}` })
   if (draft.access.installation && !saved.access.installation)
     lines.push({ kind: 'power', section: 'powers', text: 'Added: installation management. This agent will be able to create and change agents, projects, skills, MCP connections, missions and runs on your behalf.' })
   for (const id of listChanges(saved.plugins ?? [], draft.plugins ?? []).added)
@@ -398,6 +467,8 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
     removed.push(connectionLabel(id, context))
   if (saved.access.installation && !draft.access.installation)
     removed.push('installation management')
+  if (backendOf(saved.access) === 'native' && backendOf(draft.access) !== 'native')
+    removed.push('native execution')
   if (saved.access.github && !draft.access.github)
     removed.push('shared GitHub connection')
   if (githubToken === 'remove')
@@ -521,6 +592,7 @@ export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 
   const parts = [
     agent.id === MAIN_AGENT_ID ? 'All projects' : count(access.projects, 'project', 'All projects'),
     count(nodes, 'node', 'All nodes'),
+    ...(backendOf(access) === 'native' ? ['Native process'] : []),
   ]
   const packages = new Set<string>()
   for (const id of agent.plugins ?? []) {

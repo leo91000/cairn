@@ -44,6 +44,7 @@ data class AccessPolicy(
     val installation: Boolean = false,
     val github: Boolean = true,
     val sandbox: String = "yolo",
+    val backend: String = "firecracker",
 )
 
 @Serializable
@@ -198,6 +199,7 @@ data class Run(
     val backup: NodeBackup? = null,
     val storage: RunStorage? = null,
     val suspendedByExclusive: ExclusiveReservation? = null,
+    val executionBackend: String? = null,
 ) {
     val active
         get() = status == "running" || status == "queued"

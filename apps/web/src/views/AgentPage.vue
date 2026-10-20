@@ -27,6 +27,7 @@ import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { LOCAL_NODE_ID } from '../../../../packages/contracts/nodes'
 import {
   alwaysAvailable,
+  backendOf,
   changes,
   draftOf,
   effectiveExclusive,
@@ -38,6 +39,7 @@ import {
   needsReview,
   newAgentDraft,
   nodeName,
+  nodesFor,
   rebaseDraft,
   restrictedGithubMode,
   reviewLines,
@@ -159,7 +161,9 @@ const context = computed<Context>(() => ({
   nodesUnavailable: Boolean(nodesError.value),
 }))
 const access = computed(() => draft.value.access)
-const availableNodes = computed(() => nodes.value.filter(node => !node.revoked))
+const backend = computed(() => backendOf(access.value))
+// Nodes of the agent's execution backend, the only ones it can be granted.
+const availableNodes = computed(() => nodesFor(nodes.value, backend.value))
 // The owner's own choice: "No GitHub" or "Remove saved token" removes the saved token.
 const githubMode = computed({
   get: (): GithubMode => draft.value.access.github ? 'shared' : dedicated.value ? 'dedicated' : 'none',
@@ -266,7 +270,7 @@ const summaries = computed<Record<SectionId, { short: string, long: string }>>((
     : { short: draft.value.plugins.length ? String(draft.value.plugins.length) : 'None', long: pluginSummary.value || 'None' },
   nodes: nodesError.value
     ? { short: 'Unavailable', long: 'Not loaded' }
-    : { short: short(access.value.nodes, availableNodes.value.length), long: `${selectionSummary(access.value.nodes, availableNodes.value.length)}${exclusiveNodes.value.length ? ` · exclusive on ${exclusiveNodes.value.length}` : ''}` },
+    : { short: `${backend.value === 'native' ? 'Native · ' : ''}${short(access.value.nodes, availableNodes.value.length)}`, long: `${backend.value === 'native' ? 'Native process · ' : ''}${selectionSummary(access.value.nodes, availableNodes.value.length)}${exclusiveNodes.value.length ? ` · exclusive on ${exclusiveNodes.value.length}` : ''}` },
   sandbox: { short: sandbox.value.label, long: sandbox.value.label },
   powers: { short: powers.value ? String(powers.value) : nodesError.value ? 'Unavailable' : 'None', long: [nodesError.value ? 'Exclusive reservation not loaded' : exclusiveNodes.value.length ? 'Exclusive reservation' : '', access.value.installation ? 'Installation management' : ''].filter(Boolean).join(' · ') || 'None' },
   advanced: { short: draft.value.timeoutMinutes ? `${draft.value.timeoutMinutes} min` : '', long: draft.value.timeoutMinutes ? `Time limit: ${draft.value.timeoutMinutes} minutes` : 'No time limit' },
@@ -325,9 +329,13 @@ const overview = computed(() => [
         id: 'nodes',
         section: 'nodes' as const,
         title: 'Execution',
-        summary: nodesError.value ? 'Not loaded' : access.value.nodes === null ? 'All nodes, including future' : `${access.value.nodes.length} of ${availableNodes.value.length} ${availableNodes.value.length === 1 ? 'node' : 'nodes'}`,
+        summary: nodesError.value ? 'Not loaded' : `${backend.value === 'native' ? 'Native process · ' : ''}${access.value.nodes === null ? 'All nodes, including future' : `${access.value.nodes.length} of ${availableNodes.value.length} ${availableNodes.value.length === 1 ? 'node' : 'nodes'}`}`,
         detail: nodesError.value ? 'Nodes could not be loaded' : access.value.nodes === null ? `${availableNodes.value.length} today` : names(access.value.nodes, node => nodeName(nodes.value.find(item => item.id === node), node)) || 'Cannot run anywhere',
-        chip: nodesError.value ? { tone: 'unavailable' as const, label: 'Unavailable' } : access.value.nodes?.length === 0 ? { tone: 'none' as const, label: 'None' } : { tone: 'granted' as const, label: 'Granted' },
+        chip: nodesError.value
+          ? { tone: 'unavailable' as const, label: 'Unavailable' }
+          : backend.value === 'native'
+            ? { tone: 'power' as const, label: 'Native process' }
+            : access.value.nodes?.length === 0 ? { tone: 'none' as const, label: 'None' } : { tone: 'granted' as const, label: 'Granted' },
       },
       {
         id: 'exclusive',
@@ -502,6 +510,8 @@ function validate() {
   const limit = draft.value.timeoutMinutes
   if (limit !== 0 && !(Number.isInteger(limit) && limit >= 1 && limit <= 720))
     errors.advanced = 'Enter a time limit between 1 and 720 minutes, or choose no time limit.'
+  if (backendOf(draft.value.access) === 'native' && !draft.value.access.nodes?.length)
+    errors.nodes = 'Choose at least one native node: native execution never applies to all nodes.'
   if (!isMain.value && githubMode.value === 'dedicated' && !githubConfigured.value && !githubToken.value.trim())
     errors.github = 'Enter a token, or choose No GitHub.'
   fieldErrors.value = errors

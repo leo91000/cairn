@@ -60,8 +60,10 @@ restart reads the same pending records and safely attempts the continuation agai
 ### Failure recovery
 
 Stop rollout and preserve the installation directory, private identity, chat/run
-records, checkpoints and workspace data. Use an epoch-5 forward fix if startup or
-continuation fails. Do not start an epoch-4 binary against data written under this
+records, checkpoints and workspace data. Use a forward fix compatible with the
+installation's current data epoch (epoch 5 for F2; native execution advances it to
+epoch 6) if startup or continuation fails. Do not start an epoch-4 binary against
+data written under this
 contract, and do not change the epoch or legacy tree to bypass the check.
 
 If an older binary has already consumed a request, stop further continuation and

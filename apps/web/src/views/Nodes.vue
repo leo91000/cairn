@@ -18,6 +18,7 @@ import Modal from '../components/Modal.vue'
 import NodeStorage from '../components/NodeStorage.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
+import VirtualSelect from '../components/VirtualSelect.vue'
 import {
   Plus,
   Server,
@@ -25,6 +26,8 @@ import {
 } from '../icons'
 
 const nodes = ref<ExecutionNode[]>([])
+const nativeCallers = ref<Array<{ id: string, email: string }>>([])
+const enrollmentBackend = ref<'firecracker' | 'native'>('firecracker')
 const editing = ref<ExecutionNode | null>(null)
 const tags = ref('')
 const name = ref('')
@@ -65,6 +68,8 @@ let timer: ReturnType<typeof setInterval> | undefined
 async function load() {
   try {
     nodes.value = await api<ExecutionNode[]>('/nodes')
+    if (nodes.value.some(node => node.capabilities.backend === 'native'))
+      nativeCallers.value = await api('/nodes/native-callers')
   }
   catch (e) {
     error.value = (e as Error).message
@@ -78,7 +83,10 @@ async function load() {
     enrollment.value = null
     adding.value = false
     notify(`${connected.name} is connected`)
-    grant(connected)
+    if (connected.capabilities.backend === 'native')
+      edit(connected)
+    else
+      grant(connected)
   }
 }
 
@@ -110,13 +118,19 @@ function enroll() {
     knownBeforeEnrollment = new Set(nodes.value.map(node => node.id))
     enrollment.value = await api<NodeEnrollment>('/nodes/enrollments', {
       method: 'POST',
-      body: JSON.stringify({ name: name.value, managerUrl: managerUrl.value.trim() }),
+      body: JSON.stringify({ name: name.value, managerUrl: managerUrl.value.trim(), backend: enrollmentBackend.value }),
     })
   })
 }
 
 function edit(node: ExecutionNode) {
   editing.value = JSON.parse(JSON.stringify(node))
+  if (editing.value && node.capabilities.backend === 'native') {
+    editing.value.nativeEnabled ??= false
+    editing.value.nativeAccounts ??= []
+    editing.value.slots = 1
+  }
+
   tags.value = node.tags.join(', ')
   memoryGiB.value = +(node.limits.memoryMiB / 1024).toFixed(2)
   diskGiB.value = +(node.limits.diskMiB / 1024).toFixed(2)
@@ -137,6 +151,7 @@ function save() {
         slots: node.slots,
         // Exclusive reservations are granted on each agent's page; omitting them keeps them.
         accepting: node.accepting,
+        ...(node.capabilities.backend === 'native' ? { nativeEnabled: node.nativeEnabled, nativeAccounts: node.nativeAccounts } : {}),
       }),
     })
     editing.value = null
@@ -165,7 +180,7 @@ function saveGrants() {
   if (!node)
     return
   // `add` only grants the chosen agents: finishing never revokes one allowed meanwhile.
-  const agentIds = granted.value.filter(agentId => !allowed(agentId))
+  const agentIds = granted.value.filter(agentId => !allowed(agentId) && !mismatch(agentId))
   return action(async () => {
     if (agentIds.length)
       await api(`/nodes/${node.id}/agents`, { method: 'PUT', body: JSON.stringify({ agentIds, add: true }) })
@@ -186,8 +201,17 @@ function freeStaleDisks() {
   })
 }
 
+/** Why an agent cannot run on the node being granted: the server only accepts agents of its backend. */
+function mismatch(agentId: string) {
+  const agent = state.agents.find(item => item.id === agentId)
+  const native = granting.value?.capabilities.backend === 'native'
+  if (!agent || (agent.access?.backend === 'native') === native)
+    return ''
+  return native ? 'Runs in a Firecracker VM: set it to native execution on its page first' : 'Uses native execution: only native nodes can run it'
+}
+
 function allNodes(agentId: string) {
-  return state.agents.some(agent => agent.id === agentId && agent.access?.nodes === null)
+  return (!mismatch(agentId) && state.agents.some(agent => agent.id === agentId && agent.access?.nodes === null))
     || (granting.value?.agents?.some(agent => agent.id === agentId && agent.allNodes) ?? false)
 }
 
@@ -237,7 +261,7 @@ function statusLabel(node: ExecutionNode) {
       </UiButton>
     </header>
     <div class="fleet-summary">
-      <span class="inline-flex gap-1"><strong>{{ active.length }}</strong><span>{{ active.length === 1 ? 'machine' : 'machines' }}</span></span><span class="inline-flex gap-1"><strong>{{ active.filter(n => n.local || n.status === 'online').length }}</strong><span>connected</span></span><span>Linux · isolated conversations</span>
+      <span class="inline-flex gap-1"><strong>{{ active.length }}</strong><span>{{ active.length === 1 ? 'machine' : 'machines' }}</span></span><span class="inline-flex gap-1"><strong>{{ active.filter(n => n.local || n.status === 'online').length }}</strong><span>connected</span></span><span>Linux · managed executions</span>
     </div>
     <UiAlert v-if="error && !adding" class="mt-4">
       {{ error }}
@@ -250,7 +274,7 @@ function statusLabel(node: ExecutionNode) {
     >
       <section class="node-form">
         <p class="text-sm text-muted">
-          Connect a trusted Linux machine, then choose which agents can use it. GPU execution is not available yet.
+          Connect a trusted Linux machine, then choose its execution mode and authorized agents.
         </p>
         <p class="text-sm text-muted">
           The node must reach the manager directly over your local network, VPN or an optional public URL. It does not use the relay. Disk blocks never pass through the relay.
@@ -259,6 +283,17 @@ function statusLabel(node: ExecutionNode) {
           {{ error }}
         </UiAlert>
         <form class="mt-3 grid gap-3" @submit.prevent="enroll">
+          <VirtualSelect
+            v-model="enrollmentBackend"
+            label="Execution backend"
+            :options="[
+              { value: 'firecracker', label: 'Firecracker VM' },
+              { value: 'native', label: 'Native process · trusted people only' },
+            ]"
+          />
+          <p v-if="enrollmentBackend === 'native'" class="text-sm text-muted">
+            Shares the host GPU through its installed drivers. Uses weaker isolation than a VM; heavy work can slow your desktop. Linux x86-64 and systemd are required.
+          </p>
           <label>Machine name<input
             v-model="name"
             class="mt-1 block"
@@ -281,7 +316,7 @@ function statusLabel(node: ExecutionNode) {
         </form>
         <div v-if="enrollment" class="mt-4 grid gap-2">
           <template v-if="enrollment.installCommand">
-            <p><strong>1.</strong> On the Linux machine (x86-64 with KVM, Docker, curl and systemd), run:</p>
+            <p><strong>1.</strong> On the Linux machine ({{ enrollment.backend === 'native' ? 'x86-64 with Python 3, curl and systemd' : 'x86-64 with KVM, Docker, curl and systemd' }}), run:</p>
             <code class="block break-all select-all" aria-label="Node installation command">{{ enrollment.installCommand }}</code>
             <p><strong>2.</strong> When prompted, enter this single-use code. It expires {{ new Date(enrollment.expiresAt).toLocaleString() }}.</p>
           </template>
@@ -312,6 +347,9 @@ function statusLabel(node: ExecutionNode) {
             </h2>
           </div><span class="node-status" :class="{ connected: !node.revoked && (node.local || node.status === 'online') }">{{ statusLabel(node) }}</span>
         </div>
+        <p class="mt-2 text-sm text-muted">
+          {{ node.capabilities.backend === 'native' ? 'Native process · shared host GPU · trusted people only' : 'Firecracker VM' }}
+        </p>
         <template v-if="!node.revoked">
           <div class="capacity-grid" aria-label="Shared capacity">
             <div><span>Slots available</span><strong>{{ node.availableSlots ?? node.slots }} <small>of {{ node.slots }}</small></strong><span>{{ node.occupiedSlots ?? 0 }} active or reserved</span></div>
@@ -401,7 +439,7 @@ function statusLabel(node: ExecutionNode) {
             <UiButton variant="default" @click="edit(node)">
               <Icon :name="Settings2" :size="15" /> Configure
             </UiButton>
-            <NodeStorage :node="node" @saved="load" />
+            <NodeStorage v-if="node.capabilities.backend !== 'native'" :node="node" @saved="load" />
             <UiButton v-if="!node.local" variant="default" @click="revoking = node">
               Revoke
             </UiButton>
@@ -508,7 +546,12 @@ function statusLabel(node: ExecutionNode) {
         </p>
         <label v-for="agent in state.agents" :key="agent.id" class="access-row">
           <input
-            v-if="allowed(agent.id)"
+            v-if="mismatch(agent.id)"
+            type="checkbox"
+            disabled
+          >
+          <input
+            v-else-if="allowed(agent.id)"
             type="checkbox"
             checked
             disabled
@@ -519,7 +562,7 @@ function statusLabel(node: ExecutionNode) {
             type="checkbox"
             :value="agent.id"
           >
-          <span class="min-w-0">{{ agent.name }}<span v-if="allNodes(agent.id)" class="block text-xs text-muted">Allowed on all nodes</span><span v-else-if="allowed(agent.id)" class="block text-xs text-muted">Already allowed on this machine</span></span>
+          <span class="min-w-0">{{ agent.name }}<span v-if="mismatch(agent.id)" class="block text-xs text-muted">{{ mismatch(agent.id) }}</span><span v-else-if="allNodes(agent.id)" class="block text-xs text-muted">Allowed on all nodes</span><span v-else-if="allowed(agent.id)" class="block text-xs text-muted">Already allowed on this machine</span></span>
         </label>
         <p class="text-xs text-muted">
           You can change this later on each agent’s page.
@@ -575,10 +618,20 @@ function statusLabel(node: ExecutionNode) {
           required
         ></label>
         <label>Tags, separated by commas<input v-model="tags" class="mt-1 block w-full"></label>
+        <fieldset v-if="editing.capabilities.backend === 'native'" class="form-section">
+          <legend>Native execution</legend>
+          <p>Only selected native agents and trusted people may run here. Disabling native execution or removing a person stops affected work after its lease expires.</p>
+          <label class="checkbox"><input v-model="editing.nativeEnabled" type="checkbox">Enable native execution</label>
+          <label v-for="person in nativeCallers" :key="person.id" class="checkbox"><input v-model="editing.nativeAccounts" type="checkbox" :value="person.id">{{ person.email }}</label>
+          <p v-if="!nativeCallers.length" class="text-sm text-muted">
+            No current people are available. Refresh the installation connection before granting access.
+          </p>
+        </fieldset>
         <fieldset class="form-section">
           <legend>Slots and shared budgets</legend><p>All slots share these budgets. Resources are used on demand.</p><div class="form-grid">
             <label>Execution slots<input
               v-model.number="editing.slots"
+              :disabled="editing.capabilities.backend === 'native'"
               class="mt-1 block"
               type="number"
               min="1"
@@ -650,7 +703,8 @@ function statusLabel(node: ExecutionNode) {
           Conversations running there pause within the disconnection delay, then resume from their latest recovery point on another authorized machine when one has capacity. Conversations fixed to this machine, or without a recovery point, wait.
         </p>
         <p>Files stored on the machine are not deleted. To uninstall it, run on the machine:</p>
-        <code class="block break-all select-all">sudo systemctl disable --now cairn-node; sudo docker rm -f cairn-execution-node; sudo rm -rf /etc/systemd/system/cairn-node.service /opt/cairn-node /var/lib/cairn-node</code>
+        <code v-if="revoking?.capabilities.backend === 'native'" class="block break-all select-all">sudo systemctl disable --now cairn-native-node; sudo rm -rf /etc/systemd/system/cairn-native-node.service /opt/cairn-native /var/lib/cairn-native</code>
+        <code v-else class="block break-all select-all">sudo systemctl disable --now cairn-node; sudo docker rm -f cairn-execution-node; sudo rm -rf /etc/systemd/system/cairn-node.service /opt/cairn-node /var/lib/cairn-node</code>
         <p class="text-sm text-muted">
           The last command also deletes the local conversation disks kept on that machine.
         </p>

@@ -156,6 +156,20 @@ pub(crate) fn node_data_dir() -> PathBuf {
     PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| "/data".into()))
 }
 
+/// Native workloads share the host network. Their privileged controller must
+/// use an authenticated, root-private filesystem endpoint, never a claimable TCP port.
+pub(crate) fn local_client() -> Result<reqwest::Client> {
+    if crate::native::enabled() {
+        return crate::native::controller_client(
+            &crate::native::state_dir().join("controller.sock"),
+        );
+    }
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(Error::internal)
+}
+
 pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers
         .get("authorization")
@@ -233,6 +247,8 @@ impl Resources {
 struct Capabilities {
     os: String,
     arch: String,
+    #[serde(default = "firecracker_backend")]
+    backend: String,
     kvm: bool,
     #[serde(default)]
     fuse: bool,
@@ -243,10 +259,17 @@ struct Capabilities {
     disk_total_mi_b: u64,
 }
 
+fn firecracker_backend() -> String {
+    "firecracker".into()
+}
+
 impl Capabilities {
     fn validate(&self) -> Result<()> {
         if self.os != "linux" || self.arch != "x86_64" {
             return Err(Error::bad("Nodes require Linux x86-64."));
+        }
+        if !matches!(self.backend.as_str(), "firecracker" | "native") {
+            return Err(Error::bad("Unknown node backend."));
         }
         self.resources().validate()
     }
@@ -260,6 +283,13 @@ impl Capabilities {
     }
 
     pub(crate) fn limits(&self) -> Resources {
+        if self.backend == "native" {
+            return Resources {
+                cpu: (self.cpu / 2).clamp(1, 8),
+                memory_mi_b: (self.memory_mi_b / 4).clamp(128, 8192),
+                disk_mi_b: (self.disk_mi_b / 5).clamp(128, 32768),
+            };
+        }
         Resources {
             cpu: self.cpu.saturating_sub(1).max(1),
             memory_mi_b: self.memory_mi_b.saturating_sub(512).max(128),
@@ -397,7 +427,11 @@ impl Usage<'_> {
         let id = text(node, "id");
         self.agents
             .iter()
-            .filter(|agent| agent_allows(agent, id))
+            .filter(|agent| {
+                agent_allows(agent, id)
+                    && crate::native::policy::native(agent)
+                        == crate::native::policy::node_native(node)
+            })
             .map(|agent| AgentGrant {
                 id: &agent["id"],
                 name: &agent["name"],
@@ -428,6 +462,9 @@ impl Usage<'_> {
 
 /// Legacy nodes inherit the runner's slot count, or the historical four slots.
 pub(crate) fn slots(node: &Value) -> u64 {
+    if crate::native::policy::node_native(node) {
+        return 1;
+    }
     node["slots"]
         .as_u64()
         .or(node["runtimeSlots"].as_u64())
@@ -466,12 +503,32 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
     }
     match (input.method.as_str(), segments.as_slice()) {
         ("GET" | "PUT", ["nodes", "placement", run]) => {
-            let selection = (input.method == "PUT").then(|| input.body.clone());
-            placement::configure(s, run, selection).await
+            if input.method == "GET" {
+                placement::configure(s, run, None).await
+            } else {
+                placement::configure_authorized(
+                    s,
+                    run,
+                    Some(input.body.clone()),
+                    crate::native::policy::run_authorization(run),
+                )
+                .await
+            }
         }
         ("POST", ["nodes", "placement", run, "move"]) => {
             crate::validation::uuid(run)?;
             moves::request(s, &s.store.run(run).await?, &input.body).await
+        }
+        ("GET", ["nodes", "native-callers"]) => {
+            crate::native::policy::refresh(s).await?;
+            let authority = s.store.kv("native-authority").await?.unwrap_or_default();
+            Ok(authority["accounts"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(id, account)| json!({ "id": id, "email": account["email"] }))
+                .collect::<Vec<_>>()
+                .into())
         }
         ("GET", ["nodes", "alerts"]) => alerts::recent(s).await,
         ("GET", ["nodes", "settings"]) => {
@@ -559,10 +616,24 @@ struct Configuration {
     accepting: bool,
     #[serde(default, rename = "exclusiveAgents")]
     exclusive_agents: Option<Vec<String>>,
+    #[serde(default, rename = "nativeEnabled")]
+    native_enabled: Option<bool>,
+    #[serde(default, rename = "nativeAccounts")]
+    native_accounts: Option<Vec<String>>,
 }
 
 async fn configure_node(s: &Service, node: &str, body: Value) -> Result<Value> {
     let request: Configuration = decode(body)?;
+    if let Some(accounts) = &request.native_accounts {
+        let existing = s.get("nodes", node).await?;
+        if accounts.iter().any(|account| {
+            !existing["nativeAccounts"]
+                .as_array()
+                .is_some_and(|values| values.iter().any(|value| value == account))
+        }) {
+            crate::native::policy::refresh(s).await?;
+        }
+    }
     let label = name(&request.name)?;
     request.limits.validate()?;
     if request.limits.memory_mi_b <= 128 {
@@ -624,6 +695,34 @@ async fn configure_node(s: &Service, node: &str, body: Value) -> Result<Value> {
             if let Some(slots) = request.slots {
                 record["slots"] = slots.into();
             }
+            if crate::native::policy::node_native(&record)
+                && request.slots.is_some_and(|slots| slots != 1)
+            {
+                return Err(Error::bad(
+                    "Native nodes currently support one active execution.",
+                ));
+            }
+            if let Some(enabled) = request.native_enabled {
+                record["nativeEnabled"] = enabled.into();
+            }
+            if let Some(accounts) = request.native_accounts {
+                if accounts.len() > 100 {
+                    return Err(Error::bad("Use at most 100 trusted native accounts."));
+                }
+                let authority = db.kv("native-authority")?.unwrap_or_default();
+                for account in &accounts {
+                    crate::validation::uuid(account)?;
+                    let retained = record["nativeAccounts"]
+                        .as_array()
+                        .is_some_and(|values| values.iter().any(|value| value == account));
+                    if !retained && authority["accounts"].get(account).is_none() {
+                        return Err(Error::bad(
+                            "Select a current installation owner or member for native access.",
+                        ));
+                    }
+                }
+                record["nativeAccounts"] = accounts.into();
+            }
             record["accepting"] = request.accepting.into();
             // Older clients still send this list; the grants live on each agent.
             if let Some(agents) = request.exclusive_agents {
@@ -644,6 +743,8 @@ async fn configure_node(s: &Service, node: &str, body: Value) -> Result<Value> {
 #[serde(deny_unknown_fields)]
 struct Invitation {
     name: String,
+    #[serde(default = "firecracker_backend")]
+    backend: String,
     #[serde(rename = "managerUrl")]
     manager_url: Option<String>,
 }
@@ -651,6 +752,10 @@ struct Invitation {
 async fn invite(s: &Service, body: Value) -> Result<Value> {
     let request: Invitation = decode(body)?;
     let name = name(&request.name)?;
+    if !matches!(request.backend.as_str(), "firecracker" | "native") {
+        return Err(Error::bad("Unknown execution backend."));
+    }
+    let backend = request.backend;
     let origin = match request.manager_url {
         Some(value) => Some(connector::master(value.trim())?),
         None => connector::master(&s.config.public_url).ok(),
@@ -663,22 +768,30 @@ async fn invite(s: &Service, body: Value) -> Result<Value> {
     s.store
         .set(
             &format!("node-enrollment:{}", digest(&code)),
-            json!({ "name": name }),
+            json!({ "name": name, "backend": backend }),
             Some(expires),
         )
         .await?;
-    let install = maintenance::release().ok().and(origin).map(|origin| {
-        let mut script = origin.clone();
-        script.set_path("/internal/nodes/install.sh");
-        let quoted = script.as_str().replace('\'', "'\\''");
-        let manager = origin.as_str().trim_end_matches('/').replace('\'', "'\\''");
-        format!("curl --fail --silent --show-error '{quoted}' | sudo bash -s -- '{manager}'")
-    });
+    let install = (backend == "native" || maintenance::release().is_ok())
+        .then_some(origin)
+        .flatten()
+        .map(|origin| {
+            let mut script = origin.clone();
+            script.set_path(if backend == "native" {
+                "/internal/nodes/native-install.sh"
+            } else {
+                "/internal/nodes/install.sh"
+            });
+            let quoted = script.as_str().replace('\'', "'\\''");
+            let manager = origin.as_str().trim_end_matches('/').replace('\'', "'\\''");
+            format!("curl --fail --silent --show-error '{quoted}' | sudo bash -s -- '{manager}'")
+        });
     Ok(json!({
         "code": code,
         "expiresAt": expires,
         "managerUrl": manager_url,
         "installCommand": install,
+        "backend": backend,
     }))
 }
 
@@ -737,6 +850,14 @@ async fn grant_agents(s: &Service, node: &str, body: Value) -> Result<Value> {
                 let granted = request.agent_ids.iter().any(|id| agent["id"] == *id);
                 if request.add && !granted {
                     continue;
+                }
+                if granted
+                    && crate::native::policy::native(&agent)
+                        != crate::native::policy::node_native(&record)
+                {
+                    return Err(Error::bad(
+                        "Choose agents configured for this node's execution backend.",
+                    ));
                 }
                 set_node_grant(db, agent, &node, granted)?;
             }
@@ -887,6 +1008,12 @@ async fn enroll(s: &Service, body: Value) -> Result<Value> {
             let invitation = db
                 .kv(&key)?
                 .ok_or_else(|| Error::unauthorized("Invalid or expired enrollment code."))?;
+            let expected = invitation["backend"].as_str().unwrap_or("firecracker");
+            if request.capabilities.backend != expected {
+                return Err(Error::forbidden(
+                    "Enrollment backend differs from the owner's invitation.",
+                ));
+            }
             db.delete(&key)?;
             let capabilities = request.capabilities;
             let node = EnrolledNode {
@@ -904,7 +1031,13 @@ async fn enroll(s: &Service, body: Value) -> Result<Value> {
                 last_seen: now(),
                 created_at: now(),
             };
-            db.put("nodes", &serde_json::to_value(node)?)?;
+            let mut node = serde_json::to_value(node)?;
+            if crate::native::policy::node_native(&node) {
+                node["slots"] = 1.into();
+                node["nativeEnabled"] = false.into();
+                node["nativeAccounts"] = json!([]);
+            }
+            db.put("nodes", &node)?;
             db.set(&token_key, &Value::from(node_id.clone()), None)?;
             db.audit("node.enrolled", &json!({ "nodeId": node_id }))?;
             Ok(json!({
@@ -955,6 +1088,9 @@ async fn heartbeat(s: &Service, input: &Input) -> Result<Value> {
     } else {
         None
     };
+    if input.body["capabilities"]["backend"] == "native" {
+        crate::native::policy::refresh(s).await?;
+    }
     let expected = Expectations {
         data_root: s.config.data_dir.to_string_lossy().into_owned(),
         image: maintenance::release().ok().map(|release| release.image),
@@ -1022,6 +1158,15 @@ fn execution_ready(node: &Value, body: &Value, expected: &Expectations) -> bool 
         .image
         .as_ref()
         .is_none_or(|image| node["imageDigest"] == *image || node["updateError"].is_string());
+    if crate::native::policy::node_native(node) {
+        return body["executionReady"] == true
+            && body["backend"] == "native"
+            && body["nodeProtocol"] == 2
+            && body["dataRoot"]
+                .as_str()
+                .is_some_and(|path| std::path::Path::new(path).is_absolute())
+            && body["budget"] == json!({ "slots": 1, "limits": node["limits"] });
+    }
     body["executionReady"] == true
         && body["pool"]["quarantined"] != true
         && body["sharedResources"] == true
@@ -1046,7 +1191,14 @@ fn renew_leases(db: &Db<'_>, node_id: &str, lease_ms: u64) -> Result<Vec<Lease>>
             && run["cancelRequestedAt"].is_null()
             && checkpoint["runnerId"] == attempt["id"]
             && agent_allows(&agent, node_id);
-        if !owns_execution {
+        let native_allowed =
+            !crate::native::policy::node_native(&db.get("nodes", node_id)?.unwrap_or_default())
+                || crate::native::policy::allows(
+                    db,
+                    &run,
+                    &db.get("nodes", node_id)?.unwrap_or_default(),
+                )?;
+        if !owns_execution || !native_allowed {
             continue;
         }
         attempt["leaseExpiresAt"] = (now() + lease_ms as i64).into();
@@ -1167,7 +1319,14 @@ pub async fn daemon(
     directory: &std::path::Path,
     stop: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    let mut runner = tokio::spawn(crate::runner::serve(stop.child_token()));
+    let runner_stop = stop.child_token();
+    let mut runner = tokio::spawn(async move {
+        if crate::native::enabled() {
+            crate::native::serve(runner_stop).await
+        } else {
+            crate::runner::serve(runner_stop).await
+        }
+    });
     let directory = directory.to_owned();
     let connector_stop = stop.child_token();
     let mut connector =

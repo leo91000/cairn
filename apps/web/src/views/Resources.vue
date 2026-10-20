@@ -306,7 +306,7 @@ async function remove() {
     :description="
       isAgent
         ? 'Create a profile with the right instructions and model for the job.'
-        : 'Choose a GitHub repository or an existing directory on your server. Agents work on private copies in their VMs.'
+        : 'Choose a GitHub repository or an existing directory on your server. Agents work on private copies in their workspaces.'
     "
   >
     <template v-if="state.installationRole === 'owner'">

@@ -172,9 +172,9 @@ impl RunCheckpoint {
         self.prepared().is_some_and(|p| p["isolated"] == true)
     }
 
-    pub fn firecracker(&self) -> bool {
+    pub fn managed(&self) -> bool {
         self.prepared()
-            .is_some_and(|p| p["backend"] == "firecracker")
+            .is_some_and(|p| matches!(p["backend"].as_str(), Some("firecracker" | "native")))
     }
 
     pub fn runner_id(&self) -> Option<&str> {
@@ -276,7 +276,7 @@ impl Checkpoint {
 
     pub async fn refresh_pause(&self, service: &crate::service::Service) -> Result<()> {
         let state = self.snapshot().await;
-        if state.firecracker()
+        if state.managed()
             && let Some(attempt) = state.runner_id()
         {
             let total =
@@ -386,7 +386,7 @@ mod tests {
         assert!(checkpoint.launched());
         assert_eq!(checkpoint.remaining_ms, Some(None));
         assert_eq!(checkpoint.deadline(), None);
-        assert!(checkpoint.isolated() && checkpoint.firecracker());
+        assert!(checkpoint.isolated() && checkpoint.managed());
         assert_eq!(checkpoint.runner_id(), Some("runner"));
         assert_eq!(checkpoint.to_value().unwrap(), stored);
 

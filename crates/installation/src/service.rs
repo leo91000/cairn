@@ -438,10 +438,15 @@ impl Service {
         existing: Option<&str>,
         author: Option<cairn_protocol::TaskAuthorGrant>,
         bearer: Option<String>,
+        reduces_execution: bool,
     ) -> Result<Value> {
         let creation_id = creation_id(&input, existing)?;
         let mut task = parse("task", input)?;
         let agent = self.get("agents", text(&task, "agentId")).await?;
+        let origin = crate::native::policy::origin();
+        if crate::native::policy::native(&agent) && !reduces_execution {
+            crate::native::policy::refresh(self).await?;
+        }
         task_projects(&agent, &task, &self.store.list("projects").await?)?;
         if let Some(cron) = task["cron"].as_str() {
             next_occurrences(cron, text(&task, "timezone"), now(), 1)?;
@@ -479,6 +484,17 @@ impl Service {
         let existing = existing.map(str::to_owned);
         self.store
             .transaction(move |db| {
+                let previous = existing
+                    .as_deref()
+                    .map(|id| db.get("tasks", id))
+                    .transpose()?
+                    .flatten();
+                let grant = if reduces_execution {
+                    required(previous.clone(), "Task not found")?
+                } else {
+                    crate::native::policy::task_grant(db, &task, previous.as_ref(), &origin)?
+                };
+                crate::native::policy::apply(&mut task, &grant);
                 if let Some(bearer) = bearer {
                     crate::installation_mcp::authorize_task_in(
                         db,
@@ -671,9 +687,24 @@ impl Service {
         dedupe: Option<String>,
         bearer: Option<String>,
     ) -> Result<Value> {
+        let mut run = run;
+        let origin = if run["trigger"] == "schedule" {
+            crate::native::policy::Origin::Stored(run["snapshot"]["task"].clone())
+        } else {
+            crate::native::policy::origin()
+        };
+        if crate::native::policy::native(&run["snapshot"]["agent"]) {
+            crate::native::policy::refresh(self).await?;
+        }
         let result = self
             .store
             .transaction(move |db| {
+                let grant = crate::native::policy::authorize_origin(
+                    db,
+                    &run["snapshot"]["agent"],
+                    &origin,
+                )?;
+                crate::native::policy::apply(&mut run, &grant);
                 if let Some(bearer) = bearer {
                     crate::installation_mcp::authorize_task_in(
                         db,
@@ -918,7 +949,7 @@ fn inherit_agent_settings(input: &mut Value, existing: &Value) {
     if !input["access"].is_object() {
         return;
     }
-    for key in ["nodes", "installation"] {
+    for key in ["nodes", "installation", "backend"] {
         if input["access"].get(key).is_none() {
             input["access"][key] = policy(existing)[key].clone();
         }
@@ -963,6 +994,11 @@ fn restricted(access: &Value) -> bool {
 }
 
 fn validate_access(agent: &Value, access: &Value) -> Result<()> {
+    if access["backend"] == "native" && access["nodes"].as_array().is_none_or(Vec::is_empty) {
+        return Err(Error::bad(
+            "Native execution requires selected nodes; wildcard access is not sufficient.",
+        ));
+    }
     if !access["projects"].is_null() && access["github"] == true {
         return Err(Error::bad(
             "Shared GitHub credentials require access to all projects. Disable the GitHub connection for an agent with selected projects.",
@@ -1015,6 +1051,7 @@ pub fn policy(agent: &Value) -> Value {
         "github": true,
         "sandbox": "yolo",
         "nodes": [crate::nodes::LOCAL_NODE_ID],
+        "backend": "firecracker",
     });
     merge(&mut value, &agent["access"]);
     // Agents restricted before MCP permissions existed get no MCP connection.
@@ -1039,6 +1076,9 @@ pub fn covers(current: &Value, granted: &Value) -> bool {
     let current = policy(current);
     let granted = policy(granted);
 
+    if current["backend"] != granted["backend"] {
+        return false;
+    }
     let scopes = ["projects", "skills", "mcps"]
         .iter()
         .all(|key| within(&granted[*key], &current[*key]));

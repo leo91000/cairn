@@ -390,6 +390,54 @@ class AgentEditingTest {
     }
 
     @Test
+    fun nativeExecutionUsesOnlyNativeNodesAndIsReviewed() {
+        val desk =
+            ExecutionNode(
+                "desk",
+                "desk-native",
+                status = "online",
+                capabilities = NodeCapabilities(backend = NATIVE_BACKEND),
+            )
+        val all = nodes + desk
+        val reserved = agent.withExclusive("gpu", true)
+
+        // New agents and existing ones default to a VM.
+        assertEquals(VM_BACKEND, newAgent().access.backend)
+        assertEquals(listOf(LOCAL_NODE_ID, "gpu", "mac"), reserved.nodeChoices(all).map { it.id })
+
+        // Switching starts again from no node and no exclusive reservation.
+        val native = reserved.withBackend(native = true)
+        assertEquals(NATIVE_BACKEND, native.access.backend)
+        assertEquals(emptyList<String>(), native.access.nodes)
+        assertEquals(emptyList<String>(), native.exclusiveNodes)
+        assertEquals(listOf("desk"), native.nodeChoices(all).map { it.id })
+        assertEquals(native, native.withBackend(native = true))
+
+        val running = native.withNodeRun("desk", true)
+        assertEquals("Exécution native · 1 sur 1", nodesSummary(running, all))
+        assertEquals(
+            listOf(AgentSection.Nodes),
+            agentChanges(agent, AgentDraft(running), false, "").distinct(),
+        )
+        val lines = agentReview(agent, running, resources.copy(nodes = all), null)
+        assertEquals(ReviewKind.Power, lines.first().kind)
+        assertTrue(lines.first().text.startsWith("Ajout : exécution native sur l’hôte."))
+        assertTrue(needsReview(lines, null))
+
+        // Back to a VM: no power added, the native machines are no longer offered.
+        val vm = running.withBackend(native = false)
+        assertEquals(VM_BACKEND, vm.access.backend)
+        assertEquals(emptyList<String>(), vm.access.nodes)
+        assertTrue(agentReview(running, vm, resources, null).none { it.kind == ReviewKind.Power })
+
+        // A reload keeps a backend switch made on top of the newer version.
+        assertEquals(
+            NATIVE_BACKEND,
+            rebaseAgent(agent, running, agent.copy(revision = "r2")).access.backend,
+        )
+    }
+
+    @Test
     fun aSavedTokenIsOnlyRemovedByAnExplicitChoice() {
         val shared = agent.copy(access = agent.access.copy(projects = null, github = true))
 

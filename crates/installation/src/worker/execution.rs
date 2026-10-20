@@ -152,7 +152,7 @@ async fn recovers_controller(
     cancel: &CancellationToken,
     error: &Error,
 ) -> Result<bool> {
-    if !error.is_unavailable() || !saved.firecracker() {
+    if !error.is_unavailable() || !saved.managed() {
         return Ok(false);
     }
     let run = s.store.run(&checkpoint.id).await?;
@@ -253,10 +253,22 @@ async fn release(
     }
     s.mcps.revoke_run(s, run_id).await?;
     requeue_pending_move(s, checkpoint).await?;
-    if fenced && saved.firecracker() {
+    if fenced && saved.managed() {
         let run = s.store.run(run_id).await?;
-        if run["status"] == RunStatus::Succeeded && crate::nodes::publication::protected(&run) {
+        let native = saved
+            .prepared()
+            .is_some_and(|prepared| prepared["backend"] == "native");
+        if crate::nodes::publication::protected(&run)
+            && (native || run["status"] == RunStatus::Succeeded)
+        {
+            // Native work can only be captured after fencing, including failed,
+            // cancelled and paused turns. Durable demand survives upload errors.
             crate::nodes::publication::request(s, run_id).await?;
+            if native {
+                // Native checkpoints are stopped file streams. Finish this turn's
+                // publication before admitting another writer to the conversation.
+                crate::nodes::publication::attempt(s, &s.store.run(run_id).await?).await;
+            }
         }
     }
     if fenced {
@@ -315,6 +327,86 @@ async fn clear_credentials(s: &Service, run_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stopped_native_turns_retain_final_publication_demand_for_every_outcome() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::config::Config {
+            data_dir: root.path().join("data"),
+            home: root.path().join("home"),
+            workspace_roots: vec![root.path().into()],
+            public_url: "http://localhost:4310".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            codex_bin: "codex".into(),
+            claude_bin: "claude".into(),
+            opencode_bin: "opencode".into(),
+            gh_bin: "gh".into(),
+            concurrency: 1,
+            logger: false,
+            worker_enabled: false,
+            runner_url: String::new(),
+        })
+        .await
+        .unwrap();
+        for (backend, status, fenced, expected) in [
+            ("native", "succeeded", true, true),
+            ("native", "failed", true, true),
+            ("native", "cancelled", true, true),
+            ("native", "queued", true, true),
+            ("native", "failed", false, false),
+            ("firecracker", "failed", true, false),
+            ("firecracker", "cancelled", true, false),
+        ] {
+            let run = crate::config::id();
+            service
+                .store
+                .transaction({
+                    let run = run.clone();
+                    move |db| {
+                        let record = json!({
+                            "id": run,
+                            "status": status,
+                            "isolated": true,
+                        });
+                        db.0.execute(
+                            "INSERT INTO runs(id,task_id,project_id,status,created_at,data) VALUES(?1,?1,'',?2,0,?3)",
+                            rusqlite::params![run, status, record.to_string()],
+                        )?;
+                        Ok(())
+                    }
+                })
+                .await
+                .unwrap();
+            let checkpoint = Checkpoint::new(
+                service.store.clone(),
+                run.clone(),
+                RunCheckpoint::from_value(json!({
+                    "prepared": { "backend": backend, "isolated": true },
+                    "runnerId": crate::config::id(),
+                }))
+                .unwrap(),
+            );
+            checkpoint.persist().await.unwrap();
+            release(&service, &checkpoint, None, fenced).await.unwrap();
+            let current = service.store.run(&run).await.unwrap();
+            assert_eq!(
+                crate::nodes::publication::requested(&current),
+                expected,
+                "{backend}/{status}/fenced={fenced}: {current}",
+            );
+            if expected {
+                // No S3 is configured: the synchronous attempt must fail without
+                // losing demand, so the background scheduler can retry after repair.
+                assert_eq!(current["backup"]["requestedRevision"], 1);
+                assert_eq!(current["backup"]["status"], "error");
+                assert!(!current["backup"]["error"].as_str().unwrap().is_empty());
+            } else {
+                assert!(current["backup"].is_null());
+            }
+        }
+        service.shutdown.cancel();
+    }
 
     #[tokio::test]
     async fn completed_turn_releases_admission_while_publication_is_busy() {

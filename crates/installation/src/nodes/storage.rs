@@ -34,7 +34,7 @@ fn record_volume(db: &Db<'_>, run: &str, node: &str, status: &Value) -> Result<(
         return Ok(());
     };
     let mi_b = |key: &str| status[key].as_u64().unwrap_or(0).div_ceil(1_048_576);
-    volume["storageMode"] = super::ON_DEMAND.into();
+    volume["storageMode"] = status["mode"].clone();
     volume["activeDiskMiB"] = mi_b("activeLocalBytes").into();
     volume["diskMiB"] = mi_b("localBytes").into();
     db.put("node-volumes", &volume)?;
@@ -52,10 +52,12 @@ pub async fn monitor(s: Arc<Service>) {
         let Ok(runs) = s.store.read(monitored_runs).await else {
             continue;
         };
-        for run in runs
-            .iter()
-            .filter(|run| run["storage"]["mode"] == super::ON_DEMAND)
-        {
+        for run in runs.iter().filter(|run| {
+            matches!(
+                run["storage"]["mode"].as_str(),
+                Some("on-demand" | "native")
+            )
+        }) {
             // Unreachable controllers and unacknowledged grants are retried on the next tick.
             let _ = refresh(&s, run).await;
         }
@@ -97,6 +99,17 @@ fn monitored_runs(db: &mut Db<'_>) -> Result<Vec<Value>> {
 pub async fn refresh(s: &Service, run: &Value) -> Result<()> {
     let id = text(run, "id");
     let status = controller(s, id, "storage-status", &json!({})).await?;
+    if status["mode"] == "native" {
+        let (id, node, status) = (
+            id.to_owned(),
+            super::owner_node(run).to_owned(),
+            status.clone(),
+        );
+        return s
+            .store
+            .transaction(move |db| record_status(db, &id, &node, &status, None))
+            .await;
+    }
     if status["mode"] != super::ON_DEMAND {
         return Ok(());
     }

@@ -58,7 +58,8 @@ abstract class AgentPageCases {
     private val nodes =
         """[{"id":"$LOCAL_NODE_ID","name":"local","local":true,"status":"online","accepting":true,"executionReady":true,"exclusiveReservations":true},""" +
             """{"id":"gpu","name":"gpu-box","status":"online","accepting":true,"executionReady":true,"exclusiveReservations":true,"tags":["gpu","linux"]},""" +
-            """{"id":"mac","name":"mac-mini","status":"offline","accepting":true,"tags":["macos"]}]"""
+            """{"id":"mac","name":"mac-mini","status":"offline","accepting":true,"tags":["macos"]},""" +
+            """{"id":"desk","name":"desk-native","status":"online","accepting":true,"executionReady":true,"capabilities":{"backend":"native"}}]"""
 
     private val catalog =
         PluginCatalog(
@@ -667,6 +668,54 @@ abstract class AgentPageCases {
     }
 
     @Test
+    fun switchingToNativeExecutionStartsFromNoNodesAndIsReviewed() {
+        journey("agent") { fixture ->
+            open(AgentSection.Nodes)
+            waitForDescription("Exécuter ses conversations sur gpu-box")
+            // A VM agent only sees VM machines.
+            compose
+                .onNodeWithContentDescription("Exécuter ses conversations sur desk-native")
+                .assertDoesNotExist()
+            compose
+                .onNodeWithContentDescription("Exécution native sur l’hôte")
+                .assertIsOff()
+                .performClick()
+            compose
+                .onNodeWithText("Partage le GPU et les outils de l’hôte", substring = true)
+                .assertExists()
+            compose
+                .onNodeWithContentDescription("Toutes les nodes VM, y compris futures")
+                .assertDoesNotExist()
+            compose
+                .onNodeWithContentDescription("Exécuter ses conversations sur Runner actuel")
+                .assertDoesNotExist()
+            compose
+                .onNodeWithContentDescription("Exécuter ses conversations sur gpu-box")
+                .assertDoesNotExist()
+            compose
+                .onNodeWithContentDescription("Exécuter ses conversations sur desk-native")
+                .assertIsOff()
+                .performClick()
+            back()
+            compose
+                .onNodeWithContentDescription("Nodes, Exécution native · 1 sur 1, modifié")
+                .assertExists()
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.waitUntil(15000) {
+                compose.onAllNodesWithTag("agent-review").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose
+                .onNodeWithText("Ajout : exécution native sur l’hôte", substring = true)
+                .assertExists()
+            confirmReview()
+            compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
+            val access = fixture.saved.single().second["access"]!!.jsonObject
+            assertEquals(JsonPrimitive("native"), access["backend"])
+            assertEquals(JsonArray(listOf(JsonPrimitive("desk"))), access["nodes"])
+        }
+    }
+
+    @Test
     fun pluginGrantsStayAsTheyAreWhenTheCatalogFailsToLoad() {
         journey(
             "agent",
@@ -752,7 +801,7 @@ abstract class AgentPageCases {
             open(AgentSection.Nodes)
             waitForText("Impossible de charger les nodes", substring = true)
             compose
-                .onNodeWithContentDescription("Toutes les nodes, y compris futures")
+                .onNodeWithContentDescription("Toutes les nodes VM, y compris futures")
                 .assertIsNotEnabled()
             compose
                 .onNodeWithContentDescription("Exécuter ses conversations sur Runner actuel")
@@ -765,7 +814,7 @@ abstract class AgentPageCases {
                 .onNodeWithText("Impossible de charger les nodes", substring = true)
                 .assertDoesNotExist()
             compose
-                .onNodeWithContentDescription("Toutes les nodes, y compris futures")
+                .onNodeWithContentDescription("Toutes les nodes VM, y compris futures")
                 .assertIsEnabled()
         }
     }

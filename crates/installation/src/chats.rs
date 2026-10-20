@@ -270,13 +270,15 @@ fn require_sendable(db: &Db<'_>, chat: &Value, messages: &[Value], id: &str) -> 
     Ok(())
 }
 
-fn send(
+pub(crate) fn send(
     db: &Db<'_>,
     chat_id: &str,
     mut values: Value,
     answer: Option<(Question, Value)>,
+    origin: &crate::native::policy::Origin,
 ) -> Result<Value> {
     let mut chat = chat(db, chat_id)?;
+    crate::native::policy::authorize_chat(db, &mut chat, origin)?;
     require_active(&chat)?;
     crate::attachments::message(db, chat_id, &mut values)?;
     let messages = db.messages(chat_id)?;
@@ -342,7 +344,27 @@ pub(crate) fn edit(
     message_id: &str,
     values: Option<Value>,
 ) -> Result<Value> {
-    let chat = chat(db, chat_id)?;
+    edit_as(
+        db,
+        chat_id,
+        message_id,
+        values,
+        &crate::native::policy::Origin::default(),
+    )
+}
+
+pub(crate) fn edit_as(
+    db: &Db<'_>,
+    chat_id: &str,
+    message_id: &str,
+    values: Option<Value>,
+    origin: &crate::native::policy::Origin,
+) -> Result<Value> {
+    let mut chat = chat(db, chat_id)?;
+    if values.is_some() {
+        crate::native::policy::authorize_chat(db, &mut chat, origin)?;
+        db.put("chats", &chat)?;
+    }
     require_active(&chat)?;
     let mut current = required(find_message(db, chat_id, message_id)?, "Message not found")?;
     if current["status"] != MessageStatus::Queued {
@@ -622,6 +644,7 @@ fn launch_turn(
     if let Some(run) = run {
         continue_run(db, &chat, &run, &snapshot, execution)?;
     } else {
+        crate::native::policy::apply(&mut snapshot, &chat);
         snapshot["chatExecution"] = serde_json::to_value(execution)?;
         db.add_run(&snapshot, None)?;
         chat["runId"] = snapshot["id"].clone();
@@ -649,10 +672,19 @@ fn launch_turn(
 }
 
 pub(crate) fn create_in(db: &Db<'_>, input: Value) -> Result<Value> {
+    create_as(db, input, &crate::native::policy::Origin::default())
+}
+
+pub(crate) fn create_as(
+    db: &Db<'_>,
+    input: Value,
+    origin: &crate::native::policy::Origin,
+) -> Result<Value> {
     let input = parse_as::<ChatInput>("chat", input)?;
     let agent = required(db.get("agents", &input.agent_id)?, "Agent not found")?;
+    crate::native::policy::authorize_origin(db, &agent, origin)?;
     let created_at = now();
-    let chat = serde_json::to_value(NewChat {
+    let mut chat = serde_json::to_value(NewChat {
         id: id(),
         title: "New chat",
         agent_id: input.agent_id,
@@ -662,12 +694,19 @@ pub(crate) fn create_in(db: &Db<'_>, input: Value) -> Result<Value> {
         created_at,
         updated_at: created_at,
     })?;
+    crate::native::policy::authorize_chat(db, &mut chat, origin)?;
     task_projects(&agent, &chat, &db.list("projects")?)?;
     db.put("chats", &chat)
 }
 
 pub(crate) fn send_in(db: &Db<'_>, chat: &str, input: Value) -> Result<Value> {
-    send(db, chat, parse("message", input)?, None)
+    send(
+        db,
+        chat,
+        parse("message", input)?,
+        None,
+        &crate::native::policy::Origin::default(),
+    )
 }
 
 pub(crate) fn pause_in(db: &Db<'_>, id: &str, paused: bool) -> Result<Value> {
@@ -692,21 +731,41 @@ impl Service {
     }
 
     pub async fn chat_create(&self, input: Value) -> Result<Value> {
-        self.store.transaction(move |db| create_in(db, input)).await
+        let origin = crate::native::policy::origin();
+        if origin.known() {
+            crate::native::policy::refresh_agent(
+                self,
+                input["agentId"]
+                    .as_str()
+                    .unwrap_or(crate::config::MAIN_AGENT_ID),
+            )
+            .await?;
+        }
+        self.store
+            .transaction(move |db| create_as(db, input, &origin))
+            .await
     }
 
     pub async fn chat_send(&self, id: &str, input: Value) -> Result<Value> {
         let values = parse("message", input)?;
+        let origin = crate::native::policy::origin();
+        if origin.known() {
+            crate::native::policy::refresh_chat(self, id).await?;
+        }
         let id = id.to_owned();
         let result = self
             .store
-            .transaction(move |db| send(db, &id, values, None))
+            .transaction(move |db| send(db, &id, values, None, &origin))
             .await?;
         self.worker.notify();
         Ok(result)
     }
 
     pub async fn chat_edit(&self, id: &str, message: &str, input: Option<Value>) -> Result<Value> {
+        let origin = crate::native::policy::origin();
+        if origin.known() {
+            crate::native::policy::refresh_chat(self, id).await?;
+        }
         let (id, message) = (id.to_owned(), message.to_owned());
         let values = input
             .map(|mut input| {
@@ -716,7 +775,14 @@ impl Service {
             .transpose()?;
         let result = self
             .store
-            .transaction(move |db| edit(db, &id, &message, values))
+            .transaction(move |db| {
+                let mut record = chat(db, &id)?;
+                if values.is_some() {
+                    crate::native::policy::authorize_chat(db, &mut record, &origin)?;
+                    db.put("chats", &record)?;
+                }
+                edit_as(db, &id, &message, values, &origin)
+            })
             .await?;
         self.worker.notify();
         Ok(result)
@@ -888,7 +954,7 @@ mod tests {
         use crate::store::Store;
 
         for legacy in [false, true] {
-            for isolated in [false, true] {
+            for (isolated, native) in [(false, false), (true, false), (true, true)] {
                 let root = tempfile::tempdir().unwrap();
                 let store = Store::open(root.path()).unwrap();
                 store
@@ -921,7 +987,11 @@ mod tests {
                             }),
                             None,
                         )?;
-                        let prepared = json!({ "isolated": isolated, "workspace": "preserved" });
+                        let mut prepared =
+                            json!({ "isolated": isolated, "workspace": "preserved" });
+                        if native {
+                            prepared["backend"] = "native".into();
+                        }
                         db.set(
                             "run-checkpoint:run",
                             &json!({

@@ -39,7 +39,7 @@ pub(crate) fn authorize_in(db: &Db<'_>, bearer: &str) -> Result<Value> {
 }
 
 /// Reducing the calling agent's permissions invalidates its active grant.
-fn agent_allowed(caller: &Value, target: &Value) -> bool {
+pub(crate) fn agent_allowed(caller: &Value, target: &Value) -> bool {
     if caller["id"] != target["id"] {
         return false;
     }
@@ -171,6 +171,16 @@ pub(crate) async fn operation(
 }
 
 async fn invoke(s: &Arc<Service>, bearer: &str, name: &str, args: Value) -> Result<Value> {
+    let run = authorize(s, bearer).await?;
+    crate::native::policy::PARENT
+        .scope(
+            text(&run, "id").to_owned(),
+            invoke_inner(s, bearer, name, args),
+        )
+        .await
+}
+
+async fn invoke_inner(s: &Arc<Service>, bearer: &str, name: &str, args: Value) -> Result<Value> {
     let token = bearer.to_owned();
     let operation = name.to_owned();
     let input = args.clone();

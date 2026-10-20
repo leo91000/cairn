@@ -926,6 +926,9 @@ private fun AgentOverview(
             if (resources.nodesLoaded) nodesSummary(agent, resources.nodes) else NOT_LOADED,
             error = AgentSection.Nodes in errors,
             changed = AgentSection.Nodes in changed,
+            chips = {
+                if (access.backend == NATIVE_BACKEND) PowerChip(backendLabel(access.backend))
+            },
         ) {
             open(AgentSection.Nodes)
         }
@@ -1825,15 +1828,31 @@ private fun NodesSection(
         }
     var explain by remember { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
-    val choices = agentNodeChoices(nodes)
+    val native = access.backend == NATIVE_BACKEND
+    // Only machines of the agent's backend can run it; the current runner is a VM runner.
+    val choices = agent.nodeChoices(nodes)
     SwitchRow(
-        "Toutes les nodes, y compris futures",
-        "Les nouvelles machines seront utilisables par cet agent dès leur inscription.",
-        access.nodes == null,
-        enabled = editable,
-    ) { all ->
-        change { it.copy(access = it.access.withAllNodes(all, nodes)) }
+        "Exécution native sur l’hôte",
+        if (native)
+            "Partage le GPU et les outils de l’hôte, avec une isolation plus faible qu’une VM. Chaque node doit aussi autoriser les personnes qui dirigent cet agent."
+        else "Dans une VM Firecracker isolée.",
+        native,
+        power = true,
+    ) { on ->
+        change { it.withBackend(on) }
     }
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+    if (!native)
+        SwitchRow(
+            "Toutes les nodes VM, y compris futures",
+            "Les nouvelles machines seront utilisables par cet agent dès leur inscription.",
+            access.nodes == null,
+            enabled = editable,
+        ) { all ->
+            change { it.copy(access = it.access.withAllNodes(all, nodes)) }
+        }
+    if (native && loaded && choices.isEmpty())
+        Note("Aucune node native. Inscrivez une machine en exécution native depuis Nodes.")
     if (choices.size >= 8) SearchField("Rechercher une node ou un tag", query) { query = it }
     choices
         .filter {
