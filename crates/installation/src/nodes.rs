@@ -522,17 +522,7 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
             crate::validation::uuid(run)?;
             moves::request(s, &s.store.run(run).await?, &input.body).await
         }
-        ("GET", ["nodes", "native-callers"]) => {
-            crate::native::policy::refresh(s).await?;
-            let authority = s.store.kv("native-authority").await?.unwrap_or_default();
-            Ok(authority["accounts"]
-                .as_object()
-                .into_iter()
-                .flatten()
-                .map(|(id, account)| json!({ "id": id, "email": account["email"] }))
-                .collect::<Vec<_>>()
-                .into())
-        }
+        ("GET", ["nodes", "native-callers"]) => native_callers(s, |_| Ok(())).await,
         ("GET", ["nodes", "alerts"]) => alerts::recent(s).await,
         ("GET", ["nodes", "settings"]) => {
             let mut value = publication::settings(s).await?;
@@ -546,13 +536,35 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
         ("POST", ["nodes", _, "exclusive", reservation, "release"]) => {
             exclusive::release_owned(s, reservation, None).await
         }
-        ("PUT", ["nodes", node]) => configure_node(s, node, input.body.clone()).await,
-        ("POST", ["nodes", "enrollments"]) => invite(s, input.body.clone()).await,
+        ("PUT", ["nodes", node]) => configure_node(s, node, input.body.clone(), |_| Ok(())).await,
+        ("POST", ["nodes", "enrollments"]) => invite(s, input.body.clone(), |_| Ok(())).await,
         ("POST", ["nodes", node, "stale-disks", "delete"]) => delete_stale_disks(s, node).await,
         ("PUT", ["nodes", node, "agents"]) => grant_agents(s, node, input.body.clone()).await,
-        ("POST", ["nodes", node, "revoke"]) => revoke(s, node, input.body.clone()).await,
+        ("POST", ["nodes", node, "revoke"]) => {
+            revoke(s, node, input.body.clone(), |_| Ok(())).await
+        }
         _ => Err(Error::not_found("Not found")),
     }
+}
+
+pub(crate) async fn native_callers(
+    s: &Service,
+    authorize: impl FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+) -> Result<Value> {
+    crate::native::policy::refresh(s).await?;
+    s.store
+        .read(move |db| {
+            authorize(db)?;
+            let authority = db.kv("native-authority")?.unwrap_or_default();
+            Ok(authority["accounts"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(id, account)| json!({ "id": id, "email": account["email"] }))
+                .collect::<Vec<_>>()
+                .into())
+        })
+        .await
 }
 
 async fn backups(s: &Service, run: &str) -> Result<Value> {
@@ -625,7 +637,12 @@ struct Configuration {
     native_accounts: Option<Vec<String>>,
 }
 
-async fn configure_node(s: &Service, node: &str, body: Value) -> Result<Value> {
+pub(crate) async fn configure_node(
+    s: &Service,
+    node: &str,
+    body: Value,
+    authorize: impl FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+) -> Result<Value> {
     let request: Configuration = decode(body)?;
     if let Some(accounts) = &request.native_accounts {
         let existing = s.get("nodes", node).await?;
@@ -666,6 +683,7 @@ async fn configure_node(s: &Service, node: &str, body: Value) -> Result<Value> {
     let node = node.to_owned();
     s.store
         .transaction(move |db| {
+            authorize(db)?;
             let mut record = db
                 .get("nodes", &node)?
                 .ok_or_else(|| Error::not_found("Node not found."))?;
@@ -752,7 +770,11 @@ struct Invitation {
     manager_url: Option<String>,
 }
 
-async fn invite(s: &Service, body: Value) -> Result<Value> {
+pub(crate) async fn invite(
+    s: &Service,
+    body: Value,
+    authorize: impl FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+) -> Result<Value> {
     let request: Invitation = decode(body)?;
     let name = name(&request.name)?;
     if !matches!(request.backend.as_str(), "firecracker" | "native") {
@@ -769,16 +791,13 @@ async fn invite(s: &Service, body: Value) -> Result<Value> {
     let code = token();
     let node_id = id();
     let expires = now() + ENROLLMENT_TTL_MS;
+    let invitation = json!({ "name": name, "backend": backend, "nodeId": node_id });
+    let key = format!("node-enrollment:{}", digest(&code));
     s.store
-        .set(
-            &format!("node-enrollment:{}", digest(&code)),
-            json!({
-                "name": name,
-                "backend": backend,
-                "nodeId": node_id,
-            }),
-            Some(expires),
-        )
+        .transaction(move |db| {
+            authorize(db)?;
+            db.set(&key, &invitation, Some(expires))
+        })
         .await?;
     let install = (backend == "native" || maintenance::release().is_ok())
         .then_some(origin)
@@ -914,7 +933,12 @@ struct Revocation {
     release_placements: bool,
 }
 
-async fn revoke(s: &Service, node: &str, body: Value) -> Result<Value> {
+pub(crate) async fn revoke(
+    s: &Service,
+    node: &str,
+    body: Value,
+    authorize: impl FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+) -> Result<Value> {
     let request: Revocation = if body.is_null() {
         Revocation::default()
     } else {
@@ -923,6 +947,7 @@ async fn revoke(s: &Service, node: &str, body: Value) -> Result<Value> {
     let node = node.to_owned();
     s.store
         .transaction(move |db| {
+            authorize(db)?;
             let mut record = db
                 .get("nodes", &node)?
                 .ok_or_else(|| Error::not_found("Node not found."))?;

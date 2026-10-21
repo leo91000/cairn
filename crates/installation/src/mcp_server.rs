@@ -1,6 +1,7 @@
 mod chat_files;
 mod chat_tools;
 pub mod code_mode;
+mod node_tools;
 
 use crate::{
     error::{Error, Result, required},
@@ -668,6 +669,11 @@ pub(crate) async fn invoke(
 ) -> Result<Value> {
     let authorize = crate::installation_mcp::management_authorization(bearer);
     match name {
+        "list_nodes"
+        | "list_native_callers"
+        | "create_node_enrollment"
+        | "update_node"
+        | "revoke_node" => node_tools::invoke(s, name, args, bearer).await,
         "list_chat_artifacts"
         | "read_chat_artifact"
         | "set_chat_artifact_visibility"

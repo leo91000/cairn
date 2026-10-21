@@ -50,6 +50,17 @@ continue on other VM nodes, and native work starts in new conversations with
 native agents. Switch each agent's backend on its page and allow the new node.
 Finally run the uninstall command shown for the previous runtime.
 
+The public Cairn MCP and the `cairn_installation` agent tool expose the same setup
+and retirement controls: `list_nodes`, `list_native_callers`,
+`create_node_enrollment`, `update_node` and `revoke_node`. Installation management
+access is required for mutations; read-only public MCP access cannot enroll,
+configure or revoke a node. Agent installation grants are checked again in each
+mutation transaction. Enroll the other backend, wait for the returned `nodeId`,
+configure its native trust when applicable, and grant agents through `update_agent`.
+Only after the replacement is ready, revoke the old identity with
+`releasePlacements: true`. Plain revocation preserves existing placement choices.
+These tools neither install nor uninstall a runtime on the host.
+
 ## Daily use
 
 The controller uses one slot, low CPU/I/O priority and conservative default budgets.
