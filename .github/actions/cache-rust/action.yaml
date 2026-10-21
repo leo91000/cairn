@@ -1,0 +1,16 @@
+name: Cache compiled Rust targets
+description: Share one cleaned Rust cache, refreshed by the backend test job after source changes.
+inputs:
+  save:
+    description: Whether this job owns cache publication.
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      with:
+        shared-key: compiled-debug0
+        key: ${{ github.sha }}
+        cache-workspace-crates: 'true'
+        cache-bin: 'false'
+        save-if: ${{ inputs.save }}
