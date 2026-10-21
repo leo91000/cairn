@@ -348,7 +348,14 @@ class ChatRenderingBenchmarkDeviceTest {
                 rendering = remember { MarkdownRendering() }
                 var follow by remember { mutableStateOf(true) }
                 val gesture = rememberHistoryFollowGesture(list, follow) { follow = it }
-                FollowHistoryTail(list, follow, text, rendering, gesture)
+                FollowHistoryTail(
+                    list,
+                    follow,
+                    text,
+                    rendering,
+                    gesture,
+                    lastContentIndex = history,
+                )
                 CairnTheme("dark") {
                     Surface(Modifier.fillMaxSize()) {
                         CompositionLocalProvider(LocalMarkdownRendering provides rendering) {
