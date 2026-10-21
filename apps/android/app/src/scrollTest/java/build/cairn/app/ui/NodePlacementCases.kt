@@ -217,6 +217,12 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Révoquer").performScrollTo().performClick()
             compose.onNodeWithText("grep ^/var/lib/cairn-native/", substring = true).assertExists()
             compose.onNodeWithText("Copier la commande").performScrollTo().assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Confirmer") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
             compose.onNodeWithText("Confirmer").assertIsEnabled()
             compose
                 .onNodeWithText("l’affiche et s’arrête avant de supprimer", substring = true)
