@@ -211,6 +211,20 @@ async function main() {
       pendingPublication = undefined
     }
 
+    async function publishForEviction() {
+      await flushPublication()
+      if (retention <= 0)
+        return
+
+      // A completed-turn prefix can precede queued block writes. Publish the
+      // current paused disk at each eviction boundary; other guest starts can
+      // give those queued writes time to land after an earlier acknowledgement.
+      const current = await (await api(`/disks/${runId}/snapshot`, 'POST', {})).json()
+      await flushPublication(current)
+      const status = await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json()
+      assert.equal(status.dirtyBytes, 0, 'Eviction requires the current journal to be acknowledged')
+    }
+
     let sessionId
     let previousVm
     let evictedVm
@@ -378,7 +392,7 @@ async function main() {
       }
 
       if (retention > 0 && lease === Number(process.env.CAIRN_RETENTION_EXPIRE_AFTER ?? -1)) {
-        await flushPublication()
+        await publishForEviction()
         await until(async () => (await (await api('/health')).json()).pool.retained === 0, (retention + 5) * 1000)
         previousVm = undefined
         evictedVm = vmId
@@ -387,9 +401,9 @@ async function main() {
     }
 
     assert.ok(credentials >= samples.length, 'Each turn renews account access')
-    // Admission/expiry/deletion may only evict after the final durable prefix
-    // has been acknowledged, including benchmarks with periodic upload disabled.
-    await flushPublication()
+    // Admission/expiry/deletion require the current paused disk, including
+    // benchmarks where periodic completed-turn publication is disabled.
+    await publishForEviction()
     let activeAdmissionPassed = false
     if (retention > 0 && process.env.CAIRN_RETENTION_ADMISSION === 'true') {
       const active = []
@@ -410,6 +424,7 @@ async function main() {
           command: ['/bin/sh', '-c', 'echo ACTIVE_TASK_OK; sleep 60'],
         }
         await writeFile(path.join(root, 'data/runner-plans', `${id}.json`), JSON.stringify(plan))
+        await publishForEviction()
         await api(`/runs/${id}`, 'POST')
         active.push({ id, run: taskRun })
         await until(() => docker('exec', name, 'node', '-e', `console.log(require('node:fs').existsSync('/runner-state/${id}.vm.json') ? 'yes' : 'no')`) === 'yes')

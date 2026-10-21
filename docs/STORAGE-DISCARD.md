@@ -1,6 +1,6 @@
 # Durable guest discard
 
-Cairn now propagates guest ext4 FITRIM through native ublk and the vhost backend.
+Cairn propagates guest ext4 FITRIM through native virtio-blk Async and managed ublk.
 The guest filesystem decides which extents are free. No controller mounts a
 conversation filesystem, infers free ranges from a partial cache or overwrites
 allocated files. This implements the discard recommendation from
@@ -60,10 +60,8 @@ without preventing a storage-pressure pause. Both the native frontend and ublk
 advertise a maximum 8 MiB request to bound each maintenance ordering boundary.
 Explicit snapshot/drain operations retain their existing I/O completion barriers.
 
-The vhost frontend negotiates discard only when its backend advertises it.
-Cairn snapshots and validates the range descriptor before touching the disk.
-Discard fences read/write groups, and success waits for the disk operation.
-UBLK handles payload-free DISCARD and WRITE_ZEROES separately from the 512 KiB
+The ublk-only transport decision is recorded in
+[ADR-0054](adr/0054-ublk-only-vm-storage.md). The ublk backend handles payload-free DISCARD and WRITE_ZEROES separately from the 512 KiB
 read/write buffer, with the same 8 MiB maximum and durability barrier. The guest
 virtio frontend advertises only discard. Volume space admission, faults and journal
 accounting remain conservative, including while trim is running. Discard

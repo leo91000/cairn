@@ -90,3 +90,11 @@ journal workload had no unintended restart. The live-memory probe reclaimed
 balloon size both reached 4,608 MiB. Its manual target holds the controller's
 existing directory lease so automatic rebalancing cannot replace that target
 while the probe measures it.
+
+The retained-admission fixture publishes the current paused disk at each new
+admission boundary. A completed-turn prefix can omit queued native block writes
+that finish later. The 4 GiB/four-turn crash-recovery scenario reproduced a
+protected eviction with 20 KiB still dirty after two other guests started; fresh
+publication at each boundary passed without weakening the runtime's refusal to
+evict unacknowledged journals. Earlier-generation receipts remain covered by the
+asynchronous publication portion of the same fixture.
