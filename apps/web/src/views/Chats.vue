@@ -213,7 +213,7 @@ function switcherAnchor() {
 
 const error = ref('')
 const dismissedError = ref(false)
-const quota = computed(() => chatQuota(detail.value?.run, events.value, detail.value?.paused))
+const quota = computed(() => chatQuota(detail.value?.run, events.value))
 const visibleError = computed(() => {
   if (error.value)
     return error.value

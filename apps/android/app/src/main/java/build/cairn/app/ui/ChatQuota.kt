@@ -46,7 +46,7 @@ private fun quotaFailure(event: RunEvent): String {
 }
 
 /** A saved failure needs manual resume; only the manager's explicit wait is automatic. */
-internal fun chatQuota(run: Run?, events: List<RunEvent>, paused: Boolean = false): ChatQuota? {
+internal fun chatQuota(run: Run?, events: List<RunEvent>): ChatQuota? {
     if (run == null) return null
     val current = events.filter { it.runId == run.id }
     val failure = current.lastOrNull { quotaFailure(it).isNotEmpty() }
@@ -75,7 +75,8 @@ internal fun chatQuota(run: Run?, events: List<RunEvent>, paused: Boolean = fals
             ?.trim()
             ?.removeSuffix(".")
             ?.ifEmpty { null },
-        waiting && !paused,
+        // Pausing the follow-up queue does not pause an execution's capacity wait.
+        waiting,
     )
 }
 

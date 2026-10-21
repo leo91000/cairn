@@ -57,6 +57,18 @@ abstract class BackgroundWaitCases {
         }
 
     @Test
+    fun quotaWaitRemainsAutomaticWhileFollowupQueueIsPaused() =
+        conversation("running", quota = true, paused = true) {
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.onNodeWithText("En pause").assertExists()
+            compose
+                .onNodeWithText("Reprise automatique dès qu’un compte est disponible.")
+                .assertIsDisplayed()
+            compose.onNodeWithText("Reprendre la conversation").assertDoesNotExist()
+            compose.onAllNodesWithTag("agent-working").assertCountEquals(0)
+        }
+
+    @Test
     fun savedQuotaFailureOffersManualResumeInsteadOfPromisingAutomaticRecovery() =
         conversation("failed", quota = true) { server ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
@@ -380,6 +392,7 @@ abstract class BackgroundWaitCases {
         sleeping: Boolean = false,
         conditional: Boolean = false,
         quota: Boolean = false,
+        paused: Boolean = false,
         reason: String = "Attendre la CI",
         history: ((ChatWakeup?, Long) -> List<RunEvent>)? = null,
         check: (MockWebServer) -> Unit,
@@ -392,6 +405,7 @@ abstract class BackgroundWaitCases {
                     title = "Conversation de test",
                     agentId = MAIN_AGENT_ID,
                     agentName = "Agent principal",
+                    paused = paused,
                     runId = "run",
                     run =
                         Run(

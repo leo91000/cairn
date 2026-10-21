@@ -57,9 +57,10 @@ coverage used, not a claim that every production account/provider was exercised.
   The card distinguishes
   spending from usage limits, keeps any announced reset time and zone without
   inventing a date, and offers account management to owners. An active account
-  wait promises automatic recovery; an older failed or paused conversation offers
-  manual resume. Android uses native Material controls and French copy; web uses
-  its existing English copy and a native HTML disclosure for technical details.
+  wait promises automatic recovery even while the follow-up queue is paused;
+  an older failed execution offers manual resume. Android uses native Material
+  controls and French copy; web uses its existing English copy and a native HTML
+  disclosure for technical details.
   Coverage: `chat-quota.test.ts`, the Claude spend-limit browser journey,
   `ConversationPresentationTest`, and shared `BackgroundWaitCases` on JVM/device.
 

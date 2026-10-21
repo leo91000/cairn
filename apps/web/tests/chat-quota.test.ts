@@ -45,9 +45,8 @@ describe('conversation quota presentation', () => {
     expect(activityEntries(events, false).length).toBeGreaterThan(entries.length)
   })
 
-  it('requires manual resume for saved failures and paused conversations', () => {
+  it('requires manual resume for saved failures', () => {
     expect(chatQuota({ ...run, status: 'failed', error: message }, events)?.automatic).toBe(false)
-    expect(chatQuota(run, events, true)?.automatic).toBe(false)
     expect(chatQuota({ ...run, status: 'succeeded', accountWaitReason: null }, events)).toBeNull()
     expect(chatQuota({ ...run, status: 'running', accountWaitReason: null }, events)).toBeNull()
   })

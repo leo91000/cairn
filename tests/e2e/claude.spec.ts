@@ -42,6 +42,10 @@ test('a Claude spend limit waits automatically and appears once in the real conv
     await page.setViewportSize({ width: 1440, height: 1000 })
     await page.emulateMedia({ colorScheme: 'dark' })
     await page.screenshot({ path: testInfo.outputPath('quota-web-desktop-dark.png'), animations: 'disabled' })
+    await workspace.api(`/api/chats/${chat.id}/pause`, 'POST', { paused: true })
+    await expect(page.getByText('Paused', { exact: true }).first()).toBeVisible()
+    await expect(card.getByText('Work resumes automatically when an account is available.')).toBeVisible()
+    await expect(card.getByRole('button', { name: 'Resume conversation', exact: true })).toHaveCount(0)
     await card.getByRole('link', { name: 'Manage accounts' }).click()
     await expect(page).toHaveURL(/\/connections$/)
   }

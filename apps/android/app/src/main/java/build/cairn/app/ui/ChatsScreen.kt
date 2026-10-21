@@ -426,10 +426,7 @@ internal fun ChatPage(
         }
     }
     val timelineKeys = remember(id) { TimelineKeys() }
-    val quota =
-        remember(chat?.run, chat?.paused, live.events) {
-            chatQuota(chat?.run, live.events, chat?.paused == true)
-        }
+    val quota = remember(chat?.run, live.events) { chatQuota(chat?.run, live.events) }
     // A failed or interrupted turn never resumes its wakeup, even when the record lingers.
     val pendingWakeup = liveWakeup(chat)
     val history =

@@ -76,7 +76,9 @@ class ConversationPresentationTest {
             conversationState(chat, "Agent", null),
         )
         assertTrue(chatQuota(run, emptyList())!!.automatic)
-        assertFalse(chatQuota(run, emptyList(), paused = true)!!.automatic)
+        val paused = chat.copy(paused = true)
+        assertEquals("En pause", conversationState(paused, "Agent", null).status)
+        assertTrue(chatQuota(paused.run, emptyList())!!.automatic)
         val saved = chatQuota(run.copy(status = "failed", error = message), emptyList())!!
         assertFalse(saved.automatic)
         assertEquals("3pm (UTC)", saved.reset)

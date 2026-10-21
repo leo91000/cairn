@@ -70,7 +70,7 @@ internal fun conversationState(
     if (chat == null) return ConversationState(if (newChat) identity else "", null)
 
     val run = chat.run?.status.orEmpty()
-    val quota = chatQuota(chat.run, emptyList(), chat.paused)
+    val quota = chatQuota(chat.run, emptyList())
     val status =
         when {
             chat.paused -> "En pause"

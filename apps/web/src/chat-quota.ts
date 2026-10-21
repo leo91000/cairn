@@ -31,7 +31,7 @@ function quotaFailure(event: RunEvent) {
 }
 
 /** Only a current failure or the manager's explicit capacity wait can promise recovery. */
-export function chatQuota(run: Run | null | undefined, events: RunEvent[], paused = false): ChatQuota | null {
+export function chatQuota(run: Run | null | undefined, events: RunEvent[]): ChatQuota | null {
   if (!run)
     return null
   const current = events.filter(event => event.runId === run.id)
@@ -49,7 +49,8 @@ export function chatQuota(run: Run | null | undefined, events: RunEvent[], pause
     spend: /\bspend limit\b/i.test(message),
     // Keep the announced zone and wording: a time without a date is not a deadline.
     reset: /\bresets\b(.*)$/i.exec(message)?.[1]?.trim().replace(/\.$/, '') || null,
-    automatic: waiting && !paused,
+    // Pausing the follow-up queue does not pause an execution's capacity wait.
+    automatic: waiting,
   }
 }
 
