@@ -57,8 +57,7 @@ Compare cold cache initialization separately from subsequent warm runs.
 The repository's GitHub Actions cache limit was 10 GiB and was already occupied
 before these changes. Only the backend job saves the shared compiled Rust cache;
 the other Rust jobs restore it. The key changes with the commit, with fallback
-to compatible earlier builds. The Rust cache action removes unused dependency
-and incremental artifacts and omits extracted registry sources. Workspace
+to compatible earlier builds. The cache omits incremental artifacts and extracted registry sources. Workspace
 artifacts are retained to reuse unchanged code. Cache ownership avoids storing
 four copies of the same dependency graph.
 

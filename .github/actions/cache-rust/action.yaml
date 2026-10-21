@@ -1,5 +1,5 @@
 name: Cache compiled Rust targets
-description: Share one cleaned Rust cache, refreshed by the backend test job after source changes.
+description: Share one Rust cache, refreshed by the backend test job after source changes.
 inputs:
   save:
     description: Whether this job owns cache publication.
@@ -7,10 +7,41 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+    - id: key
+      shell: bash
+      env:
+        CACHE_PREFIX: rust-v3-${{ runner.os }}-1.97.1-debug0-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml') }}
+        CACHE_REVISION: ${{ github.sha }}
+      run: |
+        echo "primary=$CACHE_PREFIX-$CACHE_REVISION" >> "$GITHUB_OUTPUT"
+        echo "fallback=$CACHE_PREFIX-" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@v6.1.0
+      if: inputs.save == 'true'
+      env:
+        SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
       with:
-        shared-key: compiled-debug0
-        key: ${{ github.sha }}
-        cache-workspace-crates: 'true'
-        cache-bin: 'false'
-        save-if: ${{ inputs.save }}
+        path: |
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/
+          target/debug/
+          !target/debug/incremental/
+        key: ${{ steps.key.outputs.primary }}
+        restore-keys: |
+          ${{ steps.key.outputs.fallback }}
+          rust-v3-${{ runner.os }}-1.97.1-debug0-
+    - uses: actions/cache/restore@v6.1.0
+      if: inputs.save != 'true'
+      env:
+        SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
+      with:
+        path: |
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/
+          target/debug/
+          !target/debug/incremental/
+        key: ${{ steps.key.outputs.primary }}
+        restore-keys: |
+          ${{ steps.key.outputs.fallback }}
+          rust-v3-${{ runner.os }}-1.97.1-debug0-

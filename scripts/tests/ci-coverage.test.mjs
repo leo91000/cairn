@@ -13,6 +13,22 @@ describe('parallel CI coverage', () => {
     }
   })
 
+  it('refreshes one compiled cache per commit and restores compatible earlier builds', () => {
+    const action = parse(readFileSync(new URL('../../.github/actions/cache-rust/action.yaml', import.meta.url), 'utf8'))
+    const key = action.runs.steps.find(step => step.id === 'key')
+    expect(key.env.CACHE_REVISION).toContain('github.sha')
+    expect(key.run).toContain('primary=$CACHE_PREFIX-$CACHE_REVISION')
+    expect(key.run).toContain('fallback=$CACHE_PREFIX-')
+    const writer = action.runs.steps.find(step => step.uses?.startsWith('actions/cache@'))
+    const reader = action.runs.steps.find(step => step.uses?.startsWith('actions/cache/restore@'))
+    expect(writer.if).toBe('inputs.save == \'true\'')
+    expect(reader.if).toBe('inputs.save != \'true\'')
+    expect(writer.with).toEqual(reader.with)
+    expect(writer.with['restore-keys']).toContain('steps.key.outputs.fallback')
+    const owners = Object.entries(quality.jobs).filter(([, job]) => job.steps?.some(step => step.uses === './.github/actions/cache-rust' && step.with?.save === true))
+    expect(owners.map(([name]) => name)).toEqual(['backend'])
+  })
+
   it('runs every network topology exactly once on independent hosts', () => {
     const scenarios = quality.jobs['network-bench'].strategy.matrix.include.flatMap(group => group.scenarios.split(' '))
     expect(scenarios.sort()).toEqual(['same-lan', 'mdns-only-client', 'nat-client', 'nat-installation', 'nat-both', 'udp-blocked', 'symmetric-nat', 'symmetric-client', 'same-server', 'network-change', 'packet-loss', 'qualification'].sort())
