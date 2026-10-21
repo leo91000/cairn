@@ -94,7 +94,13 @@ async function load() {
 
   if (!enrollment.value)
     return
-  const connected = nodes.value.find(node => !node.local && !node.revoked && !knownBeforeEnrollment.has(node.id))
+  const invitation = enrollment.value
+  // Older installations cannot safely associate a guided switch with its replacement.
+  if (replacing.value && !invitation.nodeId)
+    return
+  const connected = nodes.value.find(node => !node.local && !node.revoked
+    && nodeBackend(node) === (invitation.backend ?? 'firecracker')
+    && (invitation.nodeId ? node.id === invitation.nodeId : !knownBeforeEnrollment.has(node.id)))
   if (connected) {
     enrollment.value = null
     adding.value = false
@@ -426,6 +432,9 @@ function statusLabel(node: ExecutionNode) {
             <p>Paste this single-use code, press Enter, then Ctrl+D to finish standard input. It expires {{ new Date(enrollment.expiresAt).toLocaleString() }}:</p>
           </template>
           <code class="block break-all select-all" aria-label="Single-use enrollment code">{{ enrollment.code }}</code>
+          <UiAlert v-if="replacing && !enrollment.nodeId">
+            Update this installation to track the replacement and finish the guided switch. The previous node is kept.
+          </UiAlert>
           <p class="text-sm text-muted">
             <strong>3.</strong> {{ enrollment.backend === 'native' ? 'This page detects the machine once it connects, opens its configuration to enable native execution and choose trusted people, then asks which agents may use it.' : 'This page detects the machine once it connects and asks which agents may use it, as the last step.' }}
           </p>

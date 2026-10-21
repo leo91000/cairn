@@ -118,6 +118,7 @@ abstract class NodePlacementCases {
         MockWebServer().use { server ->
             val writes = CopyOnWriteArrayList<Pair<String, JsonObject>>()
             val enrolled = AtomicBoolean(false)
+            val configured = AtomicBoolean(false)
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
@@ -128,18 +129,22 @@ abstract class NodePlacementCases {
                         ) {
                             val body = request.body.readUtf8().ifBlank { "{}" }
                             writes += path to wireJson.parseToJsonElement(body).jsonObject
+                            if (request.method == "PUT" && path.endsWith("/nodes/desk"))
+                                configured.set(true)
                         }
                         val body =
                             when (path) {
                                 "/api/installations/fixture/api/nodes/enrollments" -> {
                                     enrolled.set(true)
-                                    """{"code":"native-enrollment","expiresAt":4102444800000,"installCommand":"curl https://fixture.invalid/native | bash","backend":"native"}"""
+                                    """{"code":"native-enrollment","expiresAt":4102444800000,"installCommand":"curl https://fixture.invalid/native | bash","backend":"native","nodeId":"desk"}"""
                                 }
                                 "/api/installations/fixture/api/nodes/native-callers" ->
                                     """[{"id":"trusted","email":"trusted@example.test"}]"""
                                 "/api/installations/fixture/api/nodes" ->
-                                    if (enrolled.get())
+                                    if (configured.get())
                                         """[{"id":"desk","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]}]"""
+                                    else if (enrolled.get())
+                                        """[{"id":"unrelated","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]},{"id":"desk","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]}]"""
                                     else "[]"
                                 "/api/installations/fixture/api/agents" ->
                                     """[{"id":"vm","name":"Agent VM","revision":"r1"},{"id":"native","name":"Agent natif","revision":"r1","access":{"backend":"native","nodes":[]}}]"""

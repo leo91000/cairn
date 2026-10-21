@@ -767,11 +767,16 @@ async fn invite(s: &Service, body: Value) -> Result<Value> {
         .as_ref()
         .map(|url| url.as_str().trim_end_matches('/').to_owned());
     let code = token();
+    let node_id = id();
     let expires = now() + ENROLLMENT_TTL_MS;
     s.store
         .set(
             &format!("node-enrollment:{}", digest(&code)),
-            json!({ "name": name, "backend": backend }),
+            json!({
+                "name": name,
+                "backend": backend,
+                "nodeId": node_id,
+            }),
             Some(expires),
         )
         .await?;
@@ -795,6 +800,7 @@ async fn invite(s: &Service, body: Value) -> Result<Value> {
         "managerUrl": manager_url,
         "installCommand": install,
         "backend": backend,
+        "nodeId": node_id,
     }))
 }
 
@@ -1049,7 +1055,6 @@ async fn enroll(s: &Service, body: Value) -> Result<Value> {
         return Err(Error::unauthorized("Invalid or expired enrollment code."));
     }
     let key = format!("node-enrollment:{}", digest(&request.code));
-    let node_id = id();
     let credential = token();
     let token_key = format!("node-token:{}", digest(&credential));
     s.store
@@ -1063,6 +1068,8 @@ async fn enroll(s: &Service, body: Value) -> Result<Value> {
                     "Enrollment backend differs from the owner's invitation.",
                 ));
             }
+            // Invitations issued before identity tracking remain consumable.
+            let node_id = invitation["nodeId"].as_str().map_or_else(id, str::to_owned);
             db.delete(&key)?;
             let capabilities = request.capabilities;
             let node = EnrolledNode {

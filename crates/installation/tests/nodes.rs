@@ -448,6 +448,7 @@ async fn enrollment_is_single_use_and_revocation_removes_node_access() {
     );
     let (status, identity) = owner.call("POST", ENROLL, input.clone(), None).await;
     assert_eq!(status, StatusCode::OK, "{identity}");
+    assert_eq!(identity["nodeId"], invitation["nodeId"]);
     let token = identity["token"].as_str().unwrap();
     assert_eq!(
         owner.call("POST", ENROLL, input, None).await.0,
@@ -477,6 +478,56 @@ async fn enrollment_is_single_use_and_revocation_removes_node_access() {
             .0,
         StatusCode::UNAUTHORIZED
     );
+}
+
+#[tokio::test]
+async fn enrollment_identity_tracks_the_exact_invitation_and_accepts_legacy_codes() {
+    let owner = Owner::new().await;
+    let first = owner.invite("Workstation").await;
+    let second = owner.invite("Workstation").await;
+    assert_ne!(first["nodeId"], second["nodeId"]);
+    for invitation in [second, first] {
+        let (status, identity) = owner
+            .call(
+                "POST",
+                ENROLL,
+                enrollment(
+                    &invitation,
+                    "Workstation",
+                    &capabilities(true, 8, 16384, 65536),
+                ),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{identity}");
+        assert_eq!(identity["nodeId"], invitation["nodeId"]);
+    }
+
+    let code = auth::token();
+    owner
+        .service
+        .store
+        .set(
+            &format!("node-enrollment:{}", auth::digest(&code)),
+            json!({ "name": "Legacy", "backend": "firecracker" }),
+            Some(now() + 600_000),
+        )
+        .await
+        .unwrap();
+    let (status, identity) = owner
+        .call(
+            "POST",
+            ENROLL,
+            enrollment(
+                &json!({ "code": code }),
+                "Legacy",
+                &capabilities(true, 8, 16384, 65536),
+            ),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{identity}");
+    assert!(identity["nodeId"].is_string());
 }
 
 #[tokio::test]

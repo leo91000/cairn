@@ -81,6 +81,7 @@ export interface NodeAgent {
 export interface NativeCaller { id: string, email: string }
 
 export interface NodeEnrollment {
+  nodeId?: string
   backend?: 'firecracker' | 'native'
   installCommand?: string | null
   managerUrl?: string | null

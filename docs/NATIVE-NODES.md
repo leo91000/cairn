@@ -39,7 +39,11 @@ Switch to native (or Switch to VM) on its node. Cairn pre-fills the machine name
 and the other backend. Run the generated installer on the same machine: the new
 runtime enrolls as a separate node with its own identity, grants and storage,
 alongside the existing one. After its configuration and agent step, Cairn offers to
-retire the previous node. Revoking it from there also returns conversations fixed
+retire the previous node. The invitation assigns the replacement's identity before
+it connects, so another enrollment cannot advance this switch. Older invitations
+remain consumable; installations without identity tracking keep the previous node
+and ask for an update before completing a guided switch.
+Revoking it from there also returns conversations fixed
 to or preferring that node to automatic placement; a plain revocation keeps those
 explicit choices waiting. Conversations keep their backend: VM conversations
 continue on other VM nodes, and native work starts in new conversations with

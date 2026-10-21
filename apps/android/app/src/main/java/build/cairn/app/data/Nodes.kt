@@ -186,6 +186,7 @@ data class NodeEnrollment(
     val expiresAt: Long,
     val installCommand: String? = null,
     val backend: String = "firecracker",
+    val nodeId: String? = null,
 )
 
 @Serializable data class NativeCaller(val id: String, val email: String)

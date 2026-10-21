@@ -67,9 +67,17 @@ fun NodesScreen(
         nodes = vm.api.get("/nodes")
         if (nodes.any { it.capabilities.backend == "native" })
             nativeCallers = vm.api.get("/nodes/native-callers")
-        if (enrollment == null) return
+        val invitation = enrollment ?: return
+        // A guided switch needs the identity assigned to this exact invitation.
+        if (replacing != null && invitation.nodeId == null) return
         nodes
-            .firstOrNull { !it.local && !it.revoked && it.id !in knownBeforeEnrollment }
+            .firstOrNull {
+                !it.local &&
+                    !it.revoked &&
+                    it.capabilities.backend == invitation.backend &&
+                    (invitation.nodeId?.let { expected -> it.id == expected }
+                        ?: (it.id !in knownBeforeEnrollment))
+            }
             ?.let {
                 enrollment = null
                 adding = false
@@ -363,6 +371,10 @@ fun NodesScreen(
                 Text("Créer un code d’inscription")
             }
             enrollment?.let {
+                if (replacing != null && it.nodeId == null)
+                    Text(
+                        "Mettez à jour cette installation pour suivre le remplacement et terminer la bascule guidée. L’ancienne node est conservée."
+                    )
                 val command = it.installCommand
                 if (command != null) {
                     Text(

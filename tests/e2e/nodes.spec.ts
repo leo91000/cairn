@@ -575,6 +575,20 @@ test('switching a machine to native enrolls it again and retires the previous no
   await switching.getByLabel('Direct manager address').fill(workspace.url)
   await switching.getByRole('button', { name: 'Create enrollment code' }).click()
   const code = await switching.getByLabel('Single-use enrollment code').textContent()
+  // A different invitation can connect first, even with the same name and backend.
+  const other = await workspace.api('/api/nodes/enrollments', 'POST', { name: 'Workstation', backend: 'native' })
+  const unrelated = await enroll(other.code, {
+    ...machine,
+    backend: 'native',
+    kvm: false,
+    fuse: false,
+  })
+  await page.waitForResponse(async response => response.request().method() === 'GET'
+    && new URL(response.url()).pathname.endsWith('/api/nodes')
+    && (await response.json()).some((node: { id: string }) => node.id === unrelated))
+  await expect(switching).toBeVisible()
+  await expect(page.getByRole('dialog', { name: 'Configure node' })).toHaveCount(0)
+  await expect(page.getByRole('dialog', { name: 'Retire the previous Firecracker VM node?', exact: true })).toHaveCount(0)
   const native = await enroll(code!, {
     ...machine,
     backend: 'native',
