@@ -301,8 +301,10 @@ impl Templates {
             _ => return Err(Error::bad("CAIRN_VM_SNAPSHOTS must be true or false.")),
         };
         let profile = if enabled {
-            if !cfg!(feature = "ublk")
-                || std::env::var("CAIRN_BLOCK_TRANSPORT").as_deref() != Ok("ublk")
+            if crate::storage::transport::validate_transport(
+                std::env::var("CAIRN_BLOCK_TRANSPORT").ok().as_deref(),
+            )
+            .is_err()
                 || std::env::var("CAIRN_DISK_LAYOUT").as_deref() != Ok("paired-ext4-v1")
             {
                 return Err(Error::bad(

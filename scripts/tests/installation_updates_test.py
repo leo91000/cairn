@@ -9,6 +9,8 @@ import tempfile
 import threading
 import unittest
 
+from supervisor_fixture import write_supervisors
+
 REPO = Path(__file__).resolve().parents[2]
 OLD = 'ghcr.io/leo91000/cairn@sha256:' + '1' * 64
 NEW = 'ghcr.io/leo91000/cairn@sha256:' + '2' * 64
@@ -16,7 +18,7 @@ NEW = 'ghcr.io/leo91000/cairn@sha256:' + '2' * 64
 
 class Updates(unittest.TestCase):
     def test_approved_update_and_failed_health_restore_previous_image_without_losing_data(self):
-        for failure in ('format-slow', 'format-failed', 'format-interrupted', 'migration-slow', 'migration-failed', '', 'health', 'runner-unhealthy', 'stop-once', 'up-once', 'exec-once', 'digest', 'unapproved', 'interrupted', 'interrupted-stopped', 'interrupted-created', 'interrupted-missing', 'interrupted-restarting', 'interrupted-crash-loop', 'interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-exec-refused', 'interrupted-foreign-restarting', 'lease', 'expired-lease'):
+        for failure in ('ublk', 'format-slow', 'format-failed', 'format-interrupted', 'migration-slow', 'migration-failed', '', 'health', 'runner-unhealthy', 'stop-once', 'up-once', 'exec-once', 'digest', 'unapproved', 'interrupted', 'interrupted-stopped', 'interrupted-created', 'interrupted-missing', 'interrupted-restarting', 'interrupted-crash-loop', 'interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-exec-refused', 'interrupted-foreign-restarting', 'lease', 'expired-lease'):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 class Beacon(http.server.BaseHTTPRequestHandler):
@@ -146,12 +148,12 @@ if 'exec' in args:
 ''')
                 docker.chmod(0o755)
                 try:
-                    result = subprocess.run(['python3', str(REPO / 'deploy/installations/host.py'), origin, '--update'],
+                    result = subprocess.run(['python3', str(write_supervisors(root)[0]), origin, '--update'],
                                             env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
                                                  'CAIRN_INSTALLATION_ROOT': directory, 'FAILURE': failure},
                                             capture_output=True, text=True, timeout=90)
                     if failure in ('lease', 'expired-lease'):
-                        result = subprocess.run(['python3', str(REPO / 'deploy/installations/host.py'), origin, '--update'],
+                        result = subprocess.run(['python3', str(write_supervisors(root)[0]), origin, '--update'],
                                                 env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
                                                      'CAIRN_INSTALLATION_ROOT': directory, 'FAILURE': failure},
                                                 capture_output=True, text=True, timeout=90)
@@ -169,7 +171,7 @@ if 'exec' in args:
                         if failure in ('migration-failed', 'format-failed'):
                             self.assertEqual(updated['pendingImage'], NEW)
                             self.assertEqual(updated['pendingDatabaseVersion'], 7 if failure == 'format-failed' else 5)
-                            retry = subprocess.run(['python3', str(REPO / 'deploy/installations/host.py'), origin, '--update'],
+                            retry = subprocess.run(['python3', str(write_supervisors(root)[0]), origin, '--update'],
                                                    env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
                                                         'CAIRN_INSTALLATION_ROOT': directory, 'FAILURE': ''},
                                                    capture_output=True, text=True, timeout=90)
@@ -185,7 +187,7 @@ if 'exec' in args:
                     self.assertEqual((root / 'data/kept').read_text(), 'conversation and storage must survive')
                     self.assertNotIn('fixture-private-token', result.stdout + result.stderr)
                     events = [json.loads(line) for line in (root / 'events').read_text().splitlines()] if (root / 'events').exists() else []
-                    if failure in ('digest', 'unapproved', 'lease', 'expired-lease', 'interrupted-exec-once', 'interrupted-exec-refused', 'interrupted-foreign-restarting'):
+                    if failure in ('ublk', 'digest', 'unapproved', 'lease', 'expired-lease', 'interrupted-exec-once', 'interrupted-exec-refused', 'interrupted-foreign-restarting'):
                         self.assertFalse(any('stop' in event or 'up' in event for event in events))
                         if failure == 'interrupted-exec-refused':
                             # Without a verdict, a running candidate still requires the lease.
@@ -203,13 +205,17 @@ if 'exec' in args:
                         self.assertIn('IPC_LOCK', capabilities)
                         self.assertIn('SYS_PTRACE', capabilities)
                         self.assertIn('SYS_NICE', capabilities)
+                        self.assertIn('SYS_RESOURCE', capabilities)
+                        self.assertIn('/dev/ublk-control:/dev/ublk-control', compose['services']['runner']['devices'])
+                        self.assertEqual(compose['services']['runner']['device_cgroup_rules'], ['c 238:* rwm', 'b 259:* rwm'])
+                        self.assertEqual(compose['services']['runner']['environment']['CAIRN_BLOCK_TRANSPORT'], 'ublk')
                         self.assertEqual(compose['services']['runner']['environment']['OPERATOR_SETTING'], '${KEEP_THIS_EXPRESSION}')
                         self.assertEqual(compose['services']['garage']['image'], 'retained-storage')
                         self.assertNotIn('pendingImage', updated)
                     if failure in ('interrupted', 'interrupted-created', 'interrupted-unhealthy', 'interrupted-exec-once', 'lease', 'stop-once', 'up-once', 'exec-once'):
                         # A brief outage is not evidence of an unhealthy candidate.
                         for _ in range(2):
-                            retry = subprocess.run(['python3', str(REPO / 'deploy/installations/host.py'), origin, '--update'],
+                            retry = subprocess.run(['python3', str(write_supervisors(root)[0]), origin, '--update'],
                                                    env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
                                                         'CAIRN_INSTALLATION_ROOT': directory, 'FAILURE': ''},
                                                    capture_output=True, text=True, timeout=90)

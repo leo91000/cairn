@@ -18,6 +18,7 @@ import { blockDigest } from './block-digest.mjs'
 import { entrypointSmoke } from './runner-entrypoint-smoke.mjs'
 import { prepareStorageOrigin, storageSmoke } from './runner-storage-smoke.mjs'
 import { udpSmoke } from './runner-udp-smoke.mjs'
+import { ublkDeviceArguments } from './ublk-devices.mjs'
 
 async function main() {
   const image = process.argv[2] || 'cairn-firecracker:dev'
@@ -218,7 +219,7 @@ console.log('probe.done');
       })
     })
     await new Promise(resolve => mcp.listen(path.join(source, 'home/cairn-mcp.sock'), resolve))
-    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'].flatMap(cap => ['--cap-add', cap]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv4.conf.all.rp_filter=0', '--sysctl', 'net.ipv4.conf.default.rp_filter=0', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '6g', '--cpus', '3', '-e', 'CONCURRENCY=5', '--entrypoint', '/usr/local/bin/cairn', image, 'runner-broker')
+    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'].flatMap(cap => ['--cap-add', cap]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', ...ublkDeviceArguments(), '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv4.conf.all.rp_filter=0', '--sysctl', 'net.ipv4.conf.default.rp_filter=0', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '6g', '--cpus', '3', '-e', 'CONCURRENCY=5', '--entrypoint', '/usr/local/bin/cairn', image, 'runner-broker')
     docker('network', 'connect', '--ip', '93.184.216.2', networkName, name)
     docker('network', 'create', installationNetwork)
     docker('network', 'connect', '--alias', 'manager', installationNetwork, name)
@@ -597,6 +598,9 @@ console.log('probe.done');
             let data='';res.on('data',part=>data+=part);res.on('end',()=>resolve(JSON.parse(data)));
           });req.on('error',reject);
         });
+        const drive=config.drives.find(d=>d.drive_id==='data');
+        require('node:assert/strict').equal(drive.path_on_host,'disk.blk');
+        require('node:assert/strict').equal(drive.socket,undefined);
         return {machine:config['machine-config'],config:config.balloon,stats};
       })).then(result=>console.log(JSON.stringify(result)));
     `))

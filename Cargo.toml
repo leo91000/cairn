@@ -8,16 +8,11 @@ members = [
   "crates/plugin-runtime"
 ]
 resolver = "3"
-exclude = [
-  "vendor/rtc-dtls",
-  "vendor/vhost-user-backend"
-]
+exclude = [ "vendor/rtc-dtls" ]
 
 [patch.crates-io]
 # Preserve the pinned 0.21.0 stack; fix only DTLS retransmission under loss.
 rtc-dtls = { path = "vendor/rtc-dtls" }
-# Preserve 0.23.0; keep the VM shutdown event owned until its worker stops.
-vhost-user-backend = { path = "vendor/vhost-user-backend" }
 
 [profile.release]
 lto = "thin"

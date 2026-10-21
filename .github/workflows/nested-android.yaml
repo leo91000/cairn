@@ -29,6 +29,12 @@ jobs:
       - name: Prepare KVM host
         run: |
           test -c /dev/kvm
+          if ! sudo modprobe ublk_drv; then
+            sudo apt-get update -qq
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+            sudo modprobe ublk_drv
+          fi
+          test -c /dev/ublk-control
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android
       - uses: docker/login-action@v4.6.0
         with:

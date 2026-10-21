@@ -232,7 +232,7 @@ pub fn capabilities(path: &Path) -> Result<Value> {
         .into(),
         kvm,
         fuse: device_opens("/dev/fuse").is_some(),
-        ublk: cfg!(feature = "ublk") && device_opens("/dev/ublk-control").is_some(),
+        ublk: device_opens("/dev/ublk-control").is_some(),
         cpu: u32::try_from(cpu).unwrap_or(u32::MAX),
         memory_mi_b: memory,
         disk_mi_b: mi_b(stat.f_bavail, stat.f_frsize),

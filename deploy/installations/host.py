@@ -102,9 +102,39 @@ def release(origin):
         return image
 
 
+def node_supervisor():
+    module_path = Path(__file__).with_name('node-host.py')
+    if not module_path.exists():
+        module_path = Path(__file__).parent.parent / 'nodes/host.py'
+    spec = importlib.util.spec_from_file_location('node_supervisor', module_path)
+    supervisor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(supervisor)
+    return supervisor
+
+
+def configure_ublk(runner):
+    # Detect and validate the running host before stopping any workload. Reuse
+    # the standalone node's exact kernel/device checks and capability contract.
+    arguments = node_supervisor().block_device_arguments()
+    rules = [value.split('=', 1)[1] for value in arguments if value.startswith('--device-cgroup-rule=')]
+    capabilities = runner.setdefault('cap_add', [])
+    devices = runner.setdefault('devices', [])
+    environment = runner.setdefault('environment', {})
+    if not isinstance(capabilities, list) or not isinstance(devices, list) or not isinstance(environment, dict):
+        raise ValueError('Runner capabilities/devices must be lists and environment a mapping')
+    for capability in ('SYS_PTRACE', 'SYS_NICE', 'SYS_RESOURCE'):
+        if capability not in capabilities:
+            capabilities.append(capability)
+    control = '/dev/ublk-control:/dev/ublk-control'
+    if control not in devices:
+        devices.append(control)
+    runner['device_cgroup_rules'] = rules
+    environment['CAIRN_BLOCK_TRANSPORT'] = 'ublk'
+
+
 def compose(image, origin):
     logs = {'driver': 'json-file', 'options': {'max-size': '10m', 'max-file': '3'}}
-    return {
+    deployment = {
         'name': 'cairn-installation',
         'services': {
             'garage': {
@@ -160,6 +190,9 @@ def compose(image, origin):
             },
         },
     }
+
+    configure_ublk(deployment['services']['runner'])
+    return deployment
 
 
 def claimed_identity(origin):
@@ -422,14 +455,7 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
         deployment['services']['manager']['image'] = image
         deployment['services']['manager']['environment']['CAIRN_NODE_IMAGE'] = image
         deployment['services']['runner']['image'] = image
-        # Add only the paging capabilities; preserve operator resource limits,
-        # environment expressions and any additional approved capabilities.
-        capabilities = deployment['services']['runner'].setdefault('cap_add', [])
-        if not isinstance(capabilities, list):
-            raise ValueError('Runner cap_add must be a list')
-        for capability in ('SYS_PTRACE', 'SYS_NICE'):
-            if capability not in capabilities:
-                capabilities.append(capability)
+        configure_ublk(deployment['services']['runner'])
 
         # The manager saves checkpoints before the runner is stopped. Persistent
         # volumes and Garage are never recreated or removed by this supervisor.
@@ -531,12 +557,7 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
         atomic(config_file, json.dumps(config))
         return True
 
-    module_path = Path(__file__).with_name('node-host.py')
-    if not module_path.exists():
-        module_path = Path(__file__).parent.parent / 'nodes/host.py'
-    spec = importlib.util.spec_from_file_location('node_supervisor', module_path)
-    supervisor = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(supervisor)
+    supervisor = node_supervisor()
 
     updated = supervisor.update_image(config['image'], image, pull, prepare, launch)
     # Restoring the previous image alone does not prove the candidate failed.
