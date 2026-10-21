@@ -138,11 +138,14 @@ pub async fn serve_with_status(socket: UdpSocket, status: Status) -> io::Result<
         if !valid {
             continue;
         }
+        // Dual-stack sockets receive IPv4 peers as ::ffff:a.b.c.d. Report the
+        // actual IPv4 address, while retaining the socket address for send_to.
+        let address = source.ip().to_canonical();
         // No unbounded IP tracking, tasks, retransmissions or amplification loop.
-        if !counts.contains_key(&source.ip()) && counts.len() >= 1000 {
+        if !counts.contains_key(&address) && counts.len() >= 1000 {
             continue;
         }
-        let count = counts.entry(source.ip()).or_default();
+        let count = counts.entry(address).or_default();
         if *count >= 20 {
             continue;
         }
@@ -151,11 +154,11 @@ pub async fn serve_with_status(socket: UdpSocket, status: Status) -> io::Result<
         let mut response = input[..20].to_vec();
         response[..2].copy_from_slice(&[1, 1]);
         response.extend([0, 0x20]); // XOR-MAPPED-ADDRESS (RFC 8489).
-        let address_length = if source.is_ipv4() { 8_u16 } else { 20 };
+        let address_length = if address.is_ipv4() { 8_u16 } else { 20 };
         response.extend(address_length.to_be_bytes());
-        response.extend([0, if source.is_ipv4() { 1 } else { 2 }]);
+        response.extend([0, if address.is_ipv4() { 1 } else { 2 }]);
         response.extend((source.port() ^ 0x2112).to_be_bytes());
-        match source.ip() {
+        match address {
             IpAddr::V4(address) => response.extend(
                 address
                     .octets()
