@@ -23,7 +23,9 @@ work; a read that rejects an invalid queued request discards only that identity.
 
 A reader reopening before persistence finishes can restore the queued snapshot.
 Reading positions are retained across queued saves and checked against their
-history and first event. The cache's JSON version, encryption, expiry, byte
+history and first event. Offering, reading, persisting and recording positions use
+the same cursor ordering rule; an older queued boundary cannot discard a position
+for the retained newer snapshot. The cache's JSON version, encryption, expiry, byte
 budgets, disk-write throttle and backwards history boundaries are unchanged.
 
 Memory entries retain their estimated size. A warm read moves the entry in the
@@ -126,3 +128,8 @@ A second regression holds an expired disk read while a valid snapshot is offered
 Before the cleanup fix, flushing loses that snapshot and the test reads null
 instead of cursor 2. After the fix, all fourteen focused cases pass, including
 explicit removal and clearing tests. Formatting and Android lint also pass.
+
+A third regression checks a queued cursor 9 starting at event 2 against a retained
+cursor 10 starting at event 1. Before the position fix, the retained snapshot's
+position is silently dropped; afterward, all fifteen focused cases pass. The
+fresh measurement and validation record cover the shared cursor comparison.

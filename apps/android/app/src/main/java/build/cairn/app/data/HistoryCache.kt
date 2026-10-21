@@ -80,16 +80,16 @@ class HistoryCache(
             System.currentTimeMillis() - value.savedAt < ttl &&
             value.events.all { it.id > 0 && it.id <= value.cursor }
 
+    private fun olderThan(value: CachedHistory, reference: CachedHistory?) =
+        reference?.history == value.history && reference.cursor > value.cursor
+
     suspend fun read(key: String): CachedHistory? =
         withContext(Dispatchers.IO) {
             Performance.measure(PerfOperation.CACHE_READ) {
                 lock.withLock {
                     val retained = memory[key]?.value
                     val request = synchronized(pendingLock) { pending[key] }
-                    val queued =
-                        request?.value?.takeUnless {
-                            retained?.history == it.history && retained.cursor > it.cursor
-                        }
+                    val queued = request?.value?.takeUnless { olderThan(it, retained) }
                     val value =
                         queued?.let { prepareValue(key, it) }
                             ?: retained
@@ -122,9 +122,7 @@ class HistoryCache(
     ): PendingSave? =
         synchronized(pendingLock) {
             if (expectedGeneration != generation) return@synchronized null
-            val latest = pending[key]?.value
-            if (latest?.history == value.history && latest.cursor > value.cursor)
-                return@synchronized null
+            if (olderThan(value, pending[key]?.value)) return@synchronized null
             PendingSave(key, value, expectedGeneration).also { pending[key] = it }
         }
 
@@ -165,9 +163,7 @@ class HistoryCache(
                             removeLocked(key)
                             return@withLock
                         }
-                        val retained = memory[key]?.value
-                        if (retained?.history == value.history && retained.cursor > value.cursor)
-                            return@withLock
+                        if (olderThan(value, memory[key]?.value)) return@withLock
                         val next = prepareValue(key, value)
                         memory.remove(key)
                         memory[key] = entry(next)
@@ -197,8 +193,11 @@ class HistoryCache(
     suspend fun position(key: String, value: ReadingPosition) =
         withContext(Dispatchers.IO) {
             lock.withLock {
-                val queued = synchronized(pendingLock) { pending[key]?.value }
-                val current = queued ?: memory[key]?.value ?: return@withLock
+                val retained = memory[key]?.value
+                val queued =
+                    synchronized(pendingLock) { pending[key]?.value }
+                        ?.takeUnless { olderThan(it, retained) }
+                val current = queued ?: retained ?: return@withLock
                 if (
                     value.firstEvent != null && value.firstEvent != current.events.firstOrNull()?.id
                 )

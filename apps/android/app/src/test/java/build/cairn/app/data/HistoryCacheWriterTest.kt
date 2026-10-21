@@ -68,6 +68,28 @@ class HistoryCacheWriterTest {
     }
 
     @Test
+    fun aStaleQueuedBoundaryCannotDiscardTheRetainedReadingPosition() = runBlocking {
+        val cache = HistoryCache(directory.root, { _, bytes -> bytes }, { _, bytes -> bytes })
+        val events = (1L..10L).map { RunEvent(it, it, "chat.user", "Message $it") }
+        cache.save("chat", record(10).copy(events = events), true)
+        val stale =
+            cache.prepareSave(
+                "chat",
+                record(9).copy(events = events.filter { it.id in 2L..9L }),
+                cache.generation,
+            )!!
+        assertEquals(10L, cache.read("chat")?.cursor)
+        val position = ReadingPosition(4, 18, false, 1)
+
+        cache.position("chat", position)
+        cache.persist(stale)
+        cache.flush("chat")
+
+        val disk = HistoryCache(directory.root, { _, bytes -> bytes }, { _, bytes -> bytes })
+        assertEquals(position, disk.read("chat")?.position)
+    }
+
+    @Test
     fun expiredDiskCleanupPreservesASnapshotOfferedDuringTheRead() = runBlocking {
         File(directory.root, "chat").writeText(wireJson.encodeToString(record(1).copy(savedAt = 1)))
         val entered = CountDownLatch(1)
