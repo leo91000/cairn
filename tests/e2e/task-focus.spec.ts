@@ -8,6 +8,46 @@ import {
   workspacePath,
 } from './fixtures'
 
+test('a completed mission becomes a chat and follows up in the same session after reload', async ({ page, workspace }) => {
+  const project = workspace.service.store.list('projects')[0]
+  const task = workspace.service.task({
+    name: 'Deployment review to discuss',
+    agentId: workspace.service.store.list('agents')[0]!.id,
+    projectId: project.id,
+    prompt: 'Review this deployment before release.',
+    worktree: false,
+  })
+  const run = await workspace.service.enqueue(task.id)
+  await expect.poll(() => workspace.service.store.run(run.id)?.status).toBe('succeeded')
+  const original = workspace.service.store.run(run.id)!
+  await page.goto(workspacePath(`/runs/${run.id}`))
+  await authenticateWorkspace(page)
+  await page.getByRole('button', { name: 'Continue in chat', exact: true }).click()
+  await expect(page).toHaveURL(/\/chats\/[^/]+$/)
+  const chats = await workspace.api('/api/chats')
+  const chat = chats.find((chat: { runId: string }) => chat.runId === run.id)
+  expect(chat).toBeDefined()
+  await page.reload()
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible()
+  const detail = await workspace.api(`/api/chats/${chat.id}`)
+  expect(detail.run.sessionId).toBe(original.sessionId)
+  expect(detail.run.workspace).toBe(original.workspace)
+  expect(detail.run.summary).toBe(original.summary)
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('What should I monitor after this deployment?')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect.poll(async () => {
+    const detail = await workspace.api(`/api/chats/${chat.id}`)
+    return detail.messages.length === 0 && detail.run.status === 'succeeded' && detail.run.finishedAt > original.finishedAt!
+  }).toBe(true)
+  const followed = await workspace.api(`/api/chats/${chat.id}`)
+  expect(followed.run.id).toBe(run.id)
+  expect(followed.run.sessionId).toBe(original.sessionId)
+  expect(followed.run.workspace).toBe(original.workspace)
+  expect(followed.run.snapshot.task.prompt).toBe('What should I monitor after this deployment?')
+  await expect(page.getByText('Ready for the next step.', { exact: false })).toBeVisible()
+  await expect(page.getByText('The fixture task passed.', { exact: true })).toBeVisible()
+})
+
 test('reconnects after a temporary restart and resumes a cancelled conversation in place', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const agent = workspace.service.agent({ name: 'Recovery engineer' })

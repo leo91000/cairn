@@ -736,6 +736,10 @@ pub(crate) async fn invoke(
         }
         "merge_agents" => s.merge_agents_authorized(args, authorize).await,
         "run_task" => s.enqueue(text(&args, "taskId"), "mcp", None).await,
+        "convert_run_to_chat" => {
+            s.chat_from_run_authorized(text(&args, "runId"), authorize)
+                .await
+        }
         "cancel_run" => {
             s.worker.cancel(s, text(&args, "runId")).await?;
             Ok(json!({ "cancelled": true }))

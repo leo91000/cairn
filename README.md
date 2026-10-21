@@ -167,6 +167,12 @@ See the [CI measurements and release paths](docs/CI-PERFORMANCE.md).
 
 Start a conversation from **Chats**, an agent, or a project. Project chats use Main agent by default. Steer a live response, queue and edit follow-ups, and resume conversations after a restart. See [chat behavior and architecture](docs/chats.md).
 
+On a successfully completed mission run, choose **Continue in chat** (Android:
+**Continuer en chat**) to ask follow-up questions in its saved session and
+workspace. The execution moves from the mission's run history into Chats;
+the mission and its schedule remain available for future runs. Conversion needs
+a saved session and workspace and starts no agent work until you send a message.
+
 ## Public artifact links
 
 Files stay private unless explicitly shared. In the web or Android file viewer,

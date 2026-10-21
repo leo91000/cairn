@@ -1633,6 +1633,110 @@ async fn public_call(s: &Arc<Service>, scopes: &[&str], name: &str, args: Value)
 }
 
 #[tokio::test]
+async fn mission_conversion_matches_public_mcp_and_installation_tools() {
+    for internal in [false, true] {
+        let root = TempDir::new().unwrap();
+        let s = service(&root).await;
+        let main = enabled_main(&s).await;
+        let (caller, configuration) = active_run(&s, &main).await;
+        let (target, _) = active_run(&s, &main).await;
+        let run_id = target["id"].as_str().unwrap();
+        let original = s
+            .store
+            .patch_run(
+                run_id,
+                json!({
+                    "status": "succeeded",
+                    "sessionId": "mission-session",
+                    "workspace": "/saved/mission-workspace",
+                    "summary": "Mission result",
+                }),
+            )
+            .await
+            .unwrap();
+        s.store
+            .set(
+                &format!("run-checkpoint:{run_id}"),
+                json!({
+                    "prepared": {}, "completed": true,
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        let invoke = |name, args| {
+            let s = s.clone();
+            let configuration = configuration.clone();
+            async move {
+                if internal {
+                    call(&s, &configuration, name, args).await
+                } else {
+                    public_call(&s, &["manage", "run"], name, args).await
+                }
+            }
+        };
+
+        let discovery = invoke(
+            "search",
+            json!({
+                "names": ["convert_run_to_chat"], "detail": "schema",
+            }),
+        )
+        .await;
+        assert_eq!(
+            result(&discovery)["operations"][0]["name"],
+            "convert_run_to_chat"
+        );
+        let args = json!({ "runId": run_id });
+        for scopes in [&["read"][..], &["run"][..]] {
+            let denied = public_call(&s, scopes, "convert_run_to_chat", args.clone()).await;
+            assert_eq!(denied["result"]["isError"], true);
+            assert!(s.chat_list().await.unwrap().is_empty());
+            assert_eq!(s.store.run(run_id).await.unwrap(), original);
+        }
+
+        let converted = invoke("convert_run_to_chat", args.clone()).await;
+        let chat = result(&converted);
+        let retried = invoke("convert_run_to_chat", args.clone()).await;
+        assert_eq!(result(&retried)["id"], chat["id"]);
+        assert_eq!(chat["runId"], original["id"]);
+        let converted_run = s.store.run(run_id).await.unwrap();
+        for field in ["id", "sessionId", "workspace", "summary", "status"] {
+            assert_eq!(converted_run[field], original[field], "{field}");
+        }
+        assert_eq!(converted_run["sourceTaskId"], original["taskId"]);
+        assert_eq!(s.chat_list().await.unwrap().len(), 1);
+        let message = invoke(
+            "send_chat_message",
+            json!({
+                "chatId": chat["id"],
+                "message": { "id": uuid::Uuid::new_v4(), "text": "Explain the mission result" },
+            }),
+        )
+        .await;
+        assert_eq!(result(&message)["status"], "queued");
+
+        if internal {
+            s.mcps
+                .revoke_run(&s, caller["id"].as_str().unwrap())
+                .await
+                .unwrap();
+            let token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+                .as_str()
+                .unwrap();
+            let (status, _) = request(
+                &s,
+                token,
+                "tools/call",
+                common::mcp_arguments("convert_run_to_chat", &args),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+    }
+}
+
+#[tokio::test]
 async fn both_mcp_endpoints_manage_chat_queues_and_lifecycle() {
     for internal in [false, true] {
         let root = TempDir::new().unwrap();

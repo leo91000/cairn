@@ -160,6 +160,8 @@ export interface Run {
   accountRequired?: import('./accounts').Provider | null
   id: string
   taskId: string
+  /** Original mission when its execution was transferred to a chat. */
+  sourceTaskId?: string
   projectId: string | null
   status: RunStatus
   trigger: string

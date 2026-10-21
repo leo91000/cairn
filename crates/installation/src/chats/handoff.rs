@@ -54,6 +54,11 @@ fn last_chars(value: &str, count: usize) -> String {
 }
 
 fn first_user_request(db: &Db<'_>, run: &str) -> Result<String> {
+    if let Some(run) = db.run(run)?
+        && let Some(prompt) = run["sourceTaskPrompt"].as_str()
+    {
+        return Ok(prompt.chars().take(INITIAL_REQUEST_CHARS).collect());
+    }
     let first: Option<String> =
         db.0.query_row(
             "SELECT text FROM events WHERE run_id=? AND type='chat.user' ORDER BY id LIMIT 1",
@@ -121,6 +126,17 @@ pub(super) fn handoff_context(db: &Db<'_>, run: &str) -> Result<String> {
             0,
             format!(
                 "Initial user request (excerpt):\n{}\n\n[Earlier exchanges omitted to fit the context budget; recent history follows.]",
+                first_user_request(db, run)?
+            ),
+        );
+    } else if db
+        .run(run)?
+        .is_some_and(|run| run["sourceTaskPrompt"].is_string())
+    {
+        parts.insert(
+            0,
+            format!(
+                "Original mission request:\n{}",
                 first_user_request(db, run)?
             ),
         );

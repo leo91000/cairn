@@ -179,7 +179,7 @@ async fn schedule_tasks(s: Arc<Service>) {
 
 /// Requeues runs that were executing when the previous worker process stopped.
 fn restore_after_restart(db: &mut Db<'_>) -> Result<()> {
-    db.restore_chat_summaries()?;
+    db.restore_chat_summaries(None)?;
     for run in db.active()? {
         let id = text(&run, "id");
         if run["status"] != RunStatus::Running {
