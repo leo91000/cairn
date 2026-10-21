@@ -80,3 +80,13 @@ the OS page cache is not flushed. Every decoded byte is verified.
 This checks the unchanged codec/journal path, without a VM, S3 or production
 network latency. Actual transport qualification uses the real-image VM smoke
 suite; the release PR records those results and served-image read-back.
+
+Local integration used the candidate Rust binary with the existing v0.58.0 guest
+assets, separately from the exact-image CI gate. Managed ublk verified 1 GiB after
+SIGKILL, grouped durable commits, no OOM, cleanup and refusal without SYS_RESOURCE.
+VM smoke, exclusive resources and three retained turns passed. A 64.26-second
+journal workload had no unintended restart. The live-memory probe reclaimed
+521,576,448 anonymous bytes while its sentinel remained intact; target and actual
+balloon size both reached 4,608 MiB. Its manual target holds the controller's
+existing directory lease so automatic rebalancing cannot replace that target
+while the probe measures it.

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
+import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -65,6 +66,7 @@ export async function memorySmoke({
   }
 
   let started = false
+  let balloonOwner
   try {
     await api(`/runs/${id}`, 'POST')
     started = true
@@ -78,6 +80,20 @@ export async function memorySmoke({
     assert.equal(config['machine-config'].mem_size_mib, memoryMiB)
     assert.equal(config.drives[1].path_on_host, 'disk.blk')
     assert.equal(config.drives[1].socket, undefined)
+
+    // The controller's rebalance loop returns ballooned memory when pressure
+    // clears. Hold its existing directory lease while testing a manual target.
+    balloonOwner = spawn('docker', ['--context', 'default', 'exec', '-i', name, 'flock', '--exclusive', `/runner-state/jails/firecracker/${vmId}`, 'node', '-e', 'process.stdout.write(\'owned\'); process.stdin.resume(); process.stdin.once(\'end\', () => process.exit(0))'], { stdio: ['pipe', 'pipe', 'pipe'] })
+    let owned = false
+    let ownerError = ''
+    balloonOwner.stdout.on('data', data => owned ||= data.toString().includes('owned'))
+    balloonOwner.stderr.on('data', data => ownerError += data.toString())
+    balloonOwner.on('error', error => ownerError += error.message)
+    await until(() => {
+      assert.equal(ownerError, '')
+      assert.equal(balloonOwner.exitCode, null, 'Balloon lease exited before acquisition')
+      return owned
+    })
 
     function balloon(method, endpoint, body) {
       const request = JSON.stringify({ socketPath: socket, path: endpoint, method })
@@ -130,6 +146,7 @@ export async function memorySmoke({
     process.stdout.write(`${JSON.stringify(evidence)}\n`)
   }
   finally {
+    balloonOwner?.stdin.end()
     if (started) {
       await api(`/runs/${id}`, 'DELETE')
       await until(async () => (await (await api('/health')).json()).activeRuns === 0)
