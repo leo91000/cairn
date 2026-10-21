@@ -35,6 +35,9 @@ pub(super) async fn invoke(
         "update_node" => {
             nodes::configure_node(s, text(&args, "nodeId"), args["node"].clone(), authorize).await
         }
+        "update_node_storage" => {
+            nodes::configure_storage(s, text(&args, "nodeId"), &args["storage"], authorize).await
+        }
         "revoke_node" => {
             nodes::revoke(
                 s,

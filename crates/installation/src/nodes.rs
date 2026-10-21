@@ -531,7 +531,9 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
         }
         ("PUT", ["nodes", "settings"]) => publication::configure(s, input.body.clone()).await,
         ("GET", ["nodes", "backups", run]) => backups(s, run).await,
-        ("PUT", ["nodes", node, "storage"]) => configure_storage(s, node, &input.body).await,
+        ("PUT", ["nodes", node, "storage"]) => {
+            configure_storage(s, node, &input.body, |_| Ok(())).await
+        }
         ("GET", ["nodes"]) => Ok(inventory(s).await?.into()),
         ("POST", ["nodes", _, "exclusive", reservation, "release"]) => {
             exclusive::release_owned(s, reservation, None).await
@@ -579,7 +581,12 @@ async fn backups(s: &Service, run: &str) -> Result<Value> {
         .into())
 }
 
-async fn configure_storage(s: &Service, node: &str, body: &Value) -> Result<Value> {
+pub(crate) async fn configure_storage(
+    s: &Service,
+    node: &str,
+    body: &Value,
+    authorize: impl FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+) -> Result<Value> {
     crate::validation::uuid(node)?;
     if body["enabled"] == false {
         return Err(Error::bad(
@@ -610,9 +617,13 @@ async fn configure_storage(s: &Service, node: &str, body: &Value) -> Result<Valu
     let value = s
         .store
         .transaction(move |db| {
+            authorize(db)?;
             let mut record = db
                 .get("nodes", &node)?
                 .ok_or_else(|| Error::not_found("Node missing."))?;
+            if record["revoked"] == true {
+                return Err(Error::conflict("Node revoked."));
+            }
             record["storage"] = serde_json::to_value(&policy)?;
             db.put("nodes", &record)
         })

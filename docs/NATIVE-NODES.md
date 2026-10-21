@@ -52,7 +52,7 @@ Finally run the uninstall command shown for the previous runtime.
 
 The public Cairn MCP and the `cairn_installation` agent tool expose the same setup
 and retirement controls: `list_nodes`, `list_native_callers`,
-`create_node_enrollment`, `update_node` and `revoke_node`. Installation management
+`create_node_enrollment`, `update_node`, `update_node_storage` and `revoke_node`. Installation management
 access is required for mutations; read-only public MCP access cannot enroll,
 configure or revoke a node. Agent installation grants are checked again in each
 mutation transaction. Enroll the other backend, wait for the returned `nodeId`,

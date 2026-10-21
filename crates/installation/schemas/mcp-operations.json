@@ -2286,6 +2286,34 @@
     }
   },
   {
+    "name": "update_node_storage",
+    "description": "Configure a VM or native node's disk cache, shared memory cache, free-space reserve and synchronization limits. Read its current storage policy from list_nodes and send all six values to preserve unchanged settings. Requires configured private S3 storage and a successful node storage probe, like the owner's Storage dialog.",
+    "scope": "manage",
+    "destructive": true,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "nodeId": { "type": "string", "format": "uuid" },
+        "storage": {
+          "type": "object",
+          "properties": {
+            "cacheMiB": { "type": "integer", "minimum": 0, "maximum": 16777216 },
+            "memoryCacheMiB": { "type": "integer", "minimum": 4, "maximum": 4096 },
+            "reserveMiB": { "type": "integer", "minimum": 64, "maximum": 16777216 },
+            "reservePercent": { "type": "integer", "minimum": 1, "maximum": 50 },
+            "backupSeconds": { "type": "integer", "minimum": 5, "maximum": 3600 },
+            "maxDirtySeconds": { "type": "integer", "minimum": 5, "maximum": 86400 }
+          },
+          "required": ["cacheMiB", "memoryCacheMiB", "reserveMiB", "reservePercent", "backupSeconds", "maxDirtySeconds"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["nodeId", "storage"],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "revoke_node",
     "description": "Permanently revoke a node identity and its execution grants, preserving files on the machine. After a replacement is configured, releasePlacements returns conversations pinned to or preferring the old node to automatic placement. Ordinary revocation keeps those choices. Conversations retain their execution backend. Does not uninstall the runtime or delete its files.",
     "scope": "manage",
