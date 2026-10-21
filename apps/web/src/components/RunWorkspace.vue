@@ -14,6 +14,7 @@ import {
   CalendarClock,
   Copy,
   FileText,
+  MessageCircle,
   RotateCw,
   Square,
   Terminal,
@@ -61,6 +62,7 @@ const waitNotice = computed(() => retryNotice.value ?? run.value?.accountWaitRea
 const deliverables = computed(() => live.snapshot.value?.artifacts ?? [])
 const artifactViewer = ref<string | null>(null)
 const error = ref('')
+const converting = ref(false)
 // As on Android, a run opens on its conversation.
 const tab = ref('events')
 // Only acknowledge output that is displayed, including a mission finishing while it is open.
@@ -123,6 +125,18 @@ async function retry() {
   }
 }
 
+async function continueInChat() {
+  if (!run.value || converting.value)
+    return
+  converting.value = true
+  try {
+    const chat = await api(`/runs/${run.value.id}/chat`, { method: 'POST' })
+    await router.push(`/chats/${chat.slug ?? chat.id}`)
+  }
+  catch (e) { error.value = (e as Error).message }
+  finally { converting.value = false }
+}
+
 async function cleanup() {
   try {
     await api(`/runs/${run.value!.id}/cleanup`, { method: 'POST' })
@@ -160,6 +174,15 @@ async function copy() {
         </RouterLink>
         <UiButton v-else size="small" @click="retry">
           Run again
+        </UiButton>
+        <UiButton
+          v-if="run.trigger !== 'chat' && run.status === 'succeeded' && run.sessionId && !run.workspaceCleanedAt"
+          size="small"
+          variant="primary"
+          :disabled="converting"
+          @click="continueInChat"
+        >
+          <Icon :name="MessageCircle" :size="16" />{{ converting ? 'Opening…' : 'Continue in chat' }}
         </UiButton>
         <UiButton
           v-if="run.resumeAvailable && run.trigger !== 'chat'"

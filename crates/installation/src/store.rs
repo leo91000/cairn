@@ -646,7 +646,7 @@ impl Db<'_> {
 
     /// Repair completed chats whose answer survived only in the run summary.
     /// Match within the latest user turn so repeated answers in later turns survive.
-    pub(crate) fn restore_chat_summaries(&self) -> Result<()> {
+    pub(crate) fn restore_chat_summaries(&self, run: Option<&str>) -> Result<()> {
         #[derive(serde::Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Summary {
@@ -658,6 +658,7 @@ impl Db<'_> {
             "SELECT json_object('id',r.id,'summary',json_extract(r.data,'$.summary'),
                 'finishedAt',json_extract(r.data,'$.finishedAt')) FROM runs r
              WHERE r.status='succeeded' AND json_extract(r.data,'$.trigger')='chat'
+               AND (?1 IS NULL OR r.id=?1)
                AND NOT EXISTS (
                  SELECT 1 FROM records c
                  WHERE c.kind='chats' AND json_extract(c.data,'$.runId')=r.id
@@ -672,7 +673,7 @@ impl Db<'_> {
                    AND trim(substr(COALESCE(json_extract(e.payload,'$.item.text'),e.text),1,100000),char(9)||char(10)||char(13)||' ')
                      =trim(json_extract(r.data,'$.summary'),char(9)||char(10)||char(13)||' ')
                )",
-            [],
+            [run],
         )?;
         for Summary {
             id,

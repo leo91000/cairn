@@ -193,6 +193,7 @@ async fn run_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result
             crate::live::history(s, kind, id, input).await?
         }
         ("GET", ["runs", id]) => s.store.run(id).await?,
+        ("POST", ["runs", id, "chat"]) => s.chat_from_run(id).await?,
         ("GET", ["runs", id, "events"]) => {
             s.store.run(id).await?;
             let after = input.number("after", 0, 0, i64::MAX)?;
