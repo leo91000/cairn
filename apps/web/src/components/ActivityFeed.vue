@@ -4,6 +4,7 @@ import type { ChatWakeup } from '../../../../packages/contracts/chats'
 import type { RunEvent, TaskOutcome } from '../../../../packages/contracts/contracts'
 import type { ActivityEntry } from '../activity'
 import type { SendingMessage } from '../chat-delivery'
+import type { ChatQuota } from '../chat-quota'
 import type { LiveWait } from '../chat-wait'
 import type { ReadingPosition } from '../history-cache'
 import { twMerge } from 'tailwind-merge'
@@ -20,6 +21,7 @@ import {
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
 import { activityEntries, ActivityGroups } from '../activity'
 import { currentPlan } from '../agent-plan'
+import { quotaEntries } from '../chat-quota'
 import { deliveryEntries } from '../deliverables'
 import { ArrowDown, Maximize2, Minimize2 } from '../icons'
 import { MessageTimes } from '../message-times'
@@ -34,6 +36,7 @@ import ArtifactRail from './ArtifactRail.vue'
 import ArtifactViewer from './ArtifactViewer.vue'
 import ChatNotice from './ChatNotice.vue'
 import ChatOutcome from './ChatOutcome.vue'
+import ChatQuotaCard from './ChatQuotaCard.vue'
 import ChatWaitCard from './ChatWaitCard.vue'
 import Icon from './Icon.vue'
 import MessageAttachments from './MessageAttachments.vue'
@@ -67,8 +70,16 @@ const props = defineProps<{
   subagentBar?: boolean
   /** The conversation's pending wakeup, which keeps its wait card live. */
   wakeup?: LiveWait
+  quota?: ChatQuota | null
+  canManageAccounts?: boolean
+  busy?: boolean
 }>()
-const emit = defineEmits<{ load: [], position: [value: ReadingPosition, key?: string], pauseWait: [] }>()
+const emit = defineEmits<{
+  load: []
+  position: [value: ReadingPosition, key?: string]
+  pauseWait: []
+  resumeQuota: []
+}>()
 const skillNames = computed(() => new Set(props.skills ?? []))
 const messageTimes = new MessageTimes()
 onBeforeMount(() => messageTimes.beginRender())
@@ -83,7 +94,8 @@ const pendingWakeup = computed<ChatWakeup | null>((previous) => {
   return previous && next?.id === previous.id && JSON.stringify(next.observation) === JSON.stringify(previous.observation) ? previous : next
 })
 const entries = computed(() => {
-  const entries = activityEntries(props.events, props.chat, activityGroups.value, pendingWakeup.value)
+  const projected = activityEntries(props.events, props.chat, activityGroups.value, pendingWakeup.value)
+  const entries = props.chat ? quotaEntries(projected, props.events) : projected
 
   const acknowledged = new Set(props.events.filter(event => event.type === 'chat.user').map(event => event.payload?.messageId))
   for (const { message, label } of props.sending ?? []) {
@@ -452,6 +464,14 @@ defineExpose({
                   <slot name="outcome" />
                 </ChatOutcome>
               </template>
+
+              <ChatQuotaCard
+                v-if="chat && quota"
+                :quota="quota"
+                :can-manage="!!canManageAccounts"
+                :busy="busy"
+                @resume="emit('resumeQuota')"
+              />
 
               <ChatOutcome
                 v-if="visibleOutcome && !outcomeEntryId"
