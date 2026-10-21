@@ -54,6 +54,7 @@ coverage used, not a claim that every production account/provider was exercised.
   It folds the current quota's assistant echo, failed-turn notice and failed-status
   notice, while the run activity retains its diagnostics. Recovered quota
   interruptions stay hidden in the chat after account rotation or manual resume.
+  Later admission waits do not reuse a recovered turn’s error or announced reset.
   The card distinguishes
   spending from usage limits, keeps any announced reset time and zone without
   inventing a date, and offers account management to owners. An active account

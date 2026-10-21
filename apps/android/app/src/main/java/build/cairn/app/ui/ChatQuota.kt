@@ -49,21 +49,30 @@ private fun quotaFailure(event: RunEvent): String {
 internal fun chatQuota(run: Run?, events: List<RunEvent>): ChatQuota? {
     if (run == null) return null
     val current = events.filter { it.runId == run.id }
-    val failure = current.lastOrNull { quotaFailure(it).isNotEmpty() }
-    val failureMessage = failure?.let(::quotaFailure).orEmpty()
-    val waiting =
+    var failureMessage = ""
+    for (event in current) {
+        val turnBoundary = event.type in listOf("chat.user", "turn.started", "turn.completed")
+        val executionBoundary =
+            event.type == "status" &&
+                event.text in listOf("queued", "succeeded", "cancelled", "interrupted")
+        if (turnBoundary || executionBoundary) failureMessage = ""
+        failureMessage = quotaFailure(event).ifEmpty { failureMessage }
+    }
+    val exhausted =
         run.active &&
-            Regex(
-                    "^(?:Usage exhausted\\.|Waiting for a .+ account with available usage\\.)",
-                    RegexOption.IGNORE_CASE,
-                )
+            run.accountWaitReason.orEmpty().startsWith("Usage exhausted.", ignoreCase = true)
+    val admission =
+        run.active &&
+            Regex("^Waiting for a .+ account with available usage\\.", RegexOption.IGNORE_CASE)
                 .containsMatchIn(run.accountWaitReason.orEmpty())
+    val waiting = exhausted || admission
     val savedQuota =
         run.status == "failed" &&
             (isQuotaMessage(run.error) ||
                 (failureMessage.isNotEmpty() && failureMessage == run.error))
     if (!waiting && !savedQuota) return null
-    val message = failureMessage.ifEmpty { run.error?.takeIf(::isQuotaMessage).orEmpty() }
+    // Admission has no current agent failure; saved failures have an authoritative error.
+    val message = if (savedQuota) run.error.orEmpty() else if (exhausted) failureMessage else ""
     return ChatQuota(
         providerLabel(run.snapshot.agent.provider),
         message,

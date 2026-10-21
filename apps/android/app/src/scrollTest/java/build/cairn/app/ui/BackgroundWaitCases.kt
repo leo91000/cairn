@@ -57,6 +57,32 @@ abstract class BackgroundWaitCases {
         }
 
     @Test
+    fun laterAdmissionWaitDoesNotRestoreRecoveredQuotaDetails() =
+        conversation(
+            "queued",
+            quota = true,
+            history = { _, now ->
+                quotaEvents(now) +
+                    listOf(
+                        RunEvent(7, now, "turn.started", "", runId = "run"),
+                        RunEvent(8, now, "turn.completed", "", runId = "run"),
+                        RunEvent(9, now, "status", "succeeded", runId = "run"),
+                    )
+            },
+        ) {
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.onNodeWithText("La limite d’usage du compte est atteinte.").assertIsDisplayed()
+            compose
+                .onNodeWithText("La limite de dépense du compte est atteinte.")
+                .assertDoesNotExist()
+            compose
+                .onNodeWithText("Réinitialisation annoncée", substring = true)
+                .assertDoesNotExist()
+            compose.onNodeWithText("Détails techniques").assertDoesNotExist()
+            compose.onNodeWithText(SPEND_LIMIT).assertDoesNotExist()
+        }
+
+    @Test
     fun quotaWaitRemainsAutomaticWhileFollowupQueueIsPaused() =
         conversation("running", quota = true, paused = true) {
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
@@ -417,9 +443,13 @@ abstract class BackgroundWaitCases {
                                     agent = Agent(provider = if (quota) "claude" else "codex")
                                 ),
                             accountWaitReason =
-                                if (quota && status == "running")
-                                    "Usage exhausted. Waiting for an available Claude Code account to resume."
-                                else null,
+                                when {
+                                    quota && status == "running" ->
+                                        "Usage exhausted. Waiting for an available Claude Code account to resume."
+                                    quota && status == "queued" ->
+                                        "Waiting for a Claude Code account with available usage."
+                                    else -> null
+                                },
                             error = if (quota && status == "failed") SPEND_LIMIT else null,
                         ),
                     wakeup =
@@ -457,8 +487,8 @@ abstract class BackgroundWaitCases {
             val batch =
                 wireJson.encodeToString(
                     LiveBatch(
-                        if (quota) quotaEvents(now)
-                        else history?.invoke(chat.wakeup, now) ?: listOf(waiting),
+                        history?.invoke(chat.wakeup, now)
+                            ?: if (quota) quotaEvents(now) else listOf(waiting),
                         LiveState(chat = chat),
                         true,
                         false,

@@ -81,6 +81,30 @@ describe('conversation quota presentation', () => {
     expect(chatQuota({ ...run, accountWaitReason: 'Waiting for a free Claude Code account slot.' }, events)).toBeNull()
   })
 
+  it('does not borrow recovered quota details for later admission or provider changes', () => {
+    const recovered = [...events, event(6, 'turn.started'), event(7, 'turn.completed'), event(8, 'status', {}, 'succeeded')]
+    const admission = {
+      ...run,
+      status: 'queued' as const,
+      accountWaitReason: 'Waiting for a Codex account with available usage.',
+      snapshot: { ...run.snapshot, agent: { ...run.snapshot.agent, provider: 'codex' as const } },
+    }
+    expect(chatQuota(admission, recovered)).toMatchObject({
+      provider: 'Codex',
+      message: '',
+      spend: false,
+      reset: null,
+      automatic: true,
+    })
+    expect(chatQuota(admission, events)?.message).toBe('')
+    expect(chatQuota(run, recovered)?.message).toBe('')
+
+    const currentMessage = 'You\'ve hit your usage limit · resets Tuesday 9am (UTC)'
+    const interrupted = [...recovered, event(9, 'turn.started'), event(10, 'turn.failed', { error: { message: currentMessage } })]
+    expect(chatQuota(run, interrupted)).toMatchObject({ message: currentMessage, spend: false, reset: 'Tuesday 9am (UTC)' })
+    expect(chatQuota({ ...run, status: 'failed', error: currentMessage }, events)?.message).toBe(currentMessage)
+  })
+
   it('keeps recovered and repeated quota interruptions folded, including legacy JSON text events', () => {
     const legacy = events.map(event => event.type === 'turn.failed'
       ? { ...event, payload: undefined, text: JSON.stringify({ type: event.type, ...event.payload }) }

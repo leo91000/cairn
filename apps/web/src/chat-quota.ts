@@ -35,13 +35,24 @@ export function chatQuota(run: Run | null | undefined, events: RunEvent[]): Chat
   if (!run)
     return null
   const current = events.filter(event => event.runId === run.id)
-  const failure = current.findLast(event => quotaFailure(event))
-  const failureMessage = failure ? quotaFailure(failure) : ''
-  const waiting = ['running', 'queued'].includes(run.status) && /^(?:Usage exhausted\.|Waiting for a .+ account with available usage\.)/i.test(run.accountWaitReason ?? '')
+  let failureMessage = ''
+  for (const event of current) {
+    const turnBoundary = ['chat.user', 'turn.started', 'turn.completed'].includes(event.type)
+    const executionBoundary = event.type === 'status' && ['queued', 'succeeded', 'cancelled', 'interrupted'].includes(event.text)
+    if (turnBoundary || executionBoundary)
+      failureMessage = ''
+    failureMessage = quotaFailure(event) || failureMessage
+  }
+
+  const active = ['running', 'queued'].includes(run.status)
+  const exhausted = active && /^Usage exhausted\./i.test(run.accountWaitReason ?? '')
+  const admission = active && /^Waiting for a .+ account with available usage\./i.test(run.accountWaitReason ?? '')
+  const waiting = exhausted || admission
   const savedQuota = run.status === 'failed' && (isQuotaMessage(run.error) || (!!failureMessage && failureMessage === run.error))
   if (!waiting && !savedQuota)
     return null
-  const message = failureMessage || (isQuotaMessage(run.error) ? run.error! : '')
+  // Admission has no current agent failure; saved failures have an authoritative error.
+  const message = savedQuota ? run.error! : exhausted ? failureMessage : ''
 
   return {
     provider: providers[run.snapshot.agent.provider ?? 'codex'].label,

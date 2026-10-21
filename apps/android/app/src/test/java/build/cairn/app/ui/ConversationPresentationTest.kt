@@ -7,6 +7,53 @@ import org.junit.Test
 
 class ConversationPresentationTest {
     @Test
+    fun `later admission waits do not borrow a recovered quota message or reset`() {
+        val old = "You've hit your individual spend limit · resets Monday 3pm (UTC)"
+        fun failure(id: Long, message: String) =
+            RunEvent(
+                id,
+                id,
+                "turn.failed",
+                "",
+                buildJsonObject { put("error", buildJsonObject { put("message", message) }) },
+                runId = "run",
+            )
+        val failed = listOf(failure(1, old))
+        val recovered =
+            failed +
+                listOf(
+                    RunEvent(2, 2, "turn.started", "", runId = "run"),
+                    RunEvent(3, 3, "turn.completed", "", runId = "run"),
+                    RunEvent(4, 4, "status", "succeeded", runId = "run"),
+                )
+        val admission =
+            Run(
+                "run",
+                status = "queued",
+                accountWaitReason = "Waiting for a Codex account with available usage.",
+                snapshot = Snapshot(agent = Agent(provider = "codex")),
+            )
+        val quota = chatQuota(admission, recovered)!!
+        assertEquals("Codex", quota.provider)
+        assertEquals("", quota.message)
+        assertFalse(quota.spend)
+        assertNull(quota.reset)
+        assertTrue(quota.automatic)
+        assertEquals("", chatQuota(admission, failed)!!.message)
+
+        val waiting = admission.copy(status = "running", accountWaitReason = "Usage exhausted.")
+        assertEquals("", chatQuota(waiting, recovered)!!.message)
+        val current = "You've hit your usage limit · resets Tuesday 9am (UTC)"
+        val interrupted = recovered + failure(5, current)
+        assertEquals(current, chatQuota(waiting, interrupted)!!.message)
+        assertEquals("Tuesday 9am (UTC)", chatQuota(waiting, interrupted)!!.reset)
+        assertEquals(
+            current,
+            chatQuota(waiting.copy(status = "failed", error = current), failed)!!.message,
+        )
+    }
+
+    @Test
     fun `quota history supports structured failures retry notices and plain legacy replies`() {
         val text = "Account usage is exhausted."
         fun event(id: Long, type: String, payload: JsonObject? = null, raw: String = "") =
