@@ -823,7 +823,16 @@ async fn claude_individual_spend_limit_waits_for_capacity_and_remains_cancellabl
     assert!(waiting["error"].is_null(), "{waiting}");
     let saved = s.store.get(KIND, &account).await.unwrap().unwrap();
     assert!(saved["exhausted"].is_object(), "{saved}");
-    s.worker.cancel(&s, &run_id).await.unwrap();
+    let session = common::relay_fixture::context(&s).await;
+    reqwest::Client::new()
+        .post(format!("{}/api/runs/{run_id}/cancel", fixture.url))
+        .header("x-test-relay-token", text(&session, "value"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
     let cancelled = fixture
         .until(&run_id, |run| run["status"] == RunStatus::Cancelled)
         .await;
