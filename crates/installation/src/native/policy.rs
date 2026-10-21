@@ -280,6 +280,11 @@ pub fn authorize_caller(db: &Db<'_>, agent: &Value, caller: Option<&str>) -> Res
 pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<Value> {
     let agent = db.get("agents", text(chat, "agentId"))?.unwrap_or_default();
     let run = db.run(text(chat, "runId"))?.unwrap_or_default();
+    if run["backendMigration"].is_object() {
+        return Err(Error::conflict(
+            "Wait for the backend migration to finish before directing this conversation.",
+        ));
+    }
     if native(&run["snapshot"]["agent"]) != native(&agent) && run["id"].is_string() {
         return Err(Error::conflict(
             "Execution backend changed. Start a new conversation.",

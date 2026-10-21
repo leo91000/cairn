@@ -5,7 +5,10 @@ workspace storage uses the same `Volume`, `LazyDisk`, authenticated S3 block sou
 immutable publications, generation acknowledgements and clean cache as Firecracker.
 The controller mounts one flat ext4 filesystem on a ublk device; no VM is involved.
 Native checkpoints use `native-ext4-v1` and a native runtime identity. Backend and
-runtime checks continue to prohibit native/VM or cross-OS environment conversion.
+runtime checks continue to prohibit implicit native/VM or cross-OS environment conversion.
+[Explicit conversation migration](0054-explicit-conversation-backend-migration.md)
+now converts Linux user files into a destination-compatible disk before replacing
+the saved backend; ordinary node moves keep these checks.
 
 ## Ownership and shutdown
 

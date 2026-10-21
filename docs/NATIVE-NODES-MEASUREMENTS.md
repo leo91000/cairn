@@ -142,3 +142,45 @@ and reserves free space rather than promising cheap live incremental backups.
 Use measured project workloads before choosing native execution as the general
 default. A file-inventory/delta checkpoint format would need its own compatibility
 and measurement review.
+
+## Explicit VM/native conversion
+
+Local single sample on 2026-10-21, Linux 7.2.9-arch1-1 x86-64, Intel i9-14900K,
+32 visible CPUs, 98,638,380 kB total RAM, ext4 on NVMe (`stat -f`: ext2/ext3).
+Rust 1.97.1 debug test build, e2fsprogs 1.47.4. Backend compilation, other builds and desktop
+processes were active, with shared NVMe I/O and about 4% host disk free; no CPU pinning or host-wide cache flush. This measures the
+manager's offline conversion only, with no kernel VM/native execution, GPU, S3
+transport or production network latency.
+
+Reproduce with the credential-isolating launcher:
+
+```sh
+TMPDIR=/var/tmp pnpm test:backend -p cairn-installation --lib \
+  backend_conversion_measurement -- --ignored --nocapture --test-threads=1
+```
+
+The deterministic workload contains an 8 MiB xorshift asset (seed 42), 128 text
+files of 4 KiB and 13 bytes of private home/output, in a 128 MiB flat VM ext4 image.
+The reference writes that tree and creates its image. Conversion reads the source,
+copies user files and creates native flat ext4 through fakeroot with numeric UID 1000.
+Reads use the same userspace reader for both filesystems. Advisory
+`POSIX_FADV_DONTNEED` applies only to each image before the first read; the next
+sample is warm. Cold physical I/O is not demonstrated.
+
+| Operation | Wall ms | Manager process CPU ms |
+| --- | ---: | ---: |
+| Reference tree write and image creation | 483.15 | 45.09 |
+| VM image asset read, cold hint / warm | 197.86 / 8.77 | 10.52 / 8.74 |
+| Full conversion | 8951.49 | 65.49 |
+| Converted image asset read, cold hint / warm | 50.79 / 5.35 | 9.67 / 5.32 |
+
+CPU uses `getrusage(RUSAGE_SELF)` and excludes fakeroot/chown/mkfs child processes. Wall time
+includes those children; reference and conversion both include image creation.
+These are single observations, not throughput or release performance guarantees.
+
+Raw payload: 8,912,909 bytes. Each image is 134,217,728 logical bytes, with
+41,943,040 bytes in nonzero 4 MiB blocks. Encoding those blocks using the existing
+Cairn compressed/authenticated block codec gives 8,402,049 reference bytes and
+8,401,718 converted bytes. This accounting includes ext4 metadata and per-block
+encoding overhead, excludes manifest/HTTP bytes, and makes no S3 deduplication
+claim. Conversion requires extra temporary image and extracted-tree space; an original disk is never removed to make room.

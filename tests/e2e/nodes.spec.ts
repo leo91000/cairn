@@ -621,3 +621,48 @@ test('switching a machine to native enrolls it again and retires the previous no
   expect(nodes.find((node: { id: string }) => node.id === native).capabilities.backend).toBe('native')
   expect((await workspace.api(`/api/nodes/placement/${detail.run.id}`)).pinnedNodeId).toBeNull()
 })
+
+test('existing conversation explicitly confirms backend migration and follows its progress', async ({ page, workspace }) => {
+  test.setTimeout(60000)
+  await useRelayForHttpMocks(page)
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Keep this conversation' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
+  await page.route('**/nodes/placement/*', route => route.fulfill({ json: { nodes: [{ id: 'native-fixture', name: 'Desktop GPU' }], pinnedNodeId: null, preferredNodeId: null } }))
+  let phase = 'ready'
+  let requestBody: unknown
+  await page.route('**/nodes/placement/*/backend-migration', async (route) => {
+    if (route.request().method() === 'POST') {
+      requestBody = route.request().postDataJSON()
+      phase = 'pending'
+      await route.fulfill({ json: { status: 'migrating' } })
+      return
+    }
+
+    await route.fulfill({
+      json: {
+        chatId: chat.id,
+        required: phase !== 'complete',
+        fromBackend: 'firecracker',
+        toBackend: 'native',
+        pending: phase === 'pending',
+        nodes: [{ id: 'native-fixture', name: 'Desktop GPU' }],
+      },
+    })
+  })
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  await page.getByRole('button', { name: 'Execution node', exact: true }).click()
+  await page.getByRole('button', { name: 'Migrate this conversation…', exact: true }).click()
+  const confirm = page.getByRole('dialog', { name: 'Migrate this conversation?', exact: true })
+  await expect(confirm).toContainText('fresh engine session')
+  await expect(confirm).toContainText('original environment is retained')
+  expect(requestBody).toBeUndefined()
+  await page.screenshot({ path: 'test-results/backend-migration-confirm.png' })
+  await confirm.getByRole('button', { name: 'Stop and migrate', exact: true }).click()
+  await expect(page.getByRole('status').filter({ hasText: 'Migrating to native execution' })).toBeVisible()
+  expect(requestBody).toEqual({ nodeId: 'native-fixture', backend: 'native', confirm: true })
+  phase = 'complete'
+  await expect(page.getByRole('status').filter({ hasText: 'Migration complete' })).toBeVisible()
+  await expect(page).toHaveURL(/\/chats\//)
+})

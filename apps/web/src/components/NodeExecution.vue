@@ -23,6 +23,7 @@ import {
   X,
 } from '../icons'
 import { loadPlacement } from '../placement'
+import BackendMigration from './BackendMigration.vue'
 import Icon from './Icon.vue'
 import Modal from './Modal.vue'
 import UiButton from './UiButton.vue'
@@ -343,6 +344,7 @@ onUnmounted(() => {
           </div>
         </section>
 
+        <BackendMigration :key="run.id" :run-id="run.id" @completed="loadPlacement(run.id).then(applyPlacement)" />
         <section class="mt-3 border-t border-line pt-3">
           <div class="flex items-center justify-between gap-3">
             <h3 class="m-0! text-xs! font-semibold text-ink">

@@ -61,8 +61,16 @@ pub async fn authorize(s: &Service, credential: &str) -> Result<Option<Value>> {
         })
         .await?;
     let Some(grant) = grant else { return Ok(None) };
-    let run = s.store.run(text(&grant, "runId")).await?;
+    let mut run = s.store.run(text(&grant, "runId")).await?;
     let node = text(&grant, "nodeId");
+    if run["backendMigration"]["nodeId"] == node
+        && run["backendMigration"]["convertedBackup"].is_string()
+        && grant["backups"]
+            .as_array()
+            .is_some_and(|points| points.contains(&run["backendMigration"]["convertedBackup"]))
+    {
+        run = crate::backend_migration::candidate(&run);
+    }
     let agent = s.get("agents", super::run_agent(&run)).await?;
     let record = s.get("nodes", node).await?;
     let native_allowed = if crate::native::policy::node_native(&record) {
@@ -74,7 +82,9 @@ pub async fn authorize(s: &Service, credential: &str) -> Result<Option<Value>> {
         true
     };
     let revoked = record["revoked"] == true;
-    let owner = super::owner_node(&run) == node || run["moveRequest"]["nodeId"] == node;
+    let owner = super::owner_node(&run) == node
+        || run["moveRequest"]["nodeId"] == node
+        || run["backendMigration"]["nodeId"] == node;
     let cancelling = run["status"] == RunStatus::Running && !run["cancelRequestedAt"].is_null();
     if !native_allowed || revoked || !owner || cancelling || !super::agent_allows(&agent, node) {
         return Err(Error::forbidden("Disk ownership or authorization changed."));
@@ -155,12 +165,17 @@ async fn update(s: &Service, grant_id: &str, backup: &Value, acknowledged: bool)
 }
 
 pub async fn pinned(s: &Service, run: &str) -> Result<std::collections::HashSet<String>> {
-    Ok(s.store
+    let mut points: std::collections::HashSet<String> = s
+        .store
         .list("node-disk-grants")
         .await?
         .into_iter()
         .filter(|g| g["runId"] == run)
         .flat_map(|g| g["backups"].as_array().cloned().unwrap_or_default())
         .filter_map(|id| id.as_str().map(str::to_owned))
-        .collect())
+        .collect();
+    if let Some(point) = s.store.run(run).await?["backendMigration"]["convertedBackup"].as_str() {
+        points.insert(point.to_owned());
+    }
+    Ok(points)
 }
