@@ -11,6 +11,80 @@ import {
   workspacePath,
 } from './fixtures'
 
+test('a Claude spend limit waits automatically and appears once in the real conversation', async ({ page, workspace }, testInfo) => {
+  test.setTimeout(120000)
+  expect((await connectClaude(workspace, 'Quota test', 'fixture-code:quota@example.test')).state).toBe('complete')
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text: 'Corrige le dialogue de révocation.', provider: 'claude' })
+  try {
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.accountWaitReason, { timeout: 30000 }).toContain('Usage exhausted.')
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.emulateMedia({ colorScheme: 'dark' })
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+    const card = page.getByRole('status', { name: 'Coding agent quota reached' })
+    await expect(card).toBeVisible()
+    await expect(card).toHaveCount(1)
+    await expect(card.getByText('Work resumes automatically when an account is available.')).toBeVisible()
+    await expect(page.locator('.chat-notice')).toHaveCount(0)
+    await expect(page.locator('.agent-working')).toHaveCount(0)
+    const raw = page.getByText(/^You've hit your individual spend limit/)
+    await expect(raw).toBeHidden()
+    await expectSingleScroll(page)
+    await page.screenshot({ path: testInfo.outputPath('quota-web-mobile-dark.png'), animations: 'disabled' })
+    await card.getByText('Technical details', { exact: true }).click()
+    await expect(raw).toBeVisible()
+    await expect(raw).toHaveCount(1)
+    await page.screenshot({ path: testInfo.outputPath('quota-web-details.png'), animations: 'disabled' })
+    await card.getByText('Technical details', { exact: true }).click()
+    await page.emulateMedia({ colorScheme: 'light' })
+    await page.screenshot({ path: testInfo.outputPath('quota-web-mobile-light.png'), animations: 'disabled' })
+    await page.setViewportSize({ width: 1440, height: 1000 })
+    await page.emulateMedia({ colorScheme: 'dark' })
+    await page.screenshot({ path: testInfo.outputPath('quota-web-desktop-dark.png'), animations: 'disabled' })
+    await workspace.api(`/api/chats/${chat.id}/pause`, 'POST', { paused: true })
+    await expect(page.getByText('Paused', { exact: true }).first()).toBeVisible()
+    await expect(card.getByText('Work resumes automatically when an account is available.')).toBeVisible()
+    await expect(card.getByRole('button', { name: 'Resume conversation', exact: true })).toHaveCount(0)
+    await card.getByRole('link', { name: 'Manage accounts' }).click()
+    await expect(page).toHaveURL(/\/connections$/)
+  }
+  finally {
+    await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
+  }
+})
+
+test('a saved quota failure really resumes its session from the inline card', async ({ page, workspace }) => {
+  test.setTimeout(120000)
+  expect((await connectClaude(workspace, 'Resume quota test', 'fixture-code:resume-quota@example.test')).state).toBe('complete')
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text: 'Inspect the saved workspace', provider: 'claude' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
+  const before = (await workspace.api(`/api/chats/${chat.id}`)).run
+  const message = 'You\'ve hit your individual spend limit · your weekly limit resets 3pm (UTC)'
+  // Reproduce a pre-fix persisted failure with a real prepared session and workspace.
+  workspace.service.store.updateRun(before.id, { status: 'failed', error: message, resumeAvailable: true })
+  workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, paused: true })
+  workspace.service.store.event(before.id, 'turn.failed', JSON.stringify({ type: 'turn.failed', error: { message } }))
+  workspace.service.store.event(before.id, 'status', 'failed')
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const card = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(card).toBeVisible()
+  await expect(page.locator('.chat-notice')).toHaveCount(0)
+  await card.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expect.poll(async () => {
+    const current = await workspace.api(`/api/chats/${chat.id}`)
+    return current.run?.status === 'succeeded' && current.run.resumeCount > (before.resumeCount ?? 0) && !current.paused
+  }, { timeout: 30000 }).toBe(true)
+  const after = (await workspace.api(`/api/chats/${chat.id}`)).run
+  expect(after.sessionId).toBe(before.sessionId)
+  expect(after.workspace).toBe(before.workspace)
+  await expect(card).toHaveCount(0)
+  await expect(page.locator('.chat-notice')).toHaveCount(0)
+  await expect(page.getByText(/^You've hit your individual spend limit/)).toHaveCount(0)
+})
+
 test('Claude agents, chats, questions and scheduled work run on a connected Claude account', async ({ page, workspace }, testInfo) => {
   test.setTimeout(120000)
   expect((await connectClaude(workspace)).state).toBe('complete')

@@ -9,12 +9,21 @@ import {
   watch,
 } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, notify, state } from '../api'
-import { waitLeft } from '../chat-wait'
 import {
+  api,
+  notify,
+  refresh,
+  state,
+} from '../api'
+import { waitLeft } from '../chat-wait'
+import { setAside } from '../dismissals'
+import {
+  Archive,
   Check,
   CheckCheck,
+  Clock,
   ListFilter,
+  MoreHorizontal,
   RotateCcw,
   Search,
   X,
@@ -23,17 +32,22 @@ import { refreshMissionRuns, useMissionRuns } from '../mission-runs'
 import { localReads, markRead } from '../reads'
 import { typingTarget } from '../shortcuts'
 import {
+  dismissible,
   filOf,
   greeting,
   isUnread,
+  outcomeLabels,
   shortAge,
+  tomorrowMorning,
 } from '../signal'
 import AgentAvatar from './AgentAvatar.vue'
 import Icon from './Icon.vue'
 import InstallationHeader from './InstallationHeader.vue'
+import MenuButton from './MenuButton.vue'
 
 // The Fil: what needs the user, live work, waiting and recent conversations. J/K move the selection,
-// Enter opens it, E marks finished work as read and / filters, as in a mail client.
+// Enter opens it, E marks finished work as read or dismisses a blocked mission, and / filters, as in
+// a mail client.
 const props = withDefaults(defineProps<{
   chats: ChatView[]
   selected?: string | null
@@ -49,7 +63,7 @@ const now = ref(Date.now())
 const clock = setInterval(() => now.value = Date.now(), 30000)
 onBeforeUnmount(() => clearInterval(clock))
 
-const fil = computed(() => filOf(props.chats, state.tasks, runs.value, localReads))
+const fil = computed(() => filOf(props.chats, state.tasks, runs.value, localReads, now.value))
 const opened = (item: FilItem) => (item.chatId && item.chatId === props.selected) || (item.runId && item.runId === props.selectedRun)
 
 // Finished work opened from For you stays there, read, while it is open: it moves to Recent once
@@ -69,7 +83,7 @@ const forYou = computed(() => {
   const at = firstUnread < 0 ? items.length : firstUnread
   return [...items.slice(0, at), kept, ...items.slice(at)]
 })
-// Missions have no Recent section: one read as it finishes simply leaves For you.
+// A mission read as it finishes simply leaves For you; only blocked ones set aside reach Recent.
 const recent = computed(() => [
   ...fil.value.forYou.filter(item => item.chatId && readingNow(item)).map(item => ({ ...item, kind: 'recent' as const, preview: undefined })),
   ...fil.value.recent.filter(item => item.key !== lingering.value?.key),
@@ -117,7 +131,7 @@ function current(item: FilItem) {
 }
 
 function badge(item: FilItem) {
-  return item.kind === 'question' ? 'question' : item.kind === 'failed' || item.kind === 'failed-mission' ? 'failed' : item.kind === 'unread' ? 'done' : item.kind === 'queued' ? 'queued' : item.kind === 'waiting' ? 'waiting' : item.kind === 'paused' || item.kind === 'suspended' ? 'paused' : null
+  return item.kind === 'question' ? 'question' : item.kind === 'failed' || item.kind === 'failed-mission' ? 'failed' : item.kind === 'unread' ? 'done' : item.kind === 'queued' ? 'queued' : item.kind === 'waiting' || item.kind === 'snoozed' ? 'waiting' : item.kind === 'paused' || item.kind === 'suspended' ? 'paused' : null
 }
 
 const labels: Partial<Record<FilItem['kind'], string>> = {
@@ -166,6 +180,31 @@ async function runAgain(item: FilItem) {
   }
 }
 
+// A blocked mission's outcome, for the account's dismissal or snooze.
+const outcomeOf = (item: FilItem) => ({ id: item.runId!, taskId: item.taskId!, finishedAt: item.at })
+
+function dismiss(item: FilItem) {
+  void setAside(outcomeOf(item))
+}
+
+function snooze(item: FilItem) {
+  void setAside(outcomeOf(item), tomorrowMorning(now.value))
+}
+
+async function archive(item: FilItem) {
+  const task = state.tasks.find(task => task.id === item.taskId)
+  if (!task)
+    return
+  try {
+    await api(`/tasks/${task.id}`, { method: 'PUT', body: JSON.stringify({ ...task, archived: true, enabled: false }) })
+    await refresh()
+    notify(`${item.title} archived`)
+  }
+  catch (error) {
+    notify((error as Error).message)
+  }
+}
+
 function move(delta: number) {
   const items = flat.value
   if (!items.length)
@@ -196,6 +235,10 @@ function key(event: KeyboardEvent) {
     if (item && isUnread(item) && !read(item)) {
       event.preventDefault()
       void markRead([item])
+    }
+    else if (item && dismissible(item)) {
+      event.preventDefault()
+      dismiss(item)
     }
   }
   else if (event.key === '/') {
@@ -342,6 +385,56 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                   >
                     <Icon :name="Check" :size="14" /> Mark as read
                   </button>
+                  <button
+                    v-if="dismissible(item)"
+                    type="button"
+                    :aria-label="`Dismiss “${item.title}”`"
+                    title="Nothing to do on your side: it leaves For you until the mission reports again (E)"
+                    class="press flex h-8 items-center gap-1.5 rounded-full px-3 text-[12.5px] font-semibold text-muted hover:bg-hover hover:text-ink"
+                    @click="dismiss(item)"
+                  >
+                    <Icon :name="Check" :size="14" /> Dismiss
+                  </button>
+                  <MenuButton
+                    v-if="item.kind === 'review'"
+                    :label="`More actions for “${item.title}”`"
+                    title="More actions"
+                    trigger-class="press ml-auto grid size-8 place-items-center rounded-full text-muted hover:bg-hover hover:text-ink"
+                    :width="232"
+                  >
+                    <template #trigger>
+                      <Icon :name="MoreHorizontal" :size="16" />
+                    </template>
+                    <template #default="{ select }">
+                      <button
+                        type="button"
+                        role="menuitem"
+                        tabindex="-1"
+                        class="menu-item"
+                        @click="select(() => snooze(item))"
+                      >
+                        <Icon :name="Clock" :size="16" />Remind me tomorrow
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        tabindex="-1"
+                        class="menu-item"
+                        @click="select(() => runAgain(item))"
+                      >
+                        <Icon :name="RotateCcw" :size="16" />Run again
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        tabindex="-1"
+                        class="menu-item"
+                        @click="select(() => archive(item))"
+                      >
+                        <Icon :name="Archive" :size="16" />Archive mission
+                      </button>
+                    </template>
+                  </MenuButton>
                 </div>
               </article>
             </template>
@@ -380,6 +473,10 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                       <span class="truncate font-medium text-accent">{{ item.subtitle }}</span>
                       <span v-if="item.project" class="ml-1.5 truncate text-subtle">· {{ item.project }}</span>
                     </template>
+                    <template v-else-if="item.kind === 'snoozed' || item.kind === 'set-aside'">
+                      <span class="shrink-0 font-medium" :class="item.kind === 'snoozed' ? 'text-accent' : 'text-warning'">{{ item.kind === 'snoozed' ? 'Snoozed' : outcomeLabels[item.outcome!] }}</span>
+                      <span class="ml-1.5 truncate text-subtle">· {{ item.kind === 'snoozed' ? outcomeLabels[item.outcome!] : item.subtitle }}</span>
+                    </template>
                     <template v-else-if="item.kind === 'suspended'">
                       <span class="truncate font-medium text-muted">{{ item.subtitle }}</span>
                     </template>
@@ -390,9 +487,9 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                   </span>
                 </span>
                 <span
-                  v-if="item.kind === 'waiting'"
+                  v-if="item.kind === 'waiting' || item.kind === 'snoozed'"
                   class="shrink-0 self-start pt-0.5 text-[11px] font-semibold tabular-nums text-accent"
-                  :title="item.condition ? 'Resumes when the result arrives, at the latest by its deadline' : 'Time left before it resumes'"
+                  :title="item.kind === 'snoozed' ? 'Time left before it is back in For you' : item.condition ? 'Resumes when the result arrives, at the latest by its deadline' : 'Time left before it resumes'"
                 >{{ waitLeft({ wakeAt: item.wakeAt!, condition: item.condition, resolved: item.resolved }, now) }}</span>
                 <span v-else class="shrink-0 self-start pt-0.5 text-[11px] tabular-nums" :class="item.kind === 'running' ? 'font-semibold text-accent' : 'text-subtle'">{{ shortAge(item.at, now) }}</span>
               </button>
@@ -403,6 +500,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
       <p v-if="!compact" class="mt-6 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11.5px] text-subtle phone:hidden">
         <span><kbd class="keycap">J</kbd> <kbd class="keycap">K</kbd> move</span>
         <span v-if="unread.length"><kbd class="keycap">E</kbd> read</span>
+        <span v-else-if="forYou.some(dismissible)"><kbd class="keycap">E</kbd> dismiss</span>
         <span><kbd class="keycap">C</kbd> new</span>
         <span class="inline-flex items-center gap-1"><Icon :name="Search" :size="12" /><kbd class="keycap">⌘ K</kbd></span>
         <span><kbd class="keycap">?</kbd> shortcuts</span>

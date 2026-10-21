@@ -18,7 +18,13 @@ export function identityColor(key: string) {
 
 export const initial = (name: string) => name.trim().match(/[\p{L}\p{N}]/u)?.[0]?.toUpperCase() ?? '?'
 
-export type FilKind = 'question' | 'failed' | 'failed-mission' | 'review' | 'unread' | 'running' | 'queued' | 'waiting' | 'paused' | 'suspended' | 'recent'
+export type FilKind = 'question' | 'failed' | 'failed-mission' | 'review' | 'unread' | 'running' | 'queued' | 'waiting' | 'snoozed' | 'set-aside' | 'paused' | 'suspended' | 'recent'
+
+/**
+ * Why a blocked mission no longer asks for the user: it waits on the agent work that started it,
+ * on an outside system, or the user dismissed it.
+ */
+export type SetAside = 'requester' | 'external' | 'dismissed'
 export interface FilItem {
   key: string
   kind: FilKind
@@ -40,6 +46,12 @@ export interface FilItem {
   condition?: boolean
   /** Its result already arrived: it resumes as soon as capacity allows. */
   resolved?: boolean
+  /** A mission's outcome that is not complete: what its actions apply to. */
+  outcome?: 'blocked' | 'needs_input'
+  /** Why a blocked mission sits in Recent rather than For you. */
+  setAside?: SetAside
+  /** The conversation or mission that started this one, while it still exists. */
+  requester?: { title: string, to: string }
 }
 export interface Fil {
   forYou: FilItem[]
@@ -51,7 +63,18 @@ export interface Fil {
 /** Missions open beside the Fil, as conversations do, rather than in the Atelier. */
 export const filRunPath = (runId: string) => `/fil/runs/${runId}`
 
-const outcomeLabels = { blocked: 'Blocked', needs_input: 'Needs your input' } as const
+export const outcomeLabels = { blocked: 'Blocked', needs_input: 'Needs your input' } as const
+
+/** Only a blocked outcome can be dismissed; input the agent asked for can only be snoozed. */
+export const dismissible = (item: FilItem) => item.kind === 'review' && item.outcome === 'blocked'
+
+/** 9:00 tomorrow, local time: when a snoozed mission asks again. */
+export function tomorrowMorning(now = Date.now()) {
+  const date = new Date(now)
+  date.setDate(date.getDate() + 1)
+  date.setHours(9, 0, 0, 0)
+  return date.getTime()
+}
 
 /** Finished work waiting to be read, as opposed to what needs an answer or a decision. */
 export const isUnread = (item: FilItem) => item.kind === 'unread'
@@ -61,8 +84,12 @@ export const isUnread = (item: FilItem) => item.kind === 'unread'
  * have not read), then live work, waiting conversations, then recent conversations. Only the latest run of each mission
  * counts, and chat runs belong to their conversation. `read` holds marks taken on this page
  * before the server's lists reflect them, by the finish time that was read.
+ *
+ * A blocked mission asks the user only when it waits on them: one waiting on the agent work that
+ * started it or on an outside system, or one the user dismissed, sits in Recent. A snoozed one
+ * waits until `now` reaches its time.
  */
-export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], read: Record<string, number> = {}): Fil {
+export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], read: Record<string, number> = {}, now = Date.now()): Fil {
   const unreadNow = (key: string, finishedAt: number | null | undefined) => !(read[key] >= (finishedAt ?? 0))
   const forYou: FilItem[] = []
   const live: FilItem[] = []
@@ -133,6 +160,19 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
       latest.set(run.taskId, run)
   }
 
+  // The work that started a mission, while it is still there to act.
+  function requesterOf(run: RunListItem): FilItem['requester'] {
+    const { chatId, taskId } = run.requestedBy ?? {}
+    const chat = chatId ? chats.find(chat => chat.id === chatId && (!chat.lifecycle || chat.lifecycle === 'active')) : undefined
+    if (chat)
+      return { title: chat.title || 'New conversation', to: chatPath(chat) }
+    const mission = taskId ? tasks.find(task => task.id === taskId && !task.archived) : undefined
+    const missionRun = mission && latest.get(mission.id)
+    if (mission && missionRun)
+      return { title: mission.name, to: filRunPath(missionRun.id) }
+    return undefined
+  }
+
   for (const task of tasks) {
     const run = latest.get(task.id)
     if (task.archived || !run)
@@ -158,7 +198,56 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
       forYou.push({ ...base, kind: 'failed-mission', subtitle: run.error?.split('\n')[0] || (run.status === 'failed' ? 'Mission failed' : 'Mission interrupted') })
     }
     else if (run.status === 'succeeded' && run.outcome && run.outcome.status !== 'completed') {
-      forYou.push({ ...base, kind: 'review', subtitle: `${outcomeLabels[run.outcome.status]} · ${run.outcome.reason}` })
+      const outcome = run.outcome.status
+      const reason = `${outcomeLabels[outcome]} · ${run.outcome.reason}`
+      // A requester that is gone leaves the user to act.
+      const requester = run.outcome.waitingOn === 'requester' ? requesterOf(run) : undefined
+      const until = run.dismissal?.until
+      if (requester) {
+        recent.push({
+          ...base,
+          kind: 'set-aside',
+          outcome,
+          setAside: 'requester',
+          requester,
+          subtitle: `Waiting on ${requester.title}`,
+        })
+      }
+      else if (run.outcome.waitingOn === 'external') {
+        recent.push({
+          ...base,
+          kind: 'set-aside',
+          outcome,
+          setAside: 'external',
+          subtitle: 'Waiting on an outside check',
+        })
+      }
+      else if (run.dismissal && !until && outcome === 'blocked') {
+        recent.push({
+          ...base,
+          kind: 'set-aside',
+          outcome,
+          setAside: 'dismissed',
+          subtitle: 'Dismissed',
+        })
+      }
+      else if (until && until > now) {
+        waiting.push({
+          ...base,
+          kind: 'snoozed',
+          outcome,
+          subtitle: `Snoozed · ${reason}`,
+          wakeAt: until,
+        })
+      }
+      else {
+        forYou.push({
+          ...base,
+          kind: 'review',
+          outcome,
+          subtitle: reason,
+        })
+      }
     }
     else if (run.status === 'succeeded' && run.unread && unreadNow(base.key, run.finishedAt)) {
       forYou.push({

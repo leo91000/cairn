@@ -67,14 +67,15 @@ pub(crate) fn management_authorization(
     }
 }
 
-/// Rechecks the grant and referenced records in the task mutation transaction.
+/// Rechecks the grant and referenced records in the task mutation transaction, and returns the
+/// calling run.
 pub(crate) fn authorize_task_in(
     db: &Db<'_>,
     bearer: &str,
     task: &Value,
     existing: Option<&str>,
-) -> Result<()> {
-    authorize_in(db, bearer)?;
+) -> Result<Value> {
+    let caller = authorize_in(db, bearer)?;
 
     if let Some(id) = existing {
         required(db.get("tasks", id)?, "Task not found")?;
@@ -82,7 +83,7 @@ pub(crate) fn authorize_task_in(
 
     required(db.get("agents", text(task, "agentId"))?, "Agent not found")?;
 
-    Ok(())
+    Ok(caller)
 }
 
 pub(crate) async fn rpc(

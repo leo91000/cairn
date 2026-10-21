@@ -20,7 +20,9 @@ const note = computed(() => {
   const { state, usage } = props.account
   if (state !== 'ready')
     return ''
-  return props.account.modelProvider ? 'Usage not reported by provider' : usage?.error ? 'Usage unavailable' : 'Usage not reported yet'
+  if (usage?.error)
+    return 'Usage unavailable'
+  return props.account.modelProvider && props.account.modelProvider !== 'opencode-go' ? 'Usage not reported by provider' : 'Usage not reported yet'
 })
 </script>
 

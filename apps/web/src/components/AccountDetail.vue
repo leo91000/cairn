@@ -137,6 +137,9 @@ const note = computed(() => {
         <p v-else-if="general.length && account.stale" class="mt-3 text-xs text-muted" role="status">
           {{ account.usage?.error || 'These values are out of date. Usage is checked again automatically.' }}
         </p>
+        <p v-if="account.usage?.useBalance" class="mt-3 text-xs text-muted">
+          Use balance is enabled in OpenCode. Requests can use paid Zen credits after Go limits are reached.
+        </p>
       </section>
 
       <section class="border-b border-line px-6.5 py-5 phone:px-5" aria-labelledby="account-runs">

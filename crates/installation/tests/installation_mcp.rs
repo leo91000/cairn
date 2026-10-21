@@ -462,6 +462,10 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
     )
     .await;
     let queued_id = result(&queued)["id"].clone();
+    // The mission remembers which agent work started it, so it can wait on that work.
+    let requested_by = &s.store.run(queued_id.as_str().unwrap()).await.unwrap()["requestedBy"];
+    assert_eq!(requested_by["runId"], run["id"]);
+    assert_eq!(requested_by["taskId"], run["taskId"]);
     let cancelled = call(
         &s,
         &configuration,

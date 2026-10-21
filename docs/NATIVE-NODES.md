@@ -154,8 +154,9 @@ First confirm with `findmnt` that no conversation disk is still mounted below
 `/var/lib/cairn-native` after a failed stop; unmount it otherwise, so removal never
 walks into a live filesystem. Then remove its systemd unit, run
 `systemctl daemon-reload` and delete the `cairn-workload` account. The Revoke dialog
-shows one command that lists such mounts and stops before deleting anything, and that
-removes the unit file last so it can be rerun after a failed removal. The
+shows one command that lists such mounts and stops before deleting anything. It keeps
+the unit file until the directories and account are gone, and skips stopping a unit
+that no longer exists, so it can be rerun after any failed step. The
 installer leaves GPU drivers and the personal desktop session untouched.
 
 Claude's broker and CLI use a separate writable transient secure store for

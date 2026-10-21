@@ -1,6 +1,9 @@
 //! What each Cairn account has read. A conversation turn or a mission run that finished
 //! successfully stays unread in the Fil until the account opens it. Marks belong to the
 //! account, so every device and the web share them, and each member reads on their own.
+//!
+//! A mission that reports it is blocked asks for attention until the account sets that outcome
+//! aside: dismissed for good, or snoozed until a time. Both last until the mission finishes again.
 use crate::{
     config::now,
     error::{Error, Result},
@@ -14,6 +17,8 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 
 const MAX_ITEMS: usize = 200;
+/// The longest a blocked mission can be snoozed.
+const MAX_SNOOZE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const PREVIEW_CHARS: usize = 240;
 
 fn since_key(account: &str) -> String {
@@ -22,6 +27,18 @@ fn since_key(account: &str) -> String {
 
 fn marks_prefix(account: &str) -> String {
     format!("read:{account}:")
+}
+
+fn dismissals_prefix(account: &str) -> String {
+    format!("dismissed:{account}:")
+}
+
+/// An outcome set aside, by the finish time of the run that reported it.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+struct Dismissal {
+    finished_at: i64,
+    until: Option<i64>,
 }
 
 /// The account an API request reads for. Every installation request carries one.
@@ -51,10 +68,12 @@ pub(crate) async fn begin(s: &Service, account: &str) -> Result<()> {
         .await
 }
 
-/// One account's read marks, keyed by Fil item (`chat:<id>` or `task:<id>`).
+/// One account's read marks, keyed by Fil item (`chat:<id>` or `task:<id>`), and the mission
+/// outcomes it set aside.
 pub(crate) struct Reads {
     since: i64,
     marks: HashMap<String, i64>,
+    dismissals: HashMap<String, Dismissal>,
 }
 
 impl Reads {
@@ -67,7 +86,17 @@ impl Reads {
             .into_iter()
             .map(|(key, at)| (key[prefix.len()..].to_owned(), at))
             .collect();
-        Ok(Self { since, marks })
+        let prefix = dismissals_prefix(account);
+        let dismissals = db
+            .keys_as::<Dismissal>(&prefix)?
+            .into_iter()
+            .map(|(key, dismissal)| (key[prefix.len()..].to_owned(), dismissal))
+            .collect();
+        Ok(Self {
+            since,
+            marks,
+            dismissals,
+        })
     }
 
     fn unread(&self, item: &str, finished_at: Option<i64>) -> bool {
@@ -94,7 +123,8 @@ impl Reads {
         Ok(())
     }
 
-    /// Marks mission runs that finished after the account last opened their mission.
+    /// Marks mission runs that finished after the account last opened their mission, and the
+    /// outcomes it set aside.
     pub(crate) fn runs(&self, db: &Db<'_>, runs: &mut [Value]) -> Result<()> {
         for run in runs {
             let mission = run["trigger"] != "chat" && run["status"] == RunStatus::Succeeded;
@@ -104,8 +134,29 @@ impl Reads {
             if unread {
                 run["preview"] = summary_preview(db, text(run, "id"))?;
             }
+            run["dismissal"] = self.dismissal(&item, run).into();
         }
         Ok(())
+    }
+
+    /// How the account set this run's outcome aside, if it still applies. A later finish asks
+    /// again, and input the agent asked for can only be snoozed.
+    fn dismissal(&self, item: &str, run: &Value) -> Option<Value> {
+        let waiting = run["trigger"] != "chat"
+            && run["status"] == RunStatus::Succeeded
+            && run["outcome"]["status"]
+                .as_str()
+                .is_some_and(|status| status != "completed");
+        let dismissal = self.dismissals.get(item).filter(|dismissal| {
+            waiting
+                && run["finishedAt"]
+                    .as_i64()
+                    .is_some_and(|finished| finished <= dismissal.finished_at)
+        })?;
+        if dismissal.until.is_none() && run["outcome"]["status"] == "needs_input" {
+            return None;
+        }
+        Some(json!({ "until": dismissal.until }))
     }
 }
 
@@ -201,11 +252,66 @@ async fn mark(s: &Service, account: &str, body: &Value) -> Result<Value> {
     Ok(json!({ "read": count, "readAt": read_at }))
 }
 
-pub(crate) async fn routes(s: &Service, input: &Input) -> Option<Result<Value>> {
-    if input.method != "POST" || input.path != "/api/reads" {
-        return None;
+/// Sets blocked mission outcomes aside for the account, or brings them back with `restore`.
+/// `until` snoozes one rather than dismissing it.
+async fn dismiss(s: &Service, account: &str, body: &Value) -> Result<Value> {
+    let items = body["items"]
+        .as_array()
+        .filter(|items| !items.is_empty() && items.len() <= MAX_ITEMS)
+        .ok_or_else(|| Error::bad("List between 1 and 200 missions to set aside."))?;
+    let at = now();
+    let mut changes = Vec::with_capacity(items.len());
+    for item in items {
+        let key = text(item, "key");
+        let id = key
+            .strip_prefix("task:")
+            .ok_or_else(|| Error::bad("Only mission outcomes can be set aside."))?;
+        uuid(id)?;
+        let stored = format!("{}{key}", dismissals_prefix(account));
+        if item["restore"] == true {
+            changes.push((stored, None));
+            continue;
+        }
+
+        let finished_at = item["finishedAt"]
+            .as_i64()
+            .filter(|finished| *finished > 0 && *finished <= at)
+            .ok_or_else(|| Error::bad("Include the finish time of the outcome you set aside."))?;
+        let until = match &item["until"] {
+            Value::Null => None,
+            until => Some(
+                until
+                    .as_i64()
+                    .filter(|until| *until > at && *until <= at + MAX_SNOOZE_MS)
+                    .ok_or_else(|| Error::bad("Snooze a mission for up to 30 days."))?,
+            ),
+        };
+        changes.push((stored, Some(Dismissal { finished_at, until })));
     }
+
+    let count = changes.len();
+    s.store
+        .transaction(move |db| {
+            for (key, dismissal) in &changes {
+                match dismissal {
+                    Some(dismissal) => db.set_as(key, dismissal, None)?,
+                    None => db.delete(key)?,
+                }
+            }
+            Ok(())
+        })
+        .await?;
+    Ok(json!({ "updated": count }))
+}
+
+pub(crate) async fn routes(s: &Service, input: &Input) -> Option<Result<Value>> {
+    let dismissals = match (input.method.as_str(), input.path.as_str()) {
+        ("POST", "/api/reads") => false,
+        ("POST", "/api/dismissals") => true,
+        _ => return None,
+    };
     Some(match account(input) {
+        Ok(account) if dismissals => dismiss(s, account, &input.body).await,
         Ok(account) => mark(s, account, &input.body).await,
         Err(error) => Err(error),
     })

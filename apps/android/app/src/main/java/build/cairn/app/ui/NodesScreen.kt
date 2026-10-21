@@ -17,7 +17,7 @@ private const val UNINSTALL_COMMAND =
     "sudo systemctl disable --now cairn-node; sudo docker rm -f cairn-execution-node; sudo rm -rf /etc/systemd/system/cairn-node.service /opt/cairn-node /var/lib/cairn-node"
 
 private const val NATIVE_UNINSTALL_COMMAND =
-    "sudo sh -c 'systemctl disable --now cairn-native-node || exit; if findmnt -rno TARGET | grep ^/var/lib/cairn-native/; then echo \"Unmount these conversation disks, then run this command again.\" >&2; exit 1; fi; rm -rf /opt/cairn-native /var/lib/cairn-native && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload && userdel cairn-workload'"
+    "sudo sh -c 'if [ -e /etc/systemd/system/cairn-native-node.service ]; then systemctl disable --now cairn-native-node || exit; fi; command -v findmnt >/dev/null || exit; if findmnt -rno TARGET | grep ^/var/lib/cairn-native/; then echo \"Unmount these conversation disks, then run this command again.\" >&2; exit 1; fi; rm -rf /opt/cairn-native /var/lib/cairn-native && { userdel cairn-workload || ! id cairn-workload >/dev/null 2>&1; } && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload'"
 
 private fun uninstallCommand(node: ExecutionNode) =
     if (node.capabilities.backend == NATIVE_BACKEND) NATIVE_UNINSTALL_COMMAND else UNINSTALL_COMMAND

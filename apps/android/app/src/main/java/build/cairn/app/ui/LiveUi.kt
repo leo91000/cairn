@@ -7,7 +7,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.hideFromAccessibility
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -72,6 +74,17 @@ fun rememberLive(
             CoroutineScope(parentScope.coroutineContext + Job(parentScope.coroutineContext[Job]))
         }
     DisposableEffect(scope) { onDispose { scope.cancel() } }
+    val cacheWriter =
+        remember(path, api) {
+            api?.let {
+                HistoryCacheWriter(
+                    vm.historyCache,
+                    vm.historyCache.key(it.cacheScope, it.csrf, path),
+                    scope,
+                )
+            }
+        }
+    DisposableEffect(cacheWriter) { onDispose { cacheWriter?.close() } }
     val pages = remember(path, api) { OlderPages() }
     var loadingOlder by remember(path, api) { mutableStateOf(false) }
     var olderError by remember(path, api) { mutableStateOf<String?>(null) }
@@ -123,8 +136,7 @@ fun rememberLive(
                                 } else if (
                                     !it.catchingUp && it.state != null && it.history != null
                                 ) {
-                                    vm.historyCache.save(
-                                        key,
+                                    cacheWriter?.offer(
                                         CachedHistory(
                                             it.cursor,
                                             it.history,
@@ -145,11 +157,11 @@ fun rememberLive(
                                     )
                             }
                     } finally {
-                        withContext(NonCancellable) { vm.historyCache.flush(key) }
+                        withContext(NonCancellable) { cacheWriter?.flush() }
                     }
                 }
             } finally {
-                withContext(NonCancellable) { vm.historyCache.flush(key) }
+                withContext(NonCancellable) { cacheWriter?.flush() }
             }
         }
     }
@@ -182,8 +194,7 @@ fun rememberLive(
                             pageApplied = true
                             loadingOlder = false
                             value.state?.let { detail ->
-                                vm.historyCache.save(
-                                    vm.historyCache.key(api.cacheScope, api.csrf, path),
+                                cacheWriter?.offer(
                                     CachedHistory(
                                         value.cursor,
                                         history,
@@ -524,6 +535,14 @@ internal fun rememberHistoryPosition(
                     restoreHistoryPosition(list, saved, rendering)
                 }
             }
+            if (saved?.follow ?: currentFollow) {
+                // Measure the latest rows while hidden, including their async Markdown, before
+                // exposing a position or allowing the paging hook to load older messages.
+                list.scrollToItem(Int.MAX_VALUE)
+                rendering?.awaitLayout()
+                val last = (list.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
+                list.scrollToItem(last, Int.MAX_VALUE)
+            }
             ready = true
         }
     }
@@ -561,6 +580,12 @@ internal fun rememberHistoryPosition(
     }
     return ready
 }
+
+/** Keep measuring during restoration without painting intermediate reading positions. */
+internal fun Modifier.historyVisibility(ready: Boolean): Modifier = graphicsLayer {
+    alpha = if (ready) 1f else 0f
+}
+    .semantics { if (!ready) hideFromAccessibility() }
 
 internal fun RunEvent.item(): JsonObject? = activityData()?.get("item") as? JsonObject
 

@@ -157,7 +157,11 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
                         "Sauvegarde entre les tours",
                         style = MaterialTheme.typography.bodySmall,
                     )
-                if (run.storage?.mode == "on-demand")
+                // As on the web, a native run without a recorded mode uses a journal disk.
+                if (
+                    run.storage?.mode == "on-demand" ||
+                        (run.executionBackend == "native" && run.storage?.mode != "native")
+                )
                     Text(
                         "Fichiers chargés à la demande",
                         style = MaterialTheme.typography.bodySmall,

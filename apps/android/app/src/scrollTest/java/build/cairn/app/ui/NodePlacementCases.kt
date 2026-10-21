@@ -757,7 +757,7 @@ abstract class NodePlacementCases {
                                     """{"freedMiB":2048,"failed":0}"""
                                 }
                                 path == "/api/installations/fixture/api/nodes" ->
-                                    """[{"id":"node","name":"Serveur test","status":"${if (revoked) "revoked" else "online"}","revoked":$revoked,"accepting":true,"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536},"agents":[],"exclusiveAgents":[],"staleDisks":{"count":${if (cleaned) 0 else 1},"diskMiB":2048}}${if (enrolled) """,{"id":"fresh","name":"Nouvelle node","status":"online","accepting":true,"agents":[{"id":"other","name":"Agent autorisé"},{"id":"main","name":"Agent global","allNodes":true}${if (grantedElsewhere) """,{"id":"late","name":"Agent tardif"}""" else ""}${if (granted) """,{"id":"agent","name":"Agent test"}""" else ""}]}""" else ""}]"""
+                                    """[{"id":"node","name":"Serveur test","status":"${if (revoked) "revoked" else "online"}","revoked":$revoked,"accepting":true,"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536},"storage":{"memoryCacheMiB":512},"agents":[],"exclusiveAgents":[],"staleDisks":{"count":${if (cleaned) 0 else 1},"diskMiB":2048}}${if (enrolled) """,{"id":"fresh","name":"Nouvelle node","status":"online","accepting":true,"agents":[{"id":"other","name":"Agent autorisé"},{"id":"main","name":"Agent global","allNodes":true}${if (grantedElsewhere) """,{"id":"late","name":"Agent tardif"}""" else ""}${if (granted) """,{"id":"agent","name":"Agent test"}""" else ""}]}""" else ""}]"""
                                 path == "/api/installations/fixture/api/agents" ->
                                     """[{"id":"agent","name":"Agent test"},{"id":"other","name":"Agent autorisé","access":{"nodes":["fresh"]}},{"id":"late","name":"Agent tardif"},{"id":"main","name":"Agent global","access":{"nodes":null}},{"id":"native","name":"Agent natif","access":{"backend":"native","nodes":[]}}]"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
@@ -829,14 +829,13 @@ abstract class NodePlacementCases {
                         .fetchSemanticsNodes()
                         .isEmpty()
             }
-            assertEquals(
-                51200,
+            val storage =
                 writes
                     .first { it.first == "/api/installations/fixture/api/nodes/node/storage" }
-                    .second["cacheMiB"]!!
-                    .jsonPrimitive
-                    .int,
-            )
+                    .second
+            assertEquals(51200, storage["cacheMiB"]!!.jsonPrimitive.int)
+            // The memory cache is edited on the web; saving here keeps its value.
+            assertEquals(512, storage["memoryCacheMiB"]!!.jsonPrimitive.int)
             // Agent access is read-only here: it is set on each agent's page.
             compose.onNodeWithText("Choisir les agents").assertDoesNotExist()
             compose.onNodeWithText("Aucun agent ne peut exécuter ici.").assertExists()

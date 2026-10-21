@@ -630,6 +630,25 @@ async fn outcome_is_explicit_validated_and_rejected_after_run_revocation() {
     );
     let blank = json!({ "status": "completed", "reason": " ", "evidence": [] });
     assert!(outcome::report(&s, bearer, &blank).await.is_err());
+
+    // Who must act next is kept for work that waits, and dropped for completed work.
+    let mut waiting = input.clone();
+    waiting["waitingOn"] = "requester".into();
+    assert_eq!(
+        outcome::report(&s, bearer, &waiting).await.unwrap()["waitingOn"],
+        "requester"
+    );
+    waiting["waitingOn"] = "someone".into();
+    assert!(outcome::report(&s, bearer, &waiting).await.is_err());
+    let done = json!({
+        "status": "completed",
+        "reason": "Shipped.",
+        "evidence": [],
+        "waitingOn": "external",
+    });
+    assert!(outcome::report(&s, bearer, &done).await.unwrap()["waitingOn"].is_null());
+    outcome::report(&s, bearer, &input).await.unwrap();
+
     patch_run(&s, &run, json!({ "status": RunStatus::Succeeded })).await;
     assert!(outcome::report(&s, bearer, &input).await.is_err());
     assert_eq!(
