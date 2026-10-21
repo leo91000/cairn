@@ -128,6 +128,7 @@ webrtc = { version = "=0.21.0", default-features = false, features = [
 rtc = { version = "=0.21.0", default-features = false, features = [ "crypto-aws-lc-rs" ] }
 zstd = { version = "0.14.0", default-features = false }
 zip = { version = "6", default-features = false, features = [ "deflate-flate2" ] }
+ext4-view = { version = "=1.0.0", features = [ "std" ] }
 
 [dev-dependencies]
 tempfile = "3"

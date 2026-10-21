@@ -253,6 +253,12 @@ impl Worker {
 }
 
 fn eligible_run(db: &Db<'_>, id: &str) -> Result<bool> {
+    if db
+        .run(id)?
+        .is_some_and(|run| run["backendMigration"].is_object())
+    {
+        return Ok(false);
+    }
     let Some(run) = db.run(id)? else {
         return Ok(false);
     };

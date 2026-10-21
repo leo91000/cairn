@@ -1222,6 +1222,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "croner",
+ "ext4-view",
  "flate2",
  "fuser",
  "futures-util",
@@ -2082,6 +2083,16 @@ checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
 dependencies = [
  "event-listener",
  "pin-project-lite",
+]
+
+[[package]]
+name = "ext4-view"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ecf6379b7cfeace5e109ccc51955afc05f5f7f2466ae0cf2697bda46afd01e6"
+dependencies = [
+ "bitflags 2.13.2",
+ "crc",
 ]
 
 [[package]]

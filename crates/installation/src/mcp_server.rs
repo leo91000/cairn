@@ -304,16 +304,27 @@ async fn respond(s: &Arc<Service>, request: Request) -> Result<Response> {
     if id.is_null() {
         return Ok(StatusCode::ACCEPTED.into_response());
     }
-    let dispatched = dispatch(
-        s,
-        &endpoint,
-        &bearer,
-        scopes.as_deref(),
-        method,
-        &body["params"],
-        modern,
-    )
-    .await;
+    let migration_owner = input
+        .identity
+        .as_ref()
+        .filter(|identity| {
+            relayed_management && identity.role == crate::auth::InstallationRole::Owner
+        })
+        .map(|identity| identity.account_id.clone());
+    let dispatched = crate::backend_migration::OWNER
+        .scope(
+            migration_owner,
+            dispatch(
+                s,
+                &endpoint,
+                &bearer,
+                scopes.as_deref(),
+                method,
+                &body["params"],
+                modern,
+            ),
+        )
+        .await;
     if matches!(method, "initialize" | "tools/list") {
         let (endpoint, connection_id) = match &endpoint {
             Endpoint::Management => ("management", "unknown"),
@@ -669,6 +680,10 @@ pub(crate) async fn invoke(
 ) -> Result<Value> {
     let authorize = crate::installation_mcp::management_authorization(bearer);
     match name {
+        "get_chat_backend_migration" => {
+            crate::backend_migration::preview(s, text(&args, "chatId"), authorize).await
+        }
+        "migrate_chat_backend" => s.migrate_chat_backend(args, authorize).await,
         "list_nodes"
         | "list_native_callers"
         | "create_node_enrollment"

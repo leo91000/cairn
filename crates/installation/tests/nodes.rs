@@ -1,3 +1,5 @@
+#[path = "nodes/backend_migration.rs"]
+mod backend_migration;
 mod common;
 
 use cairn_installation::plugins::run_credentials::RunCredentials;

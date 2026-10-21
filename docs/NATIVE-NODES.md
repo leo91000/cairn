@@ -45,10 +45,18 @@ remain consumable; installations without identity tracking keep the previous nod
 and ask for an update before completing a guided switch.
 Revoking it from there also returns conversations fixed
 to or preferring that node to automatic placement; a plain revocation keeps those
-explicit choices waiting. Conversations keep their backend: VM conversations
-continue on other VM nodes, and native work starts in new conversations with
-native agents. Switch each agent's backend on its page and allow the new node.
-Finally run the uninstall command shown for the previous runtime.
+explicit choices waiting. Switch each agent's backend on its page and allow the
+new node. Existing conversations show **Migrate this conversation…** in their
+execution-node details on web and Android. Confirm the destination to preserve the
+same conversation, history, private home, workspace and output. Execution stops;
+the next message opens a fresh engine session with the conversation context.
+System packages and running processes do not transfer; dependencies may need
+reinstalling. Migration needs a coherent source capture, S3 access, temporary
+manager disk space (including the logical destination disk budget), fakeroot and e2fsprogs. An interrupted or
+failed migration retains the source and stays paused; retry from the same action.
+Legacy native file archives must resume once on their original node first.
+Finally run the uninstall command shown for the previous runtime after the
+conversations you want to keep have migrated.
 
 The public Cairn MCP and the `cairn_installation` agent tool expose the same setup
 and retirement controls: `list_nodes`, `list_native_callers`,
@@ -59,7 +67,12 @@ mutation transaction. Enroll the other backend, wait for the returned `nodeId`,
 configure its native trust when applicable, and grant agents through `update_agent`.
 Only after the replacement is ready, revoke the old identity with
 `releasePlacements: true`. Plain revocation preserves existing placement choices.
-These tools neither install nor uninstall a runtime on the host.
+`get_chat_backend_migration` previews the saved/profile backend difference and
+authorized destinations. `migrate_chat_backend` requires `chatId`, `nodeId`, the
+profile's current `backend` and `confirm: true`; it returns `status: "migrating"`.
+Poll the preview until `pending` is false and `required` is false. An `error` with
+`required: true` means the source remains and migration can be retried. These tools
+neither install nor uninstall a runtime on the host.
 
 ## Daily use
 
