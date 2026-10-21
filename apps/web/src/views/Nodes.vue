@@ -31,7 +31,7 @@ const nodes = ref<ExecutionNode[]>([])
 const nativeCallers = ref<Array<{ id: string, email: string }>>([])
 const enrollmentBackend = ref<'firecracker' | 'native'>('firecracker')
 // Stops before deleting while a conversation disk is mounted and keeps the unit until the rest is gone, so it can be rerun.
-const nativeUninstallCommand = `sudo sh -c 'if [ -e /etc/systemd/system/cairn-native-node.service ]; then systemctl disable --now cairn-native-node || exit; fi; command -v findmnt >/dev/null || exit; if findmnt -rno TARGET | grep ^/var/lib/cairn-native/; then echo "Unmount these conversation disks, then run this command again." >&2; exit 1; fi; rm -rf /opt/cairn-native /var/lib/cairn-native && { userdel cairn-workload || ! id cairn-workload >/dev/null 2>&1; } && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload'`
+const nativeUninstallCommand = `sudo sh -c 'if [ -e /etc/systemd/system/cairn-native-node.service ]; then systemctl disable --now cairn-native-node || exit; fi; mounts=$(findmnt -rno TARGET) || { echo "findmnt could not list mounts." >&2; exit 1; }; printf "%s\\n" "$mounts" | grep ^/var/lib/cairn-native/; match=$?; if [ "$match" -ne 1 ]; then echo "Mount safety could not be confirmed. Run sudo systemctl start cairn-native-node to release owned conversation disks, then retry." >&2; exit 1; fi; rm -rf /opt/cairn-native /var/lib/cairn-native && { userdel cairn-workload || ! id cairn-workload >/dev/null 2>&1; } && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload'`
 // The node a guided backend switch replaces, while the new runtime's enrollment is pending.
 const replacing = ref<ExecutionNode | null>(null)
 // Once the replacement connects and its setup steps end, retiring the previous node is offered.
@@ -817,7 +817,7 @@ function statusLabel(node: ExecutionNode) {
           Removing these directories also deletes the local conversation disks kept on that machine.
         </p>
         <p v-if="revoking.capabilities.backend === 'native'" class="text-sm text-muted">
-          If a conversation disk is still mounted, the command lists it and stops before deleting anything: unmount it and run the command again.
+          If a conversation disk is still mounted, the command lists it and stops before deleting anything: start cairn-native-node so its recovery releases owned disks, then run the command again.
         </p>
         <div>
           <UiButton variant="danger" :disabled="busy" @click="action(async () => { await api(`/nodes/${revoking!.id}/revoke`, { method: 'POST', body: '{}' }); revoking = null })">
@@ -850,7 +850,7 @@ function statusLabel(node: ExecutionNode) {
           Removing these directories also deletes the local conversation disks kept for the previous node.
         </p>
         <p v-if="nodeBackend(retiring.previous) === 'native'" class="text-sm text-muted">
-          If a conversation disk is still mounted, the command lists it and stops before deleting anything: unmount it and run the command again.
+          If a conversation disk is still mounted, the command lists it and stops before deleting anything: start cairn-native-node so its recovery releases owned disks, then run the command again.
         </p>
         <UiAlert v-if="error">
           {{ error }}

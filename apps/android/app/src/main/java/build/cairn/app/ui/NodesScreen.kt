@@ -17,7 +17,7 @@ private const val UNINSTALL_COMMAND =
     "sudo systemctl disable --now cairn-node; sudo docker rm -f cairn-execution-node; sudo rm -rf /etc/systemd/system/cairn-node.service /opt/cairn-node /var/lib/cairn-node"
 
 private const val NATIVE_UNINSTALL_COMMAND =
-    "sudo sh -c 'if [ -e /etc/systemd/system/cairn-native-node.service ]; then systemctl disable --now cairn-native-node || exit; fi; command -v findmnt >/dev/null || exit; if findmnt -rno TARGET | grep ^/var/lib/cairn-native/; then echo \"Unmount these conversation disks, then run this command again.\" >&2; exit 1; fi; rm -rf /opt/cairn-native /var/lib/cairn-native && { userdel cairn-workload || ! id cairn-workload >/dev/null 2>&1; } && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload'"
+    "sudo sh -c 'if [ -e /etc/systemd/system/cairn-native-node.service ]; then systemctl disable --now cairn-native-node || exit; fi; mounts=\$(findmnt -rno TARGET) || { echo \"findmnt could not list mounts.\" >&2; exit 1; }; printf \"%s\\n\" \"\$mounts\" | grep ^/var/lib/cairn-native/; match=\$?; if [ \"\$match\" -ne 1 ]; then echo \"Mount safety could not be confirmed. Run sudo systemctl start cairn-native-node to release owned conversation disks, then retry.\" >&2; exit 1; fi; rm -rf /opt/cairn-native /var/lib/cairn-native && { userdel cairn-workload || ! id cairn-workload >/dev/null 2>&1; } && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload'"
 
 private fun uninstallCommand(node: ExecutionNode) =
     if (node.capabilities.backend == NATIVE_BACKEND) NATIVE_UNINSTALL_COMMAND else UNINSTALL_COMMAND
@@ -496,6 +496,8 @@ fun NodesScreen(
     }
     revoking?.let { node ->
         val running = node.occupiedSlots > 0
+        val native = node.capabilities.backend == NATIVE_BACKEND
+        val command = uninstallCommand(node)
         Confirm(
             "Révoquer ${node.name} ?",
             buildString {
@@ -507,16 +509,25 @@ fun NodesScreen(
                         " Les conversations en cours se mettent en pause après le délai de déconnexion, puis reprennent depuis leur dernier point de reprise sur une autre machine autorisée qui a de la capacité. Celles fixées à cette machine, ou sans point de reprise, attendent."
                     )
                 append(
-                    "\n\nLes fichiers restent sur la machine. Pour la désinstaller, lancez dessus :\n${uninstallCommand(node)}\n(supprimer ces répertoires efface aussi les disques de conversation conservés sur la machine)."
+                    "\n\nLes fichiers restent sur la machine. Pour la désinstaller, lancez dessus :"
                 )
-                if (node.capabilities.backend == NATIVE_BACKEND)
-                    append(
-                        "\nSi un disque de conversation est encore monté, la commande l’affiche et s’arrête avant de supprimer quoi que ce soit : démontez-le puis relancez-la."
-                    )
             },
             state.busy,
             state.error,
             { revoking = null },
+            details = {
+                Code(command)
+                CopyButton("Copier la commande", command)
+                Text(
+                    "Supprimer ces répertoires efface aussi les disques de conversation conservés sur la machine.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (native)
+                    Text(
+                        "Si un disque de conversation est encore monté, la commande l’affiche et s’arrête avant de supprimer quoi que ce soit : démarrez cairn-native-node pour que sa reprise libère les disques dont il est propriétaire, puis relancez la commande.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+            },
         ) {
             vm.perform {
                 api.request("POST", "/nodes/${node.id}/revoke")
@@ -586,7 +597,7 @@ internal fun RetireNode(
         )
         if (previousNative)
             Text(
-                "Si un disque de conversation est encore monté, la commande l’affiche et s’arrête avant de supprimer quoi que ce soit : démontez-le puis relancez-la.",
+                "Si un disque de conversation est encore monté, la commande l’affiche et s’arrête avant de supprimer quoi que ce soit : démarrez cairn-native-node pour que sa reprise libère les disques dont il est propriétaire, puis relancez-la.",
                 style = MaterialTheme.typography.bodySmall,
             )
         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }

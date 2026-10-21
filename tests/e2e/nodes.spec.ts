@@ -456,7 +456,7 @@ test('native enrollment requires explicit people and native agent grants', async
   await expect(node).toContainText('ublk unavailable')
   await node.getByRole('button', { name: 'Revoke', exact: true }).click()
   const revoke = page.getByRole('dialog', { name: 'Revoke node', exact: true })
-  await expect(revoke).toContainText('findmnt -rno TARGET | grep ^/var/lib/cairn-native/')
+  await expect(revoke).toContainText('mounts=$(findmnt -rno TARGET)')
   await expect(revoke).toContainText('the command lists it and stops before deleting anything')
   await page.keyboard.press('Escape')
   await expect(revoke).toHaveCount(0)

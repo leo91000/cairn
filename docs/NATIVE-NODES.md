@@ -151,10 +151,12 @@ Revoke the node in Cairn first, then stop/disable `cairn-native-node.service` on
 host. Removing `/opt/cairn-native` and `/var/lib/cairn-native` deletes binaries and
 all retained local work; do this only after synchronization and recovery review.
 First confirm with `findmnt` that no conversation disk is still mounted below
-`/var/lib/cairn-native` after a failed stop; unmount it otherwise, so removal never
-walks into a live filesystem. Then remove its systemd unit, run
-`systemctl daemon-reload` and delete the `cairn-workload` account. The Revoke dialog
-shows one command that lists such mounts and stops before deleting anything. It keeps
+`/var/lib/cairn-native` after a failed stop. If one remains, start
+`sudo systemctl start cairn-native-node` so its recovery releases the disks it owns,
+then retry. Removal must never walk into a live filesystem. Delete the directories
+and `cairn-workload` account before removing the systemd unit and running
+`systemctl daemon-reload`. The Revoke dialog shows one command that lists such mounts
+and stops before deleting anything, including when mount enumeration fails. It keeps
 the unit file until the directories and account are gone, and skips stopping a unit
 that no longer exists, so it can be rerun after any failed step. The
 installer leaves GPU drivers and the personal desktop session untouched.
