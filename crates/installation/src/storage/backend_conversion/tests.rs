@@ -190,6 +190,54 @@ async fn copied_links_cannot_redirect_later_migration_writes_onto_the_host() {
 }
 
 #[tokio::test]
+async fn selected_roots_cannot_be_symlinks_or_files_in_either_backend() {
+    for native in [false, true] {
+        for name in ["home", "workspaces", "output"] {
+            for symlink in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let tree = root.path().join("source");
+                for (directory, vm) in [
+                    ("home", "upper/home/node"),
+                    ("workspaces", "upper/data/runs/test/workspace"),
+                    ("output", "upper/data/runs/test/output"),
+                ] {
+                    let path = tree.join(if native { directory } else { vm });
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    if directory != name {
+                        std::fs::create_dir(path).unwrap();
+                    } else if symlink {
+                        std::os::unix::fs::symlink("/", path).unwrap();
+                    } else {
+                        std::fs::write(path, b"not a directory").unwrap();
+                    }
+                }
+                let original = image(root.path(), &tree, "source.ext4").await;
+                let staging = root.path().join("staging");
+                std::fs::create_dir(&staging).unwrap();
+                let mut manifest = json!({ "size": SIZE });
+                if native {
+                    manifest["kind"] = "native-ext4-v1".into();
+                }
+                let error = convert(
+                    &original,
+                    &manifest,
+                    &prepared(),
+                    if native { "firecracker" } else { "native" },
+                    &staging,
+                )
+                .await
+                .unwrap_err();
+                assert!(
+                    error.to_string().contains("root must be a directory"),
+                    "{error}"
+                );
+                assert!(!staging.join("converted.ext4").exists());
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn paired_vm_copies_workspace_and_redirected_home_caches() {
     let root = tempfile::tempdir().unwrap();
     let system_tree = root.path().join("system-tree");

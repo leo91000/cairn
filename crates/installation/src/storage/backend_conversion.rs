@@ -267,6 +267,17 @@ pub(crate) async fn convert(
                     "Saved {name} directory is unavailable; original disk retained."
                 )));
             }
+            // These roots become host bind sources on native nodes. Following
+            // a saved root symlink could bind a host path instead of user data.
+            if !fs
+                .symlink_metadata(source.as_path())
+                .map_err(Error::internal)?
+                .is_dir()
+            {
+                return Err(Error::conflict(format!(
+                    "Saved {name} root must be a directory, not a symlink or file; original disk retained."
+                )));
+            }
             copy.tree(fs, &source, &target)?;
         }
         if !native_source && let Some(paired) = paired {

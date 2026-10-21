@@ -54,6 +54,11 @@ budgets the full logical destination image in addition to source/extraction spac
 so filesystem creation cannot spend the manager reserve (from its local node
 policy, or the default when it has no local node), regardless of a remote
 destination’s policy.
+The selected home, workspace and output roots must be actual directories; links
+below these roots are preserved. This prevents a saved root link from becoming a
+host bind source. Staging lives in a dedicated manager directory. Before another
+conversion starts, both storage locks exclude live converters while abandoned
+staging from a terminated manager is reclaimed, including on a retry.
 
 This supersedes the blanket native/VM conversion prohibition in
 [native journal storage](0052-native-ublk-workspaces-and-idle-eviction.md).

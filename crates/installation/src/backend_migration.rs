@@ -12,7 +12,11 @@ use crate::{
     validation::{parse, text},
 };
 use serde_json::{Value, json};
-use std::{path::Path, sync::LazyLock, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::LazyLock,
+    time::Duration,
+};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 // Only the explicit migration operation uses the verified public MCP owner.
@@ -20,6 +24,23 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 tokio::task_local! { pub(crate) static OWNER: Option<String>; }
 
 static PROCESS: LazyLock<String> = LazyLock::new(id);
+
+/// Call only while holding the installation and in-process storage locks.
+fn migration_staging(data_dir: &Path) -> Result<PathBuf> {
+    let root = data_dir.join("backend-migration-staging");
+    match std::fs::symlink_metadata(&root) {
+        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&root)?,
+        Ok(_) => {
+            return Err(Error::conflict(
+                "Migration staging root must be a directory.",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    std::fs::create_dir(&root)?;
+    Ok(root)
+}
 
 fn origin() -> Origin {
     OWNER
@@ -368,6 +389,10 @@ impl Service {
         let run_id = text(&chat, "runId").to_owned();
         let _storage_lock = crate::conversation_lifecycle::storage_lock(&self.config.data_dir)?;
         let _storage = self.conversation_storage_lock.lock().await;
+        // Both storage locks exclude every live converter. Anything retained in
+        // this dedicated directory therefore belongs to a terminated process.
+        // Reclaim it before capacity checks, including retries using a saved point.
+        let staging_root = migration_staging(&self.config.data_dir)?;
         let initial = self.store.run(&run_id).await?;
         if RunStatus::of(&initial).is_some_and(RunStatus::is_active) {
             match self.worker.cancel(self, &run_id).await {
@@ -447,8 +472,8 @@ impl Service {
                 ));
             }
             let staging = tempfile::Builder::new()
-                .prefix("backend-migration-")
-                .tempdir_in(&self.config.data_dir)?;
+                .prefix("conversion-")
+                .tempdir_in(&staging_root)?;
             let raw = staging.path().join("source.ext4");
             let reserve = materialize(self, &backup, &manifest, &raw, &node).await?;
             let checkpoint = nodes::checkpoint(self, &run_id).await?;
@@ -629,6 +654,25 @@ async fn materialize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_reclaims_staging_abandoned_by_a_terminated_process() {
+        let root = tempfile::tempdir().unwrap();
+        let unrelated = root.path().join("other-storage");
+        std::fs::write(&unrelated, b"retained").unwrap();
+        let staging = migration_staging(root.path()).unwrap();
+        let abandoned = tempfile::tempdir_in(&staging).unwrap().keep();
+        std::fs::write(abandoned.join("source.ext4"), b"source blocks").unwrap();
+        std::fs::create_dir(abandoned.join("tree")).unwrap();
+        std::fs::write(abandoned.join("tree/file"), b"extracted data").unwrap();
+        std::fs::write(abandoned.join("converted.ext4"), b"destination blocks").unwrap();
+
+        let next = migration_staging(root.path()).unwrap();
+        assert_eq!(next, staging);
+        assert_eq!(std::fs::read_dir(next).unwrap().count(), 0);
+        assert!(!abandoned.exists());
+        assert_eq!(std::fs::read(unrelated).unwrap(), b"retained");
+    }
 
     #[tokio::test]
     async fn delegated_migration_keeps_historical_principals_and_parent_bounds() {

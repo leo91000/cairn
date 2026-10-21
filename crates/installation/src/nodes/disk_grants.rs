@@ -190,8 +190,19 @@ pub async fn pinned(s: &Service, run: &str) -> Result<std::collections::HashSet<
         .flat_map(|g| g["backups"].as_array().cloned().unwrap_or_default())
         .filter_map(|id| id.as_str().map(str::to_owned))
         .collect();
-    if let Some(point) = s.store.run(run).await?["backendMigration"]["convertedBackup"].as_str() {
-        points.insert(point.to_owned());
+    let run = run.to_owned();
+    let converted = s
+        .store
+        .read(move |db| {
+            Ok(db.run(&run)?.and_then(|run| {
+                run["backendMigration"]["convertedBackup"]
+                    .as_str()
+                    .map(str::to_owned)
+            }))
+        })
+        .await?;
+    if let Some(point) = converted {
+        points.insert(point);
     }
     Ok(points)
 }
