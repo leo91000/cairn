@@ -113,6 +113,11 @@ on the affected physical phone.
 
 ## Inspecting received reports
 
+For an opt-in local reproduction of cache persistence delaying already received
+live updates, see [Android cache diagnosis](../../../docs/ANDROID-CACHE-DIAGNOSIS.md).
+Its controlled write gate establishes a scheduling dependency; its JVM measurements
+exclude Android Keystore and do not establish affected-phone performance.
+
 `GET /api/account/telemetry/performance` returns the signed-in account's latest 20
 unexpired reports with `Cache-Control: no-store`. Mutations require the account
 session and CSRF token. The receiver rejects unknown fields, screen/operation
