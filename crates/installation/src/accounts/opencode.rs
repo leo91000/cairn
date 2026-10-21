@@ -641,6 +641,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admission_preserves_refresh_results_received_while_waiting_for_the_account() {
+        let root = TempDir::new().unwrap();
+        let (url, _response, task) = endpoint(reading(85, false)).await;
+        let s = service(&root, &url).await;
+        let go = s
+            .accounts
+            .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", KEY, None)
+            .await
+            .unwrap();
+        let zen = s
+            .accounts
+            .connect_api_key(
+                &s,
+                Provider::Opencode,
+                "Zen",
+                "opencode",
+                "synthetic-zen-key",
+                None,
+            )
+            .await
+            .unwrap();
+        let go_id = text(&go, "id");
+        let zen_id = text(&zen, "id");
+        s.accounts
+            .reorder(&s, Provider::Opencode, &[go_id.into(), zen_id.into()])
+            .await
+            .unwrap();
+        s.opencode.models(&s).await.unwrap();
+
+        for (monthly, rejected) in [(100, false), (85, true), (30, false)] {
+            let mut account = s.accounts.account(&s, go_id).await.unwrap();
+            account.mark_ready();
+            account.usage =
+                Some(normalize(&serde_json::to_vec(&reading(85, false)).unwrap(), now()).unwrap());
+            save(&s, &account).await.unwrap();
+
+            // Hold exactly the lock used during a provider request. Wait until
+            // admission has selected its snapshot and queued behind this lock.
+            let guard = s.accounts.lock(go_id).await;
+            let account_lock = s.accounts.locks.lock().await.get(go_id).unwrap().clone();
+            let admission_service = s.clone();
+            let admission = tokio::spawn(async move {
+                admission_service
+                    .accounts
+                    .acquire(
+                        &admission_service,
+                        "concurrent-refresh",
+                        Provider::Opencode,
+                        MODEL,
+                    )
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let waiting = Arc::strong_count(&account_lock) >= 4;
+                    if waiting {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+
+            account.usage = Some(
+                normalize(
+                    &serde_json::to_vec(&reading(monthly, false)).unwrap(),
+                    now(),
+                )
+                .unwrap(),
+            );
+            if rejected {
+                account.state = AccountState::Error;
+                account.error = "Replace this OpenCode Go API key in Connections.".into();
+            }
+            let expected_usage = account.usage();
+            let expected_state = account.state;
+            save(&s, &account).await.unwrap();
+            drop(guard);
+
+            let lease = admission.await.unwrap().unwrap().unwrap();
+            assert_eq!(
+                lease.account_id,
+                if monthly == 100 || rejected {
+                    zen_id
+                } else {
+                    go_id
+                }
+            );
+            let current = s.accounts.account(&s, go_id).await.unwrap();
+            assert_eq!(current.usage(), expected_usage);
+            assert_eq!(current.state, expected_state);
+            assert_eq!(current.error, account.error);
+            s.accounts.release(&lease).await.unwrap();
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn unavailable_usage_keeps_last_reading_and_throttles_retries() {
         let root = TempDir::new().unwrap();
         let (url, response, task) = endpoint(reading(35, false)).await;

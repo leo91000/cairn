@@ -543,27 +543,42 @@ impl Accounts {
         }
         let candidates = self.eligible(s, provider, model, &leases).await?;
         drop(leases);
-        let Some(mut account) = candidates.into_iter().next() else {
-            return Err(self.waiting(s, provider).await?);
-        };
-        let lease = Lease {
-            account_id: account.id.clone(),
-            provider,
-            run_id: run_id.into(),
-            model: model.into(),
-            home: driver.home(s, run_id),
-        };
-        timing.next("prepare_home");
-        let _guard = self.lock(&lease.account_id).await;
-        driver.prepare(s, &lease.account_id, &lease.home).await?;
-        self.leases
-            .lock()
-            .await
-            .insert(lease.run_id.clone(), lease.clone());
-        account.last_used_at = Some(now());
-        save(s, &account).await?;
-        timing.finish();
-        Ok(Some(lease))
+        for candidate in candidates {
+            let _guard = self.lock(&candidate.id).await;
+            // Refresh or edits can finish while admission waits for the lock.
+            // Use the current record for both eligibility and last-used updates.
+            let Some(mut account) = self.find(s, &candidate.id).await? else {
+                continue;
+            };
+            let leases = self.leases.lock().await;
+            let available = schedulable(&account, driver, model)
+                && running(&leases, &account.id) < account.parallel_runs();
+            drop(leases);
+            if !available
+                || self.busy(s, &account.id).await?
+                || !driver.supports(s, &account.id, model).await?
+            {
+                continue;
+            }
+            let lease = Lease {
+                account_id: account.id.clone(),
+                provider,
+                run_id: run_id.into(),
+                model: model.into(),
+                home: driver.home(s, run_id),
+            };
+            timing.next("prepare_home");
+            driver.prepare(s, &lease.account_id, &lease.home).await?;
+            self.leases
+                .lock()
+                .await
+                .insert(lease.run_id.clone(), lease.clone());
+            account.last_used_at = Some(now());
+            save(s, &account).await?;
+            timing.finish();
+            return Ok(Some(lease));
+        }
+        Err(self.waiting(s, provider).await?)
     }
 
     /// Why no account can take a run now.
