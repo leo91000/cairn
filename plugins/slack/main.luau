@@ -11,5 +11,6 @@ return {
     view = setup.view,
     webhook = ingress.webhook,
     message = conversation.message,
+    interaction = conversation.interaction,
     reply = conversation.reply,
 }

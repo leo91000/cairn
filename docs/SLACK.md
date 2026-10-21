@@ -58,6 +58,27 @@ a second time after a worker or manager restart. Checkpoints are bounded per
 pending delivery and removed on settlement, rather than accumulating permanent
 plugin storage receipts.
 
+## Start a fresh conversation from Slack
+
+The generated app manifest also enables signed HTTP interactivity at the same URL.
+The final answer part includes a **New conversation** button and a confirmation;
+its section block preserves that part's complete text, and the top-level fallback
+remains available to accessibility clients. Earlier answer parts stay plain text.
+
+A button press is verified over its original form-urlencoded bytes by the host.
+Luau checks the app, workspace, channel, source bot message and action, then admits
+only the minimal routed reset request. It does not persist `response_url`, trigger
+credentials, unrelated form state or a copy of the Slack message. Queue pressure
+returns 503 rather than acknowledging an uncommitted request. The HTTP response
+acknowledges admission, not completion of the reset.
+
+The admitted person's existing native `conversations.reset` authority retires
+only the exact settled source binding named by the button. Outstanding work and
+replies prevent retirement. Cairn history is retained; the next authorized mention
+in the same Slack thread starts a new conversation. Replaying an old button cannot
+retire that successor. Other controls and Slack-facing completion/error notices
+remain part of the remaining Slack surfaces.
+
 ## Proof and limits
 
 `crates/installation/tests/slack.rs` exercises the actual bundled package, HTTP
@@ -105,7 +126,7 @@ The complete contract remains [SLACK-PLUGIN-SPEC.md](SLACK-PLUGIN-SPEC.md). The 
 slice does not finish Socket Mode; Slack OAuth installation and personal OAuth;
 private channels, Slack Connect, DMs/group DMs; automatic following of engaged
 threads or authorized initial thread history; slash commands, shortcuts, buttons,
-questions, stop/reset, modals, App Home or streaming; authenticated files and
+questions, stop, modals, App Home or streaming; authenticated files and
 livrable links; collaboration/productivity tools and scoped agent profiles;
 workflows and bounded owner automations; or private ephemeral RTS search with
 verified engines. Expired mentions currently do not execute, but a private

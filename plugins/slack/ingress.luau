@@ -1,4 +1,5 @@
 local api = require("./lib/api")
+local controls = require("./controls")
 
 local function response(status, body)
     return { status = status, body = body, headers = { ["content-type"] = "text/plain; charset=utf-8" } }
@@ -13,6 +14,22 @@ local function timestamp(value)
 end
 
 return { webhook = function(event)
+    local contentType = string.match(event.headers["content-type"] or "", "^[^;]+")
+    if contentType == "application/x-www-form-urlencoded" then
+        local encoded = string.match(event.body, "^payload=(.*)$")
+        if not encoded or string.find(encoded, "&", 1, true) then
+            return response(400, "Invalid interaction form")
+        end
+        local decoded = string.gsub(encoded, "%+", " ")
+        decoded = string.gsub(decoded, "%%(%x%x)", function(byte)
+            return string.char(tonumber(byte, 16))
+        end)
+        local ok, payload = pcall(cairn.json.decode, decoded)
+        if not ok or type(payload) ~= "table" or payload.type ~= "block_actions" then
+            return response(400, "Invalid interaction")
+        end
+        return controls.webhook(event, payload)
+    end
     local ok, envelope = pcall(cairn.json.decode, event.body)
     if not ok or type(envelope) ~= "table" then
         return response(400, "Invalid event")

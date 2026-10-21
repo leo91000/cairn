@@ -8,6 +8,7 @@ capabilities = [
   "inbound",
   "resources",
   "conversations.submit",
+  "conversations.control",
   "http",
   "storage"
 ]

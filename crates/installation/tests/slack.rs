@@ -3,6 +3,8 @@ mod checkpoints;
 mod common;
 #[path = "slack/controller.rs"]
 mod controller;
+#[path = "slack/reset.rs"]
+mod reset;
 
 use aws_lc_rs::hmac;
 use axum::{
@@ -323,6 +325,11 @@ async fn a_failed_long_answer_survives_the_next_authorized_slack_turn() {
     exchange(DeliveryScenario::LongFailedReplyAdvanced).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_signed_slack_control_starts_a_fresh_conversation_without_retiring_its_successor() {
+    exchange(DeliveryScenario::ResetThread).await;
+}
+
 #[derive(Clone, Copy)]
 enum DeliveryScenario {
     Normal,
@@ -330,6 +337,7 @@ enum DeliveryScenario {
     LongReplyRateLimited,
     LongReplyRestart,
     LongFailedReplyAdvanced,
+    ResetThread,
     FullStorage,
     FullStorageRateLimited,
     UnreservedStorage,
@@ -1082,6 +1090,22 @@ async fn exchange(scenario: DeliveryScenario) {
             },
         )
         .await;
+    }
+    if matches!(scenario, DeliveryScenario::ResetThread) {
+        reset::round_trip(
+            &app,
+            &service,
+            &slack,
+            instance_id,
+            &envelope,
+            result.as_ref().expect("first Slack answer missing"),
+        )
+        .await;
+        stop_manager(&mut manager).await;
+        service.shutdown.cancel();
+        slack_server.abort();
+        controller_server.abort();
+        return;
     }
     stop_manager(&mut manager).await;
     let post = result.expect("the actual manager/provider/worker never delivered Slack's answer");

@@ -16,6 +16,7 @@ local function rootForm(event)
     local ready = event.values.appId and table.find(event.secrets or {}, "signingSecret") ~= nil
     if url and ready then
         manifest.settings.event_subscriptions = { request_url = url, bot_events = { "app_mention" } }
+        manifest.settings.interactivity = { is_enabled = true, request_url = url }
     end
     local view = {
         notice(),

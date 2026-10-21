@@ -7,7 +7,32 @@ local text = require("./lib/text")
 local startedAfter = os.clock() + 1
 local nextPost = {}
 
+local function controls(event, part)
+    return cairn.json.encode(cairn.array({
+        { type = "section", text = { type = "plain_text", text = part, emoji = false } },
+        { type = "actions", block_id = "cairn-reset:" .. event.deliveryId, elements = cairn.array({
+            { type = "button", action_id = "cairn_reset", value = event.conversation,
+                text = { type = "plain_text", text = "New conversation", emoji = false },
+                confirm = {
+                    title = { type = "plain_text", text = "New shared conversation" },
+                    text = { type = "plain_text", text = "Retire this settled conversation. The next authorized request in this Slack thread starts fresh; Cairn history stays available." },
+                    confirm = { type = "plain_text", text = "Start fresh" },
+                    deny = { type = "plain_text", text = "Keep conversation" },
+                },
+            },
+        }) },
+    }))
+end
+
 return {
+    interaction = function(event)
+        assert(event.action == "reset", "Unknown Slack control")
+        return cairn.conversations.reset({
+            conversation = event.conversation,
+            thread = event.context.team .. ":" .. event.context.channel .. ":" .. event.context.thread,
+            shared = true,
+        })
+    end,
     message = function(event)
         return cairn.conversations.submit({
             text = event.text,
@@ -48,12 +73,14 @@ return {
             end
             error("The Slack channel is no longer an available public, unshared channel.")
         end
+        local finished = index == #chunks
         cairn.delivery.checkpoint({ status = "sending", nextChunk = index })
         nextPost[channelKey] = os.clock() + 1
         local result = api.request("POST", "chat.postMessage", {
             channel = event.reply.channel,
             thread_ts = event.reply.thread_ts,
             text = chunks[index],
+            blocks = if finished then controls(event, chunks[index]) else nil,
             mrkdwn = "false",
             parse = "none",
             unfurl_links = "false",
@@ -72,7 +99,6 @@ return {
         end
         -- Advance only after a confirmed post. Each next part has its own
         -- durable write intent; a restart cannot repeat an earlier part.
-        local finished = index == #chunks
         cairn.delivery.checkpoint({
             status = if finished then "sent" else "retryable",
             nextChunk = index + 1,
