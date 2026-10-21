@@ -233,7 +233,7 @@ pub(super) async fn save_for(
         super::forms::require_valid(&collection.settings, &result)?;
         super::forms::merge_values(&mut settings, &result);
     }
-    let settings = connections::settings_fields(&fields, &settings)?;
+    let settings = connections::settings_with(&fields, &settings)?;
     let resource_id = previous
         .as_ref()
         .map_or_else(id, |resource| resource.id.clone());

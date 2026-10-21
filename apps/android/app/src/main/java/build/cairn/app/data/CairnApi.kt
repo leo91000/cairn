@@ -428,7 +428,7 @@ private fun Response.withConnectionErrors(): Response {
 /** Imports, skill batches and staged uploads may clone or transfer several megabytes. */
 internal fun longRequest(path: String): Boolean {
     val route = path.substringBefore('?')
-    return route == "/projects/github" ||
+    return route == "/projects/import" ||
         route == "/skills/uploads" ||
         (route.startsWith("/skills/") &&
             (route.endsWith("/import") ||

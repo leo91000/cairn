@@ -328,7 +328,6 @@ test('Discord bots are set up through the package’s own form and keep the toke
       projects: [],
       skills: [],
       mcps: [],
-      github: false,
       installation: false,
     },
   })
@@ -3196,4 +3195,121 @@ test('agent pages show scoped resource rights independently from instance grants
   expect(rules[0]).toMatchObject({ agentId: agent.id, profile: 'contribute', scopes: { channel: ['C222'] } })
   const saved = (await workspace.api('/api/agents')).find((item: any) => item.id === agent.id)
   expect(saved.plugins).toEqual([])
+})
+
+test('a package with device sign-in saves an account without the token reaching the browser', async ({ page }) => {
+  test.setTimeout(60000)
+  await useRelayForHttpMocks(page)
+  const manifest = {
+    id: 'codehost',
+    name: 'Code host',
+    version: '1.0.0',
+    apiVersion: 2,
+    description: 'Synthetic device sign-in fixture.',
+    capabilities: ['http'],
+    instances: { singular: 'Account', plural: 'Accounts' },
+    credential: {
+      label: 'Code host token',
+      header: 'authorization',
+      prefix: 'Bearer ',
+      deviceFlow: { authorizationUrl: 'https://code.example/device/code', tokenUrl: 'https://code.example/token', clientId: 'fixture' },
+    },
+    settings: [{
+      key: 'login',
+      title: 'Account',
+      type: 'string',
+      hidden: true,
+    }],
+    instanceForm: true,
+  }
+  await page.route('**/api/plugins', route => route.fulfill({
+    json: {
+      packages: [{
+        id: 'codehost',
+        builtin: true,
+        status: 'active',
+        active: '1.0.0',
+        manifest,
+        versions: [],
+      }],
+      capabilities: [],
+      connections: [],
+    },
+  }))
+  const flow = (id: string, state: string) => ({
+    id,
+    pluginId: 'codehost',
+    state,
+    userCode: id === 'first' ? 'FIRS-T000' : 'ABCD-1234',
+    verificationUri: 'https://code.example/device',
+    verificationUriComplete: `https://code.example/device?code=${id}`,
+    expiresAt: Date.now() + 900000,
+  })
+  const started: string[] = []
+  const cancelled: string[] = []
+  let polls = 0
+  await page.route('**/api/plugins/codehost/device-flow', async (route) => {
+    const id = started.length ? 'second' : 'first'
+    started.push(id)
+    await route.fulfill({ json: flow(id, 'pending') })
+  })
+  await page.route('**/api/plugins/codehost/device-flow/*', async (route) => {
+    const id = new URL(route.request().url()).pathname.split('/').at(-1)!
+    if (route.request().method() === 'DELETE') {
+      cancelled.push(id)
+      return route.fulfill({ json: { cancelled: true } })
+    }
+
+    polls++
+    await route.fulfill({ json: flow(id, id === 'second' && polls > 1 ? 'completed' : 'pending') })
+  })
+  const completions: Record<string, any>[] = []
+  await page.route('**/api/plugins/codehost/form', async (route) => {
+    const body = route.request().postDataJSON()
+    completions.push(body)
+    const signedIn = body.credentialFlow === 'second'
+    await route.fulfill({
+      json: {
+        options: {},
+        values: signedIn ? { login: 'octocat' } : {},
+        errors: {},
+        view: signedIn ? [{ type: 'alert', tone: 'success', title: 'Signed in as octocat' }] : [],
+      },
+    })
+  })
+  const saves: Record<string, any>[] = []
+  await page.route('**/api/plugins/codehost/connections', async (route) => {
+    saves.push(route.request().postDataJSON())
+    await route.fulfill({ json: {} })
+  })
+  await page.goto(workspacePath('/plugins/codehost'))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Add account', exact: true }).click()
+  const editor = page.getByRole('dialog', { name: 'New account' })
+  await expect(editor.getByLabel('Code host token')).toHaveAttribute('required', '')
+
+  // A sign-in shows its code and the service's page, and can be cancelled.
+  await editor.getByRole('button', { name: 'Sign in with Code host', exact: true }).click()
+  await expect(editor.getByLabel('Verification code', { exact: true })).toHaveText('FIRS-T000')
+  await expect(editor.getByRole('link', { name: 'Open Code host' })).toHaveAttribute('href', 'https://code.example/device?code=first')
+  await editor.getByRole('button', { name: 'Cancel sign-in', exact: true }).click()
+  await expect.poll(() => cancelled).toEqual(['first'])
+  await expect(editor.getByLabel('Verification code', { exact: true })).toHaveCount(0)
+
+  // Polled every 2 s until it completes; the form handler then says who signed in.
+  await editor.getByRole('button', { name: 'Sign in with Code host', exact: true }).click()
+  await expect(editor.getByLabel('Verification code', { exact: true })).toHaveText('ABCD-1234')
+  await expect(editor.getByText('Signed in. Save to keep this account.')).toBeVisible({ timeout: 10000 })
+  await expect(editor.getByText('Signed in as octocat')).toBeVisible()
+  expect(completions.at(-1)).toMatchObject({ credentialFlow: 'second', changed: 'credential' })
+  expect(completions.at(-1)).not.toHaveProperty('token')
+  await expect(editor.getByLabel('Code host token')).not.toHaveAttribute('required', '')
+  await editor.getByLabel('Name', { exact: true }).fill('Work')
+  await editor.getByRole('button', { name: 'Save account', exact: true }).click()
+  await expect(editor).toHaveCount(0)
+  expect(saves).toHaveLength(1)
+  expect(saves[0]).toMatchObject({ name: 'Work', credentialFlow: 'second', settings: { login: 'octocat' } })
+  expect(saves[0]).not.toHaveProperty('token')
+  // The save consumed the sign-in: nothing is left to cancel.
+  expect(cancelled).toEqual(['first'])
 })

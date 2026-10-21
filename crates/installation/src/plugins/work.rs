@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 pub const EVENTS: &str = "plugin-events";
 pub const DELIVERIES: &str = "plugin-deliveries";
+pub const CHECKPOINTS: &str = "plugin-delivery-checkpoints";
 
 /// Remove the native event and its idempotency receipts atomically. Consent
 /// remains valid independently of whether its URL delivery has finished.
@@ -1364,12 +1365,82 @@ pub async fn questions(s: &Service, expected: &Connection, delivery: &Value) -> 
         .await
 }
 
+/// Durable reply state belongs to one host-selected delivery, not general plugin
+/// storage. It survives a handler failure and is removed with that delivery.
+pub(crate) async fn checkpoint(
+    s: &Service,
+    context: &Context,
+    args: &Value,
+    digest: Option<&str>,
+) -> Result<Value> {
+    if context.event["name"] != "reply" {
+        return Err(Error::forbidden(
+            "Only a reply can checkpoint its delivery.",
+        ));
+    }
+    let delivery = text(&context.event, "id").to_owned();
+    crate::validation::uuid(&delivery)?;
+    let state = args.get("state").cloned().unwrap_or(Value::Null);
+    if serde_json::to_vec(&state)?.len() > 65_536 {
+        return Err(Error::too_large(
+            "Delivery checkpoints are limited to 64 KB.",
+        ));
+    }
+    let package = registry::approved(s, &context.connection.plugin_id).await?;
+    if digest.is_some_and(|expected| expected != package.package.digest) {
+        return Err(Error::forbidden("The reply package approval changed."));
+    }
+    let approval = package.snapshot();
+    let expected = context.connection.clone();
+    let author = context.event["authorId"].clone();
+    let routing = serde_json::to_value(&expected.routing)?;
+    s.store
+        .transaction(move |db| {
+            approval.recheck_in(db)?;
+            let connection = authorize(db, &expected)?;
+            if !connection.allows(author.as_str().unwrap_or("")) {
+                return Err(Error::forbidden("Reply authorization was revoked."));
+            }
+            let current = db
+                .get(DELIVERIES, &delivery)?
+                .ok_or_else(|| Error::forbidden("The delivery is no longer pending."))?;
+            if current["connectionId"] != expected.id
+                || current["revision"] != expected.revision
+                || current["routing"] != routing
+                || current["userId"] != author
+            {
+                return Err(Error::forbidden("The reply's authority changed."));
+            }
+            db.put(
+                CHECKPOINTS,
+                &json!({
+                    "id": checkpoint_key(&delivery), "connectionId": expected.id,
+                    "deliveryId": delivery, "state": state,
+                }),
+            )?;
+            Ok(Value::Null)
+        })
+        .await
+}
+
+pub(crate) fn checkpoint_key(delivery: &str) -> String {
+    format!("delivery-checkpoint:{delivery}")
+}
+
+pub(crate) async fn checkpoint_state(s: &Service, delivery: &Value) -> Result<Value> {
+    Ok(s.store
+        .get(CHECKPOINTS, &checkpoint_key(text(delivery, "id")))
+        .await?
+        .map_or(Value::Null, |record| record["state"].clone()))
+}
+
 /// Removes a delivery and records how its exchange ended.
 pub async fn finish(s: &Service, delivery: &Value, status: &'static str) -> Result<()> {
     let id = text(delivery, "id").to_owned();
     s.store
         .transaction(move |db| {
             db.remove(DELIVERIES, &id)?;
+            db.remove(CHECKPOINTS, &checkpoint_key(&id))?;
             for mut value in db.list("plugin-activity")? {
                 if value["deliveryId"] == id {
                     value["status"] = json!(status);

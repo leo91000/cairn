@@ -187,7 +187,8 @@ async fn run(
     evaluation.finish(&package.manifest.settings, &["credential", "form"], result)
 }
 
-/// `POST /api/plugins/{id}/form`: `{ instance?, settings, secrets?, token?, changed? }`
+/// `POST /api/plugins/{id}/form`:
+/// `{ instance?, settings, secrets?, token? | credentialFlow?, changed? }`
 /// → `{ options, values, errors, view }`.
 pub async fn form(s: &Service, plugin_id: &str, input: &Value) -> Result<Value> {
     let owner = Arc::new(super::operations::Owner::current(s).await?);
@@ -211,7 +212,22 @@ pub(crate) async fn form_owned(
         None => None,
     };
     let instance = root.as_ref().map(|root| root.instance().to_owned());
-    let token = text(input, "token").trim();
+    let signed_in = match input["credentialFlow"]
+        .as_str()
+        .filter(|flow| !flow.is_empty())
+    {
+        Some(flow) => Some(
+            s.plugins
+                .device_flows
+                .token(s, plugin_id, flow, false)
+                .await?,
+        ),
+        None => None,
+    };
+    let token = signed_in
+        .as_deref()
+        .unwrap_or_else(|| text(input, "token"))
+        .trim();
     if token.len() > 4096 || token.chars().any(|c| c.is_whitespace() || c.is_control()) {
         let label = manifest
             .credential

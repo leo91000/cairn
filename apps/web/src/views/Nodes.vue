@@ -7,6 +7,7 @@ import {
   ref,
 } from 'vue'
 import { diskCapacity, formatMiB, nodeDiagnostics } from '../../../../packages/contracts/nodes'
+import { nodeBackend } from '../agent-access'
 import {
   api,
   ApiError,
@@ -29,6 +30,18 @@ import {
 const nodes = ref<ExecutionNode[]>([])
 const nativeCallers = ref<Array<{ id: string, email: string }>>([])
 const enrollmentBackend = ref<'firecracker' | 'native'>('firecracker')
+// Stops before deleting while a conversation disk is mounted and keeps the unit until the rest is gone, so it can be rerun.
+const nativeUninstallCommand = `sudo sh -c 'if [ -e /etc/systemd/system/cairn-native-node.service ]; then systemctl disable --now cairn-native-node || exit; fi; mounts=$(findmnt -rno TARGET) || { echo "findmnt could not list mounts." >&2; exit 1; }; printf "%s\\n" "$mounts" | grep ^/var/lib/cairn-native/; match=$?; if [ "$match" -ne 1 ]; then echo "Mount safety could not be confirmed. Run sudo systemctl start cairn-native-node to release owned conversation disks, then retry." >&2; exit 1; fi; rm -rf /opt/cairn-native /var/lib/cairn-native && { userdel cairn-workload || ! id cairn-workload >/dev/null 2>&1; } && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload'`
+// The node a guided backend switch replaces, while the new runtime's enrollment is pending.
+const replacing = ref<ExecutionNode | null>(null)
+// Once the replacement connects and its setup steps end, retiring the previous node is offered.
+let replacement: { previous: string, next: string } | null = null
+const retiring = ref<{ previous: ExecutionNode, next: ExecutionNode } | null>(null)
+const uninstallCommands = {
+  firecracker: 'sudo systemctl disable --now cairn-node; sudo docker rm -f cairn-execution-node; sudo rm -rf /etc/systemd/system/cairn-node.service /opt/cairn-node /var/lib/cairn-node',
+  native: nativeUninstallCommand,
+}
+const backendNames = { firecracker: 'Firecracker VM', native: 'native process' }
 const editing = ref<ExecutionNode | null>(null)
 const tags = ref('')
 const name = ref('')
@@ -81,11 +94,22 @@ async function load() {
 
   if (!enrollment.value)
     return
-  const connected = nodes.value.find(node => !node.local && !node.revoked && !knownBeforeEnrollment.has(node.id))
+  const invitation = enrollment.value
+  // Older installations cannot safely associate a guided switch with its replacement.
+  if (replacing.value && !invitation.nodeId)
+    return
+  const connected = nodes.value.find(node => !node.local && !node.revoked
+    && nodeBackend(node) === (invitation.backend ?? 'firecracker')
+    && (invitation.nodeId ? node.id === invitation.nodeId : !knownBeforeEnrollment.has(node.id)))
   if (connected) {
     enrollment.value = null
     adding.value = false
     notify(`${connected.name} is connected`)
+    if (replacing.value) {
+      replacement = { previous: replacing.value.id, next: connected.id }
+      replacing.value = null
+    }
+
     // A native machine is configured first (trusted people), then the same add-only step follows.
     if (connected.capabilities.backend === 'native') {
       grantAfterConfigure = connected.id
@@ -130,6 +154,44 @@ function enroll() {
   })
 }
 
+function addMachine() {
+  replacing.value = null
+  adding.value = true
+}
+
+// Another runtime enrolls as a new node, so its grants and checkpoints never mix with the old ones.
+function switchBackend(node: ExecutionNode) {
+  replacing.value = node
+  enrollmentBackend.value = nodeBackend(node) === 'native' ? 'firecracker' : 'native'
+  name.value = node.name
+  enrollment.value = null
+  error.value = ''
+  adding.value = true
+}
+
+// The last step of a guided switch, once the replacement's setup is done or skipped.
+function offerRetirement(node: string) {
+  if (replacement?.next !== node)
+    return
+  const previous = nodes.value.find(item => item.id === replacement!.previous && !item.revoked)
+  const next = nodes.value.find(item => item.id === node)
+  replacement = null
+  if (previous && next)
+    retiring.value = { previous, next }
+}
+
+function retire() {
+  const pair = retiring.value
+  if (!pair)
+    return
+  return action(async () => {
+    const result = await api<{ releasedPlacements?: number }>(`/nodes/${pair.previous.id}/revoke`, { method: 'POST', body: JSON.stringify({ releasePlacements: true }) })
+    retiring.value = null
+    const released = result.releasedPlacements ?? 0
+    notify(released ? `${pair.previous.name} revoked; ${released} ${released === 1 ? 'conversation returns' : 'conversations return'} to automatic placement` : `${pair.previous.name} revoked`)
+  })
+}
+
 function edit(node: ExecutionNode) {
   editing.value = JSON.parse(JSON.stringify(node))
   if (editing.value && node.capabilities.backend === 'native') {
@@ -171,8 +233,19 @@ function save() {
 }
 
 function closeEditor() {
+  const node = editing.value
   editing.value = null
+  const pending = grantAfterConfigure
   grantAfterConfigure = null
+  if (node && pending === node.id)
+    offerRetirement(node.id)
+}
+
+function closeGrants() {
+  const node = granting.value
+  granting.value = null
+  if (node)
+    offerRetirement(node.id)
 }
 
 // The last step of adding a machine: nothing is granted unless the owner picks agents here.
@@ -214,6 +287,7 @@ function saveGrants() {
     granting.value = null
     notify(`${node.name} is ready`)
     await refresh()
+    offerRetirement(node.id)
   })
 }
 
@@ -283,7 +357,7 @@ function statusLabel(node: ExecutionNode) {
         </p><h1>Nodes</h1><p class="mt-2 text-muted">
           A home for your agents’ work. Manage machines, capacity and access.
         </p>
-      </div><UiButton @click="adding = true">
+      </div><UiButton @click="addMachine">
         <Icon :name="Plus" :size="16" /> Add a machine
       </UiButton>
     </header>
@@ -296,12 +370,15 @@ function statusLabel(node: ExecutionNode) {
     <Modal
       v-if="adding"
       sheet
-      title="Add a machine"
+      :title="replacing ? `Switch ${replacing.name} to ${backendNames[enrollmentBackend]}` : 'Add a machine'"
       @close="adding = false"
     >
       <section class="node-form">
-        <p class="text-sm text-muted">
-          Connect a trusted Linux machine, then choose its execution mode and authorized agents.
+        <p v-if="replacing" class="text-sm text-muted">
+          Install the {{ backendNames[enrollmentBackend] }} runtime on the machine running {{ replacing.name }}. It enrolls as a new node; once it connects and is set up, Cairn offers to revoke {{ replacing.name }}. Conversations keep their execution backend, and each agent’s backend is chosen on its page.
+        </p>
+        <p v-else class="text-sm text-muted">
+          Connect a trusted Linux machine, then choose its execution backend and authorized agents.
         </p>
         <p class="text-sm text-muted">
           The node must reach the manager directly over your local network, VPN or an optional public URL. It does not use the relay. Disk blocks never pass through the relay.
@@ -311,6 +388,7 @@ function statusLabel(node: ExecutionNode) {
         </UiAlert>
         <form class="mt-3 grid gap-3" @submit.prevent="enroll">
           <VirtualSelect
+            v-if="!replacing"
             v-model="enrollmentBackend"
             label="Execution backend"
             :options="[
@@ -319,7 +397,7 @@ function statusLabel(node: ExecutionNode) {
             ]"
           />
           <p v-if="enrollmentBackend === 'native'" class="text-sm text-muted">
-            Shares the host GPU through its installed drivers. Uses weaker isolation than a VM; heavy work can slow your desktop. Linux x86-64 and systemd are required.
+            Shares the host GPU through its installed drivers. Uses weaker isolation than a VM; heavy work can slow your desktop. Requires Linux x86-64 with systemd and the ublk kernel driver.
           </p>
           <label>Machine name<input
             v-model="name"
@@ -343,7 +421,7 @@ function statusLabel(node: ExecutionNode) {
         </form>
         <div v-if="enrollment" class="mt-4 grid gap-2">
           <template v-if="enrollment.installCommand">
-            <p><strong>1.</strong> On the Linux machine ({{ enrollment.backend === 'native' ? 'x86-64 with Python 3, curl and systemd' : 'x86-64 with KVM, Docker, curl and systemd' }}), run:</p>
+            <p><strong>1.</strong> On the Linux machine ({{ enrollment.backend === 'native' ? 'x86-64 with Python 3, curl, systemd, e2fsprogs and the ublk_drv kernel module' : 'x86-64 with KVM, Docker, curl and systemd' }}), run:</p>
             <code class="block break-all select-all" aria-label="Node installation command">{{ enrollment.installCommand }}</code>
             <p><strong>2.</strong> When prompted, enter this single-use code. It expires {{ new Date(enrollment.expiresAt).toLocaleString() }}.</p>
           </template>
@@ -354,8 +432,11 @@ function statusLabel(node: ExecutionNode) {
             <p>Paste this single-use code, press Enter, then Ctrl+D to finish standard input. It expires {{ new Date(enrollment.expiresAt).toLocaleString() }}:</p>
           </template>
           <code class="block break-all select-all" aria-label="Single-use enrollment code">{{ enrollment.code }}</code>
+          <UiAlert v-if="replacing && !enrollment.nodeId">
+            Update this installation to track the replacement and finish the guided switch. The previous node is kept.
+          </UiAlert>
           <p class="text-sm text-muted">
-            <strong>3.</strong> This page detects the machine once it connects and asks which agents may use it, as the last step.
+            <strong>3.</strong> {{ enrollment.backend === 'native' ? 'This page detects the machine once it connects, opens its configuration to enable native execution and choose trusted people, then asks which agents may use it.' : 'This page detects the machine once it connects and asks which agents may use it, as the last step.' }}
           </p>
           <div>
             <UiButton variant="default" @click="enrollment = null">
@@ -450,7 +531,7 @@ function statusLabel(node: ExecutionNode) {
           <details class="mt-2 text-xs text-muted">
             <summary>Technical details</summary>
             <p class="mt-2">
-              Detected {{ node.capabilities.cpu }} CPU · {{ formatMiB(node.capabilities.memoryMiB) }} RAM · {{ formatMiB(node.capabilities.diskMiB) }} disk · {{ node.capabilities.os }} {{ node.capabilities.arch }} · KVM {{ node.capabilities.kvm ? 'available' : 'unavailable' }}
+              Detected {{ node.capabilities.cpu }} CPU · {{ formatMiB(node.capabilities.memoryMiB) }} RAM · {{ formatMiB(node.capabilities.diskMiB) }} disk · {{ node.capabilities.os }} {{ node.capabilities.arch }} · {{ node.capabilities.backend === 'native' ? `ublk ${node.capabilities.ublk ? 'available' : 'unavailable'}` : `KVM ${node.capabilities.kvm ? 'available' : 'unavailable'}` }}
             </p>
             <p v-if="node.lastSeen">
               Last contact {{ new Date(node.lastSeen).toLocaleString() }}
@@ -466,7 +547,10 @@ function statusLabel(node: ExecutionNode) {
             <UiButton variant="default" @click="edit(node)">
               <Icon :name="Settings2" :size="15" /> Configure
             </UiButton>
-            <NodeStorage v-if="node.capabilities.backend !== 'native'" :node="node" @saved="load" />
+            <NodeStorage :node="node" @saved="load" />
+            <UiButton v-if="!node.local" variant="default" @click="switchBackend(node)">
+              {{ nodeBackend(node) === 'native' ? 'Switch to VM' : 'Switch to native' }}
+            </UiButton>
             <UiButton v-if="!node.local" variant="default" @click="revoking = node">
               Revoke
             </UiButton>
@@ -565,7 +649,7 @@ function statusLabel(node: ExecutionNode) {
       v-if="granting"
       sheet
       :title="`Who can use “${granting.name}”?`"
-      @close="granting = null"
+      @close="closeGrants"
     >
       <form class="node-form" @submit.prevent="saveGrants">
         <p class="text-sm text-muted">
@@ -598,7 +682,7 @@ function statusLabel(node: ExecutionNode) {
           {{ error }}
         </UiAlert>
         <div class="flex justify-end gap-2.5">
-          <UiButton :disabled="busy" @click="granting = null">
+          <UiButton :disabled="busy" @click="closeGrants">
             Later
           </UiButton>
           <UiButton type="submit" variant="primary" :disabled="busy">
@@ -648,14 +732,21 @@ function statusLabel(node: ExecutionNode) {
         <fieldset v-if="editing.capabilities.backend === 'native'" class="form-section">
           <legend>Native execution</legend>
           <p>Only selected native agents and trusted people may run here. Disabling native execution or removing a person stops affected work after its lease expires.</p>
-          <label class="checkbox"><input v-model="editing.nativeEnabled" type="checkbox">Enable native execution</label>
-          <label v-for="person in nativeCallers" :key="person.id" class="checkbox"><input v-model="editing.nativeAccounts" type="checkbox" :value="person.id">{{ person.email }}</label>
+          <label class="access-row"><input v-model="editing.nativeEnabled" type="checkbox">Enable native execution</label>
+          <template v-if="nativeCallers.length">
+            <p id="native-trusted-people" class="mt-4 mb-2!">
+              Trusted people
+            </p>
+            <div class="grid gap-2" role="group" aria-labelledby="native-trusted-people">
+              <label v-for="person in nativeCallers" :key="person.id" class="access-row"><input v-model="editing.nativeAccounts" type="checkbox" :value="person.id"><span class="min-w-0 break-all">{{ person.email }}</span></label>
+            </div>
+          </template>
           <p v-if="!nativeCallers.length" class="text-sm text-muted">
             No current people are available. Refresh the installation connection before granting access.
           </p>
         </fieldset>
         <fieldset class="form-section">
-          <legend>Slots and shared budgets</legend><p>All slots share these budgets. Resources are used on demand.</p><div class="form-grid">
+          <legend>Slots and shared budgets</legend><p>{{ editing.capabilities.backend === 'native' ? 'A native node runs one conversation at a time. Resources are used on demand.' : 'All slots share these budgets. Resources are used on demand.' }}</p><div class="form-grid">
             <label>Execution slots<input
               v-model.number="editing.slots"
               :disabled="editing.capabilities.backend === 'native'"
@@ -704,7 +795,7 @@ function statusLabel(node: ExecutionNode) {
           <p v-if="editing.exclusiveAgents?.length">
             {{ editing.exclusiveAgents.length }} can reserve it exclusively: {{ agentNames(editing.exclusiveAgents) }}
           </p>
-          <p v-if="!editing.exclusiveReservations">
+          <p v-if="!editing.exclusiveReservations && editing.capabilities.backend !== 'native'">
             This runtime needs an update before exclusive reservations can be acquired.
           </p>
           <p class="text-xs">
@@ -730,14 +821,55 @@ function statusLabel(node: ExecutionNode) {
           Conversations running there pause within the disconnection delay, then resume from their latest recovery point on another authorized machine when one has capacity. Conversations fixed to this machine, or without a recovery point, wait.
         </p>
         <p>Files stored on the machine are not deleted. To uninstall it, run on the machine:</p>
-        <code v-if="revoking?.capabilities.backend === 'native'" class="block break-all select-all">sudo systemctl disable --now cairn-native-node; sudo rm -rf /etc/systemd/system/cairn-native-node.service /opt/cairn-native /var/lib/cairn-native</code>
-        <code v-else class="block break-all select-all">sudo systemctl disable --now cairn-node; sudo docker rm -f cairn-execution-node; sudo rm -rf /etc/systemd/system/cairn-node.service /opt/cairn-node /var/lib/cairn-node</code>
+        <code class="block break-all select-all">{{ uninstallCommands[nodeBackend(revoking)] }}</code>
         <p class="text-sm text-muted">
-          The last command also deletes the local conversation disks kept on that machine.
+          Removing these directories also deletes the local conversation disks kept on that machine.
+        </p>
+        <p v-if="revoking.capabilities.backend === 'native'" class="text-sm text-muted">
+          If a conversation disk is still mounted, the command lists it and stops before deleting anything: start cairn-native-node so its recovery releases owned disks, then run the command again.
         </p>
         <div>
           <UiButton variant="danger" :disabled="busy" @click="action(async () => { await api(`/nodes/${revoking!.id}/revoke`, { method: 'POST', body: '{}' }); revoking = null })">
             Revoke node
+          </UiButton>
+        </div>
+      </div>
+    </Modal>
+    <Modal
+      v-if="retiring"
+      sheet
+      :title="`Retire the previous ${backendNames[nodeBackend(retiring.previous)]} node?`"
+      @close="retiring = null"
+    >
+      <div class="node-form">
+        <p>{{ retiring.next.name }} now runs as a {{ backendNames[nodeBackend(retiring.next)] }} node. Revoke the previous {{ backendNames[nodeBackend(retiring.previous)] }} node, {{ retiring.previous.name }}, to finish the switch: it loses access to the master, and agents lose their permission to use it.</p>
+        <p v-if="retiring.previous.agents?.some(agent => !agent.allNodes)">
+          Agents allowed on the previous node: {{ retiring.previous.agents.filter(agent => !agent.allNodes).map(agent => agent.name).join(', ') }}. To run them on the new node, set them to {{ backendNames[nodeBackend(retiring.next)] }} on their page and allow it.
+          <RouterLink to="/agents" class="text-accent hover:underline">
+            Open agents ›
+          </RouterLink>
+        </p>
+        <p>Conversations fixed to or preferring the previous node return to automatic placement. Conversations keep their execution backend: existing ones continue on other {{ backendNames[nodeBackend(retiring.previous)] }} nodes.</p>
+        <p v-if="retiring.previous.occupiedSlots">
+          Conversations running there pause within the disconnection delay, then resume from their latest recovery point on another authorized machine when one has capacity.
+        </p>
+        <p>Then uninstall the previous runtime on the machine:</p>
+        <code class="block break-all select-all" aria-label="Previous runtime uninstall command">{{ uninstallCommands[nodeBackend(retiring.previous)] }}</code>
+        <p class="text-sm text-muted">
+          Removing these directories also deletes the local conversation disks kept for the previous node.
+        </p>
+        <p v-if="nodeBackend(retiring.previous) === 'native'" class="text-sm text-muted">
+          If a conversation disk is still mounted, the command lists it and stops before deleting anything: start cairn-native-node so its recovery releases owned disks, then run the command again.
+        </p>
+        <UiAlert v-if="error">
+          {{ error }}
+        </UiAlert>
+        <div class="flex flex-wrap justify-end gap-2.5">
+          <UiButton :disabled="busy" @click="retiring = null">
+            Keep both for now
+          </UiButton>
+          <UiButton variant="danger" :disabled="busy" @click="retire">
+            Revoke previous node
           </UiButton>
         </div>
       </div>

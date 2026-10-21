@@ -31,6 +31,7 @@ export interface ExecutionNode {
   capabilities: NodeResources & {
     diskTotalMiB?: number
     backend?: 'firecracker' | 'native'
+    ublk?: boolean
     os: string
     arch: string
     kvm: boolean
@@ -80,6 +81,7 @@ export interface NodeAgent {
 export interface NativeCaller { id: string, email: string }
 
 export interface NodeEnrollment {
+  nodeId?: string
   backend?: 'firecracker' | 'native'
   installCommand?: string | null
   managerUrl?: string | null
@@ -131,11 +133,13 @@ export function nodeDiagnostics(node: ExecutionNode, now = Date.now()) {
     return []
   const reasons: string[] = []
   if (!node.local && node.status === 'offline')
-    reasons.push(node.lastSeen != null ? `No contact since ${relativeAge(node.lastSeen, now)}: check that the machine is on, online and that the cairn-node service is running.` : 'The machine has never connected: run the installation command on it.')
+    reasons.push(node.lastSeen != null ? `No contact since ${relativeAge(node.lastSeen, now)}: check that the machine is on, online and that the ${node.capabilities.backend === 'native' ? 'cairn-native-node' : 'cairn-node'} service is running.` : 'The machine has never connected: run the installation command on it.')
   if (node.capabilities.backend !== 'native' && !node.capabilities.kvm)
     reasons.push('KVM is unavailable: enable virtualization in the BIOS and load the kvm module.')
   if (node.capabilities.backend !== 'native' && !node.capabilities.fuse)
     reasons.push('FUSE is unavailable: this node cannot mount S3-backed conversation disks.')
+  if (node.capabilities.backend === 'native' && !node.capabilities.ublk)
+    reasons.push('ublk is unavailable: this node needs a current native runtime and the ublk_drv kernel module (/dev/ublk-control) to mount S3-backed conversation disks.')
   if (node.status !== 'offline' && node.executionReady === false)
     reasons.push(node.budgetError ? `The shared budget could not be applied: ${node.budgetError}` : node.updateError ? `The runtime is not ready: ${node.updateError}` : 'The runtime is not ready yet or does not match the version approved by the master.')
   if (node.maintenance)

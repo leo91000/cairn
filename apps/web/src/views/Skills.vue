@@ -20,7 +20,6 @@ import {
   BookOpen,
   Files,
   FolderGit2,
-  Github,
   Globe,
   HardDrive,
   Import,
@@ -31,7 +30,7 @@ import {
   Terminal,
   Trash2,
 } from '../icons'
-import { formatBytes, plural, shortCommit } from '../skill-bundle'
+import { formatBytes, plural, shortVersion } from '../skill-bundle'
 import { iconButton } from '../ui'
 
 const query = ref('')
@@ -63,7 +62,7 @@ const items = computed(() =>
   state.skills.filter(
     skill =>
       (scopeFilter.value === 'all' || skill.scope === scopeFilter.value)
-      && `${skill.name} ${skill.description} ${skill.source?.repository ?? ''}`
+      && `${skill.name} ${skill.description} ${skill.source?.label ?? ''}`
         .toLowerCase()
         .includes(query.value.toLowerCase()),
   ),
@@ -145,12 +144,12 @@ async function remove() {
         <span
           v-if="skill.source"
           class="inline-flex min-w-0 items-center gap-1.5 rounded-[5px] border border-line bg-surface px-1.5 py-[3px] text-2xs text-muted"
-          :title="`Imported from github.com/${skill.source.repository}${skill.source.path ? `/${skill.source.path}` : ''} at ${shortCommit(skill.source.commit)}${skill.source.modified ? ' · edited since' : ''}`"
+          :title="`Imported from ${skill.source.label}${skill.source.folder ? ` · ${skill.source.folder}` : ''} at ${shortVersion(skill.source.version)}${skill.source.modified ? ' · edited since' : ''}`"
           data-testid="skill-source"
         >
-          <Icon :name="Github" :size="12" class="shrink-0 text-ink" />
-          <span class="truncate font-medium text-ink">{{ skill.source.repository }}</span>
-          <code class="shrink-0 text-3xs">{{ shortCommit(skill.source.commit) }}</code>
+          <Icon :name="Import" :size="12" class="shrink-0 text-ink" />
+          <span class="truncate font-medium text-ink">{{ skill.source.label }}</span>
+          <code class="shrink-0 text-3xs">{{ shortVersion(skill.source.version) }}</code>
           <span v-if="skill.source.modified" class="shrink-0 text-3xs font-semibold text-warning">· edited</span>
         </span>
         <button

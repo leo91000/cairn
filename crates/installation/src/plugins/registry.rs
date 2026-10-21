@@ -170,6 +170,15 @@ fn package(format: &str, manifest: &str, source: Sources, builtin: bool) -> Resu
             Error::bad(message)
         }
     })?;
+    if manifest
+        .conditions
+        .iter()
+        .any(|condition| jsonschema::validator_for(&condition.input_schema).is_err())
+    {
+        return Err(Error::bad(
+            "A plugin condition has an invalid input schema.",
+        ));
+    }
     for program in &manifest.programs {
         if !program.installer.is_empty() && !source.modules.contains_key(&program.installer) {
             return Err(Error::bad(
@@ -405,6 +414,24 @@ pub(crate) async fn approved(s: &Service, id: &str) -> Result<ApprovedPackage> {
         package,
         record: Some(record),
     })
+}
+
+/// Every package that can run now: bundled ones and approved active installed versions.
+/// A package that fails to load is left out, as it cannot run either.
+pub async fn all_active(s: &Service) -> Result<Vec<Package>> {
+    let mut packages = BUILTIN
+        .iter()
+        .map(|(id, _, _, _)| builtin(id).expect("bundled plugin"))
+        .collect::<Vec<_>>();
+    for id in entries(&root(s))? {
+        if BUILTIN.iter().any(|(name, _, _, _)| *name == id) {
+            continue;
+        }
+        if let Ok(package) = active(s, &id).await {
+            packages.push(package);
+        }
+    }
+    Ok(packages)
 }
 
 fn summary(package: &Package) -> Value {

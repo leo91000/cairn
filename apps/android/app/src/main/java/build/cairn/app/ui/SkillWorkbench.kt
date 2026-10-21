@@ -252,7 +252,7 @@ internal fun SkillWorkbench(
                                 )
                                 if (draft?.base?.source != null)
                                     DropdownMenuItem(
-                                        text = { Text("Source GitHub") },
+                                        text = { Text("Source du skill") },
                                         leadingIcon = { Icon(CairnIcons.Branch, null) },
                                         onClick = {
                                             menu = false
@@ -787,16 +787,14 @@ private fun SkillOverview(
                     Spacer(Modifier.width(8.dp))
                     Column(Modifier.weight(1f)) {
                         Text(
-                            source.label,
+                            source.reference,
                             style = MaterialTheme.typography.labelLarge,
                             fontFamily = FontFamily.Monospace,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
                         Text(
-                            listOf(source.path.ifBlank { "racine" }, source.ref)
-                                .filter { it.isNotBlank() }
-                                .joinToString(" · "),
+                            source.folder.ifBlank { "racine" },
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,

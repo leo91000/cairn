@@ -399,14 +399,16 @@ fun Confirm(
     busy: Boolean,
     error: String?,
     dismiss: () -> Unit,
+    details: (@Composable () -> Unit)? = null,
     action: () -> Unit,
 ) {
     AlertDialog(
         onDismissRequest = { if (!busy) dismiss() },
         title = { Text(title) },
         text = {
-            Column {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(description)
+                details?.invoke()
                 ConnectionFeedbackNotice()
                 if (error != null) Text(error, color = MaterialTheme.colorScheme.error)
             }

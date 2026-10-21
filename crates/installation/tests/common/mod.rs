@@ -3,6 +3,8 @@
 //! Every test crate compiles this module on its own and uses only part of it.
 #![allow(dead_code)]
 
+pub mod github;
+
 use axum::{
     Router,
     body::{Body, Bytes, to_bytes},
@@ -52,7 +54,6 @@ pub fn config(root: &Path) -> Config {
         claude_bin: "claude".into(),
         opencode_bin: "opencode".into(),
         opencode_go_usage_url: cairn_installation::accounts::opencode::USAGE_URL.into(),
-        gh_bin: "gh".into(),
         concurrency: 1,
         logger: false,
         worker_enabled: false,

@@ -6,7 +6,6 @@ import type {
   ChipTone,
   Context,
   DelegationEffect,
-  GithubMode,
   Preview,
   ReviewLine,
   SectionId,
@@ -33,7 +32,6 @@ import {
   effectiveExclusive,
   errorSection,
   issues as findIssues,
-  githubTokenChange,
   grantablePackages,
   isolationNote,
   mainLockedSections,
@@ -43,7 +41,6 @@ import {
   nodesFor,
   olderInstallation,
   rebaseDraft,
-  restrictedGithubMode,
   reviewLines,
   sandboxOptionsFor,
   savedDraft,
@@ -103,7 +100,6 @@ const titles: Record<SectionId, string> = {
   projects: 'Projects',
   skills: 'Skills',
   mcps: 'MCP & tools',
-  github: 'GitHub',
   plugins: 'Secrets & plugins',
   nodes: 'Nodes',
   sandbox: 'Execution mode',
@@ -112,7 +108,7 @@ const titles: Record<SectionId, string> = {
 }
 const navGroups: { title: string, items: SectionId[] }[] = [
   { title: 'Profile', items: ['identity', 'model'] },
-  { title: 'Resource access', items: ['projects', 'skills', 'mcps', 'github', 'plugins'] },
+  { title: 'Resource access', items: ['projects', 'skills', 'mcps', 'plugins'] },
   { title: 'Execution', items: ['nodes', 'sandbox'] },
   { title: 'Elevated rights', items: ['powers'] },
   { title: 'Advanced', items: ['advanced'] },
@@ -136,21 +132,8 @@ const catalogError = ref('')
 const nodesError = ref('')
 const nodesLoading = ref(false)
 const catalogLoading = ref(false)
-// The dedicated GitHub token is a separate secret, saved with the page.
-const githubConfigured = ref(false)
-const githubToken = ref('')
-const dedicated = ref(false)
-const savedDedicated = ref(false)
-const removeToken = ref(false)
 // An installation older than agent revisions keeps live grants on its resources: shown read-only.
 const legacy = ref(false)
-// Reload found a dedicated token saved since the owner chose "No GitHub".
-const tokenSavedMeanwhile = ref(false)
-// The token state could not be read: the GitHub section is read-only until it is.
-const githubError = ref('')
-const githubLoading = ref(false)
-// Restricting projects switched the shared connection to the saved dedicated token.
-const switchedToToken = ref(false)
 const suspended = ref<string[]>([])
 const busy = ref(false)
 const serverError = ref('')
@@ -179,50 +162,13 @@ const access = computed(() => draft.value.access)
 const backend = computed(() => backendOf(access.value))
 // Nodes of the agent's execution backend, the only ones it can be granted.
 const availableNodes = computed(() => nodesFor(nodes.value, backend.value))
-// The owner's own choice: "No GitHub" or "Remove saved token" removes the saved token.
-const githubMode = computed({
-  get: (): GithubMode => draft.value.access.github ? 'shared' : dedicated.value ? 'dedicated' : 'none',
-  set: (mode: GithubMode) => {
-    draft.value.access.github = mode === 'shared'
-    dedicated.value = mode === 'dedicated'
-    removeToken.value = mode === 'none'
-    switchedToToken.value = false
-    if (mode !== 'dedicated')
-      githubToken.value = ''
-  },
-})
-const tokenChange = computed(() => githubError.value
-  ? null
-  : githubTokenChange({
-      main: isMain.value,
-      mode: githubMode.value,
-      token: githubToken.value,
-      configured: githubConfigured.value,
-      removeRequested: removeToken.value,
-    }))
-// With an unknown token state, turning the shared connection off may switch to a saved token.
-const usesSavedToken = computed<boolean | 'unknown'>(() => githubError.value
-  ? (switchedToToken.value ? 'unknown' : false)
-  : githubMode.value === 'dedicated' && githubConfigured.value && !githubToken.value.trim())
-// A token typed before its state became unknown stays pending: it is not lost, nor claimed saved.
-const tokenPendingUnknown = computed(() => Boolean(githubError.value) && Boolean(githubToken.value.trim()))
-const changed = computed(() => [...changes(saved.value, draft.value), ...(tokenChange.value || tokenPendingUnknown.value ? ['github' as const] : [])])
+const changed = computed(() => changes(saved.value, draft.value))
 const dirty = computed(() => loaded.value && !notFound.value && changed.value.length > 0)
 const issues = computed(() => loaded.value ? findIssues(draft.value, context.value, isMain.value, isNew.value ? null : id.value) : [])
 
 const allProjects = computed({
   get: () => draft.value.access.projects,
-  set: (value: string[] | null) => {
-    draft.value.access.projects = value
-    // Shared GitHub credentials reach every repository, so restricted agents lose them and use
-    // their saved dedicated token, narrower, when they have one. Only the owner removes it.
-    if (value !== null && draft.value.access.github) {
-      const mode = githubError.value ? 'none' : restrictedGithubMode('shared', githubConfigured.value && !removeToken.value)
-      draft.value.access.github = false
-      dedicated.value = mode === 'dedicated'
-      switchedToToken.value = mode === 'dedicated' || Boolean(githubError.value)
-    }
-  },
+  set: (value: string[] | null) => draft.value.access.projects = value,
 })
 const projectItems = computed<SelectionItem[]>(() => state.projects.map(project => ({ id: project.id, name: project.name, detail: project.description || undefined })))
 const permittedSkills = computed(() => state.skills.filter(skill => skill.valid && (skill.scope === 'global' || access.value.projects === null || access.value.projects.includes(skill.scope))))
@@ -275,7 +221,6 @@ const pluginSummary = computed(() => {
 
   return [[...counts].map(([name, count]) => name === '1Password' ? `1Password: ${count} ${count === 1 ? 'account' : 'accounts'}` : count > 1 ? `${name} (${count})` : name).join(' · '), resourceCountsKnown.value ? (resourceCount.value ? `${resourceCount.value} saved resource rule${resourceCount.value === 1 ? '' : 's'}` : '') : 'Resource access not loaded'].filter(Boolean).join(' · ')
 })
-const githubSummary = computed(() => isMain.value || githubMode.value === 'shared' ? 'Shared connection' : githubMode.value === 'dedicated' ? 'Dedicated token' : 'No GitHub')
 const powers = computed(() => exclusiveNodes.value.length + Number(access.value.installation))
 const mcpCount = computed(() => access.value.mcps === null ? state.mcps.length : access.value.mcps.length)
 // Connections whose tools are limited to a chosen few, also under "All, including future".
@@ -289,9 +234,6 @@ const summaries = computed<Record<SectionId, { short: string, long: string }>>((
   projects: !isMain.value && !state.workspaceLoaded ? { short: 'Unavailable', long: 'Not loaded' } : { short: isMain.value ? 'Fixed' : short(access.value.projects, state.projects.length), long: isMain.value ? 'All, including future' : selectionSummary(access.value.projects, state.projects.length) },
   skills: !isMain.value && !state.workspaceLoaded ? { short: 'Unavailable', long: 'Not loaded' } : { short: isMain.value ? 'Fixed' : short(access.value.skills, permittedSkills.value.length), long: isMain.value ? 'All, including future' : selectionSummary(access.value.skills, permittedSkills.value.length) },
   mcps: !isMain.value && !state.workspaceLoaded ? { short: 'Unavailable', long: 'Not loaded' } : { short: isMain.value ? 'Fixed' : short(access.value.mcps, state.mcps.length), long: isMain.value ? 'All, including future' : `${selectionSummary(access.value.mcps, state.mcps.length)}${limitedMcps.value.length ? ` · tools limited on ${limitedMcps.value.length}` : ''}${disabledMcps.value.length ? ` · ${disabledMcps.value.length} disabled` : ''}` },
-  github: isMain.value || !githubError.value
-    ? { short: isMain.value ? 'Fixed' : githubMode.value === 'shared' ? 'Shared' : githubMode.value === 'dedicated' ? 'Token' : 'None', long: githubSummary.value }
-    : { short: 'Unavailable', long: 'Not loaded' },
   plugins: catalogError.value
     ? { short: 'Unavailable', long: 'Not loaded' }
     : { short: draft.value.plugins.length || resourceCount.value ? String(draft.value.plugins.length + resourceCount.value) : resourceCountsKnown.value ? 'None' : 'Unknown', long: pluginSummary.value || 'None' },
@@ -330,14 +272,6 @@ const overview = computed(() => [
         summary: isMain.value ? 'All, including future' : `${mcpCount.value} ${mcpCount.value === 1 ? 'connection' : 'connections'}${access.value.mcps === null ? ', including future' : ''}`,
         detail: isMain.value ? 'All enabled tools' : access.value.mcps === null ? (limitedMcps.value.length ? `Tools limited on ${names(limitedMcps.value.map(connection => connection.name), name => name)}` : 'All enabled tools') : names(access.value.mcps, connection => state.mcps.find(item => item.id === connection)?.name ?? 'Removed connection'),
         chip: isMain.value ? { tone: 'fixed' as const, label: 'Fixed' } : disabledMcps.value.length ? { tone: 'unavailable' as const, label: `${disabledMcps.value[0]!.name} disabled` } : chip(access.value.mcps),
-      },
-      {
-        id: 'github',
-        section: 'github' as const,
-        title: 'GitHub',
-        summary: !isMain.value && githubError.value ? 'Not loaded' : githubSummary.value,
-        detail: !isMain.value && githubError.value ? 'The GitHub connection could not be loaded' : !isMain.value && access.value.projects !== null ? 'Shared connection unavailable: projects are restricted' : '',
-        chip: isMain.value ? { tone: 'fixed' as const, label: 'Fixed' } : githubError.value ? { tone: 'unavailable' as const, label: 'Unavailable' } : githubMode.value === 'none' ? { tone: 'none' as const, label: 'None' } : { tone: 'granted' as const, label: 'Granted' },
       },
       {
         id: 'plugins',
@@ -433,11 +367,6 @@ function apply(found: Agent) {
   agent.value = found
   saved.value = loadedDraft(found)
   draft.value = loadedDraft(found)
-  githubToken.value = ''
-  removeToken.value = false
-  switchedToToken.value = false
-  savedDedicated.value = !found.access.github && githubConfigured.value
-  dedicated.value = savedDedicated.value
   fieldErrors.value = {}
   attempted.value = false
 }
@@ -450,45 +379,6 @@ async function loadSuspension() {
     suspended.value = preview.delegations.filter(item => item.suspended).map(item => item.id)
   }
   catch {}
-}
-
-// `target` is the agent being edited, also one created from /agents/new that the page still edits.
-async function loadGithub(target: string | null = isNew.value ? null : id.value) {
-  if (!target || target === MAIN_AGENT_ID)
-    return
-  // A failure leaves the rest of the page usable: only the GitHub section waits for it.
-  try {
-    githubConfigured.value = (await api<{ configured: boolean }>(`/agents/${target}/github-token`)).configured
-    githubError.value = ''
-  }
-  catch (e) {
-    githubError.value = (e as Error).message || 'The GitHub connection could not be loaded.'
-    return
-  }
-
-  savedDedicated.value = !saved.value.access.github && githubConfigured.value
-  dedicated.value = savedDedicated.value
-}
-
-async function retryGithub() {
-  githubLoading.value = true
-  try {
-    const pendingDedicated = dedicated.value
-    const edited = dedicated.value !== savedDedicated.value
-    await loadGithub(isNew.value ? creation.savedId.value : id.value)
-    if (edited)
-      dedicated.value = pendingDedicated
-    // A shared connection turned off while the token state was unknown is resolved now: to the
-    // saved token when there is one (note and review), otherwise to no GitHub.
-    if (!githubError.value && switchedToToken.value) {
-      const mode = restrictedGithubMode('shared', githubConfigured.value)
-      dedicated.value = mode === 'dedicated'
-      switchedToToken.value = mode === 'dedicated'
-    }
-  }
-  finally {
-    githubLoading.value = false
-  }
 }
 
 // Reloads projects, skills and MCP connections; a failure leaves them flagged as not loaded.
@@ -604,7 +494,6 @@ async function load() {
       }
 
       apply(found)
-      await loadGithub()
       void loadSuspension()
     }
   }
@@ -625,13 +514,11 @@ function validate() {
     errors.advanced = 'Enter a time limit between 1 and 720 minutes, or choose no time limit.'
   if (backendOf(draft.value.access) === 'native' && !draft.value.access.nodes?.length)
     errors.nodes = 'Choose at least one native node: native execution never applies to all nodes.'
-  if (!isMain.value && githubMode.value === 'dedicated' && !githubConfigured.value && !githubToken.value.trim())
-    errors.github = 'Enter a token, or choose No GitHub.'
   fieldErrors.value = errors
   return !Object.keys(errors).length
 }
 
-watch([draft, githubToken, dedicated], () => {
+watch(draft, () => {
   if (attempted.value)
     validate()
 }, { deep: true })
@@ -662,16 +549,15 @@ async function requestSave() {
     return
   }
 
-  let lines = reviewLines(saved.value, sentDraft(saved.value, draft.value, legacy.value), context.value, undefined, tokenChange.value, usesSavedToken.value)
+  let lines = reviewLines(saved.value, sentDraft(saved.value, draft.value, legacy.value), context.value)
   let effects: DelegationEffect[] = []
   let current: Preview | null = null
-  // A pending GitHub token alone changes no access: it is saved without a preview.
   if (!isNew.value && changes(saved.value, draft.value).length) {
     busy.value = true
     try {
       // The server says which queued or running work and which delegations the change affects.
       const preview = await api<Preview>(`/agents/${id.value}/preview`, { method: 'POST', body: JSON.stringify(body()) })
-      lines = reviewLines(saved.value, sentDraft(saved.value, draft.value, legacy.value), context.value, preview.runs, tokenChange.value, usesSavedToken.value)
+      lines = reviewLines(saved.value, sentDraft(saved.value, draft.value, legacy.value), context.value, preview.runs)
       effects = preview.delegations.filter(item => item.suspended)
       current = preview
     }
@@ -687,9 +573,9 @@ async function requestSave() {
     }
   }
 
-  // Powers, secrets, interrupted work, delegations this edit suspends and a switch to the saved
-  // GitHub token deserve a look; anything else saves directly.
-  if (needsReview(lines, current, switchedToToken.value && (githubMode.value === 'dedicated' || Boolean(githubError.value)))) {
+  // Powers, secrets, interrupted work and delegations this edit suspends deserve a look; anything
+  // else saves directly.
+  if (needsReview(lines, current)) {
     reviewError.value = ''
     review.value = { lines, delegations: effects }
     return
@@ -718,9 +604,7 @@ async function commit(reapprove: string[]) {
   busy.value = true
   serverError.value = ''
   reviewError.value = ''
-  const change = tokenChange.value
-  const token = githubToken.value.trim()
-  // After a saved profile and a failed token, a retry only saves what is still pending.
+  // After a saved profile and a failed reload, a retry only reloads.
   const profileChanged = isNew.value || changes(saved.value, draft.value).length > 0
   let result: Agent
   try {
@@ -763,9 +647,8 @@ async function commit(reapprove: string[]) {
   }
 
   review.value = null
-  // The saved profile and its revision advance now; the GitHub token stays pending until it is saved.
-  // A created agent stays on this draft until its token and the workspace are saved too:
-  // retrying then updates the same agent instead of creating another one.
+  // The saved profile and its revision advance now. A created agent stays on this draft until the
+  // workspace is reloaded too: retrying then updates the same agent instead of creating another one.
   agent.value = result
   if (profileChanged) {
     saved.value = loadedDraft(result)
@@ -774,32 +657,14 @@ async function commit(reapprove: string[]) {
     attempted.value = false
   }
 
-  let phase: 'token' | 'refresh' = 'token'
   let completed = false
   try {
-    // A token typed before its state became unknown is kept pending, never claimed saved.
-    if (tokenPendingUnknown.value)
-      throw new Error(githubError.value)
-    if (change) {
-      await api(`/agents/${result.id}/github-token`, { method: 'PUT', body: JSON.stringify({ token: change === 'set' ? token : '' }) })
-      githubConfigured.value = change === 'set'
-    }
-
-    githubToken.value = ''
-    removeToken.value = false
-    switchedToToken.value = false
-    savedDedicated.value = !result.access.github && githubConfigured.value
-    dedicated.value = savedDedicated.value
-    phase = 'refresh'
     await refresh()
     completed = true
     notify(isNew.value ? 'Agent created' : 'Agent saved')
   }
   catch (e) {
-    const detail = (e as Error).message
-    serverError.value = phase === 'token'
-      ? `Agent saved, but the GitHub connection could not be saved. ${detail}`
-      : `Agent saved, but the workspace could not be reloaded. ${detail}`
+    serverError.value = `Agent saved, but the workspace could not be reloaded. ${(e as Error).message}`
   }
   finally {
     busy.value = false
@@ -840,9 +705,6 @@ async function reloadAgent() {
 
     const base = saved.value
     const mine = draft.value
-    const githubEdited = dedicated.value !== savedDedicated.value
-    const pendingDedicated = dedicated.value
-    const hadToken = githubConfigured.value
     agent.value = found
     saved.value = draftOf(found)
     legacy.value = olderInstallation(agents)
@@ -852,16 +714,6 @@ async function reloadAgent() {
     if (state.workspaceLoaded && state.installationRole === 'owner')
       rebased.access.mcpTools = Object.fromEntries(Object.entries(rebased.access.mcpTools ?? {}).filter(([connection]) => state.mcps.some(item => item.id === connection)))
     draft.value = rebased
-    const knewToken = !githubError.value
-    await loadGithub(found.id)
-    if (githubEdited)
-      dedicated.value = pendingDedicated
-    // "No GitHub" chosen while no token existed never removes a token saved since.
-    if (knewToken && !githubError.value && !hadToken && githubConfigured.value) {
-      tokenSavedMeanwhile.value = removeToken.value || githubMode.value === 'none'
-      removeToken.value = false
-    }
-
     void loadSuspension()
     conflict.value = false
     serverError.value = ''
@@ -876,10 +728,6 @@ async function reloadAgent() {
 
 function discard() {
   draft.value = structuredClone(JSON.parse(JSON.stringify(saved.value)))
-  githubToken.value = ''
-  removeToken.value = false
-  switchedToToken.value = false
-  dedicated.value = savedDedicated.value
   fieldErrors.value = {}
   attempted.value = false
   serverError.value = ''
@@ -998,7 +846,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
     <div v-else-if="loaded && !loadError" class="grid min-w-0 flex-1 grid-cols-[232px_minmax(0,1fr)] items-start gap-8 phone:grid-cols-1 phone:gap-0">
       <nav class="sticky top-0 grid min-w-0 gap-0.5 short:static phone:static" :class="section ? 'phone:hidden' : ''" aria-label="Agent sections">
         <p v-if="isMain" class="mb-3 hidden rounded-xl bg-soft px-4 py-3 text-xs leading-relaxed phone:block">
-          The main agent always has access to every project, skill, MCP connection and GitHub, including future ones. Create another agent for restricted access.
+          The main agent always has access to every project, skill and MCP connection, including future ones. Create another agent for restricted access.
         </p>
         <button
           v-if="issues.length"
@@ -1060,7 +908,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
 
         <template v-if="!section">
           <p v-if="isMain" class="mb-5 rounded-xl bg-soft px-5 py-3.5 text-sm leading-relaxed">
-            The main agent always has access to every project, skill, MCP connection and GitHub, including future ones. Create another agent for restricted access.
+            The main agent always has access to every project, skill and MCP connection, including future ones. Create another agent for restricted access.
           </p>
           <div v-if="issues.length" class="mb-5 rounded-xl bg-warning-surface px-5 py-3.5 text-sm text-warning" role="status">
             <p class="flex items-center gap-2 font-semibold">
@@ -1090,7 +938,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
             {{ fieldErrors[section] }}
           </UiAlert>
           <p v-if="isMain && mainLockedSections.includes(section)" class="rounded-xl bg-soft px-5 py-3.5 text-sm leading-relaxed">
-            The main agent always has access to every project, skill, MCP connection and GitHub, including future ones. Create another agent for restricted access.
+            The main agent always has access to every project, skill and MCP connection, including future ones. Create another agent for restricted access.
           </p>
 
           <template v-if="section === 'identity'">
@@ -1137,7 +985,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
             <div class="flex items-center justify-between gap-3 rounded-xl border border-line bg-surface px-5 py-4">
               <span class="min-w-0">
                 <span class="block text-sm font-semibold">{{ titles[section] }}</span>
-                <span class="block text-xs text-muted">{{ section === 'github' ? 'Shared connection' : 'All, including future' }}</span>
+                <span class="block text-xs text-muted">All, including future</span>
               </span>
               <AccessChip tone="fixed">
                 Fixed
@@ -1167,7 +1015,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               :items="projectItems"
             >
               <template #all>
-                <p>Every project, including those added later. Required for the shared GitHub connection.</p>
+                <p>Every project, including those added later.</p>
               </template>
               <template #empty>
                 No projects registered yet. <RouterLink to="/projects" class="text-accent hover:underline">
@@ -1178,9 +1026,6 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
                 Removed project
               </template>
             </AgentSelection>
-            <p v-if="access.projects !== null" class="text-xs text-muted">
-              Restricted agents cannot use the shared GitHub connection; give them a dedicated token in GitHub.
-            </p>
           </template>
 
           <template v-else-if="section === 'skills'">
@@ -1231,80 +1076,6 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               </div>
             </div>
             <AgentMcpSection v-else v-model:access="draft.access" :mcps="state.mcps" />
-          </template>
-
-          <template v-else-if="section === 'github'">
-            <div v-if="githubError && !isMain" class="grid gap-3 rounded-xl border border-line bg-surface p-5" role="alert">
-              <p class="text-sm">
-                The GitHub connection could not be loaded, so it cannot be shown or changed. {{ githubError }}
-              </p>
-              <div>
-                <UiButton size="small" :disabled="githubLoading" @click="retryGithub">
-                  {{ githubLoading ? 'Loading…' : 'Try again' }}
-                </UiButton>
-              </div>
-            </div>
-            <template v-else>
-              <fieldset class="grid gap-2.5">
-                <legend class="sr-only">
-                  GitHub access
-                </legend>
-                <label class="grid! grid-cols-[auto_1fr] items-start gap-x-3! gap-y-0.5! rounded-xl border border-line bg-surface px-4 py-3.5 font-normal! text-ink!" :class="access.projects !== null ? 'opacity-70' : ''">
-                  <input
-                    v-model="githubMode"
-                    type="radio"
-                    value="shared"
-                    class="mt-1 size-4 w-4!"
-                    :disabled="access.projects !== null"
-                  ><span class="text-sm font-semibold">Shared connection</span>
-                  <small class="col-start-2">{{ access.projects !== null ? 'Unavailable: the shared credentials reach every repository, so only agents with all projects can use them.' : 'Uses the installation’s GitHub connection.' }}</small>
-                </label>
-                <label class="grid! grid-cols-[auto_1fr] items-start gap-x-3! gap-y-0.5! rounded-xl border border-line bg-surface px-4 py-3.5 font-normal! text-ink!">
-                  <input
-                    v-model="githubMode"
-                    type="radio"
-                    value="dedicated"
-                    class="mt-1 size-4 w-4!"
-                  ><span class="text-sm font-semibold">Dedicated token</span>
-                  <small class="col-start-2">A fine-grained token limited to this agent’s repositories. Its remote permissions are those of the token.</small>
-                </label>
-                <label class="grid! grid-cols-[auto_1fr] items-start gap-x-3! gap-y-0.5! rounded-xl border border-line bg-surface px-4 py-3.5 font-normal! text-ink!">
-                  <input
-                    v-model="githubMode"
-                    type="radio"
-                    value="none"
-                    class="mt-1 size-4 w-4!"
-                  ><span class="text-sm font-semibold">No GitHub</span>
-                  <small class="col-start-2">{{ githubConfigured && removeToken ? 'The saved token is removed when you save.' : 'The agent works without GitHub credentials.' }}</small>
-                </label>
-              </fieldset>
-              <p v-if="switchedToToken && githubMode === 'dedicated'" class="rounded-xl bg-soft px-4 py-3 text-sm" role="status">
-                The shared connection was turned off: this agent will use its saved dedicated token.
-              </p>
-              <p v-if="tokenSavedMeanwhile && githubMode === 'none' && githubConfigured && !removeToken" class="flex flex-wrap items-center gap-2 rounded-xl bg-soft px-4 py-3 text-sm" role="status">
-                <span class="min-w-0 flex-1">A dedicated token was saved meanwhile: this agent will use it unless you remove it.</span>
-                <UiButton size="small" @click="githubMode = 'none'">
-                  Remove saved token
-                </UiButton>
-              </p>
-              <div v-if="githubMode === 'dedicated'" class="grid gap-3 rounded-xl border border-line bg-surface p-4">
-                <p v-if="githubConfigured" class="flex flex-wrap items-center gap-2 text-sm">
-                  <AccessChip tone="granted">
-                    A token is saved
-                  </AccessChip>
-                  <UiButton size="small" @click="githubMode = 'none'">
-                    Remove saved token
-                  </UiButton>
-                </p>
-                <label>{{ githubConfigured ? 'Replace the token (optional)' : 'GitHub token' }}<input
-                  v-model="githubToken"
-                  type="password"
-                  autocomplete="new-password"
-                  spellcheck="false"
-                  :placeholder="githubConfigured ? 'Saved token · leave blank to keep' : 'Fine-grained GitHub token'"
-                ><small>Select only this agent’s repositories and permissions when creating the token on GitHub. It is saved with the page.</small></label>
-              </div>
-            </template>
           </template>
 
           <template v-else-if="section === 'plugins'">
@@ -1459,7 +1230,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               :aria-invalid="Boolean(fieldErrors.advanced)"
             ></label>
             <p class="text-xs text-muted">
-              Runs that reach the limit stop. A dedicated GitHub token is managed in GitHub.
+              Runs that reach the limit stop.
             </p>
           </template>
         </section>
@@ -1548,7 +1319,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
     <Modal v-if="deleting" :title="`Delete ${saved.name}?`" @close="!busy && (deleting = false)">
       <div class="px-6.5 py-6 phone:p-5">
         <p class="text-sm">
-          Remove “{{ saved.name }}” from your workspace? Referenced items must be removed from tasks first. Its grants, GitHub token and portrait are deleted.
+          Remove “{{ saved.name }}” from your workspace? Referenced items must be removed from tasks first. Its grants and portrait are deleted.
         </p>
       </div>
       <footer class="modal-actions sticky bottom-0 flex justify-end gap-2.5 border-t border-line bg-surface px-6.5 py-4.5 phone:flex-wrap phone:px-5 phone:py-4">

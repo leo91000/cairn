@@ -13,14 +13,20 @@ manifest parser. An older host also lacks the requester and resource-authority
 checks required by newly admitted work. Treat starting that host on this data as
 an unsafe downgrade, even when some JSON records are syntactically readable.
 
-The installation epoch advances to **8**. PR #226 inherited epoch 4; integrated
-main `176969f5` reserves epoch 5 for durable session restart and epoch 6 for trusted
-native execution. Main through `19300c12` reserves epoch 7 for native ublk
-workspaces and idle eviction. This plugin boundary uses a distinct higher epoch rather than
-reusing those numbers. `legacyTree` remains unchanged. The production release gate
-must refuse an unequal served/candidate epoch. This metadata is an operational deployment
-fence, not a runtime promise that an old executable cannot open the directory.
-No deployment, automatic backup, restoration or epoch transition is performed.
+The installation epoch advances to **10**, with SQLite `user_version` **9**.
+Main through `1e735587` already reserves epochs 5–7 for restart/native storage,
+epoch 8 for GitHub's plugin migration, and epoch 9 / SQLite 8 for the reviewed
+automatic transition. Slack uses a distinct higher boundary. `legacyTree` remains
+unchanged. Opening the candidate advances SQLite before service startup; earlier
+binaries reject that newer database instead of resuming work without Slack's
+requester checks.
+
+The historical automatic migration to epoch 9 remains documented in
+[AUTOMATIC-MIGRATIONS.md](AUTOMATIC-MIGRATIONS.md). Its evidence does **not**
+qualify this new boundary. This draft declares no `automaticMigration`, so the
+production release gate refuses any earlier epoch. Final delivery must qualify
+and review a separate forward transition before enabling automatic deployment.
+No deployment, automatic backup, restoration or production transition is performed.
 
 ## Persistent inventory and forward behavior
 
@@ -33,9 +39,10 @@ No deployment, automatic backup, restoration or epoch transition is performed.
 | Conversation and execution | Per-message requester proofs, shared-source bindings, generation/revision fences and new-turn bookkeeping preserve each author's authority through queue/preparation/wake. Existing un-attributed messages never gain another person's personal OAuth. An authenticated account captured while Beacon is unavailable has no personal membership-generation proof; later recovery cannot upgrade that turn. Verified proof records retain their existing serialized generation string. Exact owner-answer provenance is stored under the existing chat-control KV prefix, bound to the run, initiating turn and answer; edits retire it and conversation deletion clears that prefix. It permits only that answer's delivery and never restores suspended personal credentials. Older execution code cannot be used to resume work that depends on these checks. |
 | Clients | Android's ordinary setup-input snapshots are local, backup-excluded and bounded. They contain no declared secret fields; session/scope retirement clears them. They are disposable editor state, not installation data or an offline mutation queue. Web state remains browser-local. |
 
-No SQLite schema, existing storage envelope, installation identity or old package
-file is rewritten merely to add these declarations. Forward installation opens
-the existing store and validates packages normally; new records are written only
+The SQLite version fence advances; the existing application tables, storage
+envelopes, installation identity and old package files are not rewritten merely
+to add these declarations. Forward installation opens the existing store and
+validates packages normally; new records are written only
 by explicitly authorized configuration/admission. Existing integrations must be
 checked with the candidate before a separately reviewed transition. This does
 not certify every future Slack format or every previous production binary.
@@ -45,9 +52,9 @@ earlier API-v2 form readers retain it while ignoring its semantics. Lookup query
 cursor and page/echo metadata use the existing opaque configuration-operation
 payload/result, with its existing lifetime; no new stored kind or envelope is
 added. A recovered old-host operation may produce a full-form result instead;
-new clients reject its missing lookup echo. This addition therefore keeps epoch 8
+new clients reject its missing lookup echo. This addition therefore keeps the same Slack compatibility boundary
 and the legacy tree unchanged. It does not relax the already incompatible
-pre-epoch-8 downgrade boundary or authorize a production transition.
+pre-Slack downgrade boundary or authorize a production transition.
 
 ## Separately reviewed transition and recovery
 
@@ -67,7 +74,7 @@ data and deploy a reviewed forward fix. Repair an incompatible package as a new
 version under its existing ID, explicitly review/approve it, and retain its
 instance/resource IDs and secrets. Reconnect a provider after an uncertain
 exchange or interrupted rotation; do not replay a consumed code/token. Restoring
-an earlier image is not a supported recovery once epoch-8 data has been written.
+an earlier image is not a supported recovery once Slack data has been written.
 No automatic data restore point or reversible provider-side transaction exists.
 
 ## Evidence and remaining qualification

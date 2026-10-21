@@ -312,6 +312,112 @@ pub(crate) struct RunRequester {
     suspended: bool,
 }
 
+/// A dormant plugin condition keeps the exact waiting turn and its source identity.
+/// It cannot borrow an execution bearer or become personal OAuth authority.
+#[derive(Clone)]
+pub(crate) struct Observation {
+    run: Value,
+    chat: String,
+    wakeup: Value,
+    pub(crate) principal: Option<Principal>,
+    approval: Option<super::registry::Approval>,
+}
+
+impl Observation {
+    pub(crate) async fn capture(s: &Service, run: &Value, condition: &Value) -> Result<Self> {
+        let run = run.clone();
+        let condition = condition.clone();
+        let observation = s
+            .store
+            .read(move |db| {
+                let chat = crate::chats::chat_for_run(db, text(&run, "id"))?
+                    .ok_or_else(|| Error::forbidden("The waiting conversation was removed."))?;
+                if chat["wakeup"]["condition"] != condition {
+                    return Err(Error::conflict("The waiting condition changed."));
+                }
+                let principal = captured_run(db, &run)?.map(|requester| requester.principal);
+                let approval = match &principal {
+                    Some(Principal::External(actor)) => {
+                        let connection = external_in(db, actor)?;
+                        Some(super::registry::Approval::capture_in(
+                            db,
+                            &connection.plugin_id,
+                            &actor.binding.digest,
+                        )?)
+                    }
+                    _ => None,
+                };
+                let observation = Self {
+                    run,
+                    chat: text(&chat, "id").to_owned(),
+                    wakeup: chat["wakeup"].clone(),
+                    principal,
+                    approval,
+                };
+                observation.recheck_in(db)?;
+                Ok(observation)
+            })
+            .await?;
+        observation.recheck(s).await?;
+        Ok(observation)
+    }
+
+    pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
+        match &self.principal {
+            Some(Principal::Account(actor)) if actor.access_id.is_some() => {
+                if account(s, &actor.account).await? != *actor {
+                    return Err(Error::forbidden("The waiting requester's access changed."));
+                }
+            }
+            Some(Principal::External(actor)) => {
+                let connection = external(s, actor).await?;
+                super::registry::require_digest(s, &connection.plugin_id, &actor.binding.digest)
+                    .await?;
+            }
+            _ => {}
+        }
+        let expected = self.clone();
+        s.store.read(move |db| expected.recheck_in(db)).await
+    }
+
+    pub(crate) fn recheck_in(&self, db: &Db<'_>) -> Result<()> {
+        let run = db
+            .run(text(&self.run, "id"))?
+            .ok_or_else(|| Error::forbidden("The waiting run was removed."))?;
+        let chat = db
+            .get("chats", &self.chat)?
+            .ok_or_else(|| Error::forbidden("The waiting conversation was removed."))?;
+        if run["snapshot"]["agent"] != self.run["snapshot"]["agent"]
+            || run["chatExecution"]["messageId"] != self.run["chatExecution"]["messageId"]
+            || chat["runId"] != run["id"]
+            || chat["wakeup"] != self.wakeup
+            || !crate::chats::sleep::resumable(&chat, Some(&run))
+            || chat["wakeup"]["wakeAt"]
+                .as_i64()
+                .is_none_or(|at| at <= crate::config::now())
+            || captured_run(db, &run)?.map(|requester| requester.principal) != self.principal
+        {
+            return Err(Error::conflict(
+                "The waiting turn changed. Retry its condition.",
+            ));
+        }
+        if let Some(Principal::External(actor)) = &self.principal {
+            external_in(db, actor)?;
+        }
+        if let Some(approval) = &self.approval {
+            approval.recheck_in(db)?;
+        }
+        crate::chats::wait_for::access(db, &run, &self.wakeup["condition"])
+    }
+}
+
+/// Different original requesters never share the result of a condition probe.
+pub(crate) fn observation_key_in(db: &Db<'_>, run: &Value) -> Result<Value> {
+    Ok(serde_json::to_value(
+        captured_run(db, run)?.map(|requester| requester.principal),
+    )?)
+}
+
 /// Native execution retains its admitted source across capacity waits and slow
 /// preparation. Owner intervention suspends OAuth, not this source boundary.
 #[derive(Clone)]

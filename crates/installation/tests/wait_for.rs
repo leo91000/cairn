@@ -5,11 +5,13 @@ mod pr_checks;
 use cairn_installation::{
     chats::{sleep, wait_for},
     config::{MAIN_AGENT_ID, id, now},
+    plugins::{conditions, connections},
     service::Service,
     validation::text,
 };
+use common::github::{self, Github};
 use serde_json::{Value, json};
-use std::{collections::HashSet, os::unix::fs::PermissionsExt, sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 use tempfile::TempDir;
 
 const SHA: &str = "1111111111111111111111111111111111111111";
@@ -17,6 +19,8 @@ const SHA: &str = "1111111111111111111111111111111111111111";
 struct Fixture {
     root: TempDir,
     s: Arc<Service>,
+    github: Github,
+    instance: String,
     chat: String,
     run: String,
     token: String,
@@ -29,53 +33,31 @@ impl Fixture {
     }
 
     async fn with_origin(origin: &str) -> Self {
+        Self::with_identity(origin, None).await
+    }
+
+    async fn with_identity(
+        origin: &str,
+        identity: Option<cairn_installation::auth::InstallationIdentity>,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         common::managed_codex_home(&root.path().join("home"));
-        let gh = root.path().join("gh.cjs");
-        std::fs::write(
-            &gh,
-            r#"#!/usr/bin/env node
-const fs = require('node:fs');
-const state = JSON.parse(fs.readFileSync(`${__dirname}/github-state.json`, 'utf8'));
-fs.appendFileSync(`${__dirname}/github-calls.jsonl`, JSON.stringify({
-  args: process.argv.slice(2),
-  agentToken: process.env.GH_TOKEN === 'fixture-only-token',
-  storage: Object.keys(process.env).some(key => /^(AWS_|ARCHIVE_|STORAGE_S3_)/.test(key)),
-}) + '\n');
-while (state.waitForRelease && !fs.existsSync(`${__dirname}/github-release`))
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-if (state.delay) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, state.delay);
-if (state.error) { console.error('fixture-secret-must-not-leak'); process.exit(1); }
-const args = process.argv.slice(2);
-if (state.pr) {
-  const query = args.find(arg => arg.startsWith('query=')) || '';
-  if (query) {
-    const cursor = args.find(arg => arg.startsWith('cursor='));
-    const response = cursor ? state.pages?.[cursor.slice(7)] : !query.includes('contexts(') ? state.finalPr : state.pr;
-    console.log(JSON.stringify(state.graphqlError ? { errors: [{ message: 'fixture-secret-must-not-leak' }] } : { data: { repository: { pullRequest: response || state.pr } } }));
-  } else {
-    const page = (args[3].match(/[?&]page=(\d+)/) || [null, '1'])[1];
-    const rulesCalls = state.rulesAfter ? fs.readFileSync(`${__dirname}/github-calls.jsonl`, 'utf8').trim().split('\n').map(JSON.parse).filter(call => call.args[3]?.includes('/rules/branches/')).length : 0;
-    console.log(JSON.stringify(state.rulePages?.[page] || (rulesCalls > 1 ? state.rulesAfter : null) || state.rules || []));
-  }
-} else console.log(JSON.stringify(state.response));
-"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let github = Github::start(root.path()).await;
         let s = Service::new(cairn_installation::config::Config {
             runner_url: "http://unused-runner:4311".into(),
-            gh_bin: gh.to_string_lossy().into_owned(),
             ..common::config(root.path())
         })
         .await
         .unwrap();
+        github.attach(&s);
         s.agent(
             json!({ "name": "Main agent", "access": { "installation": true } }),
             Some(MAIN_AGENT_ID),
         )
         .await
         .unwrap();
+        let instance =
+            github::instance(&s, "Shared", "fixture-shared-token", &[MAIN_AGENT_ID]).await;
         let project = id();
         let path = root.path().join("project");
         std::fs::create_dir(&path).unwrap();
@@ -96,9 +78,10 @@ if (state.pr) {
         let chat = s.chat_create(json!({})).await.unwrap();
         let chat = text(&chat, "id").to_owned();
         let message = id();
-        s.chat_send(
+        s.chat_send_as(
             &chat,
             json!({ "id": message, "text": "Finish after the result" }),
+            identity.as_ref(),
         )
         .await
         .unwrap();
@@ -123,6 +106,8 @@ if (state.pr) {
         let f = Self {
             root,
             s,
+            github,
+            instance,
             chat,
             run: run_id,
             token,
@@ -132,23 +117,27 @@ if (state.pr) {
         f
     }
 
+    /// The same installation after a restart, still talking to the local GitHub.
+    async fn restart(&self) -> Arc<Service> {
+        let restarted = Service::new(self.s.config.clone()).await.unwrap();
+        self.github.attach(&restarted);
+        restarted
+    }
+
     fn github_condition(&self) -> Value {
         json!({ "type": "github_workflow", "projectId": self.project, "runId": 42, "headSha": SHA })
     }
 
     fn github_state(&self, status: &str, conclusion: Option<&str>, delay: u64) {
-        std::fs::write(self.root.path().join("github-state.json"), json!({
+        self.github.state(&json!({
             "delay": delay,
             "response": { "id": 42, "head_sha": SHA, "status": status, "conclusion": conclusion, "run_attempt": 1 },
-        }).to_string()).unwrap();
+        }));
     }
 
+    /// GitHub requests made for conditions, not for instance forms.
     fn calls(&self) -> Vec<Value> {
-        std::fs::read_to_string(self.root.path().join("github-calls.jsonl"))
-            .unwrap_or_default()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
+        self.github.api_calls()
     }
 
     async fn target(&self) -> Value {
@@ -203,7 +192,7 @@ async fn run_wait_survives_restart_and_only_resumes_after_target_completion() {
     assert_eq!(wait["deferred"], true);
     f.finish().await;
     assert_eq!(f.tick().await["run"]["status"], "succeeded");
-    let restarted = Service::new(f.s.config.clone()).await.unwrap();
+    let restarted = f.restart().await;
     restarted.chat_tick(&HashSet::new()).await.unwrap();
     assert_eq!(
         restarted.chat_detail(&f.chat).await.unwrap()["wakeup"],
@@ -338,10 +327,10 @@ async fn github_monitor_pins_identity_and_wakes_on_failure_without_polling_the_l
     assert_eq!(wait, repeated);
     assert_eq!(f.calls().len(), 1);
     f.finish().await;
-    wait_for::github::poll_once(&f.s).await.unwrap();
+    conditions::poll_once(&f.s).await.unwrap();
     assert_eq!(f.calls().len(), 2);
     assert_eq!(f.tick().await["run"]["status"], "succeeded");
-    wait_for::github::poll_once(&f.s).await.unwrap();
+    conditions::poll_once(&f.s).await.unwrap();
     assert_eq!(
         f.calls().len(),
         2,
@@ -349,8 +338,8 @@ async fn github_monitor_pins_identity_and_wakes_on_failure_without_polling_the_l
     );
     f.github_state("completed", Some("cancelled"), 0);
     f.next_poll().await;
-    let restarted = Service::new(f.s.config.clone()).await.unwrap();
-    wait_for::github::poll_once(&restarted).await.unwrap();
+    let restarted = f.restart().await;
+    conditions::poll_once(&restarted).await.unwrap();
     let result = restarted.chat_detail(&f.chat).await.unwrap()["wakeup"]["observation"].clone();
     assert_eq!(result["conclusion"], "cancelled");
     assert_eq!(result["headSha"], SHA);
@@ -364,9 +353,12 @@ async fn github_monitor_pins_identity_and_wakes_on_failure_without_polling_the_l
     );
     assert!(f.s.chat_detail(&f.chat).await.unwrap()["wakeup"].is_null());
     for call in f.calls() {
-        assert_eq!(call["args"][3], "repos/fixture/repo/actions/runs/42");
-        assert_eq!(call["storage"], false);
+        assert_eq!(call["path"], "repos/fixture/repo/actions/runs/42");
+        assert_eq!(call["token"], "fixture-shared-token");
     }
+    assert_eq!(wait["wakeup"]["display"]["short"], "GitHub workflow");
+    assert_eq!(result["display"]["tone"], "warning");
+    assert_eq!(result["pluginId"], "github");
 }
 
 #[tokio::test]
@@ -385,7 +377,7 @@ async fn github_monitor_only_probes_resumable_wakeups() {
         let mut blocked = chat.clone();
         blocked[field] = value;
         f.s.store.put("chats", blocked.clone()).await.unwrap();
-        wait_for::github::poll_once(&f.s).await.unwrap();
+        conditions::poll_once(&f.s).await.unwrap();
         assert_eq!(f.calls().len(), 1, "chat guard: {field}");
         assert_eq!(f.s.get("chats", &f.chat).await.unwrap(), blocked);
     }
@@ -402,7 +394,7 @@ async fn github_monitor_only_probes_resumable_wakeups() {
             .patch_run(&f.run, json!({ (field): value }))
             .await
             .unwrap();
-        wait_for::github::poll_once(&f.s).await.unwrap();
+        conditions::poll_once(&f.s).await.unwrap();
         assert_eq!(f.calls().len(), 1, "run guard: {field}");
         assert_eq!(f.s.get("chats", &f.chat).await.unwrap(), chat);
         f.s.store
@@ -413,7 +405,7 @@ async fn github_monitor_only_probes_resumable_wakeups() {
 
     // The original, still-resumable wait remains observable after the guards clear.
     f.github_state("completed", Some("success"), 0);
-    wait_for::github::poll_once(&f.s).await.unwrap();
+    conditions::poll_once(&f.s).await.unwrap();
     assert_eq!(f.calls().len(), 2);
     assert_eq!(
         f.s.get("chats", &f.chat).await.unwrap()["wakeup"]["observation"]["conclusion"],
@@ -432,7 +424,7 @@ async fn github_monitor_rechecks_session_restart_after_the_probe() {
     state["waitForRelease"] = true.into();
     std::fs::write(state_path, state.to_string()).unwrap();
     let s = f.s.clone();
-    let observer = tokio::spawn(async move { wait_for::github::poll_once(&s).await });
+    let observer = tokio::spawn(async move { conditions::poll_once(&s).await });
     common::eventually(
         Duration::from_secs(3),
         Duration::from_millis(10),
@@ -480,7 +472,7 @@ async fn late_github_results_cannot_restore_a_wait_replaced_by_user_input() {
     f.finish().await;
     f.github_state("completed", Some("success"), 350);
     let s = f.s.clone();
-    let observer = tokio::spawn(async move { wait_for::github::poll_once(&s).await });
+    let observer = tokio::spawn(async move { conditions::poll_once(&s).await });
     common::eventually(
         Duration::from_secs(3),
         Duration::from_millis(10),
@@ -502,7 +494,7 @@ async fn transient_github_errors_preserve_the_wait_and_never_expose_cli_output()
     f.schedule(f.github_condition()).await;
     f.finish().await;
     std::fs::write(f.root.path().join("github-state.json"), "{\"error\":true}").unwrap();
-    wait_for::github::poll_once(&f.s).await.unwrap();
+    conditions::poll_once(&f.s).await.unwrap();
     let failed = f.s.chat_detail(&f.chat).await.unwrap();
     assert!(failed["wakeup"].is_object());
     assert!(failed["wakeup"]["lastError"].is_string());
@@ -511,13 +503,13 @@ async fn transient_github_errors_preserve_the_wait_and_never_expose_cli_output()
     // GitHub answers again, without a result yet: the conversation no longer reports an outage.
     f.github_state("in_progress", None, 0);
     f.next_poll().await;
-    wait_for::github::poll_once(&f.s).await.unwrap();
+    conditions::poll_once(&f.s).await.unwrap();
     let recovered = f.s.chat_detail(&f.chat).await.unwrap();
     assert!(recovered["wakeup"].is_object());
     assert!(recovered["wakeup"].get("lastError").is_none());
     f.github_state("completed", Some("success"), 0);
     f.next_poll().await;
-    wait_for::github::poll_once(&f.s).await.unwrap();
+    conditions::poll_once(&f.s).await.unwrap();
     assert_eq!(f.tick().await["run"]["status"], "queued");
 }
 
@@ -542,37 +534,40 @@ async fn permissions_origins_and_workflow_commit_mismatches_are_rechecked() {
     let mut project = f.s.get("projects", &f.project).await.unwrap();
     project["origin"] = "https://github.com/another/repository.git".into();
     f.s.store.put("projects", project).await.unwrap();
-    wait_for::github::poll_once(&f.s).await.unwrap();
+    conditions::poll_once(&f.s).await.unwrap();
     assert_eq!(f.calls().len(), calls);
     assert_eq!(
         f.s.chat_detail(&f.chat).await.unwrap()["wakeup"]["observation"]["state"],
         "unavailable"
     );
 
+    // Plugin grants are live: withdrawing the instance ends the wait without a query.
     let f = Fixture::new().await;
     f.schedule(f.github_condition()).await;
     f.finish().await;
-    let mut agent = f.s.get("agents", MAIN_AGENT_ID).await.unwrap();
-    agent["access"]["github"] = false.into();
-    f.s.store.put("agents", agent).await.unwrap();
-    wait_for::github::poll_once(&f.s).await.unwrap();
+    connections::set_enabled(&f.s, "github", &f.instance, &json!({ "enabled": false }))
+        .await
+        .unwrap();
+    conditions::poll_once(&f.s).await.unwrap();
     assert_eq!(f.calls().len(), 1);
-    assert_eq!(f.tick().await["paused"], true);
+    assert_eq!(
+        f.s.chat_detail(&f.chat).await.unwrap()["wakeup"]["observation"]["state"],
+        "unavailable"
+    );
+    let resumed = f.tick().await;
+    assert_eq!(resumed["run"]["status"], "queued");
+    assert!(text(&resumed["run"]["chatExecution"], "text").contains("unavailable"));
 }
 
 #[tokio::test]
 async fn sleep_replaces_condition_waits_and_private_tokens_follow_agent_identity() {
     let f = Fixture::new().await;
-    f.s.store
-        .set(
-            &format!("agent-github:{MAIN_AGENT_ID}"),
-            "fixture-only-token".into(),
-            None,
-        )
+    connections::remove(&f.s, "github", &f.instance)
         .await
         .unwrap();
+    github::instance(&f.s, "Main's own", "fixture-only-token", &[MAIN_AGENT_ID]).await;
     let wait = f.schedule(f.github_condition()).await;
-    assert_eq!(f.calls()[0]["agentToken"], true);
+    assert_eq!(f.calls()[0]["token"], "fixture-only-token");
     let replaced = sleep::schedule(
         &f.s,
         &f.token,
@@ -858,7 +853,7 @@ async fn watchers_share_requests_only_for_the_same_granted_project_origin() {
             .unwrap();
         assert_eq!(f.calls().len(), 2);
         f.github_state("completed", Some("success"), 0);
-        wait_for::github::poll_once(&f.s).await.unwrap();
+        conditions::poll_once(&f.s).await.unwrap();
         assert_eq!(f.calls().len(), 3);
         let first = f.s.chat_detail(&f.chat).await.unwrap()["wakeup"].clone();
         let second = f.s.chat_detail(chat).await.unwrap()["wakeup"].clone();
@@ -909,7 +904,7 @@ async fn all_existing_cancellation_paths_also_invalidate_condition_waits() {
             }
             _ => unreachable!(),
         }
-        wait_for::github::poll_once(&f.s).await.unwrap();
+        conditions::poll_once(&f.s).await.unwrap();
         assert!(f.tick().await["wakeup"].is_null(), "{action}");
         assert_eq!(
             f.calls().len(),
@@ -924,7 +919,7 @@ async fn git_suffixes_and_installation_grant_flags_cannot_change_the_target_scop
     let f = Fixture::with_origin("https://github.com/fixture/repo.git.git").await;
     f.schedule(f.github_condition()).await;
     assert_eq!(
-        f.calls()[0]["args"][3],
+        f.calls()[0]["path"],
         "repos/fixture/repo.git/actions/runs/42"
     );
     let target = f.target().await;
@@ -948,23 +943,49 @@ async fn git_suffixes_and_installation_grant_flags_cannot_change_the_target_scop
 }
 
 #[tokio::test]
+async fn projects_registered_with_ssh_remotes_can_wait_for_their_ci() {
+    // Cairn stores SSH remotes without their user: `git@github.com:o/r.git` becomes
+    // `github.com:o/r.git` and `ssh://git@github.com/…` becomes `ssh://github.com/…`.
+    for origin in [
+        "github.com:fixture/repo.git",
+        "ssh://github.com/fixture/repo.git",
+        "git@github.com:fixture/repo.git",
+    ] {
+        let f = Fixture::with_origin(origin).await;
+        let wait = f.schedule(f.github_condition()).await;
+        assert_eq!(wait["deferred"], true, "{origin}: {wait}");
+        assert_eq!(
+            f.calls()[0]["path"],
+            "repos/fixture/repo/actions/runs/42",
+            "{origin}"
+        );
+    }
+    let f = Fixture::with_origin("https://gitlab.com/fixture/repo.git").await;
+    let result = wait_for::schedule(
+        &f.s,
+        &f.token,
+        &json!({ "condition": f.github_condition(), "reason": "Elsewhere", "timeoutSeconds": 420 }),
+    )
+    .await;
+    assert_eq!(result.unwrap_err().status, 409);
+    assert!(f.calls().is_empty());
+}
+
+#[tokio::test]
 async fn scoped_agent_token_removal_never_falls_back_to_shared_credentials() {
     let f = Fixture::new().await;
     let agent =
         f.s.agent(
             json!({
                 "name": "Scoped watcher",
-                "access": { "projects": [f.project], "github": false, "installation": true },
+                "access": { "projects": [f.project], "installation": true },
             }),
             None,
         )
         .await
         .unwrap();
-    let key = format!("agent-github:{}", text(&agent, "id"));
-    f.s.store
-        .set(&key, "fixture-only-token".into(), None)
-        .await
-        .unwrap();
+    let dedicated =
+        github::instance(&f.s, "Scoped", "fixture-only-token", &[text(&agent, "id")]).await;
     let chat =
         f.s.chat_create(json!({ "agentId": agent["id"] }))
             .await
@@ -997,14 +1018,16 @@ async fn scoped_agent_token_removal_never_falls_back_to_shared_credentials() {
     .await
     .unwrap();
     assert_eq!(result["deferred"], true);
-    assert_eq!(f.calls()[0]["agentToken"], true);
+    assert_eq!(f.calls()[0]["token"], "fixture-only-token");
     assert!(!result.to_string().contains("fixture-only-token"));
     f.s.store
         .patch_run(text(&run, "id"), json!({ "status": "succeeded" }))
         .await
         .unwrap();
-    f.s.store.delete(&key).await.unwrap();
-    wait_for::github::poll_once(&f.s).await.unwrap();
+    connections::remove(&f.s, "github", &dedicated)
+        .await
+        .unwrap();
+    conditions::poll_once(&f.s).await.unwrap();
     assert_eq!(f.calls().len(), 1);
     assert_eq!(
         f.s.chat_detail(chat_id).await.unwrap()["wakeup"]["observation"]["state"],
@@ -1132,4 +1155,255 @@ async fn measure_wait_metadata_against_sleep() {
             })
         );
     }
+}
+
+#[tokio::test]
+async fn dormant_plugin_probes_keep_the_requesters_membership_generation() {
+    use cairn_installation::auth::{InstallationIdentity, InstallationRole};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    for during_request in [false, true] {
+        let f = Fixture::with_identity(
+            "https://github.com/fixture/repo.git",
+            Some(InstallationIdentity::trusted(
+                InstallationRole::Owner,
+                "fixture-owner",
+            )),
+        )
+        .await;
+        f.schedule(f.github_condition()).await;
+        f.finish().await;
+        let revoked = Arc::new(AtomicBool::new(false));
+        let state = revoked.clone();
+        let authority = axum::Router::new().route(
+            "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+            axum::routing::get(move || {
+                let state = state.clone();
+                async move {
+                    axum::Json(cairn_protocol::TaskAuthorPolicy {
+                        owner: cairn_protocol::TaskAuthorGrant {
+                            account_id: "fixture-owner".into(),
+                            access_id: if state.load(Ordering::SeqCst) {
+                                "replacement-grant"
+                            } else {
+                                "fixture-owner"
+                            }
+                            .into(),
+                        },
+                        members: Vec::new(),
+                    })
+                }
+            }),
+        );
+        let (origin, authority) = common::serve_locally(authority).await;
+        let path = f.s.config.data_dir.join("installation-relay/identity.json");
+        let mut identity: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        identity["origin"] = origin.into();
+        std::fs::write(path, serde_json::to_vec(&identity).unwrap()).unwrap();
+        f.github.state(&json!({
+            "waitForRelease": during_request,
+            "response": { "id": 42, "head_sha": SHA, "status": "completed", "conclusion": "success", "run_attempt": 1 },
+        }));
+        if during_request {
+            let service = f.s.clone();
+            let observer = tokio::spawn(async move { conditions::poll_once(&service).await });
+            common::eventually(
+                Duration::from_secs(3),
+                Duration::from_millis(10),
+                || async { (f.calls().len() == 2).then_some(()) },
+            )
+            .await;
+            revoked.store(true, Ordering::SeqCst);
+            std::fs::write(f.root.path().join("github-release"), "").unwrap();
+            observer.await.unwrap().unwrap();
+        } else {
+            revoked.store(true, Ordering::SeqCst);
+            conditions::poll_once(&f.s).await.unwrap();
+        }
+        if during_request {
+            // An unhandled capability refusal is a failed worker invocation.
+            // It must deliver no provider result; the next poll then observes
+            // the revoked source before making another provider request.
+            let pending = f.s.get("chats", &f.chat).await.unwrap();
+            assert!(pending["wakeup"]["observation"].is_null());
+            f.next_poll().await;
+            conditions::poll_once(&f.s).await.unwrap();
+        }
+        let chat = f.s.get("chats", &f.chat).await.unwrap();
+        assert_eq!(chat["wakeup"]["observation"]["state"], "unavailable");
+        assert_eq!(f.calls().len(), if during_request { 2 } else { 1 });
+        authority.abort();
+    }
+}
+
+#[tokio::test]
+async fn cancelling_the_shared_probe_representative_keeps_other_waits_pending() {
+    use cairn_installation::{
+        auth::{InstallationIdentity, InstallationRole},
+        plugins::registry,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let identity = InstallationIdentity::trusted(InstallationRole::Owner, "fixture-owner");
+    let f = Fixture::with_identity(
+        "https://github.com/fixture/repo.git",
+        Some(identity.clone()),
+    )
+    .await;
+    let package = registry::install(&f.s, &json!({
+        "manifest": {
+            "id": "probe-fixture", "name": "Probe fixture", "version": "1", "apiVersion": 2,
+            "capabilities": ["storage"],
+            "settings": [{"key":"ready", "title":"Ready", "type":"boolean", "default":false}],
+            "agentAccess": {"description":"Read a synthetic condition."},
+            "conditions": [{"name":"ready", "description":"Wait for a synthetic result.", "inputSchema":{"type":"object","properties":{},"additionalProperties":false}}],
+        },
+        "source": "return {condition = function(event) if not event.instances[1].settings.ready then return {state = 'waiting'} end; cairn.storage.set('result-ready', true); return {state = 'completed'} end}",
+    })).await.unwrap();
+    registry::approve(&f.s, "probe-fixture", "1", text(&package, "digest"))
+        .await
+        .unwrap();
+    let instance = connections::save(
+        &f.s,
+        "probe-fixture",
+        &json!({
+            "name":"Probe", "enabled":true, "agentIds":[MAIN_AGENT_ID], "settings":{"ready":false},
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    let condition = json!({"type":"probe-fixture_ready"});
+    f.schedule(condition.clone()).await;
+    f.finish().await;
+    let second = f.s.chat_create(json!({})).await.unwrap();
+    let second_chat = text(&second, "id").to_owned();
+    let message = id();
+    f.s.chat_send_as(
+        &second_chat,
+        json!({"id":message,"text":"Independently wait for the same result"}),
+        Some(&identity),
+    )
+    .await
+    .unwrap();
+    f.s.chat_tick(&HashSet::from([f.run.clone()]))
+        .await
+        .unwrap();
+    let run = f.s.chat_detail(&second_chat).await.unwrap()["run"].clone();
+    let run =
+        f.s.store
+            .patch_run(text(&run, "id"), json!({"status":"running"}))
+            .await
+            .unwrap();
+    f.s.chat_acknowledge(text(&run, "id"), &message)
+        .await
+        .unwrap();
+    let config = f.s.mcps.run_configuration(&f.s, &run).await.unwrap();
+    wait_for::schedule(
+        &f.s,
+        text(&config["env"], "CAIRN_MCP_RUN_TOKEN"),
+        &json!({
+            "condition":condition, "reason":"Independent wait", "timeoutSeconds":420,
+        }),
+    )
+    .await
+    .unwrap();
+    f.s.store
+        .patch_run(text(&run, "id"), json!({"status":"succeeded"}))
+        .await
+        .unwrap();
+    connections::save(
+        &f.s,
+        "probe-fixture",
+        &json!({
+            "name":"Probe", "enabled":true, "settings":{"ready":true},
+        }),
+        Some(text(&instance, "id")),
+    )
+    .await
+    .unwrap();
+    // The stable durable catalog order determines the representative of the
+    // identical conditions. Cancelling it must not cancel its independent peer.
+    let representative =
+        f.s.store
+            .list("chats")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|chat| chat["id"] == f.chat || chat["id"] == second_chat)
+            .unwrap();
+    let representative_id = text(&representative, "id").to_owned();
+    let other = if representative_id == f.chat {
+        second_chat
+    } else {
+        f.chat.clone()
+    };
+    let held = Arc::new(AtomicBool::new(false));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let released = Arc::new(tokio::sync::Notify::new());
+    let (service, holding, entering, releasing) =
+        (f.s.clone(), held.clone(), entered.clone(), released.clone());
+    let authority = axum::Router::new().route(
+        "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+        axum::routing::get(move || {
+            let (service, held, entered, released) = (
+                service.clone(),
+                holding.clone(),
+                entering.clone(),
+                releasing.clone(),
+            );
+            async move {
+                let marker = service
+                    .store
+                    .list("plugin-storage")
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|record| record["key"] == "result-ready");
+                if marker && !held.swap(true, Ordering::SeqCst) {
+                    // storage.set has completed. The next lookup belongs to the
+                    // invocation's final recheck, outside worker-error mapping.
+                    entered.notify_one();
+                    released.notified().await;
+                }
+                axum::Json(cairn_protocol::TaskAuthorPolicy {
+                    owner: cairn_protocol::TaskAuthorGrant {
+                        account_id: "fixture-owner".into(),
+                        access_id: "fixture-owner".into(),
+                    },
+                    members: Vec::new(),
+                })
+            }
+        }),
+    );
+    let (origin, authority) = common::serve_locally(authority).await;
+    let path = f.s.config.data_dir.join("installation-relay/identity.json");
+    let mut identity: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    identity["origin"] = origin.into();
+    std::fs::write(path, serde_json::to_vec(&identity).unwrap()).unwrap();
+    let service = f.s.clone();
+    let observer = tokio::spawn(async move { conditions::poll_once(&service).await });
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    f.s.chat_pause(&representative_id, true).await.unwrap();
+    released.notify_one();
+    observer.await.unwrap().unwrap();
+    let pending = f.s.get("chats", &other).await.unwrap();
+    assert!(
+        pending["wakeup"]["observation"].is_null(),
+        "Another wait was permanently resolved: {}",
+        pending["wakeup"]
+    );
+    conditions::poll_once(&f.s).await.unwrap();
+    let resolved = f.s.get("chats", &other).await.unwrap();
+    assert_eq!(
+        resolved["wakeup"]["observation"]["state"], "completed",
+        "Remaining wait: {}",
+        resolved["wakeup"]
+    );
+    assert_eq!(
+        f.s.get("chats", &representative_id).await.unwrap()["paused"],
+        true
+    );
+    authority.abort();
 }

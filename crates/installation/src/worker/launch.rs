@@ -289,7 +289,13 @@ impl Execution<'_> {
     async fn prepare(&mut self, existing: bool) -> Result<Workspace> {
         let s = self.s;
         let mut timing = Operation::new("workspace_prepare", &self.id, "execution");
-        let prepared = self.prepare_execution(existing).await?;
+        let (prepared, credentials) = self.prepare_execution(existing).await?;
+        // Plugin credentials written into the run are masked wherever they appear.
+        for secret in &credentials.secrets {
+            if !self.sensitive.contains(secret) {
+                self.sensitive.push(secret.clone());
+            }
+        }
         self.check_source().await?;
         timing.next("account_home");
         let state_home = self.prepare_state_home(&prepared).await?;
@@ -334,7 +340,10 @@ impl Execution<'_> {
     }
 
     /// Prepares the workspace, or restores the one saved before a restart.
-    async fn prepare_execution(&self, existing: bool) -> Result<Value> {
+    async fn prepare_execution(
+        &self,
+        existing: bool,
+    ) -> Result<(Value, crate::plugins::run_credentials::RunCredentials)> {
         let s = self.s;
         if existing && self.checkpoint.read(|c| c.prepared().is_none()).await {
             // A fresh generation keeps a half-prepared workspace from being reused.
@@ -345,18 +354,18 @@ impl Execution<'_> {
         }
         let saved = self.checkpoint.snapshot().await;
         let agent_id = text(&self.run["snapshot"]["agent"], "id");
-        let github = s.store.kv(&format!("agent-github:{agent_id}")).await?;
-        let github = github.as_ref().and_then(Value::as_str);
+        let projects = crate::project_workspaces::catalog(self.run);
+        let credentials = crate::plugins::run_credentials::for_run(s, agent_id, &projects).await?;
         let prepared = match saved.prepared() {
             Some(prepared) => {
-                execution::restore(self.run, prepared.clone(), &s.config, github).await?
+                execution::restore(self.run, prepared.clone(), &s.config, &credentials).await?
             }
             None => {
                 let account_home = self.account.as_ref().map(|a| a.home.as_path());
                 execution::prepare(
                     self.run,
                     &s.config,
-                    github,
+                    &credentials,
                     account_home,
                     saved.generation.as_deref(),
                 )
@@ -367,7 +376,7 @@ impl Execution<'_> {
         self.checkpoint
             .update(|c| c.prepared = Some(Some(saved_prepared)))
             .await?;
-        Ok(prepared)
+        Ok((prepared, credentials))
     }
 
     async fn prepare_state_home(&mut self, prepared: &Value) -> Result<PathBuf> {

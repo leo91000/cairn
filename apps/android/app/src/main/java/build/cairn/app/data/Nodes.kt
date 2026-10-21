@@ -24,6 +24,7 @@ data class NodeCapabilities(
     val arch: String = "",
     val kvm: Boolean = false,
     val backend: String = "firecracker",
+    val ublk: Boolean = false,
 )
 
 @Serializable
@@ -185,9 +186,13 @@ data class NodeEnrollment(
     val expiresAt: Long,
     val installCommand: String? = null,
     val backend: String = "firecracker",
+    val nodeId: String? = null,
 )
 
 @Serializable data class NativeCaller(val id: String, val email: String)
+
+/** Reply to a revocation; older installations omit the released placement count. */
+@Serializable data class NodeRevocation(val releasedPlacements: Int = 0)
 
 @Serializable
 data class NodeConfiguration(
@@ -248,11 +253,14 @@ fun nodeDiagnostics(node: ExecutionNode, now: Long = System.currentTimeMillis())
     if (!node.local && node.status == "offline")
         reasons +=
             node.lastSeen?.let {
-                "Aucun contact depuis ${relativeAge(it, now).removePrefix("il y a ")} : vérifiez que la machine est allumée, connectée et que le service cairn-node tourne."
+                "Aucun contact depuis ${relativeAge(it, now).removePrefix("il y a ")} : vérifiez que la machine est allumée, connectée et que le service ${if (node.capabilities.backend == NATIVE_BACKEND) "cairn-native-node" else "cairn-node"} tourne."
             } ?: "La machine ne s’est jamais connectée : lancez la commande d’installation dessus."
     if (node.capabilities.backend != "native" && !node.capabilities.kvm)
         reasons +=
             "KVM indisponible : activez la virtualisation dans le BIOS et chargez le module kvm."
+    if (node.capabilities.backend == NATIVE_BACKEND && !node.capabilities.ublk)
+        reasons +=
+            "ublk indisponible : cette node a besoin d’un runtime natif à jour et du module noyau ublk_drv (/dev/ublk-control) pour monter les disques de conversation stockés sur S3."
     if (node.status != "offline" && !node.executionReady)
         reasons +=
             node.budgetError?.let { "Le budget partagé n’a pas pu être appliqué : $it" }
@@ -294,6 +302,7 @@ data class NodeStoragePolicy(
     val reservePercent: Int = 5,
     val backupSeconds: Long = 60,
     val maxDirtySeconds: Long = 300,
+    val memoryCacheMiB: Long? = null,
 )
 
 fun formatBytes(bytes: Long): String {

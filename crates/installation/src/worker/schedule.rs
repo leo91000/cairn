@@ -199,7 +199,7 @@ impl Worker {
         let cancel = CancellationToken::new();
         let admitted = match self.source_ready(s, &run_id, source.as_ref()).await {
             Ok(true) => {
-                self.register(s, &run_id, cancel.clone(), source.as_ref())
+                self.register(s, &run, cancel.clone(), source.as_ref())
                     .await
             }
             other => other,
@@ -284,16 +284,19 @@ impl Worker {
     async fn register(
         &self,
         s: &Service,
-        run_id: &str,
+        prepared: &Value,
         cancel: CancellationToken,
         source: Option<&ExecutionSource>,
     ) -> Result<bool> {
+        let run_id = text(prepared, "id");
         let mut active = self.active.lock().await;
         if s.shutdown.is_cancelled() || active.contains_key(run_id) {
             return Ok(false);
         }
         let id = run_id.to_owned();
         let source = source.cloned();
+        let expected_agent = prepared["snapshot"]["agent"].clone();
+        let expected_message = prepared["chatExecution"]["messageId"].clone();
         let eligible = s
             .store
             .read(move |db| {
@@ -303,7 +306,13 @@ impl Worker {
                 if let Some(source) = source {
                     source.recheck_in(db)?;
                 }
-                Ok(true)
+                let current = db
+                    .run(&id)?
+                    .ok_or_else(|| Error::not_found("Run not found"))?;
+                // Account preparation can outlive cancellation, merge and resume.
+                // Its account and captured execution belong to this exact selection.
+                Ok(current["snapshot"]["agent"] == expected_agent
+                    && current["chatExecution"]["messageId"] == expected_message)
             })
             .await?;
         if !eligible {
@@ -550,7 +559,6 @@ mod tests {
             claude_bin: "unused".into(),
             opencode_bin: "unused".into(),
             opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
-            gh_bin: "unused".into(),
             concurrency: 1,
             logger: false,
             worker_enabled: false,
@@ -716,18 +724,19 @@ mod tests {
     #[tokio::test]
     async fn deletion_committed_before_registration_prevents_stale_admission() {
         let (_root, service, chat_id, run_id, workspace) = fixture().await;
+        let prepared = service.store.run(&run_id).await.unwrap();
 
         assert!(
             service
                 .worker
-                .register(&service, &run_id, CancellationToken::new(), None)
+                .register(&service, &prepared, CancellationToken::new(), None)
                 .await
                 .unwrap()
         );
         assert!(
             !service
                 .worker
-                .register(&service, &run_id, CancellationToken::new(), None)
+                .register(&service, &prepared, CancellationToken::new(), None)
                 .await
                 .unwrap()
         );
@@ -737,7 +746,7 @@ mod tests {
         let registration =
             service
                 .worker
-                .register(&service, &run_id, CancellationToken::new(), None);
+                .register(&service, &prepared, CancellationToken::new(), None);
         tokio::pin!(registration);
         std::future::poll_fn(|cx| {
             assert!(registration.as_mut().poll(cx).is_pending());
@@ -790,7 +799,68 @@ mod tests {
         assert!(
             !service
                 .worker
-                .register(&service, &run_id, CancellationToken::new(), None)
+                .register(&service, &prepared, CancellationToken::new(), None)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_admission_prepared_before_merge_cannot_register_after_resume() {
+        let (_root, service, chat_id, run_id, _workspace) = fixture().await;
+        let source = service
+            .agent(json!({ "name": "Source" }), None)
+            .await
+            .unwrap();
+        let prepared = service
+            .store
+            .patch_run(
+                &run_id,
+                json!({
+                    "snapshot": { "agent": source },
+                    "chatExecution": { "messageId": "original-message" },
+                }),
+            )
+            .await
+            .unwrap();
+        service
+            .store
+            .patch_run(&run_id, json!({ "status": RunStatus::Cancelled }))
+            .await
+            .unwrap();
+        service
+            .store
+            .transaction({
+                let chat_id = chat_id.clone();
+                let source = source.clone();
+                move |db| {
+                    let mut chat = db.get("chats", &chat_id)?.unwrap();
+                    chat["agentId"] = source["id"].clone();
+                    db.put("chats", &chat)?;
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        service
+            .merge_agents(json!({
+                "sourceId": source["id"], "targetId": crate::config::MAIN_AGENT_ID, "confirm": true,
+            }))
+            .await
+            .unwrap();
+        let resumed = service.worker.resume(&service, &run_id).await.unwrap();
+        assert!(
+            !service
+                .worker
+                .register(&service, &prepared, CancellationToken::new(), None)
+                .await
+                .unwrap()
+        );
+        assert!(service.worker.active.lock().await.is_empty());
+        assert!(
+            service
+                .worker
+                .register(&service, &resumed, CancellationToken::new(), None)
                 .await
                 .unwrap()
         );

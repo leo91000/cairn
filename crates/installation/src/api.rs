@@ -70,9 +70,6 @@ async fn dispatch_inner(s: &Arc<Service>, input: &Input) -> Result<Value> {
     if let Some(result) = skill_routes(s, input, route).await? {
         return Ok(result);
     }
-    if let Some(result) = connection_routes(s, input, route).await? {
-        return Ok(result);
-    }
     if let Some(result) = settings_routes(s, input, route).await? {
         return Ok(result);
     }
@@ -98,15 +95,12 @@ async fn overview(s: &Service) -> Result<Value> {
 /// Agents, projects, tasks and their scheduling.
 async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result<Option<Value>> {
     let result = match route {
-        ("GET", ["github", "repositories"]) => {
-            crate::github_projects::list(s, input.number("page", 1, 1, 10000)?).await?
-        }
-        ("POST", ["projects", "github"]) => {
+        ("POST", ["projects", "import"]) => {
             static IMPORT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
             let _guard = IMPORT.try_lock().map_err(|_| {
-                Error::conflict("A GitHub import is already running. Retry shortly.")
+                Error::conflict("A project import is already running. Retry shortly.")
             })?;
-            crate::github_projects::import(s, input.body.clone()).await?
+            crate::plugins::projects::import(s, &input.body).await?
         }
         ("GET", ["overview"]) => overview(s).await?,
         ("GET", ["agent-avatars"]) => json!({ "configured": s.avatars.configured(s).await? }),
@@ -126,6 +120,16 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
                 .as_ref()
                 .map_or("", |identity| identity.account_id.as_str());
             crate::plugins::grants::revoke_for_agent(s, agent, grant, account).await?
+        }
+        ("POST", ["agents", id, "merge"]) => {
+            let mut args = input.body.clone();
+            if !args.is_object() {
+                return Err(Error::bad(
+                    "Enter a destination agent and confirm the merge.",
+                ));
+            }
+            args["sourceId"] = (*id).into();
+            s.merge_agents(args).await?
         }
         ("GET", ["agents"]) => {
             // Never stored: clients tell this release from an earlier or rolled-back one,
@@ -320,7 +324,7 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
 }
 
 async fn skill_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result<Option<Value>> {
-    use crate::skills::github;
+    use crate::skills::sources;
     let result = match route {
         ("GET", ["skills"]) => {
             let mut items = s.skills.list("global", None).await?;
@@ -328,7 +332,7 @@ async fn skill_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resu
                 let path = Path::new(text(&project, "path"));
                 items.extend(s.skills.list(text(&project, "id"), Some(path)).await?);
             }
-            github::attach(s, &mut items).await?;
+            sources::attach(s, &mut items).await?;
             items.into()
         }
         ("POST", ["skills", scope, "import"]) => {
@@ -344,8 +348,10 @@ async fn skill_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resu
                         )
                         .await?
                 }
-                Some("github") => github::import(s, scope, &input.body, project.as_deref()).await?,
-                _ => return Err(Error::bad("source: use archive or github")),
+                Some("plugin") => {
+                    sources::import(s, scope, &input.body, project.as_deref()).await?
+                }
+                _ => return Err(Error::bad("source: use archive or plugin")),
             };
             if let Some(name) = result["imported"]["name"].as_str() {
                 let detail = json!({
@@ -378,7 +384,7 @@ async fn skill_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resu
         ("GET", ["skills", scope, name, "bundle"]) => {
             let project = skill_project(s, scope).await?;
             let mut bundle = s.skills.bundle(scope, name, project.as_deref()).await?;
-            github::source(s, scope, name, &mut bundle).await?;
+            sources::source(s, scope, name, &mut bundle).await?;
             bundle
         }
         ("POST", ["skills", scope, name, "bundle"]) => {
@@ -400,7 +406,7 @@ async fn skill_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resu
             });
             s.store.audit("skill.saved", detail).await?;
             let mut bundle = crate::skills::bundle_response(scope, name, &saved);
-            github::source(s, scope, name, &mut bundle).await?;
+            sources::source(s, scope, name, &mut bundle).await?;
             bundle
         }
         ("GET", ["skills", scope, name, "files"]) => {
@@ -458,15 +464,15 @@ async fn skill_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resu
         }
         ("GET", ["skills", scope, name, "source"]) => {
             let project = skill_project(s, scope).await?;
-            github::status(s, scope, name, project.as_deref()).await?
+            sources::status(s, scope, name, project.as_deref()).await?
         }
         ("POST", ["skills", scope, name, "source", "update"]) => {
             let project = skill_project(s, scope).await?;
-            github::update(s, scope, name, &input.body, project.as_deref()).await?
+            sources::update(s, scope, name, &input.body, project.as_deref()).await?
         }
         ("DELETE", ["skills", scope, name, "source"]) => {
             skill_project(s, scope).await?;
-            github::forget(s, scope, name).await?;
+            sources::forget(s, scope, name).await?;
             json!({ "detached": true })
         }
         _ => return Ok(None),
@@ -491,62 +497,13 @@ async fn delete_skill(
             "This skill is selected by a task. Update that task first.",
         ));
     }
-    crate::skills::github::remove(s, scope, name, project).await?;
+    crate::skills::sources::remove(s, scope, name, project).await?;
     let detail = json!({
         "scope": scope,
         "name": name
     });
     s.store.audit("skill.deleted", detail).await?;
     Ok(json!({ "deleted": true }))
-}
-
-async fn connection_routes(
-    s: &Arc<Service>,
-    input: &Input,
-    route: Route<'_>,
-) -> Result<Option<Value>> {
-    let result = match route {
-        ("GET", ["connections"]) => {
-            let refresh = input.query.get("refresh").is_some_and(|s| s == "true");
-            s.connections.status(s, refresh).await?
-        }
-        ("GET", ["connections", "login"]) => s.connections.flow().await,
-        ("POST", ["connections", "login"]) => {
-            if input.string("provider", 20)? != "github" {
-                return Err(Error::bad("Unknown connection provider."));
-            }
-            s.connections.start(s).await?
-        }
-        ("DELETE", ["connections", "login"]) => {
-            s.connections.cancel().await;
-            json!({ "cancelled": true })
-        }
-        ("GET", ["agents", id, "github-token"]) => {
-            s.get("agents", id).await?;
-            let configured = s.store.kv(&format!("agent-github:{id}")).await?.is_some();
-            json!({ "configured": configured })
-        }
-        ("PUT", ["agents", id, "github-token"]) => set_github_token(s, id, input).await?,
-        _ => return Ok(None),
-    };
-    Ok(Some(result))
-}
-
-async fn set_github_token(s: &Service, id: &str, input: &Input) -> Result<Value> {
-    s.get("agents", id).await?;
-    let token = input.string("token", 500)?.trim();
-    let key = format!("agent-github:{id}");
-    if token.is_empty() {
-        s.store.delete(&key).await?;
-    } else {
-        s.store.set(&key, token.into(), None).await?;
-    }
-    let detail = json!({
-        "agentId": id,
-        "provider": "github"
-    });
-    s.store.audit("agent.connection.updated", detail).await?;
-    Ok(json!({ "configured": !token.is_empty() }))
 }
 
 fn settings(s: &Service) -> Value {

@@ -6,6 +6,7 @@ use super::{
 use crate::{
     config::Config,
     error::{Error, Result},
+    plugins::run_credentials::RunCredentials,
     process::{Environment, bounded_output, command},
     service::isolated,
     skills::{private_dir, workspace},
@@ -128,6 +129,7 @@ pub(super) async fn prepare_project(
     root: &Path,
     single: bool,
     generation: Option<&str>,
+    credentials: &RunCredentials,
 ) -> Result<Workspace> {
     let microvm = uses_vm(run, config);
     let is_isolated = microvm || isolated(&run["snapshot"]["agent"]);
@@ -156,7 +158,8 @@ pub(super) async fn prepare_project(
         copy_tree(&source, &target, false).await?;
         WorkspaceKind::Copy
     } else if is_isolated || project["sourceMode"] != "local" {
-        crate::project_git::clone(&source, &target, project, config).await?;
+        let access = credentials.fetch_for(project);
+        crate::project_git::clone(&source, &target, project, config, access).await?;
         WorkspaceKind::Clone
     } else {
         if target == root {
@@ -204,6 +207,7 @@ pub(super) async fn seed(
     project: &Value,
     config: &Config,
     root: &Path,
+    credentials: &RunCredentials,
 ) -> Result<Workspace> {
     let destination = root.join(text(project, "id"));
     let kind = if Path::new(text(project, "path")).join(".git").exists() {
@@ -228,7 +232,8 @@ pub(super) async fn seed(
         tokio::fs::remove_dir_all(&staging).await?;
     }
     private_dir(&staging).await?;
-    let prepared = prepare_project(run, project, config, &staging, false, None).await?;
+    let prepared =
+        prepare_project(run, project, config, &staging, false, None, credentials).await?;
     strip_private_state(&prepared.path).await?;
     entry.revision = prepared.revision;
     tokio::fs::rename(&prepared.path, &destination).await?;

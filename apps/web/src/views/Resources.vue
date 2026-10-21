@@ -2,11 +2,12 @@
 import type { z } from 'zod'
 import type {
   Agent,
-  GithubRepository,
+  PluginProject,
   Project,
   projectInput,
 } from '../../../../packages/contracts/contracts'
 import type { AgentPluginDirectory } from '../agent-plugin-directory'
+import type { Catalog } from '../plugins'
 import {
   computed,
   nextTick,
@@ -25,9 +26,9 @@ import {
 } from '../api'
 import AgentAvatar from '../components/AgentAvatar.vue'
 import Empty from '../components/Empty.vue'
-import GithubRepositoryPicker from '../components/GithubRepositoryPicker.vue'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
+import PluginProjectPicker from '../components/PluginProjectPicker.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
 import VirtualSelect from '../components/VirtualSelect.vue'
@@ -40,6 +41,8 @@ import {
   ShieldCheck,
   Trash2,
 } from '../icons'
+import { pluginSources } from '../plugin-sources'
+import { instanceNoun } from '../plugins'
 import { useResourceSave } from '../resourceSave'
 import {
   buttonBase,
@@ -92,30 +95,58 @@ const form = ref<z.infer<typeof projectInput>>({
   baseBranch: 'main',
   sourceMode: 'remote',
 })
+// "local", or the key of a plugin's project source to import from.
 const projectMode = ref('local')
-const repository = ref('')
+const instance = ref('')
+const picked = ref('')
 
-function selectRepository(repo: GithubRepository) {
-  repository.value = repo.fullName
-  form.value.name = repo.name.slice(0, 100)
-  form.value.description = repo.description.slice(0, 500)
-  form.value.baseBranch = repo.defaultBranch
+// Agent summaries load compact metadata; importing projects loads the project catalog.
+const catalog = ref<Catalog>({ packages: [], capabilities: [], connections: [] })
+const sources = computed(() => pluginSources(catalog.value, 'projectSources'))
+const importSource = computed(() => editing.value ? undefined : sources.value.find(source => source.key === projectMode.value))
+const modes = computed(() => [
+  { value: 'local', label: 'Server directory' },
+  ...sources.value.map(source => ({ value: source.key, label: source.title, description: source.pluginName })),
+])
+// An instance is chosen only when the package has several.
+const instances = computed(() => (importSource.value?.instances ?? []).map(connection => ({ value: connection.id, label: connection.name, description: connection.status.message || undefined })))
+const instanceLabel = computed(() => instanceNoun(catalog.value.packages.find(entry => entry.id === importSource.value?.pluginId)?.manifest))
+
+async function loadCatalog() {
+  if (state.installationRole === 'owner')
+    catalog.value = await api<Catalog>('/plugins').catch(() => catalog.value)
 }
 
-const githubImport = computed(() => !editing.value && projectMode.value === 'github')
-// Plugin names for the agents' access summary; members do not see plugins.
+const agentCatalog = ref<AgentPluginDirectory>({ packages: [], connections: [] })
 const catalogFailed = ref(false)
-const catalog = ref<AgentPluginDirectory>({ packages: [], connections: [] })
 onMounted(async () => {
-  if (isAgent.value && state.installationRole === 'owner') {
+  if (state.installationRole !== 'owner')
+    return
+  if (isAgent.value) {
     try {
-      catalog.value = await agentPluginDirectory(new AbortController().signal)
+      agentCatalog.value = await agentPluginDirectory(new AbortController().signal)
     }
     catch {
       catalogFailed.value = true
     }
   }
+  else {
+    await loadCatalog()
+  }
 })
+
+function chooseSource() {
+  instance.value = importSource.value?.instances[0]?.id ?? ''
+  picked.value = ''
+}
+
+function selectProject(project: PluginProject) {
+  picked.value = project.id
+  form.value.name = (project.projectName || project.name).slice(0, 100)
+  form.value.description = project.description.slice(0, 500)
+  form.value.baseBranch = project.defaultBranch || form.value.baseBranch
+}
+
 const primaryLink = [buttonBase, buttonVariants.primary, buttonSizes.default].join(' ')
 
 function edit(item?: Project) {
@@ -123,7 +154,11 @@ function edit(item?: Project) {
     return
 
   projectMode.value = 'local'
-  repository.value = ''
+  instance.value = ''
+  picked.value = ''
+  // Instances may have been added or paused since the page opened.
+  if (!item)
+    void loadCatalog()
   openedId = item?.id ?? null
   resourceSave.reset(openedId)
   form.value = item
@@ -141,19 +176,22 @@ function edit(item?: Project) {
 }
 
 async function save() {
-  if (busy.value || (githubImport.value && !repository.value))
+  if (busy.value || (importSource.value && !picked.value))
     return
   busy.value = true
   error.value = ''
   let phase: 'save' | 'refresh' = 'save'
   try {
-    const importing = githubImport.value
+    const importing = importSource.value
     await resourceSave.save<Project>(`/${props.kind}`, {
       body: () => form.value,
-      createPath: importing ? '/projects/github' : undefined,
+      createPath: importing ? '/projects/import' : undefined,
       createBody: importing
         ? () => ({
-            repository: repository.value,
+            pluginId: importing.pluginId,
+            source: importing.source,
+            instance: instance.value,
+            id: picked.value,
             name: form.value.name,
             description: form.value.description,
             baseBranch: form.value.baseBranch,
@@ -265,7 +303,7 @@ async function remove() {
         </div>
         <div v-if="'reasoning' in item" class="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-muted">
           <span class="max-w-full truncate" :title="item.model || 'Provider default'">{{ `${codingAgents[item.provider || 'codex'].label} · ${item.model || 'Provider default'}` }}</span>
-          <span class="inline-flex min-w-0 items-center gap-1.5"><Icon :name="ShieldCheck" :size="13" class="shrink-0" /><span class="min-w-0">{{ accessSummary(item, catalog, olderInstallation(state.agents)) }}{{ catalogFailed ? ' · Plugin access not loaded' : '' }}</span></span>
+          <span class="inline-flex min-w-0 items-center gap-1.5"><Icon :name="ShieldCheck" :size="13" class="shrink-0" /><span class="min-w-0">{{ accessSummary(item, agentCatalog, olderInstallation(state.agents)) }}{{ catalogFailed ? ' · Plugin access not loaded' : '' }}</span></span>
         </div>
         <div v-else-if="'path' in item" class="flex shrink-0 items-center gap-5 pr-6 text-xs text-muted phone:mt-2 phone:gap-4 phone:pr-0">
           <span class="inline-flex max-w-36 items-center gap-1.5" :title="item.baseBranch"><Icon :name="GitBranch" :size="13" /><span class="truncate">{{ item.baseBranch }}</span></span>
@@ -314,7 +352,7 @@ async function remove() {
     :description="
       isAgent
         ? 'Create a profile with the right instructions and model for the job.'
-        : 'Choose a GitHub repository or an existing directory on your server. Agents work on private copies in their workspaces.'
+        : 'Choose an existing directory on your server, or import a project through a plugin such as GitHub. Agents work on private copies in their workspaces.'
     "
   >
     <template v-if="state.installationRole === 'owner'">
@@ -337,13 +375,24 @@ async function remove() {
             v-model="projectMode"
             label="Add from"
             :disabled="busy || pendingCreation"
-            :options="[{ value: 'local', label: 'Server directory' }, { value: 'github', label: 'GitHub' }]"
+            :options="modes"
+            @update:model-value="chooseSource"
           />
-          <GithubRepositoryPicker
-            v-if="githubImport"
+          <VirtualSelect
+            v-if="importSource && instances.length > 1"
+            v-model="instance"
+            :label="instanceLabel"
             :disabled="busy || pendingCreation"
-            :selected="repository"
-            @select="selectRepository"
+            :options="instances"
+            @update:model-value="picked = ''"
+          />
+          <PluginProjectPicker
+            v-if="importSource && instance"
+            :source="importSource"
+            :instance="instance"
+            :disabled="busy || pendingCreation"
+            :selected="picked"
+            @select="selectProject"
           />
         </div>
         <label class="span-2 col-span-2 phone:col-span-1">Name<input
@@ -359,12 +408,12 @@ async function remove() {
           placeholder="A short reminder of what this is for."
         /></label>
         <VirtualSelect
-          v-if="!githubImport"
+          v-if="!importSource"
           v-model="form.sourceMode"
           label="New work starts from"
           :options="[{ value: 'remote', label: 'Latest remote branch', description: 'Fetch a fresh copy; local files stay untouched' }, { value: 'local', label: 'Local branch snapshot', description: 'Use committed files from the local branch' }]"
         />
-        <label v-if="!githubImport" class="span-2 col-span-2 phone:col-span-1">Project directory<input
+        <label v-if="!importSource" class="span-2 col-span-2 phone:col-span-1">Project directory<input
           v-model="form.path"
           required
           placeholder="/workspaces/my-project"
@@ -380,7 +429,7 @@ async function remove() {
       <footer class="modal-actions flex justify-end gap-2.5 bg-surface border-t border-line sticky bottom-0 phone:flex-wrap px-6.5 py-4.5 phone:px-5 phone:py-4">
         <UiButton type="button" :disabled="busy" @click="open = false">
           Cancel
-        </UiButton><UiButton variant="primary" type="submit" :disabled="busy || (githubImport && !repository)">
+        </UiButton><UiButton variant="primary" type="submit" :disabled="busy || (importSource && !picked)">
           {{ busy ? "Saving…" : "Save project" }}
         </UiButton>
       </footer>

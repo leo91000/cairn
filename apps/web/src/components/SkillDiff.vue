@@ -4,7 +4,7 @@ import { computed, ref } from 'vue'
 import { ChevronRight, FileBox } from '../icons'
 import Icon from './Icon.vue'
 
-// One file of a GitHub update: its status, then a unified diff. The server already trims
+// One file of a source update: its status, then a unified diff. The server already trims
 // unchanged stretches into `gap` rows.
 const props = defineProps<{ change: SkillSourceChange, open?: boolean }>()
 const expanded = ref(props.open ?? false)

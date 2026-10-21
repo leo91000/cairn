@@ -1,6 +1,7 @@
 mod chat_files;
 mod chat_tools;
 pub mod code_mode;
+mod node_tools;
 mod plugin_reads;
 
 use crate::{
@@ -674,6 +675,12 @@ pub(crate) async fn invoke(
         | "list_plugin_instance_access"
         | "list_plugin_agent_grant_counts"
         | "list_plugin_resource_choices" => plugin_reads::invoke(s, name, args, bearer).await,
+        "list_nodes"
+        | "list_native_callers"
+        | "create_node_enrollment"
+        | "update_node"
+        | "update_node_storage"
+        | "revoke_node" => node_tools::invoke(s, name, args, bearer).await,
         "list_chat_artifacts"
         | "read_chat_artifact"
         | "set_chat_artifact_visibility"
@@ -718,6 +725,7 @@ pub(crate) async fn invoke(
                 .await?;
             Ok(json!({ "deleted": true }))
         }
+        "merge_agents" => s.merge_agents_authorized(args, authorize).await,
         "run_task" => s.enqueue(text(&args, "taskId"), "mcp", None).await,
         "cancel_run" => {
             s.worker.cancel(s, text(&args, "runId")).await?;
@@ -771,7 +779,7 @@ async fn skills_tool(s: &Service, name: &str, args: &Value, bearer: Option<&str>
                 return s.skills.read(skill, path, project).await;
             }
             let mut bundle = s.skills.bundle(scope, skill, project).await?;
-            crate::skills::github::source(s, scope, skill, &mut bundle).await?;
+            crate::skills::sources::source(s, scope, skill, &mut bundle).await?;
             Ok(bundle)
         }
         "edit_skill_files" => {
@@ -791,7 +799,7 @@ async fn skills_tool(s: &Service, name: &str, args: &Value, bearer: Option<&str>
                 .await?;
             s.skills.discard(&uploads).await;
             let mut bundle = crate::skills::bundle_response(scope, skill, &saved);
-            crate::skills::github::source(s, scope, skill, &mut bundle).await?;
+            crate::skills::sources::source(s, scope, skill, &mut bundle).await?;
             Ok(bundle)
         }
         _ => {

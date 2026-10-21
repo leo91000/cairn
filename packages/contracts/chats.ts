@@ -30,20 +30,31 @@ export interface ChatAttachment {
   height?: number
 }
 export type ConversationLifecycle = 'active' | 'trash' | 'purging'
+/** A condition a plugin provides, such as `github_pr_checks`, with its own fields. */
+export interface PluginCondition {
+  type: string
+  pluginId: string
+  projectId?: string
+  [field: string]: unknown
+}
+/** A plugin's words for a pending wait. */
+export interface WaitDisplay {
+  title: string
+  short: string
+  details: string[]
+}
+/** A plugin's words for a wait's result, inside its observation. */
+export interface WaitResultDisplay {
+  tone: 'ok' | 'error' | 'warning' | 'neutral'
+  title: string
+  detail: string
+}
 export interface ChatWakeup {
-  condition?: { type: 'run_finished', runId: string } | {
-    type: 'github_workflow'
-    projectId: string
-    runId: number
-    headSha: string
-  } | {
-    type: 'github_pr_checks'
-    projectId: string
-    prNumber: number
-    headSha: string
-  }
+  condition?: { type: 'run_finished', runId: string } | PluginCondition
   observation?: Record<string, unknown> | null
-  /** GitHub conditions: when Cairn checks again, and why its last check failed. */
+  /** What a plugin condition shows while waiting. */
+  display?: WaitDisplay | null
+  /** Plugin conditions: when Cairn checks again, and why its last check failed. */
   nextCheckAt?: number
   lastError?: string
   id: string

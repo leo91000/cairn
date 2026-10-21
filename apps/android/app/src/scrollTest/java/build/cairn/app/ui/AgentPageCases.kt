@@ -55,7 +55,6 @@ abstract class AgentPageCases {
                     nodes = listOf(LOCAL_NODE_ID),
                     projects = listOf("p1", "p2"),
                     skills = listOf("global/review"),
-                    github = false,
                 ),
         )
 
@@ -80,6 +79,21 @@ abstract class AgentPageCases {
                                 agentAccess = PluginAgentAccess("Read-only secrets"),
                             ),
                     ),
+                    // GitHub accounts are plugin instances granted like any other.
+                    PluginEntry(
+                        "github",
+                        builtin = true,
+                        manifest =
+                            PluginManifest(
+                                id = "github",
+                                name = "GitHub",
+                                agentAccess =
+                                    PluginAgentAccess(
+                                        "Granted agents' runs push and use the GitHub CLI as this account."
+                                    ),
+                                instances = PluginInstances("Account", "Accounts"),
+                            ),
+                    ),
                     PluginEntry(
                         "discord",
                         builtin = true,
@@ -96,8 +110,14 @@ abstract class AgentPageCases {
                     PluginConnection("prod", "onepassword", "Production"),
                     PluginConnection("staging", "onepassword", "Staging", enabled = false),
                     PluginConnection("bot", "discord", "#support", agentId = "agent"),
+                    PluginConnection("gh-work", "github", "octo-work"),
+                    PluginConnection("gh-home", "github", "octo-home"),
                 ),
         )
+
+    /** The server's refusal of two accounts of a package whose runs use their credentials. */
+    private val oneInstance =
+        "Grant one GitHub instance per agent: its runs use that instance's credentials."
 
     private class Fixture(
         val server: MockWebServer,
@@ -105,8 +125,6 @@ abstract class AgentPageCases {
         val agents: AtomicReference<List<Agent>>,
         val conflict: AtomicBoolean,
         val loseCreation: AtomicBoolean,
-        val rejectToken: AtomicBoolean,
-        val tokens: CopyOnWriteArrayList<String>,
         /** The preview reports the delegation as suspended by an earlier change. */
         val alreadySuspended: AtomicBoolean = AtomicBoolean(false),
         /** The next agent update is rejected. */
@@ -117,15 +135,11 @@ abstract class AgentPageCases {
         val failNodes: AtomicBoolean = AtomicBoolean(false),
         /** The plugin catalog fails to load. */
         val failPlugins: AtomicBoolean = AtomicBoolean(false),
-        /** The agent has a dedicated GitHub token saved. */
-        val tokenConfigured: AtomicBoolean = AtomicBoolean(false),
         /**
          * An installation that predates agent revisions: live grants live on the resources
          * (instance `agentIds`, node `exclusiveAgents`).
          */
         val older: AtomicBoolean = AtomicBoolean(false),
-        /** Reading the dedicated GitHub token's state fails. */
-        val failToken: AtomicBoolean = AtomicBoolean(false),
         /** The installation's MCP connections, as `GET /mcps` returns them. */
         val mcps: AtomicReference<String> = AtomicReference("[]"),
         /** No agent is listed yet, so the installation's version is unknown. */
@@ -137,16 +151,12 @@ abstract class AgentPageCases {
         val agents = AtomicReference(listOf(main, release))
         val conflict = AtomicBoolean(false)
         val loseCreation = AtomicBoolean(false)
-        val rejectToken = AtomicBoolean(false)
-        val tokens = CopyOnWriteArrayList<String>()
         val alreadySuspended = AtomicBoolean(false)
         val rejectUpdate = AtomicBoolean(false)
         val failRefresh = AtomicBoolean(false)
         val failNodes = AtomicBoolean(false)
         val failPlugins = AtomicBoolean(false)
-        val tokenConfigured = AtomicBoolean(false)
         val older = AtomicBoolean(false)
-        val failToken = AtomicBoolean(false)
         val mcps = AtomicReference("[]")
         val noAgents = AtomicBoolean(false)
         val server = MockWebServer()
@@ -176,21 +186,18 @@ abstract class AgentPageCases {
                                 .setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)
                         return response.setBody(wireJson.encodeToString(created))
                     }
-                    if (request.method == "PUT" && path.endsWith("/github-token")) {
-                        tokens += path
-                        if (rejectToken.getAndSet(false))
-                            return response
-                                .setResponseCode(400)
-                                .setBody("""{"error":"Jeton refusé"}""")
-                        return response.setBody("""{"configured":true}""")
-                    }
-                    if (
-                        request.method == "PUT" &&
-                            path.startsWith("/agents/") &&
-                            !path.endsWith("/github-token")
-                    ) {
+                    if (request.method == "PUT" && path.startsWith("/agents/")) {
                         val body = wireJson.parseToJsonElement(text).jsonObject
                         saved += path to body
+                        // Like the server: runs use one account's credentials per package.
+                        val github =
+                            body["plugins"]?.jsonArray.orEmpty().count {
+                                it.jsonPrimitive.content.startsWith("gh-")
+                            }
+                        if (github > 1)
+                            return response
+                                .setResponseCode(400)
+                                .setBody("""{"error":"$oneInstance"}""")
                         if (rejectUpdate.getAndSet(false))
                             return response
                                 .setResponseCode(429)
@@ -226,10 +233,6 @@ abstract class AgentPageCases {
                         return response
                             .setResponseCode(409)
                             .setBody("""{"error":"Plugins indisponibles"}""")
-                    if (path.endsWith("/github-token") && failToken.get())
-                        return response
-                            .setResponseCode(409)
-                            .setBody("""{"error":"Jeton illisible"}""")
                     if (path == "/agents" && noAgents.get()) return response.setBody("[]")
                     if (path == "/nodes" && failNodes.get())
                         return response
@@ -241,8 +244,6 @@ abstract class AgentPageCases {
                                 if (path.startsWith("/agents/agent"))
                                     """{"runs":{"queued":0,"running":0},"delegations":[{"id":"bot","pluginId":"discord","name":"#support","enabled":true,"suspended":true,"blocked":null,"alreadySuspended":${alreadySuspended.get()}}]}"""
                                 else """{"runs":{"queued":0,"running":0},"delegations":[]}"""
-                            path.endsWith("/github-token") ->
-                                """{"configured":${tokenConfigured.get()}}"""
                             path == "/agents" -> wireJson.encodeToString(agents.get())
                             path == "/projects" ->
                                 """[{"id":"p1","name":"cairn","path":"/srv/cairn"},{"id":"p2","name":"SheetOM","path":"/srv/sheetom"}]"""
@@ -285,16 +286,12 @@ abstract class AgentPageCases {
             agents,
             conflict,
             loseCreation,
-            rejectToken,
-            tokens,
             alreadySuspended,
             rejectUpdate,
             failRefresh,
             failNodes,
             failPlugins,
-            tokenConfigured,
             older,
-            failToken,
             mcps,
             noAgents,
         )
@@ -608,7 +605,8 @@ abstract class AgentPageCases {
                 compose
                     .onNodeWithText("L’agent principal a toujours accès", substring = true)
                     .assertExists()
-                assertEquals(4, compose.onAllNodesWithText("🔒 Fixé").fetchSemanticsNodes().size)
+                assertEquals(3, compose.onAllNodesWithText("🔒 Fixé").fetchSemanticsNodes().size)
+                compose.onNodeWithTag("agent-section-Github").assertDoesNotExist()
                 // Fixed rows do not open: Android used to offer restrictions the server rejects.
                 compose.onNodeWithTag("agent-section-Projects").assertHasNoClickAction()
                 // The fixed permissions render before the asynchronous plugin catalogue.
@@ -796,26 +794,51 @@ abstract class AgentPageCases {
     }
 
     @Test
-    fun aReloadAfterAConflictReadsTheTokenAgain() {
+    fun aGithubAccountIsAPluginGrantAndTwoAccountsShowTheServerRefusal() {
         journey("agent") { fixture ->
-            open(AgentSection.Identity)
-            compose.onNodeWithText("Nom").performTextReplacement("Release bot")
+            open(AgentSection.Plugins)
+            waitForDescription("Accès à octo-work")
+            compose
+                .onNodeWithText("Granted agents' runs push", substring = true)
+                .performScrollTo()
+                .assertExists()
+            compose
+                .onNodeWithContentDescription("Accès à octo-work")
+                .performScrollTo()
+                .performClick()
+            compose
+                .onNodeWithContentDescription("Accès à octo-home")
+                .performScrollTo()
+                .performClick()
+            capture("agent-github-accounts")
             back()
-            // Someone else saved the agent and its dedicated token meanwhile.
-            fixture.conflict.set(true)
-            fixture.tokenConfigured.set(true)
             compose.onNodeWithText("Enregistrer").performClick()
             confirmReview()
-            waitForText("Cet agent a été modifié ailleurs", substring = true)
-            compose.onNodeWithText("Recharger").performClick()
-            compose.waitUntil(15000) {
-                compose.onAllNodesWithText("Recharger").fetchSemanticsNodes().isEmpty()
-            }
+            // The server refuses two accounts whose runs would both receive credentials.
+            waitForText(oneInstance, substring = true)
+            assertEquals(
+                listOf("gh-work", "gh-home"),
+                fixture.saved.single().second["plugins"]!!.jsonArray.map {
+                    it.jsonPrimitive.content
+                },
+            )
+
+            // One account saves.
+            open(AgentSection.Plugins)
             compose
-                .onNodeWithContentDescription("GitHub, ${GithubMode.Dedicated.label}")
-                .assertExists()
-            open(AgentSection.Github)
-            compose.onNodeWithText("Un jeton est enregistré.").assertExists()
+                .onNodeWithContentDescription("Accès à octo-home")
+                .performScrollTo()
+                .performClick()
+            back()
+            compose.onNodeWithText("Enregistrer").performClick()
+            confirmReview()
+            compose.waitUntil(15000) {
+                fixture.saved.size == 2 &&
+                    compose.onAllNodesWithTag("agent-save-bar").fetchSemanticsNodes().isEmpty()
+            }
+            val body = fixture.saved.last().second
+            assertEquals(JsonArray(listOf(JsonPrimitive("gh-work"))), body["plugins"])
+            assertFalse("github" in body["access"]!!.jsonObject)
         }
     }
 
@@ -881,32 +904,6 @@ abstract class AgentPageCases {
     }
 
     @Test
-    fun anUnknownTokenStateNeverOffersNoGithub() {
-        journey("agent", prepare = { it.failToken.set(true) }) { fixture ->
-            waitForDescription("GitHub, Non chargé")
-            open(AgentSection.Github)
-            waitForText("Impossible de savoir si un jeton GitHub dédié est enregistré", true)
-            compose.onNodeWithText(GithubMode.None.label).assertDoesNotExist()
-
-            // Saving something else sends no token change.
-            back()
-            open(AgentSection.Identity)
-            compose.onNodeWithText("Nom").performTextReplacement("Release bot")
-            back()
-            compose.onNodeWithText("Enregistrer").performClick()
-            confirmReview()
-            compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
-            assertTrue(fixture.tokens.isEmpty())
-
-            // Once readable, the GitHub choice is offered again.
-            fixture.failToken.set(false)
-            open(AgentSection.Github)
-            compose.onNodeWithText("Réessayer").performClick()
-            waitForText(GithubMode.None.label)
-        }
-    }
-
-    @Test
     fun switchingToNativeExecutionStartsFromNoNodesAndIsReviewed() {
         journey("agent") { fixture ->
             open(AgentSection.Nodes)
@@ -951,42 +948,6 @@ abstract class AgentPageCases {
             val access = fixture.saved.single().second["access"]!!.jsonObject
             assertEquals(JsonPrimitive("native"), access["backend"])
             assertEquals(JsonArray(listOf(JsonPrimitive("desk"))), access["nodes"])
-        }
-    }
-
-    @Test
-    fun restrictingProjectsWithAnUnknownTokenIsReviewed() {
-        journey(
-            "agent",
-            prepare = { fixture ->
-                fixture.failToken.set(true)
-                // Only the GitHub switch can open the review here.
-                fixture.alreadySuspended.set(true)
-                fixture.agents.set(
-                    fixture.agents.get().map {
-                        if (it.id == "agent")
-                            it.copy(access = it.access.copy(projects = null, github = true))
-                        else it
-                    }
-                )
-            },
-        ) { fixture ->
-            open(AgentSection.Projects)
-            compose.onNodeWithText("Choisir").performClick()
-            compose.onNodeWithText("cairn").performScrollTo().performClick()
-            back()
-            compose.onNodeWithText("Enregistrer").performClick()
-            compose.waitUntil(15000) {
-                compose.onAllNodesWithTag("agent-review").fetchSemanticsNodes().isNotEmpty()
-            }
-            compose
-                .onNodeWithText(
-                    "Connexion GitHub partagée désactivée : l’agent utilisera son jeton dédié enregistré s’il en existe un."
-                )
-                .assertExists()
-            confirmReview()
-            compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
-            assertTrue(fixture.tokens.isEmpty())
         }
     }
 
@@ -1052,21 +1013,21 @@ abstract class AgentPageCases {
     }
 
     @Test
-    fun aFailedReReadOnReloadMakesTokenAndPluginsUnknown() {
+    fun aFailedReReadOnReloadMakesPluginsUnknown() {
         journey("agent") { fixture ->
             open(AgentSection.Identity)
             compose.onNodeWithText("Nom").performTextReplacement("Release bot")
             back()
-            waitForDescription("GitHub, ${GithubMode.None.label}")
             fixture.conflict.set(true)
-            fixture.failToken.set(true)
             fixture.failPlugins.set(true)
             compose.onNodeWithText("Enregistrer").performClick()
             confirmReview()
             waitForText("Cet agent a été modifié ailleurs", substring = true)
             compose.onNodeWithText("Recharger").performClick()
+            compose.waitUntil(15000) {
+                compose.onAllNodesWithText("Recharger").fetchSemanticsNodes().isEmpty()
+            }
             // Known before, unknown now: never shown as it was.
-            waitForDescription("GitHub, Non chargé")
             open(AgentSection.Plugins)
             waitForText("Impossible de charger les plugins", substring = true)
             compose.onNodeWithContentDescription("Accès à Production").assertDoesNotExist()
@@ -1200,6 +1161,7 @@ abstract class AgentPageCases {
             compose.onNodeWithText("Indisponible").assertExists()
             compose
                 .onNodeWithText("Ce plugin ne donne plus d’accès aux agents", substring = true)
+                .performScrollTo()
                 .assertExists()
             compose
                 .onNodeWithContentDescription("Retirer #support")
@@ -1283,57 +1245,13 @@ abstract class AgentPageCases {
     }
 
     @Test
-    fun aRejectedTokenKeepsTheSavedRevisionAndARetrySavesOnlyTheToken() {
-        journey("agent") { fixture ->
-            fixture.rejectToken.set(true)
-            open(AgentSection.Identity)
-            compose.onNodeWithText("Nom").performTextReplacement("Release bot")
-            back()
-            open(AgentSection.Github)
-            compose.onNodeWithText(GithubMode.Dedicated.label).performClick()
-            compose.onNodeWithText("Jeton GitHub dédié").performTextInput("fixture-token")
-            back()
-
-            // The agent is saved, its token is rejected.
-            compose.onNodeWithText("Enregistrer").performClick()
-            confirmReview()
-            waitForText("Agent enregistré, mais le jeton GitHub n’a pas été enregistré. Réessayez.")
-            compose.onNodeWithText("● 1 modification non enregistrée").assertExists()
-
-            // The retry neither resends the old revision nor loses the entered token.
-            waitForEnabled("Enregistrer")
-            compose.onNodeWithText("Enregistrer").performClick()
-            confirmReview()
-            compose.waitUntil(15000) {
-                fixture.tokens.size == 2 &&
-                    compose.onAllNodesWithTag("agent-save-bar").fetchSemanticsNodes().isEmpty()
-            }
-            compose
-                .onNodeWithText("Cet agent a été modifié ailleurs", substring = true)
-                .assertDoesNotExist()
-            assertEquals(listOf("/agents/agent"), fixture.saved.map { it.first })
-            assertEquals("r1", fixture.saved.single().second["revision"]!!.jsonPrimitive.content)
-            assertEquals(
-                "Release bot",
-                fixture.agents.get().single { it.id == "agent" }.name,
-            )
-        }
-    }
-
-    @Test
-    fun creationRetriesKeepOneAgentAfterALostResponseAConflictAndARejectedToken() {
+    fun creationRetriesKeepOneAgentAfterALostResponseAndAConflict() {
         journey("") { fixture ->
             fixture.loseCreation.set(true)
-            fixture.rejectToken.set(true)
             // A new agent starts without access: the owner grants what it needs.
             compose.onNodeWithContentDescription("Projets, Aucun").assertExists()
-            compose.onNodeWithContentDescription("GitHub, ${GithubMode.None.label}").assertExists()
             open(AgentSection.Identity)
             compose.onNodeWithText("Nom").performTextReplacement("Nouvel agent")
-            back()
-            open(AgentSection.Github)
-            compose.onNodeWithText(GithubMode.Dedicated.label).performClick()
-            compose.onNodeWithText("Jeton GitHub dédié").performTextInput("fixture-token")
             back()
 
             // The response is lost after the server created the agent.
@@ -1349,8 +1267,7 @@ abstract class AgentPageCases {
             waitForText("Cet agent a été modifié ailleurs", substring = true)
             assertEquals("c1", fixture.saved[2].second["revision"]!!.jsonPrimitive.content)
 
-            // Reloading keeps the draft; a further edit is saved from the created revision and
-            // the token is then rejected.
+            // Reloading keeps the draft; a further edit is saved from the created revision.
             compose.onNodeWithText("Recharger").performClick()
             compose.waitUntil(15000) {
                 compose.onAllNodesWithText("Recharger").fetchSemanticsNodes().isEmpty()
@@ -1358,18 +1275,6 @@ abstract class AgentPageCases {
             open(AgentSection.Identity)
             compose.onNodeWithText("Nom").performTextReplacement("Agent de release")
             back()
-            waitForEnabled("Créer l’agent")
-            compose.onNodeWithText("Créer l’agent").performClick()
-            waitForText("Agent enregistré, mais le jeton GitHub n’a pas été enregistré. Réessayez.")
-            assertFalse(left.get())
-            // The agent exists: leaving only loses the pending token.
-            compose.runOnIdle { checkNotNull(backDispatcher).onBackPressed() }
-            waitForText("Quitter sans enregistrer ?")
-            compose.onNodeWithText("Cet agent ne sera pas créé.").assertDoesNotExist()
-            compose.onNodeWithText("La modification non enregistrée sera perdue.").assertExists()
-            compose.onNodeWithText("Continuer").performClick()
-
-            // The last retry saves only the token of that agent.
             waitForEnabled("Créer l’agent")
             compose.onNodeWithText("Créer l’agent").performClick()
             compose.waitUntil(15000) { left.get() }
@@ -1387,7 +1292,7 @@ abstract class AgentPageCases {
             assertEquals(JsonArray(emptyList()), access["projects"])
             assertEquals(JsonArray(emptyList()), access["skills"])
             assertEquals(JsonArray(emptyList()), access["mcps"])
-            assertEquals(JsonPrimitive(false), access["github"])
+            assertFalse("github" in access)
             assertEquals(JsonArray(listOf(JsonPrimitive(LOCAL_NODE_ID))), access["nodes"])
             assertEquals(
                 "Agent de release",
@@ -1397,7 +1302,6 @@ abstract class AgentPageCases {
                 listOf("Agent de release"),
                 fixture.agents.get().filter { it.id == "created" }.map { it.name },
             )
-            assertEquals(2, fixture.tokens.size)
         }
     }
 }

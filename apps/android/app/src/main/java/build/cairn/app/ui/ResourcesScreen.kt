@@ -177,9 +177,25 @@ internal fun ProjectEditor(
     var form by rememberForm(initial)
     val saving = rememberResourceSave(initial.id)
     var saveError by rememberSaveable { mutableStateOf<String?>(null) }
+    // "local", or the key of a plugin's project source to import from.
     var mode by rememberSaveable { mutableStateOf("local") }
-    var repository by rememberSaveable { mutableStateOf("") }
-    val github = saving.id.isEmpty() && mode == "github"
+    var instanceChoice by rememberSaveable { mutableStateOf("") }
+    var item by rememberSaveable { mutableStateOf("") }
+    val creating = saving.id.isEmpty()
+    var catalog by remember { mutableStateOf<PluginCatalog?>(null) }
+    if (creating)
+        LaunchedEffect(Unit) {
+            // Without the catalogue, projects can still be added from a server folder.
+            catalog = runCatching { vm.api.get<PluginCatalog>("/plugins") }.getOrNull()
+        }
+    val sources = catalog?.projectSources().orEmpty()
+    val source = sources.find { it.key == mode }?.takeIf { creating }
+    // The first enabled instance unless the owner picks another one.
+    val instance =
+        source?.instances?.let { instances ->
+            instances.find { it.id == instanceChoice } ?: instances.firstOrNull()
+        }
+    val importing = source != null
     Editor(
         if (saving.id.isEmpty()) "Ajouter un projet" else "Modifier le projet",
         state.busy,
@@ -199,11 +215,14 @@ internal fun ProjectEditor(
                         api,
                         "/projects",
                         value = { wireJson.encodeToJsonElement(form) },
-                        createPath = if (github) "/projects/github" else "/projects",
+                        createPath = if (importing) "/projects/import" else "/projects",
                         createValue = {
-                            if (github)
+                            if (source != null && instance != null)
                                 body(
-                                    "repository" to repository,
+                                    "pluginId" to source.entry.id,
+                                    "source" to source.source.name,
+                                    "instance" to instance.id,
+                                    "id" to item,
                                     "name" to form.name,
                                     "description" to form.description,
                                     "baseBranch" to form.baseBranch,
@@ -211,7 +230,7 @@ internal fun ProjectEditor(
                             else wireJson.encodeToJsonElement(form)
                         },
                         onCreated = {
-                            if (github) {
+                            if (importing) {
                                 val saved = wireJson.decodeFromJsonElement<Project>(it)
                                 form =
                                     form.copy(
@@ -240,32 +259,49 @@ internal fun ProjectEditor(
         valid =
             form.name.isNotBlank() &&
                 form.name.length <= 100 &&
-                (if (github) repository.isNotBlank() else form.path.isNotBlank()) &&
+                (if (importing) instance != null && item.isNotBlank()
+                else form.path.isNotBlank()) &&
                 form.baseBranch.isNotBlank(),
     ) {
-        if (saving.id.isEmpty()) {
-            Choice(
-                "Ajouter depuis",
-                mode,
-                listOf("local" to "Dossier sur le serveur", "github" to "GitHub"),
-                enabled = !state.busy && !saving.pendingCreation,
-            ) {
-                mode = it
-            }
-            if (github)
-                GithubRepositoryPicker(vm.api, repository, !state.busy && !saving.pendingCreation) {
-                    repository = it.fullName
+        if (creating) {
+            val editable = !state.busy && !saving.pendingCreation
+            // Plugins with project sources (e.g. GitHub) import from their enabled instances.
+            if (sources.isNotEmpty())
+                Choice(
+                    "Ajouter depuis",
+                    mode,
+                    listOf("local" to "Dossier sur le serveur") +
+                        sources.map { it.key to it.label },
+                    enabled = editable,
+                ) {
+                    if (it != mode) item = ""
+                    mode = it
+                }
+            if (source != null && instance != null) {
+                if (source.instances.size > 1)
+                    Choice(
+                        source.entry.manifest?.noun() ?: "Instance",
+                        instance.id,
+                        source.instances.map { it.id to it.name },
+                        enabled = editable,
+                    ) {
+                        if (it != instance.id) item = ""
+                        instanceChoice = it
+                    }
+                PluginProjectPicker(vm.api, source, instance.id, item, editable) {
+                    item = it.id
                     form =
                         form.copy(
-                            name = it.name.take(100),
+                            name = (it.projectName?.ifBlank { null } ?: it.name).take(100),
                             description = it.description.take(500),
-                            baseBranch = it.defaultBranch,
+                            baseBranch = it.defaultBranch.ifBlank { form.baseBranch },
                         )
                 }
+            }
         }
         Field("Nom", form.name, { form = form.copy(name = it) })
         Field("Description", form.description, { form = form.copy(description = it) }, 3)
-        if (!github) {
+        if (!importing) {
             Choice(
                 "Démarrer depuis",
                 form.sourceMode,

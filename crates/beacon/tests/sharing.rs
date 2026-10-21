@@ -174,7 +174,7 @@ async fn member_cannot_manage_projects_skills_agents_or_installation_settings() 
             "/projects/00000000-0000-0000-0000-000000000000",
         ),
         (Method::POST, "/agents"),
-        (Method::GET, "/github/repositories"),
+        (Method::GET, "/plugins/github/projects"),
         (Method::GET, "/agents/00000000-0000-0000-0000-000000000000"),
         (Method::GET, "/nodes"),
         (Method::GET, "/accounts"),

@@ -31,6 +31,36 @@ originating permission. Previously unattributed conversations and external plugi
 origins cannot silently gain host access. When changing an existing agent's backend,
 start a new conversation; environments cannot switch backend in place.
 
+## Switching an existing machine
+
+A node keeps the execution backend it enrolled with; a heartbeat reporting another
+backend is refused. To move a Firecracker machine to native execution, or back, use
+Switch to native (or Switch to VM) on its node. Cairn pre-fills the machine name
+and the other backend. Run the generated installer on the same machine: the new
+runtime enrolls as a separate node with its own identity, grants and storage,
+alongside the existing one. After its configuration and agent step, Cairn offers to
+retire the previous node. The invitation assigns the replacement's identity before
+it connects, so another enrollment cannot advance this switch. Older invitations
+remain consumable; installations without identity tracking keep the previous node
+and ask for an update before completing a guided switch.
+Revoking it from there also returns conversations fixed
+to or preferring that node to automatic placement; a plain revocation keeps those
+explicit choices waiting. Conversations keep their backend: VM conversations
+continue on other VM nodes, and native work starts in new conversations with
+native agents. Switch each agent's backend on its page and allow the new node.
+Finally run the uninstall command shown for the previous runtime.
+
+The public Cairn MCP and the `cairn_installation` agent tool expose the same setup
+and retirement controls: `list_nodes`, `list_native_callers`,
+`create_node_enrollment`, `update_node`, `update_node_storage` and `revoke_node`. Installation management
+access is required for mutations; read-only public MCP access cannot enroll,
+configure or revoke a node. Agent installation grants are checked again in each
+mutation transaction. Enroll the other backend, wait for the returned `nodeId`,
+configure its native trust when applicable, and grant agents through `update_agent`.
+Only after the replacement is ready, revoke the old identity with
+`releasePlacements: true`. Plain revocation preserves existing placement choices.
+These tools neither install nor uninstall a runtime on the host.
+
 ## Daily use
 
 The controller uses one slot, low CPU/I/O priority and conservative default budgets.
@@ -120,8 +150,10 @@ Cross-node recovery requires native Linux x86-64, ublk and the pinned coding-eng
 runtime on the destination. Different installed application dependencies can still
 prevent a project from running. Native-to-VM and cross-OS environment conversion
 remain unsupported. This storage change advances installation data epoch 6 to 7;
-follow the reviewed transition in [ADR 0052](adr/0052-native-ublk-workspaces-and-idle-eviction.md)
-before upgrading. An older native binary must not be started against the new state.
+the [reviewed automatic transition to epoch 9](AUTOMATIC-MIGRATIONS.md) qualifies its
+conversion and recovery tests alongside the rules in
+[ADR 0052](adr/0052-native-ublk-workspaces-and-idle-eviction.md).
+An older native binary must not be started against the new state.
 
 ## Updates and removal
 
@@ -135,7 +167,15 @@ status for update failures. Enrollment and update credentials stay root-private.
 Revoke the node in Cairn first, then stop/disable `cairn-native-node.service` on its
 host. Removing `/opt/cairn-native` and `/var/lib/cairn-native` deletes binaries and
 all retained local work; do this only after synchronization and recovery review.
-Remove its systemd unit and run `systemctl daemon-reload` when uninstalling. The
+First confirm with `findmnt` that no conversation disk is still mounted below
+`/var/lib/cairn-native` after a failed stop. If one remains, start
+`sudo systemctl start cairn-native-node` so its recovery releases the disks it owns,
+then retry. Removal must never walk into a live filesystem. Delete the directories
+and `cairn-workload` account before removing the systemd unit and running
+`systemctl daemon-reload`. The Revoke dialog shows one command that lists such mounts
+and stops before deleting anything, including when mount enumeration fails. It keeps
+the unit file until the directories and account are gone, and skips stopping a unit
+that no longer exists, so it can be rerun after any failed step. The
 installer leaves GPU drivers and the personal desktop session untouched.
 
 Claude's broker and CLI use a separate writable transient secure store for

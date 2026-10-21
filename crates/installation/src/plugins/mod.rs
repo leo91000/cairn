@@ -5,20 +5,25 @@ mod addresses;
 pub mod agents;
 pub mod capabilities;
 pub mod cli;
+pub mod conditions;
 pub mod connections;
+pub mod device_flow;
 pub mod forms;
 pub mod grants;
 pub mod legacy;
+pub mod legacy_github;
 pub mod oauth;
 pub mod operations;
 mod paging;
 pub mod panels;
 pub mod program_installation;
 pub mod programs;
+pub mod projects;
 pub mod registry;
 pub(crate) mod requesters;
 pub mod resources;
 pub mod routes;
+pub mod run_credentials;
 pub mod runtime;
 pub mod scope;
 pub mod setup;
@@ -59,6 +64,7 @@ pub struct Plugins {
     pub(crate) program_installation: tokio::sync::Mutex<()>,
     pub(crate) installer_host: Host,
     pub operations: operations::Operations,
+    pub device_flows: device_flow::Flows,
     /// When each paced key (e.g. a bot token's Identify budget) may send next.
     paces: socket::pacing::Paces,
     oauth: oauth::Authorizations,
@@ -71,6 +77,8 @@ impl Default for Plugins {
             changed: Notify::new(),
             http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                // Some APIs refuse requests without one; packages may set their own.
+                .user_agent("Cairn")
                 .build()
                 .expect("plugin HTTP client"),
             test_origin: Mutex::new(None),
@@ -80,6 +88,7 @@ impl Default for Plugins {
             program_installation: tokio::sync::Mutex::new(()),
             installer_host: Host::with_limits(4, std::time::Duration::from_secs(120)),
             operations: operations::Operations::default(),
+            device_flows: device_flow::Flows::default(),
             paces: socket::pacing::Paces::default(),
             oauth: oauth::Authorizations::default(),
         }
@@ -145,6 +154,7 @@ impl Plugins {
     }
 
     pub async fn start(self: Arc<Self>, s: Arc<Service>) {
+        tokio::spawn(legacy_github::complete(s.clone()));
         runtime::maintain(s).await;
     }
 }
@@ -933,6 +943,10 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 grant,
             ],
         ) => grants::remove(s, id, connection, collection, resource, grant).await,
+        ("POST", ["plugins", id, "device-flow"]) => device_flow::start(s, id).await,
+        ("GET", ["plugins", id, "device-flow", flow]) => device_flow::status(s, id, flow).await,
+        ("DELETE", ["plugins", id, "device-flow", flow]) => Ok(device_flow::cancel(s, id, flow)),
+        ("GET", ["plugins", id, "projects"]) => projects::list(s, id, input).await,
         ("GET", ["plugins", id, "programs"]) => program_installation::list(s, id).await,
         ("POST", ["plugins", id, "programs", name, action]) => {
             let account = input

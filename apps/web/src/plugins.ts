@@ -111,7 +111,18 @@ export interface Manifest {
   apiVersion: number
   capabilities: string[]
   hosts?: string[]
-  credential?: { label: string, header: string, prefix?: string }
+  credential?: {
+    label: string
+    header: string
+    prefix?: string
+    /** The owner can sign in on the service's page instead of pasting a token. */
+    deviceFlow?: {
+      authorizationUrl: string
+      tokenUrl: string
+      clientId: string
+      scopes?: string[]
+    }
+  }
   settings?: SettingField[]
   instances?: { singular: string, plural: string }
   brand?: { color: string, path?: string }
@@ -132,6 +143,15 @@ export interface Manifest {
   operations?: PluginOperation[]
   oauth?: PluginOAuthProvider[]
   webhooks?: { name: string }[]
+  /** Where its enabled instances import projects from. */
+  projectSources?: PluginSource[]
+  /** Where its enabled instances import skills from, with the location's fields. */
+  skillSources?: (PluginSource & { fields: SettingField[] })[]
+  /** Conditions granted agents can wait for; agents use them, the owner never edits them. */
+  conditions?: { name: string, description: string, project?: boolean }[]
+  /** What granted agents' runs receive from its instance, such as git credentials. */
+  runCredentials?: Record<string, unknown>
+  secretPatterns?: string[]
 }
 
 export type PluginAccessProfile = 'read' | 'contribute' | 'manage'
@@ -248,6 +268,13 @@ export interface PluginPage<T> {
 /** Configuration requiring stable callbacks or resources before activation. */
 export function hasSetup(manifest: Manifest | null | undefined) {
   return Boolean(manifest?.resources?.length || manifest?.oauth?.length || manifest?.webhooks?.length)
+}
+
+/** A named source a package offers, such as GitHub repositories. */
+export interface PluginSource {
+  name: string
+  title: string
+  description?: string
 }
 
 export interface ProgramRelease {
@@ -432,15 +459,13 @@ export function eligibleAgent(agent: Agent) {
 
 /**
  * Why an agent can't serve anyone in a channel, or '' when it can. Mirrors the server:
- * read-only sandbox, one project at most, no installation, GitHub, MCP or plugin grants.
+ * read-only sandbox, one project at most, no installation, MCP or plugin grants.
  */
 export function publicProblem(agent: Agent, pluginAccess: boolean) {
   if (!eligibleAgent(agent))
     return 'Too broad'
   if (agent.access.sandbox !== 'read-only')
     return 'Not read-only'
-  if (agent.access.github)
-    return 'Has GitHub'
   if (!Array.isArray(agent.access.mcps) || agent.access.mcps.length)
     return 'Has MCPs'
   if (pluginAccess)

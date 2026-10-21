@@ -5,7 +5,8 @@ import { isolateTestCredentials } from './test-environment.mjs'
 // A coding-agent VM may expose its live auth broker to child processes. Tests
 // must use their own temporary homes and synthetic brokers instead.
 isolateTestCredentials()
-const args = process.argv.slice(2)
+const nextest = process.argv[2] === '--nextest'
+const args = process.argv.slice(nextest ? 3 : 2)
 const selectsPackage = args.some(arg => arg === '-p' || arg === '--package' || arg.startsWith('--package='))
 // Beacon's real MCP relay tests also execute the installation's isolated code
 // worker. Build it with the same feature/profile flags before tests start, so a
@@ -57,7 +58,7 @@ if (needsCodeWorker) {
   process.env.CAIRN_TEST_CODE_WORKER = worker.executable
 }
 
-const result = spawnSync('cargo', ['test', '--locked', ...(selectsPackage ? [] : ['--workspace']), ...args], { stdio: 'inherit' })
+const result = spawnSync('cargo', [...(nextest ? ['nextest', 'run'] : ['test']), '--locked', ...(selectsPackage ? [] : ['--workspace']), ...args], { stdio: 'inherit' })
 if (result.error)
   throw result.error
 process.exit(result.status ?? 1)

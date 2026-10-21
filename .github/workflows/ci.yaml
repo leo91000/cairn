@@ -69,17 +69,7 @@ jobs:
       - run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
       - name: Install bindings toolchain for the optional ublk transport
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev
-      # The quality job owns this cache; restoring it here keeps one compiled dependency set.
-      - uses: actions/cache/restore@v6.1.0
-        env:
-          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
-        with:
-          path: |
-            ~/.cargo/registry/
-            ~/.cargo/git/
-            target/
-          key: rust-${{ runner.os }}-1.97.1-debug0-${{ hashFiles('Cargo.lock') }}
-          restore-keys: rust-${{ runner.os }}-1.97.1-debug0-
+      - uses: ./.github/actions/cache-rust
       - name: Build the browser-test backend and frontend
         run: |
           cargo build --locked --bin cairn --example worker_fixture --example network_direct_client --example network_qualification --example native_storage_qualifier --features ublk
@@ -103,6 +93,44 @@ jobs:
           path: dist/
           retention-days: 1
   quality:
+    needs: resolve
+    if: needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          cache: true
+      - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt && rustup default 1.97.1
+      - name: Check formatting, lint, tests and frontend build
+        run: pnpm check
+      - name: Check generated API schemas
+        run: |
+          node --import tsx scripts/backend-schemas.mjs
+          git diff --exit-code -- crates/installation/schemas/
+      - name: Check the C3 candidate-selection snapshot model
+        run: python3 -m unittest discover -s scripts/tests -p test_chat_candidates_study.py -v
+  rust-check:
+    needs: resolve
+    if: needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          cache: true
+      - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
+      - name: Install native test dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age
+      - uses: ./.github/actions/cache-rust
+      - name: Check all Rust targets, including the optional storage transport
+        run: cargo clippy --locked --workspace --all-targets --features ublk-prototype -- -D warnings
+  backend:
     services:
       postgres:
         image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
@@ -115,9 +143,6 @@ jobs:
           --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     needs: resolve
-    # Main still runs these checks after reusing a pull request image: they report
-    # main's health and save the Rust cache for a changed Cargo.lock, which pull
-    # requests cannot share with each other.
     if: needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # Native builds/tests plus node/S3 recovery took 28m31s before cleanup on
@@ -133,31 +158,52 @@ jobs:
         with:
           cache: true
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
-      - name: Install bindings toolchain for the optional ublk transport
+      - name: Install native test dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age
-      - uses: actions/cache@v6.1.0
-        env:
-          # A stalled segment must leave time for the uncached quality checks.
-          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
+      - uses: ./.github/actions/cache-rust
         with:
-          path: |
-            ~/.cargo/registry/
-            ~/.cargo/git/
-            target/
-          key: rust-${{ runner.os }}-1.97.1-debug0-${{ hashFiles('Cargo.lock') }}
-          restore-keys: rust-${{ runner.os }}-1.97.1-debug0-
-      - name: Check formatting, lint, tests and frontend build
-        run: pnpm check
-      - name: Check the C3 candidate-selection snapshot model
-        run: python3 -m unittest discover -s scripts/tests -p test_chat_candidates_study.py -v
-      - run: |
-          node --import tsx scripts/backend-schemas.mjs
-          git diff --exit-code -- crates/installation/schemas/
-          cargo clippy --locked --workspace --all-targets --features ublk-prototype -- -D warnings
-          node scripts/test-backend.mjs --features ublk-prototype
-          # Also compile the browser-test binaries into the cache that later build jobs restore.
-          cargo build --locked --bin cairn --example worker_fixture --example network_direct_client --example network_qualification --example native_storage_qualifier --features ublk
-          cargo build --locked -p cairn-beacon --bin cairn-beacon --example network_stun_server
+          save: true
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
+        with:
+          tool: cargo-nextest@0.9.149
+      - name: Run backend tests across binaries with isolated credentials
+        run: |
+          set -o pipefail
+          node scripts/test-backend.mjs --nextest --features ublk-prototype --test-threads 8 --no-fail-fast --color never --status-level pass 2>&1 | tee backend-tests.log
+          node scripts/production-release.mjs qualify backend-tests.log
+      - name: Check Rust documentation examples
+        run: node scripts/test-backend.mjs --doc --features ublk-prototype
+  node-checks:
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        env:
+          POSTGRES_USER: cairn
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: cairn_beacon_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    needs: resolve
+    if: needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@localhost:5432/cairn_beacon_test
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          cache: true
+      - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
+      - name: Install native test dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age
+      - uses: ./.github/actions/cache-rust
+      - name: Build the frontend used by installer and update fixtures
+        run: pnpm exec vite build --config apps/web/vite.config.ts
       - name: Validate node supervisor and S3 recovery
         run: |
           python3 scripts/tests/guest_trim_test.py
@@ -237,25 +283,32 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - group: journeys
-            browser: chromium
+          - group: journeys-1
             projects: journeys*
-            shard: 1/2
-          - group: journeys-extra
-            browser: chromium
+            shard: 1/4
+          - group: journeys-2
             projects: journeys*
-            shard: 2/2
-          - group: chromium
-            browser: chromium
+            shard: 2/4
+          - group: journeys-3
+            projects: journeys*
+            shard: 3/4
+          - group: journeys-4
+            projects: journeys*
+            shard: 4/4
+          - group: chromium-1
             projects: layout-chromium-*
-          - group: webkit
-            browser: webkit
+          - group: webkit-1
             projects: layout-webkit-*
-            shard: 1/2
-          - group: webkit-extra
-            browser: webkit
+            shard: 1/4
+          - group: webkit-2
             projects: layout-webkit-*
-            shard: 2/2
+            shard: 2/4
+          - group: webkit-3
+            projects: layout-webkit-*
+            shard: 3/4
+          - group: webkit-4
+            projects: layout-webkit-*
+            shard: 4/4
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: ./.github/actions/setup-pnpm
@@ -301,11 +354,25 @@ jobs:
             docs/screenshots/
           retention-days: 14
   network-bench:
-    name: direct-relay network bench (no KVM)
+    name: direct-relay network bench (${{ matrix.group }})
     needs: [resolve, build]
     if: needs.resolve.outputs.reuse != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: lan
+            scenarios: same-lan mdns-only-client same-server
+          - group: nat
+            scenarios: nat-client nat-installation nat-both
+          - group: fallback
+            scenarios: udp-blocked symmetric-nat symmetric-client
+          - group: recovery
+            scenarios: network-change packet-loss
+          - group: qualification
+            scenarios: qualification
     services:
       postgres:
         image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
@@ -341,25 +408,61 @@ jobs:
       - run: chmod +x target/debug/examples/network_qualification
       - run: pnpm exec vite build --config tests/network-qualification.vite.ts
       - name: Validate real network topology and authenticated sessions
+        env:
+          NETWORK_SCENARIOS: ${{ matrix.scenarios }}
         run: |
           python3 tests/network_probe_test.py
           python3 tests/network_bench_test.py
           python3 tests/stun_docker_test.py
-          for scenario in same-lan mdns-only-client nat-client nat-installation nat-both udp-blocked symmetric-nat symmetric-client same-server network-change packet-loss qualification; do
+          for scenario in $NETWORK_SCENARIOS; do
             python3 tests/network-bench.py "$scenario" --output "test-results/network/$scenario.json"
           done
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
-          name: direct-relay-network-evidence
+          name: direct-relay-network-evidence-${{ matrix.group }}
           path: test-results/network/
           retention-days: 14
-  android-direct:
-    name: Android direct-relay device bench
-    needs: [resolve, build]
+  android-direct-build:
+    needs: resolve
     if: needs.resolve.outputs.reuse != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          install: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - uses: gradle/actions/setup-gradle@v5
+      - run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
+      - name: Build the native client and instrumented tests
+        working-directory: apps/android
+        run: ./gradlew assembleDebug assembleDebugAndroidTest --no-daemon --stacktrace
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: android-direct-apks
+          path: |
+            apps/android/app/build/outputs/apk/debug/app-debug.apk
+            apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          if-no-files-found: error
+          retention-days: 1
+  android-direct:
+    name: Android direct-relay device bench (${{ matrix.scenario }})
+    needs: [resolve, build, android-direct-build]
+    if: needs.resolve.outputs.reuse != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [same-lan, udp-blocked, network-change]
     services:
       postgres:
         image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
@@ -391,25 +494,24 @@ jobs:
           name: browser-backend
           path: target/debug/
       - run: chmod +x target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/network_stun_server
-      - uses: actions/setup-java@v5
+      - uses: actions/download-artifact@v8.0.1
         with:
-          distribution: temurin
-          java-version: '21'
+          name: android-direct-apks
+          path: apps/android/app/build/outputs/apk/
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
-      - uses: gradle/actions/setup-gradle@v5
-      - run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
-      - name: Build the native client and instrumented tests
-        working-directory: apps/android
-        run: ./gradlew assembleDebug assembleDebugAndroidTest --no-daemon --stacktrace
       - name: Enable emulator acceleration
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
       - uses: ./.github/actions/setup-android-emulator
+        with:
+          build-packages: ''
       - name: Observe native responses, network restart and revocation
+        env:
+          ANDROID_SCENARIO: ${{ matrix.scenario }}
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
         with:
           api-level: 36
@@ -418,17 +520,16 @@ jobs:
           profile: pixel_6
           disable-animations: true
           script: |
-            for scenario in same-lan udp-blocked network-change; do python3 tests/network-bench.py "$scenario" --android --output "test-results/android-direct/$scenario.json" || exit 1; done
+            python3 tests/network-bench.py "$ANDROID_SCENARIO" --android --output "test-results/android-direct/$ANDROID_SCENARIO.json"
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
-          name: android-direct-device-evidence
+          name: android-direct-device-evidence-${{ matrix.scenario }}
           path: test-results/android-direct/
           retention-days: 14
   image:
-    # The exact-image smoke test uses the beacon binary and frontend from the
-    # build job, which finishes long before the image does; quality never gates it.
-    needs: [resolve, build]
+    # Compile the release image immediately; wait for fixtures only before smoke tests.
+    needs: resolve
     if: needs.resolve.outputs.reuse != 'true'
     outputs:
       digest: ${{ steps.build.outputs.digest }}
@@ -438,6 +539,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      actions: read
     env:
       # A pull request from this repository can become the release, so its image
       # is published like main's. Fork images stay local.
@@ -547,6 +649,24 @@ jobs:
       - uses: ./.github/actions/setup-pnpm
         with:
           cache: true
+      - name: Wait for the concurrent fixture build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'JS'
+          import { execFileSync } from 'node:child_process'
+          import { waitForArtifact } from './scripts/android-device-tests.mjs'
+          const gh = args => execFileSync('gh', args, { encoding: 'utf8' })
+          for (const artifact of ['browser-backend', 'browser-build']) {
+            await waitForArtifact({
+              repository: process.env.GITHUB_REPOSITORY,
+              runId: process.env.GITHUB_RUN_ID,
+              attempt: process.env.GITHUB_RUN_ATTEMPT,
+              artifact,
+              job: 'build',
+            }, { gh })
+          }
+          JS
       - uses: actions/download-artifact@v8.0.1
         with:
           name: browser-backend
@@ -732,8 +852,8 @@ jobs:
   publish:
     # The Intel nested Android test needs hardware GitHub does not provide; it runs locally
     # before releases when Android or runner changes need it (docs/DEPLOYMENT.md) and does not gate CI.
-    needs: [resolve, quality, browser, network-bench, native-runtime, image, beacon-image]
-    if: always() && !cancelled() && needs.resolve.outputs.reuse != 'true' && needs.quality.result == 'success' && needs.browser.result == 'success' && needs.network-bench.result == 'success' && needs.native-runtime.result == 'success' && needs.image.result == 'success' && needs.image.outputs.published == 'true' && needs.beacon-image.result == 'success' && needs.beacon-image.outputs.published == 'true'
+    needs: [resolve, build, quality, rust-check, backend, node-checks, browser, network-bench, native-runtime, android-direct-build, android-direct, image, beacon-image]
+    if: always() && !cancelled() && needs.resolve.outputs.reuse != 'true' && needs.quality.result == 'success' && needs.rust-check.result == 'success' && needs.backend.result == 'success' && needs.node-checks.result == 'success' && needs.build.result == 'success' && needs.browser.result == 'success' && needs.network-bench.result == 'success' && needs.native-runtime.result == 'success' && needs.android-direct-build.result == 'success' && needs.android-direct.result == 'success' && needs.image.result == 'success' && needs.image.outputs.published == 'true' && needs.beacon-image.result == 'success' && needs.beacon-image.outputs.published == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

@@ -63,7 +63,7 @@ const workspace = computed<Array<{
     to: '/connections',
     label: 'Connections',
     icon: Plug,
-    detail: 'Coding agent accounts and GitHub',
+    detail: 'Coding agent accounts',
   },
   {
     to: '/personal-connections',
@@ -75,7 +75,7 @@ const workspace = computed<Array<{
     to: '/plugins',
     label: 'Plugins',
     icon: Puzzle,
-    detail: '1Password, Discord and your packages',
+    detail: '1Password, Discord, GitHub and your packages',
   },
   {
     to: '/nodes',

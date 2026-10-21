@@ -25,9 +25,11 @@ Infrastructure changes have their own scope and are not part of a routine releas
    Beacon and installation images from that same evidence. A reused PR image
    can report its tested merge commit while matching the tag's tree.
 2. **Check data compatibility.** The workflow compares the served and candidate
-   installation data epochs. A changed epoch requires a separately reviewed forward
-   migration. Releases do not create or retain backups. Check the migration's
-   effect on existing accounts and conversations before deploying it.
+   installation data epochs. A changed epoch can deploy automatically when its
+   source epoch is explicitly listed in the reviewed migration contract and its
+   declared regressions passed exact-tree image validation. See
+   [automatic migrations](AUTOMATIC-MIGRATIONS.md). Unknown transitions and
+   downgrades stop before deployment. Releases do not create or retain backups.
 3. **Create the tag and release notes.** A pushed version tag starts the container
    and Android workflows. They reuse compatible validation evidence or run fresh
    checks; a tag can wait for validation already running on main. For Android,
@@ -67,9 +69,13 @@ epoch in the same PR**, with a reviewed forward migration and failure recovery p
 There is no automatic backup or data restoration.
 
 The automatic job compares the served and candidate source contracts. Equal
-epochs allow routine deployment; missing/invalid metadata or different epochs
-stop before deployment. Carry out a reviewed epoch transition separately;
-never change the epoch or legacy tree to force the automatic check to pass.
+epochs with unchanged database compatibility allow routine deployment. Schema 2
+also permits declared forward transitions whose plan and regression evidence were
+reviewed and validated with the exact candidate tree. Missing/invalid metadata,
+unlisted source epochs and downgrades stop before deployment. The database version
+fence prevents an old binary or the installed updater from rolling back after
+migration starts. See [the transition contract](AUTOMATIC-MIGRATIONS.md).
+Never lower the epoch, database version or legacy tree to force a deployment.
 Initial adoption accepts epoch 1 only when the served
 Git tree matches the recorded reviewed legacy tree. The contract covers all
 persisted data; it relies on source review, rather than inferring compatibility

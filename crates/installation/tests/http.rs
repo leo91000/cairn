@@ -142,7 +142,8 @@ async fn member_identity_cannot_manage_installation_resources() {
         ("GET", "/api/accounts".to_owned()),
         ("GET", "/api/plugins".to_owned()),
         ("GET", "/api/mcps".to_owned()),
-        ("GET", "/api/connections/login".to_owned()),
+        ("GET", "/api/plugins/github/projects".to_owned()),
+        ("POST", "/api/plugins/github/device-flow".to_owned()),
         ("GET", "/api/settings".to_owned()),
         ("GET", "/api/audit".to_owned()),
         ("GET", "/api/nodes/settings".to_owned()),
@@ -633,19 +634,19 @@ async fn plugin_secrets_require_trusted_owner_context() {
 }
 
 #[tokio::test]
-async fn github_projects_require_trusted_owner_context() {
+async fn plugin_project_imports_require_trusted_owner_context() {
     let (_root, app, service) = app().await;
     for (method, path) in [
-        ("GET", "/api/github/repositories"),
-        ("POST", "/api/projects/github"),
+        ("GET", "/api/plugins/github/projects"),
+        ("POST", "/api/projects/import"),
     ] {
         let request = json_request(method, path).body(Body::from("{}")).unwrap();
         assert_eq!(send(&app, request).await.status(), StatusCode::UNAUTHORIZED);
     }
     let session = owner_context(&service).await;
     let import = Credentials::Cookie(&session)
-        .apply(json_request("POST", "/api/projects/github"))
-        .body(Body::from(r#"{"repository":"fixture/repo"}"#))
+        .apply(json_request("POST", "/api/projects/import"))
+        .body(Body::from(r#"{"pluginId":"github","id":"fixture/repo"}"#))
         .unwrap();
     assert_eq!(send(&app, import).await.status(), StatusCode::UNAUTHORIZED);
 }

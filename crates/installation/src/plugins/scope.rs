@@ -37,6 +37,7 @@ pub struct Agent {
     instances: Vec<Connection>,
     bearer: String,
     requester: Option<super::requesters::RunRequester>,
+    observation: Option<Arc<super::requesters::Observation>>,
 }
 
 impl Scope {
@@ -69,6 +70,39 @@ impl Scope {
             instances,
             bearer: bearer.to_owned(),
             requester,
+            observation: None,
+        })))
+    }
+
+    /// An internal wait probe has no running bearer, but retains its original turn.
+    pub(crate) async fn for_condition(
+        s: &Service,
+        run: &Value,
+        condition: &Value,
+        instances: Vec<Connection>,
+    ) -> Result<Self> {
+        let observation = super::requesters::Observation::capture(s, run, condition).await?;
+        if let Some(super::requesters::Principal::External(actor)) = &observation.principal {
+            let actor = actor.clone();
+            let origin = s
+                .store
+                .read(move |db| super::requesters::external_in(db, &actor))
+                .await?;
+            if instances
+                .iter()
+                .any(|instance| instance.plugin_id == origin.plugin_id)
+            {
+                return Err(Error::forbidden(
+                    "Use a resource operation within the requester's admitted source scope.",
+                ));
+            }
+        }
+        Ok(Self::Agent(Box::new(Agent {
+            agent_id: text(&run["snapshot"]["agent"], "id").to_owned(),
+            instances,
+            bearer: String::new(),
+            requester: None,
+            observation: Some(Arc::new(observation)),
         })))
     }
 
@@ -115,6 +149,9 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
             }
         }
         Scope::Agent(agent) => {
+            if let Some(observation) = &agent.observation {
+                observation.recheck(s).await?;
+            }
             if let Some(requester) = &agent.requester {
                 super::requesters::recheck(s, requester).await?;
             }
@@ -176,14 +213,22 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
     };
     let id = expected.id.clone();
     let authority = match scope {
-        Scope::Agent(agent) => Some((agent.bearer.clone(), agent.requester.clone())),
+        Scope::Agent(agent) => Some((
+            agent.bearer.clone(),
+            agent.requester.clone(),
+            agent.observation.clone(),
+        )),
         _ => None,
     };
     let value = s
         .store
         .read(move |db| {
-            if let Some((bearer, requester)) = authority {
-                crate::project_workspaces::authorize_in(db, &bearer)?;
+            if let Some((bearer, requester, observation)) = authority {
+                if let Some(observation) = observation {
+                    observation.recheck_in(db)?;
+                } else {
+                    crate::project_workspaces::authorize_in(db, &bearer)?;
+                }
                 if let Some(requester) = requester {
                     super::requesters::recheck_in(db, &requester)?;
                 }

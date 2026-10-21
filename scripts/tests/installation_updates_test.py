@@ -16,7 +16,7 @@ NEW = 'ghcr.io/leo91000/cairn@sha256:' + '2' * 64
 
 class Updates(unittest.TestCase):
     def test_approved_update_and_failed_health_restore_previous_image_without_losing_data(self):
-        for failure in ('migration-slow', 'migration-failed', '', 'health', 'runner-unhealthy', 'stop-once', 'up-once', 'exec-once', 'digest', 'unapproved', 'interrupted', 'interrupted-stopped', 'interrupted-created', 'interrupted-missing', 'interrupted-restarting', 'interrupted-crash-loop', 'interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-exec-refused', 'interrupted-foreign-restarting', 'lease', 'expired-lease'):
+        for failure in ('format-slow', 'format-failed', 'format-interrupted', 'migration-slow', 'migration-failed', '', 'health', 'runner-unhealthy', 'stop-once', 'up-once', 'exec-once', 'digest', 'unapproved', 'interrupted', 'interrupted-stopped', 'interrupted-created', 'interrupted-missing', 'interrupted-restarting', 'interrupted-crash-loop', 'interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-exec-refused', 'interrupted-foreign-restarting', 'lease', 'expired-lease'):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 class Beacon(http.server.BaseHTTPRequestHandler):
@@ -36,16 +36,23 @@ class Updates(unittest.TestCase):
                     config.update(pendingImage=NEW, leaseOwner='00000000-0000-4000-8000-000000000001')
                 if failure in ('interrupted-stopped', 'interrupted-created', 'interrupted-missing', 'interrupted-restarting', 'interrupted-crash-loop', 'interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-exec-refused', 'interrupted-foreign-restarting', 'expired-lease'):
                     config['leaseAcquired'] = True
+                if failure == 'format-interrupted':
+                    config.update(pendingImage=NEW, pendingDatabaseVersion=7,
+                                  leaseOwner='00000000-0000-4000-8000-000000000001', leaseAcquired=True)
                 (root / 'installation.json').write_text(json.dumps(config))
                 (root / 'data').mkdir()
-                if failure.startswith('migration-'):
+                if failure.startswith(('migration-', 'format-')):
                     with sqlite3.connect(root / 'data/manager.db') as db:
-                        db.execute('PRAGMA user_version=5')
+                        version = 8 if failure == 'format-interrupted' else 7 if failure.startswith('format-') else 5
+                        db.execute(f'PRAGMA user_version={version}')
                         db.execute('CREATE TABLE kv(key TEXT PRIMARY KEY,data TEXT,expires INTEGER)')
+                        if failure.startswith('format-'):
+                            # No disk-block conversion is pending: only the generic format fence applies.
+                            db.execute("INSERT INTO kv VALUES('migration:disk-blocks-v2','true',NULL)")
                 (root / 'data/kept').write_text('conversation and storage must survive')
                 (root / 'data/maintenance-token').write_text('fixture-private-token')
                 (root / '.env').write_text('')
-                initial_image = NEW if failure in ('interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-exec-refused', 'interrupted-created', 'interrupted-crash-loop') else OLD
+                initial_image = NEW if failure in ('format-interrupted', 'interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-exec-refused', 'interrupted-created', 'interrupted-crash-loop') else OLD
                 (root / 'compose.json').write_text(json.dumps({
                     'name': 'cairn-installation',
                     'services': {
@@ -68,10 +75,12 @@ if 'stop' in args and os.environ['FAILURE'] == 'stop-once' and not (root / 'stop
     sys.exit(1)
 if 'up' in args:
     image = json.loads((root / 'compose.json').read_text())['services']['manager']['image']
-    if image.endswith('2' * 64) and os.environ['FAILURE'].startswith('migration-'):
+    if image.endswith('2' * 64) and os.environ['FAILURE'].startswith(('migration-', 'format-')):
         with sqlite3.connect(root / 'data/manager.db') as db:
-            db.execute('PRAGMA user_version=7')
-        sys.exit(1)
+            version = 8 if os.environ['FAILURE'].startswith('format-') else 7
+            db.execute(f'PRAGMA user_version={version}')
+        if os.environ['FAILURE'] != 'format-interrupted':
+            sys.exit(1)
     if image.endswith('2' * 64) and os.environ['FAILURE'] == '' and (root / 'data/manager.db').exists():
         with sqlite3.connect(root / 'data/manager.db') as db:
             db.execute("INSERT OR REPLACE INTO kv VALUES('migration:disk-blocks-v2','true',NULL)")
@@ -84,9 +93,9 @@ if 'ps' in args:
     if failure != 'interrupted-missing':
         state = 'restarting' if 'restarting' in failure else 'exited' if failure == 'interrupted-stopped' else 'created' if failure == 'interrupted-created' else 'running'
         image = 'ghcr.io/leo91000/cairn@sha256:' + ('2' if failure in ('interrupted-restarting', 'interrupted-crash-loop', 'interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-exec-refused', 'interrupted-created') else '1') * 64
-        if failure.startswith('migration-') or (root / 'data/manager.db').exists():
+        if failure.startswith(('migration-', 'format-')) or (root / 'data/manager.db').exists():
             image = json.loads((root / 'compose.json').read_text())['services']['manager']['image']
-            state = 'exited' if failure == 'migration-failed' else 'running'
+            state = 'exited' if failure in ('migration-failed', 'format-failed') else 'running'
         if failure == 'interrupted-crash-loop':
             # Between restarts, Docker briefly reports a crash-looping candidate running.
             # Recovery observes it running twice before Docker reports the restart.
@@ -118,11 +127,11 @@ if 'exec' in args:
     if 'health' in args[-1] and os.environ['FAILURE'] in ('exec-once', 'interrupted-exec-once') and not (root / 'exec-refused').exists():
         (root / 'exec-refused').touch()
         sys.exit(1)
-    if 'health' in args[-1] and os.environ['FAILURE'].startswith('migration-'):
+    if 'health' in args[-1] and os.environ['FAILURE'].startswith(('migration-', 'format-')):
         probes = root / 'migration-probes'
         count = int(probes.read_text()) + 1 if probes.exists() else 1
         probes.write_text(str(count))
-        healthy = os.environ['FAILURE'] == 'migration-slow' and count >= 2
+        healthy = os.environ['FAILURE'] == 'format-interrupted' or (os.environ['FAILURE'] in ('migration-slow', 'format-slow') and count >= 2)
         if healthy:
             with sqlite3.connect(root / 'data/manager.db') as db:
                 db.execute("INSERT OR REPLACE INTO kv VALUES('migration:disk-blocks-v2','true',NULL)")
@@ -146,10 +155,10 @@ if 'exec' in args:
                                                 env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
                                                      'CAIRN_INSTALLATION_ROOT': directory, 'FAILURE': failure},
                                                 capture_output=True, text=True, timeout=90)
-                    self.assertEqual(result.returncode, 0 if failure in ('migration-slow', '', 'health', 'runner-unhealthy', 'stop-once', 'up-once', 'exec-once', 'interrupted', 'interrupted-stopped', 'interrupted-created', 'interrupted-missing', 'interrupted-restarting', 'interrupted-crash-loop', 'interrupted-unhealthy') else 1, result.stderr)
+                    self.assertEqual(result.returncode, 0 if failure in ('format-slow', 'format-interrupted', 'migration-slow', '', 'health', 'runner-unhealthy', 'stop-once', 'up-once', 'exec-once', 'interrupted', 'interrupted-stopped', 'interrupted-created', 'interrupted-missing', 'interrupted-restarting', 'interrupted-crash-loop', 'interrupted-unhealthy') else 1, result.stderr)
                     updated = json.loads((root / 'installation.json').read_text())
-                    self.assertEqual(updated['image'], NEW if not failure or failure == 'migration-slow' else OLD)
-                    if failure.startswith('migration-'):
+                    self.assertEqual(updated['image'], NEW if not failure or failure in ('migration-slow', 'format-slow', 'format-interrupted') else OLD)
+                    if failure.startswith(('migration-', 'format-')):
                         deployment = json.loads((root / 'compose.json').read_text())
                         self.assertEqual(deployment['services']['manager']['image'], NEW)
                         self.assertEqual((root / 'data/kept').read_text(), 'conversation and storage must survive')
@@ -157,9 +166,9 @@ if 'exec' in args:
                         events = [json.loads(line) for line in (root / 'events').read_text().splitlines()]
                         last_up = next(index for index, event in enumerate(events) if 'up' in event)
                         self.assertFalse(any('stop' in event for event in events[last_up + 1:]), 'Advanced storage must never trigger a rollback stop')
-                        if failure == 'migration-failed':
+                        if failure in ('migration-failed', 'format-failed'):
                             self.assertEqual(updated['pendingImage'], NEW)
-                            self.assertEqual(updated['pendingDatabaseVersion'], 5)
+                            self.assertEqual(updated['pendingDatabaseVersion'], 7 if failure == 'format-failed' else 5)
                             retry = subprocess.run(['python3', str(REPO / 'deploy/installations/host.py'), origin, '--update'],
                                                    env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
                                                         'CAIRN_INSTALLATION_ROOT': directory, 'FAILURE': ''},

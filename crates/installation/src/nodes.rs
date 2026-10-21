@@ -522,17 +522,7 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
             crate::validation::uuid(run)?;
             moves::request(s, &s.store.run(run).await?, &input.body).await
         }
-        ("GET", ["nodes", "native-callers"]) => {
-            crate::native::policy::refresh(s).await?;
-            let authority = s.store.kv("native-authority").await?.unwrap_or_default();
-            Ok(authority["accounts"]
-                .as_object()
-                .into_iter()
-                .flatten()
-                .map(|(id, account)| json!({ "id": id, "email": account["email"] }))
-                .collect::<Vec<_>>()
-                .into())
-        }
+        ("GET", ["nodes", "native-callers"]) => native_callers(s, |_| Ok(())).await,
         ("GET", ["nodes", "alerts"]) => alerts::recent(s).await,
         ("GET", ["nodes", "settings"]) => {
             let mut value = publication::settings(s).await?;
@@ -541,18 +531,42 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
         }
         ("PUT", ["nodes", "settings"]) => publication::configure(s, input.body.clone()).await,
         ("GET", ["nodes", "backups", run]) => backups(s, run).await,
-        ("PUT", ["nodes", node, "storage"]) => configure_storage(s, node, &input.body).await,
+        ("PUT", ["nodes", node, "storage"]) => {
+            configure_storage(s, node, &input.body, |_| Ok(())).await
+        }
         ("GET", ["nodes"]) => Ok(inventory(s).await?.into()),
         ("POST", ["nodes", _, "exclusive", reservation, "release"]) => {
             exclusive::release_owned(s, reservation, None).await
         }
-        ("PUT", ["nodes", node]) => configure_node(s, node, input.body.clone()).await,
-        ("POST", ["nodes", "enrollments"]) => invite(s, input.body.clone()).await,
+        ("PUT", ["nodes", node]) => configure_node(s, node, input.body.clone(), |_| Ok(())).await,
+        ("POST", ["nodes", "enrollments"]) => invite(s, input.body.clone(), |_| Ok(())).await,
         ("POST", ["nodes", node, "stale-disks", "delete"]) => delete_stale_disks(s, node).await,
         ("PUT", ["nodes", node, "agents"]) => grant_agents(s, node, input.body.clone()).await,
-        ("POST", ["nodes", node, "revoke"]) => revoke(s, node).await,
+        ("POST", ["nodes", node, "revoke"]) => {
+            revoke(s, node, input.body.clone(), |_| Ok(())).await
+        }
         _ => Err(Error::not_found("Not found")),
     }
+}
+
+pub(crate) async fn native_callers(
+    s: &Service,
+    authorize: impl FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+) -> Result<Value> {
+    crate::native::policy::refresh(s).await?;
+    s.store
+        .read(move |db| {
+            authorize(db)?;
+            let authority = db.kv("native-authority")?.unwrap_or_default();
+            Ok(authority["accounts"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(id, account)| json!({ "id": id, "email": account["email"] }))
+                .collect::<Vec<_>>()
+                .into())
+        })
+        .await
 }
 
 async fn backups(s: &Service, run: &str) -> Result<Value> {
@@ -567,7 +581,12 @@ async fn backups(s: &Service, run: &str) -> Result<Value> {
         .into())
 }
 
-async fn configure_storage(s: &Service, node: &str, body: &Value) -> Result<Value> {
+pub(crate) async fn configure_storage(
+    s: &Service,
+    node: &str,
+    body: &Value,
+    authorize: impl FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+) -> Result<Value> {
     crate::validation::uuid(node)?;
     if body["enabled"] == false {
         return Err(Error::bad(
@@ -592,15 +611,19 @@ async fn configure_storage(s: &Service, node: &str, body: &Value) -> Result<Valu
         .await
         .map_err(|_| Error::unavailable("Node storage probe unavailable."))?;
     if !response.status().is_success() {
-        return Err(Error::conflict("Node did not pass its FUSE storage probe."));
+        return Err(Error::conflict("Node did not pass its storage probe."));
     }
     let node = node.to_owned();
     let value = s
         .store
         .transaction(move |db| {
+            authorize(db)?;
             let mut record = db
                 .get("nodes", &node)?
                 .ok_or_else(|| Error::not_found("Node missing."))?;
+            if record["revoked"] == true {
+                return Err(Error::conflict("Node revoked."));
+            }
             record["storage"] = serde_json::to_value(&policy)?;
             db.put("nodes", &record)
         })
@@ -625,7 +648,12 @@ struct Configuration {
     native_accounts: Option<Vec<String>>,
 }
 
-async fn configure_node(s: &Service, node: &str, body: Value) -> Result<Value> {
+pub(crate) async fn configure_node(
+    s: &Service,
+    node: &str,
+    body: Value,
+    authorize: impl FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+) -> Result<Value> {
     let request: Configuration = decode(body)?;
     if let Some(accounts) = &request.native_accounts {
         let existing = s.get("nodes", node).await?;
@@ -666,6 +694,7 @@ async fn configure_node(s: &Service, node: &str, body: Value) -> Result<Value> {
     let node = node.to_owned();
     s.store
         .transaction(move |db| {
+            authorize(db)?;
             let mut record = db
                 .get("nodes", &node)?
                 .ok_or_else(|| Error::not_found("Node not found."))?;
@@ -752,7 +781,11 @@ struct Invitation {
     manager_url: Option<String>,
 }
 
-async fn invite(s: &Service, body: Value) -> Result<Value> {
+pub(crate) async fn invite(
+    s: &Service,
+    body: Value,
+    authorize: impl FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+) -> Result<Value> {
     let request: Invitation = decode(body)?;
     let name = name(&request.name)?;
     if !matches!(request.backend.as_str(), "firecracker" | "native") {
@@ -767,13 +800,15 @@ async fn invite(s: &Service, body: Value) -> Result<Value> {
         .as_ref()
         .map(|url| url.as_str().trim_end_matches('/').to_owned());
     let code = token();
+    let node_id = id();
     let expires = now() + ENROLLMENT_TTL_MS;
+    let invitation = json!({ "name": name, "backend": backend, "nodeId": node_id });
+    let key = format!("node-enrollment:{}", digest(&code));
     s.store
-        .set(
-            &format!("node-enrollment:{}", digest(&code)),
-            json!({ "name": name, "backend": backend }),
-            Some(expires),
-        )
+        .transaction(move |db| {
+            authorize(db)?;
+            db.set(&key, &invitation, Some(expires))
+        })
         .await?;
     let install = (backend == "native" || maintenance::release().is_ok())
         .then_some(origin)
@@ -795,6 +830,7 @@ async fn invite(s: &Service, body: Value) -> Result<Value> {
         "managerUrl": manager_url,
         "installCommand": install,
         "backend": backend,
+        "nodeId": node_id,
     }))
 }
 
@@ -900,10 +936,29 @@ fn set_node_grant(db: &Db<'_>, mut agent: Value, node: &str, granted: bool) -> R
     Ok(())
 }
 
-async fn revoke(s: &Service, node: &str) -> Result<Value> {
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
+struct Revocation {
+    /// Return conversations fixed to or preferring this node to automatic placement,
+    /// as when the machine re-enrolls under another execution backend.
+    release_placements: bool,
+}
+
+pub(crate) async fn revoke(
+    s: &Service,
+    node: &str,
+    body: Value,
+    authorize: impl FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+) -> Result<Value> {
+    let request: Revocation = if body.is_null() {
+        Revocation::default()
+    } else {
+        decode(body)?
+    };
     let node = node.to_owned();
     s.store
         .transaction(move |db| {
+            authorize(db)?;
             let mut record = db
                 .get("nodes", &node)?
                 .ok_or_else(|| Error::not_found("Node not found."))?;
@@ -931,10 +986,43 @@ async fn revoke(s: &Service, node: &str) -> Result<Value> {
             crate::agent_grants::forget_resource(db, crate::agent_grants::EXCLUSIVE_NODES, &node)?;
             record["exclusiveAgents"] = json!([]);
             db.put("nodes", &record)?;
-            db.audit("node.revoked", &json!({ "nodeId": node }))?;
-            Ok(public(record))
+
+            let mut released = 0_u64;
+            if request.release_placements {
+                released = release_placements(db, &node)?;
+            }
+
+            db.audit(
+                "node.revoked",
+                &json!({ "nodeId": node, "releasedPlacements": released }),
+            )?;
+            let mut value = public(record);
+            value["releasedPlacements"] = released.into();
+            Ok(value)
         })
         .await
+}
+
+/// Clears pins and preferences naming `node`. A pinned conversation otherwise waits
+/// for a machine that can never return under this identity.
+fn release_placements(db: &Db<'_>, node: &str) -> Result<u64> {
+    let runs = db.json_rows(
+        "SELECT data FROM runs
+         WHERE json_extract(data,'$.pinnedNodeId')=?1 OR json_extract(data,'$.preferredNodeId')=?1",
+        [node],
+    )?;
+    let mut released = 0;
+    for run in runs {
+        let mut patch = json!({});
+        for field in ["pinnedNodeId", "preferredNodeId"] {
+            if run[field] == node {
+                patch[field] = Value::Null;
+            }
+        }
+        db.patch_run(text(&run, "id"), &patch)?;
+        released += 1;
+    }
+    Ok(released)
 }
 
 pub async fn internal(State(app): State<App>, request: Request) -> Result<Json<Value>> {
@@ -1003,7 +1091,6 @@ async fn enroll(s: &Service, body: Value) -> Result<Value> {
         return Err(Error::unauthorized("Invalid or expired enrollment code."));
     }
     let key = format!("node-enrollment:{}", digest(&request.code));
-    let node_id = id();
     let credential = token();
     let token_key = format!("node-token:{}", digest(&credential));
     s.store
@@ -1017,6 +1104,8 @@ async fn enroll(s: &Service, body: Value) -> Result<Value> {
                     "Enrollment backend differs from the owner's invitation.",
                 ));
             }
+            // Invitations issued before identity tracking remain consumable.
+            let node_id = invitation["nodeId"].as_str().map_or_else(id, str::to_owned);
             db.delete(&key)?;
             let capabilities = request.capabilities;
             let node = EnrolledNode {
@@ -1137,6 +1226,19 @@ fn record_heartbeat(
     node["budgetError"] = body["budgetError"].clone();
     node["exclusiveReservations"] = body["exclusiveReservations"].clone();
     if let Some(capabilities) = capabilities {
+        // The installer fixes the execution backend at enrollment. Another runtime on the
+        // same machine enrolls as a new node, so its grants and checkpoints never mix.
+        let backend = |value: &Value| {
+            value["backend"]
+                .as_str()
+                .unwrap_or("firecracker")
+                .to_owned()
+        };
+        if backend(&capabilities) != backend(&node["capabilities"]) {
+            return Err(Error::conflict(
+                "A node cannot change its execution backend. Enroll the machine again as a new node.",
+            ));
+        }
         node["capabilities"] = capabilities;
     }
     node["storage"] = serde_json::to_value(Policy::for_node(&node["storage"])?)?;

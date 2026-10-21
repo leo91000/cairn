@@ -9,7 +9,7 @@
 --   progress          every ~8 s while the agent works       { deliveryId, conversation, state, step, reply }
 --   question          the agent asks something, once each    { deliveryId, conversation, question, reply }
 --   reply             the agent's final answer to deliver    { deliveryId, conversation, text, status,
---                                                              files, reply, state }
+--                                                              files, reply, state, checkpoint }
 --                     return { retryAfter = seconds, state = … } to be called again later
 --   timer             a timer scheduled with cairn.timers    { id, name, payload }
 --   start             when Cairn starts the worker           { connectionId, settings }
@@ -38,6 +38,23 @@
 --                     setup=true accepts only declared setup challenges; all host capabilities are refused
 --                     -> {status, body: string, headers?: {["content-type"]: string}}
 --                     Original UTF-8 body; 128 KiB input, 64 KiB response, 2.5 s total.
+--   projects          a `projectSources` request, for the owner through one instance
+--                     { op = "list", source, page, query, instance }
+--                       -> { items = { { id, name, description?, defaultBranch?, badges?,
+--                            updatedAt?, url?, origin? } }, nextPage? }
+--                     { op = "resolve", source, id, instance }
+--                       -> { id, name, description?, origin, defaultBranch? }
+--   condition         a granted agent's `conditions` wait     { condition, input, project?,
+--                     agent, instances } -> { state = "waiting", display = { title, short,
+--                     details } } | { state = "completed" | …, …, display = { tone, title,
+--                     detail } } | { state = "unavailable", message }; errors are retried,
+--                     `checkAfter` (seconds) delays the next check
+--   skills            a `skillSources` request, for the owner through one instance
+--                     { op = "resolve", source, location, instance }
+--                       -> { version, location?, folder?, label?, url?, message?, date? }
+--                     { op = "files", source, location, version, folder, instance }
+--                       -> { files = { { path, size, digest, executable?, link?,
+--                            download = { url, headers? } } }, truncated? }
 -- `instances` are those the agent is granted: { id, name, enabled, settings, secrets }
 -- (secret field names only). Pass `instance = id` to capability calls when several.
 -- Each handler runs to completion under a deadline and a 16 MB memory limit.
@@ -169,6 +186,7 @@ export type ResourceFormInput = {
 
 export type HttpResponse = {
     status: number,
+    -- content-type, retry-after, link and x-* headers.
     headers: { [string]: string },
     json: Json?,
     text: string?,
@@ -182,6 +200,8 @@ export type Cairn = {
     storage: {
         get: (key: string) -> Json,
         set: (key: string, value: Json) -> (),
+        -- Atomic maximum of finite numbers; a later observation cannot shorten it.
+        max: (key: string, value: number) -> number,
         delete: (key: string) -> (),
         list: (prefix: string?) -> { string },
     },
@@ -262,6 +282,10 @@ export type Cairn = {
         after: (seconds: number, name: string, payload: Json?) -> string,
         cancel: (id: string) -> (),
     },
+    -- During reply only, with conversations.submit: durable state for the host's
+    -- current delivery. Available as event.checkpoint on retries, even after an
+    -- exception/restart. At most 64 KiB; removed atomically when delivery settles.
+    delivery: { checkpoint: (state: Json) -> () },
     -- capability "conversations.submit": only while handling an admitted message, for
     -- its author. `files` are fetched from declared hosts (4 × 10 MB). With
     -- `shared = true`, everyone allowed who writes in `thread` continues one conversation.

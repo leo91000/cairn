@@ -7,6 +7,33 @@ The agreed test seams are the manifest contract, public installation/Beacon HTTP
 the actual Luau worker against HTTP/WSS fixtures, granted CLI/MCP operations and
 the web/Android journeys. Tests assert observable behavior at those interfaces.
 
+## First Slack exchange (HTTP slice)
+
+The user reprioritized delivery toward an actual package and exchange before more
+foundation polish. `plugins/slack` now contains the manifest, setup form, HTTP
+normalizer, conversation/reply handlers and HTTP helper. The real-worker HTTP
+fixtures pass: create an inert owner draft, generate the app manifest and stable
+URL, accept a signed setup challenge, verify bot/app/public channel, activate,
+reject a bad
+signature and an unapproved person, commit a mention once, execute it through the
+real manager/native chat adapter with a fake provider process, and return that
+process's answer to the source Slack thread. Native requester and route/resource
+bindings are asserted. Fresh visibility checks prevent import or export after
+channel conversion. Native bounded checkpoints prevent repeating uncertain posts
+after restart; shared workspace/method cooldowns preserve a 900-second provider
+deadline across deliveries and early scheduler wakeups. Method slots are reserved
+before provider I/O/admission and retained, so a full store cannot turn a definite
+429 into an uncertain write. HTTP readiness is reported by the package's start
+handler. These cases execute real
+turns through the fixture provider; they do not synthesize completed database work.
+This is a local Slack HTTP fixture, not a real workspace
+or real model. See [Slack's current slice and outstanding features](SLACK.md).
+
+The complete Q1–Q20 contract remains required. No app, workspace, token or channel
+has been created or accessed on Slack; PR #226 stays draft and unmerged. Existing
+review findings and interrupted browser qualification remain tracked. Neither this
+slice nor its fixture success is a clean full review, complete CI or release gate.
+
 ## Delivery checklist
 
 - [x] Signed generic HTTP ingress, bounded responses and precise durable admission.
@@ -134,8 +161,8 @@ retries acknowledge an existing answer without recapturing a later turn's author
 reusing that receipt ID for a new question is refused.
 
 New persisted plugin
-manifests require a separate compatibility boundary: epoch 8, above the inherited
-epoch 4 and upstream main's reserved epochs 5, 6 and 7. The [persistent-format inventory and
+manifests require a separate compatibility boundary: epoch 10 / SQLite 9, above
+main through `1e735587` and its reserved epochs 5–9. The [persistent-format inventory and
 forward recovery plan](SLACK-PLUGIN-COMPATIBILITY.md) retain the unchanged legacy
 tree and require a separately reviewed production transition. The route-authority
 measurements document bounded record shape and their limits; full native/storage
@@ -1401,3 +1428,25 @@ identity and revocation checks. In particular, existing installation-agent
 restrictions on granting owner secrets or exclusive reservations are preserved.
 The Slack package, transport/files, remaining provider lifecycle, wake delivery,
 tools, automations, transient search and complete final qualification remain open.
+
+## Integration with generic provider conditions and device sign-in
+
+Dormant condition probes retain the original requester's membership generation,
+run, snapshot and exact wait. They use a dedicated observation proof rather than
+a running agent bearer. A revoked requester cannot send another provider request
+or receive a provider result. Grouped probes discard a result whose representative
+wait changed during I/O; unchanged peer conversations remain eligible for their
+own subsequent observation. This does not grant external Slack turns access to
+a shared provider credential.
+
+Generic device-code sign-in captures the owner generation and approved package.
+Status, token use and provider polling recheck that proof, including after I/O.
+Configuration carries the completed flow identifier instead of exposing its token.
+Agent merging refuses unresolved resource routes and granular grants, including
+inactive records. The owner must reassign routes and explicitly resolve access
+through normal approvals before retrying; merging cannot infer or widen resource
+rights from ordinary agent access.
+
+These adaptations preserve the newer generic provider interfaces from main; they
+do not deliver the Slack package, token lifecycle, socket primitives or remaining
+UI/public-MCP/installation-tool management parity. PR #226 remains a draft.

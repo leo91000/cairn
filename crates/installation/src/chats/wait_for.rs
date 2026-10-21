@@ -1,11 +1,12 @@
 //! Named, durable conditions that resume an existing conversation without keeping its VM active.
-pub mod github;
-
+//! Cairn's own condition is another run finishing; plugins granted to the agent add
+//! theirs (see `plugins::conditions`).
 use super::{chat_for_run, sleep};
 use crate::{
     config::{id, now},
     conversation_lifecycle::require_active,
     error::{Error, Result},
+    plugins::conditions,
     run_status::RunStatus,
     service::{Service, covers, policy},
     store::Db,
@@ -14,62 +15,41 @@ use crate::{
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
-pub fn tool() -> Value {
+fn run_finished() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "type": { "const": "run_finished" },
+            "runId": { "type": "string", "format": "uuid" },
+        },
+        "required": ["type", "runId"],
+        "additionalProperties": false,
+    })
+}
+
+/// The tool with the conditions of plugins granted to the agent.
+pub fn tool(plugin_conditions: &[Value]) -> Value {
+    let mut conditions = vec![run_finished()];
+    conditions.extend(plugin_conditions.iter().cloned());
     json!({
         "name": "wait_for",
-        "description": "Wait durably for an authorized Cairn run to finish or a specific GitHub Actions \
-            workflow run or the required checks of a pull request to complete. If already complete, returns the observed result: continue this turn. \
+        "description": "Wait durably for an authorized Cairn run to finish or for a condition \
+            provided by a plugin granted to this agent, such as a remote check pinned to a commit. \
+            If already complete, returns the observed result: continue this turn. \
             Otherwise saves a wakeup: end this turn so execution resources can be released. Cairn checks \
             the condition without waking the LLM and resumes this conversation when a result is available \
             or the timeout expires, subject to capacity. Completion includes failure and cancellation; \
-            inspect the result before taking action. Pin GitHub waits to the project, workflow run ID \
-            and full commit SHA; PR checks require the project, PR number and full head SHA. A changed PR head \
-            returns superseded; a closed or merged PR returns closed. No configured required checks returns \
-            no_required_checks, not a CI success or permission to merge. Required check failures and cancellations \
-            wake immediately; success waits for all required checks. Never use this for local background processes that need this VM. \
-            Run dependencies require the existing installation grant; GitHub uses the agent's existing connection. \
-            One wait is stored per conversation. Identical repeated requests preserve the deadline; \
-            a different request replaces the previous wait, including sleep. Queued follow-ups start after the continuation. \
-            A new user message, stop, deletion, \
+            inspect the result before taking action. Each plugin condition describes what it observes \
+            and what its results mean. Never use this for local background processes that need this VM. \
+            Run dependencies require the existing installation grant; plugin conditions use the \
+            agent's plugin grants. One wait is stored per conversation. Identical repeated requests \
+            preserve the deadline; a different request replaces the previous wait, including sleep. \
+            Queued follow-ups start after the continuation. A new user message, stop, deletion, \
             terminal turn failure or manual run resume cancels the wait; queue pause holds it.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "condition": {
-                    "oneOf": [
-                        {
-                            "type": "object",
-                            "properties": {
-                                "type": { "const": "run_finished" },
-                                "runId": { "type": "string", "format": "uuid" },
-                            },
-                            "required": ["type", "runId"],
-                            "additionalProperties": false,
-                        },
-                        {
-                            "type": "object",
-                            "properties": {
-                                "type": { "const": "github_pr_checks" },
-                                "projectId": { "type": "string", "format": "uuid" },
-                                "prNumber": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
-                                "headSha": { "type": "string", "pattern": "^[a-fA-F0-9]{40}$" },
-                            },
-                            "required": ["type", "projectId", "prNumber", "headSha"],
-                            "additionalProperties": false,
-                        },
-                        {
-                            "type": "object",
-                            "properties": {
-                                "type": { "const": "github_workflow" },
-                                "projectId": { "type": "string", "format": "uuid" },
-                                "runId": { "type": "integer", "minimum": 1, "maximum": 9007199254740991u64 },
-                                "headSha": { "type": "string", "pattern": "^[a-fA-F0-9]{40}$" },
-                            },
-                            "required": ["type", "projectId", "runId", "headSha"],
-                            "additionalProperties": false,
-                        },
-                    ],
-                },
+                "condition": { "oneOf": conditions },
                 "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
                 "reason": { "type": "string", "minLength": 1, "maxLength": 1000 },
             },
@@ -79,29 +59,40 @@ pub fn tool() -> Value {
     })
 }
 
-fn input(input: &Value) -> Result<Value> {
-    if !jsonschema::is_valid(&tool()["inputSchema"], input)
-        || text(input, "reason").trim().is_empty()
-    {
-        return Err(Error::bad(
+/// Checks the request; plugin conditions are checked against their package's schema
+/// and record their plugin.
+async fn input(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
+    let base = json!({
+        "type": "object",
+        "properties": {
+            "condition": { "type": "object" },
+            "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
+            "reason": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        },
+        "required": ["condition", "timeoutSeconds", "reason"],
+        "additionalProperties": false,
+    });
+    let invalid = || {
+        Error::bad(
             "Provide a supported condition, a concrete reason and a timeout of 1 to 86400 seconds.",
-        ));
+        )
+    };
+    if !jsonschema::is_valid(&base, input) || text(input, "reason").trim().is_empty() {
+        return Err(invalid());
     }
     let mut input = crate::run_output::payload(input, &[]);
     // JSON Schema accepts integral floats; canonicalize them for idempotency.
     input["timeoutSeconds"] = (input["timeoutSeconds"].as_f64().unwrap() as i64).into();
-    let condition = &mut input["condition"];
-    if condition["type"] == "run_finished" {
-        uuid(text(condition, "runId"))?;
-    } else {
-        uuid(text(condition, "projectId"))?;
-        let id_key = if condition["type"] == "github_pr_checks" {
-            "prNumber"
-        } else {
-            "runId"
-        };
-        condition[id_key] = (condition[id_key].as_f64().unwrap() as u64).into();
-        condition["headSha"] = text(condition, "headSha").to_ascii_lowercase().into();
+    let run = crate::project_workspaces::authorize(s, bearer).await?;
+    let agent_id = text(&run["snapshot"]["agent"], "id");
+    match conditions::normalize(s, agent_id, &input["condition"]).await? {
+        Some(condition) => input["condition"] = condition,
+        None => {
+            if !jsonschema::is_valid(&run_finished(), &input["condition"]) {
+                return Err(invalid());
+            }
+            uuid(text(&input["condition"], "runId"))?;
+        }
     }
     Ok(input)
 }
@@ -175,7 +166,7 @@ fn check_dependency(db: &Db<'_>, caller: &str, target: &str) -> Result<()> {
 }
 
 /// Rechecks the durable authorization after the turn's live MCP grant is released.
-pub(super) fn access(db: &Db<'_>, run: &Value, condition: &Value) -> Result<()> {
+pub(crate) fn access(db: &Db<'_>, run: &Value, condition: &Value) -> Result<()> {
     let agent = &run["snapshot"]["agent"];
     let current = db
         .get("agents", text(agent, "id"))?
@@ -196,9 +187,7 @@ pub(super) fn access(db: &Db<'_>, run: &Value, condition: &Value) -> Result<()> 
             db.run(text(condition, "runId"))?
                 .ok_or_else(|| Error::not_found("The target run no longer exists."))?;
         }
-        "github_workflow" | "github_pr_checks" => {
-            github::project(db, run, condition)?;
-        }
+        _ if conditions::is_condition(condition) => conditions::access(db, run, condition)?,
         _ => return Err(Error::bad("Unsupported wait condition.")),
     }
     Ok(())
@@ -231,7 +220,7 @@ fn run_result(db: &Db<'_>, condition: &Value) -> Result<Option<Value>> {
 }
 
 pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
-    let input = input(raw)?;
+    let input = input(s, bearer, raw).await?;
     let token = bearer.to_owned();
     let request = input.clone();
     // Keep the input checks and revision atomic: an acknowledged steering
@@ -247,10 +236,17 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
     if same_request(&chat["wakeup"], &run, &input) {
         return Ok(json!({ "deferred": true, "wakeup": chat["wakeup"] }));
     }
-    let observed = if github::is_condition(&input["condition"]) {
-        github::observe(s, &run, &input["condition"]).await?
+    let (observed, display) = if conditions::is_condition(&input["condition"]) {
+        let observed = conditions::observe(s, &run, &input["condition"], Some(bearer)).await?;
+        // A condition that cannot be observed is refused rather than awaited.
+        if let Some(result) = &observed.result
+            && result["state"] == "unavailable"
+        {
+            return Err(Error::conflict(text(result, "message").to_owned()));
+        }
+        (observed.result, observed.display)
     } else {
-        None
+        (None, None)
     };
     let token = bearer.to_owned();
     let result = s
@@ -294,8 +290,11 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
                 "wakeAt": created + seconds * 1000,
                 "condition": input["condition"],
             });
-            if github::is_condition(&input["condition"]) {
+            if conditions::is_condition(&input["condition"]) {
                 wakeup["nextCheckAt"] = created.into();
+                if let Some(display) = &display {
+                    wakeup["display"] = display.clone();
+                }
             }
             chat["wakeup"] = wakeup.clone();
             crate::nodes::exclusive::release_before_wait(db, text(&run, "id"))?;

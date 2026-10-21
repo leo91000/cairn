@@ -13,7 +13,8 @@ use serde_json::{Value, json};
 
 pub const INSTRUCTIONS: &str = "When waiting for a remote result before continuing the current task, \
     prefer cairn_workspace.wait_for for a supported condition (an authorized Cairn run finishing or \
-    a GitHub workflow run or required PR checks completing at a specific commit SHA). If its result says deferred=false, \
+    a condition a granted plugin lists in wait_for, such as remote checks pinned to a commit). \
+    If its result says deferred=false, \
     the condition is already complete: inspect the result and continue this turn. If deferred=true, \
     end this turn; Cairn observes the condition without keeping this execution active. \
     For other remote waits, call cairn_workspace.sleep with a delay in seconds and a concrete reason, then end this turn. \
@@ -136,7 +137,7 @@ pub(crate) fn has_unhandled_input(db: &Db<'_>, chat: &Value) -> Result<bool> {
 }
 
 /// The wakeup can still resume the turn that scheduled it.
-pub(super) fn resumable(chat: &Value, run: Option<&Value>) -> bool {
+pub(crate) fn resumable(chat: &Value, run: Option<&Value>) -> bool {
     chat["wakeup"].is_object()
         && is_active(chat)
         && chat["paused"] != true

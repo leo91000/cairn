@@ -25,6 +25,53 @@ abstract class NodePlacementCases {
     @get:Rule val compose = createComposeRule()
 
     @Test
+    fun retiringASwitchedNodeExplainsAgentsPlacementsAndTheOldRuntime() {
+        var revoked = false
+        var kept = false
+        val previous =
+            ExecutionNode(
+                id = "vm",
+                name = "Workstation",
+                status = "online",
+                agents = listOf(NodeAgent("a", "Builder"), NodeAgent("b", "Everywhere", true)),
+            )
+        val next =
+            ExecutionNode(
+                id = "native",
+                name = "Workstation GPU",
+                status = "online",
+                slots = 1,
+                capabilities = NodeCapabilities(backend = NATIVE_BACKEND, ublk = true),
+            )
+        compose.setContent {
+            CairnTheme {
+                RetireNode(previous, next, Workspace(), { kept = true }) { revoked = true }
+            }
+        }
+        compose
+            .onNodeWithText("Workstation GPU tourne maintenant comme node native", substring = true)
+            .assertExists()
+        // Only agents granted this node by name lose it; "all nodes" agents keep others.
+        compose
+            .onNodeWithText("Agents autorisés sur l’ancienne node : Builder.", substring = true)
+            .assertExists()
+        compose
+            .onNodeWithText("reviennent au placement automatique", substring = true)
+            .assertExists()
+        compose
+            .onNodeWithText("sudo docker rm -f cairn-execution-node", substring = true)
+            .performScrollTo()
+            .assertExists()
+        capture("retire-switched-node")
+        compose.onNodeWithText("Garder les deux pour l’instant").performScrollTo().performClick()
+        compose.onNodeWithText("Révoquer l’ancienne node").performScrollTo().performClick()
+        compose.runOnIdle {
+            assertTrue(kept)
+            assertTrue(revoked)
+        }
+    }
+
+    @Test
     fun nativeNodeEditorRequiresExplicitPeopleAndKeepsOneExecutionSlot() {
         var saved: NodeConfiguration? = null
         val node =
@@ -47,7 +94,10 @@ abstract class NodePlacementCases {
             }
         }
         compose.onNodeWithText("Slots d’exécution").assertIsNotEnabled()
+        compose.onNodeWithText("Une node native exécute une conversation à la fois.").assertExists()
         compose.onNodeWithText("Réservation exclusive").assertDoesNotExist()
+        compose.onNodeWithText("Mettez à jour le runtime", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("Personnes de confiance").performScrollTo().assertExists()
         compose.onNodeWithText("Activer l’exécution native").performScrollTo().performClick()
         compose.onNodeWithText("trusted@example.test").performScrollTo().performClick()
         capture("native-node-trust")
@@ -68,6 +118,7 @@ abstract class NodePlacementCases {
         MockWebServer().use { server ->
             val writes = CopyOnWriteArrayList<Pair<String, JsonObject>>()
             val enrolled = AtomicBoolean(false)
+            val enrollmentConfigured = AtomicBoolean(false)
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
@@ -78,18 +129,22 @@ abstract class NodePlacementCases {
                         ) {
                             val body = request.body.readUtf8().ifBlank { "{}" }
                             writes += path to wireJson.parseToJsonElement(body).jsonObject
+                            if (request.method == "PUT" && path.endsWith("/nodes/desk"))
+                                enrollmentConfigured.set(true)
                         }
                         val body =
                             when (path) {
                                 "/api/installations/fixture/api/nodes/enrollments" -> {
                                     enrolled.set(true)
-                                    """{"code":"native-enrollment","expiresAt":4102444800000,"installCommand":"curl https://fixture.invalid/native | bash","backend":"native"}"""
+                                    """{"code":"native-enrollment","expiresAt":4102444800000,"installCommand":"curl https://fixture.invalid/native | bash","backend":"native","nodeId":"desk"}"""
                                 }
                                 "/api/installations/fixture/api/nodes/native-callers" ->
                                     """[{"id":"trusted","email":"trusted@example.test"}]"""
                                 "/api/installations/fixture/api/nodes" ->
-                                    if (enrolled.get())
+                                    if (enrollmentConfigured.get())
                                         """[{"id":"desk","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]}]"""
+                                    else if (enrolled.get())
+                                        """[{"id":"unrelated","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]},{"id":"desk","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]}]"""
                                     else "[]"
                                 "/api/installations/fixture/api/agents" ->
                                     """[{"id":"vm","name":"Agent VM","revision":"r1"},{"id":"native","name":"Agent natif","revision":"r1","access":{"backend":"native","nodes":[]}}]"""
@@ -201,6 +256,29 @@ abstract class NodePlacementCases {
                 grant["agentIds"]!!.jsonArray.map { it.jsonPrimitive.content },
             )
             assertEquals(JsonPrimitive(true), grant["add"])
+            // The ublk storage policy applies to native disks; technical details name ublk.
+            compose.onNodeWithText("Stockage").performScrollTo().assertExists()
+            compose.onNodeWithText("Détails techniques").performScrollTo().performClick()
+            compose.onNodeWithText("disque · ublk indisponible", substring = true).assertExists()
+            compose
+                .onNodeWithText(
+                    "ublk indisponible : cette node a besoin d’un runtime natif à jour",
+                    substring = true,
+                )
+                .assertExists()
+            compose.onNodeWithText("Révoquer").performScrollTo().performClick()
+            compose.onNodeWithText("grep ^/var/lib/cairn-native/", substring = true).assertExists()
+            compose.onNodeWithText("Copier la commande").performScrollTo().assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Confirmer") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Confirmer").assertIsEnabled()
+            compose
+                .onNodeWithText("l’affiche et s’arrête avant de supprimer", substring = true)
+                .assertExists()
         }
     }
 
@@ -443,6 +521,71 @@ abstract class NodePlacementCases {
         }
     }
 
+    @Test
+    fun aRunningNativeConversationShowsItsStorageSynchronization() {
+        MockWebServer().use { server ->
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val body =
+                            when (request.path!!.substringBefore('?')) {
+                                "/api/installations/fixture/api/nodes/placement/native" ->
+                                    """{"nodes":[{"id":"desk","name":"Bureau GPU","status":"online","capabilities":{"backend":"native","ublk":true}}]}"""
+                                "/api/installations" -> beaconInstallationsFixture()
+                                "/api/account/session" -> beaconAccountFixture("fixture")
+                                "/api/installations/fixture/api/overview" -> "{}"
+                                else -> "[]"
+                            }
+                        return MockResponse().setBody(body)
+                    }
+                }
+            server.start()
+            val vm = connectedViewModel()
+            // A legacy native file workspace is only saved once execution stops.
+            val run =
+                mutableStateOf(
+                    Run(
+                        id = "native",
+                        status = "running",
+                        nodeId = "desk",
+                        executionBackend = "native",
+                        storage = RunStorage(mode = "native", dirtyBytes = 0),
+                        backup = NodeBackup(capturedAt = System.currentTimeMillis() - 120_000),
+                    )
+                )
+            compose.setContent {
+                val state by vm.state.collectAsStateWithLifecycle()
+                LaunchedEffect(Unit) {
+                    vm.state.first { it.ready }
+                    vm.connect(server.url("/").toString())
+                }
+                CairnTheme {
+                    if (state.session.authenticated) Page { NodePlacement(vm, run.value) }
+                }
+            }
+            compose.waitUntil(20000) {
+                compose
+                    .onAllNodesWithText("Travail local · sauvegardé après l’arrêt")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            // Native ublk disks synchronize while running, like VM disks.
+            compose.runOnIdle {
+                run.value = run.value.copy(storage = RunStorage(mode = "on-demand", dirtyBytes = 0))
+            }
+            compose.onNodeWithText("Travail local · sauvegardé après l’arrêt").assertDoesNotExist()
+            compose.onNodeWithText("Synchronisé il y a 2 min").assertExists()
+            compose.waitUntil(20000) {
+                compose.onAllNodesWithText("Node : Bureau GPU").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Node : Bureau GPU").performClick()
+            compose.onNodeWithText("Processus natif · GPU partagé").assertExists()
+            compose.onNodeWithText("Fichiers chargés à la demande").assertExists()
+            compose.onNodeWithText("Sauvegarde entre les tours").assertDoesNotExist()
+            capture("native-run-synchronized")
+        }
+    }
+
     private fun connectedViewModel(): CairnViewModel =
         CairnViewModel(
             ApplicationProvider.getApplicationContext<Application>(),
@@ -627,7 +770,7 @@ abstract class NodePlacementCases {
                                     """{"freedMiB":2048,"failed":0}"""
                                 }
                                 path == "/api/installations/fixture/api/nodes" ->
-                                    """[{"id":"node","name":"Serveur test","status":"${if (revoked) "revoked" else "online"}","revoked":$revoked,"accepting":true,"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536},"agents":[],"exclusiveAgents":[],"staleDisks":{"count":${if (cleaned) 0 else 1},"diskMiB":2048}}${if (enrolled) """,{"id":"fresh","name":"Nouvelle node","status":"online","accepting":true,"agents":[{"id":"other","name":"Agent autorisé"},{"id":"main","name":"Agent global","allNodes":true}${if (grantedElsewhere) """,{"id":"late","name":"Agent tardif"}""" else ""}${if (granted) """,{"id":"agent","name":"Agent test"}""" else ""}]}""" else ""}]"""
+                                    """[{"id":"node","name":"Serveur test","status":"${if (revoked) "revoked" else "online"}","revoked":$revoked,"accepting":true,"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536},"storage":{"memoryCacheMiB":512},"agents":[],"exclusiveAgents":[],"staleDisks":{"count":${if (cleaned) 0 else 1},"diskMiB":2048}}${if (enrolled) """,{"id":"fresh","name":"Nouvelle node","status":"online","accepting":true,"agents":[{"id":"other","name":"Agent autorisé"},{"id":"main","name":"Agent global","allNodes":true}${if (grantedElsewhere) """,{"id":"late","name":"Agent tardif"}""" else ""}${if (granted) """,{"id":"agent","name":"Agent test"}""" else ""}]}""" else ""}]"""
                                 path == "/api/installations/fixture/api/agents" ->
                                     """[{"id":"agent","name":"Agent test"},{"id":"other","name":"Agent autorisé","access":{"nodes":["fresh"]}},{"id":"late","name":"Agent tardif"},{"id":"main","name":"Agent global","access":{"nodes":null}},{"id":"native","name":"Agent natif","access":{"backend":"native","nodes":[]}}]"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
@@ -699,14 +842,13 @@ abstract class NodePlacementCases {
                         .fetchSemanticsNodes()
                         .isEmpty()
             }
-            assertEquals(
-                51200,
+            val storage =
                 writes
                     .first { it.first == "/api/installations/fixture/api/nodes/node/storage" }
-                    .second["cacheMiB"]!!
-                    .jsonPrimitive
-                    .int,
-            )
+                    .second
+            assertEquals(51200, storage["cacheMiB"]!!.jsonPrimitive.int)
+            // The memory cache is edited on the web; saving here keeps its value.
+            assertEquals(512, storage["memoryCacheMiB"]!!.jsonPrimitive.int)
             // Agent access is read-only here: it is set on each agent's page.
             compose.onNodeWithText("Choisir les agents").assertDoesNotExist()
             compose.onNodeWithText("Aucun agent ne peut exécuter ici.").assertExists()

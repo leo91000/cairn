@@ -39,6 +39,10 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
+// Advanced before Service::new runs any data migration. Older managers refuse
+// this database, and installed host updaters retain the candidate after a failure.
+const DATABASE_VERSION: i64 = 9;
+
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
 fn actors(connections: Vec<Connection>) -> mpsc::Sender<Job> {
@@ -69,7 +73,7 @@ impl Store {
         let file = directory.join("manager.db");
         let mut writer = Connection::open(&file)?;
         let version: i64 = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 7 {
+        if version > DATABASE_VERSION {
             return Err(Error::bad(
                 "This database belongs to a newer application version.",
             ));
@@ -97,8 +101,9 @@ CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at
         }
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS chat_messages(id TEXT PRIMARY KEY,chat_id TEXT NOT NULL,data TEXT NOT NULL,created_at INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id,created_at); PRAGMA user_version=7;",
+CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id,created_at);",
         )?;
+        tx.pragma_update(None, "user_version", DATABASE_VERSION)?;
         // Backwards history excludes superseded text snapshots. These small keys
         // bound both the next-turn lookup and the same-message revision lookup.
         tx.execute_batch("CREATE INDEX IF NOT EXISTS events_turns ON events(run_id,id) WHERE type='turn.started';

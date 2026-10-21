@@ -677,7 +677,6 @@ abstract class PluginsCases {
                                                 AccessPolicy(
                                                     projects = emptyList(),
                                                     mcps = emptyList(),
-                                                    github = false,
                                                     sandbox = "read-only",
                                                 )
                                         )
@@ -975,6 +974,176 @@ abstract class PluginsCases {
             assertEquals("helper", payload["agentId"]?.jsonPrimitive?.content)
             // The token is only ever sent to the installation, never echoed back in settings.
             assertFalse(payload["settings"].toString().contains("synthetic_android_token"))
+        }
+    }
+
+    /** A package whose accounts sign in on the service's page, as the GitHub package does. */
+    private val forge =
+        PluginEntry(
+            id = "forge",
+            builtin = true,
+            active = "1.0.0",
+            manifest =
+                PluginManifest(
+                    id = "forge",
+                    name = "Forge",
+                    version = "1.0.0",
+                    capabilities = listOf("http"),
+                    instances = PluginInstances("Account", "Accounts"),
+                    credential =
+                        PluginCredential(
+                            "Forge token",
+                            "authorization",
+                            "Bearer ",
+                            deviceFlow =
+                                buildJsonObject {
+                                    put("authorizationUrl", "https://forge.example/device/code")
+                                    put("tokenUrl", "https://forge.example/token")
+                                    put("clientId", "fixture")
+                                },
+                        ),
+                    instanceForm = true,
+                    settings =
+                        listOf(PluginSetting(key = "login", title = "Account", hidden = true)),
+                ),
+        )
+
+    private fun deviceFlow(id: String, state: String, message: String? = null) =
+        wireJson.encodeToString(
+            PluginDeviceFlow(
+                id,
+                "forge",
+                state,
+                "WXYZ-${id.takeLast(1)}234",
+                "https://forge.example/login/device",
+                "https://forge.example/login/device?code=WXYZ",
+                expiresAt = 1,
+                message = message,
+            )
+        )
+
+    @Test
+    fun deviceSignInHelpersSendTheFlowInsteadOfAToken() {
+        val pending = wireJson.decodeFromString<PluginDeviceFlow>(deviceFlow("flow-1", "pending"))
+        assertEquals("https://forge.example/login/device?code=WXYZ", pending.link)
+        assertEquals(
+            "https://forge.example/login/device",
+            pending.copy(verificationUriComplete = null).link,
+        )
+        // Pending: a pasted token, or nothing for the saved credential.
+        assertEquals("token" to "pasted", credentialInput(" pasted ", pending))
+        assertNull(credentialInput("", pending))
+        // Completed: the sign-in replaces any paste; the token never reaches the app.
+        val completed = pending.copy(state = "completed")
+        assertEquals("credentialFlow" to "flow-1", credentialInput("pasted", completed))
+        assertNull(signInProblem(pending))
+        assertEquals(
+            "Cette connexion a expiré. Recommencez.",
+            signInProblem(pending.copy(state = "expired")),
+        )
+        assertEquals("Refused", signInProblem(pending.copy(state = "failed", message = "Refused")))
+        // The manifest's device flow is read without depending on its shape.
+        val manifest =
+            wireJson.decodeFromString<PluginManifest>(
+                """{"id":"github","credential":{"label":"GitHub token","header":"authorization","deviceFlow":{"clientId":"x","scopes":["repo"]}},"projectSources":[{"name":"repositories","title":"GitHub repository"}],"skillSources":[{"name":"repository","title":"GitHub repository","fields":[{"key":"repository","title":"Repository","required":true}]}],"conditions":[{"name":"workflow"}],"runCredentials":{"git":[]}}"""
+            )
+        assertNotNull(manifest.credential?.deviceFlow)
+        assertEquals("repositories", manifest.projectSources.single().name)
+        assertEquals("repository", manifest.skillSources.single().fields.single().key)
+    }
+
+    @Test
+    fun anAccountSignsInWithADeviceCodeAndSavesTheSignInNotAToken() {
+        MockWebServer().use { server ->
+            val forms = CopyOnWriteArrayList<JsonObject>()
+            val saved = CopyOnWriteArrayList<String>()
+            val requests = CopyOnWriteArrayList<String>()
+            val started = AtomicInteger()
+            server.dispatcher =
+                dispatcher(
+                    includeGet = true,
+                    packages = listOf(onePassword, discord, forge),
+                    requests = requests,
+                ) { path, body ->
+                    val route = path.removePrefix("/api/installations/fixture/api")
+                    when {
+                        route == "/plugins/forge/form" -> {
+                            forms += wireJson.parseToJsonElement(body).jsonObject
+                            "{}"
+                        }
+                        route == "/plugins/forge/device-flow" ->
+                            deviceFlow("flow-${started.incrementAndGet()}", "pending")
+                        // The first sign-in is cancelled; the second one completes.
+                        route == "/plugins/forge/device-flow/flow-1" ->
+                            deviceFlow("flow-1", "pending")
+                        route == "/plugins/forge/device-flow/flow-2" ->
+                            deviceFlow("flow-2", "completed")
+                        route == "/plugins/forge/connections" && body.isNotEmpty() -> {
+                            saved += body
+                            "{}"
+                        }
+                        else -> null
+                    }
+                }
+            server.start()
+            show(server) { vm, state -> PluginScreen(vm, state, "forge") {} }
+            compose.waitUntil(30000) {
+                compose.onAllNodesWithText("Ajouter · Account").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Ajouter · Account").performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Se connecter avec Forge")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Nom").performTextInput("Work")
+            // Pasting a token stays possible; without either, an account cannot be saved.
+            compose.onNodeWithText("Forge token").assertExists()
+            compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+
+            compose.onNodeWithText("Se connecter avec Forge").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("WXYZ-1234").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Copier le code").assertExists()
+            compose.onNodeWithText("Ouvrir Forge").assertExists()
+            capture("plugin-device-sign-in")
+            compose.onNodeWithText("Annuler la connexion").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                requests.any { it.startsWith("DELETE ") && it.endsWith("/device-flow/flow-1") }
+            }
+            compose.onNodeWithText("WXYZ-1234").assertDoesNotExist()
+
+            compose.onNodeWithText("Se connecter avec Forge").performScrollTo().performClick()
+            compose.waitUntil(20000) {
+                compose
+                    .onAllNodesWithText("Connecté. Enregistrez pour garder ce account.")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            // The package's form handler hears about the new credential through the sign-in.
+            compose.waitUntil(10000) {
+                forms.any {
+                    it["changed"]?.jsonPrimitive?.content == "credential" &&
+                        it["credentialFlow"]?.jsonPrimitive?.content == "flow-2"
+                }
+            }
+            assertTrue(forms.none { "token" in it })
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Enregistrer") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.waitUntil(10000) { saved.isNotEmpty() }
+            val payload = wireJson.parseToJsonElement(saved.single()).jsonObject
+            assertEquals("flow-2", payload["credentialFlow"]?.jsonPrimitive?.content)
+            assertFalse("token" in payload)
+            // The save consumed the sign-in: nothing is cancelled afterwards.
+            compose.waitForIdle()
+            assertFalse(requests.any { it.startsWith("DELETE ") && it.endsWith("/flow-2") })
         }
     }
 
@@ -6199,12 +6368,16 @@ abstract class PluginsCases {
         includeGet: Boolean = false,
         read: (String) -> String? = { null },
         current: Boolean = true,
+        packages: List<PluginEntry> = listOf(onePassword, discord, notes),
+        /** Every request as "METHOD path", when a journey checks methods. */
+        requests: MutableList<String>? = null,
         handle: (String, String) -> String?,
     ) =
         object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val path = request.path.orEmpty()
                 val body = request.body.readUtf8()
+                requests?.add("${request.method} $path")
                 if (request.method == "GET")
                     read(path)?.let {
                         return MockResponse().setBody(it)
@@ -6261,12 +6434,7 @@ abstract class PluginsCases {
                             wireJson.encodeToString(
                                 PluginCatalog(
                                     setupDrafts = current,
-                                    packages =
-                                        listOf(
-                                            onePassword,
-                                            discord,
-                                            notes,
-                                        ),
+                                    packages = packages,
                                     connections = listOf(bot, account),
                                 )
                             )

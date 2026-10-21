@@ -93,6 +93,7 @@ async fn checked_approval(
     };
     let result = match method {
         "conversations.submit" => super::work::submit_approved(s, context, &args, digest).await,
+        "delivery.checkpoint" => super::work::checkpoint(s, context, &args, digest).await,
         "conversations.check" => super::work::check(s, context, &args).await,
         "conversations.answer" => super::work::answer(s, context, &args).await,
         "conversations.cancel" => super::work::cancel(s, context, &args).await,
@@ -160,7 +161,7 @@ where
     Fut: std::future::Future<Output = Result<()>>,
 {
     match method {
-        "storage.get" | "storage.set" | "storage.delete" | "storage.list" => {
+        "storage.get" | "storage.set" | "storage.max" | "storage.delete" | "storage.list" => {
             storage(s, &context.connection, method, &args).await
         }
         "http.request" => http(s, context, &args, authorize).await,
@@ -223,7 +224,25 @@ async fn storage(
                     Ok(Value::Null)
                 }
                 _ => {
-                    let value = args.get("value").cloned().unwrap_or(Value::Null);
+                    let mut value = args.get("value").cloned().unwrap_or(Value::Null);
+                    if method == "storage.max" {
+                        let number = value
+                            .as_f64()
+                            .filter(|value| value.is_finite())
+                            .ok_or_else(|| Error::bad("Store a finite number."))?;
+                        let previous = db.get(KIND, &record_id)?;
+                        let current = previous
+                            .as_ref()
+                            .map(|row| {
+                                row["value"]
+                                    .as_f64()
+                                    .ok_or_else(|| Error::bad("The stored value is not a number."))
+                            })
+                            .transpose()?;
+                        if current.is_some_and(|current| current >= number) {
+                            value = previous.unwrap()["value"].clone();
+                        }
+                    }
                     if serde_json::to_string(&value)?.len() > 65_536 {
                         return Err(Error::too_large("Stored values are limited to 64 KB."));
                     }
@@ -242,7 +261,11 @@ async fn storage(
                             "updatedAt": now(),
                         }),
                     )?;
-                    Ok(Value::Null)
+                    Ok(if method == "storage.max" {
+                        value
+                    } else {
+                        Value::Null
+                    })
                 }
             }
         })
@@ -580,9 +603,10 @@ where
     let mut headers = Map::new();
     for (name, value) in response.headers() {
         let name = name.as_str();
-        if (name == "retry-after" || name == "content-type" || name.starts_with("x-ratelimit"))
-            && let Ok(value) = value.to_str()
-        {
+        // Metadata such as rate limits, granted scopes and pagination; never cookies.
+        let metadata =
+            matches!(name, "retry-after" | "content-type" | "link") || name.starts_with("x-");
+        if metadata && let Ok(value) = value.to_str() {
             headers.insert(name.to_owned(), json!(value));
         }
     }

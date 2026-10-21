@@ -21,6 +21,7 @@ pub const KIND: &str = "plugin-connections";
 pub const OWNED: &[&str] = &[
     "plugin-events",
     "plugin-deliveries",
+    "plugin-delivery-checkpoints",
     "plugin-requests",
     "plugin-activity",
     "plugin-storage",
@@ -133,8 +134,8 @@ impl Connection {
 }
 
 /// An agent anyone may reach: read-only sandbox, one project at most, and no
-/// installation, GitHub, MCP or plugin grants (such as 1Password). Checked on save and
-/// on every effect.
+/// installation, MCP or plugin grants (such as GitHub or 1Password). Checked on save
+/// and on every effect.
 pub(crate) fn public_safe(db: &Db<'_>, agent_id: &str, access: &Value) -> Result<()> {
     public_access(access, plugin_granted(db, agent_id)?)
 }
@@ -152,13 +153,12 @@ fn public_access(access: &Value, plugin_access: bool) -> Result<()> {
     let projects = access["projects"].as_array().map_or(usize::MAX, Vec::len);
     if access["sandbox"] != "read-only"
         || access["installation"] == true
-        || access["github"] == true
         || access["mcps"] != json!([])
         || projects > 1
         || plugin_access
     {
         return Err(Error::bad(
-            "For anyone in the channel, choose an agent with a read-only sandbox, at most one project, and no installation, GitHub, MCP or plugin access such as 1Password.",
+            "For anyone in the channel, choose an agent with a read-only sandbox, at most one project, and no installation, MCP or plugin access such as GitHub or 1Password.",
         ));
     }
     Ok(())
@@ -354,10 +354,11 @@ pub(crate) async fn status_with(
 /// Validates settings against the manifest schema. Unknown keys are rejected; secret
 /// fields are saved separately with [`secrets`].
 pub fn settings(manifest: &Manifest, input: &Value) -> Result<Value> {
-    settings_fields(&manifest.settings, input)
+    settings_with(&manifest.settings, input)
 }
 
-pub(crate) fn settings_fields(fields: &[Value], input: &Value) -> Result<Value> {
+/// Validates values against declared fields, such as a skill source's location form.
+pub fn settings_with(fields: &[Value], input: &Value) -> Result<Value> {
     let empty = Map::new();
     let input = match input {
         Value::Object(map) => map,
@@ -656,6 +657,8 @@ pub(crate) struct Prepared {
     updating: bool,
     keep_agents: bool,
     root: Option<std::sync::Arc<super::resources::target::Target>>,
+    one_per_agent: bool,
+    package_name: String,
 }
 
 pub async fn save(
@@ -688,6 +691,12 @@ pub(crate) async fn save_owned(
             prepared.persist_in(db)
         })
         .await?;
+    if let Some(flow) = input["credentialFlow"]
+        .as_str()
+        .filter(|flow| !flow.is_empty())
+    {
+        let _ = s.plugins.device_flows.token(s, plugin_id, flow, true).await;
+    }
     s.plugins.changed.notify_one();
     Ok(result)
 }
@@ -798,7 +807,23 @@ pub(crate) async fn prepare(
         .as_u64()
         .filter(|value| (1..=50).contains(value))
         .unwrap_or(5) as u32;
-    let token = text(input, "token").trim();
+    // A device sign-in the owner completed supplies the credential instead of a paste.
+    let flow = input["credentialFlow"]
+        .as_str()
+        .filter(|flow| !flow.is_empty());
+    let signed_in = match flow {
+        Some(flow) => Some(
+            s.plugins
+                .device_flows
+                .token(s, plugin_id, flow, false)
+                .await?,
+        ),
+        None => None,
+    };
+    let token = signed_in
+        .as_deref()
+        .unwrap_or_else(|| text(input, "token"))
+        .trim();
     if input.get("token").is_some_and(|value| !value.is_string())
         || token.len() > 4096
         || token.chars().any(|c| c.is_whitespace() || c.is_control())
@@ -901,6 +926,8 @@ pub(crate) async fn prepare(
         updating,
         keep_agents,
         root,
+        one_per_agent: super::run_credentials::one_per_package(&manifest),
+        package_name: manifest.name.clone(),
     })
 }
 
@@ -913,6 +940,8 @@ impl Prepared {
             updating,
             keep_agents,
             root,
+            one_per_agent,
+            package_name,
         } = self;
         if let Some(root) = root {
             root.current(db)?;
@@ -932,6 +961,22 @@ impl Prepared {
         for agent in &connection.agent_ids {
             if db.get("agents", agent)?.is_none() {
                 return Err(Error::bad("A selected agent no longer exists."));
+            }
+        }
+        // Runs receive the credentials of one instance per package.
+        if one_per_agent && !keep_agents {
+            let held = db.list(KIND)?.into_iter().any(|other| {
+                other["pluginId"] == connection.plugin_id
+                    && other["id"] != connection.id.as_str()
+                    && other["agentIds"].as_array().is_some_and(|ids| {
+                        ids.iter()
+                            .any(|id| connection.agent_ids.iter().any(|agent| id == agent))
+                    })
+            });
+            if held {
+                return Err(Error::bad(format!(
+                    "Grant one {package_name} instance per agent: its runs use that instance's credentials."
+                )));
             }
         }
         if !connection.agent_id.is_empty() {
@@ -1008,6 +1053,60 @@ fn delegation_rules(
     if connection.access_mode == AccessMode::Everyone {
         public_access(access, plugin_grants)?;
     }
+    Ok(())
+}
+
+/// Runs the package's form on a saved instance and keeps the values it derives, such
+/// as the account a credential belongs to. Used after migrations; an instance edited
+/// meanwhile is left as the owner saved it.
+pub(crate) async fn refresh(s: &Service, connection: &Connection) -> Result<()> {
+    let package = registry::active(s, &connection.plugin_id).await?;
+    if !package.manifest.instance_form {
+        return Ok(());
+    }
+    let credential = s
+        .vault
+        .get(&credential_key(&connection.id))
+        .await?
+        .map(|value| text(&value, "token").to_owned());
+    let draft = forms::Draft {
+        credential,
+        secrets: secret_values(s, &connection.id).await?,
+        setup: None,
+        urls: None,
+        owner: None,
+        resource: None,
+        root: Some(
+            super::resources::target::Target::active(s, &connection.plugin_id, &connection.id)
+                .await?,
+        ),
+    };
+    let settings = forms::submit(
+        s,
+        &package,
+        &connection.id,
+        connection.settings.clone(),
+        draft,
+    )
+    .await?;
+    let expected = connection.revision.clone();
+    let id_ = connection.id.clone();
+    s.store
+        .transaction(move |db| {
+            let Some(mut current) = db.get(KIND, &id_)? else {
+                return Ok(());
+            };
+            if current["revision"] != expected.as_str() {
+                return Ok(());
+            }
+            current["settings"] = settings;
+            current["revision"] = id().into();
+            current["updatedAt"] = now().into();
+            db.put(KIND, &current)?;
+            Ok(())
+        })
+        .await?;
+    s.plugins.changed.notify_one();
     Ok(())
 }
 

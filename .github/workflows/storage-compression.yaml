@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      CARGO_BUILD_JOBS: '2'
+      CARGO_BUILD_JOBS: '4'
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: ./.github/actions/setup-pnpm
@@ -40,8 +40,12 @@ jobs:
             ~/.cargo/registry/
             ~/.cargo/git/
             target/release/
-          key: storage-compression-${{ runner.os }}-1.97.1-release-${{ hashFiles('Cargo.lock') }}
-          restore-keys: storage-compression-${{ runner.os }}-1.97.1-release-
+            !target/release/incremental/
+          key: storage-compression-v2-${{ runner.os }}-1.97.1-release-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            storage-compression-v2-${{ runner.os }}-1.97.1-release-${{ hashFiles('Cargo.lock') }}-
+            storage-compression-v2-${{ runner.os }}-1.97.1-release-
+            storage-compression-${{ runner.os }}-1.97.1-release-
       - name: Prepare isolated loopback S3
         run: |
           python3 -m venv .codec-s3-test

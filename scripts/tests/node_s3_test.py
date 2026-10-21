@@ -61,10 +61,10 @@ def main():
             assert not versions.get('Versions') and not versions.get('DeleteMarkers'), 'Migration must purge historical source versions'
             return
         if args.compression_benchmark:
-            subprocess.run(['node', 'scripts/test-backend.mjs', '--release', '--test', 'block_codec_performance',
+            subprocess.run(['node', 'scripts/test-backend.mjs', '-p', 'cairn-installation', '--release', '--test', 'block_codec_performance',
                             '--', '--ignored', '--nocapture', '--test-threads=1'],
                            cwd=args.repo, env=env, check=True)
-            subprocess.run(['node', 'scripts/test-backend.mjs', '--release', '--test', 'storage_startup_migration',
+            subprocess.run(['node', 'scripts/test-backend.mjs', '-p', 'cairn-installation', '--release', '--test', 'storage_startup_migration',
                             'blocking_upgrade_performance', '--', '--ignored', '--nocapture', '--test-threads=1'],
                            cwd=args.repo, env=env, check=True)
             return

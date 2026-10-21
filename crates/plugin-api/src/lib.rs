@@ -4,6 +4,7 @@ use serde_json::Value;
 
 mod arguments;
 mod form;
+mod integrations;
 mod oauth;
 mod operations;
 mod resources;
@@ -14,6 +15,10 @@ mod webhooks;
 
 pub use arguments::{parse_arguments, usage};
 pub use form::{FormLookup, validate_form_fields, validate_form_result, validate_lookup_result};
+pub use integrations::{
+    Condition, DeviceFlow, GitCredential, GitIdentity, ProjectSource, RunCredentials, RunFile,
+    SkillSource, home_path, render,
+};
 pub use oauth::{OAuth, OAuthPersonal, OAuthTokenResponse};
 pub use operations::{Operation, Profile, RequestRule};
 pub use resources::ResourceCollection;
@@ -74,10 +79,12 @@ pub const CAPABILITIES: &[(&str, &str)] = &[
 /// The capability a host method belongs to, if any.
 pub fn capability(method: &str) -> Option<&'static str> {
     let family = match method {
-        "storage.get" | "storage.set" | "storage.delete" | "storage.list" => "storage",
+        "storage.get" | "storage.set" | "storage.max" | "storage.delete" | "storage.list" => {
+            "storage"
+        }
         "http.request" => "http",
         "timers.after" | "timers.cancel" => "timers",
-        "conversations.submit" => "conversations.submit",
+        "conversations.submit" | "delivery.checkpoint" => "conversations.submit",
         "conversations.check"
         | "conversations.answer"
         | "conversations.cancel"
@@ -104,6 +111,9 @@ pub struct Credential {
     pub header: String,
     #[serde(default)]
     pub prefix: String,
+    /// The owner may sign in instead of pasting the credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_flow: Option<DeviceFlow>,
 }
 
 /// A program on the installation the package may run through `exec`.
@@ -260,6 +270,21 @@ pub struct Manifest {
     pub operations: Vec<Operation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub oauth: Vec<OAuth>,
+    /// Files, Git credentials and identity rendered into granted agents' runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_credentials: Option<RunCredentials>,
+    /// Regular expressions of the service's token formats, masked in run output.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_patterns: Vec<String>,
+    /// Projects the owner can import through the `projects` handler.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_sources: Vec<ProjectSource>,
+    /// Conditions granted agents wait for, observed by the `condition` handler.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<Condition>,
+    /// Skill sources the owner imports from through the `skills` handler.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skill_sources: Vec<SkillSource>,
 }
 
 pub(crate) fn slug(value: &str, max: usize) -> bool {
@@ -421,7 +446,8 @@ impl Manifest {
             }
         }
         self.validate_programs()?;
-        self.validate_agent_interface()
+        self.validate_agent_interface()?;
+        self.validate_integrations()
     }
 
     fn validate_programs(&self) -> Result<(), &'static str> {
@@ -452,8 +478,10 @@ impl Manifest {
     }
 
     fn validate_agent_interface(&self) -> Result<(), &'static str> {
-        let interface =
-            !self.commands.is_empty() || !self.tools.is_empty() || !self.instructions.is_empty();
+        let interface = !self.commands.is_empty()
+            || !self.tools.is_empty()
+            || !self.instructions.is_empty()
+            || !self.conditions.is_empty();
         if interface && self.agent_access.is_none() {
             return Err("Plugin commands, tools and instructions need agentAccess.");
         }

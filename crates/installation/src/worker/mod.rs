@@ -69,7 +69,7 @@ impl Worker {
         self.initialize(&s).await?;
         self.tasks.spawn(crate::chat_titles::run(s.clone()));
         self.tasks
-            .spawn(crate::chats::wait_for::github::maintain(s.clone()));
+            .spawn(crate::plugins::conditions::maintain(s.clone()));
         self.tasks
             .spawn(crate::nodes::publication::maintain(s.clone()));
         self.tasks
@@ -258,7 +258,6 @@ mod tests {
             claude_bin: "claude".into(),
             opencode_bin: "opencode".into(),
             opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
-            gh_bin: "unused".into(),
             concurrency: 1,
             logger: false,
             worker_enabled: false,

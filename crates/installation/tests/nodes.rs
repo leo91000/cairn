@@ -1,5 +1,6 @@
 mod common;
 
+use cairn_installation::plugins::run_credentials::RunCredentials;
 use common::relay_fixture::router;
 
 use axum::{
@@ -74,7 +75,6 @@ impl Owner {
         std::fs::create_dir(root.path().join("home")).unwrap();
         let service = Service::new(Config {
             public_url: format!("http://{host}"),
-            gh_bin: "false".into(),
             concurrency: 4,
             runner_url,
             ..common::config(root.path())
@@ -448,6 +448,7 @@ async fn enrollment_is_single_use_and_revocation_removes_node_access() {
     );
     let (status, identity) = owner.call("POST", ENROLL, input.clone(), None).await;
     assert_eq!(status, StatusCode::OK, "{identity}");
+    assert_eq!(identity["nodeId"], invitation["nodeId"]);
     let token = identity["token"].as_str().unwrap();
     assert_eq!(
         owner.call("POST", ENROLL, input, None).await.0,
@@ -477,6 +478,56 @@ async fn enrollment_is_single_use_and_revocation_removes_node_access() {
             .0,
         StatusCode::UNAUTHORIZED
     );
+}
+
+#[tokio::test]
+async fn enrollment_identity_tracks_the_exact_invitation_and_accepts_legacy_codes() {
+    let owner = Owner::new().await;
+    let first = owner.invite("Workstation").await;
+    let second = owner.invite("Workstation").await;
+    assert_ne!(first["nodeId"], second["nodeId"]);
+    for invitation in [second, first] {
+        let (status, identity) = owner
+            .call(
+                "POST",
+                ENROLL,
+                enrollment(
+                    &invitation,
+                    "Workstation",
+                    &capabilities(true, 8, 16384, 65536),
+                ),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{identity}");
+        assert_eq!(identity["nodeId"], invitation["nodeId"]);
+    }
+
+    let code = auth::token();
+    owner
+        .service
+        .store
+        .set(
+            &format!("node-enrollment:{}", auth::digest(&code)),
+            json!({ "name": "Legacy", "backend": "firecracker" }),
+            Some(now() + 600_000),
+        )
+        .await
+        .unwrap();
+    let (status, identity) = owner
+        .call(
+            "POST",
+            ENROLL,
+            enrollment(
+                &json!({ "code": code }),
+                "Legacy",
+                &capabilities(true, 8, 16384, 65536),
+            ),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{identity}");
+    assert!(identity["nodeId"].is_string());
 }
 
 #[tokio::test]
@@ -939,6 +990,141 @@ async fn revocation_removes_node_grants_without_blocking_later_agent_edits() {
     assert_eq!(main_agent["access"]["nodes"], json!([LOCAL_NODE_ID]));
     main_agent["name"] = "Renamed after revocation".into();
     assert_eq!(owner.send("PUT", &main, main_agent).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_node_keeps_the_execution_backend_it_enrolled_with() {
+    let owner = Owner::new().await;
+    // Native heartbeats refresh the trusted people first; keep that local to the test.
+    owner
+        .service
+        .store
+        .set(
+            "native-authority",
+            json!({ "observedAt": now(), "accounts": {} }),
+            None,
+        )
+        .await
+        .unwrap();
+    let vm = capabilities(true, 8, 16384, 65536);
+    let mut native = capabilities(false, 8, 16384, 65536);
+    native["backend"] = "native".into();
+    native["ublk"] = true.into();
+
+    let identity = owner.enroll("Workstation", &vm).await;
+    let token = identity["token"].as_str().unwrap();
+    let node = identity["nodeId"].as_str().unwrap();
+    let (status, body) = owner
+        .call(
+            "POST",
+            HEARTBEAT,
+            json!({ "capabilities": native }),
+            Some(token),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let stored = owner.stored("nodes", node).await.unwrap();
+    assert_eq!(stored["capabilities"]["backend"], "firecracker");
+    let (status, body) = owner
+        .call(
+            "POST",
+            HEARTBEAT,
+            json!({ "capabilities": vm }),
+            Some(token),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, invitation) = owner
+        .send(
+            "POST",
+            "/api/nodes/enrollments",
+            json!({ "name": "Desktop", "backend": "native" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{invitation}");
+    let (status, identity) = owner
+        .call(
+            "POST",
+            ENROLL,
+            enrollment(&invitation, "Desktop", &native),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{identity}");
+    let token = identity["token"].as_str().unwrap();
+    let node = identity["nodeId"].as_str().unwrap();
+    let (status, body) = owner
+        .call(
+            "POST",
+            HEARTBEAT,
+            json!({ "capabilities": vm }),
+            Some(token),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let stored = owner.stored("nodes", node).await.unwrap();
+    assert_eq!(stored["capabilities"]["backend"], "native");
+    assert_eq!(stored["slots"], 1);
+}
+
+#[tokio::test]
+async fn revoking_a_replaced_node_can_release_its_conversation_placements() {
+    let owner = Owner::new().await;
+    let machine = capabilities(true, 8, 16384, 65536);
+    let replaced = owner.enroll("Replaced", &machine).await["nodeId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let plain = owner.enroll("Plain", &machine).await["nodeId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let other = id();
+
+    let (pinned, preferred, elsewhere, kept) = (id(), id(), id(), id());
+    for (run, pin, prefer) in [
+        (&pinned, Some(replaced.as_str()), Some(other.as_str())),
+        (&preferred, None, Some(replaced.as_str())),
+        (&elsewhere, Some(other.as_str()), Some(other.as_str())),
+        (&kept, Some(plain.as_str()), None),
+    ] {
+        let mut record = run_record(run, RunStatus::Succeeded);
+        record["pinnedNodeId"] = pin.into();
+        record["preferredNodeId"] = prefer.into();
+        owner.add_run(&record).await;
+    }
+
+    // A plain revocation keeps explicit placements: the owner chose to wait for that machine.
+    let (status, value) = owner
+        .send("POST", &format!("/api/nodes/{plain}/revoke"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["releasedPlacements"], 0);
+    assert_eq!(owner.run(&kept).await["pinnedNodeId"], plain.as_str());
+
+    let path = format!("/api/nodes/{replaced}/revoke");
+    let (status, _) = owner.send("POST", &path, json!({ "release": true })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        owner.stored("nodes", &replaced).await.unwrap()["revoked"],
+        false
+    );
+
+    let (status, value) = owner
+        .send("POST", &path, json!({ "releasePlacements": true }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["revoked"], true);
+    assert_eq!(value["releasedPlacements"], 2);
+    let run = owner.run(&pinned).await;
+    assert!(run["pinnedNodeId"].is_null());
+    assert_eq!(run["preferredNodeId"], other.as_str());
+    assert!(owner.run(&preferred).await["preferredNodeId"].is_null());
+    let run = owner.run(&elsewhere).await;
+    assert_eq!(run["pinnedNodeId"], other.as_str());
+    assert_eq!(run["preferredNodeId"], other.as_str());
+    assert_eq!(owner.run(&kept).await["pinnedNodeId"], plain.as_str());
 }
 
 #[test]
@@ -1771,10 +1957,15 @@ async fn a_remote_only_agent_prepares_a_private_vm_without_a_local_controller() 
         },
     });
     owner.put("agents", run["snapshot"]["agent"].clone()).await;
-    let prepared =
-        cairn_installation::execution::prepare(&run, &owner.service.config, None, None, None)
-            .await
-            .unwrap();
+    let prepared = cairn_installation::execution::prepare(
+        &run,
+        &owner.service.config,
+        &RunCredentials::default(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(prepared["backend"], "firecracker");
     assert_eq!(prepared["isolated"], true);
     let placement =
