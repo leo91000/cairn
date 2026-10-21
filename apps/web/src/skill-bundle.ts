@@ -523,48 +523,9 @@ export async function downloadArchive(fetchChunk: (offset: number, revision?: st
   return { filename: first.filename, revision: first.revision, bytes: archive }
 }
 
-// `owner/repo`, or a GitHub URL that may name a ref and a folder (or a SKILL.md inside it).
-export function parseGithubSource(input: string): { repository: string, ref?: string, path?: string } | null {
-  const value = input.trim().replace(/\.git$/, '').replace(/\/+$/, '')
-  const plain = /^([\w.-]+)\/([\w.-]+)$/.exec(value)
-  if (plain)
-    return { repository: `${plain[1]}/${plain[2]}` }
-
-  let url: URL
-  try {
-    url = new URL(/^https?:\/\//.test(value) ? value : `https://${value}`)
-  }
-  catch {
-    return null
-  }
-
-  if (url.hostname !== 'github.com' && url.hostname !== 'www.github.com')
-    return null
-
-  let segments: string[]
-  try {
-    segments = url.pathname.split('/').filter(Boolean).map(segment => decodeURIComponent(segment))
-  }
-  catch {
-    return null
-  }
-
-  const [owner, repo, kind, ref, ...rest] = segments
-  if (!owner || !repo)
-    return null
-
-  const repository = `${owner}/${repo.replace(/\.git$/, '')}`
-  if ((kind !== 'tree' && kind !== 'blob') || !ref)
-    return { repository }
-
-  let path = rest.join('/')
-  if (kind === 'blob' && basename(path) === skillManifest)
-    path = dirname(path)
-  return { repository, ref, ...(path ? { path } : {}) }
-}
-
-export function shortCommit(commit: string) {
-  return commit.slice(0, 7)
+/** The short form of a source version, such as a commit. */
+export function shortVersion(version: string) {
+  return version.slice(0, 7)
 }
 
 // A new SKILL.md keeps its frontmatter `name` in step with the skill name being typed.

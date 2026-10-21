@@ -36,12 +36,19 @@ const wakeup: ChatWakeup = {
   wakeAt: 60001,
   condition: {
     type: 'github_pr_checks',
+    pluginId: 'github',
     projectId: 'project',
     prNumber: 1,
     headSha: 'head',
   },
+  display: { title: 'Waiting for required checks on PR #1', short: 'PR #1 checks', details: ['head'] },
 }
-const observation = { state: 'completed', type: 'github_pr_checks', conclusion: 'success' }
+const observation = {
+  state: 'completed',
+  type: 'github_pr_checks',
+  pluginId: 'github',
+  display: { tone: 'ok', title: 'Required checks passed', detail: '' },
+}
 const resolved: ActivityWait = { wakeup, observation }
 
 function render(wait: ActivityWait, live: Omit<LiveWait, 'settled'>) {
@@ -65,4 +72,14 @@ it('completed resumptions and immediate results retain their historical outcome'
   expect(resumed).toContain('Required checks passed')
   expect(resumed).not.toContain('Wait cancelled')
   expect(await render({ wakeup: null, observation }, { wakeup: null, paused: false })).toContain('The result was already available')
+})
+
+it('names a plugin condition with its latest words, and falls back without them', async () => {
+  const polled = { ...wakeup, display: { title: 'Waiting for 2 required checks on PR #1', short: 'PR #1 checks', details: ['head'] } }
+  const live = await render({ wakeup }, { wakeup: polled, paused: false })
+  expect(live).toContain('Waiting for 2 required checks on PR #1')
+  expect(live).toContain('head')
+  const bare = { ...wakeup, display: null }
+  expect(await render({ wakeup: bare }, { wakeup: bare, paused: false })).toContain('Waiting for a condition')
+  expect(await render({ wakeup: null, observation: { state: 'completed', type: 'custom', pluginId: 'ci' } }, { wakeup: null, paused: false })).toContain('A condition')
 })

@@ -4,12 +4,17 @@ use serde_json::Value;
 
 mod arguments;
 mod form;
+mod integrations;
 mod settings;
 mod sources;
 mod view;
 
 pub use arguments::{parse_arguments, usage};
 pub use form::validate_form_result;
+pub use integrations::{
+    Condition, DeviceFlow, GitCredential, GitIdentity, ProjectSource, RunCredentials, RunFile,
+    SkillSource, home_path, render,
+};
 pub use settings::validate_settings_schema;
 pub use sources::{MAX_MODULES, MAX_SOURCE_BYTES, Sources, module_path, resolve};
 pub use view::{validate_action_result, validate_view};
@@ -78,6 +83,9 @@ pub struct Credential {
     pub header: String,
     #[serde(default)]
     pub prefix: String,
+    /// The owner may sign in instead of pasting the credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_flow: Option<DeviceFlow>,
 }
 
 /// A program on the installation the package may run through `exec`.
@@ -221,6 +229,21 @@ pub struct Manifest {
     /// guidance while the owner edits an instance, and checks it before it is saved.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub instance_form: bool,
+    /// Files, Git credentials and identity rendered into granted agents' runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_credentials: Option<RunCredentials>,
+    /// Regular expressions of the service's token formats, masked in run output.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_patterns: Vec<String>,
+    /// Projects the owner can import through the `projects` handler.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_sources: Vec<ProjectSource>,
+    /// Conditions granted agents wait for, observed by the `condition` handler.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<Condition>,
+    /// Skill sources the owner imports from through the `skills` handler.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skill_sources: Vec<SkillSource>,
 }
 
 pub(crate) fn slug(value: &str, max: usize) -> bool {
@@ -373,7 +396,8 @@ impl Manifest {
             }
         }
         self.validate_programs()?;
-        self.validate_agent_interface()
+        self.validate_agent_interface()?;
+        self.validate_integrations()
     }
 
     fn validate_programs(&self) -> Result<(), &'static str> {
@@ -404,8 +428,10 @@ impl Manifest {
     }
 
     fn validate_agent_interface(&self) -> Result<(), &'static str> {
-        let interface =
-            !self.commands.is_empty() || !self.tools.is_empty() || !self.instructions.is_empty();
+        let interface = !self.commands.is_empty()
+            || !self.tools.is_empty()
+            || !self.instructions.is_empty()
+            || !self.conditions.is_empty();
         if interface && self.agent_access.is_none() {
             return Err("Plugin commands, tools and instructions need agentAccess.");
         }

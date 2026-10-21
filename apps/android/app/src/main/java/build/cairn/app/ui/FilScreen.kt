@@ -219,7 +219,8 @@ internal fun buildFeed(
                             .copy(
                                 wakeAt = chat.wakeup.wakeAt,
                                 condition = chat.wakeup.condition != null,
-                                // Recorded by GitHub polling; another run's result is only computed
+                                // Recorded by plugin condition polling; another run's result is
+                                // only computed
                                 // at resumption.
                                 resolved = chat.wakeup.observation != null,
                             )

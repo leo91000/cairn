@@ -344,11 +344,6 @@ test('dark appearance settings, empty states and connection sign-in feedback', a
   await page.goto(workspacePath('/tasks'))
   await expect(page.getByRole('heading', { name: 'No missions yet', exact: true })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('empty-tasks.png'), fullPage: true, animations: 'disabled' })
-  await page.route('**/api/connections?*', route => route.fulfill({
-    json: [
-      { provider: 'github', installed: false, connected: false },
-    ],
-  }))
   // Synthetic feedback only: never initiate a real device login or capture a real code.
   const signIn = {
     accountId: 'demo',

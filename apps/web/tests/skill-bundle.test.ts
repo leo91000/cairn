@@ -14,7 +14,7 @@ import {
   formatBytes,
   limitProblems,
   normalizePath,
-  parseGithubSource,
+  shortVersion,
   skillChanges,
   skillFileKind,
   stageChanges,
@@ -375,20 +375,10 @@ describe('archive downloads', () => {
   })
 })
 
-describe('github sources', () => {
-  it('decodes folder names and refs from GitHub URLs and rejects malformed escapes', () => {
-    expect(parseGithubSource('https://github.com/o/r/tree/feature%2Freview/my%20skills/r%C3%A9sum%C3%A9')).toEqual({ repository: 'o/r', ref: 'feature/review', path: 'my skills/résumé' })
-    expect(parseGithubSource('https://github.com/o/r/blob/main/my%20skills/SKILL.md')).toEqual({ repository: 'o/r', ref: 'main', path: 'my skills' })
-    expect(parseGithubSource('https://github.com/o/r/tree/main/bad%ZZ')).toBeNull()
-  })
-
-  it('reads repositories, refs and skill folders from what people paste', () => {
-    expect(parseGithubSource('anthropics/skills')).toEqual({ repository: 'anthropics/skills' })
-    expect(parseGithubSource('https://github.com/anthropics/skills.git')).toEqual({ repository: 'anthropics/skills' })
-    expect(parseGithubSource('github.com/anthropics/skills/tree/main/skills/pdf')).toEqual({ repository: 'anthropics/skills', ref: 'main', path: 'skills/pdf' })
-    expect(parseGithubSource('https://github.com/o/r/blob/v2/skills/review/SKILL.md')).toEqual({ repository: 'o/r', ref: 'v2', path: 'skills/review' })
-    expect(parseGithubSource('https://gitlab.com/o/r')).toBeNull()
-    expect(parseGithubSource('not a repo')).toBeNull()
+describe('skill sources', () => {
+  it('shortens a source version, whatever the plugin calls it', () => {
+    expect(shortVersion('0b2ddce3a1b2c3d4e5f60718293a4b5c6d7e8f90')).toBe('0b2ddce')
+    expect(shortVersion('v2')).toBe('v2')
   })
 })
 

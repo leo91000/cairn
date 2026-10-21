@@ -28,7 +28,6 @@ export type SectionId
     | 'projects'
     | 'skills'
     | 'mcps'
-    | 'github'
     | 'plugins'
     | 'nodes'
     | 'sandbox'
@@ -50,7 +49,7 @@ export interface SelectionItem {
 }
 
 /** Sections the server keeps unrestricted for the main agent. */
-export const mainLockedSections: SectionId[] = ['projects', 'skills', 'mcps', 'github']
+export const mainLockedSections: SectionId[] = ['projects', 'skills', 'mcps']
 
 export const sandboxOptions = [
   { value: 'yolo', label: 'YOLO', description: 'Private VM with sudo and Docker. Default.' },
@@ -80,7 +79,7 @@ export function isolationNote(backend: 'firecracker' | 'native') {
 export const alwaysAvailable = 'Publish deliverables (including public links), wait for a delay or a condition, see its nodes and move the conversation between them, report its outcome.'
 
 /**
- * A new agent starts restricted: no project, skill, MCP connection or GitHub, on the
+ * A new agent starts restricted: no project, skill, MCP connection or plugin, on the
  * current runner only. The owner widens each section, e.g. with "All, including future".
  */
 export function newAgentDraft(): AgentDraft {
@@ -100,7 +99,6 @@ export function newAgentDraft(): AgentDraft {
       mcps: [],
       mcpTools: {},
       installation: false,
-      github: false,
       sandbox: 'yolo',
     },
     exclusiveNodes: [],
@@ -127,7 +125,6 @@ export function draftOf(agent: Agent): AgentDraft {
       mcps: access.mcps ? [...access.mcps] : null,
       mcpTools: structuredClone(JSON.parse(JSON.stringify(access.mcpTools ?? {}))),
       installation: access.installation ?? false,
-      github: access.github ?? true,
       sandbox: access.sandbox ?? 'yolo',
     },
     // Responses omit empty live grants: absent means none.
@@ -202,39 +199,6 @@ export function rebaseDraft(base: AgentDraft, mine: AgentDraft, theirs: AgentDra
     plugins: mergeList(base.plugins, mine.plugins, theirs.plugins) ?? [],
   }
   return JSON.parse(JSON.stringify(rebased))
-}
-
-export type GithubMode = 'shared' | 'dedicated' | 'none'
-
-/**
- * The GitHub mode once projects are restricted: the shared connection reaches every repository, so
- * the agent moves to its saved dedicated token, narrower, or to no GitHub.
- */
-export function restrictedGithubMode(mode: GithubMode, tokenSaved: boolean): GithubMode {
-  if (mode !== 'shared')
-    return mode
-  return tokenSaved ? 'dedicated' : 'none'
-}
-
-/**
- * What saving does to the dedicated GitHub token. It is removed only when the owner asked for it
- * (chose "No GitHub" or "Remove saved token"): restricting projects turns the shared connection off
- * and switches to a saved token instead.
- */
-export function githubTokenChange(input: {
-  main: boolean
-  mode: GithubMode
-  token: string
-  configured: boolean
-  removeRequested: boolean
-}): 'set' | 'remove' | null {
-  if (input.main)
-    return null
-  if (input.mode === 'dedicated' && input.token.trim())
-    return 'set'
-  if (input.configured && input.mode === 'none' && input.removeRequested)
-    return 'remove'
-  return null
 }
 
 /**
@@ -541,7 +505,6 @@ export function changes(saved: AgentDraft, draft: AgentDraft) {
   const asSet = (chosen: string[] | undefined) => chosen ? JSON.stringify([...new Set(chosen)].sort()) : null
   for (const connection of tools)
     add('mcps', Number(asSet(savedTools[connection]) !== asSet(draftTools[connection])))
-  add('github', Number(saved.access.github !== draft.access.github))
   add('sandbox', Number(saved.access.sandbox !== draft.access.sandbox))
   add('powers', Number(saved.access.installation !== draft.access.installation))
   add('nodes', Number(backendOf(saved.access) !== backendOf(draft.access)))
@@ -580,11 +543,9 @@ function restrictedTools(saved: AgentAccess, draft: AgentAccess) {
 
 /**
  * What saving would grant or take away that deserves a look first: new powers and
- * secrets, and removed access when `runs` says work is affected. `githubToken` is the
- * pending change of the dedicated GitHub token, saved with the page; `dedicatedToken` says the
- * agent will use its saved dedicated token, or 'unknown' when the token state could not be read.
+ * secrets, and removed access when `runs` says work is affected.
  */
-export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Context, runs = { queued: 0, running: 0 }, githubToken: 'set' | 'remove' | null = null, dedicatedToken: boolean | 'unknown' = false) {
+export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Context, runs = { queued: 0, running: 0 }) {
   const lines: ReviewLine[] = []
   const node = (id: string) => nodeName(context.nodes.find(item => item.id === id), id)
 
@@ -622,10 +583,6 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
     removed.push('installation management')
   if (backendOf(saved.access) === 'native' && backendOf(draft.access) !== 'native')
     removed.push('native execution')
-  if (saved.access.github && !draft.access.github)
-    removed.push('shared GitHub connection')
-  if (githubToken === 'remove')
-    removed.push('dedicated GitHub token')
   if (sandboxStrictness[draft.access.sandbox] > sandboxStrictness[saved.access.sandbox]) {
     const mode = sandboxOptions.find(option => option.value === draft.access.sandbox)?.label ?? draft.access.sandbox
     removed.push(`execution mode (now ${mode})`)
@@ -641,18 +598,6 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
     lines.push({ kind: 'reduction', section: 'projects', text: `Removed: ${removed.join(', ')}.${consequence}` })
   else if (affected)
     lines.push({ kind: 'reduction', section: 'projects', text: `Changed access.${consequence}` })
-  if (saved.access.github && !draft.access.github && saved.access.projects === null && draft.access.projects !== null) {
-    lines.push({
-      kind: 'reduction',
-      section: 'github',
-      text: dedicatedToken === 'unknown'
-        ? 'Shared GitHub connection turned off: the agent may use its saved dedicated token if one exists.'
-        : dedicatedToken
-          ? 'Shared GitHub connection turned off: the agent will use its saved dedicated token.'
-          : 'Shared GitHub connection turned off: selected projects require a dedicated token.',
-    })
-  }
-
   return lines
 }
 
@@ -675,14 +620,14 @@ export interface Preview {
 }
 
 /**
- * Whether saving needs the review first: a power or a secret added, interrupted work, a delegation
- * this edit suspends, or a switch to the saved GitHub token. A delegation already suspended by an
- * earlier change, blocked or not, is listed when the review opens, but never opens it.
+ * Whether saving needs the review first: a power or a secret added, interrupted work, or a
+ * delegation this edit suspends. A delegation already suspended by an earlier change, blocked or
+ * not, is listed when the review opens, but never opens it.
  */
-export function needsReview(lines: ReviewLine[], preview: Preview | null, githubSwitch = false) {
+export function needsReview(lines: ReviewLine[], preview: Preview | null) {
   const runs = preview ? preview.runs.queued + preview.runs.running : 0
   const delegations = preview?.delegations.some(item => item.suspended && !item.alreadySuspended) ?? false
-  return lines.some(line => line.kind !== 'reduction') || runs > 0 || delegations || githubSwitch
+  return lines.some(line => line.kind !== 'reduction') || runs > 0 || delegations
 }
 
 export interface Issue {
@@ -800,11 +745,11 @@ export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 
 export function errorSection(message: string): SectionId | undefined {
   const text = message.toLowerCase()
   const rules: [SectionId, RegExp][] = [
-    ['plugins', /plugin|1password|delegation/],
+    // "Grant one GitHub instance per agent: its runs use that instance's credentials."
+    ['plugins', /plugin|1password|delegation|instance|credential/],
     ['nodes', /node|exclusive|reserv/],
     ['mcps', /mcp|tool/],
     ['skills', /skill/],
-    ['github', /github|token/],
     ['projects', /project/],
     ['model', /model|provider|reasoning|codex|claude|opencode/],
     ['advanced', /time limit|timeout/],

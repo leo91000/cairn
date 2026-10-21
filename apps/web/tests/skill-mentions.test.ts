@@ -30,7 +30,6 @@ function agent(access: Partial<Agent['access']> = {}) {
       skills: null,
       mcps: null,
       mcpTools: {},
-      github: true,
       sandbox: 'yolo',
       ...access,
     },

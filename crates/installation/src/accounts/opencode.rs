@@ -461,7 +461,6 @@ mod tests {
             )
             .into(),
             opencode_go_usage_url: endpoint.into(),
-            gh_bin: "gh".into(),
             concurrency: 1,
             logger: false,
             worker_enabled: false,

@@ -714,11 +714,6 @@ async fn delete_agent_removes_an_unused_profile_and_preserves_completed_history(
             let id = id.to_owned();
             move |db| {
                 db.set(
-                    &format!("agent-github:{id}"),
-                    &json!({ "token": "fixture-only" }),
-                    None,
-                )?;
-                db.set(
                     &format!("agent-avatar:{id}"),
                     &json!({ "status": "ready" }),
                     None,
@@ -741,9 +736,13 @@ async fn delete_agent_removes_an_unused_profile_and_preserves_completed_history(
     let deleted = call(&s, &configuration, "delete_agent", json!({ "id": id })).await;
     assert_eq!(result(&deleted)["deleted"], true);
     assert!(s.store.get("agents", id).await.unwrap().is_none());
-    for key in ["agent-github", "agent-avatar"] {
-        assert!(s.store.kv(&format!("{key}:{id}")).await.unwrap().is_none());
-    }
+    assert!(
+        s.store
+            .kv(&format!("agent-avatar:{id}"))
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
         s.store
             .get("plugin-connections", "fixture-account")

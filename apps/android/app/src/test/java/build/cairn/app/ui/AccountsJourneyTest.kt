@@ -71,9 +71,6 @@ class AccountsJourneyTest {
                                     "/api/account/session" -> beaconAccountFixture("fixture")
                                     "/api/installations/fixture/api/accounts" ->
                                         """{"accounts":[${server.accounts.joinToString(",")}],"signIn":${server.signIn}}"""
-                                    "/api/installations/fixture/api/connections" ->
-                                        """[{"provider":"github","installed":true,"connected":true,"account":"cairn-coletta"}]"""
-                                    "/api/installations/fixture/api/connections/login" -> "null"
                                     "/api/installations/fixture/api/runs" ->
                                         """[{"id":"run","status":"running","taskName":"Revue des dépendances"}]"""
                                     "/api/installations/fixture/api/overview",
@@ -154,6 +151,8 @@ class AccountsJourneyTest {
             waitText("AGENTS DE CODE")
             waitText("Work")
             compose.onNodeWithText("Aucun compte Claude Code", substring = true).assertExists()
+            // GitHub accounts are plugin instances now: Connections lists coding agents only.
+            compose.onNodeWithText("GitHub").assertDoesNotExist()
             capture("connections-light")
             compose.onNodeWithContentDescription("Ajouter un compte").performClick()
             waitText("Ajouter un compte")

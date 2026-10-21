@@ -127,7 +127,7 @@ Un savoir-faire réutilisable que les agents appliquent : ses instructions et le
 _Avoid_ : prompt, plugin
 
 **Source d’une skill** :
-Le dépôt GitHub d’où une skill a été importée, avec la version importée. La source permet de comparer la skill à une version plus récente et de la remplacer par celle-ci ; les modifications faites dans Cairn depuis l’import sont alors perdues.
+L’emplacement d’où une skill a été importée par la source de skills d’un plugin (par exemple un dossier d’un dépôt GitHub), avec la version importée. La source permet de comparer la skill à une version plus récente et de la remplacer par celle-ci ; les modifications faites dans Cairn depuis l’import sont alors perdues.
 
 **Délégation externe d’un plugin** :
 L’accès précis que le propriétaire accorde à des identités externes, par exemple
@@ -139,19 +139,42 @@ visibles dans le canal externe autorisé. La délégation reste liée à l’acc
 du propriétaire et aux permissions d’agent qu’il a approuvées.
 
 **Instance de plugin** :
-Une configuration d’un plugin par le propriétaire, par exemple un bot Discord ou un
-compte de service 1Password : ses réglages, ses secrets chiffrés et, s’il répond à
-des personnes, sa délégation externe. Les agents autorisés à utiliser ce que le
-plugin leur apporte se choisissent sur la page de chaque agent. Aucun agent n’est
-autorisé par défaut.
-_Avoid_ : connexion (réservé aux comptes des agents de code et à GitHub)
+Une configuration d’un plugin par le propriétaire, par exemple un bot Discord, un
+compte de service 1Password ou un compte GitHub : ses réglages, ses secrets chiffrés
+et, s’il répond à des personnes, sa délégation externe. Les agents autorisés à
+utiliser ce que le plugin leur apporte se choisissent sur la page de chaque agent.
+Aucun agent n’est autorisé par défaut.
+_Avoid_ : connexion (réservé aux comptes des agents de code)
 
 **Contribution d’un plugin** :
 Ce qu’un package déclare dans son manifeste et que Cairn affiche et contrôle : le
-formulaire d’une instance (que le package peut compléter pendant la saisie), les
-commandes et outils donnés aux agents autorisés, leurs instructions, le panneau d’une
-instance et son test. Le code du package ne fait que répondre ; il ne reçoit jamais les
-secrets.
+formulaire d’une instance (que le package peut compléter pendant la saisie), la
+connexion par appareil, les commandes et outils donnés aux agents autorisés, leurs
+instructions, les identifiants de run, les conditions d’attente, les sources de
+projets et de skills, le panneau d’une instance et son test. Le code du package ne
+fait que répondre ; il ne reçoit jamais les secrets.
+
+**Connexion par appareil** :
+La connexion d’une instance à un service tiers que Cairn déroule pour le propriétaire :
+il saisit sur la page du service le code que Cairn affiche, et Cairn garde le jeton
+obtenu comme identifiant de l’instance, sans le montrer au navigateur ni au package.
+_Avoid_ : OAuth (le protocole), login
+
+**Identifiants de run** :
+Ce que Cairn écrit dans l’environnement d’une exécution pour un agent autorisé sur une
+instance : fichiers de configuration d’outils, identifiants Git et identité de commit,
+rendus depuis l’instance. Un droit retiré les efface à la reprise suivante ; la fin de
+l’exécution les supprime. Un agent reçoit ceux d’une seule instance par plugin.
+
+**Source de projets** :
+Ce qu’un plugin propose d’importer comme projets à travers une instance, par exemple
+les dépôts d’un compte GitHub. Cairn clone le projet choisi avec les identifiants de
+l’instance et retient l’instance comme source du projet.
+
+**Condition d’un plugin** :
+Ce qu’un agent autorisé peut attendre avec `wait_for` grâce à un plugin, par exemple
+les checks requis d’une pull request. Cairn garde l’attente et reprend la
+conversation ; le plugin dit seulement si la condition est remplie.
 
 **Transport d’un plugin** :
 La connexion qu’un package entretient lui-même avec un service externe, par exemple la
