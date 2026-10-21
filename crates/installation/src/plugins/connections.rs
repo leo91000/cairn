@@ -21,6 +21,7 @@ pub const OWNED: &[&str] = &[
     "plugin-requests",
     "plugin-activity",
     "plugin-storage",
+    "plugin-http-receipts",
     "plugin-timers",
 ];
 
@@ -214,13 +215,7 @@ pub(crate) fn authorize(db: &Db<'_>, expected: &Connection) -> Result<Connection
 
 /// The connection's secret, for host-side injection only. Never sent to plugin code.
 pub(crate) async fn credential(s: &Service, connection: &Connection) -> Result<Option<String>> {
-    ensure_owner(s, connection).await?;
-    let expected = connection.clone();
-    s.store.read(move |db| authorize(db, &expected)).await?;
-    Ok(s.vault
-        .get(&credential_key(&connection.id))
-        .await?
-        .map(|value| text(&value, "token").to_owned()))
+    super::oauth::access_token(s, connection).await
 }
 
 pub(crate) async fn status(s: &Service, connection: &Connection, state: &str) {
@@ -525,8 +520,26 @@ pub async fn save(
     input: &Value,
     existing: Option<&str>,
 ) -> Result<Value> {
+    save_authorized(s, plugin_id, input, existing, |_| Ok(()), None).await
+}
+
+pub(crate) async fn save_authorized<F>(
+    s: &Service,
+    plugin_id: &str,
+    input: &Value,
+    existing: Option<&str>,
+    authorize_management: F,
+    management: Option<super::management::Authority>,
+) -> Result<Value>
+where
+    F: Fn(&Db<'_>) -> Result<()> + Send + Sync + 'static,
+{
     let package = registry::active(s, plugin_id).await?;
     let manifest = package.manifest.clone();
+    let expected_revision = match existing {
+        Some(id) => Some(get(s, plugin_id, id).await?.revision),
+        None => None,
+    };
     let owner = crate::relay::task_author_policy(s).await?;
     let name = text(input, "name").trim();
     if name.is_empty() || name.chars().count() > 100 {
@@ -603,16 +616,24 @@ pub async fn save(
     let flow = input["credentialFlow"]
         .as_str()
         .filter(|flow| !flow.is_empty());
-    let signed_in = match flow {
-        Some(flow) => Some(s.plugins.device_flows.token(plugin_id, flow, false)?),
+    let flow_lock = flow.map(|flow| s.plugins.oauth_flows.lock(&format!("flow:{flow}")));
+    let _flow_guard = match &flow_lock {
+        Some(lock) => Some(lock.lock().await),
         None => None,
     };
-    let token = signed_in
-        .as_deref()
+    let signed_record = match flow {
+        Some(flow) => Some(
+            super::oauth::flow_credential(s, plugin_id, flow, existing, &settings, false).await?,
+        ),
+        None => None,
+    };
+    let token = signed_record
+        .as_ref()
+        .and_then(|v| v["token"].as_str())
         .unwrap_or_else(|| text(input, "token"))
         .trim();
     if input.get("token").is_some_and(|value| !value.is_string())
-        || token.len() > 4096
+        || token.len() > 16_384
         || token.chars().any(|c| c.is_whitespace() || c.is_control())
         || (existing.is_none() && token.is_empty() && manifest.credential.is_some())
     {
@@ -621,6 +642,17 @@ pub async fn save(
             .as_ref()
             .map_or("credential", |c| c.label.as_str());
         return Err(Error::bad(format!("Enter the {label}.")));
+    }
+    if manifest
+        .credential
+        .as_ref()
+        .is_some_and(|c| c.oauth.is_some())
+        && signed_record.is_none()
+        && !token.is_empty()
+    {
+        return Err(Error::bad(
+            "Connect this account through OAuth; pasted access tokens are not accepted.",
+        ));
     }
     let connection_id = existing.map_or_else(id, str::to_owned);
     uuid(&connection_id)?;
@@ -632,22 +664,62 @@ pub async fn save(
         None => Map::new(),
     };
     let secret_fields = secrets(&manifest, &input["secrets"], &saved)?;
+    if let Some(record) = &signed_record
+        && let Some(key) = manifest
+            .credential
+            .as_ref()
+            .and_then(|c| c.oauth.as_ref())
+            .and_then(|o| o.client_secret_setting.as_ref())
+        && record["oauth"]["clientSecret"] != secret_fields.get(key).cloned().unwrap_or(Value::Null)
+    {
+        return Err(Error::bad(
+            "The client secret changed after sign-in. Sign in again.",
+        ));
+    }
     let secret_keys = secret_fields.keys().cloned().collect::<Vec<_>>();
     if manifest.instance_form {
         let credential = match (token.is_empty(), existing) {
             (false, _) => Some(token.to_owned()),
-            (true, Some(id)) => s
-                .vault
-                .get(&credential_key(id))
-                .await?
-                .map(|value| text(&value, "token").to_owned()),
+            (true, Some(id)) => {
+                super::oauth::draft_token(s, &get(s, plugin_id, id).await?, management.as_ref())
+                    .await?
+            }
             (true, None) => None,
         };
         let draft = forms::Draft {
+            management,
             credential,
             secrets: secret_fields.clone(),
         };
         settings = forms::submit(s, &package, &connection_id, settings, draft).await?;
+    }
+    if signed_record.is_none()
+        && let Some(oauth) = manifest.credential.as_ref().and_then(|c| c.oauth.as_ref())
+    {
+        let previous = match existing {
+            Some(id) => Some(get(s, plugin_id, id).await?),
+            None => None,
+        };
+        if let Some(previous) = previous {
+            let client_changed =
+                previous.settings[&oauth.client_id_setting] != settings[&oauth.client_id_setting];
+            let added_scope = oauth
+                .scope_settings
+                .keys()
+                .any(|key| settings[key] == true && previous.settings[key] != true);
+            let secret_changed = oauth
+                .client_secret_setting
+                .as_ref()
+                .is_some_and(|key| secret_fields.get(key) != saved.get(key));
+            if client_changed || added_scope || secret_changed {
+                return Err(Error::bad(
+                    "The OAuth client or permissions changed. Sign in again before saving.",
+                ));
+            }
+        }
+    }
+    if let Some(flow) = flow {
+        super::oauth::flow_credential(s, plugin_id, flow, existing, &settings, false).await?;
     }
     let encrypted_secrets = if manifest.secret_settings().next().is_some() {
         Some(s.vault.encrypt(
@@ -661,8 +733,12 @@ pub async fn save(
         None
     } else {
         Some(
-            s.vault
-                .encrypt(&credential_key(&connection_id), &json!({ "token": token }))?,
+            s.vault.encrypt(
+                &credential_key(&connection_id),
+                &signed_record
+                    .clone()
+                    .unwrap_or_else(|| json!({ "token": token })),
+            )?,
         )
     };
     let mut connection = Connection {
@@ -691,7 +767,11 @@ pub async fn save(
     let result = s
         .store
         .transaction(move |db| {
+            authorize_management(db)?;
             if let Some(current) = db.get(KIND, &connection.id)? {
+                if expected_revision.as_ref().is_some_and(|revision| current["revision"] != *revision) {
+                    return Err(Error::conflict("This instance changed while it was being checked. Reload it and retry."));
+                }
                 if current["pluginId"] != connection.plugin_id {
                     return Err(Error::not_found("Plugin connection not found."));
                 }
@@ -774,7 +854,15 @@ pub async fn save(
         })
         .await?;
     if let Some(flow) = flow {
-        let _ = s.plugins.device_flows.token(plugin_id, flow, true);
+        if manifest
+            .credential
+            .as_ref()
+            .is_some_and(|c| c.oauth.is_some())
+        {
+            s.plugins.oauth_flows.consume(plugin_id, flow);
+        } else {
+            let _ = s.plugins.device_flows.token(plugin_id, flow, true);
+        }
     }
     s.plugins.changed.notify_one();
     Ok(result)
@@ -823,6 +911,7 @@ pub(crate) async fn refresh(s: &Service, connection: &Connection) -> Result<()> 
         .await?
         .map(|value| text(&value, "token").to_owned());
     let draft = forms::Draft {
+        management: None,
         credential,
         secrets: secret_values(s, &connection.id).await?,
     };
@@ -954,10 +1043,24 @@ pub async fn get(s: &Service, plugin_id: &str, connection_id: &str) -> Result<Co
 }
 
 pub async fn remove(s: &Service, plugin_id: &str, connection_id: &str) -> Result<Value> {
+    remove_authorized(s, plugin_id, connection_id, |_| Ok(())).await
+}
+
+pub(crate) async fn remove_authorized<F>(
+    s: &Service,
+    plugin_id: &str,
+    connection_id: &str,
+    authorize_management: F,
+) -> Result<Value>
+where
+    F: Fn(&Db<'_>) -> Result<()> + Send + Sync + 'static,
+{
     get(s, plugin_id, connection_id).await?;
+    let forgotten_instance = connection_id.to_owned();
     let connection_id = connection_id.to_owned();
     s.store
         .transaction(move |db| {
+            authorize_management(db)?;
             db.remove(KIND, &connection_id)?;
             crate::agent_grants::forget_resource(db, crate::agent_grants::PLUGINS, &connection_id)?;
             db.delete(&format!("mcp-secret:{}", credential_key(&connection_id)))?;
@@ -973,6 +1076,7 @@ pub async fn remove(s: &Service, plugin_id: &str, connection_id: &str) -> Result
             db.audit("plugin.connection.deleted", &json!({ "id": connection_id }))
         })
         .await?;
+    s.plugins.files.forget(&forgotten_instance);
     s.plugins.changed.notify_one();
     Ok(json!({ "deleted": true }))
 }
@@ -1019,14 +1123,46 @@ pub async fn overview(s: &Service) -> Result<Vec<Value>> {
 
 /// Pausing keeps the configuration and credential; the worker stops within seconds.
 pub async fn set_enabled(s: &Service, plugin_id: &str, id: &str, input: &Value) -> Result<Value> {
+    set_enabled_authorized(s, plugin_id, id, input, |_| Ok(())).await
+}
+
+pub(crate) async fn set_enabled_authorized<F>(
+    s: &Service,
+    plugin_id: &str,
+    id: &str,
+    input: &Value,
+    authorize_management: F,
+) -> Result<Value>
+where
+    F: Fn(&Db<'_>) -> Result<()> + Send + Sync + 'static,
+{
     get(s, plugin_id, id).await?;
     let enabled = input["enabled"]
         .as_bool()
         .ok_or_else(|| Error::bad("Choose whether the connection accepts work."))?;
+    let oauth = if enabled {
+        registry::active(s, plugin_id)
+            .await?
+            .manifest
+            .credential
+            .as_ref()
+            .is_some_and(|c| c.oauth.is_some())
+    } else {
+        false
+    };
     let id = id.to_owned();
     let value = s
         .store
         .transaction(move |db| {
+            authorize_management(db)?;
+            if enabled
+                && oauth
+                && db
+                    .kv(&format!("mcp-secret:{}", credential_key(&id)))?
+                    .is_none()
+            {
+                return Err(Error::bad("Reconnect this account before enabling it."));
+            }
             let mut value = db
                 .get(KIND, &id)?
                 .ok_or_else(|| Error::not_found("Plugin connection not found."))?;

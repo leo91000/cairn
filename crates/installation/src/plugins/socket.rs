@@ -289,6 +289,7 @@ pub async fn deliver(
     event: Value,
 ) -> Result<Value> {
     let context = Context {
+        management: None,
         connection: connection.clone(),
         manifest: session.manifest().clone(),
         event: json!({ "name": "socket", "revision": connection.revision }),

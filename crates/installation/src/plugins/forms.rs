@@ -3,7 +3,7 @@
 //! adds guidance; on save it checks the instance once more. It runs in a one-shot
 //! worker with the draft's own credential and secrets, before anything is saved.
 use super::{
-    connections::{self, Connection, credential_key, secret_values},
+    connections::{self, Connection, secret_values},
     registry::{self, Package},
     scope::{self, Scope},
 };
@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 /// Unsaved values a draft's handler may use through `auth`. Never sent to scripts.
 pub struct Draft {
+    pub management: Option<super::management::Authority>,
     pub credential: Option<String>,
     pub secrets: Map<String, Value>,
 }
@@ -64,7 +65,16 @@ async fn run(
     submit: bool,
 ) -> Result<Value> {
     let secret_keys = draft.secrets.keys().cloned().collect::<Vec<_>>();
+    let previous = match instance {
+        Some(id) => s
+            .store
+            .get(connections::KIND, id)
+            .await?
+            .map(|v| v["settings"].clone()),
+        None => None,
+    };
     let payload = json!({
+        "previous": previous,
         "values": settings,
         "credential": draft.credential.is_some(),
         "secrets": secret_keys,
@@ -78,7 +88,12 @@ async fn run(
         settings,
         secret_keys,
     );
+    let management = draft.management.clone();
     let scope = Scope::Draft(Box::new(connection), Arc::new(draft));
+    let scope = match management {
+        Some(authority) => Scope::Managed(Box::new(scope), authority),
+        None => scope,
+    };
     let result = scope::invoke(s, package, "form", payload, &scope).await?;
     validate_form_result(&package.manifest, &result).map_err(Error::bad_gateway)?;
     Ok(result)
@@ -88,6 +103,15 @@ async fn run(
 /// `{ instance?, settings, secrets?, token? | credentialFlow?, changed? }`
 /// → `{ options, values, errors, view }`.
 pub async fn form(s: &Service, plugin_id: &str, input: &Value) -> Result<Value> {
+    form_managed(s, plugin_id, input, None).await
+}
+
+pub(crate) async fn form_managed(
+    s: &Service,
+    plugin_id: &str,
+    input: &Value,
+    management: Option<super::management::Authority>,
+) -> Result<Value> {
     let package = registry::active(s, plugin_id).await?;
     let manifest = &package.manifest;
     if !manifest.instance_form {
@@ -101,14 +125,25 @@ pub async fn form(s: &Service, plugin_id: &str, input: &Value) -> Result<Value> 
         .as_str()
         .filter(|flow| !flow.is_empty())
     {
-        Some(flow) => Some(s.plugins.device_flows.token(plugin_id, flow, false)?),
+        Some(flow) => Some(
+            super::oauth::flow_credential(
+                s,
+                plugin_id,
+                flow,
+                instance.as_deref(),
+                &values(manifest, &input["settings"]),
+                false,
+            )
+            .await?,
+        ),
         None => None,
     };
     let token = signed_in
-        .as_deref()
+        .as_ref()
+        .and_then(|v| v["token"].as_str())
         .unwrap_or_else(|| text(input, "token"))
         .trim();
-    if token.len() > 4096 || token.chars().any(|c| c.is_whitespace() || c.is_control()) {
+    if token.len() > 16_384 || token.chars().any(|c| c.is_whitespace() || c.is_control()) {
         let label = manifest
             .credential
             .as_ref()
@@ -117,11 +152,14 @@ pub async fn form(s: &Service, plugin_id: &str, input: &Value) -> Result<Value> 
     }
     let credential = match (&instance, token.is_empty()) {
         (_, false) => Some(token.to_owned()),
-        (Some(id), true) => s
-            .vault
-            .get(&credential_key(id))
+        (Some(id), true) => {
+            super::oauth::draft_token(
+                s,
+                &connections::get(s, plugin_id, id).await?,
+                management.as_ref(),
+            )
             .await?
-            .map(|value| text(&value, "token").to_owned()),
+        }
         (None, true) => None,
     };
     let saved = match &instance {
@@ -129,6 +167,7 @@ pub async fn form(s: &Service, plugin_id: &str, input: &Value) -> Result<Value> 
         None => Map::new(),
     };
     let draft = Draft {
+        management,
         credential: credential.filter(|_| manifest.credential.is_some()),
         secrets: secrets(manifest, &input["secrets"], saved),
     };

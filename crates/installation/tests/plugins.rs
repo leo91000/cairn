@@ -168,6 +168,7 @@ async fn interact(
 /// What a handler acts for: here, the Discord package handling `event`.
 fn context(connection: &Connection, event: &Value) -> capabilities::Context {
     capabilities::Context {
+        management: None,
         connection: connection.clone(),
         manifest: registry::builtin("discord").unwrap().manifest,
         event: event.clone(),
@@ -2210,6 +2211,17 @@ async fn installed_packages_can_be_split_into_modules_and_any_file_change_needs_
         .unwrap();
     assert_eq!(result, "HELLO Ada");
 
+    let connection = connections::save(
+        &s,
+        "splitter",
+        &json!({
+            "name": "Module instance", "enabled": true,
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+
     // Editing a module, adding one or linking one withdraws the approval.
     let original = std::fs::read_to_string(directory.join("lib/text.luau")).unwrap();
     std::fs::write(
@@ -2220,6 +2232,21 @@ async fn installed_packages_can_be_split_into_modules_and_any_file_change_needs_
     assert_eq!(
         registry::active(&s, "splitter").await.err().unwrap().status,
         403
+    );
+    let paused = connections::set_enabled(
+        &s,
+        "splitter",
+        text(&connection, "id"),
+        &json!({ "enabled": false }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(paused["enabled"], false);
+    assert!(
+        !connections::get(&s, "splitter", text(&connection, "id"))
+            .await
+            .unwrap()
+            .enabled
     );
     std::fs::write(directory.join("lib/text.luau"), &original).unwrap();
     registry::active(&s, "splitter").await.unwrap();

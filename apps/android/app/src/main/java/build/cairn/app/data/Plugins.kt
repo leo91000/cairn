@@ -61,6 +61,7 @@ data class PluginCredential(
      * matters to the app, so its shape is not checked here.
      */
     val deviceFlow: JsonObject? = null,
+    val oauth: JsonObject? = null,
 )
 
 /** A named source a package offers, such as a service's repositories. */
@@ -562,7 +563,7 @@ data class PluginDeviceFlow(
         get() = verificationUriComplete?.takeIf { it.isNotBlank() } ?: verificationUri
 
     val pending
-        get() = state == "pending"
+        get() = state == "pending" || state == "exchanging"
 
     val completed
         get() = state == "completed"

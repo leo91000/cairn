@@ -1,6 +1,6 @@
 //! Host capabilities exposed to plugin scripts. Each call is checked against the
 //! manifest (by the host crate), then against the live connection here.
-use super::connections::{Connection, authorize, credential, ensure_owner, secret_values};
+use super::connections::{Connection, authorize, ensure_owner, secret_values};
 use crate::{
     config::{id, now},
     error::{Error, Result},
@@ -15,6 +15,7 @@ use std::{sync::Arc, time::Duration};
 
 /// What a handler acts for: its connection and the event being handled.
 pub struct Context {
+    pub management: Option<super::management::Authority>,
     pub connection: Connection,
     pub manifest: Manifest,
     pub event: Value,
@@ -91,10 +92,13 @@ async fn instance_status(s: &Service, context: &Context, args: &Value) -> Result
 pub async fn effect(s: &Service, context: &Context, method: &str, args: Value) -> Result<Value> {
     match method {
         "storage.get" | "storage.set" | "storage.delete" | "storage.list" => {
-            storage(s, &context.connection, method, &args).await
+            storage(s, context, method, &args).await
         }
         "http.request" => http(s, context, &args).await,
-        "timers.after" | "timers.cancel" => timers(s, &context.connection, method, &args).await,
+        "files.create" | "files.append" | "files.read" | "files.delete" | "files.composeMime" => {
+            s.plugins.files.call(&context.connection, method, &args)
+        }
+        "timers.after" | "timers.cancel" => timers(s, context, method, &args).await,
         "exec.run" => super::programs::run(s, context, &args).await,
         _ => Err(Error::forbidden("Unknown plugin capability.")),
     }
@@ -109,18 +113,15 @@ fn key(args: &Value) -> Result<String> {
 }
 
 /// Small connection-scoped values. Removed with the connection.
-async fn storage(
-    s: &Service,
-    connection: &Connection,
-    method: &str,
-    args: &Value,
-) -> Result<Value> {
+async fn storage(s: &Service, context: &Context, method: &str, args: &Value) -> Result<Value> {
     const KIND: &str = "plugin-storage";
-    let connection = connection.id.clone();
+    let connection = context.connection.id.clone();
+    let management = context.management.clone();
     let method = method.to_owned();
     let args = args.clone();
     s.store
         .transaction(move |db| {
+            if let Some(authority) = management { authority.authorize(db)?; }
             let owned = || {
                 db.list(KIND).map(|values| {
                     values
@@ -281,7 +282,14 @@ pub(crate) async fn authorization(
             .ok_or_else(|| Error::forbidden("This plugin declares no credential."))?;
         let secret = match &context.draft {
             Some(draft) => draft.credential.clone(),
-            None => credential(s, &context.connection).await?,
+            None => {
+                super::oauth::access_token_managed(
+                    s,
+                    &context.connection,
+                    context.management.as_ref(),
+                )
+                .await?
+            }
         }
         .ok_or_else(|| Error::forbidden("This connection has no credential."))?;
         return Ok(Some((rule.header.clone(), rule.prefix.clone(), secret)));
@@ -362,7 +370,44 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
             request = request.header(name, value);
         }
     }
-    if let Some(spec) = args.get("multipart").filter(|value| value.is_object()) {
+    if let Some(spec) = args.get("bodyFile").filter(|value| value.is_object()) {
+        if !context.manifest.permits_capability("files") {
+            return Err(Error::forbidden("File transfers are not approved."));
+        }
+        let bytes = s
+            .plugins
+            .files
+            .bytes(&context.connection, text(spec, "id"))?;
+        match text(spec, "format") {
+            "base64url" => {
+                use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+                let mut body = args.get("json").cloned().unwrap_or_else(|| json!({}));
+                let pointer = spec["jsonPointer"].as_str().unwrap_or("/raw");
+                if pointer.len() > 200 || !pointer.starts_with('/') {
+                    return Err(Error::bad(
+                        "Provide a JSON pointer to the encoded file field.",
+                    ));
+                }
+                let (parent, key) = pointer.rsplit_once('/').unwrap();
+                let key = key.replace("~1", "/").replace("~0", "~");
+                let object = if parent.is_empty() {
+                    body.as_object_mut()
+                } else {
+                    body.pointer_mut(parent).and_then(Value::as_object_mut)
+                }
+                .ok_or_else(|| Error::bad("The file's JSON parent must be an object."))?;
+                object.insert(key, json!(URL_SAFE_NO_PAD.encode(bytes)));
+                request = request.json(&body);
+            }
+            "raw" => request = request.body(bytes),
+            "json" => {
+                request = request
+                    .header("content-type", "application/json")
+                    .body(bytes);
+            }
+            _ => return Err(Error::bad("Choose raw, json or base64url file format.")),
+        }
+    } else if let Some(spec) = args.get("multipart").filter(|value| value.is_object()) {
         let (kind, body) = multipart(s, context, spec).await?;
         request = request.header("content-type", kind).body(body);
     } else if let Some(body) = args.get("json").filter(|value| !value.is_null()) {
@@ -378,6 +423,17 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
     }
     if let Some((header, prefix, secret)) = authorization(s, context, &args["auth"]).await? {
         request = request.header(header, format!("{prefix}{secret}"));
+    }
+    let file_response = args.get("responseFile").filter(|v| v.is_object());
+    if file_response.is_some() && !context.manifest.permits_capability("files") {
+        return Err(Error::forbidden("File transfers are not approved."));
+    }
+    authorize_management(s, context).await?;
+    let claim =
+        super::idempotency::claim(s, &context.connection, args, context.management.as_ref())
+            .await?;
+    if let Some(super::idempotency::Claim::Cached(response)) = &claim {
+        return Ok(response.clone());
     }
     let response = request
         .send()
@@ -398,28 +454,63 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| Error::bad_gateway("The response was interrupted."))?;
-        if body.len() + chunk.len() > 1_048_576 {
-            return Err(Error::too_large("The response is larger than 1 MB."));
+        let limit = if file_response.is_some() && (200..300).contains(&status) {
+            super::files::MAX_BYTES * 4 / 3 + 65_536
+        } else {
+            1_048_576
+        };
+        if body.len() + chunk.len() > limit {
+            return Err(Error::too_large(
+                "The response is too large. Use a transfer file for large payloads.",
+            ));
         }
         body.extend_from_slice(&chunk);
     }
+    if let Some(spec) = file_response
+        && (200..300).contains(&status)
+    {
+        let media_type = headers
+            .get("content-type")
+            .and_then(Value::as_str)
+            .unwrap_or("application/octet-stream");
+        let file = s
+            .plugins
+            .files
+            .response(&context.connection, spec, &body, media_type)?;
+        return Ok(json!({ "status": status, "headers": headers, "file": file }));
+    }
     let json = serde_json::from_slice::<Value>(&body).ok();
-    Ok(json!({
+    let response = json!({
         "status": status,
         "headers": headers,
         "json": json,
         "text": if json.is_none() { json!(String::from_utf8_lossy(&body)) } else { Value::Null },
-    }))
+    });
+    if let Some(super::idempotency::Claim::Fresh(id)) = claim {
+        super::idempotency::complete(
+            s,
+            &context.connection,
+            &id,
+            &response,
+            context.management.as_ref(),
+        )
+        .await?;
+    }
+    Ok(response)
 }
 
 /// Durable timers delivered later as `timer` events.
-async fn timers(s: &Service, connection: &Connection, method: &str, args: &Value) -> Result<Value> {
+async fn timers(s: &Service, context: &Context, method: &str, args: &Value) -> Result<Value> {
     const KIND: &str = "plugin-timers";
-    let connection = connection.clone();
+    let connection = context.connection.clone();
+    let management = context.management.clone();
     let method = method.to_owned();
     let args = args.clone();
     s.store
         .transaction(move |db| {
+            if let Some(authority) = management {
+                authority.authorize(db)?;
+            }
             let owned = db
                 .list(KIND)?
                 .into_iter()
@@ -466,4 +557,12 @@ async fn timers(s: &Service, connection: &Connection, method: &str, args: &Value
             Ok(json!(timer))
         })
         .await
+}
+
+pub(crate) async fn authorize_management(s: &Service, context: &Context) -> Result<()> {
+    if let Some(authority) = &context.management {
+        let authority = authority.clone();
+        s.store.read(move |db| authority.authorize(db)).await?;
+    }
+    Ok(())
 }

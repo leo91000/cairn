@@ -522,6 +522,7 @@ async fn sockets_reach_only_declared_hosts_from_the_transport_worker() {
         _ => panic!("expected a connection"),
     }
     let context = cairn_installation::plugins::capabilities::Context {
+        management: None,
         connection: connection.clone(),
         manifest: package.manifest.clone(),
         event: json!({ "name": "socket" }),
@@ -919,6 +920,7 @@ async fn same_credential_reserves_the_last_session_start_across_instances() {
     let package = registry::active(&s, "discord").await.unwrap();
     let (link, mut commands) = socket::Link::channel();
     let context = |connection| Context {
+        management: None,
         connection,
         manifest: package.manifest.clone(),
         event: json!({ "name": "socket" }),

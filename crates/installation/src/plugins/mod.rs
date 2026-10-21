@@ -7,9 +7,14 @@ pub mod cli;
 pub mod conditions;
 pub mod connections;
 pub mod device_flow;
+pub mod files;
 pub mod forms;
+mod idempotency;
 pub mod legacy;
 pub mod legacy_github;
+pub(crate) mod management;
+mod mime;
+pub mod oauth;
 pub mod operations;
 pub mod panels;
 pub mod program_installation;
@@ -55,6 +60,8 @@ pub struct Plugins {
     pub(crate) installer_host: Host,
     pub operations: operations::Operations,
     pub device_flows: device_flow::Flows,
+    pub oauth_flows: oauth::Flows,
+    pub files: files::Files,
     /// When each paced key (e.g. a bot token's Identify budget) may send next.
     paces: socket::pacing::Paces,
 }
@@ -78,6 +85,8 @@ impl Default for Plugins {
             installer_host: Host::with_limits(4, std::time::Duration::from_secs(120)),
             operations: operations::Operations::default(),
             device_flows: device_flow::Flows::default(),
+            oauth_flows: oauth::Flows::default(),
+            files: files::Files::default(),
             paces: socket::pacing::Paces::default(),
         }
     }
@@ -232,6 +241,42 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         }
     }
     match (input.method.as_str(), parts.as_slice()) {
+        ("POST", ["plugins", "oauth", "callback"]) => {
+            let identity = input
+                .identity
+                .as_ref()
+                .ok_or_else(|| Error::unauthorized("Please sign in."))?;
+            oauth::callback(s, body, identity.oauth_binding()).await
+        }
+        ("GET", ["plugins", id, "oauth"]) => {
+            registry::active(s, id).await?;
+            Ok(json!({ "callbackUrl": oauth::callback_url(s).await? }))
+        }
+        ("POST", ["plugins", id, "oauth"]) => {
+            let identity = input
+                .identity
+                .as_ref()
+                .ok_or_else(|| Error::unauthorized("Please sign in."))?;
+            oauth::start(s, id, body, identity.oauth_binding()).await
+        }
+        ("GET", ["plugins", id, "oauth", flow]) => {
+            let identity = input
+                .identity
+                .as_ref()
+                .ok_or_else(|| Error::unauthorized("Please sign in."))?;
+            s.plugins
+                .oauth_flows
+                .status(id, flow, identity.oauth_binding())
+        }
+        ("DELETE", ["plugins", id, "oauth", flow]) => {
+            let identity = input
+                .identity
+                .as_ref()
+                .ok_or_else(|| Error::unauthorized("Please sign in."))?;
+            s.plugins
+                .oauth_flows
+                .cancel(id, flow, identity.oauth_binding())
+        }
         ("GET", ["plugins"]) => {
             let mut catalog = registry::catalog(s).await?;
             let mut overview = connections::overview(s).await?;
@@ -299,6 +344,9 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         }
         ("POST", ["plugins", id, "connections", connection, "enabled"]) => {
             connections::set_enabled(s, id, connection, body).await
+        }
+        ("POST", ["plugins", id, "connections", connection, "disconnect"]) => {
+            oauth::disconnect(s, id, connection, |_| Ok(())).await
         }
         ("POST", ["plugins", id, "connections", connection, "test"]) => {
             panels::test(s, id, connection).await
