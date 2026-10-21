@@ -55,7 +55,6 @@
           "mcps": null,
           "mcpTools": {},
           "installation": false,
-          "github": true,
           "sandbox": "yolo"
         },
         "type": "object",
@@ -159,10 +158,6 @@
             "default": false,
             "type": "boolean"
           },
-          "github": {
-            "default": true,
-            "type": "boolean"
-          },
           "sandbox": {
             "default": "yolo",
             "type": "string",
@@ -181,7 +176,6 @@
           "mcps",
           "mcpTools",
           "installation",
-          "github",
           "sandbox"
         ],
         "additionalProperties": false

@@ -6,16 +6,32 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ChatWaitTest {
-    private val sha = "0b2ddce3a1b2c3d4e5f60718293a4b5c6d7e8f90"
+    // A plugin's condition: only the plugin knows what its fields mean.
     private val checks = buildJsonObject {
         put("type", "github_pr_checks")
+        put("pluginId", "github")
         put("projectId", "project")
         put("prNumber", 193)
-        put("headSha", sha)
+        put("headSha", "0b2ddce3a1b2c3d4e5f60718293a4b5c6d7e8f90")
+    }
+    // How the plugin words it while it waits.
+    private val display = buildJsonObject {
+        put("title", "Waiting for required checks on PR #193")
+        put("short", "PR #193 checks")
+        putJsonArray("details") { add("0b2ddce") }
     }
 
     private fun wakeup(condition: JsonObject? = null, wakeAt: Long = 1_800_000) =
-        ChatWakeup("wake", "first", "Merger après la CI", 1800, 0, wakeAt, condition = condition)
+        ChatWakeup(
+            "wake",
+            "first",
+            "Merger après la CI",
+            1800,
+            0,
+            wakeAt,
+            condition = condition,
+            display = display.takeIf { condition != null },
+        )
 
     private var id = 0L
 
@@ -49,17 +65,47 @@ class ChatWaitTest {
     fun `names what the conversation waits for and counts down to it`() {
         assertEquals(
             WaitTarget(
-                WaitKind.PR,
-                "Attente des checks requis de la PR #193",
-                "Checks PR #193",
+                WaitKind.CONDITION,
+                "Waiting for required checks on PR #193",
+                "PR #193 checks",
                 listOf("0b2ddce"),
             ),
             waitTarget(wakeup(checks)),
         )
+        // A plugin that gives no wording, or an unexpected one, still reads as a condition.
+        assertEquals(
+            WaitTarget(WaitKind.CONDITION, "Attente d’une condition", "Condition", emptyList()),
+            waitTarget(wakeup(checks).copy(display = null)),
+        )
+        assertEquals(
+            WaitTarget(WaitKind.CONDITION, "Attente d’une condition", "Condition", emptyList()),
+            waitTarget(
+                wakeup(checks)
+                    .copy(
+                        display =
+                            buildJsonObject {
+                                put("title", 3)
+                                put("details", "abc")
+                            }
+                    )
+            ),
+        )
+        val run = buildJsonObject {
+            put("type", "run_finished")
+            put("runId", "run")
+        }
+        assertEquals(WaitKind.RUN, waitTarget(wakeup(run)).kind)
         assertTrue(waitTarget(wakeup()).short.startsWith("Reprise à "))
         // Seen only in a run's history, a wait reads as what was scheduled.
         assertTrue(recordedTitle(wakeup()).startsWith("Reprise programmée à "))
-        assertEquals("Attente programmée · Checks PR #193", recordedTitle(wakeup(checks)))
+        assertEquals("Attente programmée · PR #193 checks", recordedTitle(wakeup(checks)))
+        // The plugin's words survive the wakeup's round trip through events.
+        assertEquals(
+            "PR #193 checks",
+            wireJson.decodeFromJsonElement<ChatWakeup>(wakeup(checks).json()).let {
+                waitTarget(it).short
+            },
+        )
         assertEquals("45 s", timeLeft(45_000))
         assertEquals("2 min", timeLeft(61_000))
         assertEquals("1 h 05", timeLeft(65 * 60_000L))
@@ -70,51 +116,90 @@ class ChatWaitTest {
 
     @Test
     fun `says how the wait ended`() {
+        // The plugin's own words come first.
         assertEquals(
-            WaitOutcome(WaitTone.ERROR, "Checks requis en échec", "lint"),
+            WaitOutcome(WaitTone.ERROR, "Required checks failed", "lint"),
             waitOutcome(
                 buildJsonObject {
                     put("state", "completed")
                     put("type", "github_pr_checks")
+                    put("pluginId", "github")
                     put("conclusion", "failure")
-                    putJsonArray("checks") {
-                        addJsonObject {
-                            put("name", "lint")
-                            put("state", "failure")
-                        }
-                        addJsonObject {
-                            put("name", "test")
-                            put("state", "success")
-                        }
+                    putJsonObject("display") {
+                        put("tone", "error")
+                        put("title", "Required checks failed")
+                        put("detail", "lint")
                     }
                 }
             ),
         )
         assertEquals(
-            "La PR #193 a été fusionnée",
+            WaitOutcome(WaitTone.NEUTRAL, "PR #193 was merged", ""),
             waitOutcome(
-                    buildJsonObject {
-                        put("state", "closed")
-                        put("prNumber", 193)
-                        put("pullRequestState", "MERGED")
+                buildJsonObject {
+                    put("state", "closed")
+                    put("pluginId", "github")
+                    putJsonObject("display") {
+                        put("tone", "sparkly")
+                        put("title", "PR #193 was merged")
                     }
-                )
-                .title,
+                }
+            ),
         )
         assertEquals(WaitTone.NEUTRAL, waitOutcome(null).tone)
-        fun workflow(conclusion: String) =
+        // Generic outcomes, without plugin words.
+        assertEquals(
+            WaitOutcome(WaitTone.WARNING, "Échéance atteinte sans résultat", ""),
+            waitOutcome(buildJsonObject { put("state", "timed_out") }),
+        )
+        assertEquals(
+            WaitOutcome(WaitTone.WARNING, "Résultat indisponible", "No access"),
+            waitOutcome(
+                buildJsonObject {
+                    put("state", "unavailable")
+                    put("message", "No access")
+                }
+            ),
+        )
+        assertEquals(
+            WaitOutcome(WaitTone.ERROR, "L’exécution a échoué", ""),
+            waitOutcome(
+                buildJsonObject {
+                    put("state", "completed")
+                    put("type", "run_finished")
+                    put("status", "failed")
+                }
+            ),
+        )
+        // Otherwise its conclusion, when it has one.
+        fun concluded(conclusion: String) =
             waitOutcome(
                 buildJsonObject {
                     put("state", "completed")
                     put("type", "github_workflow")
+                    put("pluginId", "github")
                     put("conclusion", conclusion)
                 }
             )
-        assertEquals(WaitOutcome(WaitTone.ERROR, "Workflow en échec", ""), workflow("failure"))
-        assertEquals("échec au démarrage", workflow("startup_failure").detail)
-        assertEquals("Workflow annulé", workflow("cancelled").title)
-        assertEquals("Workflow : action requise", workflow("action_required").title)
-        assertEquals("Workflow périmé", workflow("stale").title)
+        assertEquals(WaitOutcome(WaitTone.OK, "Réussi", ""), concluded("success"))
+        assertEquals(WaitOutcome(WaitTone.ERROR, "Failure", ""), concluded("failure"))
+        assertEquals(
+            WaitOutcome(WaitTone.ERROR, "Startup failure", ""),
+            concluded("startup_failure"),
+        )
+        assertEquals(
+            WaitOutcome(WaitTone.WARNING, "Action required", ""),
+            concluded("action_required"),
+        )
+        assertEquals(
+            WaitOutcome(WaitTone.NEUTRAL, "Attente terminée", ""),
+            waitOutcome(
+                buildJsonObject {
+                    put("state", "superseded")
+                    put("pluginId", "github")
+                }
+            ),
+        )
     }
 
     @Test
@@ -617,13 +702,30 @@ class ChatWaitTest {
         // Without live state, as in a run's history, only the history speaks.
         assertTrue(waitProgress(ActivityWait(pending, ended = "cancelled"), null).cancelled)
         assertEquals(
-            "Checks PR #193",
+            "PR #193 checks",
+            observedTarget(
+                buildJsonObject {
+                    put("type", "github_pr_checks")
+                    put("pluginId", "github")
+                    putJsonObject("display") {
+                        put("title", "Checks passed")
+                        put("short", "PR #193 checks")
+                    }
+                }
+            ),
+        )
+        assertEquals(
+            "Une condition",
             observedTarget(
                 buildJsonObject {
                     put("type", "github_pr_checks")
                     put("prNumber", 193)
                 }
             ),
+        )
+        assertEquals(
+            "Autre exécution",
+            observedTarget(buildJsonObject { put("type", "run_finished") }),
         )
         assertEquals("", observedTarget(buildJsonObject { put("state", "timed_out") }))
         assertEquals("≤ 10 min", waitLeft(600_000, condition = true, resolved = false, now = 0))
@@ -675,7 +777,7 @@ class ChatWaitTest {
             )
         assertEquals(listOf("chat:sooner", "chat:later"), feed.waiting.map { it.key })
         assertTrue(feed.forYou.isEmpty())
-        assertEquals("Checks PR #193", feed.waiting[1].subtitle)
+        assertEquals("PR #193 checks", feed.waiting[1].subtitle)
         assertTrue(feed.waiting[1].condition)
         assertEquals(listOf("chat:paused"), feed.recent.map { it.key })
         assertEquals(feed.keys(), listOf("chat:sooner", "chat:later", "chat:paused"))

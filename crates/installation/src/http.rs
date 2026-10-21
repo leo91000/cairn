@@ -387,14 +387,13 @@ fn owner_operation(method: &str, path: &str) -> bool {
     let read = matches!(method, "GET" | "HEAD");
     match segments.as_slice() {
         // Storage configuration lives under nodes; credentials also include
-        // MCP connection flows and per-agent GitHub tokens below.
+        // MCP connection flows and plugin instances, with their sign-ins and sources.
         [
-            "nodes" | "accounts" | "plugins" | "mcps" | "connections" | "settings" | "audit"
-            | "github" | "agent-avatars",
+            "nodes" | "accounts" | "plugins" | "mcps" | "settings" | "audit" | "agent-avatars",
             ..,
         ] => true,
         ["agents"] | ["agents", _, "avatar"] => !read,
-        // Checking a skill source reads GitHub through the owner's connection.
+        // Checking a skill source reads it through the owner's plugin instance.
         ["skills", _, _, "source", ..] => true,
         ["skills" | "projects", ..] => !read,
         ["agents", ..] => true,

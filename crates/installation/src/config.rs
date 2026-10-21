@@ -18,7 +18,6 @@ pub struct Config {
     pub opencode_bin: String,
     #[serde(default = "default_opencode_go_usage_url")]
     pub opencode_go_usage_url: String,
-    pub gh_bin: String,
     pub concurrency: usize,
     pub logger: bool,
     pub worker_enabled: bool,
@@ -44,7 +43,6 @@ impl Config {
             "codexBin": get("CODEX_BIN", "codex"),
             "claudeBin": get("CLAUDE_BIN", "claude"),
             "opencodeBin": get("OPENCODE_BIN", "opencode"),
-            "ghBin": get("GH_BIN", "gh"),
             "concurrency": concurrency()?,
             "logger": get("NODE_ENV", "") != "test",
             "workerEnabled": get("WORKER_ENABLED", "true") != "false",

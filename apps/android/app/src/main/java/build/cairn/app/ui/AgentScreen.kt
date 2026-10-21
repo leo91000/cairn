@@ -107,8 +107,6 @@ private fun AgentPage(
 ) {
     var baseline by rememberSaveable(saver = agentSaver()) { mutableStateOf(loaded) }
     var draft by rememberSaveable(saver = draftSaver()) { mutableStateOf(AgentDraft(loaded)) }
-    // Deliberately not saveable: never persist a credential in saved instance state.
-    var newToken by remember { mutableStateOf("") }
     var section by rememberSaveable { mutableStateOf<String?>(null) }
     var nodes by remember { mutableStateOf<List<ExecutionNode>>(emptyList()) }
     var nodesLoaded by remember { mutableStateOf(false) }
@@ -119,11 +117,6 @@ private fun AgentPage(
     // Without the catalog, held grants cannot be checked: the section stays read-only.
     var catalogFailed by remember { mutableStateOf(false) }
     var catalogAttempt by remember { mutableIntStateOf(0) }
-    var tokenSaved by remember { mutableStateOf(false) }
-    // Until the token's state is known, GitHub is shown as unknown and no token change is sent.
-    var tokenLoaded by remember { mutableStateOf(false) }
-    var tokenFailed by remember { mutableStateOf(false) }
-    var tokenAttempt by remember { mutableIntStateOf(0) }
     var saving by remember { mutableStateOf(false) }
     var saveError by remember { mutableStateOf<String?>(null) }
     var errorSection by remember { mutableStateOf<AgentSection?>(null) }
@@ -133,8 +126,8 @@ private fun AgentPage(
     var discarding by remember { mutableStateOf(false) }
     var reloadFailed by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf(false) }
-    // A new agent keeps one creation identity: retrying after a lost response or a failed
-    // token never creates a second agent.
+    // A new agent keeps one creation identity: retrying after a lost response never creates a
+    // second agent.
     val creation = rememberResourceSave("")
     val scope = rememberCoroutineScope()
     val agentId = baseline.id
@@ -162,23 +155,8 @@ private fun AgentPage(
             catalogFailed = true
         }
     }
-    suspend fun loadToken() {
-        if (agentId.isNotBlank())
-            try {
-                tokenSaved =
-                    vm.api.get<Configured>("/agents/${segment(agentId)}/github-token").configured
-                tokenLoaded = true
-                tokenFailed = false
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                tokenFailed = true
-            }
-    }
-    LaunchedEffect(agentId, tokenAttempt) { loadToken() }
-    // A new agent has no token yet.
-    val tokenKnown = agentId.isBlank() || tokenLoaded
 
-    val changes = agentChanges(baseline, draft, tokenSaved, newToken)
+    val changes = agentChanges(baseline, draft)
     val dirty = changes.isNotEmpty()
     // A newer saved version replaces an untouched page; a modified draft keeps its base so a
     // concurrent save is detected by the server.
@@ -198,13 +176,11 @@ private fun AgentPage(
             state.mcps,
             nodes,
             catalog,
-            tokenSaved,
-            tokenKnown = tokenKnown,
             nodesLoaded = nodesLoaded,
             // Skills arrive with the agents, in the same workspace load.
             skillsLoaded = state.agents.isNotEmpty(),
         )
-    val errors = agentErrors(draft, tokenSaved, newToken)
+    val errors = agentErrors(draft)
     // An older installation keeps live grants on its resources and ignores them on the agent:
     // they are shown from there, read-only, and checked as shown.
     val legacy = olderInstallation(state.agents)
@@ -236,9 +212,7 @@ private fun AgentPage(
     BackHandler(enabled = !saving) { leave() }
 
     suspend fun commit(edited: Agent, approved: List<String>) {
-        val tokenChange = draft.tokenChange(tokenSaved, newToken)
-
-        // A profile already saved (its token failed) is not sent again: only the token is retried.
+        // A profile already saved (only its reload failed) is not sent again.
         val profilePending = baseline.id.isBlank() || profileChanged(baseline, edited)
         val saved: Agent =
             when {
@@ -291,26 +265,6 @@ private fun AgentPage(
                     )
             }
 
-        // The profile is saved: a retry after a failed token starts from this revision.
-        baseline = saved
-        draft = draft.afterProfileSaved(saved)
-
-        tokenChange?.let { token ->
-            try {
-                vm.api.request(
-                    "PUT",
-                    "/agents/${segment(saved.id)}/github-token",
-                    body("token" to token),
-                )
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                throw IllegalStateException(
-                    "Agent enregistré, mais le jeton GitHub n’a pas été enregistré. Réessayez."
-                )
-            }
-            tokenSaved = token.isNotEmpty()
-        }
-        newToken = ""
         baseline = saved
         draft = AgentDraft(saved)
         try {
@@ -341,7 +295,7 @@ private fun AgentPage(
     }
     fun save() {
         if (saving || errors.isNotEmpty()) return
-        val edited = draft.resolved(tokenSaved)
+        val edited = draft.resolved()
         saving = true
         saveError = null
         scope.launch {
@@ -361,18 +315,12 @@ private fun AgentPage(
                                 agentSaveBody(edited, mcpIds = mcpIds, liveGrants = liveGrants),
                             )
                         }
-                val tokenRemoved = draft.tokenChange(tokenSaved, newToken) == ""
-                // Only the automatic switch; an explicit « Jeton dédié » needs no such line.
-                val savedToken = draft.switchedToSavedToken(tokenSaved)
                 val lines =
                     agentReview(
                         reviewBaseline(baseline, edited, legacy),
                         edited,
                         resources,
                         preview,
-                        tokenRemoved,
-                        savedToken,
-                        tokenUnknown = !tokenKnown,
                     )
                 if (needsReview(lines, preview)) {
                     val suspended = preview?.suspendedDelegations().orEmpty()
@@ -401,10 +349,8 @@ private fun AgentPage(
                     fresh.mcps.map { it.id }.toSet().takeIf { refreshed && fresh.isOwner }
                 draft = draft.rebased(baseline, theirs, freshMcps)
                 baseline = theirs
-                // The token, machines and plugin instances may have changed elsewhere too; until
-                // read again they are unknown.
-                tokenLoaded = false
-                loadToken()
+                // Machines and plugin instances may have changed elsewhere too; until read again
+                // they are unknown.
                 nodesAttempt++
                 catalogAttempt++
                 saveError = null
@@ -457,7 +403,7 @@ private fun AgentPage(
                                 draft.agent.access,
                                 state.projects,
                                 chooseAll = { all ->
-                                    draft = draft.withAllProjects(all, tokenSaved)
+                                    draft = draft.withAllProjects(all)
                                     saveError = null
                                     conflict = false
                                 },
@@ -479,20 +425,6 @@ private fun AgentPage(
                                 state.mcps,
                                 { navigate("mcps") },
                                 ::access,
-                            )
-                    AgentSection.Github ->
-                        if (main) LockedSection()
-                        else if (!tokenKnown) UnknownGithub(tokenFailed, retry = { tokenAttempt++ })
-                        else
-                            GithubSection(
-                                draft,
-                                tokenSaved,
-                                newToken,
-                                { newToken = it },
-                                { mode ->
-                                    draft = draft.withGithub(mode, tokenSaved)
-                                    saveError = null
-                                },
                             )
                     AgentSection.Plugins ->
                         PluginsSection(
@@ -554,7 +486,6 @@ private fun AgentPage(
                     if (creating) discarding = true
                     else {
                         draft = AgentDraft(baseline)
-                        newToken = ""
                         saveError = null
                         conflict = false
                     }
@@ -605,7 +536,6 @@ private fun AgentPage(
                     onClick = {
                         discarding = false
                         draft = AgentDraft(baseline)
-                        newToken = ""
                         back()
                     }
                 ) {
@@ -759,7 +689,7 @@ private fun LockedChip() {
 @Composable
 private fun LockedSection() {
     InfoBox(
-        "L’agent principal a toujours accès à tous les projets, skills, connexions MCP et à GitHub, y compris futurs. Créez un autre agent pour un accès restreint."
+        "L’agent principal a toujours accès à tous les projets, skills et connexions MCP, y compris futurs. Créez un autre agent pour un accès restreint."
     )
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text("Tous, y compris futurs", Modifier.weight(1f))
@@ -853,7 +783,7 @@ private fun AgentOverview(
     var showIssues by rememberSaveable { mutableStateOf(false) }
     if (main)
         InfoBox(
-            "L’agent principal a toujours accès à tous les projets, skills, connexions MCP et à GitHub, y compris futurs. Créez un autre agent pour un accès restreint."
+            "L’agent principal a toujours accès à tous les projets, skills et connexions MCP, y compris futurs. Créez un autre agent pour un accès restreint."
         )
     if (issues.isNotEmpty())
         Column(
@@ -888,7 +818,6 @@ private fun AgentOverview(
         )
     val disabledMcps =
         access.mcps.orEmpty().count { id -> resources.mcps.find { it.id == id }?.enabled == false }
-    val mode = draft.githubMode(resources.tokenSaved)
     val plugins = pluginSummary(agent, resources.catalog)
     val exclusive = agent.effectiveExclusive(resources.nodes)
     Column {
@@ -932,19 +861,6 @@ private fun AgentOverview(
             },
         ) {
             open(AgentSection.Mcp)
-        }
-        OverviewRow(
-            AgentSection.Github,
-            when {
-                main -> GithubMode.Shared.label
-                !resources.tokenKnown -> NOT_LOADED
-                else -> githubSummary(mode)
-            },
-            locked = main,
-            error = AgentSection.Github in errors,
-            changed = AgentSection.Github in changed,
-        ) {
-            open(AgentSection.Github)
         }
         OverviewRow(
             AgentSection.Plugins,
@@ -1335,7 +1251,6 @@ private fun ProjectsSection(
         Note("Les nouveaux projets seront accessibles dès leur ajout.")
         return
     }
-    Note("Limiter les projets désactive la connexion GitHub partagée : utilisez un jeton dédié.")
     val selected = access.projects
     val items =
         projects.map { ChoiceItem(it.id, it.name, it.path) } +
@@ -1530,81 +1445,6 @@ private fun RadioRow(
             )
             if (detail.isNotBlank()) Note(detail)
         }
-    }
-}
-
-@Composable
-private fun UnknownGithub(failed: Boolean, retry: () -> Unit) {
-    if (!failed) {
-        LinearProgressIndicator(Modifier.fillMaxWidth())
-        return
-    }
-    // Showing « Pas de GitHub » here could lead to deleting a token nobody chose to remove.
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(
-            "Impossible de savoir si un jeton GitHub dédié est enregistré. L’accès GitHub ne peut pas être modifié pour l’instant.",
-            Modifier.weight(1f),
-            color = MaterialTheme.colorScheme.error,
-        )
-        TextButton(onClick = retry) { Text("Réessayer") }
-    }
-}
-
-@Composable
-private fun GithubSection(
-    draft: AgentDraft,
-    tokenSaved: Boolean,
-    token: String,
-    changeToken: (String) -> Unit,
-    choose: (GithubMode) -> Unit,
-) {
-    val mode = draft.githubMode(tokenSaved)
-    val allProjects = draft.agent.access.projects == null
-    RadioRow(
-        GithubMode.Shared.label,
-        if (allProjects) "Utilise le compte GitHub connecté à l’installation."
-        else "Impossible : projets limités. Choisissez « Tous » dans Projets pour l’utiliser.",
-        mode == GithubMode.Shared && allProjects,
-        enabled = allProjects,
-    ) {
-        choose(GithubMode.Shared)
-    }
-    RadioRow(
-        GithubMode.Dedicated.label,
-        "Un jeton personnel propre à cet agent.",
-        mode == GithubMode.Dedicated,
-    ) {
-        choose(GithubMode.Dedicated)
-    }
-    if (mode == GithubMode.Dedicated)
-        Column(
-            Modifier.padding(start = 40.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            if (draft.switchedToSavedToken(tokenSaved))
-                Note(
-                    "La connexion partagée a été désactivée : cet agent utilisera son jeton dédié enregistré."
-                )
-            else if (tokenSaved) Note("Un jeton est enregistré.")
-            SecretField(
-                if (tokenSaved) "Nouveau jeton (facultatif)" else "Jeton GitHub dédié",
-                token,
-                changeToken,
-            )
-            Note("Le jeton est enregistré avec la fiche.")
-            if (tokenSaved)
-                TextButton(onClick = { choose(GithubMode.None) }) {
-                    Text("Retirer le jeton enregistré")
-                }
-        }
-    RadioRow(
-        GithubMode.None.label,
-        if (tokenSaved && mode == GithubMode.None)
-            "Le jeton enregistré sera supprimé à l’enregistrement."
-        else "L’agent n’utilise pas GitHub.",
-        mode == GithubMode.None,
-    ) {
-        choose(GithubMode.None)
     }
 }
 

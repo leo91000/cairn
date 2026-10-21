@@ -4,11 +4,19 @@ import type {
   Run,
   Task,
 } from './contracts.ts'
+import { z } from 'zod'
 import { accessPolicy, MAIN_AGENT_ID } from '../../../../packages/contracts/contracts.ts'
 import { AppError } from './errors.ts'
 
+// The historical backend still had the shared GitHub connection setting.
+const legacyAccess = accessPolicy.extend({ github: z.boolean().default(true) })
+
 export function policy(agent: Agent) {
-  const access = accessPolicy.parse(agent.access ?? {})
+  const access = legacyAccess.parse(agent.access ?? {})
+  // Agents saved by the current contract have no setting: they had the shared
+  // connection only with access to every project.
+  if (agent.access && !Object.hasOwn(agent.access, 'github'))
+    access.github = access.projects === null
   if (agent.id !== MAIN_AGENT_ID && agent.access && !Object.hasOwn(agent.access, 'mcps') && (access.projects !== null || access.skills !== null || !access.github || access.sandbox !== 'yolo'))
     access.mcps = []
   return access

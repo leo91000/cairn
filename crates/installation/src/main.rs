@@ -239,8 +239,9 @@ async fn prepare_execution() -> Result<()> {
     let input = read_stdin_json().await?;
     let config: Config = serde_json::from_value(input["config"].clone())?;
     let mut run = input["run"].clone();
+    let credentials = cairn_installation::plugins::run_credentials::RunCredentials::default();
     let mut prepared =
-        cairn_installation::execution::prepare(&run, &config, None, None, None).await?;
+        cairn_installation::execution::prepare(&run, &config, &credentials, None, None).await?;
     run["workspace"] = prepared["cwd"].clone();
     run["workspaces"] = prepared["workspaces"].clone();
     prepared["args"] = serde_json::to_value(cairn_installation::run_output::args(
@@ -396,6 +397,8 @@ where
     }
 
     if service.config.worker_enabled {
+        // Resumed runs mask plugin token formats from their first line of output.
+        cairn_installation::plugins::runtime::load_secret_patterns(&service).await;
         service.worker.start(service.clone()).await?;
         background.push(tokio::spawn(service.plugins.clone().start(service.clone())));
         background.push(spawn_periodic(
@@ -419,7 +422,6 @@ where
     service.shutdown.cancel();
     service.avatars.close().await;
     service.worker.close().await;
-    service.connections.cancel().await;
     if let Err(error) = service.accounts.cancel(&service).await {
         tracing::warn!(error = %error, "Account shutdown failed");
     }

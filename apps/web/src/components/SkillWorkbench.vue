@@ -27,8 +27,8 @@ import {
   FilePlus,
   FolderGit2,
   FolderPlus,
-  Github,
   Globe,
+  Import,
   LoaderCircle,
   Lock,
   RefreshCw,
@@ -58,7 +58,7 @@ import {
   plural,
   readPickedFile,
   saveBytes,
-  shortCommit,
+  shortVersion,
   skillChanges,
   skillFileKind,
   skillManifest,
@@ -695,7 +695,7 @@ function replaced(result: SkillBundle) {
   sourceWorking.value = false
   applyBundle(result)
   pane.value = 'file'
-  notify('Skill updated from GitHub')
+  notify('Skill updated from its source')
   void refresh()
 }
 
@@ -766,13 +766,13 @@ onMounted(async () => {
           class="flex min-w-0 items-center gap-2 rounded-full border border-line py-1.5 pr-3 pl-2 text-2xs transition-colors hover:bg-hover phone:hidden"
           :class="pane === 'source' ? 'bg-soft' : 'bg-surface'"
           :aria-pressed="pane === 'source'"
-          aria-label="GitHub source"
+          aria-label="Imported source"
           :disabled="sourceWorking"
           @click="pane = pane === 'source' ? 'file' : 'source'; mobilePane = 'editor'"
         >
-          <Icon :name="Github" :size="15" />
-          <span class="max-w-48 truncate font-medium text-ink">{{ bundle.source.repository }}</span>
-          <code class="text-muted">{{ shortCommit(bundle.source.commit) }}</code>
+          <Icon :name="Import" :size="15" />
+          <span class="max-w-48 truncate font-medium text-ink">{{ bundle.source.label }}</span>
+          <code class="text-muted">{{ shortVersion(bundle.source.version) }}</code>
           <span v-if="bundle.source.modified" class="size-1.5 rounded-full bg-warning" title="Edited since import" />
         </button>
         <UiButton
@@ -892,13 +892,13 @@ onMounted(async () => {
             type="button"
             class="mx-2.5 mb-2 flex items-center gap-2.5 rounded-xl border border-line px-3 py-2.5 text-left transition-colors hover:bg-hover"
             :class="pane === 'source' ? 'bg-soft' : 'bg-surface'"
-            aria-label="Open GitHub source"
+            aria-label="Open imported source"
             @click="pane = 'source'; mobilePane = 'editor'"
           >
-            <Icon :name="Github" :size="17" />
+            <Icon :name="Import" :size="17" />
             <span class="min-w-0 flex-1">
-              <span class="block truncate text-xs font-semibold">{{ bundle.source.repository }}</span>
-              <span class="block truncate text-3xs text-muted">{{ bundle.source.ref }} · {{ shortCommit(bundle.source.commit) }}{{ bundle.source.modified ? ' · edited' : '' }}</span>
+              <span class="block truncate text-xs font-semibold">{{ bundle.source.label }}</span>
+              <span class="block truncate text-3xs text-muted">{{ bundle.source.folder ? `${bundle.source.folder} · ` : '' }}{{ shortVersion(bundle.source.version) }}{{ bundle.source.modified ? ' · edited' : '' }}</span>
             </span>
             <span v-if="bundle.source.modified" class="size-1.5 shrink-0 rounded-full bg-warning" />
           </button>

@@ -130,7 +130,7 @@ test('keeps projects compact and agent summaries readable with several resources
   await expect(page.getByRole('combobox', { name: 'Chat project' })).toHaveValue('Web app')
 })
 
-test('reviews workflow permission, fresh project sources and explicit blocked outcomes', async ({ page, workspace }, testInfo) => {
+test('reviews fresh project sources and explicit blocked outcomes', async ({ page, workspace }, testInfo) => {
   await useRelayForHttpMocks(page)
   await page.emulateMedia({ reducedMotion: 'reduce' })
   // The server rate-limits each client; the previous journey spends this worker's budget.
@@ -147,27 +147,8 @@ test('reviews workflow permission, fresh project sources and explicit blocked ou
       reportedAt: Date.now(),
     },
   })
-  await page.route('**/api/connections?*', route => route.fulfill({
-    json: [{
-      provider: 'github',
-      installed: true,
-      connected: true,
-      account: 'fixture',
-      version: 'gh fixture',
-      workflowPermission: false,
-    }],
-  }))
-  await page.goto(workspacePath('/connections'))
-  await authenticateWorkspace(page)
-  await expect(page.getByRole('button', { name: 'Enable workflow updates' })).toBeVisible()
-  for (const colorScheme of ['dark', 'light'] as const) {
-    await page.emulateMedia({ colorScheme })
-    await page.setViewportSize({ width: colorScheme === 'dark' ? 390 : 1440, height: 900 })
-    await expectSingleScroll(page)
-    await page.screenshot({ animations: 'disabled', path: testInfo.outputPath(`github-permission-${colorScheme}.png`) })
-  }
-
   await page.goto(workspacePath('/projects'))
+  await authenticateWorkspace(page)
   await page.getByRole('button', { name: 'Design system', exact: true }).click()
   const mode = page.getByRole('combobox', { name: 'New work starts from' })
   await expect(mode).toHaveValue('Latest remote branch')

@@ -78,11 +78,7 @@ fn merge(db: &Db<'_>, input: &Value, executing: &[String]) -> Result<Value> {
             ));
         }
     }
-    if db.kv(&format!("agent-github:{source_id}"))?.is_some() {
-        return Err(Error::conflict(
-            "Remove the source's personal GitHub token before merging; credentials are not transferred.",
-        ));
-    }
+
     for instance in db.list(crate::plugins::connections::KIND)? {
         if instance["agentId"] == source_id {
             return Err(Error::conflict(
@@ -181,7 +177,6 @@ mod tests {
             claude_bin: "claude".into(),
             opencode_bin: "opencode".into(),
             opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
-            gh_bin: "gh".into(),
             concurrency: 1,
             logger: false,
             worker_enabled: false,

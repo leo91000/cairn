@@ -26,7 +26,7 @@ async fn legacy_statuses_cannot_satisfy_multiple_application_bindings() {
         f.schedule(condition(&f)).await;
         f.finish().await;
         state(&f, &response);
-        wait_for::github::poll_once(&f.s).await.unwrap();
+        conditions::poll_once(&f.s).await.unwrap();
         assert_eq!(
             f.s.chat_detail(&f.chat).await.unwrap()["wakeup"]["observation"]["state"],
             "unavailable"
@@ -90,7 +90,7 @@ fn condition(f: &Fixture) -> Value {
 }
 
 fn state(f: &Fixture, value: &Value) {
-    std::fs::write(f.root.path().join("github-state.json"), value.to_string()).unwrap();
+    f.github.state(value);
 }
 
 pub(super) fn pending(f: &Fixture) {
@@ -110,7 +110,7 @@ async fn required_pr_checks_resume_once_without_waiting_for_optional_checks() {
     assert_eq!(f.schedule(condition(&f)).await, wait);
     assert_eq!(f.calls().len(), calls);
     f.finish().await;
-    let restarted = Service::new(f.s.config.clone()).await.unwrap();
+    let restarted = f.restart().await;
     restarted.chat_tick(&HashSet::new()).await.unwrap();
     assert_eq!(
         restarted.chat_detail(&f.chat).await.unwrap()["wakeup"],
@@ -123,7 +123,7 @@ async fn required_pr_checks_resume_once_without_waiting_for_optional_checks() {
         check("Optional", "IN_PROGRESS", None, false),
     ], &["CI"]) }),
     );
-    wait_for::github::poll_once(&restarted).await.unwrap();
+    conditions::poll_once(&restarted).await.unwrap();
     let ready = restarted.chat_detail(&f.chat).await.unwrap();
     assert_eq!(ready["wakeup"]["observation"]["conclusion"], "success");
     assert_eq!(ready["wakeup"]["observation"]["requiredCount"], 1);
@@ -176,7 +176,7 @@ async fn missing_required_checks_and_wrong_apps_never_look_like_success() {
         } else {
             assert_eq!(result["deferred"], true, "{mode}: {result}");
             f.finish().await;
-            wait_for::github::poll_once(&f.s).await.unwrap();
+            conditions::poll_once(&f.s).await.unwrap();
             assert!(f.tick().await["wakeup"]["observation"].is_null());
         }
     }
@@ -255,8 +255,8 @@ async fn pushes_and_closure_are_detected_during_the_final_identity_read_and_afte
         f.schedule(condition(&f)).await;
         f.finish().await;
         state(&f, &json!({ "pr": current }));
-        let restarted = Service::new(f.s.config.clone()).await.unwrap();
-        wait_for::github::poll_once(&restarted).await.unwrap();
+        let restarted = f.restart().await;
+        conditions::poll_once(&restarted).await.unwrap();
         assert_eq!(
             restarted.chat_detail(&f.chat).await.unwrap()["wakeup"]["observation"]["state"],
             expected
@@ -282,13 +282,11 @@ async fn check_pagination_and_limits_preserve_complete_head_bound_results() {
         f.schedule(condition(&f)).await["observation"]["conclusion"],
         "success"
     );
-    assert!(f.calls().iter().any(|c| {
-        c["args"]
-            .as_array()
-            .unwrap()
+    assert!(
+        f.calls()
             .iter()
-            .any(|a| a == "cursor=page-two")
-    }));
+            .any(|c| c["body"]["variables"]["cursor"] == "page-two")
+    );
     initial["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["totalCount"] =
         501.into();
     state(&f, &json!({ "pr": initial }));
@@ -314,7 +312,7 @@ async fn changed_rules_during_observation_stay_pending_and_branch_names_are_path
     );
     assert_eq!(f.schedule(condition(&f)).await["deferred"], true);
     assert!(f.calls().iter().any(|c| {
-        c["args"][3]
+        c["path"]
             .as_str()
             .is_some_and(|a| a.contains("/release%2Fv1?"))
     }));
@@ -350,9 +348,9 @@ async fn pr_waits_keep_cancellation_permission_and_deadline_contracts() {
                     .unwrap();
             }
             "permission" => {
-                let mut agent = f.s.get("agents", MAIN_AGENT_ID).await.unwrap();
-                agent["access"]["github"] = false.into();
-                f.s.store.put("agents", agent).await.unwrap();
+                connections::set_enabled(&f.s, "github", &f.instance, &json!({ "enabled": false }))
+                    .await
+                    .unwrap();
             }
             "deadline" => {
                 f.due().await;
@@ -360,7 +358,7 @@ async fn pr_waits_keep_cancellation_permission_and_deadline_contracts() {
             _ => unreachable!(),
         }
         let calls = f.calls().len();
-        wait_for::github::poll_once(&f.s).await.unwrap();
+        conditions::poll_once(&f.s).await.unwrap();
         assert_eq!(f.calls().len(), calls);
         if action == "deadline" {
             let detail = f.tick().await;
@@ -376,7 +374,7 @@ async fn pr_waits_keep_cancellation_permission_and_deadline_contracts() {
                 f.s.chat_detail(&f.chat).await.unwrap()["wakeup"]["observation"]["state"],
                 "unavailable"
             );
-            assert_eq!(f.tick().await["paused"], true);
+            assert_eq!(f.tick().await["run"]["status"], "queued");
         } else if action == "message" {
             assert!(f.s.chat_detail(&f.chat).await.unwrap()["wakeup"].is_null());
         }

@@ -37,7 +37,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.lifecycle.viewModelScope
 import build.cairn.app.data.*
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
 
 /** The installation's web page for steps that stay on the web: package uploads. */
@@ -704,6 +706,11 @@ private fun InstanceEditor(
     var perPerson by
         remember(initial.id) { mutableStateOf((initial.maxPerPersonPerHour ?: 5).toString()) }
     var enabled by remember(initial.id) { mutableStateOf(initial.enabled) }
+    // A device sign-in gives the draft its credential once completed; the token stays on the
+    // installation. Not saveable either: a flow outlives neither the editor nor the process.
+    var signIn by remember(initial.id) { mutableStateOf<PluginDeviceFlow?>(null) }
+    var signInError by remember(initial.id) { mutableStateOf<String?>(null) }
+    var signingIn by remember(initial.id) { mutableStateOf(false) }
     var completion by remember(initial.id) { mutableStateOf<PluginForm?>(null) }
     // While the package answers, its derived values aren't in the form yet: no saving.
     var completing by remember(initial.id) { mutableStateOf(manifest.instanceForm) }
@@ -715,6 +722,92 @@ private fun InstanceEditor(
         else if (agent.eligibleForPlugins()) null else "Trop large"
     fun refresh(key: String?) {
         asking = (asking.first + 1) to key
+    }
+    val scope = rememberCoroutineScope()
+    /** Forgets the sign-in, on the installation too unless a save consumed it. */
+    fun cancelSignIn() {
+        val current = signIn ?: return
+        signIn = null
+        signInError = null
+        if (current.state != "expired")
+            vm.viewModelScope.launch {
+                runCatching {
+                    vm.api.request(
+                        "DELETE",
+                        "/plugins/${segment(current.pluginId)}/device-flow/${segment(current.id)}",
+                    )
+                }
+            }
+    }
+    fun startSignIn() {
+        cancelSignIn()
+        signingIn = true
+        scope.launch {
+            try {
+                signIn =
+                    vm.api.send<PluginDeviceFlow>(
+                        "POST",
+                        "/plugins/${segment(pluginId)}/device-flow",
+                    )
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                signInError = e.message ?: "La connexion n’a pas pu démarrer."
+            } finally {
+                signingIn = false
+            }
+        }
+    }
+    // Polls every 2 s until the sign-in settles; a newer or cancelled flow stops this one.
+    val polling = signIn?.takeIf { it.pending }
+    LaunchedEffect(polling?.id) {
+        val flow = polling ?: return@LaunchedEffect
+        while (true) {
+            kotlinx.coroutines.delay(2000)
+            val next =
+                try {
+                    vm.api.get<PluginDeviceFlow>(
+                        "/plugins/${segment(flow.pluginId)}/device-flow/${segment(flow.id)}"
+                    )
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    if (signIn?.id != flow.id) return@LaunchedEffect
+                    // A forgotten sign-in expired on the installation.
+                    if (e is ApiException && e.status == 404) {
+                        signIn = flow.copy(state = "expired", message = e.message)
+                        return@LaunchedEffect
+                    }
+                    signInError = e.message
+                    continue
+                }
+            if (signIn?.id != flow.id) return@LaunchedEffect
+            signInError = null
+            signIn = next
+            if (!next.pending) {
+                // The package's form handler then says who it signed in as.
+                if (next.completed && manifest.instanceForm) refresh("credential")
+                return@LaunchedEffect
+            }
+        }
+    }
+    // Read the draft state directly: saving can consume the sign-in and close the
+    // editor before another composition updates a remembered copy.
+    DisposableEffect(initial.id) {
+        onDispose {
+            signIn
+                ?.takeIf { it.state != "expired" }
+                ?.let { current ->
+                    vm.viewModelScope.launch {
+                        runCatching {
+                            vm.api.request(
+                                "DELETE",
+                                "/plugins/${segment(current.pluginId)}/device-flow/${segment(current.id)}",
+                            )
+                        }
+                    }
+                }
+        }
     }
     if (manifest.instanceForm)
         LaunchedEffect(initial.id, asking) {
@@ -731,7 +824,7 @@ private fun InstanceEditor(
                                 "secrets",
                                 pluginSecrets(secrets),
                             )
-                            if (token.isNotBlank()) put("token", token.trim())
+                            credentialInput(token, signIn)?.let { (key, value) -> put(key, value) }
                             asking.second?.let { put("changed", it) }
                         },
                     )
@@ -774,7 +867,10 @@ private fun InstanceEditor(
         close = close,
         valid =
             name.isNotBlank() &&
-                (!creating || manifest.credential == null || token.isNotBlank()) &&
+                (!creating ||
+                    manifest.credential == null ||
+                    token.isNotBlank() ||
+                    signIn?.completed == true) &&
                 !missingSecret &&
                 fields.none {
                     it.required &&
@@ -803,7 +899,8 @@ private fun InstanceEditor(
                         if (creating) "" else "/${segment(initial.id)}",
                     buildJsonObject {
                         put("name", name.trim())
-                        if (token.isNotBlank()) put("token", token.trim())
+                        // The save consumes a completed sign-in.
+                        credentialInput(token, signIn)?.let { (key, value) -> put(key, value) }
                         put("settings", pluginSettings(stored, values))
                         // Blank secret fields keep what is saved.
                         put(
@@ -842,6 +939,8 @@ private fun InstanceEditor(
                     method = if (creating) "POST" else "PUT",
                 )
                 token = ""
+                // Consumed by the save: nothing is left to cancel.
+                signIn = null
                 secrets = emptyMap()
                 notify("${manifest.noun()} enregistré")
                 saved()
@@ -852,10 +951,13 @@ private fun InstanceEditor(
         Field("Nom", name, { name = it }, enabled = !state.busy)
         manifest.credential?.let { credential ->
             val problem = completion?.errors?.get("credential")
+            val signedIn = signIn?.completed == true
             OutlinedTextField(
                 token,
                 {
                     token = it
+                    // A pasted token replaces a sign-in.
+                    if (signIn != null) cancelSignIn()
                     if (manifest.instanceForm) refresh("credential")
                 },
                 Modifier.fillMaxWidth(),
@@ -871,7 +973,11 @@ private fun InstanceEditor(
                 enabled = !state.busy,
                 isError = problem != null,
                 placeholder =
-                    if (creating) null else ({ Text("Enregistré · laissez vide pour le garder") }),
+                    when {
+                        signedIn -> ({ Text("Connecté · ou collez un jeton à la place") })
+                        creating -> null
+                        else -> ({ Text("Enregistré · laissez vide pour le garder") })
+                    },
                 supportingText = {
                     Text(
                         problem
@@ -879,6 +985,15 @@ private fun InstanceEditor(
                     )
                 },
             )
+            if (credential.deviceFlow != null)
+                DeviceSignIn(
+                    manifest,
+                    signIn,
+                    signInError,
+                    enabled = !state.busy && !signingIn,
+                    start = ::startSignIn,
+                    cancel = ::cancelSignIn,
+                )
         }
         completion
             ?.view
@@ -941,7 +1056,7 @@ private fun InstanceEditor(
             }
             if (accessMode == "everyone")
                 Text(
-                    "Il faut un agent en lecture seule, limité à un projet, sans GitHub, MCP ni plugin.",
+                    "Il faut un agent en lecture seule, limité à un projet, sans MCP ni plugin.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1040,6 +1155,89 @@ private fun FormError(text: String) {
         style = MaterialTheme.typography.bodySmall,
         color = signal.attention,
     )
+}
+
+/**
+ * Signing in on the service's page instead of pasting a token: the code to enter, copyable, and the
+ * page in a Custom Tab, until the installation holds the credential.
+ */
+@Composable
+private fun DeviceSignIn(
+    manifest: PluginManifest,
+    flow: PluginDeviceFlow?,
+    error: String?,
+    enabled: Boolean,
+    start: () -> Unit,
+    cancel: () -> Unit,
+) {
+    val problem = error ?: signInProblem(flow)
+    Column(
+        Modifier.fillMaxWidth().testTag("plugin-device-sign-in"),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        if (flow == null || flow.completed)
+            OutlinedButton(onClick = start, enabled = enabled) {
+                Icon(CairnIcons.Key, null, Modifier.size(16.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    if (flow?.completed == true) "Se connecter avec un autre compte"
+                    else "Se connecter avec ${manifest.name}"
+                )
+            }
+        problem?.let { FormError(it) }
+        if (flow?.completed == true)
+            Text(
+                "Connecté. Enregistrez pour garder ce ${manifest.noun().lowercase()}.",
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.SemiBold,
+                color = signal.success,
+            )
+        else if (flow?.pending == true)
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceContainer,
+            ) {
+                Column(
+                    Modifier.fillMaxWidth().padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        "Ouvrez ${manifest.name} et saisissez ce code. Votre mot de passe reste chez ${manifest.name}.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        androidx.compose.foundation.text.selection.SelectionContainer(
+                            Modifier.weight(1f, fill = false)
+                        ) {
+                            Text(
+                                flow.userCode,
+                                Modifier.semantics { contentDescription = "Code de vérification" },
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                style = MaterialTheme.typography.headlineSmall,
+                            )
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        CopyButton("Copier le code", flow.userCode)
+                    }
+                    flow.message
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let {
+                            Text(
+                                it,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ExternalButton("Ouvrir ${manifest.name}", flow.link)
+                        TextButton(onClick = cancel) { Text("Annuler la connexion") }
+                    }
+                }
+            }
+        else if (flow != null && signInProblem(flow) != null)
+            TextButton(onClick = start, enabled = enabled) { Text("Réessayer") }
+    }
 }
 
 /** Choices that explain themselves, e.g. why one can't be picked: one row each. */

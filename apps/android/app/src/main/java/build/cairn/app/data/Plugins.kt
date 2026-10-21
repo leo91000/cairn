@@ -51,7 +51,34 @@ data class PluginForm(
     val view: JsonArray = JsonArray(emptyList()),
 )
 
-@Serializable data class PluginCredential(val label: String = "", val header: String = "")
+@Serializable
+data class PluginCredential(
+    val label: String = "",
+    val header: String = "",
+    val prefix: String = "",
+    /**
+     * The owner can sign in on the service's page instead of pasting a token. Only its presence
+     * matters to the app, so its shape is not checked here.
+     */
+    val deviceFlow: JsonObject? = null,
+)
+
+/** A named source a package offers, such as a service's repositories. */
+@Serializable
+data class PluginProjectSource(
+    val name: String = "",
+    val title: String = "",
+    val description: String = "",
+)
+
+/** Where a package's instances import skills from, with the location's fields. */
+@Serializable
+data class PluginSkillSource(
+    val name: String = "",
+    val title: String = "",
+    val description: String = "",
+    val fields: List<PluginSetting> = emptyList(),
+)
 
 /** The package's mark: a background colour and an SVG path on a 24×24 grid. */
 @Serializable data class PluginBrand(val color: String = "", val path: String = "")
@@ -144,6 +171,10 @@ data class PluginManifest(
     val instanceView: Boolean = false,
     val instanceTest: Boolean = false,
     val instanceForm: Boolean = false,
+    /** Where its enabled instances import projects from. */
+    val projectSources: List<PluginProjectSource> = emptyList(),
+    /** Where its enabled instances import skills from. */
+    val skillSources: List<PluginSkillSource> = emptyList(),
 ) {
     /** Instances answer external people through a dedicated agent. */
     val delegates
@@ -368,13 +399,12 @@ fun Agent.eligibleForPlugins() =
 
 /**
  * Why an agent can't answer anyone who reaches an instance, or null when it can. Mirrors the
- * server: read-only sandbox, one project at most, no installation, GitHub, MCP or plugin grants.
+ * server: read-only sandbox, one project at most, no installation, MCP or plugin grants.
  */
 fun Agent.publicProblem(connections: List<PluginConnection>): String? =
     when {
         !eligibleForPlugins() -> "Trop large"
         access.sandbox != "read-only" -> "Pas en lecture seule"
-        access.github -> "A GitHub"
         access.mcps == null || access.mcps.isNotEmpty() -> "A des MCP"
         connections.any { id in it.agentIds } -> "A des plugins"
         else -> null
@@ -402,6 +432,17 @@ fun pluginSettings(fields: List<PluginSetting>, values: Map<String, String>): Js
             }
             .toMap()
     )
+
+/** Whether a required field of a declarative form is still empty (switches always have a value). */
+fun requiredMissing(fields: List<PluginSetting>, values: Map<String, String>): Boolean =
+    fields.any {
+        !it.hidden &&
+            it.required &&
+            it.type !in setOf("boolean", "secret", "multiselect") &&
+            // A choice is an exact identifier; only text uses blankness.
+            (if (it.type == "select") values[it.key].isNullOrEmpty()
+            else values[it.key].isNullOrBlank())
+    }
 
 /** Blank secrets keep saved credentials; view actions preserve the typed value. */
 fun pluginSecrets(values: Map<String, String>, trim: Boolean = true): JsonObject =
@@ -458,8 +499,6 @@ fun PluginConnection.abilities(
             PluginAbility(true, "Utiliser des plugins : ${plugins.joinToString(", ")}", warn = true)
         else PluginAbility(false, "Utiliser des plugins comme 1Password")
     )
-    if (agent?.access?.github == true)
-        add(PluginAbility(true, "Utiliser GitHub en votre nom", warn = true))
     add(PluginAbility(false, "Gérer l’installation"))
     add(PluginAbility(false, "Voir les autres conversations"))
 }
@@ -501,3 +540,156 @@ suspend fun PluginConnection.agentIdsToSend(
     val fresh = current() ?: return null
     return copy(agentIds = fresh).agentIdsToKeep(agents, manifest)
 }
+
+/**
+ * A plugin's device sign-in as the installation shows it (`POST /plugins/{id}/device-flow`): the
+ * token never reaches the app. [state] is `pending`, `completed`, `failed` or `expired`.
+ */
+@Serializable
+data class PluginDeviceFlow(
+    val id: String = "",
+    val pluginId: String = "",
+    val state: String = "pending",
+    val userCode: String = "",
+    val verificationUri: String = "",
+    val verificationUriComplete: String? = null,
+    val expiresAt: Long = 0,
+    /** Why it failed, or the service's guidance. */
+    val message: String? = null,
+) {
+    /** The page where the owner enters the code; some services prefill it. */
+    val link
+        get() = verificationUriComplete?.takeIf { it.isNotBlank() } ?: verificationUri
+
+    val pending
+        get() = state == "pending"
+
+    val completed
+        get() = state == "completed"
+}
+
+/**
+ * What a form call or a save sends for the credential: a completed sign-in replaces a pasted token,
+ * and neither is sent when the saved credential stays.
+ */
+fun credentialInput(token: String, flow: PluginDeviceFlow?): Pair<String, String>? =
+    when {
+        flow?.completed == true -> "credentialFlow" to flow.id
+        token.isNotBlank() -> "token" to token.trim()
+        else -> null
+    }
+
+/** Why a sign-in ended without a credential, or null while it can still complete. */
+fun signInProblem(flow: PluginDeviceFlow?): String? =
+    when (flow?.state) {
+        "expired" -> flow.message?.ifBlank { null } ?: "Cette connexion a expiré. Recommencez."
+        "failed" -> flow.message?.ifBlank { null } ?: "La connexion a échoué. Réessayez."
+        else -> null
+    }
+
+/** A project source of one package, with the enabled instances that can import from it. */
+data class ProjectSourceChoice(
+    val entry: PluginEntry,
+    val source: PluginProjectSource,
+    val instances: List<PluginConnection>,
+) {
+    val key
+        get() = "${entry.id}/${source.name}"
+
+    /** "GitHub · Repositories", or the source alone when it names the package already. */
+    val label
+        get() = sourceLabel(entry.name, source.title)
+}
+
+/** A skill source of one package, with the enabled instances that can import from it. */
+data class SkillSourceChoice(
+    val entry: PluginEntry,
+    val source: PluginSkillSource,
+    val instances: List<PluginConnection>,
+) {
+    val key
+        get() = "${entry.id}/${source.name}"
+
+    val label
+        get() = sourceLabel(entry.name, source.title)
+}
+
+private fun sourceLabel(plugin: String, title: String) =
+    when {
+        title.isBlank() -> plugin
+        title.contains(plugin, ignoreCase = true) -> title
+        else -> "$plugin · $title"
+    }
+
+private fun PluginEntry.runs() =
+    active != null && manifest != null && (status == "active" || status == "update")
+
+/** Project sources the owner can import from: approved packages with an enabled instance. */
+fun PluginCatalog.projectSources(): List<ProjectSourceChoice> =
+    packages
+        .filter { it.runs() }
+        .flatMap { entry ->
+            val instances = connections.filter { it.pluginId == entry.id && it.enabled }
+            entry.manifest
+                ?.projectSources
+                .orEmpty()
+                .filter { it.name.isNotBlank() }
+                .map { ProjectSourceChoice(entry, it, instances) }
+        }
+        .filter { it.instances.isNotEmpty() }
+
+/** Skill sources the owner can import from: approved packages with an enabled instance. */
+fun PluginCatalog.skillSources(): List<SkillSourceChoice> =
+    packages
+        .filter { it.runs() }
+        .flatMap { entry ->
+            val instances = connections.filter { it.pluginId == entry.id && it.enabled }
+            entry.manifest
+                ?.skillSources
+                .orEmpty()
+                .filter { it.name.isNotBlank() }
+                .map { SkillSourceChoice(entry, it, instances) }
+        }
+        .filter { it.instances.isNotEmpty() }
+
+/** One project a plugin's project source offers for import. */
+@Serializable
+data class PluginProject(
+    val id: String = "",
+    val name: String = "",
+    val description: String = "",
+    val defaultBranch: String = "",
+    /** The plugin's short labels, e.g. "Private", "Fork", "Rust". */
+    val badges: List<String> = emptyList(),
+    val updatedAt: String? = null,
+    val url: String? = null,
+    /** Already registered: shown, not selectable. */
+    val imported: Boolean = false,
+    /** The name a project imported from this item takes. */
+    val projectName: String? = null,
+)
+
+@Serializable
+data class PluginProjectPage(
+    val items: List<PluginProject> = emptyList(),
+    val nextPage: Int? = null,
+)
+
+/**
+ * A loaded project matches when every word typed appears in its name, identifier, description or
+ * badges, ignoring case and accents.
+ */
+fun PluginProject.matches(query: String): Boolean {
+    val words = searchable(query).split(Regex("\\s+")).filter { it.isNotBlank() }
+    val text = searchable(listOf(name, id, description, *badges.toTypedArray()).joinToString(" "))
+    return words.all { it in text }
+}
+
+private fun searchable(value: String) =
+    java.text.Normalizer.normalize(value, java.text.Normalizer.Form.NFD)
+        .replace(Regex("\\p{M}+"), "")
+        .lowercase()
+
+/** `GET /plugins/{id}/projects` for one page of a source, through one instance. */
+fun pluginProjectsPath(pluginId: String, source: String, instance: String, page: Int): String =
+    "/plugins/${segment(pluginId)}/projects?source=${segment(source)}&instance=${segment(instance)}&page=$page"

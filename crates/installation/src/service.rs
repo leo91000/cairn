@@ -33,7 +33,6 @@ pub struct Service {
     pub accounts: Arc<crate::accounts::Accounts>,
     pub models: Arc<crate::models::Models>,
     pub opencode: Arc<crate::opencode::Catalog>,
-    pub connections: Arc<crate::connections::Connections>,
     pub conversation_storage_lock: Arc<tokio::sync::Mutex<()>>,
     pub attachment_upload: Arc<tokio::sync::Mutex<()>>,
     pub conversation_lists: Arc<crate::live::ConversationLists>,
@@ -81,7 +80,6 @@ impl Service {
             accounts: Arc::default(),
             models: Arc::default(),
             opencode: Arc::default(),
-            connections: Arc::default(),
             conversation_storage_lock: Arc::default(),
             attachment_upload: Arc::default(),
             conversation_lists: Arc::default(),
@@ -107,6 +105,8 @@ impl Service {
             shutdown: CancellationToken::new(),
         });
         crate::storage::migration::run(&service).await?;
+        // Reads `access.github` before agents are normalized without it.
+        crate::plugins::legacy_github::migrate(&service).await?;
         service.migrate_agents().await?;
         crate::plugins::legacy::migrate(&service).await?;
         service
@@ -315,6 +315,11 @@ impl Service {
                     .map_or_else(|| json!([]), |agent| json!(live_grant(agent, key)));
             }
         }
+        // Clients predating the GitHub plugin still send `access.github`; plugin grants
+        // replaced it.
+        if let Some(access) = input.get_mut("access").and_then(Value::as_object_mut) {
+            access.remove("github");
+        }
         let mut agent = parse("agent", input)?;
         crate::agent_grants::normalize(&mut agent);
         crate::provider::Provider::of_agent(&agent)?
@@ -340,19 +345,34 @@ impl Service {
         })
     }
 
-    /// Plugin instances whose package gives agents access.
+    /// Plugin instances whose package gives agents access. A package that renders
+    /// credentials into runs gives each agent one instance: its runs use that one.
     async fn instances_accepting_agents(&self, agent: &Value) -> Result<Vec<String>> {
         let requested = crate::agent_grants::plugins(agent);
         let mut accepting = Vec::new();
+        let mut run_credentials = Vec::new();
         for instance in self.store.list(crate::plugins::connections::KIND).await? {
             let id = text(&instance, "id");
             if !requested.iter().any(|requested| requested == id) {
                 continue;
             }
-            let package = crate::plugins::registry::active(self, text(&instance, "pluginId")).await;
-            if package.is_ok_and(|package| package.manifest.agent_access.is_some()) {
-                accepting.push(id.to_owned());
+            let plugin = text(&instance, "pluginId");
+            let Ok(package) = crate::plugins::registry::active(self, plugin).await else {
+                continue;
+            };
+            if package.manifest.agent_access.is_none() {
+                continue;
             }
+            if crate::plugins::run_credentials::one_per_package(&package.manifest) {
+                if run_credentials.contains(&plugin.to_owned()) {
+                    return Err(Error::bad(format!(
+                        "Grant one {} instance per agent: its runs use that instance's credentials.",
+                        package.manifest.name
+                    )));
+                }
+                run_credentials.push(plugin.to_owned());
+            }
+            accepting.push(id.to_owned());
         }
         Ok(accepting)
     }
@@ -422,10 +442,30 @@ impl Service {
         self.project_authorized(input, existing, |_| Ok(())).await
     }
 
+    /// Registers a project a plugin's project source resolved. `source` names the
+    /// plugin, instance and item, so later fetches prefer that instance's credentials.
+    pub(crate) async fn project_from_source(&self, input: Value, source: Value) -> Result<Value> {
+        self.save_project(input, None, Some(source), |_| Ok(()))
+            .await
+    }
+
     pub(crate) async fn project_authorized<F>(
         &self,
         input: Value,
         existing: Option<&str>,
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
+        self.save_project(input, existing, None, authorize).await
+    }
+
+    async fn save_project<F>(
+        &self,
+        input: Value,
+        existing: Option<&str>,
+        source: Option<Value>,
         authorize: F,
     ) -> Result<Value>
     where
@@ -443,6 +483,17 @@ impl Service {
             None => None,
         };
         project["origin"] = normalize_origin(&git_origin(&actual).await).into();
+        // An edit keeps the plugin source while the project still has its origin.
+        let source = source.or_else(|| {
+            previous
+                .as_ref()
+                .filter(|previous| previous["origin"] == project["origin"])
+                .map(|previous| previous["source"].clone())
+                .filter(Value::is_object)
+        });
+        if let Some(source) = source {
+            project["source"] = source;
+        }
         project["path"] = actual.to_string_lossy().into_owned().into();
         project["id"] = existing
             .map(str::to_owned)
@@ -978,9 +1029,8 @@ fn ensure_removable(db: &Db<'_>, kind: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Drops an agent's credentials, portrait, plugin grants and exclusive node grants.
+/// Drops an agent's portrait, plugin grants and exclusive node grants.
 pub(crate) fn forget_agent(db: &Db<'_>, id: &str) -> Result<()> {
-    db.delete(&format!("agent-github:{id}"))?;
     db.delete(&format!("agent-avatar:{id}"))?;
     crate::agent_grants::forget_agent(db, id)
 }
@@ -1047,7 +1097,6 @@ pub(crate) fn touch(agent: &mut Value) {
 fn restricted(access: &Value) -> bool {
     !access["projects"].is_null()
         || !access["skills"].is_null()
-        || access["github"] != true
         || !access["mcps"].is_null()
         || access["mcpTools"]
             .as_object()
@@ -1058,11 +1107,6 @@ fn validate_access(agent: &Value, access: &Value) -> Result<()> {
     if access["backend"] == "native" && access["nodes"].as_array().is_none_or(Vec::is_empty) {
         return Err(Error::bad(
             "Native execution requires selected nodes; wildcard access is not sufficient.",
-        ));
-    }
-    if !access["projects"].is_null() && access["github"] == true {
-        return Err(Error::bad(
-            "Shared GitHub credentials require access to all projects. Disable the GitHub connection for an agent with selected projects.",
         ));
     }
     if agent["id"] == MAIN_AGENT_ID && restricted(access) {
@@ -1133,22 +1177,26 @@ pub fn policy(agent: &Value) -> Value {
         "mcps": null,
         "mcpTools": {},
         "installation": false,
-        "github": true,
         "sandbox": "yolo",
         "nodes": [crate::nodes::LOCAL_NODE_ID],
         "backend": "firecracker",
     });
     merge(&mut value, &agent["access"]);
-    // Agents restricted before MCP permissions existed get no MCP connection.
+    // Agents restricted before MCP permissions existed get no MCP connection. Their
+    // GitHub connection setting became a plugin grant, which no longer restricts.
     let legacy_restricted = agent["id"] != MAIN_AGENT_ID
         && agent["access"].is_object()
         && agent["access"].get("mcps").is_none()
         && (!value["projects"].is_null()
             || !value["skills"].is_null()
-            || value["github"] != true
+            || agent["access"]["github"] == false
             || value["sandbox"] != "yolo");
     if legacy_restricted {
         value["mcps"] = json!([]);
+    }
+    // Snapshots of runs queued before the GitHub plugin still carry the setting.
+    if let Some(access) = value.as_object_mut() {
+        access.remove("github");
     }
     value
 }
@@ -1173,10 +1221,9 @@ pub fn covers(current: &Value, granted: &Value) -> bool {
         .into_iter()
         .flatten()
         .all(|(server, selection)| within(&granted["mcpTools"][server], selection));
-    let github = current["github"] == true || granted["github"] != true;
     let installation = current["installation"] == true || granted["installation"] != true;
     let sandbox = sandbox_rank(&current["sandbox"]) >= sandbox_rank(&granted["sandbox"]);
-    scopes && tools && github && installation && sandbox
+    scopes && tools && installation && sandbox
 }
 
 /// Whether a granted scope stays within the current one; `null` means everything.
@@ -1208,7 +1255,6 @@ pub fn isolated(agent: &Value) -> bool {
     !a["projects"].is_null()
         || !a["skills"].is_null()
         || !a["mcps"].is_null()
-        || a["github"] != true
         || a["sandbox"] != "yolo"
         || a["mcpTools"].as_object().is_some_and(|a| !a.is_empty())
 }

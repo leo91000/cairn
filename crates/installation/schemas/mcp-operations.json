@@ -72,7 +72,6 @@
             "mcps": null,
             "mcpTools": {},
             "installation": false,
-            "github": true,
             "sandbox": "yolo"
           },
           "type": "object",
@@ -176,10 +175,6 @@
               "default": false,
               "type": "boolean"
             },
-            "github": {
-              "default": true,
-              "type": "boolean"
-            },
             "sandbox": {
               "default": "yolo",
               "type": "string",
@@ -198,7 +193,6 @@
             "mcps",
             "mcpTools",
             "installation",
-            "github",
             "sandbox"
           ],
           "additionalProperties": false
@@ -366,10 +360,6 @@
                 "installation": {
                   "type": "boolean"
                 },
-                "github": {
-                  "default": true,
-                  "type": "boolean"
-                },
                 "sandbox": {
                   "default": "yolo",
                   "type": "string",
@@ -385,7 +375,6 @@
                 "skills",
                 "mcps",
                 "mcpTools",
-                "github",
                 "sandbox"
               ],
               "additionalProperties": false
@@ -424,7 +413,7 @@
   },
   {
     "name": "merge_agents",
-    "description": "Merge an idle Firecracker agent into an existing profile, transferring all tasks (including archived), chats (including trash) and run identities atomically. Existing runs retain their engine, model and settings; future task runs use destination defaults. Destination access and live grants must already cover the source. Main can only be the destination. Rejects active/recovering work, native agents, source GitHub tokens and plugin delegations. Does not change destination permissions or credentials. Requires explicit confirmation.",
+    "description": "Merge an idle Firecracker agent into an existing profile, transferring all tasks (including archived), chats (including trash) and run identities atomically. Existing runs retain their engine, model and settings; future task runs use destination defaults. Destination access and live grants must already cover the source. Main can only be the destination. Rejects active/recovering work, native agents and plugin delegations. Does not change destination permissions or credentials. Requires explicit confirmation.",
     "scope": "manage",
     "destructive": true,
     "inputSchema": {

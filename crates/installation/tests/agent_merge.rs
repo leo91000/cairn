@@ -330,25 +330,6 @@ async fn merge_rejects_invalid_targets_permissions_credentials_and_delegations()
     }
     s.store.put("agents", source.clone()).await.unwrap();
     s.store
-        .set(
-            &format!("agent-github:{}", source["id"].as_str().unwrap()),
-            json!({ "fixture": true }),
-            None,
-        )
-        .await
-        .unwrap();
-    assert!(
-        s.merge_agents(input(&source))
-            .await
-            .unwrap_err()
-            .message
-            .contains("GitHub token")
-    );
-    s.store
-        .delete(&format!("agent-github:{}", source["id"].as_str().unwrap()))
-        .await
-        .unwrap();
-    s.store
         .put(
             "plugin-connections",
             json!({ "id": id(), "agentId": source["id"], "enabled": false }),
@@ -369,51 +350,6 @@ async fn merge_rejects_invalid_targets_permissions_credentials_and_delegations()
             .unwrap()
             .is_some()
     );
-}
-
-#[tokio::test]
-async fn concurrent_token_updates_and_merges_never_leave_orphan_credentials() {
-    let (_root, s, first) = fixture().await;
-    let app = cairn_installation::http::router(s.clone()).await.unwrap();
-    for round in 0..16 {
-        let source = if round == 0 {
-            first.clone()
-        } else {
-            s.agent(json!({ "name": "Source" }), None).await.unwrap()
-        };
-        let source_id = source["id"].as_str().unwrap();
-        let request = common::request("PUT", &format!("/api/agents/{source_id}/github-token"))
-            .extension(InstallationIdentity::trusted(
-                InstallationRole::Owner,
-                "fixture-account",
-            ))
-            .body(Body::from(json!({ "token": "fixture-only" }).to_string()))
-            .unwrap();
-        let (updated, merged) =
-            tokio::join!(common::send(&app, request), s.merge_agents(input(&source)));
-        if merged.is_ok() {
-            assert_eq!(updated.status(), StatusCode::NOT_FOUND);
-            assert!(s.store.get("agents", source_id).await.unwrap().is_none());
-            assert!(
-                s.store
-                    .kv(&format!("agent-github:{source_id}"))
-                    .await
-                    .unwrap()
-                    .is_none()
-            );
-            continue;
-        }
-        assert_eq!(merged.unwrap_err().status, 409);
-        assert_eq!(updated.status(), StatusCode::OK);
-        assert!(s.store.get("agents", source_id).await.unwrap().is_some());
-        assert!(
-            s.store
-                .kv(&format!("agent-github:{source_id}"))
-                .await
-                .unwrap()
-                .is_some()
-        );
-    }
 }
 
 #[tokio::test]
