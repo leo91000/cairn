@@ -791,11 +791,11 @@ private fun InstanceEditor(
             }
         }
     }
-    // Leaving the editor forgets an unfinished or unsaved sign-in.
-    val latestSignIn by rememberUpdatedState(signIn)
+    // Read the draft state directly: saving can consume the sign-in and close the
+    // editor before another composition updates a remembered copy.
     DisposableEffect(initial.id) {
         onDispose {
-            latestSignIn
+            signIn
                 ?.takeIf { it.state != "expired" }
                 ?.let { current ->
                     vm.viewModelScope.launch {
