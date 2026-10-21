@@ -2294,22 +2294,59 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
       "properties": {
-        "nodeId": { "type": "string", "format": "uuid" },
+        "nodeId": {
+          "type": "string",
+          "format": "uuid"
+        },
         "storage": {
           "type": "object",
           "properties": {
-            "cacheMiB": { "type": "integer", "minimum": 0, "maximum": 16777216 },
-            "memoryCacheMiB": { "type": "integer", "minimum": 4, "maximum": 4096 },
-            "reserveMiB": { "type": "integer", "minimum": 64, "maximum": 16777216 },
-            "reservePercent": { "type": "integer", "minimum": 1, "maximum": 50 },
-            "backupSeconds": { "type": "integer", "minimum": 5, "maximum": 3600 },
-            "maxDirtySeconds": { "type": "integer", "minimum": 5, "maximum": 86400 }
+            "cacheMiB": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16777216
+            },
+            "memoryCacheMiB": {
+              "type": "integer",
+              "minimum": 4,
+              "maximum": 4096
+            },
+            "reserveMiB": {
+              "type": "integer",
+              "minimum": 64,
+              "maximum": 16777216
+            },
+            "reservePercent": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50
+            },
+            "backupSeconds": {
+              "type": "integer",
+              "minimum": 5,
+              "maximum": 3600
+            },
+            "maxDirtySeconds": {
+              "type": "integer",
+              "minimum": 5,
+              "maximum": 86400
+            }
           },
-          "required": ["cacheMiB", "memoryCacheMiB", "reserveMiB", "reservePercent", "backupSeconds", "maxDirtySeconds"],
+          "required": [
+            "cacheMiB",
+            "memoryCacheMiB",
+            "reserveMiB",
+            "reservePercent",
+            "backupSeconds",
+            "maxDirtySeconds"
+          ],
           "additionalProperties": false
         }
       },
-      "required": ["nodeId", "storage"],
+      "required": [
+        "nodeId",
+        "storage"
+      ],
       "additionalProperties": false
     }
   },
