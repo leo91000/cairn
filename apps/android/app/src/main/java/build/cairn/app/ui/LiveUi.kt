@@ -72,6 +72,17 @@ fun rememberLive(
             CoroutineScope(parentScope.coroutineContext + Job(parentScope.coroutineContext[Job]))
         }
     DisposableEffect(scope) { onDispose { scope.cancel() } }
+    val cacheWriter =
+        remember(path, api) {
+            api?.let {
+                HistoryCacheWriter(
+                    vm.historyCache,
+                    vm.historyCache.key(it.cacheScope, it.csrf, path),
+                    scope,
+                )
+            }
+        }
+    DisposableEffect(cacheWriter) { onDispose { cacheWriter?.close() } }
     val pages = remember(path, api) { OlderPages() }
     var loadingOlder by remember(path, api) { mutableStateOf(false) }
     var olderError by remember(path, api) { mutableStateOf<String?>(null) }
@@ -123,8 +134,7 @@ fun rememberLive(
                                 } else if (
                                     !it.catchingUp && it.state != null && it.history != null
                                 ) {
-                                    vm.historyCache.save(
-                                        key,
+                                    cacheWriter?.offer(
                                         CachedHistory(
                                             it.cursor,
                                             it.history,
@@ -145,11 +155,11 @@ fun rememberLive(
                                     )
                             }
                     } finally {
-                        withContext(NonCancellable) { vm.historyCache.flush(key) }
+                        withContext(NonCancellable) { cacheWriter?.flush() }
                     }
                 }
             } finally {
-                withContext(NonCancellable) { vm.historyCache.flush(key) }
+                withContext(NonCancellable) { cacheWriter?.flush() }
             }
         }
     }
@@ -182,8 +192,7 @@ fun rememberLive(
                             pageApplied = true
                             loadingOlder = false
                             value.state?.let { detail ->
-                                vm.historyCache.save(
-                                    vm.historyCache.key(api.cacheScope, api.csrf, path),
+                                cacheWriter?.offer(
                                     CachedHistory(
                                         value.cursor,
                                         history,
