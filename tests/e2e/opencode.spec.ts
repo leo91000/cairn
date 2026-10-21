@@ -344,7 +344,7 @@ test('OpenCode Go displays three quotas, reset times and the provider balance se
   await expect(panel.getByText('5-hour window · 75%')).toBeVisible()
   await expect(panel.getByText('Weekly · 40%')).toBeVisible()
   await expect(panel.getByText('Monthly · 15%')).toBeVisible()
-  await expect(panel.getByText(/^Resets /)).toHaveCount(3)
+  await expect(panel.getByRole('definition')).toHaveText([/Resets in /, /Resets /, /Resets /])
   await expect(panel.getByText(/paid Zen credits/)).toHaveCount(0)
   for (const [width, colorScheme] of [[1440, 'light'], [390, 'dark']] as const) {
     await page.setViewportSize({ width, height: 900 })
