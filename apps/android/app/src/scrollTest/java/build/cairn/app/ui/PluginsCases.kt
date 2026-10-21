@@ -332,6 +332,237 @@ abstract class PluginsCases {
     }
 
     @Test
+    fun compactCatalogueCompletesItsPagesWithoutLoadingEveryInstanceSetting() {
+        val reads = CopyOnWriteArrayList<String>()
+        fun card(id: String, name: String) =
+            PluginCardEntry(
+                id,
+                true,
+                "active",
+                "1",
+                versionCount = 1,
+                presentation =
+                    PluginPresentation(
+                        name,
+                        "Compact package",
+                        "1",
+                        capabilities = emptyList(),
+                        needsWorker = false,
+                        delegates = false,
+                        agentAccess = true,
+                        contributions =
+                            PluginContributionCounts(1, 1, false, true, false, false, 0),
+                    ),
+                summary = PluginInstanceSummary(3, mapOf("ready" to 1, "paused" to 2), 4, 2),
+            )
+        MockWebServer().use { server ->
+            server.dispatcher =
+                dispatcher(
+                    read = { path ->
+                        reads += path
+                        when {
+                            path.endsWith("/plugins/packages") ->
+                                wireJson.encodeToString(
+                                    PluginCards(
+                                        packageReads = true,
+                                        instanceReads = true,
+                                        items = listOf(card("onepassword", "1Password")),
+                                        nextCursor = "onepassword",
+                                    )
+                                )
+                            path.endsWith("/plugins/packages?cursor=onepassword") ->
+                                wireJson.encodeToString(
+                                    PluginCards(
+                                        packageReads = true,
+                                        instanceReads = true,
+                                        items = listOf(card("notes", "Notes")),
+                                    )
+                                )
+                            else -> null
+                        }
+                    }
+                ) { _, _ ->
+                    null
+                }
+            server.start()
+            var opened = ""
+            val vm = show(server) { model, state -> PluginsScreen(model, state) { opened = it } }
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            try {
+                compose.waitUntil(10000) {
+                    compose.onAllNodesWithTag("plugin-notes").fetchSemanticsNodes().isNotEmpty()
+                }
+                compose.onNodeWithTag("plugin-onepassword").assertExists()
+                compose.onAllNodesWithText("4 demandes").assertCountEquals(2)
+                assertFalse(
+                    "Cards must not load the complete catalogue",
+                    reads.any { it.endsWith("/api/plugins") },
+                )
+                capture("plugins-compact-catalogue")
+                compose.onNodeWithTag("plugin-onepassword").performClick()
+                assertEquals("onepassword", opened)
+            } finally {
+                models.clear()
+            }
+        }
+    }
+
+    @Test
+    fun reviewApprovesOnlyTheExactDisplayedVersionAndIgnoresLateReads() {
+        val entry =
+            notes.copy(
+                id = "review",
+                builtin = false,
+                status = "update",
+                active = "1",
+                versions = emptyList(),
+            )
+        val lateStarted = CountDownLatch(1)
+        val releaseLate = CountDownLatch(1)
+        val approvalStarted = CountDownLatch(1)
+        val releaseApproval = CountDownLatch(1)
+        val writes = CopyOnWriteArrayList<JsonObject>()
+        MockWebServer().use { server ->
+            server.dispatcher =
+                dispatcher(
+                    read = { path ->
+                        val root = "/plugins/packages/review"
+                        when {
+                            path.endsWith(root) -> wireJson.encodeToString(entry)
+                            path.endsWith("$root/versions") ->
+                                wireJson.encodeToString(
+                                    PluginPage(
+                                        listOf(
+                                            PluginVersion(
+                                                version = "1",
+                                                digest = "old",
+                                                approved = true,
+                                            )
+                                        ),
+                                        "1",
+                                    )
+                                )
+                            path.endsWith("$root/versions?cursor=1") ->
+                                wireJson.encodeToString(
+                                    PluginPage(
+                                        listOf(
+                                            PluginVersion(
+                                                version = "2",
+                                                digest = "metadata-two",
+                                                approved = false,
+                                            ),
+                                            PluginVersion(
+                                                version = "3",
+                                                digest = "metadata-three",
+                                                approved = false,
+                                            ),
+                                        )
+                                    )
+                                )
+                            path.endsWith("$root/versions/3") -> {
+                                lateStarted.countDown()
+                                check(releaseLate.await(30, TimeUnit.SECONDS))
+                                wireJson.encodeToString(
+                                    PluginVersion(
+                                        version = "3",
+                                        digest = "late-three",
+                                        approved = false,
+                                        manifest =
+                                            notes.manifest!!.copy(
+                                                name = "Late version three",
+                                                version = "3",
+                                            ),
+                                    )
+                                )
+                            }
+                            path.endsWith("$root/versions/2") ->
+                                wireJson.encodeToString(
+                                    PluginVersion(
+                                        version = "2",
+                                        digest = "reviewed-two",
+                                        approved = false,
+                                        manifest =
+                                            notes.manifest!!.copy(
+                                                name = "Inspected version two",
+                                                version = "2",
+                                                capabilities = listOf("http"),
+                                            ),
+                                        files = listOf(PluginFile("lib/review.luau", 100)),
+                                    )
+                                )
+                            path.endsWith("$root/versions/1") ->
+                                wireJson.encodeToString(
+                                    PluginVersion(
+                                        version = "1",
+                                        digest = "old",
+                                        approved = true,
+                                        manifest =
+                                            notes.manifest!!.copy(
+                                                version = "1",
+                                                capabilities = emptyList(),
+                                            ),
+                                    )
+                                )
+                            else -> null
+                        }
+                    }
+                ) { path, body ->
+                    if (path.endsWith("/plugins/packages/review/approve")) {
+                        writes += wireJson.parseToJsonElement(body).jsonObject
+                        approvalStarted.countDown()
+                        check(releaseApproval.await(30, TimeUnit.SECONDS))
+                        "{}"
+                    } else null
+                }
+            server.start()
+            var closed by mutableStateOf(false)
+            val vm =
+                show(server) { model, state ->
+                    if (!closed)
+                        PluginReview(model, state, entry, emptyList(), { closed = true }) {}
+                }
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            try {
+                compose.waitUntil(10000) { lateStarted.count == 0L }
+                compose.onAllNodesWithText("Approuver et activer").assertCountEquals(0)
+                compose.onNodeWithText("2").performScrollTo().performClick()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("Inspected version two 2")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                releaseLate.countDown()
+                compose.waitForIdle()
+                compose.onNodeWithText("Inspected version two 2").assertExists()
+                compose.onAllNodesWithText("Late version three 3").assertCountEquals(0)
+                compose.onNodeWithText("Nouveau").assertExists()
+                capture("plugins-exact-version-review")
+                compose
+                    .onNodeWithText("Approuver et activer")
+                    .assertIsEnabled()
+                    .assertIsDisplayed()
+                    .performClick()
+                compose.waitUntil(10000) { approvalStarted.count == 0L }
+                releaseApproval.countDown()
+                compose.waitUntil(10000) {
+                    // Observe the UI completion as well as the HTTP write. This
+                    // drives the Robolectric main loop while the response resumes.
+                    val dismissed =
+                        compose.onAllNodesWithTag("plugin-review").fetchSemanticsNodes().isEmpty()
+                    writes.size == 1 && dismissed
+                }
+                assertEquals("2", writes.single()["version"]!!.jsonPrimitive.content)
+                assertEquals("reviewed-two", writes.single()["digest"]!!.jsonPrimitive.content)
+            } finally {
+                releaseLate.countDown()
+                releaseApproval.countDown()
+                models.clear()
+            }
+        }
+    }
+
+    @Test
     fun discordBotsAreGenericDelegatingInstances() {
         MockWebServer().use { server ->
             val actions = CopyOnWriteArrayList<Pair<String, String>>()
@@ -3630,6 +3861,9 @@ abstract class PluginsCases {
             )
         val current = AtomicReference<PluginRoute?>(initial)
         val writes = CopyOnWriteArrayList<Pair<String, JsonObject>>()
+        val restoring = java.util.concurrent.atomic.AtomicBoolean(false)
+        val restoredRead = CountDownLatch(1)
+        val releaseRestoredRead = CountDownLatch(1)
         val restoration = StateRestorationTester(compose)
         val registry = AtomicReference<androidx.compose.runtime.saveable.SaveableStateRegistry>()
         MockWebServer().use { server ->
@@ -3637,8 +3871,13 @@ abstract class PluginsCases {
                 dispatcher(
                     read = { path ->
                         when {
-                            path.endsWith("$root/routes") ->
+                            path.endsWith("$root/routes") -> {
+                                if (recovery == "missing" && restoring.get()) {
+                                    restoredRead.countDown()
+                                    check(releaseRestoredRead.await(30, TimeUnit.SECONDS))
+                                }
                                 wireJson.encodeToString(PluginPage(listOfNotNull(current.get())))
+                            }
                             path.contains("$root/route-eligibility?") ->
                                 wireJson.encodeToString(
                                     PluginPage(listOf(RouteEligibility("helper", true)))
@@ -3741,6 +3980,7 @@ abstract class PluginsCases {
                     "changed" -> current.set(initial.copy(revision = "r2", name = "Remote change"))
                     "deleted" -> current.set(null)
                 }
+                restoring.set(true)
                 restoration.emulateSavedInstanceStateRestore()
                 compose.onNodeWithText("Nom de la route").assertExists()
                 if (recovery == "missing") {
@@ -3750,6 +3990,12 @@ abstract class PluginsCases {
                         )
                         .assertExists()
                     compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                    compose.waitUntil(10000) { restoredRead.count == 0L }
+                    compose.onNodeWithText("Annuler la modification").assertIsNotEnabled()
+                    // Restoration revalidates asynchronously. A click while the
+                    // reload is pending is correctly ignored by the disabled button.
+                    releaseRestoredRead.countDown()
+                    waitEnabled("Annuler la modification")
                     compose
                         .onNodeWithText("Annuler la modification")
                         .performScrollTo()
@@ -3820,6 +4066,7 @@ abstract class PluginsCases {
                     wireJson.decodeFromJsonElement<List<PluginLabel>>(body["people"]!!),
                 )
             } finally {
+                releaseRestoredRead.countDown()
                 models.clear()
             }
         }
@@ -5569,6 +5816,12 @@ abstract class PluginsCases {
                     read(path)?.let {
                         return MockResponse().setBody(it)
                     }
+                if (
+                    request.method == "GET" &&
+                        path.contains("/api/plugins/packages") &&
+                        !path.contains("/api/plugins/packages/operations/")
+                )
+                    return MockResponse().setResponseCode(404)
                 if (request.method == "GET" && path.endsWith("/setup-drafts"))
                     return if (current) MockResponse().setBody("""{"items":[]}""")
                     else MockResponse().setResponseCode(404)

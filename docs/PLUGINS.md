@@ -134,10 +134,14 @@ the digest displayed during review; changes require reviewing again.
 Owner package reads also have separate bounded contracts:
 
 - `GET /api/plugins/packages?cursor=…`: up to 32 compact cards, with a last-ID
-  `nextCursor`, `packageReads: true`, setup support and capability descriptions.
+  `nextCursor`, `packageReads: true`, `instanceReads: true`, setup support and capability descriptions.
   A card's `presentation` contains labels, its brand, capability names and
   contribution counts; it is deliberately not a complete manifest. Cards include
   neither settings, credentials, instance configuration nor version history.
+  Each card also has a volatile `summary`: configured instance count, counts by
+  live state (paused instances remain paused), pending request count and distinct
+  agent IDs with saved instance or resource rules. `observedAt` dates this single
+  SQL snapshot. Saved rules include inactive grants and do not prove usable access.
 - `GET /api/plugins/packages/{id}`: the selected display manifest and package
   approval status, without all version manifests. An approved active version is
   preferred, otherwise the last valid version in lexical order is displayed.
@@ -148,13 +152,29 @@ Owner package reads also have separate bounded contracts:
   and file list to review before approval. The existing approval endpoint still
   checks that digest against the current files. Invalid local versions return a
   diagnostic; missing packages or versions return 404.
+- `GET /api/plugins/packages/{id}/connections?cursor=…`: up to 32 full owner
+  instance configurations, selected by package and UUID cursor before decoding.
+  Status, root hourly usage, pending requests (including route requests) and the
+  last eight activity entries share a read transaction. The encoded-byte limit
+  can end a page before its count limit. This response advertises `instanceReads`.
+- `GET /api/plugins/packages/{id}/connections/{instance}`: one exact owner
+  configuration with the full current agent ID list and the same live adornments.
+  This supports grant-preserving saves, including paused or unapproved instances.
+  Missing source files do not hide saved configuration. Neither read exposes
+  vault contents or relaxes the checks on saving or executing an instance.
 
-Both lists also enforce an encoded-byte budget below half the relay body limit.
+All three lists also enforce an encoded-byte budget below half the relay body limit.
 Package IDs and versions are the cursor domain; existing management lists retain
 their UUID cursors. Live approval changes do not invalidate a later page's cursor.
 The current complete `/api/plugins` response also advertises `packageReads: true`
-and remains available while the clients
-migrate; these new reads alone do not replace its instance and grant selectors.
+and remains available for callers still migrating. Web and Android catalogue
+cards now consume the compact pages; review pages load metadata, then only the
+exact selected and active manifests. Selection changes or closing the review
+invalidate pending reads; approval uses the digest of the files actually shown.
+Earlier hosts fall back to their complete response when the new endpoint is
+absent or the required support marker is absent. Failed or malformed supported
+reads remain errors, rather than an empty catalogue. Package instance screens
+and grant selectors still require their separate client migration.
 Status inspection still validates the installed versions of each selected package,
 without retaining all their manifests in compact responses. No summary is persisted.
 

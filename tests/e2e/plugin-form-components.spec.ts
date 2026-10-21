@@ -24,6 +24,32 @@ test.beforeAll(async () => {
       name: 'plugin-panel-test-page',
       configureServer(server) {
         server.middlewares.use(async (request, response, next) => {
+          if (request.url === '/plugin-resource-replacement-fixture') {
+            const html = await server.transformIndexHtml('/plugin-resource-replacement-fixture', `
+              <div id="app"></div>
+              <script type="module">
+                import { computed, createApp, h, ref } from 'vue'
+                import PluginResources from '/apps/web/src/components/PluginResources.vue'
+                const version = ref('old')
+                const instance = ref('example')
+                const manifest = computed(() => ({ version: version.value, resources: [
+                  { name: 'parents', title: 'Parents', singular: 'Parent', settings: [] },
+                  { name: 'children', title: 'Children', singular: 'Child', parent: 'parents',
+                    settings: version.value === 'old' ? [] : [{ key: 'required', title: 'Required value', type: 'string', required: true }] }
+                ] }))
+                createApp({ render: () => h('main', [
+                  h('button', { onClick: () => version.value = 'new' }, 'Replace schema'),
+                  h('button', { onClick: () => instance.value = 'replacement' }, 'Replace instance'),
+                  h('p', \`Schema \${version.value} · Instance \${instance.value}\`),
+                  h(PluginResources, { plugin: 'forms', instance: instance.value, manifest: manifest.value })
+                ]) }).mount('#app')
+              </script>
+`)
+            response.setHeader('Content-Type', 'text/html')
+            response.end(html)
+            return
+          }
+
           if (request.url === '/plugin-resource-fixture') {
             const html = await server.transformIndexHtml('/plugin-resource-fixture', `
               <div id="app"></div>
@@ -237,3 +263,88 @@ test('a declared constructor collection stays visible while its resources load',
   })
   expect(submitted?.secrets).toEqual({ password: '\uFEFFsynthetic-resource-secret\uFEFF' })
 })
+
+for (const replacement of ['schema', 'instance', 'failed schema read']) {
+  test(`replacing ${replacement} discards an unfinished resource editor opening`, async ({ page }) => {
+    test.setTimeout(90000)
+    let release!: () => void
+    let entered!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    let laterReads = 0
+    let firstReads = 0
+    let submitted: { instance: string, body: Record<string, unknown> } | undefined
+    const resource = (id: string, name: string) => ({
+      id,
+      name,
+      revision: id,
+      collection: 'parents',
+      enabled: true,
+      settings: {},
+      secretKeys: [],
+    })
+    await page.route('**/api/plugins/forms/connections/*/resources/**', async (route) => {
+      const url = new URL(route.request().url())
+      const instance = url.pathname.split('/connections/')[1].split('/')[0]
+      if (url.pathname.endsWith('/children')) {
+        if (route.request().method() === 'POST') {
+          submitted = { instance, body: route.request().postDataJSON() }
+          return route.fulfill({ json: {} })
+        }
+
+        return route.fulfill({ json: { items: [] } })
+      }
+
+      if (!url.searchParams.has('cursor')) {
+        firstReads++
+        return route.fulfill({ json: { items: [resource('first', 'First parent')], nextCursor: 'later' } })
+      }
+
+      laterReads++
+      if (laterReads === 1) {
+        entered()
+        await held
+        return replacement === 'failed schema read'
+          ? route.fulfill({ status: 400, json: { error: 'Obsolete directory failure' } })
+          : route.fulfill({ json: { items: [resource('stale', 'Obsolete parent')] } })
+      }
+
+      return route.fulfill({ json: { items: [resource('fresh', 'Fresh parent')] } })
+    })
+    try {
+      await page.goto(`${origin}plugin-resource-replacement-fixture`)
+      const add = page.getByRole('button', { name: 'Add child', exact: true })
+      await expect(add).toBeEnabled()
+      await add.click()
+      await waiting
+      await page.getByRole('button', { name: replacement === 'instance' ? 'Replace instance' : 'Replace schema', exact: true }).click()
+      await expect(page.getByText(replacement === 'instance' ? 'Schema old · Instance replacement' : 'Schema new · Instance example', { exact: true })).toBeVisible()
+      await expect.poll(() => firstReads).toBe(2)
+    }
+    finally {
+      release()
+    }
+
+    const add = page.getByRole('button', { name: 'Add child', exact: true })
+    await expect(add).toBeEnabled()
+    await expect(page.getByRole('form', { name: 'New child', exact: true })).not.toBeVisible()
+    await expect(page.getByText('Obsolete parent', { exact: true })).not.toBeVisible()
+    await expect(page.getByText('Obsolete directory failure', { exact: true })).not.toBeVisible()
+    await add.click()
+    const form = page.getByRole('form', { name: 'New child', exact: true })
+    await form.getByLabel('Name', { exact: true }).fill('Current child')
+    await form.getByRole('combobox', { name: 'Parent', exact: true }).fill('Fresh parent')
+    await form.getByRole('option', { name: 'Fresh parent', exact: true }).click()
+    if (replacement !== 'instance')
+      await form.getByLabel('Required value', { exact: true }).fill('Reviewed new schema')
+    await form.getByRole('button', { name: 'Save child', exact: true }).click()
+    await expect(form).not.toBeVisible()
+    expect(submitted?.instance).toBe(replacement === 'instance' ? 'replacement' : 'example')
+    expect(submitted?.body.settings).toEqual(replacement === 'instance' ? {} : { required: 'Reviewed new schema' })
+    expect(submitted?.body.parentId).toBe('fresh')
+  })
+}

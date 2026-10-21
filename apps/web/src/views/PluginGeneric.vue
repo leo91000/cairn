@@ -714,7 +714,8 @@ onBeforeUnmount(() => {
 
     <PluginReview
       v-if="reviewing && entry"
-      :entry="entry"
+      :id="entry.id"
+      :package-name="entry.manifest?.name"
       :capabilities="catalog.capabilities"
       @close="reviewing = false"
       @changed="load"

@@ -277,8 +277,7 @@ data class PluginSetupDraft(
     val expiresAt: Long = 0,
 )
 
-@Serializable
-data class PluginPage<T>(val items: List<T> = emptyList(), val nextCursor: String? = null)
+@Serializable data class PluginPage<T>(val items: List<T>, val nextCursor: String? = null)
 
 @Serializable
 data class PluginManifest(
@@ -472,13 +471,15 @@ enum class PluginTone {
 data class PluginBadge(val label: String, val tone: PluginTone)
 
 /** What an instance is doing now, as the web shows it. */
-fun PluginConnection.state(): PluginBadge =
+fun PluginConnection.state(): PluginBadge = pluginConnectionState(enabled, status.state)
+
+internal fun pluginConnectionState(enabled: Boolean, state: String): PluginBadge =
     when {
         !enabled -> PluginBadge("En pause", PluginTone.MUTED)
-        status.state == "ready" -> PluginBadge("Prêt", PluginTone.OK)
-        status.state == "connected" -> PluginBadge("En ligne", PluginTone.OK)
-        status.state == "connecting" -> PluginBadge("Connexion…", PluginTone.MUTED)
-        status.state == "needs_review" -> PluginBadge("À vérifier", PluginTone.ATTENTION)
+        state == "ready" -> PluginBadge("Prêt", PluginTone.OK)
+        state == "connected" -> PluginBadge("En ligne", PluginTone.OK)
+        state == "connecting" -> PluginBadge("Connexion…", PluginTone.MUTED)
+        state == "needs_review" -> PluginBadge("À vérifier", PluginTone.ATTENTION)
         else -> PluginBadge("Hors ligne", PluginTone.ATTENTION)
     }
 

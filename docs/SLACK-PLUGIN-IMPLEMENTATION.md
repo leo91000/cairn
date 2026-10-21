@@ -1247,3 +1247,45 @@ compares the complete response and first compact page in the same binary. It
 records bytes, first/warm read wall time and CPU, unchanged approval-write timing,
 workload and host conditions. The compact page is bounded in bytes and count;
 validating approval still scans the versions of each selected package.
+
+## Compact catalogue clients and instance reads
+
+Web and native Android catalogue cards consume all compact pages without loading
+every instance's settings. One native SQL statement supplies each page's saved
+instance counts, live states, pending requests and distinct configured agents
+across root and resource rules. These counters are presentation only, not persisted
+revisions or execution authority. Earlier hosts with only global resource totals
+show unavailable per-package agent totals instead of fabricating zero.
+
+Version review pages aggregate metadata, then fetch the exact selected version
+and the active comparison manifest. Pending or failed reads cannot approve code;
+changing selection or closing invalidates late results. Approval submits the
+digest returned with the displayed files. Invalid versions retain diagnostics.
+
+Additional owner instance APIs select one package before decoding settings and
+enrich at most 33 lookahead records inside a read transaction. Count and byte
+bounds determine continuation. An exact read retains the complete current grant
+IDs for concurrent-save merging, including when a package is paused or its source
+has disappeared. Instance/detail and grant-selector client migrations remain.
+
+R59 Android CI's sole JVM failure was reproduced with a held restoration read:
+the test clicked Cancel while route revalidation correctly disabled it. The
+shared scenario now explicitly holds that read, checks the disabled state, releases
+it and waits for the enabled control. The controlled reproduction failed before
+the wait correction and passed afterward. This is separate from the older,
+still-unexplained 25-second capacity failure. Full checkpoint qualification and
+the remainder of Q1–Q20 are still required; the Slack package is not yet present.
+
+
+## Parent discovery across a changed resource editor
+
+Independent checkpoint review found that a held later parent page could reopen
+a resource editor after its namespace or schema had changed. The actual Vue
+component reproduced stale editors for schema and instance replacement and a
+stale error from a rejected read, in both Chromium and WebKit. Parent discovery
+now retains its original path and generation, discards obsolete pages before
+publication, and suppresses errors from an invalidated opening. Fresh editing
+still loads all parent pages and saves the current schema to the current instance.
+The six held-read regressions fail before the correction and pass after it.
+Complete web/browser qualification and fresh full independent review remain
+required; this correction does not complete Slack.

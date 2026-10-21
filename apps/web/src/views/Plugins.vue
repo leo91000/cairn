@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import type { IconName } from '../icons'
-import type { Catalog, PluginEntry } from '../plugins'
-import { computed, onMounted, ref } from 'vue'
+import type { PluginCardEntry, PluginCards } from '../plugin-catalogue'
+import {
+  computed,
+  onMounted,
+  onUnmounted,
+  ref,
+} from 'vue'
 import { api, notify } from '../api'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
@@ -14,46 +19,54 @@ import {
   ArrowUpRight,
   BookOpen,
   ChevronRight,
+  KeyRound,
+  LayoutPanelTop,
   Plus,
   Puzzle,
   ShieldCheck,
+  Terminal,
   Upload,
   Users,
+  Wrench,
 } from '../icons'
+import { pluginCards } from '../plugin-catalogue'
 import {
   capabilityLabels,
   connectionState,
-  contributions,
-  delegates,
   instanceNoun,
-  needsWorker,
 } from '../plugins'
 
-const catalog = ref<Catalog>({ packages: [], capabilities: [], connections: [] })
+const catalog = ref<PluginCards>({ items: [], capabilities: [], packageReads: false })
+const controller = new AbortController()
+onUnmounted(() => controller.abort())
 const loaded = ref(false)
 const error = ref('')
-const reviewing = ref<PluginEntry>()
+const reviewing = ref<PluginCardEntry>()
 const installing = ref(false)
 const files = ref<File[]>([])
 const busy = ref(false)
 const guide = 'https://github.com/leo91000/cairn/blob/main/docs/PLUGINS.md'
 
 async function load() {
-  catalog.value = await api<Catalog>('/plugins')
+  catalog.value = await pluginCards(controller.signal)
   loaded.value = true
+  error.value = ''
 }
 
-onMounted(async () => {
+async function refresh() {
   try {
     await load()
   }
   catch (e) {
-    error.value = (e as Error).message
+    if (!controller.signal.aborted)
+      error.value = (e as Error).message
   }
-})
+}
+
+onMounted(refresh)
 
 interface Card {
-  entry: PluginEntry
+  entry: PluginCardEntry
   to?: string
   capabilities: [IconName, string][]
   status: { label: string, tone: 'ok' | 'muted' | 'coral' | 'warn' }
@@ -69,47 +82,52 @@ const tones = {
   warn: 'bg-warning-surface text-warning',
 }
 
-function card(entry: PluginEntry): Card {
-  const connections = catalog.value.connections.filter(item => item.pluginId === entry.id)
-  const requests = connections.reduce((count, connection) => count + connection.requests.length, 0)
-  const capabilities = [
-    ...(entry.manifest?.capabilities ?? []).map(name => capabilityLabels[name] ?? [ShieldCheck, name] as [IconName, string]),
-    ...contributions(entry.manifest),
+function card(entry: PluginCardEntry): Card {
+  const { presentation, summary } = entry
+  const capabilities: [IconName, string][] = [
+    ...(presentation?.capabilities ?? []).map(name => capabilityLabels[name] ?? [ShieldCheck, name] as [IconName, string]),
+    ...(presentation?.contributions.commands ? [[Terminal, 'CLI commands'] as [IconName, string]] : []),
+    ...(presentation?.contributions.tools ? [[Wrench, 'Agent tools'] as [IconName, string]] : []),
+    ...(presentation?.agentAccess ? [[KeyRound, 'Per-agent grants'] as [IconName, string]] : []),
+    ...(presentation?.contributions.view ? [[LayoutPanelTop, 'Dashboard'] as [IconName, string]] : []),
   ]
-
   if (entry.status === 'needs_approval' || entry.status === 'invalid') {
     return {
       entry,
       capabilities,
       status: entry.status === 'invalid' ? { label: 'Invalid', tone: 'coral' } : { label: 'Needs approval', tone: 'warn' },
-      meta: entry.manifest ? `Version ${entry.versions.at(-1)?.version}` : 'Check the package files',
+      meta: presentation ? `Version ${presentation.version}` : 'Check the package files',
       requests: 0,
       action: 'Review',
     }
   }
 
-  const online = connections.filter(connection => connectionState(connection).tone === 'ok').length
-  const noun = instanceNoun(entry.manifest, connections.length).toLowerCase()
-  const agents = new Set(connections.flatMap(connection => connection.agentIds ?? [])).size
-  const granted = entry.manifest?.agentAccess ? ` · ${agents} agent${agents === 1 ? '' : 's'} authorized` : ''
+  const online = (summary.states.connected ?? 0) + (summary.states.ready ?? 0)
+  const noun = instanceNoun(presentation, summary.instances).toLowerCase()
+  const agents = summary.authorizedAgents
+  const granted = presentation?.agentAccess
+    ? agents === null ? ' · Agent access details unavailable' : ` · ${agents} agent${agents === 1 ? '' : 's'} with saved access`
+    : ''
+  const state = ['needs_review', 'connecting', 'disconnected', 'paused'].find(state => summary.states[state])
+    ?? Object.keys(summary.states).find(state => summary.states[state]) ?? 'disconnected'
   return {
     entry,
     to: `/plugins/${entry.id}`,
-    capabilities: delegates(entry.manifest) ? [...capabilities, [Users, 'External people']] : capabilities,
+    capabilities: presentation?.delegates ? [...capabilities, [Users, 'External people']] : capabilities,
     status: entry.status === 'update'
       ? { label: 'Update to review', tone: 'warn' }
-      : !connections.length
+      : !summary.instances
           ? { label: 'Not set up', tone: 'muted' }
           : online
-            ? { label: `${online} ${needsWorker(entry.manifest) ? 'online' : 'ready'}`, tone: 'ok' }
-            : connectionState(connections[0]),
-    meta: connections.length ? `${connections.length} ${noun}${granted}` : `Version ${entry.active}`,
-    requests,
-    action: connections.length ? 'Manage' : 'Set up',
+            ? { label: `${online} ${presentation?.needsWorker ? 'online' : 'ready'}`, tone: 'ok' }
+            : connectionState({ enabled: state !== 'paused', status: { state } }),
+    meta: summary.instances ? `${summary.instances} ${noun}${granted}` : `Version ${entry.active}`,
+    requests: summary.pendingRequests,
+    action: summary.instances ? 'Manage' : 'Set up',
   }
 }
 
-const cards = computed(() => catalog.value.packages.map(card))
+const cards = computed(() => catalog.value.items.map(card))
 
 const soon = [
   { id: 'slack', name: 'Slack', detail: 'Bot in channels and DMs' },
@@ -155,7 +173,7 @@ async function install() {
     files.value = []
     await load()
     notify(`${installed.manifest.name} installed · review it to activate`)
-    reviewing.value = catalog.value.packages.find(entry => entry.id === installed.manifest.id)
+    reviewing.value = catalog.value.items.find(entry => entry.id === installed.manifest.id)
   }
   catch (e) {
     error.value = e instanceof SyntaxError ? 'manifest.json is not valid JSON.' : (e as Error).message
@@ -208,19 +226,19 @@ async function install() {
           v-for="item in cards"
           :key="item.entry.id"
           :to="item.to"
-          :aria-label="`${item.entry.manifest?.name ?? item.entry.id} · ${item.action}`"
+          :aria-label="`${item.entry.presentation?.name ?? item.entry.id} · ${item.action}`"
           class="lift flex flex-col gap-4 rounded-2xl border border-line bg-surface p-5 text-left text-ink"
           @click="item.to ? undefined : reviewing = item.entry"
         >
           <span class="flex items-start gap-3">
-            <PluginMark :plugin="item.entry.id" :brand="item.entry.manifest?.brand" :size="46" />
+            <PluginMark :plugin="item.entry.id" :brand="item.entry.presentation?.brand" :size="46" />
             <span class="min-w-0 flex-1">
               <span class="flex items-center gap-2">
-                <span class="truncate text-[15px] font-bold tracking-[-0.01em]">{{ item.entry.manifest?.name ?? item.entry.id }}</span>
+                <span class="truncate text-[15px] font-bold tracking-[-0.01em]">{{ item.entry.presentation?.name ?? item.entry.id }}</span>
                 <span v-if="item.entry.builtin" class="rounded-full bg-soft px-2 py-0.5 text-3xs font-semibold text-accent">Built-in</span>
                 <span v-else class="rounded-full bg-hover px-2 py-0.5 text-3xs font-semibold text-muted">Installed</span>
               </span>
-              <span class="mt-1 block text-xs leading-normal text-muted">{{ item.entry.manifest?.description || 'No description.' }}</span>
+              <span class="mt-1 block text-xs leading-normal text-muted">{{ item.entry.presentation?.description || 'No description.' }}</span>
             </span>
           </span>
           <span class="flex flex-wrap gap-1.5">
@@ -280,10 +298,11 @@ async function install() {
 
     <PluginReview
       v-if="reviewing"
-      :entry="reviewing"
+      :id="reviewing.id"
+      :package-name="reviewing.presentation?.name"
       :capabilities="catalog.capabilities"
       @close="reviewing = undefined"
-      @changed="load"
+      @changed="refresh"
     />
 
     <Modal v-if="installing" title="Install a plugin package" @close="installing = false">

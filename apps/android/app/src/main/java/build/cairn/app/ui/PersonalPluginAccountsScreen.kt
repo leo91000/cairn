@@ -20,7 +20,7 @@ fun PersonalPluginAccountsScreen(vm: CairnViewModel, state: Workspace) {
 
 @Composable
 private fun PersonalPluginAccounts(vm: CairnViewModel) {
-    var page by remember { mutableStateOf(PluginPage<PluginPersonalAuthorization>()) }
+    var page by remember { mutableStateOf(PluginPage<PluginPersonalAuthorization>(emptyList())) }
     var loaded by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }

@@ -227,6 +227,8 @@ class SignalJourneyTest {
                                         "]}"
                                 )
                             path == "/api/installations/fixture/api/onepassword" -> json("[]")
+                            path == "/api/installations/fixture/api/plugins/packages" ->
+                                MockResponse().setResponseCode(404)
                             path == "/api/installations/fixture/api/plugins" ->
                                 json(
                                     wireJson.encodeToString(

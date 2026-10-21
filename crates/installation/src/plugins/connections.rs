@@ -1,5 +1,7 @@
 //! Configured plugin connections: an owner delegation (agent, project, people, quota)
 //! plus plugin settings declared by the manifest. Identical for every plugin.
+pub mod owner;
+
 use super::{forms, registry};
 use crate::{
     config::{id, now},

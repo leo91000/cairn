@@ -1,6 +1,11 @@
 <script setup lang="ts">
-import type { Catalog, PluginEntry } from '../plugins'
-import { computed, ref } from 'vue'
+import type {
+  Catalog,
+  Manifest,
+  PackageVersion,
+  PluginEntry,
+} from '../plugins'
+import { computed, ref, watch } from 'vue'
 import { api, notify } from '../api'
 import {
   Check,
@@ -10,6 +15,7 @@ import {
   Trash2,
   TriangleAlert,
 } from '../icons'
+import { pluginReview } from '../plugin-catalogue'
 import { pluginOperation } from '../plugin-operations'
 import { capabilityLabels } from '../plugins'
 import Icon from './Icon.vue'
@@ -18,30 +24,92 @@ import PluginMark from './PluginMark.vue'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
 
-const props = defineProps<{ entry: PluginEntry, capabilities: Catalog['capabilities'] }>()
+const props = defineProps<{ id: string, packageName?: string, capabilities: Catalog['capabilities'] }>()
 const emit = defineEmits<{ close: [], changed: [] }>()
-
-const valid = computed(() => props.entry.versions.filter(version => version.manifest))
-// Review the newest version waiting for approval, otherwise the active one.
-const selected = ref(
-  [...valid.value].reverse().find(version => !version.approved)?.version
-  ?? props.entry.active
-  ?? valid.value.at(-1)?.version
-  ?? '',
-)
-const version = computed(() => valid.value.find(item => item.version === selected.value))
+const entry = ref<PluginEntry>()
+const lazy = ref(false)
+const valid = computed(() => entry.value?.versions.filter(version => !version.error) ?? [])
+const selected = ref('')
+const version = ref<PackageVersion>()
 const manifest = computed(() => version.value?.manifest)
-const active = computed(() => valid.value.find(item => item.version === props.entry.active)?.manifest)
+const active = ref<Manifest>()
 const added = computed(() => manifest.value?.capabilities.filter(name => active.value && !active.value.capabilities.includes(name)) ?? [])
 const busy = ref(false)
+const reading = ref(true)
 const error = ref('')
 const removing = ref(false)
 
+watch(() => props.id, async (id, _, onCleanup) => {
+  const controller = new AbortController()
+  onCleanup(() => controller.abort())
+  entry.value = undefined
+  version.value = undefined
+  active.value = undefined
+  selected.value = ''
+  error.value = ''
+  reading.value = true
+  try {
+    const result = await pluginReview(id, controller.signal)
+    controller.signal.throwIfAborted()
+    lazy.value = result.lazy
+    entry.value = result.entry
+    selected.value = [...result.entry.versions].reverse().find(version => !version.error && !version.approved)?.version
+      ?? result.entry?.active ?? valid.value.at(-1)?.version ?? ''
+  }
+  catch (e) {
+    if (!controller.signal.aborted) {
+      error.value = (e as Error).message
+      reading.value = false
+    }
+  }
+}, { immediate: true })
+
+watch([entry, selected], async ([current, chosen], _, onCleanup) => {
+  const controller = new AbortController()
+  onCleanup(() => controller.abort())
+  version.value = undefined
+  active.value = undefined
+  reading.value = true
+  if (!current)
+    return
+  if (!chosen) {
+    reading.value = false
+    return
+  }
+
+  error.value = ''
+  try {
+    const read = (name: string) => lazy.value
+      ? api<PackageVersion>(`/plugins/packages/${encodeURIComponent(current.id)}/versions/${encodeURIComponent(name)}`, { signal: controller.signal })
+      : Promise.resolve(current.versions.find(item => item.version === name))
+    const [shown, baseline] = await Promise.all([read(chosen), current.active && current.active !== chosen ? read(current.active) : undefined])
+    controller.signal.throwIfAborted()
+    if (!shown?.manifest || !shown.digest || shown.version !== chosen || shown.manifest.version !== chosen
+      || (current.active && current.active !== chosen && baseline?.manifest?.version !== current.active)) {
+      throw new Error(shown?.error || baseline?.error || 'The exact package files could not be loaded. Reopen the review.')
+    }
+
+    version.value = shown
+    active.value = current.active === chosen ? shown.manifest : baseline?.manifest
+  }
+  catch (e) {
+    if (!controller.signal.aborted)
+      error.value = (e as Error).message
+  }
+  finally {
+    if (!controller.signal.aborted)
+      reading.value = false
+  }
+}, { flush: 'sync' })
+
 async function act(operation: 'approve' | 'activate') {
+  const shown = version.value
+  if (reading.value || !shown?.manifest || !shown.digest || shown.version !== selected.value || !entry.value)
+    return
   busy.value = true
   error.value = ''
   try {
-    await pluginOperation(`/plugins/packages/${props.entry.id}/${operation}`, { version: selected.value, digest: version.value?.digest })
+    await pluginOperation(`/plugins/packages/${encodeURIComponent(props.id)}/${operation}`, { version: shown.version, digest: shown.digest })
     notify(`${manifest.value?.name} ${selected.value} is active`)
     emit('changed')
     emit('close')
@@ -58,8 +126,8 @@ async function uninstall() {
   busy.value = true
   error.value = ''
   try {
-    await api(`/plugins/packages/${props.entry.id}`, { method: 'DELETE' })
-    notify(`${props.entry.manifest?.name ?? props.entry.id} uninstalled`)
+    await api(`/plugins/packages/${encodeURIComponent(props.id)}`, { method: 'DELETE' })
+    notify(`${entry.value?.manifest?.name ?? props.id} uninstalled`)
     emit('changed')
     emit('close')
   }
@@ -74,13 +142,16 @@ async function uninstall() {
 </script>
 
 <template>
-  <Modal :title="`Review ${entry.manifest?.name ?? entry.id}`" wide @close="emit('close')">
+  <Modal :title="`Review ${entry?.manifest?.name ?? packageName ?? id}`" wide @close="emit('close')">
     <div class="grid gap-5 px-6.5 py-6 phone:p-5">
       <UiAlert v-if="error">
         {{ error }}
       </UiAlert>
+      <p v-if="reading" role="status" class="text-xs text-muted">
+        Loading package files…
+      </p>
       <div v-if="manifest" class="flex items-start gap-3.5">
-        <PluginMark :plugin="entry.id" :brand="manifest.brand" :size="44" />
+        <PluginMark :plugin="id" :brand="manifest.brand" :size="44" />
         <div class="min-w-0">
           <p class="text-sm font-semibold">
             {{ manifest.name }} <span class="font-normal text-muted">{{ manifest.version }}</span>
@@ -104,16 +175,17 @@ async function uninstall() {
             v-model="selected"
             type="radio"
             name="version"
+            :disabled="busy"
             :value="item.version"
             class="accent-[var(--color-accent)]"
           >
           <span class="flex-1 text-xs font-semibold">{{ item.version }}</span>
-          <span v-if="item.version === entry.active" class="rounded-full bg-[light-dark(#dff3ee,#163a33)] px-2 py-px text-3xs font-semibold text-success">Active</span>
+          <span v-if="item.version === entry?.active" class="rounded-full bg-[light-dark(#dff3ee,#163a33)] px-2 py-px text-3xs font-semibold text-success">Active</span>
           <span v-else-if="item.approved" class="text-2xs text-muted">Approved before</span>
           <span v-else class="rounded-full bg-warning-surface px-2 py-px text-3xs font-semibold text-warning">Needs approval</span>
         </label>
       </fieldset>
-      <p v-for="item in entry.versions.filter(item => item.error)" :key="item.version" class="flex items-start gap-2 text-2xs text-danger">
+      <p v-for="item in (entry?.versions ?? []).filter(item => item.error)" :key="item.version" class="flex items-start gap-2 text-2xs text-danger">
         <Icon :name="TriangleAlert" :size="13" class="mt-px" />Version {{ item.version }} can’t be used: {{ item.error }}
       </p>
 
@@ -162,11 +234,11 @@ async function uninstall() {
       </section>
     </div>
     <footer class="modal-actions sticky bottom-0 flex items-center justify-between gap-2.5 border-t border-line bg-surface px-6.5 py-4.5 phone:flex-wrap phone:px-5 phone:py-4">
-      <template v-if="!entry.builtin">
+      <template v-if="entry && !entry.builtin">
         <UiButton
           v-if="!removing"
           variant="danger-outline"
-          :disabled="busy"
+          :disabled="busy || reading"
           @click="removing = true"
         >
           <Icon :name="Trash2" :size="15" />Uninstall
@@ -174,7 +246,7 @@ async function uninstall() {
         <UiButton
           v-else
           variant="danger"
-          :disabled="busy"
+          :disabled="busy || reading"
           @click="uninstall"
         >
           Confirm uninstall
@@ -186,17 +258,17 @@ async function uninstall() {
           Close
         </UiButton>
         <UiButton
-          v-if="!entry.builtin && version && !version.approved"
+          v-if="!entry?.builtin && version && !version.approved"
           variant="primary"
-          :disabled="busy"
+          :disabled="busy || reading"
           @click="act('approve')"
         >
           <Icon :name="Check" :size="15" />Approve and activate
         </UiButton>
         <UiButton
-          v-else-if="!entry.builtin && version && selected !== entry.active"
+          v-else-if="!entry?.builtin && version && selected !== entry?.active"
           variant="primary"
-          :disabled="busy"
+          :disabled="busy || reading"
           @click="act('activate')"
         >
           Switch to {{ selected }}

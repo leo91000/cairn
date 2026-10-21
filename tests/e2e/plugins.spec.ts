@@ -86,30 +86,35 @@ test('older hosts keep existing plugin pages without a setup drafts endpoint', a
     secrets: { token: 'ops_earlier_host_fixture' },
     enabled: false,
   })
-  let draftReads = 0
-  await page.route('**/api/plugins', async (route) => {
-    const response = await route.fetch()
-    const catalog = await response.json()
-    delete catalog.setupDrafts
-    delete catalog.resourceGrantCounts
-    await route.fulfill({ response, json: catalog })
-  })
-  await page.route('**/plugins/onepassword/setup-drafts*', async (route) => {
-    draftReads++
-    await route.fulfill({ status: 404, json: { error: 'Not found' } })
-  })
-  await page.goto(workspacePath('/plugins/onepassword'))
-  await signIn(page)
-  const instance = page.getByRole('article', { name: 'Earlier host account', exact: true })
-  await expect(instance).toBeVisible()
-  await instance.getByRole('button', { name: 'Edit Earlier host account', exact: true }).click()
-  const editor = page.getByRole('dialog', { name: 'Edit Earlier host account', exact: true })
-  await editor.getByLabel('Name', { exact: true }).fill('Updated on earlier host')
-  await editor.getByRole('button', { name: 'Save service account', exact: true }).click()
-  await expect(editor).not.toBeVisible()
-  await expect(page.getByRole('article', { name: 'Updated on earlier host', exact: true })).toBeVisible()
-  expect(draftReads).toBe(0)
-  expect((await workspace.api('/api/plugins')).connections.find((item: { id: string }) => item.id === account.id).name).toBe('Updated on earlier host')
+  try {
+    let draftReads = 0
+    await page.route('**/api/plugins', async (route) => {
+      const response = await route.fetch()
+      const catalog = await response.json()
+      delete catalog.setupDrafts
+      delete catalog.resourceGrantCounts
+      await route.fulfill({ response, json: catalog })
+    })
+    await page.route('**/plugins/onepassword/setup-drafts*', async (route) => {
+      draftReads++
+      await route.fulfill({ status: 404, json: { error: 'Not found' } })
+    })
+    await page.goto(workspacePath('/plugins/onepassword'))
+    await signIn(page)
+    const instance = page.getByRole('article', { name: 'Earlier host account', exact: true })
+    await expect(instance).toBeVisible()
+    await instance.getByRole('button', { name: 'Edit Earlier host account', exact: true }).click()
+    const editor = page.getByRole('dialog', { name: 'Edit Earlier host account', exact: true })
+    await editor.getByLabel('Name', { exact: true }).fill('Updated on earlier host')
+    await editor.getByRole('button', { name: 'Save service account', exact: true }).click()
+    await expect(editor).not.toBeVisible()
+    await expect(page.getByRole('article', { name: 'Updated on earlier host', exact: true })).toBeVisible()
+    expect(draftReads).toBe(0)
+    expect((await workspace.api('/api/plugins')).connections.find((item: { id: string }) => item.id === account.id).name).toBe('Updated on earlier host')
+  }
+  finally {
+    await workspace.api(`/api/plugins/onepassword/connections/${account.id}`, 'DELETE')
+  }
 })
 
 test('Discord bots are set up through the package’s own form and keep the token private', async ({ page, workspace }) => {
@@ -1460,6 +1465,8 @@ test('resource access refreshes uncertain writes without automatically repeating
 
 test('stored versions that fail admission explain why and remain removable', async ({ page }) => {
   await useRelayForHttpMocks(page)
+  // This case exercises an earlier installation's complete catalogue contract.
+  await page.route('**/api/plugins/packages', route => route.fulfill({ status: 404, json: { error: 'Not found.' } }))
   const error = 'Plugin setting maxLength must be an integer from 1 to 10000 (text limit).'
   await page.route('**/api/plugins', route => route.fulfill({
     json: {
@@ -1492,6 +1499,143 @@ test('stored versions that fail admission explain why and remain removable', asy
   await expect(notice).toBeVisible()
   await notice.getByRole('button', { name: 'Review' }).click()
   await expect(page.getByRole('dialog', { name: 'Review legacy' }).getByText(`Version 1.0.0 can’t be used: ${error}`)).toBeVisible()
+})
+
+test('compact catalogue pages and exact version review ignore late selection reads', async ({ page }) => {
+  await useRelayForHttpMocks(page)
+  const manifest = (version: string, name: string, capabilities: string[] = []) => ({
+    id: 'review',
+    name,
+    description: 'Exact review fixture',
+    version,
+    apiVersion: 2,
+    capabilities,
+  })
+  const presentation = {
+    ...manifest('3', 'Review package'),
+    needsWorker: false,
+    delegates: false,
+    agentAccess: false,
+    contributions: {
+      commands: 0,
+      tools: 0,
+      instructions: false,
+      view: false,
+      test: false,
+      form: false,
+      collections: 0,
+    },
+  }
+  const card = {
+    id: 'review',
+    builtin: false,
+    active: null,
+    status: 'needs_approval',
+    presentation,
+    versionCount: 3,
+    summary: {
+      instances: 0,
+      states: {},
+      pendingRequests: 0,
+      authorizedAgents: 0,
+    },
+  }
+  let globalReads = 0
+  await page.route('**/api/plugins', async (route) => {
+    globalReads++
+    await route.fulfill({ status: 500, json: { error: 'Complete catalogue must not be used.' } })
+  })
+  const root = '**/api/plugins/packages'
+  await page.route(root, route => route.fulfill({
+    json: {
+      packageReads: true,
+      instanceReads: true,
+      capabilities: [],
+      items: [],
+      nextCursor: 'next',
+    },
+  }))
+  await page.route(`${root}?cursor=next`, route => route.fulfill({ json: { items: [card], nextCursor: null } }))
+  await page.route(`${root}/review`, route => route.fulfill({
+    json: {
+      id: 'review',
+      builtin: false,
+      active: null,
+      status: 'needs_approval',
+      manifest: manifest('3', 'Review package'),
+      versionCount: 3,
+    },
+  }))
+  await page.route(`${root}/review/versions`, route => route.fulfill({
+    json: {
+      items: [{ version: '1', digest: 'old', approved: true }],
+      nextCursor: '1',
+    },
+  }))
+  await page.route(`${root}/review/versions?cursor=1`, route => route.fulfill({
+    json: {
+      items: [{ version: '2', digest: 'metadata-two', approved: false }, { version: '3', digest: 'metadata-three', approved: false }],
+    },
+  }))
+  let releaseLate!: () => void
+  const late = new Promise<void>(resolve => releaseLate = resolve)
+  let startedLate!: () => void
+  const started = new Promise<void>(resolve => startedLate = resolve)
+  await page.route(`${root}/review/versions/3`, async (route) => {
+    startedLate()
+    await late
+    await route.fulfill({
+      json: {
+        version: '3',
+        digest: 'late-three',
+        approved: false,
+        manifest: manifest('3', 'Late version three'),
+      },
+    }).catch(() => {})
+  })
+  await page.route(`${root}/review/versions/2`, route => route.fulfill({
+    json: {
+      version: '2',
+      digest: 'reviewed-two',
+      approved: false,
+      manifest: manifest('2', 'Inspected version two', ['http']),
+      files: [{ path: 'lib/review.luau', bytes: 100 }],
+    },
+  }))
+  await page.route(`${root}/review/versions/1`, route => route.fulfill({
+    json: {
+      version: '1',
+      digest: 'old',
+      approved: true,
+      manifest: manifest('1', 'Review package'),
+    },
+  }))
+  const writes: unknown[] = []
+  await page.route(`${root}/review/approve`, async (route) => {
+    writes.push(route.request().postDataJSON())
+    await route.fulfill({ json: {} })
+  })
+  try {
+    await page.goto(workspacePath('/plugins'))
+    await signIn(page)
+    await page.getByRole('button', { name: 'Review package · Review' }).click()
+    const review = page.getByRole('dialog', { name: 'Review Review package' })
+    await started
+    await expect(review.getByRole('button', { name: 'Approve and activate' })).toHaveCount(0)
+    await review.getByRole('radio', { name: '2 Needs approval' }).check()
+    await expect(review.getByText('Inspected version two', { exact: false })).toBeVisible()
+    releaseLate()
+    await expect(review.getByText('Late version three', { exact: false })).toHaveCount(0)
+    await expect(review.getByText('Web requests', { exact: true })).toBeVisible()
+    await expect(review.getByLabel('Package files')).toContainText('lib/review.luau')
+    await review.getByRole('button', { name: 'Approve and activate' }).click()
+    await expect(review).toHaveCount(0)
+    expect(writes).toEqual([{ version: '2', digest: 'reviewed-two' }])
+    expect(globalReads).toBe(0)
+  }
+  finally {
+    releaseLate()
+  }
 })
 
 test('program releases can be checked, installed and restored independently of plugin accounts', async ({ page }) => {

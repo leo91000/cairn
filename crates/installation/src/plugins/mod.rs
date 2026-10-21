@@ -399,6 +399,12 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
             registry::owner::list(s, input.query.get("cursor").map(String::as_str)).await
         }
         ("GET", ["plugins", "packages", id]) => registry::owner::detail(s, id).await,
+        ("GET", ["plugins", "packages", id, "connections"]) => {
+            connections::owner::list(s, id, input.query.get("cursor").map(String::as_str)).await
+        }
+        ("GET", ["plugins", "packages", id, "connections", instance]) => {
+            connections::owner::get(s, id, instance).await
+        }
         ("GET", ["plugins", "packages", id, "versions"]) => {
             registry::owner::versions(s, id, input.query.get("cursor").map(String::as_str)).await
         }

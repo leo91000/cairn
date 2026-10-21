@@ -38,6 +38,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import build.cairn.app.data.*
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.serialization.json.*
 
 /** The installation's web page for steps that stay on the web: package uploads. */
@@ -51,11 +53,11 @@ internal fun webPage(api: CairnApi, path: String): String =
 /** Plugins: what gives the agents new abilities and new places to work. Owner only. */
 @Composable
 fun PluginsScreen(vm: CairnViewModel, state: Workspace, open: (String) -> Unit) {
-    var catalog by remember { mutableStateOf<PluginCatalog?>(null) }
+    var catalog by remember { mutableStateOf<PluginCards?>(null) }
     val context = LocalContext.current
     Poll("plugins", 10_000) {
         try {
-            catalog = vm.api.get("/plugins")
+            catalog = vm.api.pluginCards()
         } catch (e: Exception) {
             vm.report(e)
         }
@@ -77,8 +79,8 @@ fun PluginsScreen(vm: CairnViewModel, state: Workspace, open: (String) -> Unit) 
         val current = catalog
         if (current == null) LinearProgressIndicator(Modifier.fillMaxWidth())
         else
-            current.packages.forEach { entry ->
-                PluginCard(entry, entry.summary(current.connections)) {
+            current.items.forEach { entry ->
+                PluginCard(entry, entry.summary()) {
                     vm.clearMessage()
                     open(entry.id)
                 }
@@ -106,10 +108,10 @@ fun PluginsScreen(vm: CairnViewModel, state: Workspace, open: (String) -> Unit) 
 }
 
 @Composable
-private fun PluginCard(entry: PluginEntry, summary: PluginSummary, open: () -> Unit) {
+private fun PluginCard(entry: PluginCardEntry, summary: PluginSummary, open: () -> Unit) {
     SignalCard(Modifier.fillMaxWidth().testTag("plugin-${entry.id}"), onClick = open) {
         Row(verticalAlignment = Alignment.Top) {
-            PluginMark(entry.id, 44.dp, entry.manifest?.brand)
+            PluginMark(entry.id, 44.dp, entry.presentation?.brand)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -128,7 +130,7 @@ private fun PluginCard(entry: PluginEntry, summary: PluginSummary, open: () -> U
                     )
                 }
                 Text(
-                    entry.manifest?.description?.ifBlank { null } ?: "Aucune description.",
+                    entry.presentation?.description?.ifBlank { null } ?: "Aucune description.",
                     Modifier.padding(top = 2.dp),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1430,41 +1432,98 @@ private fun AgentUsage(manifest: PluginManifest) {
 
 /** Review a package: what each version may do, then approve, switch version or uninstall. */
 @Composable
-private fun PluginReview(
+internal fun PluginReview(
     vm: CairnViewModel,
     state: Workspace,
-    entry: PluginEntry,
+    initial: PluginEntry,
     capabilities: List<PluginCapability>,
     close: () -> Unit,
     changed: suspend () -> Unit,
 ) {
-    val valid = entry.versions.filter { it.manifest != null }
-    // Review the newest version waiting for approval, otherwise the active one.
-    var selected by
-        remember(entry.id) {
-            mutableStateOf(
-                valid.lastOrNull { it.approved == false }?.version
-                    ?: entry.active
-                    ?: valid.lastOrNull()?.version.orEmpty()
-            )
-        }
+    var read by remember(initial.id) { mutableStateOf<PluginReviewRead?>(null) }
+    val entry = read?.entry ?: initial
+    val valid = read?.entry?.versions.orEmpty().filter { it.error == null }
+    var selected by remember(initial.id) { mutableStateOf("") }
     var uninstalling by remember { mutableStateOf(false) }
-    val version = valid.find { it.version == selected }
+    var loadedVersion by remember(initial.id) { mutableStateOf<PluginVersion?>(null) }
+    var active by remember(initial.id) { mutableStateOf<PluginManifest?>(null) }
+    var reading by remember(initial.id) { mutableStateOf(true) }
+    var readError by remember(initial.id) { mutableStateOf<String?>(null) }
+    val version = loadedVersion
     val manifest = version?.manifest
-    val active = valid.find { it.version == entry.active }?.manifest
     val added =
-        manifest?.capabilities.orEmpty().filter { active != null && it !in active.capabilities }
-    fun act(operation: String) = vm.perform {
-        api.pluginOperation(
-            "/plugins/packages/${segment(entry.id)}/$operation",
-            buildJsonObject {
-                put("version", selected)
-                version?.digest?.let { put("digest", it) }
-            },
-        )
-        notify("${manifest?.name ?: entry.name} $selected est actif")
-        close()
-        changed()
+        manifest?.capabilities.orEmpty().filter { active != null && it !in active!!.capabilities }
+    LaunchedEffect(initial.id) {
+        try {
+            val result = vm.api.pluginReview(initial.id)
+            read = result
+            selected =
+                result.entry.versions
+                    .lastOrNull { it.error == null && it.approved != true }
+                    ?.version
+                    ?: result.entry.active
+                    ?: result.entry.versions.lastOrNull { it.error == null }?.version.orEmpty()
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            readError = e.message
+            reading = false
+        }
+    }
+    LaunchedEffect(read, selected) {
+        loadedVersion = null
+        active = null
+        reading = true
+        val current = read ?: return@LaunchedEffect
+        if (selected.isEmpty()) {
+            reading = false
+            return@LaunchedEffect
+        }
+        val chosen = selected
+        readError = null
+        try {
+            suspend fun exact(name: String): PluginVersion? =
+                if (current.lazy)
+                    vm.api.get("/plugins/packages/${segment(entry.id)}/versions/${segment(name)}")
+                else current.entry.versions.find { it.version == name }
+            val shown = exact(chosen)
+            val baseline =
+                if (entry.active != null && entry.active != chosen) exact(entry.active!!) else shown
+            check(
+                shown?.manifest != null &&
+                    shown.digest != null &&
+                    shown.version == chosen &&
+                    shown.manifest.version == chosen &&
+                    (entry.active == null || baseline?.manifest?.version == entry.active)
+            ) {
+                shown?.error
+                    ?: baseline?.error
+                    ?: "Les fichiers exacts du package sont indisponibles. Rouvrez la revue."
+            }
+            loadedVersion = shown
+            active = if (entry.active != null) baseline?.manifest else null
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            readError = e.message
+        } finally {
+            if (currentCoroutineContext().isActive) reading = false
+        }
+    }
+    fun act(operation: String) {
+        val shown = version
+        if (reading || shown?.manifest == null || shown.digest == null || shown.version != selected)
+            return
+        vm.perform {
+            api.pluginOperation(
+                "/plugins/packages/${segment(entry.id)}/$operation",
+                buildJsonObject {
+                    put("version", shown.version)
+                    put("digest", shown.digest)
+                },
+            )
+            notify("${manifest?.name ?: entry.name} $selected est actif")
+            close()
+            changed()
+        }
     }
     Dialog(
         onDismissRequest = { if (!state.busy) close() },
@@ -1520,12 +1579,16 @@ private fun PluginReview(
                         SignalButton(
                             "Approuver et activer",
                             height = 40.dp,
-                            enabled = !state.busy,
+                            enabled = !state.busy && !reading,
                         ) {
                             act("approve")
                         }
                     else if (!entry.builtin && version != null && selected != entry.active)
-                        SignalButton("Passer à $selected", height = 40.dp, enabled = !state.busy) {
+                        SignalButton(
+                            "Passer à $selected",
+                            height = 40.dp,
+                            enabled = !state.busy && !reading,
+                        ) {
                             act("activate")
                         }
                 }
@@ -1538,7 +1601,8 @@ private fun PluginReview(
                     .padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
-                if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                if (state.busy || reading) LinearProgressIndicator(Modifier.fillMaxWidth())
+                readError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 if (manifest != null)
                     Row(verticalAlignment = Alignment.Top) {
@@ -1560,7 +1624,15 @@ private fun PluginReview(
                     Eyebrow("Versions")
                     valid.forEach { item ->
                         Surface(
-                            onClick = { selected = item.version },
+                            onClick = {
+                                if (selected != item.version) {
+                                    loadedVersion = null
+                                    active = null
+                                    reading = true
+                                    selected = item.version
+                                }
+                            },
+                            enabled = !state.busy,
                             shape = RoundedCornerShape(14.dp),
                             color =
                                 if (item.version == selected)

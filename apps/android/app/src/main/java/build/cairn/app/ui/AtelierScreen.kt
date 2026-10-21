@@ -90,12 +90,12 @@ fun AtelierScreen(vm: CairnViewModel, state: Workspace, navigate: (String) -> Un
         return
     }
     var accounts by remember { mutableStateOf<AccountsView?>(null) }
-    var plugins by remember { mutableStateOf<PluginCatalog?>(null) }
+    var plugins by remember { mutableStateOf<PluginCards?>(null) }
     var loaded by remember { mutableStateOf(false) }
     var signingOut by remember { mutableStateOf(false) }
     Poll("atelier", 30_000) {
         accounts = optional(vm) { vm.api.get<AccountsView>("/accounts") }
-        plugins = optional(vm) { vm.api.get<PluginCatalog>("/plugins") }
+        plugins = optional(vm) { vm.api.pluginCards() }
         loaded = true
     }
     val pending = if (loaded) "Indisponible" else "…"
@@ -286,11 +286,11 @@ fun AtelierScreen(vm: CairnViewModel, state: Workspace, navigate: (String) -> Un
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 else ->
-                    catalog.packages.forEach { entry ->
-                        val summary = entry.summary(catalog.connections)
+                    catalog.items.forEach { entry ->
+                        val summary = entry.summary()
                         Spacer(Modifier.height(12.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            PluginMark(entry.id, 24.dp, entry.manifest?.brand)
+                            PluginMark(entry.id, 24.dp, entry.presentation?.brand)
                             Spacer(Modifier.width(10.dp))
                             Text(
                                 entry.name,

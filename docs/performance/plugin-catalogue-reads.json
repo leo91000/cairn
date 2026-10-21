@@ -1,117 +1,202 @@
 {
   "approvalWrites": [
     {
-      "processCpuMs": 83.3122699999949,
-      "wallMs": 87.09947
+      "processCpuMs": 53.669805000005,
+      "wallMs": 52.989295
     },
     {
-      "processCpuMs": 67.47070600000006,
-      "wallMs": 74.415356
+      "processCpuMs": 52.05567500000325,
+      "wallMs": 51.631691000000004
     },
     {
-      "processCpuMs": 74.97253500000079,
-      "wallMs": 75.24291199999999
+      "processCpuMs": 56.271802999996,
+      "wallMs": 55.688017
     },
     {
-      "processCpuMs": 72.54334299999755,
-      "wallMs": 71.374587
+      "processCpuMs": 53.36378400000103,
+      "wallMs": 52.693461
     },
     {
-      "processCpuMs": 69.85101700000087,
-      "wallMs": 69.433242
+      "processCpuMs": 50.16407299999992,
+      "wallMs": 49.685480999999996
     },
     {
-      "processCpuMs": 62.2977979999996,
-      "wallMs": 64.963188
+      "processCpuMs": 57.34606200000417,
+      "wallMs": 56.784997
     }
   ],
   "cache": "first API read then five warm samples, OS caches retained",
-  "candidate": "first compact page; at most 32 cards",
+  "candidate": "first compact card page, first selected-package instance page and one exact instance; different response purposes",
+  "instancesCopied": 40,
   "packagesCopied": 40,
   "reads": [
     {
-      "encodedBytes": 14404158,
+      "encodedBytes": 19226147,
       "path": "/api/plugins",
-      "processCpuMs": 3765.388427,
+      "processCpuMs": 4417.706934000001,
       "sample": 0,
-      "wallMs": 3762.9337459999997
+      "wallMs": 4413.768816
     },
     {
-      "encodedBytes": 17174,
+      "encodedBytes": 20599,
       "path": "/api/plugins/packages",
-      "processCpuMs": 2239.50162,
+      "processCpuMs": 1919.6924630000003,
       "sample": 0,
-      "wallMs": 2239.056764
+      "wallMs": 1917.2385809999998
     },
     {
-      "encodedBytes": 17174,
-      "path": "/api/plugins/packages",
-      "processCpuMs": 2066.1427649999996,
+      "encodedBytes": 3857676,
+      "path": "/api/plugins/packages/catalogue-00/connections",
+      "processCpuMs": 1966.7534510000005,
+      "sample": 0,
+      "wallMs": 1966.9780079999998
+    },
+    {
+      "encodedBytes": 120548,
+      "path": "/api/plugins/packages/catalogue-00/connections/3d2a42c5-abd7-4a83-a677-a1b61061df50",
+      "processCpuMs": 948.9146520000013,
+      "sample": 0,
+      "wallMs": 948.919259
+    },
+    {
+      "encodedBytes": 120548,
+      "path": "/api/plugins/packages/catalogue-00/connections/3d2a42c5-abd7-4a83-a677-a1b61061df50",
+      "processCpuMs": 1275.4646350000003,
       "sample": 1,
-      "wallMs": 2063.118437
+      "wallMs": 1275.3124659999999
     },
     {
-      "encodedBytes": 14404158,
-      "path": "/api/plugins",
-      "processCpuMs": 3930.136149,
+      "encodedBytes": 3857676,
+      "path": "/api/plugins/packages/catalogue-00/connections",
+      "processCpuMs": 2295.9880989999983,
       "sample": 1,
-      "wallMs": 3927.363606
+      "wallMs": 2297.1863749999998
     },
     {
-      "encodedBytes": 14404158,
+      "encodedBytes": 20599,
+      "path": "/api/plugins/packages",
+      "processCpuMs": 2020.358964000001,
+      "sample": 1,
+      "wallMs": 2017.837907
+    },
+    {
+      "encodedBytes": 19226147,
       "path": "/api/plugins",
-      "processCpuMs": 3797.0626649999995,
+      "processCpuMs": 4302.023171000001,
+      "sample": 1,
+      "wallMs": 4299.026301
+    },
+    {
+      "encodedBytes": 19226147,
+      "path": "/api/plugins",
+      "processCpuMs": 4139.077046999999,
       "sample": 2,
-      "wallMs": 3795.204997
+      "wallMs": 4136.168591
     },
     {
-      "encodedBytes": 17174,
+      "encodedBytes": 20599,
       "path": "/api/plugins/packages",
-      "processCpuMs": 2083.6427959999983,
+      "processCpuMs": 1771.2672979999988,
       "sample": 2,
-      "wallMs": 2087.478165
+      "wallMs": 1768.589252
     },
     {
-      "encodedBytes": 17174,
-      "path": "/api/plugins/packages",
-      "processCpuMs": 2147.054945,
+      "encodedBytes": 3857676,
+      "path": "/api/plugins/packages/catalogue-00/connections",
+      "processCpuMs": 1782.8661790000006,
+      "sample": 2,
+      "wallMs": 1782.916465
+    },
+    {
+      "encodedBytes": 120548,
+      "path": "/api/plugins/packages/catalogue-00/connections/3d2a42c5-abd7-4a83-a677-a1b61061df50",
+      "processCpuMs": 1079.333795999999,
+      "sample": 2,
+      "wallMs": 1079.247668
+    },
+    {
+      "encodedBytes": 120548,
+      "path": "/api/plugins/packages/catalogue-00/connections/3d2a42c5-abd7-4a83-a677-a1b61061df50",
+      "processCpuMs": 1045.0153980000032,
       "sample": 3,
-      "wallMs": 2145.6237539999997
+      "wallMs": 1044.950963
     },
     {
-      "encodedBytes": 14404158,
-      "path": "/api/plugins",
-      "processCpuMs": 3925.8552759999984,
+      "encodedBytes": 3857676,
+      "path": "/api/plugins/packages/catalogue-00/connections",
+      "processCpuMs": 1888.0687709999984,
       "sample": 3,
-      "wallMs": 3926.372214
+      "wallMs": 1888.0935170000002
     },
     {
-      "encodedBytes": 14404158,
-      "path": "/api/plugins",
-      "processCpuMs": 3959.736965,
-      "sample": 4,
-      "wallMs": 3957.770332
-    },
-    {
-      "encodedBytes": 17174,
+      "encodedBytes": 20599,
       "path": "/api/plugins/packages",
-      "processCpuMs": 1977.542082,
-      "sample": 4,
-      "wallMs": 1978.3444029999998
+      "processCpuMs": 2123.669691000003,
+      "sample": 3,
+      "wallMs": 2120.2626769999997
     },
     {
-      "encodedBytes": 17174,
-      "path": "/api/plugins/packages",
-      "processCpuMs": 2061.498792000002,
-      "sample": 5,
-      "wallMs": 2066.961508
-    },
-    {
-      "encodedBytes": 14404158,
+      "encodedBytes": 19226147,
       "path": "/api/plugins",
-      "processCpuMs": 3980.6648289999976,
+      "processCpuMs": 4341.396033999998,
+      "sample": 3,
+      "wallMs": 4338.170463
+    },
+    {
+      "encodedBytes": 19226147,
+      "path": "/api/plugins",
+      "processCpuMs": 4935.109473999997,
+      "sample": 4,
+      "wallMs": 4933.21894
+    },
+    {
+      "encodedBytes": 20599,
+      "path": "/api/plugins/packages",
+      "processCpuMs": 1892.7434460000004,
+      "sample": 4,
+      "wallMs": 1889.763396
+    },
+    {
+      "encodedBytes": 3857676,
+      "path": "/api/plugins/packages/catalogue-00/connections",
+      "processCpuMs": 1981.8664340000032,
+      "sample": 4,
+      "wallMs": 1981.94431
+    },
+    {
+      "encodedBytes": 120548,
+      "path": "/api/plugins/packages/catalogue-00/connections/3d2a42c5-abd7-4a83-a677-a1b61061df50",
+      "processCpuMs": 1033.155307000001,
+      "sample": 4,
+      "wallMs": 1033.198856
+    },
+    {
+      "encodedBytes": 120548,
+      "path": "/api/plugins/packages/catalogue-00/connections/3d2a42c5-abd7-4a83-a677-a1b61061df50",
+      "processCpuMs": 1148.0081340000033,
       "sample": 5,
-      "wallMs": 3982.784713
+      "wallMs": 1148.0019379999999
+    },
+    {
+      "encodedBytes": 3857676,
+      "path": "/api/plugins/packages/catalogue-00/connections",
+      "processCpuMs": 1949.730435999998,
+      "sample": 5,
+      "wallMs": 1949.752362
+    },
+    {
+      "encodedBytes": 20599,
+      "path": "/api/plugins/packages",
+      "processCpuMs": 2046.7111670000013,
+      "sample": 5,
+      "wallMs": 2044.4802110000003
+    },
+    {
+      "encodedBytes": 19226147,
+      "path": "/api/plugins",
+      "processCpuMs": 3922.627173999994,
+      "sample": 5,
+      "wallMs": 3919.308527
     }
   ],
   "reference": "complete owner response, same binary and unchanged record format",
@@ -121,15 +206,28 @@
     "platform": "Linux-6.12.109-x86_64-with-glibc2.36",
     "cpuCount": 7,
     "loadAverage": [
-      1.95166015625,
-      2.75634765625,
-      2.17822265625
+      1.2333984375,
+      3.04638671875,
+      3.353515625
     ],
     "memory": [
       "MemTotal:       19462272 kB",
-      "MemAvailable:   18725188 kB"
+      "MemAvailable:   18793620 kB"
     ],
-    "context": "Only synthetic catalogue measurement running; no Rust compilation, Node test workers, PostgreSQL or emulator. Agent and shared VM scheduler active; OS caches retained. Native defaults86 and serial JS655 finished before measurement."
+    "startedAt": "2026-10-21T04:18:11.250549+00:00",
+    "context": "Only synthetic catalogue/instance measurement runs; all native tests/compilers, Node tests/build and Gradle probes ended. Owned PostgreSQL and managed AOSP emulator stopped; OS caches retained. Agent and shared VM scheduler active."
   },
-  "reproduce": "PATH=\"$PATH:/usr/sbin\" CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 mise exec -- pnpm test:backend -p cairn-installation --test plugin_catalogue measure_catalogue -- --ignored --nocapture --test-threads=1"
+  "reproduce": "PATH=\"$PATH:/usr/sbin\" CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 mise exec -- pnpm test:backend -p cairn-installation --test plugin_catalogue measure_catalogue -- --ignored --nocapture --test-threads=1",
+  "source": {
+    "parent": "6d73793899bd0592937ae0db39f2720031174e68",
+    "state": "uncommitted R60 at observation; other native inputs unchanged from parent",
+    "sha256": {
+      "crates/installation/src/plugins/connections.rs": "f1f3c63bfbe6aad2196e643ed66b4b8b7cfa80476df56847d051e0a2901fe669",
+      "crates/installation/src/plugins/connections/owner.rs": "9e63c177c4e6a77f67ba2181212dcef2ed398ec919d57ec1078e184eb309a8e9",
+      "crates/installation/src/plugins/mod.rs": "25fc1a7cfd6646df77e032c31e4c0c15efc68c50d14e10e5dd94a5ab9ac8f26b",
+      "crates/installation/src/plugins/registry/owner.rs": "7a8949e81e8b0d3239d2d867e53073fa150638a8fd00f0a7c302fcaca8f654b9",
+      "crates/installation/tests/plugin_catalogue.rs": "7d0e890a2ed0a1e6c8d02668db7e24777e42298246613974f8284bbfda570eef",
+      "Cargo.lock": "ad166c810e0125960ddd6c2b2e12f5e8d5b36c6cba5bd7b1a8c6f985cbb781a0"
+    }
+  }
 }

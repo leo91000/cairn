@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     error::{Error, Result},
-    plugins::paging,
+    plugins::{connections, paging},
     service::Service,
     validation::text,
 };
@@ -178,8 +178,24 @@ pub async fn list(s: &Service, after: Option<&str>) -> Result<Value> {
     {
         cards.push(inspect(s, id, false).await?.card());
     }
+    let packages = json!(
+        cards
+            .iter()
+            .map(|card| json!({
+                "id": card["id"],
+                "needsWorker": card["presentation"]["needsWorker"],
+            }))
+            .collect::<Vec<_>>()
+    );
+    let mut summaries = connections::owner::summaries(s, packages).await?;
+    for card in &mut cards {
+        card["summary"] = summaries
+            .remove(text(card, "id"))
+            .ok_or_else(|| Error::unavailable("Plugin summary could not be loaded."))?;
+    }
     let metadata = json!({
         "packageReads": true,
+        "instanceReads": true,
         "setupDrafts": true,
         "capabilities": CAPABILITIES
             .iter()

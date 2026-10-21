@@ -182,24 +182,38 @@ async function edit(collection: PluginResourceCollection, resource?: PluginResou
   if (blocked.value)
     return
   await action(async () => {
-    // Parent choices include later pages too; the native resource limit bounds this.
-    if (collection.parent) {
-      while (pages.value[collection.parent]?.nextCursor) {
-        const page = pages.value[collection.parent]
-        const next = await api<PluginPage<PluginResource>>(`${path.value}/${collection.parent}?cursor=${encodeURIComponent(page.nextCursor!)}`)
-        pages.value[collection.parent] = { items: [...page.items, ...next.items], nextCursor: next.nextCursor }
-      }
-    }
+    const current = generation
+    const root = path.value
+    try {
+      // Parent discovery belongs to the namespace and schema that started it.
+      if (collection.parent) {
+        while (pages.value[collection.parent]?.nextCursor) {
+          const page = pages.value[collection.parent]
+          const next = await api<PluginPage<PluginResource>>(`${root}/${collection.parent}?cursor=${encodeURIComponent(page.nextCursor!)}`)
+          if (current !== generation)
+            return
 
-    cancelCompletion()
-    name.value = resource?.name ?? ''
-    parent.value = resource?.parentId ?? ''
-    enabled.value = resource?.enabled ?? true
-    values.value = pluginFormValues(collection.settings ?? [], resource?.settings ?? {})
-    secrets.value = pluginFormSecrets()
-    editing.value = { collection, resource }
-    formReady.value = !collection.form
-    typed()
+          pages.value[collection.parent] = { items: [...page.items, ...next.items], nextCursor: next.nextCursor }
+        }
+      }
+
+      if (current !== generation)
+        return
+
+      cancelCompletion()
+      name.value = resource?.name ?? ''
+      parent.value = resource?.parentId ?? ''
+      enabled.value = resource?.enabled ?? true
+      values.value = pluginFormValues(collection.settings ?? [], resource?.settings ?? {})
+      secrets.value = pluginFormSecrets()
+      editing.value = { collection, resource }
+      formReady.value = !collection.form
+      typed()
+    }
+    catch (e) {
+      if (current === generation)
+        throw e
+    }
   })
 }
 

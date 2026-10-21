@@ -69,7 +69,10 @@ fn copied_version(service: &Service, id: &str, version: &str) -> PathBuf {
 async fn get(app: &axum::Router, path: &str) -> Value {
     let response = common::send(app, request(path, InstallationRole::Owner)).await;
     let status = response.status();
-    let value = common::read_json(response).await;
+    let bytes = axum::body::to_bytes(response.into_body(), cairn_protocol::MAX_BODY / 2)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(status, StatusCode::OK, "{value}");
     value
 }
@@ -111,6 +114,208 @@ async fn pages(app: &axum::Router, path: &str, key: &str) -> Vec<Value> {
         cursor = next;
     }
     values
+}
+
+#[tokio::test]
+async fn instance_reads_are_bounded_exact_and_keep_unapproved_configuration_manageable() {
+    use cairn_installation::{
+        config::{id, now},
+        plugins::connections::Connection,
+    };
+    let (_directory, service, app) = fixture().await;
+    let plugin = "instance-reads";
+    let directory = copied_version(&service, plugin, "1");
+    let mut manifest = format!(
+        "id='{plugin}'\nname='Instance reads'\nversion='1'\napiVersion=2\ncapabilities=[]\n"
+    );
+    for n in 0..8 {
+        manifest.push_str(&format!(
+            "\n[[settings]]\nkey='field{n}'\ntitle='Field {n}'\ntype='text'\nmaxLength=10000\n"
+        ));
+    }
+    std::fs::write(directory.join("manifest.toml"), manifest).unwrap();
+    let agent = id();
+    let resource_agent = id();
+    let mut instances = Vec::new();
+    for n in 0..40 {
+        let settings = json!(
+            (0..8)
+                .map(|n| (format!("field{n}"), json!("\"".repeat(10000))))
+                .collect::<serde_json::Map<_, _>>()
+        );
+        let mut instance =
+            Connection::draft(&id(), plugin, settings, vec!["credential".to_owned()]);
+        instance.name = format!("Instance {n}");
+        instance.revision = id();
+        instance.enabled = n != 0;
+        instance.agent_ids = vec![agent.clone()];
+        instances.push(serde_json::to_value(instance).unwrap());
+    }
+    instances.sort_by(|a, b| text(a, "id").cmp(text(b, "id")));
+    let target = text(&instances[0], "id").to_owned();
+    let other = id();
+    let seed = instances.clone();
+    let (saved_target, saved_other, saved_agent, saved_resource_agent) = (
+        target.clone(),
+        other.clone(),
+        agent.clone(),
+        resource_agent.clone(),
+    );
+    let hour = now() / 3_600_000;
+    service
+        .store
+        .transaction(move |db| {
+            for instance in seed {
+                db.put("plugin-connections", &instance)?;
+            }
+            for n in 0..3 {
+                let mut worker = Connection::draft(&id(), "discord", json!({}), Vec::new());
+                worker.enabled = n != 2;
+                db.put("plugin-connections", &serde_json::to_value(&worker)?)?;
+                db.set(
+                    &format!("plugin-status:{}", worker.id),
+                    &json!({ "state": "connected" }),
+                    (n == 1).then(|| now() - 1),
+                )?;
+            }
+            db.put(
+                "plugin-connections",
+                &json!({
+                    "id": saved_other,
+                    "pluginId": "other",
+                    "settings": { "huge": "not selected" },
+                }),
+            )?;
+            db.set(
+                &format!("plugin-rate:{saved_target}:{hour}"),
+                &json!(7),
+                None,
+            )?;
+            db.set(
+                &format!("plugin-status:{saved_target}"),
+                &json!({ "state": "connected" }),
+                None,
+            )?;
+
+            // A route request is still one instance request, not counted twice.
+            for n in 0..2 {
+                db.put(
+                    "plugin-requests",
+                    &json!({
+                        "id": id(),
+                        "connectionId": saved_target,
+                        "routeId": if n == 0 { Value::Null } else { json!(id()) },
+                        "status": "pending",
+                        "updatedAt": n,
+                    }),
+                )?;
+            }
+            db.put(
+                "plugin-requests",
+                &json!({
+                    "id": id(), "connectionId": saved_other, "status": "pending",
+                }),
+            )?;
+            db.put(
+                "plugin-requests",
+                &json!({
+                    "id": id(), "connectionId": saved_target, "status": "approved",
+                }),
+            )?;
+            for n in 0..12 {
+                db.put(
+                    "plugin-activity",
+                    &json!({
+                        "id": id(), "connectionId": saved_target, "createdAt": n,
+                    }),
+                )?;
+            }
+            for agent in [
+                saved_agent.clone(),
+                saved_resource_agent.clone(),
+                saved_resource_agent,
+            ] {
+                db.put(
+                    "plugin-resource-grants",
+                    &json!({
+                        "id": id(), "connectionId": saved_target, "agentId": agent,
+                    }),
+                )?;
+            }
+            db.put(
+                "plugin-resource-grants",
+                &json!({
+                    "id": id(), "connectionId": saved_other, "agentId": id(),
+                }),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let root = format!("/api/plugins/packages/{plugin}/connections");
+    let first = get(&app, &root).await;
+    assert_eq!(first["instanceReads"], true);
+    assert!(
+        first["items"].as_array().unwrap().len() < 32,
+        "Byte bound must select fewer than the count limit"
+    );
+    let listed = pages(&app, &root, "id").await;
+    assert_eq!(listed.len(), 40);
+    let exact = get(&app, &format!("{root}/{target}")).await;
+    assert_eq!(exact["agentIds"], json!([agent]));
+    assert_eq!(exact["secretKeys"], json!(["credential"]));
+    assert!(exact["credential"].is_null());
+    assert_eq!(exact["usage"]["hour"], 7);
+    assert_eq!(exact["requests"].as_array().unwrap().len(), 2);
+    let activity = exact["activity"].as_array().unwrap();
+    assert_eq!(activity.len(), 8);
+    assert_eq!(activity[0]["createdAt"], 11);
+    assert_eq!(activity[7]["createdAt"], 4);
+    let cards = pages(&app, "/api/plugins/packages", "id").await;
+    let summary = &cards.iter().find(|card| card["id"] == plugin).unwrap()["summary"];
+    assert_eq!(summary["instances"], 40);
+    assert_eq!(summary["states"]["ready"], 39);
+    assert_eq!(summary["states"]["paused"], 1);
+    assert_eq!(summary["pendingRequests"], 2);
+    assert_eq!(summary["authorizedAgents"], 2);
+    assert!(summary["observedAt"].as_i64().unwrap() > 0);
+    let worker_summary = &cards.iter().find(|card| card["id"] == "discord").unwrap()["summary"];
+    assert_eq!(worker_summary["instances"], 3);
+    assert_eq!(worker_summary["states"]["connected"], 1);
+    assert_eq!(worker_summary["states"]["disconnected"], 1);
+    assert_eq!(worker_summary["states"]["paused"], 1);
+    // Losing approval or even all source files never hides saved configuration.
+    std::fs::remove_dir_all(directory.parent().unwrap()).unwrap();
+    assert_eq!(
+        get(&app, &format!("{root}/{target}")).await["agentIds"],
+        exact["agentIds"]
+    );
+    assert_eq!(pages(&app, &root, "id").await.len(), 40);
+    for path in [root.clone(), format!("{root}/{target}")] {
+        assert_eq!(
+            common::send(&app, request(&path, InstallationRole::Member))
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    for path in [format!("{root}?cursor=invalid"), format!("{root}/invalid")] {
+        assert_eq!(
+            common::send(&app, request(&path, InstallationRole::Owner))
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        common::send(
+            &app,
+            request(&format!("{root}/{other}"), InstallationRole::Owner)
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]
@@ -355,6 +560,7 @@ fn process_cpu_ms() -> f64 {
 #[tokio::test]
 #[ignore = "local read/write measurement; run alone with --ignored --nocapture"]
 async fn measure_catalogue_reads_and_unchanged_approval_writes() {
+    use cairn_installation::{config::id, plugins::connections::Connection};
     let (_directory, service, app) = fixture().await;
     for n in 0..40 {
         copied_version(&service, &format!("catalogue-{n:02}"), "1");
@@ -362,10 +568,37 @@ async fn measure_catalogue_reads_and_unchanged_approval_writes() {
     for n in 2..=40 {
         copied_version(&service, "catalogue-00", &format!("{n:02}"));
     }
+    let mut instance_ids = Vec::new();
+    for n in 0..40 {
+        let settings = json!(
+            (0..6)
+                .map(|n| (format!("field{n}"), json!("\"".repeat(10000))))
+                .collect::<serde_json::Map<_, _>>()
+        );
+        let mut instance = Connection::draft(&id(), "catalogue-00", settings, Vec::new());
+        instance.name = format!("Instance {n}");
+        instance.revision = id();
+        instance_ids.push(instance.id.clone());
+        let value = serde_json::to_value(instance).unwrap();
+        service
+            .store
+            .transaction(move |db| db.put("plugin-connections", &value))
+            .await
+            .unwrap();
+    }
+    let exact_path = format!(
+        "/api/plugins/packages/catalogue-00/connections/{}",
+        instance_ids[0]
+    );
     let mut reads = Vec::new();
     for sample in 0..6 {
         // Alternate warm order. First reads are API-cold, not OS-cache cold.
-        let mut paths = ["/api/plugins", "/api/plugins/packages"];
+        let mut paths = [
+            "/api/plugins",
+            "/api/plugins/packages",
+            "/api/plugins/packages/catalogue-00/connections",
+            exact_path.as_str(),
+        ];
         if sample % 2 == 1 {
             paths.reverse();
         }
@@ -404,8 +637,9 @@ async fn measure_catalogue_reads_and_unchanged_approval_writes() {
         json!({
             "packagesCopied": 40,
             "versionsCopied": 79,
+            "instancesCopied": 40,
             "reference": "complete owner response, same binary and unchanged record format",
-            "candidate": "first compact page; at most 32 cards",
+            "candidate": "first compact card page, first selected-package instance page and one exact instance; different response purposes",
             "cache": "first API read then five warm samples, OS caches retained",
             "writes": "existing approval path, identical for both read contracts",
             "reads": reads,

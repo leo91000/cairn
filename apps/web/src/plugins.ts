@@ -388,7 +388,7 @@ export function delegates(manifest: Manifest | null | undefined) {
 }
 
 /** "Service account" / "Service accounts", or the generic wording. */
-export function instanceNoun(manifest: Manifest | null | undefined, count = 1) {
+export function instanceNoun(manifest: Pick<Manifest, 'instances'> | null | undefined, count = 1) {
   if (manifest?.instances)
     return count === 1 ? manifest.instances.singular : manifest.instances.plural
   return count === 1 ? 'Instance' : 'Instances'
@@ -410,7 +410,7 @@ export const upcoming: Record<string, { icon: IconName, color: string }> = {
   linear: { icon: BrandLinear, color: '#5E6AD2' },
 }
 
-export function connectionState(connection: PluginConnection) {
+export function connectionState(connection: Pick<PluginConnection, 'enabled' | 'status'>) {
   if (!connection.enabled)
     return { label: 'Paused', tone: 'muted' } as const
   return ({
