@@ -106,6 +106,16 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
         ("GET", ["agent-avatars"]) => json!({ "configured": s.avatars.configured(s).await? }),
         ("POST", ["agents", id, "avatar", "generate"]) => s.avatars.generate(s, id).await?,
         ("POST", ["agents", id, "preview"]) => s.agent_preview(input.body.clone(), id).await?,
+        ("POST", ["agents", id, "merge"]) => {
+            let mut args = input.body.clone();
+            if !args.is_object() {
+                return Err(Error::bad(
+                    "Enter a destination agent and confirm the merge.",
+                ));
+            }
+            args["sourceId"] = (*id).into();
+            s.merge_agents(args).await?
+        }
         ("GET", ["agents"]) => {
             // Never stored: clients tell this release from an earlier or rolled-back one,
             // which does not keep grants on agents.

@@ -400,14 +400,20 @@ pub async fn poll_once(s: &Service) -> Result<()> {
 }
 
 fn record(db: &Db<'_>, group: Vec<(Value, Value)>, observed: &Result<Observed>) -> Result<()> {
-    for (expected, _) in group {
+    for (expected, observed_run) in group {
         let Some(mut chat) = db.get("chats", text(&expected, "id"))? else {
             continue;
         };
         let Some(run) = db.run(text(&chat, "runId"))? else {
             continue;
         };
-        if chat["wakeup"] != expected["wakeup"] || !watchable(&chat, &run, now()) {
+        // A merge can transfer a sleeping run while its plugin check is in flight.
+        // Retry under the current profile rather than recording a stale denial.
+        if run["id"] != observed_run["id"]
+            || run["snapshot"]["agent"] != observed_run["snapshot"]["agent"]
+            || chat["wakeup"] != expected["wakeup"]
+            || !watchable(&chat, &run, now())
+        {
             continue;
         }
         let authorized = crate::chats::wait_for::access(db, &run, &chat["wakeup"]["condition"]);
@@ -470,6 +476,63 @@ pub(crate) async fn maintain(s: Arc<Service>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn observations_captured_before_a_merge_are_retried_under_the_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let source = json!({ "id": "source" });
+                let target = json!({ "id": "target" });
+                db.put("agents", &target)?;
+                db.put(
+                    connections::KIND,
+                    &json!({
+                        "id": "instance", "pluginId": "fixture", "enabled": true,
+                        "agentIds": ["target"],
+                    }),
+                )?;
+                let captured_run = json!({
+                    "id": "run", "taskId": "task", "status": "succeeded", "createdAt": now(),
+                    "snapshot": { "agent": source }, "chatExecution": { "messageId": "message" },
+                });
+                db.add_run(&captured_run, None)?;
+                let chat = db.put(
+                    "chats",
+                    &json!({
+                        "id": "chat", "agentId": "target", "runId": "run",
+                        "wakeup": {
+                            "messageId": "message", "wakeAt": now() + 60_000,
+                            "condition": { "type": "fixture_ready", "pluginId": "fixture" },
+                        },
+                    }),
+                )?;
+                let current_run =
+                    db.patch_run("run", &json!({ "snapshot": { "agent": target } }))?;
+                let stale_denial =
+                    crate::chats::wait_for::access(db, &captured_run, &chat["wakeup"]["condition"])
+                        .unwrap_err();
+                record(db, vec![(chat.clone(), captured_run)], &Err(stale_denial))?;
+                assert_eq!(db.get("chats", "chat")?.unwrap(), chat);
+                assert!(db.events("run", 0, 10)?.is_empty());
+
+                let fresh = Ok(Observed {
+                    result: Some(json!({ "state": "completed" })),
+                    display: None,
+                    check_after: None,
+                });
+                record(db, vec![(chat, current_run)], &fresh)?;
+                assert_eq!(
+                    db.get("chats", "chat")?.unwrap()["wakeup"]["observation"]["state"],
+                    "completed"
+                );
+                assert_eq!(db.events("run", 0, 10)?.len(), 1);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
 
     #[test]
     fn displays_are_bounded_and_toned() {
