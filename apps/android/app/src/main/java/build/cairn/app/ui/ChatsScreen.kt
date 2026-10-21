@@ -763,6 +763,7 @@ internal fun ChatPage(
         live.cursor,
         rendering,
         followGesture,
+        lastContentIndex = timeline.lastIndex,
     )
     val agentName = chat?.agentName?.ifBlank { null } ?: selectedAgent?.name ?: "Agent"
     val reuse =

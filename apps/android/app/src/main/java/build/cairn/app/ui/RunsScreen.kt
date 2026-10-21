@@ -223,6 +223,7 @@ fun RunScreen(
         live.cursor,
         rendering,
         followGesture,
+        lastContentIndex = timeline.lastIndex,
     )
     val task =
         state.tasks.find { mission && run != null && run.trigger != "chat" && it.id == run.taskId }

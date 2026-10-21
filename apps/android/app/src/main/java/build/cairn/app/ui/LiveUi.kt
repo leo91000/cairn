@@ -538,9 +538,10 @@ internal fun rememberHistoryPosition(
             if (saved?.follow ?: currentFollow) {
                 // Measure the latest rows while hidden, including their async Markdown, before
                 // exposing a position or allowing the paging hook to load older messages.
-                list.scrollToItem(Int.MAX_VALUE, Int.MAX_VALUE)
+                list.scrollToItem(Int.MAX_VALUE)
                 rendering?.awaitLayout()
-                list.scrollToItem(Int.MAX_VALUE, Int.MAX_VALUE)
+                val last = (list.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
+                list.scrollToItem(last, Int.MAX_VALUE)
             }
             ready = true
         }

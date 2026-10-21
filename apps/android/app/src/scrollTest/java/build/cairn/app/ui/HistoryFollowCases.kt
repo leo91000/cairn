@@ -41,17 +41,30 @@ abstract class HistoryFollowCases {
     private val history
         get() = compose.onNodeWithTag("history")
 
+    @Test fun reopeningHistoryPaintsItsTailWithoutReplayingOlderMessages() = openingHistory()
+
     @Test
-    fun reopeningHistoryPaintsItsTailWithoutReplayingOlderMessages() {
+    fun oversizedFinalReplyIsAtItsBottomOnOpeningAndWindowReplacement() =
+        openingHistory(oversized = true)
+
+    private fun openingHistory(oversized: Boolean = false) {
         val painted = mutableListOf<Pair<Int, Boolean>>()
         var opened by mutableStateOf(false)
         var content by mutableStateOf(false)
+        var rows by mutableIntStateOf(8)
         compose.setContent {
             if (opened) {
                 list = rememberLazyListState()
                 rendering = remember { MarkdownRendering() }
                 gesture = rememberHistoryFollowGesture(list, true) {}
-                FollowHistoryTail(list, true, content, rendering, gesture)
+                FollowHistoryTail(
+                    list,
+                    true,
+                    content to rows,
+                    rendering,
+                    gesture,
+                    lastContentIndex = rows,
+                )
                 CairnTheme("dark") {
                     Surface(Modifier.fillMaxWidth().height(620.dp)) {
                         CompositionLocalProvider(LocalMarkdownRendering provides rendering) {
@@ -68,12 +81,17 @@ abstract class HistoryFollowCases {
                                 contentPadding = PaddingValues(16.dp),
                             ) {
                                 if (content) {
-                                    items(8, key = { "message:$it" }) { number ->
+                                    items(rows, key = { "message:$it" }) { number ->
                                         Text(
                                             "Message $number.\n\n" + "Du texte déjà lu. ".repeat(12)
                                         )
                                     }
-                                    item("latest") { Text("Dernière activité") }
+                                    item("latest") {
+                                        Text(
+                                            if (oversized) "Dernière activité. ".repeat(300)
+                                            else "Dernière activité"
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -83,25 +101,37 @@ abstract class HistoryFollowCases {
         }
         compose.runOnIdle { opened = true }
         compose.waitForIdle()
-        compose.mainClock.autoAdvance = false
-        compose.runOnIdle { content = true }
-        repeat(20) {
-            compose.mainClock.advanceTimeByFrame()
+        fun snapshot(change: () -> Unit) {
+            compose.mainClock.autoAdvance = false
+            compose.runOnIdle {
+                painted.clear()
+                change()
+            }
+            try {
+                repeat(20) {
+                    compose.mainClock.advanceTimeByFrame()
+                    compose.onRoot().captureToImage()
+                }
+            } finally {
+                compose.mainClock.autoAdvance = true
+            }
+            compose.waitUntil(20000) {
+                compose.waitForIdle()
+                rendering.pending == 0 &&
+                    list.layoutInfo.totalItemsCount == rows + 1 &&
+                    !list.canScrollForward
+            }
             compose.onRoot().captureToImage()
+            compose.runOnIdle {
+                assertTrue("The resumed conversation must be painted", painted.isNotEmpty())
+                assertTrue(
+                    "Opening must not paint older positions before jumping to the tail: $painted",
+                    painted.none { it.second },
+                )
+            }
         }
-        compose.mainClock.autoAdvance = true
-        compose.waitUntil(20000) {
-            compose.waitForIdle()
-            rendering.pending == 0 && list.layoutInfo.totalItemsCount == 9 && !list.canScrollForward
-        }
-        compose.onRoot().captureToImage()
-        compose.runOnIdle {
-            assertTrue("The resumed conversation must be painted", painted.isNotEmpty())
-            assertTrue(
-                "Opening must not paint older positions before jumping to the tail: $painted",
-                painted.none { it.second },
-            )
-        }
+        snapshot { content = true }
+        if (oversized) snapshot { rows = 2 }
     }
 
     @Test
@@ -168,7 +198,7 @@ abstract class HistoryFollowCases {
             list = rememberLazyListState()
             rendering = remember { MarkdownRendering() }
             gesture = rememberHistoryFollowGesture(list, follow) { follow = it }
-            FollowHistoryTail(list, follow, text, rendering, gesture)
+            FollowHistoryTail(list, follow, text, rendering, gesture, lastContentIndex = 8)
             CairnTheme("dark") {
                 Surface(Modifier.fillMaxWidth().height(height.dp)) {
                     Column {
