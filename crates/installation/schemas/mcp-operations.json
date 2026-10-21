@@ -1499,6 +1499,26 @@
     }
   },
   {
+    "name": "convert_run_to_chat",
+    "description": "Move a successfully completed mission run into Chats, preserving its session, workspace and history. The original mission schedule remains unchanged. No execution starts until a message is sent. Retrying returns the same chat.",
+    "scope": "manage",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "runId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "runId"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "send_chat_message",
     "description": "Send a message to a conversation. Supply a fresh UUID message.id; reuse it with identical content for safe retries. Queue waits for the current turn; steer joins it. Starts agent work with its configured permissions.",
     "scope": "run",

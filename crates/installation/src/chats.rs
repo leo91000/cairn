@@ -834,6 +834,18 @@ fn preparation_failed(db: &Db<'_>, prepared: &Value, error: Error) -> Result<()>
 
 impl Service {
     pub async fn chat_from_run(&self, run_id: &str) -> Result<Value> {
+        self.chat_from_run_authorized(run_id, |_| Ok(())).await
+    }
+
+    /// Rechecks delegated access in the transaction that transfers the conversation.
+    pub(crate) async fn chat_from_run_authorized<F>(
+        &self,
+        run_id: &str,
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
         let origin = crate::native::policy::origin();
         if origin.known() {
             let run = self.store.run(run_id).await?;
@@ -849,7 +861,10 @@ impl Service {
         }
         let run_id = run_id.to_owned();
         self.store
-            .transaction(move |db| from_run(db, &run_id, &origin))
+            .transaction(move |db| {
+                authorize(db)?;
+                from_run(db, &run_id, &origin)
+            })
             .await
     }
 
