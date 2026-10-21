@@ -763,6 +763,13 @@ fn from_run(db: &Db<'_>, run_id: &str, origin: &crate::native::policy::Origin) -
         "UPDATE runs SET task_id=? WHERE id=?",
         rusqlite::params![text(&chat, "id"), run_id],
     )?;
+    // Work launched by this execution still returns to the same requester,
+    // whose conversation now lives in Chats rather than the mission's history.
+    db.0.execute(
+        "UPDATE runs SET data=json_set(data, '$.requestedBy', json_object('runId', ?, 'chatId', ?))
+         WHERE json_extract(data, '$.requestedBy.runId')=?",
+        rusqlite::params![run_id, text(&chat, "id"), run_id],
+    )?;
     db.restore_chat_summaries(Some(run_id))?;
     db.audit(
         "run.converted_to_chat",

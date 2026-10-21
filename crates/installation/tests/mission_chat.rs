@@ -117,6 +117,42 @@ async fn mission_conversion_preserves_history_session_workspace_and_schedule() {
 }
 
 #[tokio::test]
+async fn mission_conversion_keeps_delegated_work_attached_to_its_requester() {
+    let (_root, service, task, original) = fixture().await;
+    let run_id = text(&original, "id");
+    let mut child = service.snapshot(task.clone(), "manual").await.unwrap();
+    child["requestedBy"] = json!({ "runId": run_id, "taskId": task["id"] });
+    child["status"] = "succeeded".into();
+    child["outcome"] = json!({
+        "status": "blocked", "reason": "Needs requester input", "waitingOn": "requester",
+    });
+    let mut unrelated = service.snapshot(task.clone(), "manual").await.unwrap();
+    unrelated["requestedBy"] = json!({ "runId": unrelated["id"], "taskId": task["id"] });
+    let saved_child = child.clone();
+    let saved_unrelated = unrelated.clone();
+    service
+        .store
+        .transaction(move |db| {
+            db.add_run(&saved_child, None)?;
+            db.add_run(&saved_unrelated, None)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let chat = service.chat_from_run(run_id).await.unwrap();
+    service.chat_from_run(run_id).await.unwrap();
+    let delegated = service.store.run(text(&child, "id")).await.unwrap();
+    child["requestedBy"] = json!({ "runId": run_id, "chatId": chat["id"] });
+    assert_eq!(delegated, child);
+    assert_eq!(
+        service.store.run(text(&unrelated, "id")).await.unwrap(),
+        unrelated
+    );
+    assert_eq!(service.get("tasks", text(&task, "id")).await.unwrap(), task);
+}
+
+#[tokio::test]
 async fn converted_mission_keeps_its_original_request_when_changing_provider() {
     let (_root, service, _task, run) = fixture().await;
     let chat = service.chat_from_run(text(&run, "id")).await.unwrap();
