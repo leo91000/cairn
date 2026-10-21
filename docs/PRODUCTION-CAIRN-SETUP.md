@@ -455,6 +455,46 @@ source IPv6 address and source port: Docker's userland proxy may translate IPv6
 to IPv4 or expose a gateway even when IPv4 DNAT preserves the source. Do not
 infer IPv6 support from the IPv4 namespace or Docker test.
 
+### Optional dual-stack endpoint
+
+The IPv4-only production Compose remains the default. For a host with working
+public IPv6, create a dedicated IPv6-only bridge (Docker 28 or newer):
+
+```sh
+docker network create --driver bridge --ipv4=false --ipv6 \
+  --opt com.docker.network.bridge.gateway_mode_ipv6=nat cairn-beacon-ipv6
+```
+
+Merge `deploy/beacon/compose.ipv6.yaml` with the production Compose and any
+subdomain override, set `CAIRN_BEACON_IPV6_NETWORK=cairn-beacon-ipv6`, and save the
+merged configuration in Coolify. Keep every existing network attachment and the
+trusted proxy's fixed IPv4 address. The additional bridge gives Docker an IPv6
+destination for UDP DNAT; forwarding IPv6 to an IPv4-only container through
+`docker-proxy` loses the client's source. The override binds STUN to `[::]:3478`
+and explicitly enables IPv4-mapped traffic on that socket. Beacon reports those
+IPv4 peers as IPv4 in STUN responses and applies the same per-address limits.
+
+Docker may enable host IPv6 forwarding when creating the bridge. Preserve the
+provider's router advertisements if the host uses them for its default route
+(for systemd-networkd, explicitly set `IPv6AcceptRA=yes` on the provider link).
+Verify the default route continues to renew before proceeding.
+
+Attach the controlled TLS proxy to an IPv6 bridge too, persisting the attachment
+in Coolify's saved main proxy configuration while retaining every existing
+network and its fixed trusted IPv4 peer. It can share the dedicated Beacon IPv6
+bridge with `gw_priority: -1`. Qualify that an external HTTPS request forwards the
+actual client IPv6 address: an IPv4-only proxy container can return HTTP 200 while
+reporting Docker's gateway for every IPv6 client, breaking per-address limits.
+
+After deploying the configuration, qualify HTTPS with the real hostname and
+certificate against the numeric IPv6 address, and STUN from a separate IPv6 host.
+The STUN XOR-MAPPED-ADDRESS must match that client's IPv6 address **and port**;
+repeat the probe over IPv4 to protect existing clients. Only then publish a
+DNS-only apex AAAA record pointing at the host. An existing wildcard CNAME to the
+apex will inherit it. Do not add AAAA while only HTTPS or Docker's translated UDP
+path works. To roll back, remove AAAA first, allow its TTL to expire, then restore
+the previous saved Compose and redeploy; retain the IPv4 records throughout.
+
 The Binding responder accepts standard 20-byte requests for interoperability.
 Its maximum UDP-payload amplification is **32/20 = 1.6× for IPv4** and
 **44/20 = 2.2× for IPv6**. With FINGERPRINT it is 40/28 (about 1.43×) and 52/28

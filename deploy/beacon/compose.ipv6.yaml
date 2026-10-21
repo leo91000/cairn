@@ -1,0 +1,15 @@
+# Merge with compose.production.yaml after creating the IPv6 bridge and qualifying
+# the public HTTPS and UDP paths. Keep the existing IPv4 service networks.
+services:
+  beacon:
+    environment:
+      CAIRN_BEACON_STUN_LISTEN: '[::]:3478'
+    sysctls:
+      net.ipv6.bindv6only: '0'
+    networks:
+      ipv6:
+        gw_priority: -1
+networks:
+  ipv6:
+    external: true
+    name: ${CAIRN_BEACON_IPV6_NETWORK:?Set the dedicated IPv6 bridge name}
