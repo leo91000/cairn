@@ -128,18 +128,26 @@ async fn refresh_at(s: &Service, id: &str, endpoint: &str) -> Result<()> {
     let credential = credentials(s, id).await?;
     let mut account = s.accounts.account(s, id).await?;
     if credential["modelProvider"] == "opencode-go" {
-        let mut usage = account.usage.take().unwrap_or_default();
+        let mut usage = account.usage();
         if !usage.attempted_at.is_some_and(|at| now() - at < USAGE_TTL) {
             usage.attempted_at = Some(now());
             match fetch_usage(text(&credential, "key"), endpoint).await {
-                Ok(current) => usage = current,
-                Err(error) if error.status == 400 => return Err(error),
+                Ok(current) => {
+                    usage = current;
+                    account.mark_ready();
+                }
+                Err(error) if error.status == 400 => {
+                    account.usage = Some(usage);
+                    save(s, &account).await?;
+                    return Err(error);
+                }
                 Err(_) => usage.set_error(Some(USAGE_ERROR)),
             }
         }
         account.usage = Some(usage);
+    } else {
+        account.mark_ready();
     }
-    account.mark_ready();
     save(s, &account).await
 }
 
@@ -571,6 +579,51 @@ mod tests {
         assert_eq!(usage.remaining(MODEL), Some(0.0));
         assert!(usage.available(MODEL));
         assert!(usage.uses_balance());
+
+        // Go quotas do not measure Zen credits: an unchanged reading must keep
+        // the immediate native-limit fence, then permit a bounded retry.
+        s.accounts.exhausted(&s, go_id, MODEL).await.unwrap();
+        expire(&s, go_id).await;
+        s.accounts.refresh(&s, go_id).await.unwrap();
+        assert!(
+            s.accounts
+                .account(&s, go_id)
+                .await
+                .unwrap()
+                .exhausted
+                .is_some()
+        );
+        let lease = s
+            .accounts
+            .acquire(&s, "balance-limited", Provider::Opencode, MODEL)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.account_id, text(&zen, "id"));
+        s.accounts.release(&lease).await.unwrap();
+
+        let mut account = s.accounts.account(&s, go_id).await.unwrap();
+        account.exhausted.as_mut().unwrap().at = now() - Opencode.fresh_for() - 1;
+        save(&s, &account).await.unwrap();
+        expire(&s, go_id).await;
+        s.accounts.refresh(&s, go_id).await.unwrap();
+        assert!(
+            s.accounts
+                .account(&s, go_id)
+                .await
+                .unwrap()
+                .exhausted
+                .is_none()
+        );
+        let lease = s
+            .accounts
+            .acquire(&s, "balance-retry", Provider::Opencode, MODEL)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.account_id, go_id);
+        s.accounts.release(&lease).await.unwrap();
+
         let replaced = s
             .accounts
             .connect_api_key(
@@ -656,6 +709,39 @@ mod tests {
         assert_eq!(account.state, AccountState::Error);
         assert!(!account.error.contains(KEY));
         assert!(!Opencode.due(&s, &account, now()).await.unwrap());
+
+        // Neither a TTL skip nor a failed usage request authenticates this key.
+        let rejected = account.error;
+        for (status, body) in [
+            (StatusCode::INTERNAL_SERVER_ERROR, KEY.into()),
+            (StatusCode::OK, "{}".into()),
+        ] {
+            *response.lock().unwrap() = (status, body);
+            s.accounts.refresh(&s, &id).await.unwrap();
+            assert_eq!(
+                s.accounts.account(&s, &id).await.unwrap().state,
+                AccountState::Error
+            );
+            expire(&s, &id).await;
+            s.accounts.refresh(&s, &id).await.unwrap();
+            let account = s.accounts.account(&s, &id).await.unwrap();
+            assert_eq!(account.state, AccountState::Error);
+            assert_eq!(account.error, rejected);
+            assert!(!account.to_value().to_string().contains(KEY));
+            assert!(
+                s.accounts
+                    .acquire(&s, "rejected", Provider::Opencode, "")
+                    .await
+                    .is_err()
+            );
+        }
+
+        *response.lock().unwrap() = (StatusCode::OK, reading(80, false).to_string());
+        expire(&s, &id).await;
+        s.accounts.refresh(&s, &id).await.unwrap();
+        let account = s.accounts.account(&s, &id).await.unwrap();
+        assert_eq!(account.state, AccountState::Ready);
+        assert!(account.error.is_empty());
         task.abort();
     }
 

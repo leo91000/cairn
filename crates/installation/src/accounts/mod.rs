@@ -254,6 +254,7 @@ pub(crate) fn different_account() -> Error {
 /// Clears exhaustion once usage read after it shows the account recovered; otherwise that
 /// usage becomes what the next reading is compared with. Without any usage to compare, a
 /// coding agent that can run on unknown usage tries the account again after `fresh_for`.
+/// The same bounded retry applies to paid balances not measured by the usage endpoint.
 pub(crate) fn replenish(account: &mut Account, driver: &dyn Driver) {
     let Some(exhausted) = &account.exhausted else {
         return;
@@ -264,15 +265,16 @@ pub(crate) fn replenish(account: &mut Account, driver: &dyn Driver) {
         .as_ref()
         .and_then(|u| u.checked_at)
         .is_some_and(|checked| checked > at);
-    let recovered = if read_since {
+    let current = account.usage();
+    let retry_unknown_capacity = !driver.requires_usage()
+        && (!read_since || current.uses_balance())
+        && now() - at >= driver.fresh_for();
+    let usage_recovered = read_since && {
         let before = exhausted.usage.clone().unwrap_or_default();
-        let current = account.usage();
         Usage::recovered(&before, &current, model)
             || (before.remaining(model).is_none() && current.available(model))
-    } else {
-        !driver.requires_usage() && now() - at >= driver.fresh_for()
     };
-    if recovered {
+    if retry_unknown_capacity || usage_recovered {
         account.exhausted = None;
     } else if read_since {
         let current = account.usage.clone();
