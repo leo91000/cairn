@@ -14,8 +14,13 @@ parent provenance and live revocation. Membership or a profile edit alone does n
 migrate any conversation. Other reduced project/tool permissions still prevent
 reuse of an environment which had broader access.
 
-Migration pauses the conversation, fences its execution, captures a coherent source
-point and reads its verified encrypted S3 blocks. A userspace ext4 reader extracts
+Migration pauses the conversation, cancels only its in-flight sending inputs,
+fences its execution, captures a coherent source
+point and reads its verified encrypted S3 blocks. After fencing, source-only read
+grants can hydrate cold baseline blocks even though the profile now grants only
+the destination backend. They recheck the destination, retained access and native
+principal/parent authority; they never authorize a workload on the source. Native
+source authority is refreshed and checked again before the final commit. A userspace ext4 reader extracts
 the private home, project workspace and output into a new filesystem. Both VM flat
 and paired layouts are accepted; redirected home caches are included. It never
 mounts the untrusted filesystem on the manager or follows its symlinks while writing.
@@ -43,7 +48,12 @@ without discarding its materialized disk allocation, then rechecks capacity.
 Do not downgrade the manager while a migration is pending. Legacy native file
 archives must first resume once on the original node to obtain block storage.
 Conversion reads and rewrites the durable environment, so it needs temporary
-manager capacity and is not an on-demand or constant-time operation.
+manager capacity and is not an on-demand or constant-time operation. Sparse user
+files retain holes while copying. Extraction rechecks free space, and admission
+budgets the full logical destination image in addition to source/extraction space,
+so filesystem creation cannot spend the manager reserve (from its local node
+policy, or the default when it has no local node), regardless of a remote
+destination’s policy.
 
 This supersedes the blanket native/VM conversion prohibition in
 [native journal storage](0052-native-ublk-workspaces-and-idle-eviction.md).

@@ -1,6 +1,16 @@
 use super::*;
 use serde_json::json;
 
+async fn convert(
+    image: &Path,
+    manifest: &Value,
+    prepared: &Value,
+    backend: &str,
+    staging: &Path,
+) -> Result<PathBuf> {
+    super::convert(image, manifest, prepared, backend, staging, 0).await
+}
+
 const SIZE: u64 = 128 * 1024 * 1024;
 
 async fn image(root: &Path, tree: &Path, name: &str) -> PathBuf {
@@ -166,6 +176,7 @@ async fn copied_links_cannot_redirect_later_migration_writes_onto_the_host() {
         root: staging.join("tree"),
         remaining: SIZE,
         entries: 0,
+        minimum_free: 0,
     };
     assert!(
         copy.tree(
@@ -355,4 +366,54 @@ async fn backend_conversion_measurement() {
         json!({ "referenceWrite": write_reference, "referenceReads": reference_reads,
         "conversion": conversion, "convertedReads": converted_reads, "accounting": accounting, "payloadBytes": bytes.len() + 128 * 4096 + 13 })
     );
+}
+
+#[tokio::test]
+async fn sparse_work_remains_sparse_and_manager_reserve_is_enforced() {
+    use std::os::unix::fs::MetadataExt;
+    let root = tempfile::tempdir().unwrap();
+    let tree = root.path().join("vm");
+    write(&tree, "upper/home/node/file", b"home");
+    write(&tree, "upper/data/runs/test/output/result.md", b"result");
+    write(&tree, "upper/data/runs/test/workspace/sparse", b"start");
+    let sparse = tree.join("upper/data/runs/test/workspace/sparse");
+    let file = OpenOptions::new().write(true).open(sparse).unwrap();
+    file.set_len(64 * 1024 * 1024).unwrap();
+    file.write_all_at(b"end", 64 * 1024 * 1024 - 3).unwrap();
+    let original = image(root.path(), &tree, "vm.ext4").await;
+    let staging = root.path().join("staging");
+    std::fs::create_dir(&staging).unwrap();
+    let disk = convert(
+        &original,
+        &json!({ "size": SIZE }),
+        &prepared(),
+        "native",
+        &staging,
+    )
+    .await
+    .unwrap();
+    let copied = std::fs::metadata(staging.join("tree/workspaces/sparse")).unwrap();
+    assert_eq!(copied.len(), 64 * 1024 * 1024);
+    assert!(
+        copied.blocks() * 512 < 1024 * 1024,
+        "sparse file was expanded on manager"
+    );
+    let fs = filesystem(&disk, 0, SIZE).unwrap();
+    let bytes = fs.read("/workspaces/sparse").unwrap();
+    assert_eq!(&bytes[..5], b"start");
+    assert_eq!(&bytes[bytes.len() - 3..], b"end");
+    let refused = root.path().join("refused");
+    std::fs::create_dir(&refused).unwrap();
+    let error = super::convert(
+        &original,
+        &json!({ "size": SIZE }),
+        &prepared(),
+        "native",
+        &refused,
+        u64::MAX,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, 507);
+    assert!(!refused.join("converted.ext4").exists());
 }

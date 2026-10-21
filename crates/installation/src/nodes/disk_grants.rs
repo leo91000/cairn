@@ -73,7 +73,18 @@ pub async fn authorize(s: &Service, credential: &str) -> Result<Option<Value>> {
     }
     let agent = s.get("agents", super::run_agent(&run)).await?;
     let record = s.get("nodes", node).await?;
-    let native_allowed = if crate::native::policy::node_native(&record) {
+    if run["backendMigration"]["sourceReadReady"] == true {
+        crate::native::policy::refresh(s).await?;
+    }
+    let source_allowed = {
+        let (run_id, record) = (text(&run, "id").to_owned(), record.clone());
+        s.store
+            .read(move |db| crate::backend_migration::source_read(db, &run_id, &record))
+            .await?
+    };
+    let native_allowed = if source_allowed {
+        true
+    } else if crate::native::policy::node_native(&record) {
         let (run, record) = (run.clone(), record.clone());
         s.store
             .read(move |db| crate::native::policy::allows(db, &run, &record))
@@ -86,7 +97,12 @@ pub async fn authorize(s: &Service, credential: &str) -> Result<Option<Value>> {
         || run["moveRequest"]["nodeId"] == node
         || run["backendMigration"]["nodeId"] == node;
     let cancelling = run["status"] == RunStatus::Running && !run["cancelRequestedAt"].is_null();
-    if !native_allowed || revoked || !owner || cancelling || !super::agent_allows(&agent, node) {
+    if !native_allowed
+        || revoked
+        || !owner
+        || cancelling
+        || (!source_allowed && !super::agent_allows(&agent, node))
+    {
         return Err(Error::forbidden("Disk ownership or authorization changed."));
     }
     Ok(Some(grant))

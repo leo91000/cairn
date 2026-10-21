@@ -198,12 +198,32 @@ pub fn allows(db: &Db<'_>, run: &Value, node: &Value) -> Result<bool> {
     let agent = db
         .get("agents", crate::nodes::run_agent(run))?
         .unwrap_or_default();
-    if !native(&agent)
+    allows_agent(db, run, node, &agent)
+}
+
+/// Only the fenced migration read path can substitute the saved backend for the
+/// current profile. All principal, node-owner and parent revocations still apply.
+pub(crate) fn allows_migration_source(db: &Db<'_>, run: &Value, node: &Value) -> Result<bool> {
+    if run["backendMigration"]["sourceReadReady"] != true {
+        return Ok(false);
+    }
+    let mut agent = db
+        .get("agents", crate::nodes::run_agent(run))?
+        .unwrap_or_default();
+    agent["access"]["backend"] = "native".into();
+    agent["access"]["nodes"] = json!([node["id"]]);
+    let mut source = run.clone();
+    apply(&mut source, &run["backendMigration"]["grant"]);
+    allows_agent(db, &source, node, &agent)
+}
+
+fn allows_agent(db: &Db<'_>, run: &Value, node: &Value, agent: &Value) -> Result<bool> {
+    if !native(agent)
         || !native(&run["snapshot"]["agent"])
         || !node_native(node)
         || node["nativeEnabled"] != true
         || node["revoked"] == true
-        || !explicit(&policy(&agent)["nodes"], text(node, "id"))
+        || !explicit(&policy(agent)["nodes"], text(node, "id"))
     {
         return Ok(false);
     }

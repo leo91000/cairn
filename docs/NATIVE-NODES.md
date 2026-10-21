@@ -52,7 +52,7 @@ same conversation, history, private home, workspace and output. Execution stops;
 the next message opens a fresh engine session with the conversation context.
 System packages and running processes do not transfer; dependencies may need
 reinstalling. Migration needs a coherent source capture, S3 access, temporary
-manager disk space, fakeroot and e2fsprogs. An interrupted or
+manager disk space (including the logical destination disk budget), fakeroot and e2fsprogs. An interrupted or
 failed migration retains the source and stays paused; retry from the same action.
 Legacy native file archives must resume once on their original node first.
 Finally run the uninstall command shown for the previous runtime after the

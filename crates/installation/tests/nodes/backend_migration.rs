@@ -71,6 +71,42 @@ async fn seed_ext4(owner: &Owner, record: &Value, node: &str, master: &str) {
     journal.sync().unwrap();
 }
 
+async fn partial_cold_write(owner: &Owner, node: &str, run: &str) {
+    let directory = owner.root().join(node).join("disks").join(run);
+    let volume = runtime::load(&directory).await.unwrap();
+    let mut context = LazyDisk::context(&directory.join("lazy")).unwrap();
+    context["policy"]["memoryCacheMiB"] = 4.into();
+    volume.disk.set_context(&context).unwrap();
+    let current = owner.run(run).await;
+    let point = owner
+        .stored("node-backups", current["backup"]["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    let manifest = publication::manifest(&owner.service, &point).await.unwrap();
+    let offset = manifest["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|block| block["hash"].is_string() && block["offset"].as_u64().unwrap() > 0)
+        .unwrap()["offset"]
+        .as_u64()
+        .unwrap();
+    let disk = volume.clone();
+    tokio::task::spawn_blocking(move || disk.read_at(offset, &mut vec![0; 4 * MIB]).unwrap())
+        .await
+        .unwrap();
+    let cache = directory.join("lazy/cache");
+    if cache.exists() {
+        std::fs::remove_dir_all(&cache).unwrap();
+    }
+    std::fs::create_dir_all(cache).unwrap();
+    // Preserve bytes while creating a partial dirty frame in a nonzero ext4
+    // block. Capturing it must demand-read the uncached acknowledged S3 base.
+    volume.disk.write_at(0, &[0]).unwrap();
+    volume.disk.sync().unwrap();
+}
+
 async fn assert_files(owner: &Owner, node: &str, run: &str, native: bool) {
     let directory = owner.root().join(node).join("disks").join(run);
     let volume = runtime::load(&directory).await.unwrap();
@@ -106,7 +142,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     let (listener, address) = common::bind().await;
     let owner = Owner::at(address.to_string()).await;
     let (run, agent, chat, vm_node, native_node) = (id(), id(), id(), id(), id());
-    let original_agent = json!({ "id": agent, "revision": 1, "access": { "backend": "firecracker", "nodes": [vm_node, native_node] } });
+    let original_agent = json!({ "id": agent, "revision": 1, "access": { "backend": "firecracker", "nodes": [vm_node] } });
     owner.put("agents", original_agent.clone()).await;
     let mut record = run_record(&run, RunStatus::Succeeded);
     record["isolated"] = true.into();
@@ -116,7 +152,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     record["snapshot"] = json!({ "agent": original_agent });
     owner.add_run(&record).await;
     owner.put("chats", json!({ "id": chat, "runId": run, "agentId": agent, "paused": false, "title": "same conversation" })).await;
-    let message = json!({ "id": id(), "chatId": chat, "text": "keep this history", "createdAt": now(), "status": "sent" });
+    let message = json!({ "id": id(), "chatId": chat, "text": "keep this history", "createdAt": now(), "status": "delivered" });
     let saved = message.clone();
     owner
         .service
@@ -132,6 +168,15 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
         cancel_during_capture: Arc::new(AtomicBool::new(false)),
     };
     let mut tasks = Vec::new();
+    // This fixture has no Beacon authority server. Model its fresh owner
+    // membership independently of slow CI filesystem/S3 timing.
+    let authority = owner.service.store.clone();
+    tasks.push(tokio::spawn(async move {
+        loop {
+            authority.set("native-authority", json!({ "observedAt": now(), "accounts": { "fixture-owner": { "email": "fixture@example.test" } } }), None).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }));
     for node in [&vm_node, &native_node] {
         tasks.extend(connect_node(&owner, &record, node, address, &faults, &stop, false).await);
     }
@@ -146,11 +191,56 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     owner.put("nodes", vm_record).await;
     seed_ext4(&owner, &record, &vm_node, &format!("http://{address}/")).await;
     tasks.push(owner.serve(listener));
+    publication::capture(&owner.service, &owner.run(&run).await)
+        .await
+        .unwrap();
+    let sending = json!({ "id": id(), "chatId": chat, "text": "stop this input", "createdAt": now(), "status": "sending" });
+    let queued = json!({ "id": id(), "chatId": chat, "text": "independent queued follow-up", "createdAt": now() + 1, "status": "queued" });
+    let (active_input, later_input) = (sending.clone(), queued.clone());
+    owner
+        .service
+        .store
+        .transaction(move |db| {
+            db.put_message(&active_input)?;
+            db.put_message(&later_input)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     for (backend, destination) in [("native", &native_node), ("firecracker", &vm_node)] {
+        let source_node = if backend == "native" {
+            &vm_node
+        } else {
+            &native_node
+        };
+        partial_cold_write(&owner, source_node, &run).await;
+        owner
+            .service
+            .store
+            .patch_run(&run, json!({ "status": RunStatus::Running }))
+            .await
+            .unwrap();
         owner.service.store.set("native-authority", json!({ "observedAt": now(), "accounts": { "fixture-owner": { "email": "fixture@example.test" } } }), None).await.unwrap();
         let mut profile = original_agent.clone();
         profile["access"]["backend"] = backend.into();
+        profile["access"]["nodes"] = json!([destination]);
         owner.put("agents", profile).await;
+        let source_context = LazyDisk::context(
+            &owner
+                .root()
+                .join(source_node)
+                .join("disks")
+                .join(&run)
+                .join("lazy"),
+        )
+        .unwrap();
+        let credential = source_context["grant"].as_str().unwrap();
+        assert!(
+            disk_grants::authorize(&owner.service, credential)
+                .await
+                .is_err(),
+            "normal source grants must not bypass the new profile"
+        );
         let path = format!("/api/nodes/placement/{run}/backend-migration");
         let (status, preview) = owner.get(&path).await;
         assert_eq!(status, StatusCode::OK, "{preview}");
@@ -209,12 +299,21 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
             .read(move |db| db.messages(&key))
             .await
             .unwrap();
-        assert_eq!(messages, vec![message.clone()]);
+        let mut cancelled = sending.clone();
+        cancelled["status"] = "cancelled".into();
+        assert_eq!(messages, vec![message.clone(), cancelled, queued.clone()]);
+        assert!(
+            disk_grants::authorize(&owner.service, credential)
+                .await
+                .is_err(),
+            "source exception must end at commit"
+        );
         assert_files(&owner, destination, &run, backend == "native").await;
     }
     let before = owner.run(&run).await;
     let mut profile = original_agent;
     profile["access"]["backend"] = "native".into();
+    profile["access"]["nodes"] = json!([native_node]);
     owner.put("agents", profile).await;
     faults.failed.store(true, Ordering::SeqCst);
     let (status, response) = owner
@@ -300,6 +399,41 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
         owner.stored("node-attempts", &reservation).await.unwrap()["released"],
         true
     );
+    assert_files(&owner, &native_node, &run, true).await;
+    // A permissive remote destination must not spend the manager's reserve.
+    let mut vm_profile = owner.stored("agents", &agent).await.unwrap();
+    vm_profile["access"]["backend"] = "firecracker".into();
+    vm_profile["access"]["nodes"] = json!([vm_node]);
+    owner.put("agents", vm_profile).await;
+    owner
+        .put(
+            "nodes",
+            json!({ "id": LOCAL_NODE_ID, "storage": { "reserveMiB": 16 * 1024 * 1024 } }),
+        )
+        .await;
+    let (status, response) = owner
+        .send(
+            "POST",
+            &format!("/api/nodes/placement/{run}/backend-migration"),
+            json!({ "nodeId": vm_node, "backend": "firecracker", "confirm": true }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let refused = wait_migration(&owner, &run).await;
+    assert!(
+        refused["backendMigrationError"]
+            .as_str()
+            .unwrap()
+            .contains("temporary disk space"),
+        "{refused}"
+    );
+    assert_eq!(refused["nodeId"], native_node);
+    assert_eq!(refused["snapshot"]["agent"]["access"]["backend"], "native");
+    assert!(refused["backendMigration"].is_null());
+    let mut native_profile = owner.stored("agents", &agent).await.unwrap();
+    native_profile["access"]["backend"] = "native".into();
+    native_profile["access"]["nodes"] = json!([native_node]);
+    owner.put("agents", native_profile).await;
     assert_files(&owner, &native_node, &run, true).await;
     stop.cancel();
     for task in tasks {

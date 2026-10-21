@@ -60,16 +60,7 @@ fn chat_run(db: &Db<'_>, chat_id: &str) -> Result<(Value, Value, Value)> {
 }
 
 fn prospective(db: &Db<'_>, run: &Value, agent: &Value, origin: &Origin) -> Result<Value> {
-    // A backend switch necessarily replaces placement grants. Other reductions
-    // retain the ordinary chat rule: old files cannot bypass reduced access.
-    let mut previous = run["snapshot"]["agent"].clone();
-    previous["access"]["backend"] = access(agent)["backend"].clone();
-    previous["access"]["nodes"] = access(agent)["nodes"].clone();
-    if !crate::service::covers(agent, &previous) {
-        return Err(Error::conflict(
-            "Other agent access was reduced. Restore that access before migrating this environment.",
-        ));
-    }
+    check_access(run, agent)?;
     let mut proposed = run.clone();
     proposed["snapshot"]["agent"] = agent.clone();
     for key in ["provider", "model", "reasoning"] {
@@ -80,6 +71,48 @@ fn prospective(db: &Db<'_>, run: &Value, agent: &Value, origin: &Origin) -> Resu
     let grant = migration_grant(db, run, agent, origin)?;
     policy::apply(&mut proposed, &grant);
     Ok(proposed)
+}
+
+fn check_access(run: &Value, agent: &Value) -> Result<()> {
+    // A backend switch necessarily replaces placement grants. Other reductions
+    // retain the ordinary chat rule: old files cannot bypass reduced access.
+    let mut previous = run["snapshot"]["agent"].clone();
+    previous["access"]["backend"] = access(agent)["backend"].clone();
+    previous["access"]["nodes"] = access(agent)["nodes"].clone();
+    if !crate::service::covers(agent, &previous) {
+        return Err(Error::conflict(
+            "Other agent access was reduced. Restore that access before migrating this environment.",
+        ));
+    }
+    Ok(())
+}
+
+/// A stopped source can fetch its own base while being copied. This is never a
+/// workload lease: ordinary execution continues to use the current backend grants.
+pub(crate) fn source_read(db: &Db<'_>, run_id: &str, node: &Value) -> Result<bool> {
+    let Some(run) = db.run(run_id)? else {
+        return Ok(false);
+    };
+    if run["backendMigration"]["process"] != PROCESS.as_str()
+        || run["backendMigration"]["sourceReadReady"] != true
+        || RunStatus::of(&run).is_some_and(RunStatus::is_active)
+        || nodes::owner_node(&run) != text(node, "id")
+    {
+        return Ok(false);
+    }
+    let agent = required(db.get("agents", nodes::run_agent(&run))?, "Agent removed")?;
+    check_access(&run, &agent)?;
+    let destination = required(
+        db.get("nodes", text(&run["backendMigration"], "nodeId"))?,
+        "Destination removed",
+    )?;
+    if !allowed(db, &candidate(&run), &destination)? {
+        return Ok(false);
+    }
+    if policy::node_native(node) {
+        return policy::allows_migration_source(db, &run, node);
+    }
+    Ok(true)
 }
 
 fn migration_grant(db: &Db<'_>, run: &Value, agent: &Value, source: &Origin) -> Result<Value> {
@@ -148,6 +181,15 @@ pub(crate) async fn chat_id(s: &Service, run: &str) -> Result<String> {
         .await
 }
 
+async fn refresh_authority(s: &Service, chat: &Value) -> Result<()> {
+    let run = s.store.run(text(chat, "runId")).await?;
+    let agent = s.get("agents", text(chat, "agentId")).await?;
+    if policy::native(&run["snapshot"]["agent"]) || policy::native(&agent) {
+        policy::refresh(s).await?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn preview(
     s: &Service,
     chat_id: &str,
@@ -155,9 +197,9 @@ pub(crate) async fn preview(
 ) -> Result<Value> {
     let check = authorize.clone();
     s.store.read(move |db| check(db)).await?;
-    // Fresh authority is required only for native destinations.
+    // Both native sources and destinations need fresh human authority.
     let chat = s.get("chats", chat_id).await?;
-    policy::refresh_agent(s, text(&chat, "agentId")).await?;
+    refresh_authority(s, &chat).await?;
     let (chat_id, origin) = (chat_id.to_owned(), origin());
     s.store.read(move |db| {
         authorize(db)?;
@@ -203,7 +245,7 @@ impl Service {
         let check = authorize.clone();
         self.store.read(move |db| check(db)).await?;
         let chat = self.get("chats", &chat_id).await?;
-        policy::refresh_agent(self, text(&chat, "agentId")).await?;
+        refresh_authority(self, &chat).await?;
         let operation = id();
         let (args, who, migration) = (input.clone(), source.clone(), operation.clone());
         let request_authorization = authorize.clone();
@@ -238,6 +280,7 @@ impl Service {
                 "convertedBackup": if reusable { previous["convertedBackup"].clone() } else { Value::Null },
                 "id": migration,
                 "process": PROCESS.as_str(),
+                "sourceReadReady": false,
                 "nodeId": node["id"],
                 "runtimeId": node["runtimeId"],
                 "snapshot": proposed["snapshot"],
@@ -247,6 +290,12 @@ impl Service {
                 "paused": if previous.is_object() { previous["paused"].clone() } else { chat["paused"].clone() },
                 "createdAt": now(),
             });
+            for mut message in db.messages(text(&chat, "id"))? {
+                if message["status"] == crate::chats::MessageStatus::Sending {
+                    message["status"] = crate::chats::MessageStatus::Cancelled.into();
+                    db.put_message(&message)?;
+                }
+            }
             chat["paused"] = true.into();
             db.put("chats", &chat)?;
             db.patch_run(text(&run, "id"), &json!({ "backendMigration": migration, "backendMigrationError": null }))?;
@@ -340,16 +389,43 @@ impl Service {
         }
         let preparation = self.worker.run_preparation_lock(&run_id).await;
         let _preparation = preparation.lock_owned().await;
-        let mut run = self.store.run(&run_id).await?;
+        let run = self.store.run(&run_id).await?;
         crate::recovery::fence(self, &run).await?;
         if RunStatus::of(&run).is_some_and(RunStatus::is_active) {
-            run = self
-                .store
+            self.store
                 .patch_run(
                     &run_id,
                     json!({ "status": RunStatus::Cancelled, "recoveryPending": false }),
                 )
                 .await?;
+        }
+        let (key, operation_id) = (run_id.clone(), operation.to_owned());
+        let run = self
+            .store
+            .transaction(move |db| {
+                let mut current = required(db.run(&key)?, "Conversation removed")?;
+                if current["backendMigration"]["id"] != operation_id {
+                    return Err(Error::conflict(
+                        "Migration changed while fencing its source.",
+                    ));
+                }
+                current["backendMigration"]["sourceReadReady"] = true.into();
+                db.patch_run(
+                    &key,
+                    &json!({ "backendMigration": current["backendMigration"] }),
+                )
+            })
+            .await?;
+        let source_node = self.get("nodes", nodes::owner_node(&run)).await?;
+        let (source_run_id, read_node) = (run_id.clone(), source_node.clone());
+        let readable = self
+            .store
+            .read(move |db| source_read(db, &source_run_id, &read_node))
+            .await?;
+        if !readable {
+            return Err(Error::forbidden(
+                "The source environment is no longer authorized for migration reads.",
+            ));
         }
         let reservation = text(&run["backendMigration"], "reservationId").to_owned();
         // The reservation ID survives process death. No workload starts during
@@ -374,7 +450,7 @@ impl Service {
                 .prefix("backend-migration-")
                 .tempdir_in(&self.config.data_dir)?;
             let raw = staging.path().join("source.ext4");
-            materialize(self, &backup, &manifest, &raw, &node).await?;
+            let reserve = materialize(self, &backup, &manifest, &raw, &node).await?;
             let checkpoint = nodes::checkpoint(self, &run_id).await?;
             let disk = crate::storage::backend_conversion::convert(
                 &raw,
@@ -382,6 +458,7 @@ impl Service {
                 &checkpoint["prepared"],
                 text(&args, "backend"),
                 staging.path(),
+                reserve,
             )
             .await?;
             let mut converted = nodes::snapshots::index(&disk).await?;
@@ -400,8 +477,7 @@ impl Service {
             }
             nodes::publication::converted_environment(self, &run, &node, &disk, converted).await?
         };
-        let current = self.store.run(&run_id).await?;
-        policy::refresh_agent(self, nodes::run_agent(&current)).await?;
+        policy::refresh(self).await?;
         let proposed = candidate(&self.store.run(&run_id).await?);
         let placement = nodes::placement::reserve(self, &proposed, &reservation).await?;
         let restored = async {
@@ -412,7 +488,7 @@ impl Service {
         let release = nodes::placement::release(self, &reservation).await;
         restored?;
         release?;
-        policy::refresh_agent(self, nodes::run_agent(&current)).await?;
+        policy::refresh(self).await?;
         let (chat_id, operation) = (chat_id.to_owned(), operation.to_owned());
         self.store.transaction(move |db| {
             authorize(db)?;
@@ -423,6 +499,10 @@ impl Service {
                 return Err(Error::conflict("Conversation or agent changed during backend migration."));
             }
             let proposed = prospective(db, &current, &agent, &source)?;
+            let source_node = required(db.get("nodes", text(&source_node, "id"))?, "Source node removed")?;
+            if !source_read(db, &run_id, &source_node)? {
+                return Err(Error::forbidden("Source read permission was revoked during migration."));
+            }
             let destination = required(db.get("nodes", text(&node, "id"))?, "Destination node removed")?;
             if !allowed(db, &proposed, &destination)? {
                 return Err(Error::forbidden("Destination permission was revoked during migration."));
@@ -485,7 +565,7 @@ async fn materialize(
     manifest: &Value,
     path: &Path,
     node: &Value,
-) -> Result<()> {
+) -> Result<u64> {
     let size = manifest["size"]
         .as_u64()
         .ok_or_else(|| Error::bad("Missing saved disk size."))?;
@@ -500,7 +580,14 @@ async fn materialize(
             "The destination disk limit is smaller than the saved environment.",
         ));
     }
-    let policy = crate::storage::policy::Policy::for_node(&node["storage"])?;
+    // Staging lives on the manager. A remote destination's reserve cannot
+    // lower the protection of the manager's database filesystem.
+    let local = s
+        .store
+        .get("nodes", nodes::LOCAL_NODE_ID)
+        .await?
+        .unwrap_or_default();
+    let policy = crate::storage::policy::Policy::for_node(&local["storage"])?;
     let (total, free) = crate::storage::policy::space(path.parent().unwrap())?;
     let payload: u64 = manifest["blocks"]
         .as_array()
@@ -512,6 +599,7 @@ async fn materialize(
     if free
         < policy
             .reserve(total)
+            .saturating_add(size)
             .saturating_add(payload.saturating_mul(4))
             .saturating_add(64 * 1024 * 1024)
     {
@@ -535,7 +623,7 @@ async fn materialize(
         output.write_all(&bytes).await?;
     }
     output.sync_all().await?;
-    Ok(())
+    Ok(policy.reserve(total))
 }
 
 #[cfg(test)]

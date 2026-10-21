@@ -9,7 +9,7 @@ use ext4_view::{Ext4, Ext4Read, FileType};
 use serde_json::Value;
 use std::{
     fs::{File, OpenOptions},
-    io::Write,
+    io::{Seek, Write},
     os::unix::{
         ffi::OsStrExt,
         fs::{FileExt, PermissionsExt},
@@ -85,16 +85,29 @@ fn directory(root: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn require_space(path: &Path, reserve: u64, additional: u64) -> Result<()> {
+    let (_, free) = super::policy::space(path)?;
+    if free < reserve.saturating_add(additional) {
+        return Err(Error::new(
+            507,
+            "Insufficient temporary migration space; original environment retained.",
+        ));
+    }
+    Ok(())
+}
+
 struct Copy {
     root: PathBuf,
     remaining: u64,
     entries: u64,
+    minimum_free: u64,
 }
 
 impl Copy {
     fn tree(&mut self, fs: &Ext4, source: &Path, destination: &Path) -> Result<()> {
         let mut pending = vec![(source.to_owned(), destination.to_owned(), 0)];
         while let Some((source, target, depth)) = pending.pop() {
+            require_space(&self.root, self.minimum_free, 64 * 1024 * 1024)?;
             self.entries += 1;
             if depth > 256 || self.entries > 1_000_000 {
                 return Err(Error::bad(
@@ -143,8 +156,18 @@ impl Copy {
                         if count == 0 {
                             break;
                         }
-                        output.write_all(&buffer[..count])?;
+                        // Keep sparse emulator images and caches sparse on the
+                        // manager. Dense extraction can exceed source block use.
+                        require_space(&self.root, self.minimum_free, 64 * 1024 * 1024)?;
+                        for page in buffer[..count].chunks(4096) {
+                            if page.iter().all(|byte| *byte == 0) {
+                                output.seek(std::io::SeekFrom::Current(page.len() as i64))?;
+                            } else {
+                                output.write_all(page)?;
+                            }
+                        }
                     }
+                    output.set_len(metadata.len())?;
                     output.sync_all()?;
                     output.set_permissions(std::fs::Permissions::from_mode(
                         u32::from(metadata.mode() & 0o777) | 0o600,
@@ -177,6 +200,7 @@ pub(crate) async fn convert(
     prepared: &Value,
     backend: &str,
     staging: &Path,
+    minimum_free: u64,
 ) -> Result<PathBuf> {
     let source_native = manifest["kind"] == "native-ext4-v1";
     if !matches!(backend, "native" | "firecracker") || source_native == (backend == "native") {
@@ -210,6 +234,7 @@ pub(crate) async fn convert(
             root: copy_root.clone(),
             remaining: size,
             entries: 0,
+            minimum_free,
         };
         for (name, guest) in [
             ("home", Path::new("/home/node")),
@@ -265,6 +290,14 @@ pub(crate) async fn convert(
     })
     .await
     .map_err(Error::internal)??;
+    // Reserve the full logical destination size before mkfs. Its allocation
+    // cannot exceed this bound, even when filesystem metadata/journal creation
+    // writes more than the source's nonzero block estimate.
+    require_space(
+        &staging,
+        minimum_free,
+        size.saturating_add(64 * 1024 * 1024),
+    )?;
     let target = staging.join("converted.ext4");
     File::create(&target)?.set_len(size)?;
     // The manager is unprivileged and may have any UID. fakeroot changes only
