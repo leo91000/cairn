@@ -53,6 +53,7 @@ impl Fixture {
             codex_bin: common::fixture("codex.mjs"),
             claude_bin: common::fixture("claude.mjs"),
             opencode_bin: "opencode".into(),
+            opencode_go_usage_url: cairn_installation::accounts::opencode::USAGE_URL.into(),
             concurrency,
             worker_enabled: true,
             ..common::config(root.path())
@@ -799,6 +800,46 @@ async fn usage_exhaustion_switches_accounts_and_preserves_the_conversation() {
     assert_eq!(completed["accountId"], accounts[1]);
     assert_eq!(completed["accountName"], "Backup");
     assert_eq!(completed["sessionId"], "fixture-chat");
+    fixture.stop(false).await;
+}
+
+#[tokio::test]
+async fn claude_individual_spend_limit_waits_for_capacity_and_remains_cancellable() {
+    let mut fixture = Fixture::new().await;
+    let s = fixture.service.clone();
+    let account = claude_account(&s, 4).await;
+    let mut sent = message("fixture:spend-limit");
+    sent["provider"] = "claude".into();
+    let chat = fixture.start_chat(sent).await;
+    let run_id = fixture.chat_run(&chat).await;
+    let waiting = fixture
+        .until(&run_id, |run| {
+            run["accountWaitReason"].as_str().is_some_and(|reason| {
+                reason.contains("available usage") || reason.starts_with("Usage exhausted.")
+            })
+        })
+        .await;
+    assert_eq!(waiting["status"], RunStatus::Running, "{waiting}");
+    assert!(waiting["sessionId"].is_string(), "{waiting}");
+    assert!(waiting["error"].is_null(), "{waiting}");
+    let saved = s.store.get(KIND, &account).await.unwrap().unwrap();
+    assert!(saved["exhausted"].is_object(), "{saved}");
+    let session = common::relay_fixture::context(&s).await;
+    reqwest::Client::new()
+        .post(format!("{}/api/runs/{run_id}/cancel", fixture.url))
+        .header("x-test-relay-token", text(&session, "value"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let cancelled = fixture
+        .until(&run_id, |run| run["status"] == RunStatus::Cancelled)
+        .await;
+    assert_eq!(cancelled["status"], RunStatus::Cancelled, "{cancelled}");
+    assert_eq!(cancelled["sessionId"], waiting["sessionId"]);
+    assert_eq!(cancelled["workspace"], waiting["workspace"]);
     fixture.stop(false).await;
 }
 

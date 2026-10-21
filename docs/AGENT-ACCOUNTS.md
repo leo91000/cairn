@@ -74,9 +74,10 @@ contribute models. A chosen model offers a **Connection** choice:
 Each connection is labelled by who pays: **Included** (OpenCode Go subscription),
 **Credits** (Zen balance) or **Your key**. Reorder OpenCode connections with the
 arrows on **Connections**. The conversation records which connection ran, such as
-*Claude Sonnet 4.5 via OpenCode Zen*. Usage is not polled: the account row says
-**Usage not reported**. Saving a key validates its format; the first model request
-checks authentication. A provider rejection asks you to replace the key. A rate
+*Claude Sonnet 4.5 via OpenCode Zen*. Go connections report their rolling, weekly
+and monthly quotas; see [OpenCode Go usage](OPENCODE-GO-USAGE.md). Other providers
+show **Usage not reported**. Saving a key validates its format; a Go usage reading
+or the first model request checks authentication. A provider rejection asks you to replace the key. A rate
 limit enters the shared exhaustion flow and retries the account after five minutes
 when no readable quota is available.
 

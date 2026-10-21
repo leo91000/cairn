@@ -224,6 +224,7 @@ fn run_result(db: &Db<'_>, condition: &Value) -> Result<Option<Value>> {
             "runId": target["id"],
             "status": status,
             "outcomeStatus": target["outcome"]["status"],
+            "waitingOn": target["outcome"]["waitingOn"],
             "finishedAt": target["finishedAt"],
         })
     }))

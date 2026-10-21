@@ -65,6 +65,7 @@ export type ActivityEntry
     id: string
     time: number
     text: string
+    sourceId?: string
     delivery?: string
     /** The model provider that wrote this reply, when the engine chose among several. */
     via?: string
@@ -143,7 +144,7 @@ function pretty(value: unknown) {
   return typeof value === 'string' ? value : JSON.stringify(value, null, 2) ?? ''
 }
 
-function payload(event: RunEvent) {
+export function activityPayload(event: RunEvent) {
   if (event.payload)
     return event.payload
   try {
@@ -183,7 +184,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
   const subagents = new Map<string, ActivityArtifact>()
   const aliases = new Map<string, string>()
   for (const event of events) {
-    const item = record(payload(event).item)
+    const item = record(activityPayload(event).item)
     if (item.type === 'subagent' && text(item.replaces_id))
       aliases.set(`${event.runId}:${text(item.replaces_id)}`, text(item.id))
   }
@@ -251,7 +252,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     }
 
     // The condition completed right away: the agent never waited, and this call replaced any wait.
-    const observation = event.type === 'chat.wait_ready' ? payload(event) : {}
+    const observation = event.type === 'chat.wait_ready' ? activityPayload(event) : {}
     const immediate = typeof observation.immediate === 'boolean' ? observation.immediate : event.text === immediateResult
     if (event.type === 'chat.wait_ready' && immediate) {
       if (openWait) {
@@ -354,7 +355,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       continue
     }
 
-    const data = payload(event)
+    const data = activityPayload(event)
     const route = record(data.route)
     // An attempt may name the provider of its replies; the next attempt ends that label.
     if (event.type === 'status' && data.attempt === true)
@@ -484,6 +485,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       const existing = messages.get(id)
       if (existing) {
         existing.text = content
+        existing.sourceId = `${event.runId}:${event.id}`
       }
       else {
         const message = {
@@ -491,6 +493,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
           id,
           time: event.createdAt,
           text: content,
+          sourceId: `${event.runId}:${event.id}`,
           ...(via ? { via } : {}),
         }
         entries.push(message)

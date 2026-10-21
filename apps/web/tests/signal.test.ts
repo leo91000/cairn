@@ -5,10 +5,12 @@ import { activityEntries } from '../src/activity'
 import { exclusiveSuspensionLabel } from '../src/run-status'
 import {
   backgroundWait,
+  dismissible,
   filOf,
   identityColor,
   liveElapsed,
   shortAge,
+  tomorrowMorning,
   waitingStep,
   workingStep,
 } from '../src/signal'
@@ -244,6 +246,76 @@ describe('the Fil', () => {
     expect(fil.forYou[3]).toMatchObject({ at: 40, subtitle: 'Finished', preview: 'Shipped the notes.' })
     expect(fil.forYou[2]).toMatchObject({ key: 'task:digest', subtitle: 'Mission finished', preview: 'Three stories today.' })
     expect(fil.recent.map(item => item.title).sort()).toEqual(['paused', 'read'])
+  })
+
+  describe('a blocked mission', () => {
+    const blocked = (values: Partial<RunListItem['outcome'] & object> = {}): RunListItem['outcome'] => ({
+      status: 'blocked',
+      reason: 'CI belongs to the parent',
+      evidence: [],
+      reportedAt: 2,
+      ...values,
+    })
+
+    it('goes back to the agent work that started it when it waits on that work', () => {
+      const fil = filOf([chat('orchestrate', { title: 'Orchestrate F8' })], [task('proof'), task('review'), task('orphan')], [
+        run('proof-1', 'proof', { outcome: blocked({ waitingOn: 'requester' }), requestedBy: { runId: 'chat-run', chatId: 'orchestrate' } }),
+        run('review-1', 'review', { outcome: blocked({ waitingOn: 'requester' }), requestedBy: { runId: 'proof-1', taskId: 'proof' } }),
+        // Its requester is gone: the user is the one left to act.
+        run('orphan-1', 'orphan', { outcome: blocked({ waitingOn: 'requester' }), requestedBy: { runId: 'gone', chatId: 'deleted' } }),
+      ])
+      expect(fil.recent.map(item => [item.title, item.kind, item.setAside, item.subtitle, item.requester?.to])).toEqual([
+        ['proof', 'set-aside', 'requester', 'Waiting on Orchestrate F8', '/chats/orchestrate'],
+        ['review', 'set-aside', 'requester', 'Waiting on proof', '/fil/runs/proof-1'],
+        ['Orchestrate F8', 'recent', undefined, 'Cairn', undefined],
+      ])
+      expect(fil.forYou.map(item => [item.title, item.kind])).toEqual([['orphan', 'review']])
+    })
+
+    it('waits in Recent on an outside check, and asks the user by default', () => {
+      const fil = filOf([], [task('ci'), task('token')], [
+        run('ci-1', 'ci', { outcome: blocked({ waitingOn: 'external' }) }),
+        run('token-1', 'token', { outcome: blocked({ waitingOn: 'user' }) }),
+      ])
+      expect(fil.recent).toMatchObject([{
+        title: 'ci',
+        kind: 'set-aside',
+        setAside: 'external',
+        outcome: 'blocked',
+      }])
+      expect(fil.forYou).toMatchObject([{ title: 'token', kind: 'review', outcome: 'blocked' }])
+    })
+
+    it('leaves For you once dismissed, and waits until its snooze ends', () => {
+      const runs = [
+        run('dismissed-1', 'dismissed', { outcome: blocked(), dismissal: { until: null } }),
+        run('snoozed-1', 'snoozed', { outcome: blocked({ status: 'needs_input', reason: 'Pick a scope' }), dismissal: { until: 100 } }),
+      ]
+      const tasks = [task('dismissed'), task('snoozed')]
+      const before = filOf([], tasks, runs, {}, 50)
+      expect(before.recent).toMatchObject([{ title: 'dismissed', kind: 'set-aside', setAside: 'dismissed' }])
+      expect(before.waiting).toMatchObject([{
+        title: 'snoozed',
+        kind: 'snoozed',
+        wakeAt: 100,
+        subtitle: 'Snoozed · Needs your input · Pick a scope',
+      }])
+      expect(before.forYou).toEqual([])
+      expect(filOf([], tasks, runs, {}, 100).forYou.map(item => [item.title, item.kind])).toEqual([['snoozed', 'review']])
+    })
+
+    it('can be dismissed only when blocked: input the agent asked for can only be snoozed', () => {
+      const fil = filOf([], [task('blocked'), task('input')], [
+        run('blocked-1', 'blocked', { outcome: blocked(), createdAt: 2 }),
+        run('input-1', 'input', { outcome: blocked({ status: 'needs_input' }) }),
+      ])
+      expect(fil.forYou.map(item => [item.title, dismissible(item)])).toEqual([['blocked', true], ['input', false]])
+    })
+
+    it('asks again tomorrow at nine, local time', () => {
+      const evening = new Date(2026, 9, 20, 22, 30).getTime()
+      expect(new Date(tomorrowMorning(evening))).toEqual(new Date(2026, 9, 21, 9, 0))
+    })
   })
 
   it('treats work read on this page as read until the server catches up, but not a later turn', () => {

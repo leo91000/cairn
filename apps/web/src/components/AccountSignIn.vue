@@ -198,7 +198,8 @@ async function close() {
             >
           </label>
           <p class="text-xs text-muted">
-            The key is encrypted on your installation and used only for this model provider. Provider usage isn’t reported here.
+            The key is encrypted on your installation and used only for this model provider.
+            {{ modelProvider === 'opencode-go' ? 'OpenCode Go usage is checked automatically.' : 'Provider usage isn’t reported here.' }}
           </p>
           <p class="text-xs text-muted">
             Model access is checked when you send a message. Your provider’s plan, balance and Privacy settings still apply.

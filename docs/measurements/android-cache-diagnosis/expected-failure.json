@@ -1,0 +1,9 @@
+{
+  "reference": "4b9558e9d90114a663e14562e994df032e96db3c",
+  "command": "CAIRN_CACHE_EXPECT_UNBLOCKED=1 ANDROID_HOME=/home/leoc/Android/Sdk ./gradlew :app:testDebugUnitTest --rerun --tests build.cairn.app.ui.CacheRefreshDiagnosisTest --no-daemon",
+  "expected": "Second received SSE update visible while cache write remains held",
+  "observed": "Second batch reduced upstream; UI still shows first update until held cache write is released",
+  "failure": "androidx.compose.ui.test.ComposeTimeoutException: Condition still not satisfied after 10000 ms",
+  "originalInvocation": "CAIRN_CACHE_EXPECT_UNBLOCKED=1 ANDROID_HOME=/home/leoc/Android/Sdk ./gradlew :app:testDebugUnitTest --rerun --tests build.cairn.app.ui.CacheRefreshDiagnosisTest --no-daemon",
+  "reproduce": "CAIRN_CACHE_EXPECT_UNBLOCKED=1 ANDROID_HOME=/home/leoc/Android/Sdk node scripts/measure-android-cache.mjs"
+}

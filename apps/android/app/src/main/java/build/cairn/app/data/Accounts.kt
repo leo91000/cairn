@@ -33,6 +33,8 @@ data class AccountUsage(
     val checkedAt: Long? = null,
     val error: String? = null,
     val resets: BankedResets? = null,
+    /** OpenCode Go may use paid Zen credits after its subscription quotas are exhausted. */
+    val useBalance: Boolean = false,
 ) {
     /** Windows limiting every model, shortest first. */
     val general

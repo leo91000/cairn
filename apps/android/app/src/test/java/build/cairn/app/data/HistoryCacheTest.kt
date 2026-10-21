@@ -1,7 +1,10 @@
 package build.cairn.app.data
 
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -19,6 +22,36 @@ class HistoryCacheTest {
 
     private fun record() =
         CachedHistory(2, "v1:r:1", LiveState(), listOf(RunEvent(2, 1, "item.completed", "saved")))
+
+    @Test
+    fun `warm reads and neighboring saves reuse retained payload sizes`() = runBlocking {
+        val strings = AtomicInteger()
+        val contents = mapOf<String, JsonElement>("output" to JsonPrimitive("retained output"))
+        val payload =
+            object : Map<String, JsonElement> by contents {
+                override fun toString(): String {
+                    strings.incrementAndGet()
+                    return contents.toString()
+                }
+            }
+        val cache = cache()
+        cache.save(
+            "retained",
+            record().copy(events = listOf(RunEvent(2, 1, "output", "", payload))),
+            true,
+        )
+        val initial = strings.get()
+        assertTrue(initial > 0)
+        repeat(10) {
+            assertNotNull(cache.read("retained"))
+            cache.save("neighbor", record())
+        }
+        assertEquals(
+            "Unchanged payloads must not be stringified for each cache access",
+            initial,
+            strings.get(),
+        )
+    }
 
     @Test
     fun `previously loaded pages and reading position survive on disk beyond the initial window`() =
