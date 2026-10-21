@@ -27,20 +27,52 @@ const USAGE_ERROR: &str =
     "OpenCode Go usage is temporarily unavailable. It will be checked again automatically.";
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GoUsage {
-    use_balance: bool,
-    rolling_usage: GoWindow,
-    weekly_usage: GoWindow,
-    monthly_usage: GoWindow,
+#[serde(untagged)]
+enum GoUsage {
+    Current {
+        usage: GoWindows,
+        #[serde(default, rename = "useBalance")]
+        use_balance: bool,
+    },
+    Legacy {
+        #[serde(flatten)]
+        windows: GoWindows,
+        #[serde(rename = "useBalance")]
+        use_balance: bool,
+    },
+}
+
+#[derive(Deserialize)]
+struct GoWindows {
+    #[serde(alias = "rollingUsage")]
+    rolling: GoWindow,
+    #[serde(alias = "weeklyUsage")]
+    weekly: GoWindow,
+    #[serde(alias = "monthlyUsage")]
+    monthly: GoWindow,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GoWindow {
     status: GoStatus,
+    #[serde(alias = "percent")]
     usage_percent: f64,
-    reset_in_sec: i64,
+    #[serde(flatten)]
+    reset: GoReset,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum GoReset {
+    Absolute {
+        #[serde(rename = "resetsAt")]
+        at: chrono::DateTime<chrono::FixedOffset>,
+    },
+    Relative {
+        #[serde(rename = "resetInSec")]
+        seconds: i64,
+    },
 }
 
 #[derive(Deserialize)]
@@ -50,39 +82,58 @@ enum GoStatus {
     RateLimited,
 }
 
-/// The official Go endpoint returns percentages and relative reset times, never token prices.
+/// Read the current Go envelope and the original response without estimating usage from prices.
 fn normalize(bytes: &[u8], checked: i64) -> Result<Usage> {
     let response: GoUsage =
         serde_json::from_slice(bytes).map_err(|_| Error::bad_gateway(USAGE_ERROR))?;
+
+    let (windows, use_balance) = match response {
+        GoUsage::Current { usage, use_balance }
+        | GoUsage::Legacy {
+            windows: usage,
+            use_balance,
+        } => (usage, use_balance),
+    };
+
     let mut usage = Usage {
         checked_at: Some(checked),
         attempted_at: Some(checked),
         ..Usage::default()
     };
+
     for (id, label, minutes, window) in [
-        ("go:rolling", "5-hour window", 300, response.rolling_usage),
-        ("go:weekly", "Weekly", 10080, response.weekly_usage),
-        ("go:monthly", "Monthly", 43200, response.monthly_usage),
+        ("go:rolling", "5-hour window", 300, windows.rolling),
+        ("go:weekly", "Weekly", 10080, windows.weekly),
+        ("go:monthly", "Monthly", 43200, windows.monthly),
     ] {
+        let reset_limit = 366 * 86400;
+        let resets_at = match window.reset {
+            GoReset::Absolute { at } => at.timestamp(),
+            GoReset::Relative { seconds } if (0..=reset_limit).contains(&seconds) => {
+                checked / 1000 + seconds
+            }
+            GoReset::Relative { .. } => return Err(Error::bad_gateway(USAGE_ERROR)),
+        };
+
         if !(0.0..=100.0).contains(&window.usage_percent)
-            || !(0..=366 * 86400).contains(&window.reset_in_sec)
+            || !(0..=checked / 1000 + reset_limit).contains(&resets_at)
         {
             return Err(Error::bad_gateway(USAGE_ERROR));
         }
+
         usage.windows.push(Window {
             id: id.into(),
             label: label.into(),
             used_percent: serde_json::Number::from_f64(window.usage_percent),
-            resets_at: Some(checked / 1000 + window.reset_in_sec),
+            resets_at: Some(resets_at),
             duration_mins: Some(minutes),
             models: Vec::new(),
             reached: matches!(window.status, GoStatus::RateLimited)
                 || window.usage_percent >= 100.0,
         });
     }
-    usage
-        .extra
-        .insert("useBalance".into(), response.use_balance.into());
+
+    usage.extra.insert("useBalance".into(), use_balance.into());
     Ok(usage)
 }
 
@@ -374,6 +425,16 @@ mod tests {
         })
     }
 
+    fn current_reading(monthly: u64) -> Value {
+        json!({
+            "usage": {
+                "rolling": { "status": "ok", "percent": 25, "resetsAt": "2027-01-01T02:00:00.000Z" },
+                "weekly": { "status": "ok", "percent": 60, "resetsAt": "2027-01-02T00:00:00.000Z" },
+                "monthly": { "status": if monthly >= 100 { "rate-limited" } else { "ok" }, "percent": monthly, "resetsAt": "2027-01-08T00:00:00.000Z" },
+            },
+        })
+    }
+
     #[test]
     fn official_windows_preserve_percentages_and_absolute_reset_times() {
         let usage = normalize(
@@ -390,6 +451,53 @@ mod tests {
         assert!(!usage.blocked(MODEL));
         let old = Usage::from_value(&usage.to_value());
         assert_eq!(old, usage);
+    }
+
+    #[tokio::test]
+    async fn current_endpoint_response_reports_usage_instead_of_unavailable() {
+        let root = TempDir::new().unwrap();
+        let (url, _, task) = endpoint(current_reading(100)).await;
+        let s = service(&root, &url).await;
+        let account = s
+            .accounts
+            .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", KEY, None)
+            .await
+            .unwrap();
+        let id = text(&account, "id");
+        s.accounts.refresh(&s, id).await.unwrap();
+        let usage = s.accounts.account(&s, id).await.unwrap().usage();
+        assert_eq!(usage.remaining(""), Some(0.0), "Go quotas must be readable");
+        assert_eq!(usage.windows.len(), 3);
+        assert_eq!(usage.windows[0].resets_at, Some(1_798_768_800));
+        assert_eq!(usage.windows[1].resets_at, Some(1_798_848_000));
+        assert_eq!(usage.windows[2].resets_at, Some(1_799_366_400));
+        assert!(usage.blocked(MODEL));
+        assert!(!usage.uses_balance());
+        assert!(usage.extra.get("error").is_none_or(Value::is_null));
+        task.abort();
+    }
+
+    #[test]
+    fn current_windows_preserve_capacity_and_reject_malformed_readings() {
+        let checked = 1_798_761_600_000;
+        let response = current_reading(85);
+        let usage = normalize(&serde_json::to_vec(&response).unwrap(), checked).unwrap();
+        assert_eq!(usage.remaining(""), Some(15.0));
+        assert!(!usage.blocked(MODEL));
+        assert_eq!(usage.checked_at, Some(checked));
+
+        for (path, invalid) in [
+            ("/usage/rolling/status", json!("unknown")),
+            ("/usage/weekly/percent", json!(101)),
+            ("/usage/weekly/percent", Value::Null),
+            ("/usage/monthly/resetsAt", json!("not a date")),
+            ("/usage/monthly/resetsAt", json!("2030-01-01T00:00:00Z")),
+            ("/usage/monthly", Value::Null),
+        ] {
+            let mut malformed = response.clone();
+            *malformed.pointer_mut(path).unwrap() = invalid;
+            assert!(normalize(&serde_json::to_vec(&malformed).unwrap(), checked).is_err());
+        }
     }
 
     #[test]
