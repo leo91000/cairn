@@ -85,11 +85,11 @@ class HistoryCache(
             Performance.measure(PerfOperation.CACHE_READ) {
                 lock.withLock {
                     val retained = memory[key]?.value
+                    val request = synchronized(pendingLock) { pending[key] }
                     val queued =
-                        synchronized(pendingLock) { pending[key]?.value }
-                            ?.takeUnless {
-                                retained?.history == it.history && retained.cursor > it.cursor
-                            }
+                        request?.value?.takeUnless {
+                            retained?.history == it.history && retained.cursor > it.cursor
+                        }
                     val value =
                         queued?.let { prepareValue(key, it) }
                             ?: retained
@@ -102,6 +102,7 @@ class HistoryCache(
                             }
                                 .getOrNull()
                     if (value == null || !valid(value)) {
+                        request?.let { discard(it) }
                         removeLocked(key)
                         null
                     } else {
@@ -216,7 +217,12 @@ class HistoryCache(
         withContext(Dispatchers.IO) { lock.withLock { writeLocked(key) } }
 
     suspend fun remove(key: String) =
-        withContext(Dispatchers.IO) { lock.withLock { removeLocked(key) } }
+        withContext(Dispatchers.IO) {
+            lock.withLock {
+                synchronized(pendingLock) { pending.remove(key) }
+                removeLocked(key)
+            }
+        }
 
     suspend fun clear() =
         withContext(Dispatchers.IO) {
@@ -236,7 +242,7 @@ class HistoryCache(
     private fun removeLocked(key: String) {
         memory.remove(key)
         positions.remove(key)
-        synchronized(pendingLock) { pending.remove(key) }
+        // Passive cleanup preserves newer requests offered while a disk operation was in flight.
         written.remove(key)
         dirty.remove(key)
         AtomicFile(File(root, key)).delete()

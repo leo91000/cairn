@@ -17,6 +17,9 @@ replace newer output in the same history, while a different history can start at
 its own cursor. Cache clearing and terminal removal invalidate queued requests.
 Reads also reject queued snapshots older than the retained cursor, so reopening
 a reader before that stale write runs cannot regress memory or disk.
+Automatic cleanup of missing, expired, corrupt or oversized stored snapshots
+preserves newer pending requests. Explicit removal and clearing invalidate queued
+work; a read that rejects an invalid queued request discards only that identity.
 
 A reader reopening before persistence finishes can restore the queued snapshot.
 Reading positions are retained across queued saves and checked against their
@@ -118,3 +121,8 @@ then passes after it. The full local rerun has 588 cases and the same existing
 cache/delivery cases pass together in isolation. A [fresh measurement](measurements/android-cache-diagnosis/review-fixed.json)
 records the follow-up source hashes and workload results separately from the
 original fixed run above.
+
+A second regression holds an expired disk read while a valid snapshot is offered.
+Before the cleanup fix, flushing loses that snapshot and the test reads null
+instead of cursor 2. After the fix, all fourteen focused cases pass, including
+explicit removal and clearing tests. Formatting and Android lint also pass.

@@ -1,5 +1,6 @@
 package build.cairn.app.data
 
+import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -64,6 +65,40 @@ class HistoryCacheWriterTest {
 
         val disk = HistoryCache(directory.root, { _, bytes -> bytes }, { _, bytes -> bytes })
         assertEquals(10L, disk.read("chat")?.cursor)
+    }
+
+    @Test
+    fun expiredDiskCleanupPreservesASnapshotOfferedDuringTheRead() = runBlocking {
+        File(directory.root, "chat").writeText(wireJson.encodeToString(record(1).copy(savedAt = 1)))
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val cache =
+            HistoryCache(
+                directory.root,
+                { _, bytes -> bytes },
+                { _, bytes ->
+                    entered.countDown()
+                    check(release.await(10, TimeUnit.SECONDS))
+                    bytes
+                },
+            )
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val writer = HistoryCacheWriter(cache, "chat", scope)
+        try {
+            val reading = async(Dispatchers.IO) { cache.read("chat") }
+            assertTrue(withContext(Dispatchers.IO) { entered.await(5, TimeUnit.SECONDS) })
+            assertTrue(writer.offer(record(2), cache.generation))
+            release.countDown()
+            reading.await()
+            withTimeout(5000) { writer.flush() }
+
+            val disk = HistoryCache(directory.root, { _, bytes -> bytes }, { _, bytes -> bytes })
+            assertEquals(2L, disk.read("chat")?.cursor)
+        } finally {
+            release.countDown()
+            writer.close()
+            scope.cancel()
+        }
     }
 
     @Test
