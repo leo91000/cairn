@@ -19,6 +19,9 @@ private const val UNINSTALL_COMMAND =
 private const val NATIVE_UNINSTALL_COMMAND =
     "sudo sh -c 'if [ -e /etc/systemd/system/cairn-native-node.service ]; then systemctl disable --now cairn-native-node || exit; fi; mounts=\$(findmnt -rno TARGET) || { echo \"findmnt could not list mounts.\" >&2; exit 1; }; printf \"%s\\n\" \"\$mounts\" | grep ^/var/lib/cairn-native/; match=\$?; if [ \"\$match\" -ne 1 ]; then echo \"Mount safety could not be confirmed. Run sudo systemctl start cairn-native-node to release owned conversation disks, then retry.\" >&2; exit 1; fi; rm -rf /opt/cairn-native /var/lib/cairn-native && { userdel cairn-workload || ! id cairn-workload >/dev/null 2>&1; } && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload'"
 
+private fun uninstallCommand(node: ExecutionNode) =
+    if (node.capabilities.backend == NATIVE_BACKEND) NATIVE_UNINSTALL_COMMAND else UNINSTALL_COMMAND
+
 @Composable
 fun NodesScreen(
     vm: CairnViewModel,
@@ -44,6 +47,19 @@ fun NodesScreen(
     // A new native machine is configured first (native execution, trusted people), then asks
     // who may use it.
     var grantAfterConfigure by remember { mutableStateOf<String?>(null) }
+    // The node a guided backend switch replaces, while the new runtime's enrollment is pending.
+    var replacing by remember { mutableStateOf<ExecutionNode?>(null) }
+    // Previous and new node ids: once the new node's setup ends, retiring the previous is offered.
+    var replacement by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var retiring by remember { mutableStateOf<Pair<ExecutionNode, ExecutionNode>?>(null) }
+    fun offerRetirement(node: String) {
+        val (previousId, nextId) = replacement ?: return
+        if (nextId != node) return
+        replacement = null
+        val previous = nodes.find { it.id == previousId && !it.revoked }
+        val next = nodes.find { it.id == node }
+        if (previous != null && next != null) retiring = previous to next
+    }
     var cleaning by remember { mutableStateOf<ExecutionNode?>(null) }
     var advanced by remember { mutableStateOf(false) }
     var showRevoked by remember { mutableStateOf(false) }
@@ -51,13 +67,25 @@ fun NodesScreen(
         nodes = vm.api.get("/nodes")
         if (nodes.any { it.capabilities.backend == "native" })
             nativeCallers = vm.api.get("/nodes/native-callers")
-        if (enrollment == null) return
+        val invitation = enrollment ?: return
+        // A guided switch needs the identity assigned to this exact invitation.
+        if (replacing != null && invitation.nodeId == null) return
         nodes
-            .firstOrNull { !it.local && !it.revoked && it.id !in knownBeforeEnrollment }
+            .firstOrNull {
+                !it.local &&
+                    !it.revoked &&
+                    it.capabilities.backend == invitation.backend &&
+                    (invitation.nodeId?.let { expected -> it.id == expected }
+                        ?: (it.id !in knownBeforeEnrollment))
+            }
             ?.let {
                 enrollment = null
                 adding = false
                 vm.notify("${it.name} est connectée")
+                replacing?.let { previous ->
+                    replacement = previous.id to it.id
+                    replacing = null
+                }
                 if (it.capabilities.backend == NATIVE_BACKEND) {
                     grantAfterConfigure = it.id
                     editing = it
@@ -83,7 +111,14 @@ fun NodesScreen(
                 Modifier.weight(1f),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            FilledTonalButton(onClick = { adding = true }) { Text("Ajouter une machine") }
+            FilledTonalButton(
+                onClick = {
+                    replacing = null
+                    adding = true
+                }
+            ) {
+                Text("Ajouter une machine")
+            }
         }
         nodes
             .filter { showRevoked || !it.revoked }
@@ -246,6 +281,26 @@ fun NodesScreen(
                         TextButton(onClick = { editing = node }) { Text("Configurer") }
                         TextButton(onClick = { storage = node }) { Text("Stockage") }
                         if (!node.local)
+                            TextButton(
+                                onClick = {
+                                    // Another runtime enrolls as a new node, so its grants and
+                                    // checkpoints never mix with the old ones.
+                                    replacing = node
+                                    backend =
+                                        if (node.capabilities.backend == NATIVE_BACKEND)
+                                            "firecracker"
+                                        else NATIVE_BACKEND
+                                    name = node.name
+                                    enrollment = null
+                                    adding = true
+                                }
+                            ) {
+                                Text(
+                                    if (node.capabilities.backend == NATIVE_BACKEND) "Passer en VM"
+                                    else "Passer en natif"
+                                )
+                            }
+                        if (!node.local)
                             TextButton(onClick = { revoking = node }) { Text("Révoquer") }
                     }
                 }
@@ -275,15 +330,23 @@ fun NodesScreen(
             }
     }
     if (adding)
-        DetailSheet("Ajouter une machine", { adding = false }) {
+        DetailSheet(
+            replacing?.let {
+                "Passer ${it.name} en ${if (backend == NATIVE_BACKEND) "natif" else "VM"}"
+            } ?: "Ajouter une machine",
+            { adding = false },
+        ) {
             Text(
-                "Connectez une machine Linux, puis choisissez qui peut l’utiliser.",
+                replacing?.let {
+                    "Installez le runtime ${if (backend == NATIVE_BACKEND) "natif" else "VM Firecracker"} sur la machine de ${it.name}. Il s’inscrit comme une nouvelle node ; une fois connectée et configurée, Cairn propose de révoquer ${it.name}. Les conversations gardent leur backend d’exécution, et celui de chaque agent se choisit sur sa fiche."
+                } ?: "Connectez une machine Linux, puis choisissez qui peut l’utiliser.",
                 style = MaterialTheme.typography.bodyMedium,
             )
             Field("Nom de la machine", name, { name = it })
-            Toggle("Exécution native sur l’hôte", backend == "native") {
-                backend = if (it) "native" else "firecracker"
-            }
+            if (replacing == null)
+                Toggle("Exécution native sur l’hôte", backend == "native") {
+                    backend = if (it) "native" else "firecracker"
+                }
             if (backend == "native")
                 Text(
                     "Linux x86-64 avec systemd et le pilote noyau ublk. Le GPU reste utilisable par le bureau, mais les travaux intensifs peuvent le ralentir. L’isolation est plus faible qu’une VM."
@@ -308,6 +371,10 @@ fun NodesScreen(
                 Text("Créer un code d’inscription")
             }
             enrollment?.let {
+                if (replacing != null && it.nodeId == null)
+                    Text(
+                        "Mettez à jour cette installation pour suivre le remplacement et terminer la bascule guidée. L’ancienne node est conservée."
+                    )
                 val command = it.installCommand
                 if (command != null) {
                     Text(
@@ -378,7 +445,10 @@ fun NodesScreen(
         // saved configuration continues to who may use it.
         fun dismiss() {
             editing = null
-            if (grantAfterConfigure == node.id) grantAfterConfigure = null
+            if (grantAfterConfigure == node.id) {
+                grantAfterConfigure = null
+                offerRetirement(node.id)
+            }
         }
         NodeEditor(node, state, nativeCallers, ::dismiss) { config ->
             vm.perform {
@@ -396,7 +466,11 @@ fun NodesScreen(
         // The page keeps polling: grants made meanwhile, as from an agent page in another window,
         // show up here and are kept.
         val node = nodes.find { it.id == opened.id } ?: opened
-        FirstAgents(node, state, { granting = null }) { chosen ->
+        fun later() {
+            granting = null
+            offerRetirement(node.id)
+        }
+        FirstAgents(node, state, ::later) { chosen ->
             vm.perform {
                 // Only grants the chosen agents: finishing never revokes one, including an agent
                 // allowed meanwhile from another window.
@@ -407,6 +481,7 @@ fun NodesScreen(
                 notify("${node.name} est prête")
                 load()
                 refresh()
+                offerRetirement(node.id)
             }
         }
     }
@@ -434,7 +509,7 @@ fun NodesScreen(
     revoking?.let { node ->
         val running = node.occupiedSlots > 0
         val native = node.capabilities.backend == NATIVE_BACKEND
-        val command = if (native) NATIVE_UNINSTALL_COMMAND else UNINSTALL_COMMAND
+        val command = uninstallCommand(node)
         Confirm(
             "Révoquer ${node.name} ?",
             buildString {
@@ -470,6 +545,88 @@ fun NodesScreen(
                 api.request("POST", "/nodes/${node.id}/revoke")
                 revoking = null
                 load()
+            }
+        }
+    }
+    retiring?.let { (previous, next) ->
+        RetireNode(previous, next, state, { retiring = null }) {
+            vm.perform {
+                val result: NodeRevocation =
+                    api.send(
+                        "POST",
+                        "/nodes/${previous.id}/revoke",
+                        buildJsonObject { put("releasePlacements", true) },
+                    )
+                retiring = null
+                notify(
+                    when (result.releasedPlacements) {
+                        0 -> "${previous.name} révoquée"
+                        1 ->
+                            "${previous.name} révoquée ; 1 conversation revient au placement automatique"
+                        else ->
+                            "${previous.name} révoquée ; ${result.releasedPlacements} conversations reviennent au placement automatique"
+                    }
+                )
+                load()
+            }
+        }
+    }
+}
+
+/** The last step of a guided backend switch: revoke the previous node, or keep both for now. */
+@Composable
+internal fun RetireNode(
+    previous: ExecutionNode,
+    next: ExecutionNode,
+    state: Workspace,
+    keep: () -> Unit,
+    revoke: () -> Unit,
+) {
+    val nextNative = next.capabilities.backend == NATIVE_BACKEND
+    val previousNative = previous.capabilities.backend == NATIVE_BACKEND
+    val agents = previous.agents.filter { !it.allNodes }.map { it.name }
+    DetailSheet("Retirer l’ancienne node ${if (previousNative) "native" else "VM"} ?", keep) {
+        Text(
+            "${next.name} tourne maintenant comme node ${if (nextNative) "native" else "VM"}. Révoquez l’ancienne node ${if (previousNative) "native" else "VM"}, ${previous.name}, pour terminer la bascule : elle perd son accès au master et les agents ne peuvent plus l’utiliser."
+        )
+        if (agents.isNotEmpty())
+            Text(
+                "Agents autorisés sur l’ancienne node : ${agents.joinToString(", ")}. Pour les faire tourner sur la nouvelle, passez-les en ${if (nextNative) "exécution native" else "VM Firecracker"} sur leur fiche et autorisez-la."
+            )
+        Text(
+            "Les conversations fixées sur l’ancienne node ou qui la préfèrent reviennent au placement automatique. Les conversations gardent leur backend d’exécution : les existantes continuent sur d’autres nodes ${if (previousNative) "natives" else "VM"}."
+        )
+        if (previous.occupiedSlots > 0)
+            Text(
+                "Les conversations en cours se mettent en pause après le délai de déconnexion, puis reprennent depuis leur dernier point de reprise sur une autre machine autorisée qui a de la capacité."
+            )
+        Text("Puis désinstallez l’ancien runtime sur la machine :")
+        Code(uninstallCommand(previous))
+        CopyButton("Copier la commande", uninstallCommand(previous))
+        Text(
+            "Supprimer ces répertoires efface aussi les disques de conversation conservés pour l’ancienne node.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        if (previousNative)
+            Text(
+                "Si un disque de conversation est encore monté, la commande l’affiche et s’arrête avant de supprimer quoi que ce soit : démarrez cairn-native-node pour que sa reprise libère les disques dont il est propriétaire, puis relancez-la.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = keep, enabled = !state.busy) {
+                Text("Garder les deux pour l’instant")
+            }
+            Button(
+                onClick = revoke,
+                enabled = !state.busy,
+                colors =
+                    ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
+                    ),
+            ) {
+                Text("Révoquer l’ancienne node")
             }
         }
     }

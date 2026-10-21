@@ -31,6 +31,36 @@ originating permission. Previously unattributed conversations and external plugi
 origins cannot silently gain host access. When changing an existing agent's backend,
 start a new conversation; environments cannot switch backend in place.
 
+## Switching an existing machine
+
+A node keeps the execution backend it enrolled with; a heartbeat reporting another
+backend is refused. To move a Firecracker machine to native execution, or back, use
+Switch to native (or Switch to VM) on its node. Cairn pre-fills the machine name
+and the other backend. Run the generated installer on the same machine: the new
+runtime enrolls as a separate node with its own identity, grants and storage,
+alongside the existing one. After its configuration and agent step, Cairn offers to
+retire the previous node. The invitation assigns the replacement's identity before
+it connects, so another enrollment cannot advance this switch. Older invitations
+remain consumable; installations without identity tracking keep the previous node
+and ask for an update before completing a guided switch.
+Revoking it from there also returns conversations fixed
+to or preferring that node to automatic placement; a plain revocation keeps those
+explicit choices waiting. Conversations keep their backend: VM conversations
+continue on other VM nodes, and native work starts in new conversations with
+native agents. Switch each agent's backend on its page and allow the new node.
+Finally run the uninstall command shown for the previous runtime.
+
+The public Cairn MCP and the `cairn_installation` agent tool expose the same setup
+and retirement controls: `list_nodes`, `list_native_callers`,
+`create_node_enrollment`, `update_node`, `update_node_storage` and `revoke_node`. Installation management
+access is required for mutations; read-only public MCP access cannot enroll,
+configure or revoke a node. Agent installation grants are checked again in each
+mutation transaction. Enroll the other backend, wait for the returned `nodeId`,
+configure its native trust when applicable, and grant agents through `update_agent`.
+Only after the replacement is ready, revoke the old identity with
+`releasePlacements: true`. Plain revocation preserves existing placement choices.
+These tools neither install nor uninstall a runtime on the host.
+
 ## Daily use
 
 The controller uses one slot, low CPU/I/O priority and conservative default budgets.

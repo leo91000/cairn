@@ -25,6 +25,53 @@ abstract class NodePlacementCases {
     @get:Rule val compose = createComposeRule()
 
     @Test
+    fun retiringASwitchedNodeExplainsAgentsPlacementsAndTheOldRuntime() {
+        var revoked = false
+        var kept = false
+        val previous =
+            ExecutionNode(
+                id = "vm",
+                name = "Workstation",
+                status = "online",
+                agents = listOf(NodeAgent("a", "Builder"), NodeAgent("b", "Everywhere", true)),
+            )
+        val next =
+            ExecutionNode(
+                id = "native",
+                name = "Workstation GPU",
+                status = "online",
+                slots = 1,
+                capabilities = NodeCapabilities(backend = NATIVE_BACKEND, ublk = true),
+            )
+        compose.setContent {
+            CairnTheme {
+                RetireNode(previous, next, Workspace(), { kept = true }) { revoked = true }
+            }
+        }
+        compose
+            .onNodeWithText("Workstation GPU tourne maintenant comme node native", substring = true)
+            .assertExists()
+        // Only agents granted this node by name lose it; "all nodes" agents keep others.
+        compose
+            .onNodeWithText("Agents autorisés sur l’ancienne node : Builder.", substring = true)
+            .assertExists()
+        compose
+            .onNodeWithText("reviennent au placement automatique", substring = true)
+            .assertExists()
+        compose
+            .onNodeWithText("sudo docker rm -f cairn-execution-node", substring = true)
+            .performScrollTo()
+            .assertExists()
+        capture("retire-switched-node")
+        compose.onNodeWithText("Garder les deux pour l’instant").performScrollTo().performClick()
+        compose.onNodeWithText("Révoquer l’ancienne node").performScrollTo().performClick()
+        compose.runOnIdle {
+            assertTrue(kept)
+            assertTrue(revoked)
+        }
+    }
+
+    @Test
     fun nativeNodeEditorRequiresExplicitPeopleAndKeepsOneExecutionSlot() {
         var saved: NodeConfiguration? = null
         val node =
@@ -71,6 +118,7 @@ abstract class NodePlacementCases {
         MockWebServer().use { server ->
             val writes = CopyOnWriteArrayList<Pair<String, JsonObject>>()
             val enrolled = AtomicBoolean(false)
+            val enrollmentConfigured = AtomicBoolean(false)
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
@@ -81,18 +129,22 @@ abstract class NodePlacementCases {
                         ) {
                             val body = request.body.readUtf8().ifBlank { "{}" }
                             writes += path to wireJson.parseToJsonElement(body).jsonObject
+                            if (request.method == "PUT" && path.endsWith("/nodes/desk"))
+                                enrollmentConfigured.set(true)
                         }
                         val body =
                             when (path) {
                                 "/api/installations/fixture/api/nodes/enrollments" -> {
                                     enrolled.set(true)
-                                    """{"code":"native-enrollment","expiresAt":4102444800000,"installCommand":"curl https://fixture.invalid/native | bash","backend":"native"}"""
+                                    """{"code":"native-enrollment","expiresAt":4102444800000,"installCommand":"curl https://fixture.invalid/native | bash","backend":"native","nodeId":"desk"}"""
                                 }
                                 "/api/installations/fixture/api/nodes/native-callers" ->
                                     """[{"id":"trusted","email":"trusted@example.test"}]"""
                                 "/api/installations/fixture/api/nodes" ->
-                                    if (enrolled.get())
+                                    if (enrollmentConfigured.get())
                                         """[{"id":"desk","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]}]"""
+                                    else if (enrolled.get())
+                                        """[{"id":"unrelated","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]},{"id":"desk","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]}]"""
                                     else "[]"
                                 "/api/installations/fixture/api/agents" ->
                                     """[{"id":"vm","name":"Agent VM","revision":"r1"},{"id":"native","name":"Agent natif","revision":"r1","access":{"backend":"native","nodes":[]}}]"""

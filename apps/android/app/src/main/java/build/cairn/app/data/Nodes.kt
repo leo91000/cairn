@@ -186,9 +186,13 @@ data class NodeEnrollment(
     val expiresAt: Long,
     val installCommand: String? = null,
     val backend: String = "firecracker",
+    val nodeId: String? = null,
 )
 
 @Serializable data class NativeCaller(val id: String, val email: String)
+
+/** Reply to a revocation; older installations omit the released placement count. */
+@Serializable data class NodeRevocation(val releasedPlacements: Int = 0)
 
 @Serializable
 data class NodeConfiguration(

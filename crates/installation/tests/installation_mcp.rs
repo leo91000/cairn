@@ -84,6 +84,337 @@ fn result(response: &Value) -> &Value {
     &response["result"]["structuredContent"]["result"]
 }
 
+async fn node_management_call(
+    app: &axum::Router,
+    endpoint: &str,
+    token: &str,
+    name: &str,
+    args: Value,
+) -> (StatusCode, Value) {
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": common::mcp_arguments(name, &args),
+    });
+    let request = common::request("POST", endpoint)
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = common::send(app, request).await;
+    (response.status(), common::read_json(response).await)
+}
+
+async fn enroll_management_node(app: &axum::Router, invitation: &Value) -> Value {
+    let backend = invitation["backend"].as_str().unwrap();
+    let body = json!({
+        "code": invitation["code"],
+        "name": "Desk",
+        "protocol": 1,
+        "runtimeId": "fixture",
+        "capabilities": {
+            "os": "linux",
+            "arch": "x86_64",
+            "backend": backend,
+            "kvm": backend == "firecracker",
+            "ublk": true,
+            "cpu": 8,
+            "memoryMiB": 16384,
+            "diskMiB": 65536,
+        },
+    });
+    let request = common::request("POST", "/internal/nodes/enroll")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = common::send(app, request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let identity = common::read_json(response).await;
+    assert_eq!(identity["nodeId"], invitation["nodeId"]);
+    identity
+}
+
+#[tokio::test]
+async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_their_grants() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (run, configuration) = active_run(&s, &main).await;
+    let agent_token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let owner_token = common::relay_fixture::grant(&s, &["read", "manage"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let trusted = uuid::Uuid::new_v4().to_string();
+    for (endpoint, token) in [
+        ("/mcp", owner_token.as_str()),
+        ("/mcp-installation", agent_token),
+    ] {
+        s.store
+            .set(
+                "native-authority",
+                json!({
+                    "observedAt": cairn_installation::config::now(),
+                    "accounts": { (trusted.clone()): { "email": "owner@example.test" } },
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        let (_, callers) =
+            node_management_call(&app, endpoint, token, "list_native_callers", json!({})).await;
+        assert_eq!(result(&callers)[0]["id"], trusted);
+        let mut identities = Vec::new();
+        for backend in ["firecracker", "native"] {
+            let (_, response) = node_management_call(
+                &app,
+                endpoint,
+                token,
+                "create_node_enrollment",
+                json!({
+                    "name": "Desk", "backend": backend,
+                }),
+            )
+            .await;
+            identities.push(enroll_management_node(&app, result(&response)).await);
+        }
+        let previous = identities[0]["nodeId"].as_str().unwrap();
+        let next = identities[1]["nodeId"].as_str().unwrap();
+        let (_, updated) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "update_node",
+            json!({
+                "nodeId": next,
+                "node": {
+                    "name": "Trusted desktop", "tags": ["gpu"],
+                    "limits": { "cpu": 2, "memoryMiB": 2048, "diskMiB": 8192 },
+                    "slots": 1, "accepting": true,
+                    "nativeEnabled": true, "nativeAccounts": [trusted],
+                },
+            }),
+        )
+        .await;
+        assert_eq!(result(&updated)["nativeEnabled"], true);
+        assert_eq!(result(&updated)["capabilities"]["backend"], "native");
+        let (_, listed) =
+            node_management_call(&app, endpoint, token, "list_nodes", json!({})).await;
+        let node = result(&listed)
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["id"] == next)
+            .unwrap();
+        assert_eq!(node["nativeAccounts"], json!([trusted]));
+        s.store
+            .patch_run(
+                run["id"].as_str().unwrap(),
+                json!({ "pinnedNodeId": previous }),
+            )
+            .await
+            .unwrap();
+        let (_, retired) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "revoke_node",
+            json!({
+                "nodeId": previous, "releasePlacements": true,
+            }),
+        )
+        .await;
+        assert_eq!(result(&retired)["revoked"], true);
+        assert_eq!(result(&retired)["releasedPlacements"], 1);
+        assert!(s.store.run(run["id"].as_str().unwrap()).await.unwrap()["pinnedNodeId"].is_null());
+        // Ordinary revocation preserves an explicit preference, as the owner UI does.
+        s.store
+            .patch_run(
+                run["id"].as_str().unwrap(),
+                json!({ "preferredNodeId": next }),
+            )
+            .await
+            .unwrap();
+        let (_, retired) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "revoke_node",
+            json!({ "nodeId": next }),
+        )
+        .await;
+        assert_eq!(result(&retired)["releasedPlacements"], 0);
+        assert_eq!(
+            s.store.run(run["id"].as_str().unwrap()).await.unwrap()["preferredNodeId"],
+            next
+        );
+    }
+
+    let read_token = common::relay_fixture::grant(&s, &["read"]).await;
+    let (_, denied) = node_management_call(
+        &app,
+        "/mcp",
+        &read_token,
+        "create_node_enrollment",
+        json!({ "name": "Denied" }),
+    )
+    .await;
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    assert!(denied["result"]["_meta"]["mcp/www_authenticate"].is_string());
+    s.agent(
+        json!({ "name": "Main agent", "access": { "installation": false } }),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
+    let (status, _) = node_management_call(
+        &app,
+        "/mcp-installation",
+        agent_token,
+        "create_node_enrollment",
+        json!({ "name": "Denied" }),
+    )
+    .await;
+    assert!(matches!(
+        status,
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    ));
+}
+
+#[tokio::test]
+async fn node_storage_controls_share_probes_persistence_and_permissions_across_both_tools() {
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let probes = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let fail_probe = Arc::new(AtomicBool::new(false));
+    let recorded = probes.clone();
+    let failure = fail_probe.clone();
+    let controller = axum::Router::new().route(
+        "/internal/execution/{node}/storage-policy",
+        axum::routing::post(move |axum::Json(policy): axum::Json<Value>| {
+            let recorded = recorded.clone();
+            let failure = failure.clone();
+            async move {
+                recorded.lock().unwrap().push(policy);
+                if failure.load(Ordering::SeqCst) {
+                    return StatusCode::CONFLICT;
+                }
+                StatusCode::OK
+            }
+        }),
+    );
+    let (url, server) = common::serve_locally(controller).await;
+    let mut config = common::config(root.path());
+    config.public_url = url;
+    let s = Service::new(config).await.unwrap();
+    common::relay_fixture::claimed(&s).await.unwrap();
+    // Synthetic successful AWS CLI responses; no real object store or credentials.
+    std::fs::write(
+        s.config.data_dir.join("storage-s3.json"),
+        json!({ "bucket": "cairn-storage-test", "awsBinary": "/bin/true" }).to_string(),
+    )
+    .unwrap();
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let agent_token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let owner_token = common::relay_fixture::grant(&s, &["read", "manage"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let policy = json!({
+        "cacheMiB": 4096, "memoryCacheMiB": 512,
+        "reserveMiB": 2048, "reservePercent": 7,
+        "backupSeconds": 30, "maxDirtySeconds": 120,
+    });
+    let mut last_node = String::new();
+    for (endpoint, token) in [
+        ("/mcp", owner_token.as_str()),
+        ("/mcp-installation", agent_token),
+    ] {
+        let (_, invitation) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "create_node_enrollment",
+            json!({ "name": "Storage host", "backend": "native" }),
+        )
+        .await;
+        let identity = enroll_management_node(&app, result(&invitation)).await;
+        let node = identity["nodeId"].as_str().unwrap();
+        let (_, updated) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "update_node_storage",
+            json!({ "nodeId": node, "storage": policy }),
+        )
+        .await;
+        assert_eq!(result(&updated)["storage"], policy);
+        assert_eq!(probes.lock().unwrap().last(), Some(&policy));
+        let (_, listed) =
+            node_management_call(&app, endpoint, token, "list_nodes", json!({})).await;
+        let saved = result(&listed)
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == node)
+            .unwrap();
+        assert_eq!(saved["storage"], policy);
+
+        fail_probe.store(true, Ordering::SeqCst);
+        let mut rejected = policy.clone();
+        rejected["memoryCacheMiB"] = 1024.into();
+        let (_, response) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "update_node_storage",
+            json!({ "nodeId": node, "storage": rejected }),
+        )
+        .await;
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        assert_eq!(s.get("nodes", node).await.unwrap()["storage"], policy);
+        fail_probe.store(false, Ordering::SeqCst);
+        last_node = node.to_owned();
+    }
+    let before = probes.lock().unwrap().len();
+    let read_token = common::relay_fixture::grant(&s, &["read"]).await;
+    let (_, denied) = node_management_call(
+        &app,
+        "/mcp",
+        &read_token,
+        "update_node_storage",
+        json!({ "nodeId": last_node, "storage": policy }),
+    )
+    .await;
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    s.agent(
+        json!({ "name": "Main agent", "access": { "installation": false } }),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
+    let (status, _) = node_management_call(
+        &app,
+        "/mcp-installation",
+        agent_token,
+        "update_node_storage",
+        json!({ "nodeId": last_node, "storage": policy }),
+    )
+    .await;
+    assert!(matches!(
+        status,
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    ));
+    assert_eq!(probes.lock().unwrap().len(), before);
+    server.abort();
+}
+
 #[tokio::test]
 async fn agent_catalog_accepts_current_providers_and_reasoning_through_native_mcp() {
     let root = TempDir::new().unwrap();
