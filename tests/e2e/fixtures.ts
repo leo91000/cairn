@@ -9,6 +9,7 @@ import {
   rm,
   writeFile,
 } from 'node:fs/promises'
+import { createServer } from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -29,6 +30,7 @@ export interface Workspace {
   installationId: string
   installationSlug: string
   setAccountUsage: (id: string, value: unknown) => Promise<void>
+  setOpenCodeGoUsage: (id: string, apiKey: string, value: unknown) => void
 }
 
 // One application per worker; navigation and sign-in share its real beacon context.
@@ -93,7 +95,25 @@ export const test = base.extend<object, { workspace: Workspace }>({
     const configuration = path.join(directory, 'config.json')
     const usageFile = path.join(directory, 'usage.json')
     const usage: Record<string, unknown> = {}
-    await writeFile(configuration, JSON.stringify({ ...config, claudeBin: path.resolve('tests/fixtures/claude.mjs'), opencodeBin: path.resolve('tests/fixtures/opencode.mjs') }))
+    const goUsage = new Map<string, unknown>()
+    const go = createServer((request, response) => {
+      const key = request.headers.authorization?.replace(/^Bearer /, '') ?? ''
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(goUsage.get(key) ?? {
+        useBalance: false,
+        rollingUsage: { status: 'ok', usagePercent: 25, resetInSec: 7200 },
+        weeklyUsage: { status: 'ok', usagePercent: 60, resetInSec: 86400 },
+        monthlyUsage: { status: 'ok', usagePercent: 85, resetInSec: 604800 },
+      }))
+    })
+    go.listen(0, '127.0.0.1')
+    await once(go, 'listening')
+    const goPort = (go.address() as { port: number }).port
+    await writeFile(configuration, JSON.stringify({
+      ...config,
+      claudeBin: path.resolve('tests/fixtures/claude.mjs'),
+      opencodeBin: path.resolve('tests/fixtures/opencode.mjs'),
+      opencodeGoUsageUrl: `http://127.0.0.1:${goPort}/usage`,
+    }))
     await writeFile(usageFile, '{}')
     // A developer may rebuild Cargo while this fixture is active. Keep the
     // supervisor's current executable stable for the entire browser journey.
@@ -294,10 +314,20 @@ export const test = base.extend<object, { workspace: Workspace }>({
           usage[id] = value
           await writeFile(usageFile, JSON.stringify(usage))
         },
+        setOpenCodeGoUsage: (id, apiKey, value) => {
+          goUsage.set(apiKey, value)
+          // Let the next explicit refresh poll the fixture without waiting a minute.
+          const row = service.store.db.prepare('SELECT data FROM records WHERE id=? AND kind=?').get(id, 'agentAccounts') as { data: string }
+          const account = JSON.parse(row.data)
+          if (account.usage)
+            account.usage.attemptedAt = Date.now() - 60001
+          service.store.db.prepare('UPDATE records SET data=? WHERE id=? AND kind=?').run(JSON.stringify(account), id, 'agentAccounts')
+        },
       })
     }
     finally {
       await stop()
+      await new Promise<void>(resolve => go.close(() => resolve()))
       await beacon.close()
       executeBeaconSql(database, `DROP SCHEMA ${schema} CASCADE`)
       currentWorkspace = undefined
