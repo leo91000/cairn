@@ -195,6 +195,10 @@ describe('production release', () => {
     await f.writeContract(automaticContract)
     const passing = 'test migrates_old_accounts ... ok\ntest refuses_newer_data ... ok\n'
     await expect(qualifyInstallationMigrations(passing, { cwd: f.directory })).resolves.toBeUndefined()
+    const nextest = '        PASS [  0.102s] (1/2) cairn-installation::migration migrates_old_accounts\n        PASS [  0.014s] (2/2) cairn-installation::migration refuses_newer_data\n'
+    await expect(qualifyInstallationMigrations(nextest, { cwd: f.directory })).resolves.toBeUndefined()
+    for (const status of ['SKIP', 'FAIL', 'FLAKY'])
+      await expect(qualifyInstallationMigrations(nextest.replace('PASS', status), { cwd: f.directory })).rejects.toThrow('passing backend regression evidence')
     for (const log of ['', passing.replace('refuses_newer_data', 'different_test'), passing.replace('... ok', '... ignored'), passing.replace('... ok', '... FAILED')])
       await expect(qualifyInstallationMigrations(log, { cwd: f.directory })).rejects.toThrow('passing backend regression evidence')
     await writeFile(path.join(f.directory, automaticContract.automaticMigration.plan), '')
@@ -241,9 +245,9 @@ describe('production release', () => {
     expect(steps[deploy].env.COOLIFY_TOKEN).toContain('secrets.CAIRN_RELEASE_COOLIFY_TOKEN')
     expect(workflow.jobs.deploy.if).toContain('startsWith(github.ref, \'refs/tags/v\')')
     expect(workflow.jobs.deploy.concurrency['cancel-in-progress']).toBe(false)
-    const quality = workflow.jobs.quality.steps.map(step => step.run ?? '').join('\n')
+    const quality = workflow.jobs.backend.steps.map(step => step.run ?? '').join('\n')
     expect(quality).toContain('set -o pipefail')
-    expect(quality).toContain('node scripts/test-backend.mjs --features ublk-prototype 2>&1 | tee backend-tests.log')
+    expect(quality).toContain('node scripts/test-backend.mjs --nextest --features ublk-prototype --test-threads 8 --no-fail-fast --color never --status-level pass 2>&1 | tee backend-tests.log')
     expect(quality.indexOf('qualify backend-tests.log')).toBeGreaterThan(quality.indexOf('tee backend-tests.log'))
   })
 })

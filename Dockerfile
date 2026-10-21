@@ -134,6 +134,12 @@ ARG PLAYWRIGHT_VERSION=1.63.0
 # Keep this layer independent of application code and package versions.
 RUN npm exec --yes --package="playwright@${PLAYWRIGHT_VERSION}" -- playwright install-deps chromium firefox webkit \
     && rm -rf /var/lib/apt/lists/* /root/.npm
+ENV NODE_ENV=production HOST=0.0.0.0 PORT=4310 DATA_DIR=/data AGENT_HOME=/home/node WORKSPACE_ROOTS=/workspaces
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl wget git git-lfs openssh-client python3 awscli build-essential bubblewrap socat \
+    zip unzip xz-utils zstd bzip2 rsync file less tree sqlite3 postgresql-client util-linux \
+    dnsutils iproute2 iputils-ping netcat-openbsd procps lsof strace patch diffutils \
+    pkg-config libssl-dev libffi-dev ninja-build poppler-utils imagemagick ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 # Resolve stable tool versions before building, then validate this exact image.
 ARG GH_VERSION
 ARG CODEX_VERSION
@@ -141,12 +147,6 @@ ARG CLAUDE_VERSION=2.1.280
 ARG OPENCODE_VERSION=1.19.0
 ARG TARGETARCH
 RUN test -n "$CODEX_VERSION" && test -n "$GH_VERSION"
-ENV NODE_ENV=production HOST=0.0.0.0 PORT=4310 DATA_DIR=/data AGENT_HOME=/home/node WORKSPACE_ROOTS=/workspaces
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl wget git git-lfs openssh-client python3 awscli build-essential bubblewrap socat \
-    zip unzip xz-utils zstd bzip2 rsync file less tree sqlite3 postgresql-client util-linux \
-    dnsutils iproute2 iputils-ping netcat-openbsd procps lsof strace patch diffutils \
-    pkg-config libssl-dev libffi-dev ninja-build poppler-utils imagemagick ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
 RUN arch="${TARGETARCH:-amd64}" \
     && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${arch}.tar.gz" -o /tmp/gh.tar.gz \
     && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_checksums.txt" -o /tmp/gh-checksums.txt \
@@ -175,8 +175,7 @@ COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/package.json ./package.json
 RUN install -d -o node -g node /data /workspaces /home/node/.agents /home/node/.agents/skills /home/node/.codex \
     && chown node:node /home/node /app
-ARG VCS_REF=development
-ENV APP_COMMIT=$VCS_REF APP_RUNTIME_ID=$VCS_REF APP_CODEX_VERSION=$CODEX_VERSION APP_GH_VERSION=$GH_VERSION
+ENV APP_CODEX_VERSION=$CODEX_VERSION APP_GH_VERSION=$GH_VERSION
 USER node
 VOLUME ["/data", "/home/node", "/workspaces"]
 EXPOSE 4310
@@ -242,4 +241,8 @@ COPY --from=guest-disk /root.ext4.zst /opt/cairn-vm/root.ext4.zst
 COPY --chmod=755 deploy/microvm/init deploy/microvm/docker deploy/microvm/install-docker /opt/cairn-vm/
 COPY --chmod=755 deploy/nodes /opt/cairn-node
 RUN node /opt/cairn-node/bundle-native-tools.mjs && rm -rf /opt/cairn-native-tools
+# Build identity belongs to the shipped image; metadata-only commits must not
+# invalidate the guest filesystem's package installation and compression layers.
+ARG VCS_REF=development
+ENV APP_COMMIT=$VCS_REF APP_RUNTIME_ID=$VCS_REF
 USER node

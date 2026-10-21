@@ -14,7 +14,7 @@ optional `automaticMigration` with:
 - `plan`: a committed document describing conversion and forward recovery;
 - `tests`: the exact Rust regression names that must pass in the backend suite.
 
-The quality job preserves the backend exit status and checks its real output with
+The backend job preserves the test exit status and checks its real output with
 `production-release.mjs qualify`. Missing, ignored, renamed or failing tests do
 not qualify a candidate. Image publication and reuse retain the existing exact-tree
 validation requirement; a tag cannot add a declaration to an otherwise tested tree.

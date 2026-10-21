@@ -37,6 +37,10 @@ and `save_agent` remain typed and validated internally; they are discovered on
 demand rather than all being loaded into the model context. `cairn_workspace`
 and gateways to other MCP servers keep their own tool interfaces.
 
+Agent profile consolidation is available through `merge_agents` on both management
+interfaces; see [merging agent profiles](AGENT-MERGE.md) for transfer behavior and
+preconditions.
+
 This is a breaking change to the previous direct-operation MCP interface. Refresh
 tool discovery and replace direct calls such as `tools/call(name: "list_chats")`
 with `execute`. Connections selecting individual tool names must explicitly enable

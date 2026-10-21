@@ -63,6 +63,8 @@ export async function qualifyInstallationMigrations(log, { cwd = process.cwd() }
   if (!(await readFile(path.join(cwd, migration.plan), 'utf8')).trim())
     throw new Error('The automatic migration requires a forward recovery plan')
   const passed = new Set([...log.matchAll(/^test ([a-z0-9_:]+) \.\.\. ok\r?$/gm)].map(match => match[1]))
+  for (const match of log.matchAll(/^\s*PASS\s+\[[^\]\r\n]+\]\s+(?:\(\s*\d+\/\d+\)\s+)?\S+\s+([a-z0-9_:]+)\s*$/gm))
+    passed.add(match[1])
   if (migration.tests.some(name => !passed.has(name)))
     throw new Error('The automatic migration requires passing backend regression evidence for every declared test')
 }

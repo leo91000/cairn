@@ -520,9 +520,9 @@ fn select_agent(snapshot: &mut Value, run: Option<&Value>, message: &Value) -> R
 
     let switched = provider != Provider::of_run(snapshot)?.as_str();
     let agent = &mut snapshot["snapshot"]["agent"];
-    if switched {
-        // An implicit follow-up keeps the previous engine's qualified selection,
-        // even when the saved agent template still names a different engine.
+    if implicit_provider || switched {
+        // An implicit follow-up keeps the conversation's qualified selection,
+        // even when its profile changed or now has different defaults.
         agent["model"] = if implicit_provider {
             inherited_model
         } else {
@@ -631,6 +631,11 @@ fn launch_turn(
     mut snapshot: Value,
 ) -> Result<()> {
     let mut chat = chat(db, chat_id)?;
+    // Preparation can overlap a merge. Retry with the chat's current profile
+    // rather than publishing a snapshot of the removed source.
+    if chat["agentId"] != snapshot["snapshot"]["agent"]["id"] {
+        return Ok(());
+    }
     let waking = message["wakeup"].is_object();
     let unchanged = if waking {
         let current = db.run(text(&chat, "runId"))?;
@@ -734,6 +739,22 @@ pub(crate) fn pause_in(db: &Db<'_>, id: &str, paused: bool) -> Result<Value> {
     chat["paused"] = paused.into();
     chat["updatedAt"] = now().into();
     db.put("chats", &chat)
+}
+
+/// Preparation happens outside the writer. A merge may have transferred the
+/// conversation since it was read; that stale attempt must simply retry next tick.
+fn preparation_failed(db: &Db<'_>, prepared: &Value, error: Error) -> Result<()> {
+    let id = text(prepared, "id");
+    if chat(db, id)?["agentId"] != prepared["agentId"] {
+        return Ok(());
+    }
+    pause_in(db, id, true)?;
+    let shown = if error.status < 500 {
+        error.message
+    } else {
+        "Unable to prepare this conversation.".into()
+    };
+    db.set(&format!("chat-error:{id}"), &shown.into(), None)
 }
 
 impl Service {
@@ -885,15 +906,9 @@ impl Service {
                     message
                 }
             };
-            if let Err(error) = self.chat_prepare(chat, run, message).await {
-                self.chat_pause(&id, true).await?;
-                let shown = if error.status < 500 {
-                    error.message
-                } else {
-                    "Unable to prepare this conversation.".into()
-                };
+            if let Err(error) = self.chat_prepare(chat.clone(), run, message).await {
                 self.store
-                    .set(&format!("chat-error:{id}"), shown.into(), None)
+                    .transaction(move |db| preparation_failed(db, &chat, error))
                     .await?;
             }
         }
@@ -964,6 +979,29 @@ impl Service {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_merge_during_preparation_keeps_queued_work_unpaused() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store.transaction(|db| {
+            let stale = json!({ "id": "chat", "agentId": "source", "paused": false });
+            let transferred = json!({ "id": "chat", "agentId": "target", "paused": false });
+            let transferred = db.put("chats", &transferred)?;
+            let queued = json!({ "id": "message", "chatId": "chat", "createdAt": 1, "status": "queued" });
+            db.put_message(&queued)?;
+            // The stale agent lookup failed before launch_turn's identity guard.
+            preparation_failed(db, &stale, Error::not_found("Record not found"))?;
+            assert_eq!(db.get("chats", "chat")?.unwrap(), transferred);
+            assert!(db.kv("chat-error:chat")?.is_none());
+            assert_eq!(db.messages("chat")?, vec![queued]);
+            // A real error on the current profile still pauses and reports normally.
+            preparation_failed(db, &transferred, Error::bad("Current preparation failed"))?;
+            assert_eq!(db.get("chats", "chat")?.unwrap()["paused"], true);
+            assert_eq!(db.kv("chat-error:chat")?.unwrap(), "Current preparation failed");
+            Ok(())
+        }).await.unwrap();
+    }
 
     #[tokio::test]
     async fn continuation_consumes_durable_and_legacy_fresh_session_requests_once() {
