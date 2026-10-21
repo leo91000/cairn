@@ -7,7 +7,7 @@ const android = parse(readFileSync(new URL('../../.github/workflows/android.yaml
 
 describe('parallel CI coverage', () => {
   it('keeps every split validation in the image publication gate', () => {
-    for (const name of ['build', 'quality', 'rust-check', 'backend', 'node-checks', 'browser', 'network-bench', 'native-runtime', 'image', 'beacon-image']) {
+    for (const name of ['build', 'quality', 'rust-check', 'backend', 'node-checks', 'browser', 'network-bench', 'native-runtime', 'android-direct-build', 'android-direct', 'image', 'beacon-image']) {
       expect(quality.jobs.publish.needs).toContain(name)
       expect(quality.jobs.publish.if).toContain(`needs.${name}.result == 'success'`)
     }
@@ -49,6 +49,23 @@ describe('parallel CI coverage', () => {
     const scenarios = quality.jobs['network-bench'].strategy.matrix.include.flatMap(group => group.scenarios.split(' '))
     expect(scenarios.sort()).toEqual(['same-lan', 'mdns-only-client', 'nat-client', 'nat-installation', 'nat-both', 'udp-blocked', 'symmetric-nat', 'symmetric-client', 'same-server', 'network-change', 'packet-loss', 'qualification'].sort())
     expect(quality.jobs['network-bench'].strategy['fail-fast']).toBe(false)
+  })
+
+  it('runs every native network scenario once with one shared APK producer', () => {
+    const build = quality.jobs['android-direct-build']
+    const device = quality.jobs['android-direct']
+    expect(device.needs).toContain('android-direct-build')
+    expect(device.strategy.matrix.scenario).toEqual(['same-lan', 'udp-blocked', 'network-change'])
+    expect(device.strategy['fail-fast']).toBe(false)
+    expect(device.steps.some(step => step.run?.includes('gradlew'))).toBe(false)
+    const upload = build.steps.find(step => step.with?.name === 'android-direct-apks')
+    expect(upload.with.path).toContain('apk/debug/app-debug.apk')
+    expect(upload.with.path).toContain('apk/androidTest/debug/app-debug-androidTest.apk')
+    const download = device.steps.find(step => step.with?.name === 'android-direct-apks')
+    expect(download.with.path).toBe('apps/android/app/build/outputs/apk/')
+    const observe = device.steps.find(step => step.name === 'Observe native responses, network restart and revocation')
+    expect(observe.env.ANDROID_SCENARIO).toContain('matrix.scenario')
+    expect(observe.with.script).toContain('"$ANDROID_SCENARIO" --android')
   })
 
   it('retains complete browser shard coverage and unique evidence names', () => {

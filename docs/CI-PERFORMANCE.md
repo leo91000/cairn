@@ -41,6 +41,9 @@ Compare cold cache initialization separately from subsequent warm runs.
   execute them.
 - Network topologies run on five separate runners. Namespaces and firewall rules
   remain isolated by host; all twelve scenarios run exactly once.
+- The native Android direct/relay bench builds its two APKs once, concurrently
+  with the Rust fixtures, then checks LAN, blocked UDP and network changes on
+  three independent emulator hosts. Every scenario gates image validation.
 - Browser journeys and WebKit checks each use four shards with two workers per
   shard. Chromium layout coverage is unchanged.
 - The installation image starts immediately after release resolution. Before
