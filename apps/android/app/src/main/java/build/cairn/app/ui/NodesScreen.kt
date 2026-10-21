@@ -16,6 +16,9 @@ import kotlinx.serialization.json.put
 private const val UNINSTALL_COMMAND =
     "sudo systemctl disable --now cairn-node; sudo docker rm -f cairn-execution-node; sudo rm -rf /etc/systemd/system/cairn-node.service /opt/cairn-node /var/lib/cairn-node"
 
+private const val NATIVE_UNINSTALL_COMMAND =
+    "sudo sh -c 'if [ -e /etc/systemd/system/cairn-native-node.service ]; then systemctl disable --now cairn-native-node || exit; fi; mounts=\$(findmnt -rno TARGET) || { echo \"findmnt could not list mounts.\" >&2; exit 1; }; printf \"%s\\n\" \"\$mounts\" | grep ^/var/lib/cairn-native/; match=\$?; if [ \"\$match\" -ne 1 ]; then echo \"Mount safety could not be confirmed. Run sudo systemctl start cairn-native-node to release owned conversation disks, then retry.\" >&2; exit 1; fi; rm -rf /opt/cairn-native /var/lib/cairn-native && { userdel cairn-workload || ! id cairn-workload >/dev/null 2>&1; } && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload'"
+
 @Composable
 fun NodesScreen(
     vm: CairnViewModel,
@@ -214,7 +217,7 @@ fun NodesScreen(
                     }
                     if (technical) {
                         Text(
-                            "Détecté : ${node.capabilities.cpu} CPU · ${formatMiB(node.capabilities.memoryMiB)} RAM · ${formatMiB(node.capabilities.diskMiB)} disque · KVM ${if (node.capabilities.kvm) "disponible" else "indisponible"}",
+                            "Détecté : ${node.capabilities.cpu} CPU · ${formatMiB(node.capabilities.memoryMiB)} RAM · ${formatMiB(node.capabilities.diskMiB)} disque · ${if (node.capabilities.backend == NATIVE_BACKEND) "ublk ${if (node.capabilities.ublk) "disponible" else "indisponible"}" else "KVM ${if (node.capabilities.kvm) "disponible" else "indisponible"}"}",
                             style = MaterialTheme.typography.bodySmall,
                         )
                         node.usage?.let {
@@ -241,8 +244,7 @@ fun NodesScreen(
                     HorizontalDivider()
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(onClick = { editing = node }) { Text("Configurer") }
-                        if (node.capabilities.backend != "native")
-                            TextButton(onClick = { storage = node }) { Text("Stockage") }
+                        TextButton(onClick = { storage = node }) { Text("Stockage") }
                         if (!node.local)
                             TextButton(onClick = { revoking = node }) { Text("Révoquer") }
                     }
@@ -284,7 +286,7 @@ fun NodesScreen(
             }
             if (backend == "native")
                 Text(
-                    "Linux x86-64 avec systemd. Le GPU reste utilisable par le bureau, mais les travaux intensifs peuvent le ralentir. L’isolation est plus faible qu’une VM."
+                    "Linux x86-64 avec systemd et le pilote noyau ublk. Le GPU reste utilisable par le bureau, mais les travaux intensifs peuvent le ralentir. L’isolation est plus faible qu’une VM."
                 )
             Button(
                 enabled = !state.busy && name.isNotBlank(),
@@ -310,7 +312,7 @@ fun NodesScreen(
                 if (command != null) {
                     Text(
                         if (it.backend == "native")
-                            "1. Sur la machine Linux x86-64 avec Python 3, curl et systemd, lancez :"
+                            "1. Sur la machine Linux x86-64 avec Python 3, curl, systemd, e2fsprogs et le module noyau ublk_drv, lancez :"
                         else
                             "1. Sur la machine Linux (x86-64 avec KVM, Docker, curl et systemd), lancez :"
                     )
@@ -330,7 +332,10 @@ fun NodesScreen(
                 Code(it.code)
                 CopyButton("Copier le code", it.code)
                 Text(
-                    "3. Cette page détecte la machine dès qu’elle se connecte et demande quels agents peuvent l’utiliser.",
+                    if (it.backend == NATIVE_BACKEND)
+                        "3. Cette page détecte la machine dès qu’elle se connecte, ouvre sa configuration pour activer l’exécution native et choisir les personnes de confiance, puis demande quels agents peuvent l’utiliser."
+                    else
+                        "3. Cette page détecte la machine dès qu’elle se connecte et demande quels agents peuvent l’utiliser.",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 TextButton(
@@ -428,6 +433,8 @@ fun NodesScreen(
     }
     revoking?.let { node ->
         val running = node.occupiedSlots > 0
+        val native = node.capabilities.backend == NATIVE_BACKEND
+        val command = if (native) NATIVE_UNINSTALL_COMMAND else UNINSTALL_COMMAND
         Confirm(
             "Révoquer ${node.name} ?",
             buildString {
@@ -439,12 +446,25 @@ fun NodesScreen(
                         " Les conversations en cours se mettent en pause après le délai de déconnexion, puis reprennent depuis leur dernier point de reprise sur une autre machine autorisée qui a de la capacité. Celles fixées à cette machine, ou sans point de reprise, attendent."
                     )
                 append(
-                    "\n\nLes fichiers restent sur la machine. Pour la désinstaller, lancez dessus :\n${if (node.capabilities.backend == "native") "sudo systemctl disable --now cairn-native-node; sudo rm -rf /etc/systemd/system/cairn-native-node.service /opt/cairn-native /var/lib/cairn-native" else UNINSTALL_COMMAND}\n(la dernière commande supprime aussi les disques de conversation conservés sur la machine)."
+                    "\n\nLes fichiers restent sur la machine. Pour la désinstaller, lancez dessus :"
                 )
             },
             state.busy,
             state.error,
             { revoking = null },
+            details = {
+                Code(command)
+                CopyButton("Copier la commande", command)
+                Text(
+                    "Supprimer ces répertoires efface aussi les disques de conversation conservés sur la machine.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (native)
+                    Text(
+                        "Si un disque de conversation est encore monté, la commande l’affiche et s’arrête avant de supprimer quoi que ce soit : démarrez cairn-native-node pour que sa reprise libère les disques dont il est propriétaire, puis relancez la commande.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+            },
         ) {
             vm.perform {
                 api.request("POST", "/nodes/${node.id}/revoke")
@@ -631,6 +651,11 @@ internal fun NodeEditor(
             Field("Budget CPU partagé", cpu, { cpu = it }, enabled = !state.busy)
             Field("Budget RAM partagé (Gio)", memory, { memory = it }, enabled = !state.busy)
             Field("Budget disque partagé (Gio)", disk, { disk = it }, enabled = !state.busy)
+            if (node.capabilities.backend == NATIVE_BACKEND)
+                Text(
+                    "Une node native exécute une conversation à la fois.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
             Text(
                 "Détecté sur cette machine : ${node.capabilities.cpu} CPU · ${formatMiB(node.capabilities.memoryMiB)} RAM · ${formatMiB(node.capabilities.diskMiB)} disque.",
                 style = MaterialTheme.typography.bodySmall,
@@ -643,6 +668,13 @@ internal fun NodeEditor(
                     "Seuls les agents natifs et les personnes sélectionnées peuvent travailler ici. Retirer une autorisation arrête les travaux concernés à l’expiration de leur bail."
                 )
                 Toggle("Activer l’exécution native", nativeEnabled) { nativeEnabled = it }
+                if (nativeCallers.isNotEmpty())
+                    Text("Personnes de confiance", style = MaterialTheme.typography.labelLarge)
+                if (nativeCallers.isEmpty())
+                    Text(
+                        "Aucune personne disponible. Actualisez la connexion de l’installation avant d’accorder l’accès.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 nativeCallers.forEach { person ->
                     Toggle(person.email, person.id in nativeAccounts) { selected ->
                         nativeAccounts =
@@ -797,6 +829,8 @@ private fun NodeStorageEditor(
                     percent.toInt(),
                     interval.toLong(),
                     dirty.toLong(),
+                    // Edited on the web only; keep it rather than resetting it to the default.
+                    memoryCacheMiB = policy.memoryCacheMiB,
                 )
             )
         },
