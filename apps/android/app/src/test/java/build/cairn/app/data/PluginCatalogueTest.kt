@@ -163,4 +163,129 @@ class PluginCatalogueTest {
             )
         }
     }
+
+    @Test
+    fun configurationCompletesSelectedInstancesAndCrossPackageAccessWithoutFullCatalogue() =
+        runTest {
+            MockWebServer().use { server ->
+                server.enqueue(
+                    MockResponse()
+                        .setBody(
+                            """{"id":"chosen","builtin":false,"status":"active","active":"1","manifest":null,"instanceReads":true,"accessReads":true,"capabilities":[],"setupDrafts":true}"""
+                        )
+                )
+                server.enqueue(
+                    MockResponse()
+                        .setBody(
+                            """{"items":[{"id":"one","pluginId":"chosen"}],"nextCursor":"one"}"""
+                        )
+                )
+                server.enqueue(
+                    MockResponse()
+                        .setBody(
+                            """{"items":[{"id":"two","pluginId":"chosen"}],"nextCursor":null}"""
+                        )
+                )
+                server.enqueue(MockResponse().setBody("""{"items":[],"nextCursor":"boundary"}"""))
+                server.enqueue(
+                    MockResponse()
+                        .setBody(
+                            """{"items":[{"id":"other","pluginId":"elsewhere","pluginName":"Other","name":"Workspace","enabled":false,"agentIds":["root"],"resourceAgentIds":["resource"]}]}"""
+                        )
+                )
+                server.start()
+                val result = CairnApi(server.url("/"), MemoryVault()).pluginConfiguration("chosen")
+                assertEquals(listOf("one", "two"), result.connections.map { it.id })
+                assertTrue(result.hasPluginAccess("root"))
+                assertTrue(result.hasPluginAccess("resource"))
+                assertFalse(result.hasPluginAccess("unknown"))
+                assertEquals(listOf("Other · Workspace"), result.grantsOf("resource"))
+                assertTrue(result.exactInstanceReads)
+                assertTrue(result.setupDrafts)
+                assertEquals(
+                    listOf(
+                        "/api/plugins/packages/chosen",
+                        "/api/plugins/packages/chosen/connections",
+                        "/api/plugins/packages/chosen/connections?cursor=one",
+                        "/api/plugins/instance-access",
+                        "/api/plugins/instance-access?cursor=boundary",
+                    ),
+                    (1..5).map { server.takeRequest().path },
+                )
+            }
+        }
+
+    @Test
+    fun supportedConfigurationFailuresNeverFallbackToAnEmptyOrGlobalList() = runTest {
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse()
+                    .setBody(
+                        """{"id":"chosen","builtin":false,"status":"active","active":null,"manifest":null,"instanceReads":true,"accessReads":true,"capabilities":[]}"""
+                    )
+            )
+            server.enqueue(
+                MockResponse().setResponseCode(404).setBody("""{"error":"Missing instance read"}""")
+            )
+            server.start()
+            val error = runCatching {
+                CairnApi(server.url("/"), MemoryVault()).pluginConfiguration("chosen")
+            }
+                .exceptionOrNull()
+            assertTrue(error is ApiException && error.status == 404)
+            assertEquals(2, server.requestCount)
+        }
+    }
+
+    @Test
+    fun exactInstanceReadsKeepFullCurrentGrantsAndRejectMissingIds() = runTest {
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse()
+                    .setBody(
+                        """{"id":"one","pluginId":"chosen","agentIds":["current","concurrent"]}"""
+                    )
+            )
+            server.enqueue(MockResponse().setBody("""{"id":"one","pluginId":"chosen"}"""))
+            server.enqueue(MockResponse().setResponseCode(404).setBody("""{"error":"Deleted"}"""))
+            server.start()
+            val api = CairnApi(server.url("/"), MemoryVault())
+            assertEquals(
+                listOf("current", "concurrent"),
+                api.pluginInstance("chosen", "one", true).agentIds,
+            )
+            assertTrue(runCatching { api.pluginInstance("chosen", "one", true) }.isFailure)
+            val error = runCatching { api.pluginInstance("chosen", "one", true) }.exceptionOrNull()
+            assertTrue(error is ApiException && error.status == 404)
+            assertEquals("/api/plugins/packages/chosen/connections/one", server.takeRequest().path)
+            assertEquals(3, server.requestCount)
+        }
+    }
+
+    @Test
+    fun removedPackageUsesBoundedSupportDiscoveryInsteadOfTheGlobalCatalogue() = runTest {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(404))
+            server.enqueue(
+                MockResponse()
+                    .setBody(
+                        wireJson.encodeToString(
+                            PluginCards(
+                                packageReads = true,
+                                instanceReads = true,
+                                accessReads = true,
+                                items = emptyList(),
+                            )
+                        )
+                    )
+            )
+            server.start()
+            val result = CairnApi(server.url("/"), MemoryVault()).pluginConfiguration("removed")
+            assertNull(result.entry)
+            assertTrue(result.exactInstanceReads)
+            assertEquals("/api/plugins/packages/removed", server.takeRequest().path)
+            assertEquals("/api/plugins/packages", server.takeRequest().path)
+            assertEquals(2, server.requestCount)
+        }
+    }
 }

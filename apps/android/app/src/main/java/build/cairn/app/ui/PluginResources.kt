@@ -62,6 +62,11 @@ internal fun PluginResources(
         remember(location.plugin, location.instance) {
             mutableStateOf(mapOf<String, PluginAuthorizationActivity>())
         }
+    // Viewing a provider survives a resource revision; its consent state does not.
+    var openedAuthorizations by
+        remember(location.path, manifest.version, manifest.oauth) {
+            mutableStateOf(emptySet<String>())
+        }
     var loading by remember(location.plugin, location.instance) { mutableStateOf(false) }
     var ready by remember(location.plugin, location.instance) { mutableStateOf(false) }
     val loads = remember(location.plugin, location.instance) { AtomicInteger() }
@@ -274,6 +279,10 @@ internal fun PluginResources(
                                             !loading &&
                                             editing == null &&
                                             !accessLocked,
+                                        opened = path in openedAuthorizations,
+                                        open = {
+                                            openedAuthorizations = openedAuthorizations + path
+                                        },
                                         blocked =
                                             authorizations.any { (other, activity) ->
                                                 other != identity &&

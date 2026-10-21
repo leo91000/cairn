@@ -284,6 +284,37 @@ async fn instance_reads_are_bounded_exact_and_keep_unapproved_configuration_mana
     assert_eq!(worker_summary["states"]["connected"], 1);
     assert_eq!(worker_summary["states"]["disconnected"], 1);
     assert_eq!(worker_summary["states"]["paused"], 1);
+    let access = pages(&app, "/api/plugins/instance-access", "id").await;
+    assert_eq!(access.len(), 44);
+    let saved = access.iter().find(|row| row["id"] == target).unwrap();
+    assert_eq!(saved["agentIds"], json!([agent]));
+    let resource_ids = saved["resourceAgentIds"].as_array().unwrap();
+    assert_eq!(resource_ids.len(), 2);
+    assert!(resource_ids.contains(&json!(resource_agent)));
+    assert_eq!(saved["enabled"], exact["enabled"]);
+    assert!(
+        access
+            .iter()
+            .any(|row| row["pluginId"] == plugin && row["enabled"] == false)
+    );
+    assert_eq!(saved["pluginName"], plugin);
+    assert!(access.iter().any(|row| row["pluginName"] == "Discord"));
+    for row in &access {
+        for key in [
+            "settings",
+            "secretKeys",
+            "status",
+            "usage",
+            "requests",
+            "activity",
+        ] {
+            assert!(row.get(key).is_none(), "Access metadata must omit {key}");
+        }
+    }
+    let detail = get(&app, &format!("/api/plugins/packages/{plugin}")).await;
+    assert_eq!(detail["accessReads"], true);
+    assert_eq!(detail["instanceReads"], true);
+    assert!(detail["capabilities"].is_array());
     // Losing approval or even all source files never hides saved configuration.
     std::fs::remove_dir_all(directory.parent().unwrap()).unwrap();
     assert_eq!(
@@ -291,7 +322,15 @@ async fn instance_reads_are_bounded_exact_and_keep_unapproved_configuration_mana
         exact["agentIds"]
     );
     assert_eq!(pages(&app, &root, "id").await.len(), 40);
-    for path in [root.clone(), format!("{root}/{target}")] {
+    assert_eq!(
+        pages(&app, "/api/plugins/instance-access", "id").await,
+        access
+    );
+    for path in [
+        "/api/plugins/instance-access".to_owned(),
+        root.clone(),
+        format!("{root}/{target}"),
+    ] {
         assert_eq!(
             common::send(&app, request(&path, InstallationRole::Member))
                 .await
@@ -299,7 +338,11 @@ async fn instance_reads_are_bounded_exact_and_keep_unapproved_configuration_mana
             StatusCode::FORBIDDEN
         );
     }
-    for path in [format!("{root}?cursor=invalid"), format!("{root}/invalid")] {
+    for path in [
+        "/api/plugins/instance-access?cursor=invalid".to_owned(),
+        format!("{root}?cursor=invalid"),
+        format!("{root}/invalid"),
+    ] {
         assert_eq!(
             common::send(&app, request(&path, InstallationRole::Owner))
                 .await
@@ -321,6 +364,10 @@ async fn instance_reads_are_bounded_exact_and_keep_unapproved_configuration_mana
 #[tokio::test]
 async fn compact_package_pages_keep_exact_version_review_separate() {
     let (_directory, service, app) = fixture().await;
+    assert_eq!(
+        get(&app, "/api/plugins/packages").await["accessReads"],
+        true
+    );
     let bundled = pages(&app, "/api/plugins/packages", "id").await.len();
     for n in 0..40 {
         copied_version(&service, &format!("catalogue-{n:02}"), "1");
@@ -597,6 +644,7 @@ async fn measure_catalogue_reads_and_unchanged_approval_writes() {
             "/api/plugins",
             "/api/plugins/packages",
             "/api/plugins/packages/catalogue-00/connections",
+            "/api/plugins/instance-access",
             exact_path.as_str(),
         ];
         if sample % 2 == 1 {
@@ -639,7 +687,7 @@ async fn measure_catalogue_reads_and_unchanged_approval_writes() {
             "versionsCopied": 79,
             "instancesCopied": 40,
             "reference": "complete owner response, same binary and unchanged record format",
-            "candidate": "first compact card page, first selected-package instance page and one exact instance; different response purposes",
+            "candidate": "first compact card page, first selected-package instance page, compact saved access and one exact instance; different response purposes",
             "cache": "first API read then five warm samples, OS caches retained",
             "writes": "existing approval path, identical for both read contracts",
             "reads": reads,

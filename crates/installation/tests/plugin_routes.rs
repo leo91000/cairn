@@ -3470,6 +3470,9 @@ async fn pending_new_turns_respect_owner_pause_and_workspace_settlement() {
         "owner-pause",
         "owner-pause-before-enqueue",
         "unsettled-workspace",
+        "owner-pause-after-success",
+        "owner-pause-before-enqueue-after-success",
+        "unsettled-workspace-after-success",
     ])
     .await;
 }
@@ -3486,11 +3489,27 @@ async fn queued_new_turns_retire_revoked_people_and_preserve_other_participants(
 
 #[tokio::test]
 async fn queued_new_turns_recheck_participants_after_slow_authority_lookup() {
-    pending_new_turn_scenarios(&["revoked-during-lookup"]).await;
+    pending_new_turn_scenarios(&[
+        "revoked-during-lookup",
+        "revoked-during-lookup-after-success",
+    ])
+    .await;
+}
+
+#[tokio::test]
+async fn queued_new_turns_retire_revoked_people_after_a_successful_turn() {
+    pending_new_turn_scenarios(&["revoked-person-after-success"]).await;
+}
+
+#[tokio::test]
+async fn queued_new_turns_retry_authority_outages_after_a_successful_turn() {
+    pending_new_turn_scenarios(&["authority-unavailable-after-success"]).await;
 }
 
 async fn pending_new_turn_scenarios(scenarios: &[&str]) {
-    for &scenario in scenarios {
+    for &case in scenarios {
+        let succeeded = case.ends_with("-after-success");
+        let scenario = case.strip_suffix("-after-success").unwrap_or(case);
         let (_root, s, instance, resource, app) = fixture().await;
         let agent = s
             .agent(
@@ -3613,24 +3632,47 @@ async fn pending_new_turn_scenarios(scenarios: &[&str]) {
             .await;
             assert_eq!(removed.status(), StatusCode::OK);
         }
-        assert_eq!(
-            deliver(
-                &app,
-                &instance,
-                json!({
-                    "id": "stop-alice",
-                    "kind": "interaction",
-                    "resource": resource,
-                    "author": { "id": "alice" },
-                    "context": { "channel": "C1", "thread": "thread" },
-                    "body": { "chat": chat["id"], "delivery": run["chatExecution"]["messageId"] },
-                })
-            )
-            .await
-            .1["status"],
-            "accepted"
-        );
-        runtime::pump(&s, &connection, &mut session).await.unwrap();
+        if succeeded {
+            s.chat_acknowledge(run_id, text(&run["chatExecution"], "messageId"))
+                .await
+                .unwrap();
+            s.store
+                .event(
+                    run_id,
+                    "item.completed",
+                    "",
+                    Some(json!({ "item": { "type": "agent_message", "text": "Alice's answer" } })),
+                )
+                .await
+                .unwrap();
+            s.store
+                .event(run_id, "turn.completed", "", None)
+                .await
+                .unwrap();
+            s.store
+                .patch_run(run_id, json!({ "status": "succeeded" }))
+                .await
+                .unwrap();
+        } else {
+            assert_eq!(
+                deliver(
+                    &app,
+                    &instance,
+                    json!({
+                        "id": "stop-alice",
+                        "kind": "interaction",
+                        "resource": resource,
+                        "author": { "id": "alice" },
+                        "context": { "channel": "C1", "thread": "thread" },
+                        "body": { "chat": chat["id"], "delivery": run["chatExecution"]["messageId"] },
+                    })
+                )
+                .await
+                .1["status"],
+                "accepted"
+            );
+            runtime::pump(&s, &connection, &mut session).await.unwrap();
+        }
         if scenario == "unsettled-workspace" {
             s.store
                 .patch_run(run_id, json!({ "recoveryPending": true }))
@@ -3706,7 +3748,10 @@ async fn pending_new_turn_scenarios(scenarios: &[&str]) {
             stopped["run"]["chatExecution"]["messageId"], run["chatExecution"]["messageId"],
             "advanced despite {scenario}"
         );
-        assert_eq!(stopped["run"]["status"], "cancelled");
+        assert_eq!(
+            stopped["run"]["status"],
+            if succeeded { "succeeded" } else { "cancelled" }
+        );
         if scenario.starts_with("revoked-") || scenario == "authority-unavailable" {
             assert_ne!(
                 stopped["paused"], true,
@@ -3793,6 +3838,25 @@ async fn pending_new_turn_scenarios(scenarios: &[&str]) {
                     "owner resume replayed the abandoned prompt instead of advancing the queued request"
                 );
             }
+        }
+        if succeeded {
+            let delivery = s
+                .store
+                .list("plugin-deliveries")
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|delivery| delivery["id"] == run["chatExecution"]["messageId"])
+                .unwrap();
+            let reply = cairn_installation::plugins::work::reply(&s, &connection, &delivery)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                reply.status, "completed",
+                "a fresh request cancelled the completed reply"
+            );
+            assert_eq!(reply.text, "Alice's answer");
         }
         if let Some(server) = authority_server {
             server.abort();

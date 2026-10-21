@@ -67,6 +67,8 @@ const removing = ref<PluginResource>()
 const accessEditors = ref<Record<string, boolean>>({})
 const accessLocked = computed(() => Object.values(accessEditors.value).some(Boolean))
 const authorizations = ref<Record<string, { busy: boolean, pending: boolean }>>({})
+// Viewing a provider survives a resource revision; its consent state does not.
+const openedAuthorizations = ref(new Set<string>())
 const oauthBusy = computed(() => Object.values(authorizations.value).some(value => value.busy))
 const oauthPending = computed(() => Object.values(authorizations.value).some(value => value.pending))
 const oauthLocked = computed(() => oauthBusy.value || oauthPending.value)
@@ -88,8 +90,12 @@ function accessActivity(key: string, active: boolean) {
   accessEditors.value = next
 }
 
+function authorizationPath(resource: PluginResource, provider: string) {
+  return `${path.value}/${resource.collection}/${resource.id}/oauth/${provider}`
+}
+
 function authorizationKey(resource: PluginResource, provider: string) {
-  return `${path.value}/${resource.collection}/${resource.id}/oauth/${provider}@${resource.revision}@${props.setupRevision ?? ''}`
+  return `${authorizationPath(resource, provider)}@${resource.revision}@${props.setupRevision ?? ''}`
 }
 
 function authorizationBlocked(resource: PluginResource, provider: string) {
@@ -354,6 +360,9 @@ async function remove() {
   })
 }
 
+watch([path, () => props.manifest.version, () => JSON.stringify(props.manifest.oauth)], () => {
+  openedAuthorizations.value.clear()
+})
 watch([path, () => props.setupRevision, () => props.manifest.version, () => JSON.stringify(props.manifest.resources)], () => {
   resetEditor()
   pages.value = Object.create(null)
@@ -443,11 +452,13 @@ onBeforeUnmount(() => {
         <PluginResourceAuthorization
           v-for="provider in (manifest.oauth ?? []).filter(provider => provider.collection === collection.name && !provider.personal)"
           :key="authorizationKey(resource, provider.name)"
-          :path="`${path}/${collection.name}/${resource.id}/oauth/${provider.name}`"
+          :path="authorizationPath(resource, provider.name)"
           :provider="provider"
+          :opened="openedAuthorizations.has(authorizationPath(resource, provider.name))"
           :enabled="ready && !submitted && !disabled && !busy && !loading && !editing && !accessLocked"
           :blocked="authorizationBlocked(resource, provider.name)"
           :setup-revision="setupRevision"
+          @open="openedAuthorizations.add(authorizationPath(resource, provider.name))"
           @state="authorizationState(authorizationKey(resource, provider.name), $event)"
           @changed="load"
         />

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { PluginOAuthProvider, PluginOAuthStatus } from '../plugins'
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { onBeforeUnmount, ref, watch } from 'vue'
 import { api } from '../api'
 import PluginAuthorization from './PluginAuthorization.vue'
 import UiAlert from './UiAlert.vue'
@@ -9,11 +9,13 @@ import UiButton from './UiButton.vue'
 const props = defineProps<{
   path: string
   provider: PluginOAuthProvider
+  opened: boolean
   enabled: boolean
   blocked?: boolean
   setupRevision?: string
 }>()
 const emit = defineEmits<{
+  open: []
   changed: []
   state: [value: { busy: boolean, pending: boolean }]
 }>()
@@ -51,7 +53,10 @@ async function load() {
   }
 }
 
-onMounted(load)
+watch(() => props.opened, (opened) => {
+  if (opened)
+    void load()
+}, { immediate: true })
 onBeforeUnmount(() => {
   active = false
   emit('state', { busy: false, pending: false })
@@ -72,8 +77,8 @@ onBeforeUnmount(() => {
     <UiAlert v-if="error">
       {{ error }}
     </UiAlert>
-    <UiButton size="small" :disabled="loading || blocked || activity.busy || activity.pending" @click="load">
-      {{ loading ? 'Checking authorization…' : 'Refresh authorization' }}
+    <UiButton size="small" :disabled="loading || blocked || activity.busy || activity.pending" @click="opened ? load() : emit('open')">
+      {{ loading ? 'Checking authorization…' : opened ? 'Refresh authorization' : 'Manage authorization' }}
     </UiButton>
     <template v-if="authorization">
       <label class="text-xs">Direct HTTPS origin (optional)<input

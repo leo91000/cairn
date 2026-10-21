@@ -1,10 +1,9 @@
 <script setup lang="ts">
 import type { Agent } from '../../../../packages/contracts/contracts'
+import type { PluginConfiguration } from '../plugin-catalogue'
 import type {
-  Catalog,
   FormResult,
   PluginConnection,
-  PluginEntry,
   PluginSetupDraft,
 } from '../plugins'
 import {
@@ -47,6 +46,7 @@ import {
   X,
   Zap,
 } from '../icons'
+import { pluginConfiguration, pluginInstance } from '../plugin-catalogue'
 import { pluginFormLookup } from '../plugin-form-lookups'
 import {
   pluginFormSecrets,
@@ -74,7 +74,7 @@ import {
 
 const route = useRoute()
 const id = computed(() => String(route.params.id))
-const catalog = ref<Catalog>({ packages: [], capabilities: [], connections: [] })
+const configuration = ref<PluginConfiguration>()
 const loaded = ref(false)
 const busy = ref(false)
 const error = ref('')
@@ -96,9 +96,9 @@ let typing: ReturnType<typeof setTimeout> | undefined
 let asked = 0
 let reader: AbortController | undefined
 
-const entry = computed<PluginEntry | undefined>(() => catalog.value.packages.find(item => item.id === id.value))
+const entry = computed(() => configuration.value?.entry)
 const manifest = computed(() => entry.value?.manifest)
-const connections = computed(() => catalog.value.connections.filter(item => item.pluginId === id.value))
+const connections = computed(() => configuration.value?.connections ?? [])
 const delegates = computed(() => delegating(manifest.value))
 const fields = computed(() => (manifest.value?.settings ?? []).filter(field => !field.hidden))
 const plainFields = computed(() => fields.value.filter(field => field.type !== 'secret'))
@@ -116,12 +116,19 @@ const activityTones = {
 
 /** Why an agent can't answer this instance's people, or '' when it can. */
 function problem(agent: Agent) {
-  if (form.value.accessMode === 'everyone')
-    return publicProblem(agent, catalog.value.connections.filter(item => item.id !== editing.value?.id))
+  if (form.value.accessMode === 'everyone') {
+    return publicProblem(agent, Boolean(configuration.value?.resourceAgentIds.includes(agent.id)
+      || configuration.value?.access.some(item => item.agentIds.includes(agent.id) || item.resourceAgentIds.includes(agent.id))))
+  }
+
   return eligibleAgent(agent) ? '' : 'Too broad'
 }
 
 const agents = computed(() => [...state.agents].sort((a, b) => Number(Boolean(problem(a))) - Number(Boolean(problem(b)))))
+const delegationReady = computed(() => {
+  const agent = state.agents.find(item => item.id === form.value.agentId)
+  return !delegates.value || Boolean(agent && !problem(agent))
+})
 const singular = computed(() => instanceNoun(manifest.value, 1))
 const plural = computed(() => instanceNoun(manifest.value, 2))
 const tones = {
@@ -135,12 +142,12 @@ async function load() {
   const controller = new AbortController()
   reader = controller
   try {
-    const nextCatalog = await api<Catalog>('/plugins', { signal: controller.signal })
+    const nextConfiguration = await pluginConfiguration(id.value, controller.signal)
     if (reader !== controller || controller.signal.aborted)
       return
-    catalog.value = nextCatalog
+    configuration.value = nextConfiguration
     loaded.value = true
-    const nextDrafts = nextCatalog.setupDrafts
+    const nextDrafts = nextConfiguration.setupDrafts
       ? await pluginManagementItems<PluginSetupDraft>(`/plugins/${id.value}/setup-drafts`, controller.signal)
       : []
     if (reader === controller && !controller.signal.aborted)
@@ -282,17 +289,20 @@ function addPerson() {
   const value = person.value.trim()
   if (!value || people.value.some(item => item.id === value))
     return
-  people.value.push({ id: value, name: catalog.value.connections.flatMap(item => item.requests).find(request => request.userId === value)?.name ?? '' })
+  people.value.push({ id: value, name: connections.value.flatMap(item => item.requests).find(request => request.userId === value)?.name ?? '' })
   person.value = ''
 }
 
 async function save() {
   // The package's derived values must be in the form before it is saved.
-  if (completing.value)
+  if (busy.value || completing.value || !delegationReady.value)
     return
   await action(async () => {
+    const plugin = id.value
+    const connection = editing.value
+    const currentEntry = entry.value ?? undefined
+    const exact = Boolean(configuration.value?.exactInstanceReads)
     const agent = state.agents.find(item => item.id === form.value.agentId)
-    const agentIds = await currentAgentIds(state.agents, entry.value, editing.value, async () => (await api<Catalog>('/plugins')).connections)
     const body = {
       name: form.value.name,
       ...(form.value.token ? { token: form.value.token } : {}),
@@ -310,11 +320,12 @@ async function save() {
         maxPerPersonPerHour: Number(form.value.maxPerPersonPerHour),
       }),
       enabled: form.value.enabled,
-      // An older (or unknown) installation needs the granted agents back, as they are now.
-      ...(agentIds ? { agentIds } : {}),
     }
-    const path = `/plugins/${id.value}/connections${editing.value ? `/${editing.value.id}` : ''}`
-    await pluginOperation(path, body, editing.value ? 'PUT' : 'POST')
+    // Capture the target and typed fields before the asynchronous grant read.
+    // Closing the editor during that read cannot turn this update into a creation.
+    const agentIds = await currentAgentIds(state.agents, currentEntry, connection, async () => [await pluginInstance(plugin, connection!.id, exact)])
+    const path = `/plugins/${plugin}/connections${connection ? `/${connection.id}` : ''}`
+    await pluginOperation(path, { ...body, ...(agentIds ? { agentIds } : {}) }, connection ? 'PUT' : 'POST')
     form.value.token = ''
     secrets.value = pluginFormSecrets()
     editing.value = undefined
@@ -716,7 +727,7 @@ onBeforeUnmount(() => {
       v-if="reviewing && entry"
       :id="entry.id"
       :package-name="entry.manifest?.name"
-      :capabilities="catalog.capabilities"
+      :capabilities="configuration?.capabilities ?? []"
       @close="reviewing = false"
       @changed="load"
     />
@@ -907,7 +918,7 @@ onBeforeUnmount(() => {
           <UiButton :disabled="busy" @click="closeEditor">
             Cancel
           </UiButton>
-          <UiButton type="submit" variant="primary" :disabled="busy || completing">
+          <UiButton type="submit" variant="primary" :disabled="busy || completing || !delegationReady">
             Save {{ singular.toLowerCase() }}
           </UiButton>
         </div>

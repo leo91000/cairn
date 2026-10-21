@@ -187,7 +187,7 @@ private fun PluginInstances(
     openChat: (String) -> Unit,
     openAgents: () -> Unit,
 ) {
-    var catalog by remember { mutableStateOf<PluginCatalog?>(null) }
+    var catalog by remember { mutableStateOf<PluginConfiguration?>(null) }
     var editing by remember { mutableStateOf<PluginConnection?>(null) }
     var removing by remember { mutableStateOf<PluginConnection?>(null) }
     var reviewing by remember { mutableStateOf(false) }
@@ -197,7 +197,7 @@ private fun PluginInstances(
     var discarding by remember(id) { mutableStateOf<PluginSetupDraft?>(null) }
     val context = LocalContext.current
     suspend fun load() {
-        val nextCatalog = vm.api.get<PluginCatalog>("/plugins")
+        val nextCatalog = vm.api.pluginConfiguration(id)
         catalog = nextCatalog
         val nextDrafts =
             if (nextCatalog.setupDrafts)
@@ -227,9 +227,9 @@ private fun PluginInstances(
                 vm.report(e)
             }
     }
-    val entry = catalog?.packages?.find { it.id == id }
+    val entry = catalog?.entry
     val manifest = entry?.manifest
-    val instances = catalog?.connections.orEmpty().filter { it.pluginId == id }
+    val instances = catalog?.connections.orEmpty()
     Column(
         Modifier.fillMaxSize()
             .verticalScroll(rememberScrollState())
@@ -439,7 +439,7 @@ private fun PluginInstances(
                 id,
                 it,
                 initial,
-                catalog?.connections.orEmpty(),
+                catalog,
                 close = { editing = null },
                 openAgents = {
                     editing = null
@@ -787,7 +787,7 @@ private fun InstanceEditor(
     pluginId: String,
     manifest: PluginManifest,
     initial: PluginConnection,
-    connections: List<PluginConnection>,
+    configuration: PluginConfiguration?,
     close: () -> Unit,
     openAgents: () -> Unit,
     saved: suspend () -> Unit,
@@ -829,9 +829,9 @@ private fun InstanceEditor(
     var completing by remember(initial.id) { mutableStateOf(manifest.instanceForm) }
     // Each change asks the package again; a newer question cancels the older one.
     var asking by remember(initial.id) { mutableStateOf(0 to (null as String?)) }
-    val others = connections.filter { it.id != initial.id }
     fun problem(agent: Agent): String? =
-        if (accessMode == "everyone") agent.publicProblem(others)
+        if (accessMode == "everyone")
+            agent.publicProblem(configuration?.hasPluginAccess(agent.id) == true)
         else if (agent.eligibleForPlugins()) null else "Trop large"
     fun refresh(key: String?) {
         asking = (asking.first + 1) to key
@@ -919,11 +919,12 @@ private fun InstanceEditor(
                     if (creating) null
                     else
                         initial.agentIdsToSend(state.agents, manifest) {
-                            wireJson
-                                .decodeFromString<PluginCatalog>(api.request("GET", "/plugins"))
-                                .connections
-                                .find { it.id == initial.id }
-                                ?.agentIds
+                            api.pluginInstance(
+                                    pluginId,
+                                    initial.id,
+                                    configuration?.exactInstanceReads == true,
+                                )
+                                .agentIds
                         }
                 api.pluginOperation(
                     "/plugins/${segment(pluginId)}/connections" +
@@ -1116,7 +1117,9 @@ private fun InstanceEditor(
                     onClick = {
                         if (people.none { it.id == person }) {
                             val known =
-                                connections
+                                configuration
+                                    ?.connections
+                                    .orEmpty()
                                     .flatMap { it.requests }
                                     .find { it.userId == person }
                                     ?.name
@@ -1435,13 +1438,13 @@ private fun AgentUsage(manifest: PluginManifest) {
 internal fun PluginReview(
     vm: CairnViewModel,
     state: Workspace,
-    initial: PluginEntry,
+    initial: PluginConfigurationEntry,
     capabilities: List<PluginCapability>,
     close: () -> Unit,
     changed: suspend () -> Unit,
 ) {
     var read by remember(initial.id) { mutableStateOf<PluginReviewRead?>(null) }
-    val entry = read?.entry ?: initial
+    val entry = read?.entry?.configuration() ?: initial
     val valid = read?.entry?.versions.orEmpty().filter { it.error == null }
     var selected by remember(initial.id) { mutableStateOf("") }
     var uninstalling by remember { mutableStateOf(false) }
@@ -1670,7 +1673,10 @@ internal fun PluginReview(
                         }
                     }
                 }
-                entry.versions
+                read
+                    ?.entry
+                    ?.versions
+                    .orEmpty()
                     .filter { it.error != null }
                     .forEach {
                         Text(

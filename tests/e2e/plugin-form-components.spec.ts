@@ -24,6 +24,27 @@ test.beforeAll(async () => {
       name: 'plugin-panel-test-page',
       configureServer(server) {
         server.middlewares.use(async (request, response, next) => {
+          if (request.url === '/plugin-resource-authorization-fixture') {
+            const html = await server.transformIndexHtml('/plugin-resource-authorization-fixture', `
+              <div id="app"></div>
+              <script type="module">
+                import { createApp, h } from 'vue'
+                import PluginResources from '/apps/web/src/components/PluginResources.vue'
+                createApp({ render: () => h(PluginResources, {
+                  plugin: 'forms', instance: 'example', manifest: {
+                    version: '1',
+                    resources: [{ name: 'workspace', title: 'Workspaces', singular: 'Workspace', settings: [] }],
+                    oauth: Array.from({ length: 8 }, (_, index) => ({
+                      name: 'provider' + index, title: 'Provider ' + index, collection: 'workspace', scopes: ['messages:read']
+                    }))
+                  }
+                }) }).mount('#app')
+              </script>`)
+            response.setHeader('Content-Type', 'text/html')
+            response.end(html)
+            return
+          }
+
           if (request.url === '/plugin-resource-replacement-fixture') {
             const html = await server.transformIndexHtml('/plugin-resource-replacement-fixture', `
               <div id="app"></div>
@@ -102,6 +123,47 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   await server?.close()
+})
+
+test('resource OAuth reads only requested providers and keeps that choice across resource revisions', async ({ page }) => {
+  test.setTimeout(90000)
+  let revision = 'resource0'
+  const statusReads: string[] = []
+  const root = '/api/plugins/forms/connections/example/resources/workspace'
+  // A native resource page admits up to 100 small records, and a package up to 8
+  // OAuth providers. 41 × 8 eager reads alone exceed the 300 account GET/minute cap.
+  await page.route(`**${root}`, route => route.fulfill({
+    json: {
+      items: Array.from({ length: 41 }, (_, index) => ({
+        id: `resource${index}`,
+        collection: 'workspace',
+        name: `Workspace ${index}`,
+        revision,
+        enabled: true,
+        settings: {},
+        secretKeys: [],
+      })),
+      nextCursor: null,
+    },
+  }))
+  await page.route(`**${root}/*/oauth/*`, (route) => {
+    statusReads.push(new URL(route.request().url()).pathname)
+    return route.fulfill({ json: { status: 'disconnected' } })
+  })
+  await page.goto(`${origin}plugin-resource-authorization-fixture`, { waitUntil: 'load' })
+  await expect(page.getByRole('heading', { name: 'Provider 0', exact: true })).toHaveCount(41)
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  expect(statusReads).toEqual([])
+  await expect(page.getByRole('button', { name: 'Checking authorization…', exact: true })).toHaveCount(0)
+  const first = page.getByRole('article', { name: 'Workspace 0', exact: true }).getByRole('region', { name: 'Provider 0', exact: true })
+  await first.getByRole('button', { name: 'Manage authorization', exact: true }).click()
+  await expect(first.getByRole('checkbox', { name: 'messages:read', exact: true })).toBeVisible()
+  expect(statusReads).toEqual([`${root}/resource0/oauth/provider0`])
+  revision = 'resource1'
+  await page.getByRole('button', { name: 'Refresh resources', exact: true }).click()
+  await expect.poll(() => statusReads.length).toBe(2)
+  await expect(first.getByRole('checkbox', { name: 'messages:read', exact: true })).toBeVisible()
+  expect(statusReads).toEqual(Array.from({ length: 2 }).fill(`${root}/resource0/oauth/provider0`))
 })
 
 for (const code of ['0085', '001C', '001D', '001E', '001F', 'FEFF', '00A0', '2007', '202F', '200B', '2060']) {

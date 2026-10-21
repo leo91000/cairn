@@ -519,7 +519,13 @@ abstract class PluginsCases {
             val vm =
                 show(server) { model, state ->
                     if (!closed)
-                        PluginReview(model, state, entry, emptyList(), { closed = true }) {}
+                        PluginReview(
+                            model,
+                            state,
+                            entry.configuration(),
+                            emptyList(),
+                            { closed = true },
+                        ) {}
                 }
             val models = ViewModelStore().apply { put("fixture", vm) }
             try {
@@ -557,6 +563,142 @@ abstract class PluginsCases {
             } finally {
                 releaseLate.countDown()
                 releaseApproval.countDown()
+                models.clear()
+            }
+        }
+    }
+
+    @Test
+    fun missingSelectedPackageShowsNotInstalledFromCompactSupport() {
+        val paths = CopyOnWriteArrayList<String>()
+        MockWebServer().use { server ->
+            server.dispatcher =
+                dispatcher(
+                    read = { path ->
+                        paths += path
+                        if (path.endsWith("/plugins/packages"))
+                            wireJson.encodeToString(
+                                PluginCards(
+                                    packageReads = true,
+                                    instanceReads = true,
+                                    accessReads = true,
+                                    items = emptyList(),
+                                )
+                            )
+                        else null
+                    }
+                ) { _, _ ->
+                    null
+                }
+            server.start()
+            val vm = show(server) { model, state -> PluginScreen(model, state, "removed") {} }
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            try {
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("Plugin introuvable")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                assertFalse(paths.any { it.endsWith("/api/plugins") })
+                assertTrue(paths.any { it.endsWith("/plugins/packages/removed") })
+                capture("plugin-selected-package-missing")
+            } finally {
+                models.clear()
+            }
+        }
+    }
+
+    @Test
+    fun selectedPackagePublicChoicesKeepOtherPackagesResourceRestrictions() {
+        val paths = CopyOnWriteArrayList<String>()
+        val instance =
+            PluginConnection(
+                id = "team",
+                pluginId = "notes",
+                name = "Team notes",
+                settings = buildJsonObject { put("team", "core") },
+                agentId = "helper",
+                accessMode = "everyone",
+            )
+        MockWebServer().use { server ->
+            server.dispatcher =
+                dispatcher(
+                    read = { path ->
+                        paths += path
+                        when {
+                            path.endsWith("/plugins/packages/notes") ->
+                                wireJson.encodeToString(
+                                    notes
+                                        .configuration()
+                                        .copy(
+                                            instanceReads = true,
+                                            accessReads = true,
+                                            capabilities = emptyList(),
+                                        )
+                                )
+                            path.endsWith("/plugins/packages/notes/connections") ->
+                                wireJson.encodeToString(PluginPage(listOf(instance)))
+                            path.endsWith("/plugins/instance-access") ->
+                                """{"items":[],"nextCursor":"next"}"""
+                            path.endsWith("/plugins/instance-access?cursor=next") ->
+                                wireJson.encodeToString(
+                                    PluginPage(
+                                        listOf(
+                                            PluginInstanceAccess(
+                                                "other",
+                                                "missing",
+                                                "missing",
+                                                "Other workspace",
+                                                false,
+                                                emptyList(),
+                                                listOf("helper"),
+                                            )
+                                        )
+                                    )
+                                )
+                            else -> null
+                        }
+                    }
+                ) { _, _ ->
+                    null
+                }
+            server.start()
+            val vm =
+                show(server) { model, state ->
+                    PluginScreen(
+                        model,
+                        state.copy(
+                            agents =
+                                state.agents.map {
+                                    if (it.id == "helper")
+                                        it.copy(
+                                            access =
+                                                AccessPolicy(
+                                                    projects = emptyList(),
+                                                    mcps = emptyList(),
+                                                    github = false,
+                                                    sandbox = "read-only",
+                                                )
+                                        )
+                                    else it
+                                }
+                        ),
+                        "notes",
+                    ) {}
+                }
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            try {
+                compose.waitUntil(10000) {
+                    compose.onAllNodesWithText("Modifier").fetchSemanticsNodes().isNotEmpty()
+                }
+                compose.onNodeWithText("Modifier").performScrollTo().performClick()
+                compose.onNodeWithText("A des plugins").assertExists()
+                compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                assertFalse(paths.any { it.endsWith("/api/plugins") })
+                assertTrue(paths.any { it.endsWith("/instance-access?cursor=next") })
+                capture("plugin-selected-package-public-resource-access")
+            } finally {
                 models.clear()
             }
         }
@@ -1977,6 +2119,129 @@ abstract class PluginsCases {
         }
     }
 
+    @Test
+    fun resourceOAuthStatusesLoadOnlyForOpenedProvidersAcrossRevisions() {
+        val revision = AtomicReference("resource0")
+        val statusReads = AtomicInteger()
+        val manifest =
+            PluginManifest(
+                id = "owner-limits",
+                name = "Owner limits",
+                version = "1",
+                resources =
+                    listOf(
+                        PluginResourceCollection(
+                            name = "workspace",
+                            title = "Workspaces",
+                            singular = "Workspace",
+                        )
+                    ),
+                oauth =
+                    (0 until 8).map { index ->
+                        PluginOAuthProvider(
+                            name = "provider$index",
+                            title = "Provider $index",
+                            collection = "workspace",
+                            scopes = listOf("messages:read"),
+                        )
+                    },
+            )
+        val connection =
+            PluginConnection(
+                id = "app",
+                pluginId = manifest.id,
+                name = "Application",
+                status = PluginStatus("ready"),
+            )
+        MockWebServer().use { server ->
+            server.dispatcher =
+                dispatcher(
+                    read = { path ->
+                        when {
+                            path.endsWith("/plugins") ->
+                                wireJson.encodeToString(
+                                    PluginCatalog(
+                                        packages =
+                                            listOf(
+                                                PluginEntry(
+                                                    id = manifest.id,
+                                                    active = "1",
+                                                    manifest = manifest,
+                                                )
+                                            ),
+                                        connections = listOf(connection),
+                                    )
+                                )
+                            path.substringBefore('?').endsWith("/resources/workspace") ->
+                                wireJson.encodeToString(
+                                    PluginPage(
+                                        (0 until 2).map { index ->
+                                            PluginResource(
+                                                id = "resource$index",
+                                                connectionId = connection.id,
+                                                collection = "workspace",
+                                                name = "Workspace $index",
+                                                revision = revision.get(),
+                                            )
+                                        }
+                                    )
+                                )
+                            path.contains("/oauth/provider") -> {
+                                statusReads.incrementAndGet()
+                                """{"status":"disconnected"}"""
+                            }
+                            else -> null
+                        }
+                    }
+                ) { _, _ ->
+                    null
+                }
+            server.start()
+            show(server) { model, state -> PluginScreen(model, state, manifest.id) {} }
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Provider 7", substring = false)
+                    .fetchSemanticsNodes()
+                    .size == 2
+            }
+            compose.waitForIdle()
+            assertEquals(
+                "Listing resources must not fetch every provider status",
+                0,
+                statusReads.get(),
+            )
+            compose
+                .onAllNodesWithText("Gérer l’autorisation", substring = false)[0]
+                .performScrollTo()
+                .performClick()
+            compose.waitUntil(10000) {
+                // Read semantics first so Robolectric advances the pending UI work.
+                val visibleScopes =
+                    compose
+                        .onAllNodesWithText("messages:read", substring = false)
+                        .fetchSemanticsNodes()
+                        .size
+                visibleScopes == 1 && statusReads.get() == 1
+            }
+            compose.onNodeWithText("messages:read", substring = false).assertExists()
+            revision.set("resource1")
+            compose.onNodeWithText("Actualiser les ressources").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                // Read semantics first so Robolectric advances the pending UI work.
+                val visibleScopes =
+                    compose
+                        .onAllNodesWithText("messages:read", substring = false)
+                        .fetchSemanticsNodes()
+                        .size
+                visibleScopes == 1 && statusReads.get() == 2
+            }
+            compose.waitForIdle()
+            assertEquals("Only the provider the owner opened is refreshed", 2, statusReads.get())
+            compose.onNodeWithText("messages:read", substring = false).assertExists()
+            capture("resource-authorization-on-demand")
+        }
+    }
+
     /** Answers the workspace fixture; custom reads and writes remain HTTP boundaries. */
     @Test
     fun ownerResourceAuthorizationsGateSetupIndependentlyAndWorkAfterActivation() {
@@ -2145,6 +2410,7 @@ abstract class PluginsCases {
                     .isNotEmpty()
             }
             compose.onNodeWithText("Continuer Shared service").performScrollTo().performClick()
+            openSharedResourceAuthorization()
             compose.waitUntil(10000) {
                 compose
                     .onAllNodesWithText("Connecter", substring = false)
@@ -2167,6 +2433,7 @@ abstract class PluginsCases {
                     1
             }
             compose.onNodeWithText("Voir plus · Workspaces").performScrollTo().performClick()
+            openSharedResourceAuthorization()
             compose.waitUntil(10000) {
                 compose.onAllNodesWithText("messages:read").fetchSemanticsNodes().size == 2
             }
@@ -2284,6 +2551,8 @@ abstract class PluginsCases {
                         .fetchSemanticsNodes()
                         .isEmpty()
             }
+            // The active namespace starts with Intro, then Engineering.
+            openSharedResourceAuthorization(1)
             compose.waitUntil(10000) {
                 compose
                     .onAllNodesWithText("Déconnecter", substring = false)
@@ -2429,6 +2698,7 @@ abstract class PluginsCases {
             server.start()
             try {
                 show(server) { vm, state -> PluginScreen(vm, state, manifest.id) {} }
+                openSharedResourceAuthorization()
                 compose.waitUntil(30000) {
                     compose
                         .onAllNodesWithText("Connecter", substring = false)
@@ -2557,6 +2827,8 @@ abstract class PluginsCases {
                 }
             server.start()
             show(server) { vm, state -> PluginScreen(vm, state, manifest.id) {} }
+            openSharedResourceAuthorization()
+            openSharedResourceAuthorization()
             compose.waitUntil(30000) {
                 compose
                     .onAllNodesWithText("Connecter", substring = false)
@@ -5744,12 +6016,78 @@ abstract class PluginsCases {
      * agents": the editor then sends the instance's current grants unchanged. A current one keeps
      * them.
      */
-    private fun editExistingAccount(older: Boolean, revokedMeanwhile: Boolean = false) {
+    @Test
+    fun selectedPackageReadsKeepCurrentGrantsWithoutReadingTheGlobalCatalogue() =
+        editExistingAccount(older = true, bounded = true)
+
+    @Test
+    fun selectedPackageExactReadDoesNotRestoreARevokedGrant() =
+        editExistingAccount(older = true, revokedMeanwhile = true, bounded = true)
+
+    private fun editExistingAccount(
+        older: Boolean,
+        revokedMeanwhile: Boolean = false,
+        bounded: Boolean = false,
+    ) {
         MockWebServer().use { server ->
             val saved = CopyOnWriteArrayList<String>()
             val editing = java.util.concurrent.atomic.AtomicBoolean(false)
             server.dispatcher =
-                dispatcher(includeGet = true, current = !older) { path, body ->
+                dispatcher(
+                    includeGet = true,
+                    current = !older,
+                    read = { path ->
+                        if (!bounded) null
+                        else
+                            when {
+                                path.endsWith("/plugins/packages/onepassword") ->
+                                    wireJson.encodeToString(
+                                        onePassword
+                                            .configuration()
+                                            .copy(
+                                                instanceReads = true,
+                                                accessReads = true,
+                                                capabilities = emptyList(),
+                                            )
+                                    )
+                                path.endsWith("/plugins/packages/onepassword/connections") ->
+                                    wireJson.encodeToString(PluginPage(listOf(account), "op1"))
+                                path.endsWith(
+                                    "/plugins/packages/onepassword/connections?cursor=op1"
+                                ) ->
+                                    wireJson.encodeToString(
+                                        PluginPage<PluginConnection>(emptyList())
+                                    )
+                                path.endsWith("/plugins/instance-access") ->
+                                    """{"items":[],"nextCursor":"next"}"""
+                                path.endsWith("/plugins/instance-access?cursor=next") ->
+                                    wireJson.encodeToString(
+                                        PluginPage(
+                                            listOf(
+                                                PluginInstanceAccess(
+                                                    "another",
+                                                    "notes",
+                                                    "Notes",
+                                                    "Other team",
+                                                    false,
+                                                    listOf("helper"),
+                                                    listOf("resource-agent"),
+                                                )
+                                            )
+                                        )
+                                    )
+                                path.endsWith("/plugins/packages/onepassword/connections/op1") ->
+                                    wireJson.encodeToString(
+                                        if (revokedMeanwhile && editing.get())
+                                            account.copy(agentIds = emptyList())
+                                        else account
+                                    )
+                                path.endsWith("/api/plugins") ->
+                                    error("Detail must never read the global catalogue")
+                                else -> null
+                            }
+                    },
+                ) { path, body ->
                     when {
                         path.endsWith("/plugins/onepassword/connections/op1") -> {
                             saved += body
@@ -5905,6 +6243,20 @@ abstract class PluginsCases {
         }
 
     /** Signs in to the fixture, then shows [content] once the workspace has loaded. */
+    private fun openSharedResourceAuthorization(index: Int = 0) {
+        compose.waitUntil(10000) {
+            compose
+                .onAllNodes(hasText("Gérer l’autorisation") and isEnabled())
+                .fetchSemanticsNodes()
+                .size > index
+        }
+        compose
+            .onAllNodes(hasText("Gérer l’autorisation") and isEnabled())[index]
+            .performScrollTo()
+            .performClick()
+        compose.waitForIdle()
+    }
+
     private fun show(
         server: MockWebServer,
         restoration: StateRestorationTester? = null,

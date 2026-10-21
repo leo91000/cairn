@@ -1289,3 +1289,80 @@ still loads all parent pages and saves the current schema to the current instanc
 The six held-read regressions fail before the correction and pass after it.
 Complete web/browser qualification and fresh full independent review remain
 required; this correction does not complete Slack.
+
+## Selected package configuration clients
+
+Web and Android detail screens now read the complete configuration manifest for
+one selected package, page all its saved instances, and separately page compact
+saved access across packages. The latter includes distinct resource memberships
+as well as root grants, including paused or unavailable instances. Public-agent
+choices retain these restrictions; native authorization remains authoritative.
+The compact projection does not materialize settings in Rust or load credentials
+or activity. SQLite still reads each underlying instance JSON record.
+
+Configuration DTOs contain no fabricated version history. Review reads remain
+separate. An older host explicitly falls back to its complete catalogue; a failed
+supported page stays an error. Compatibility saves re-read the exact instance's
+complete current root IDs and refuse a vanished instance. A missing package is
+confirmed through one compact support page, clearing the screen after uninstall
+without an aggregate read. The web captures the
+save target and typed fields before this asynchronous read, so closing the editor
+cannot turn an update into a creation or clear its outgoing credential.
+
+This slice does not migrate the agent/grant selectors or deliver the Slack package.
+Those selectors, provider lifecycle, wake delivery, transport/files, Slack surfaces
+and tools, automations, ephemeral search and final qualification remain pending.
+
+## Resource authorization reads on demand
+
+Owner resource OAuth status was fetched on every widget mount. A valid page of
+41 small resources and eight shared providers created 328 automatic reads,
+exceeding the account's 300-read minute budget on a responsive installation.
+The actual Vue component regression observes automatic status requests before
+the correction in both engines. Both clients now load a provider only after the
+owner opens its controls. Viewing interest is separate from consent: it survives
+a resource revision so the selected provider re-reads current status, while the
+existing revision key still destroys obsolete consent state. Unopened providers
+stay unknown; pending consent on an unchanged resource survives page refresh.
+The focused browser scenario passes after the correction; complete checkpoint
+qualification and fresh independent review remain required.
+
+An unrelated browser validation ended on a native read quota after a successful
+setup. A controlled predecessor fills the real read window and reproduces the
+next scenario's failure; a normal backend restart makes that same next read pass.
+Plugin journeys now retain fixture data and sign-in while restarting the backend
+between scenarios, isolating process-local request budgets. Production quotas
+and application deadlines are unchanged. This does not attribute that earlier
+failure to resource OAuth, which that setup did not declare, or complete Slack.
+
+## Independent queued requests after a completed turn
+
+The successful-predecessor path now uses the same individual retirement and
+requester recheck as the stopped-predecessor path. A revoked queued participant
+must not pause the later authorized participants. Temporary authority lookup
+failure keeps that request queued; owner Pause, workspace settlement and a
+scheduled continuation keep their precedence. A successful predecessor retains
+its own completed reply even when its run is reused for the next request.
+
+The HTTP/worker regression first reproduced both the revoked-request queue pause
+and the skipped temporary-authority check after a successful predecessor. The
+corrected route suite passes 53 tests; chat processes and scheduled continuations
+pass 23 and 10 tests, and remote waits pass 32 functional tests (their opt-in
+metadata benchmark is separate).
+
+The on-demand OAuth Android regression also exposed a test synchronization error:
+its network-first condition skipped Compose semantics reads while waiting for the
+refreshed UI to issue that network request. Reading semantics first keeps the same
+10-second limit and exact request-count assertions and passes the isolated case.
+Temporary diagnosis probes are removed. Whole-checkpoint Android, browser/device
+and fresh complete independent qualification remain in progress. This does not
+complete the Slack package or Q1–Q20.
+
+
+The complete Android run also exposed an unnecessary account reconnection in the
+shared chat test fixture during state restoration. That reconnect clears the
+ViewModel's local drafts. The fixture now retains its existing connection, as the
+plugin fixture already does. A regression waits for the restored connection check
+and asserts one actual account-session read across restoration; it first observed
+two. The corrected isolated scenario passes while retaining all original draft
+and swipe assertions. Complete final-source Android qualification remains pending.

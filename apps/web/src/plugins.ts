@@ -434,7 +434,7 @@ export function eligibleAgent(agent: Agent) {
  * Why an agent can't serve anyone in a channel, or '' when it can. Mirrors the server:
  * read-only sandbox, one project at most, no installation, GitHub, MCP or plugin grants.
  */
-export function publicProblem(agent: Agent, connections: Pick<PluginConnection, 'agentIds'>[]) {
+export function publicProblem(agent: Agent, pluginAccess: boolean) {
   if (!eligibleAgent(agent))
     return 'Too broad'
   if (agent.access.sandbox !== 'read-only')
@@ -443,7 +443,7 @@ export function publicProblem(agent: Agent, connections: Pick<PluginConnection, 
     return 'Has GitHub'
   if (!Array.isArray(agent.access.mcps) || agent.access.mcps.length)
     return 'Has MCPs'
-  if (connections.some(connection => connection.agentIds?.includes(agent.id)))
+  if (pluginAccess)
     return 'Has plugin access'
   return ''
 }

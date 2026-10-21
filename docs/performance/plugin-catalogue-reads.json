@@ -1,233 +1,270 @@
 {
   "approvalWrites": [
     {
-      "processCpuMs": 53.669805000005,
-      "wallMs": 52.989295
+      "processCpuMs": 81.78232299999945,
+      "wallMs": 80.56390300000001
     },
     {
-      "processCpuMs": 52.05567500000325,
-      "wallMs": 51.631691000000004
+      "processCpuMs": 106.98959299999842,
+      "wallMs": 101.1382
     },
     {
-      "processCpuMs": 56.271802999996,
-      "wallMs": 55.688017
+      "processCpuMs": 70.34471099999791,
+      "wallMs": 70.30342300000001
     },
     {
-      "processCpuMs": 53.36378400000103,
-      "wallMs": 52.693461
+      "processCpuMs": 66.69476199999917,
+      "wallMs": 67.450704
     },
     {
-      "processCpuMs": 50.16407299999992,
-      "wallMs": 49.685480999999996
+      "processCpuMs": 75.9341940000013,
+      "wallMs": 79.03115199999999
     },
     {
-      "processCpuMs": 57.34606200000417,
-      "wallMs": 56.784997
+      "processCpuMs": 59.02441700000054,
+      "wallMs": 61.050313
     }
   ],
   "cache": "first API read then five warm samples, OS caches retained",
-  "candidate": "first compact card page, first selected-package instance page and one exact instance; different response purposes",
+  "candidate": "first compact card page, first selected-package instance page, compact saved access and one exact instance; different response purposes",
+  "conditions": {
+    "head": "fea34810952ee6d6d0fc5c58b2ee4617cb50e5ca",
+    "host": {
+      "condition": "No compiler, web build, test suite, PostgreSQL or emulator running; coding agent and shared VM scheduler remain active.",
+      "loadAverage": "1.45 4.03 4.76 1/181 15086",
+      "memoryTotal": "MemTotal:       19462272 kB",
+      "platform": "Linux-6.12.109-x86_64-with-glibc2.36",
+      "virtualCpus": 7
+    },
+    "profile": "dev/test debug=0 incremental=0, built with one Cargo job",
+    "sourceAndBinarySha256": {
+      "Cargo.lock": "ad166c810e0125960ddd6c2b2e12f5e8d5b36c6cba5bd7b1a8c6f985cbb781a0",
+      "Cargo.toml": "ee1c593ae4c2b9ccf5506380b191e96413044c1e69a6c3e1b645070fe17f9f37",
+      "crates/installation/src/plugins/connections/owner.rs": "c73d26213fb1af36781c3a6f2454983519c081847c9ede205386c8fe4807e38f",
+      "crates/installation/src/plugins/mod.rs": "dc3b83bd70b746a5380bc62f50eeee4a36157f90b3cbbcb4fa210e2efbf4e3f3",
+      "crates/installation/src/plugins/paging.rs": "949c6a14acf6e648c79c20ee971a77d7d305b1652ae728da1f0cdbd98a9e5ef1",
+      "crates/installation/src/plugins/registry/owner.rs": "45ddf623a789f6173a0a5c2603a80f630d3623e684c09b15220d3317b37dc118",
+      "crates/installation/tests/plugin_catalogue.rs": "d0a28737a3b33a7434a1eadfa5e029c37540d4447ffe2daeb8e06193323ecaa2",
+      "target/debug/cairn": "d4dabefbbeb3531435dbfc87b08e2e3152e18661f173e8f9e4c85e7183294d10",
+      "target/debug/deps/plugin_catalogue-8d84bfbdb41aa046": "0e93443fce9a6a79a3694b54de4649e2e3ab648c737e5eb3609198a6401a3427"
+    },
+    "startedAtUtc": "2026-10-21T08:24:54Z"
+  },
   "instancesCopied": 40,
   "packagesCopied": 40,
   "reads": [
     {
       "encodedBytes": 19226147,
       "path": "/api/plugins",
-      "processCpuMs": 4417.706934000001,
+      "processCpuMs": 6050.1782,
       "sample": 0,
-      "wallMs": 4413.768816
+      "wallMs": 6067.727083000001
     },
     {
-      "encodedBytes": 20599,
+      "encodedBytes": 20618,
       "path": "/api/plugins/packages",
-      "processCpuMs": 1919.6924630000003,
+      "processCpuMs": 2367.749917000001,
       "sample": 0,
-      "wallMs": 1917.2385809999998
+      "wallMs": 2365.127884
     },
     {
-      "encodedBytes": 3857676,
+      "encodedBytes": 3857677,
       "path": "/api/plugins/packages/catalogue-00/connections",
-      "processCpuMs": 1966.7534510000005,
+      "processCpuMs": 2288.7205159999994,
       "sample": 0,
-      "wallMs": 1966.9780079999998
+      "wallMs": 2290.502658
     },
     {
-      "encodedBytes": 120548,
-      "path": "/api/plugins/packages/catalogue-00/connections/3d2a42c5-abd7-4a83-a677-a1b61061df50",
-      "processCpuMs": 948.9146520000013,
+      "encodedBytes": 5592,
+      "path": "/api/plugins/instance-access",
+      "processCpuMs": 37.88119999999981,
       "sample": 0,
-      "wallMs": 948.919259
+      "wallMs": 38.241978
     },
     {
       "encodedBytes": 120548,
-      "path": "/api/plugins/packages/catalogue-00/connections/3d2a42c5-abd7-4a83-a677-a1b61061df50",
-      "processCpuMs": 1275.4646350000003,
+      "path": "/api/plugins/packages/catalogue-00/connections/f12bbe0b-a3d4-4a70-847e-e61a6dc56cac",
+      "processCpuMs": 1107.010005,
+      "sample": 0,
+      "wallMs": 1107.745782
+    },
+    {
+      "encodedBytes": 120548,
+      "path": "/api/plugins/packages/catalogue-00/connections/f12bbe0b-a3d4-4a70-847e-e61a6dc56cac",
+      "processCpuMs": 1104.976917,
       "sample": 1,
-      "wallMs": 1275.3124659999999
+      "wallMs": 1104.971008
     },
     {
-      "encodedBytes": 3857676,
-      "path": "/api/plugins/packages/catalogue-00/connections",
-      "processCpuMs": 2295.9880989999983,
+      "encodedBytes": 5592,
+      "path": "/api/plugins/instance-access",
+      "processCpuMs": 22.57930099999976,
       "sample": 1,
-      "wallMs": 2297.1863749999998
+      "wallMs": 22.506574
     },
     {
-      "encodedBytes": 20599,
-      "path": "/api/plugins/packages",
-      "processCpuMs": 2020.358964000001,
+      "encodedBytes": 3857677,
+      "path": "/api/plugins/packages/catalogue-00/connections",
+      "processCpuMs": 1848.5429359999998,
       "sample": 1,
-      "wallMs": 2017.837907
+      "wallMs": 1848.7239949999998
     },
     {
-      "encodedBytes": 19226147,
-      "path": "/api/plugins",
-      "processCpuMs": 4302.023171000001,
+      "encodedBytes": 20618,
+      "path": "/api/plugins/packages",
+      "processCpuMs": 1945.1125040000024,
       "sample": 1,
-      "wallMs": 4299.026301
+      "wallMs": 1942.436944
     },
     {
       "encodedBytes": 19226147,
       "path": "/api/plugins",
-      "processCpuMs": 4139.077046999999,
-      "sample": 2,
-      "wallMs": 4136.168591
-    },
-    {
-      "encodedBytes": 20599,
-      "path": "/api/plugins/packages",
-      "processCpuMs": 1771.2672979999988,
-      "sample": 2,
-      "wallMs": 1768.589252
-    },
-    {
-      "encodedBytes": 3857676,
-      "path": "/api/plugins/packages/catalogue-00/connections",
-      "processCpuMs": 1782.8661790000006,
-      "sample": 2,
-      "wallMs": 1782.916465
-    },
-    {
-      "encodedBytes": 120548,
-      "path": "/api/plugins/packages/catalogue-00/connections/3d2a42c5-abd7-4a83-a677-a1b61061df50",
-      "processCpuMs": 1079.333795999999,
-      "sample": 2,
-      "wallMs": 1079.247668
-    },
-    {
-      "encodedBytes": 120548,
-      "path": "/api/plugins/packages/catalogue-00/connections/3d2a42c5-abd7-4a83-a677-a1b61061df50",
-      "processCpuMs": 1045.0153980000032,
-      "sample": 3,
-      "wallMs": 1044.950963
-    },
-    {
-      "encodedBytes": 3857676,
-      "path": "/api/plugins/packages/catalogue-00/connections",
-      "processCpuMs": 1888.0687709999984,
-      "sample": 3,
-      "wallMs": 1888.0935170000002
-    },
-    {
-      "encodedBytes": 20599,
-      "path": "/api/plugins/packages",
-      "processCpuMs": 2123.669691000003,
-      "sample": 3,
-      "wallMs": 2120.2626769999997
+      "processCpuMs": 4407.429339000002,
+      "sample": 1,
+      "wallMs": 4405.737759
     },
     {
       "encodedBytes": 19226147,
       "path": "/api/plugins",
-      "processCpuMs": 4341.396033999998,
+      "processCpuMs": 4105.967786999998,
+      "sample": 2,
+      "wallMs": 4105.9683270000005
+    },
+    {
+      "encodedBytes": 20618,
+      "path": "/api/plugins/packages",
+      "processCpuMs": 1840.3786739999996,
+      "sample": 2,
+      "wallMs": 1838.026195
+    },
+    {
+      "encodedBytes": 3857677,
+      "path": "/api/plugins/packages/catalogue-00/connections",
+      "processCpuMs": 2067.4396049999996,
+      "sample": 2,
+      "wallMs": 2067.359849
+    },
+    {
+      "encodedBytes": 5592,
+      "path": "/api/plugins/instance-access",
+      "processCpuMs": 25.3094600000004,
+      "sample": 2,
+      "wallMs": 25.211992
+    },
+    {
+      "encodedBytes": 120548,
+      "path": "/api/plugins/packages/catalogue-00/connections/f12bbe0b-a3d4-4a70-847e-e61a6dc56cac",
+      "processCpuMs": 1066.5211920000002,
+      "sample": 2,
+      "wallMs": 1066.393594
+    },
+    {
+      "encodedBytes": 120548,
+      "path": "/api/plugins/packages/catalogue-00/connections/f12bbe0b-a3d4-4a70-847e-e61a6dc56cac",
+      "processCpuMs": 1025.3273359999985,
       "sample": 3,
-      "wallMs": 4338.170463
+      "wallMs": 1025.167733
+    },
+    {
+      "encodedBytes": 5592,
+      "path": "/api/plugins/instance-access",
+      "processCpuMs": 20.51101000000199,
+      "sample": 3,
+      "wallMs": 20.441957
+    },
+    {
+      "encodedBytes": 3857677,
+      "path": "/api/plugins/packages/catalogue-00/connections",
+      "processCpuMs": 2180.021553999999,
+      "sample": 3,
+      "wallMs": 2180.054466
+    },
+    {
+      "encodedBytes": 20618,
+      "path": "/api/plugins/packages",
+      "processCpuMs": 1974.8824400000012,
+      "sample": 3,
+      "wallMs": 1972.066161
     },
     {
       "encodedBytes": 19226147,
       "path": "/api/plugins",
-      "processCpuMs": 4935.109473999997,
-      "sample": 4,
-      "wallMs": 4933.21894
-    },
-    {
-      "encodedBytes": 20599,
-      "path": "/api/plugins/packages",
-      "processCpuMs": 1892.7434460000004,
-      "sample": 4,
-      "wallMs": 1889.763396
-    },
-    {
-      "encodedBytes": 3857676,
-      "path": "/api/plugins/packages/catalogue-00/connections",
-      "processCpuMs": 1981.8664340000032,
-      "sample": 4,
-      "wallMs": 1981.94431
-    },
-    {
-      "encodedBytes": 120548,
-      "path": "/api/plugins/packages/catalogue-00/connections/3d2a42c5-abd7-4a83-a677-a1b61061df50",
-      "processCpuMs": 1033.155307000001,
-      "sample": 4,
-      "wallMs": 1033.198856
-    },
-    {
-      "encodedBytes": 120548,
-      "path": "/api/plugins/packages/catalogue-00/connections/3d2a42c5-abd7-4a83-a677-a1b61061df50",
-      "processCpuMs": 1148.0081340000033,
-      "sample": 5,
-      "wallMs": 1148.0019379999999
-    },
-    {
-      "encodedBytes": 3857676,
-      "path": "/api/plugins/packages/catalogue-00/connections",
-      "processCpuMs": 1949.730435999998,
-      "sample": 5,
-      "wallMs": 1949.752362
-    },
-    {
-      "encodedBytes": 20599,
-      "path": "/api/plugins/packages",
-      "processCpuMs": 2046.7111670000013,
-      "sample": 5,
-      "wallMs": 2044.4802110000003
+      "processCpuMs": 3927.819386000003,
+      "sample": 3,
+      "wallMs": 3924.057699
     },
     {
       "encodedBytes": 19226147,
       "path": "/api/plugins",
-      "processCpuMs": 3922.627173999994,
+      "processCpuMs": 4192.522498999999,
+      "sample": 4,
+      "wallMs": 4188.7250189999995
+    },
+    {
+      "encodedBytes": 20618,
+      "path": "/api/plugins/packages",
+      "processCpuMs": 1926.6210460000002,
+      "sample": 4,
+      "wallMs": 1924.0871020000002
+    },
+    {
+      "encodedBytes": 3857677,
+      "path": "/api/plugins/packages/catalogue-00/connections",
+      "processCpuMs": 2121.1988500000007,
+      "sample": 4,
+      "wallMs": 2121.098176
+    },
+    {
+      "encodedBytes": 5592,
+      "path": "/api/plugins/instance-access",
+      "processCpuMs": 26.986918000002333,
+      "sample": 4,
+      "wallMs": 26.895829
+    },
+    {
+      "encodedBytes": 120548,
+      "path": "/api/plugins/packages/catalogue-00/connections/f12bbe0b-a3d4-4a70-847e-e61a6dc56cac",
+      "processCpuMs": 953.2133660000036,
+      "sample": 4,
+      "wallMs": 953.030854
+    },
+    {
+      "encodedBytes": 120548,
+      "path": "/api/plugins/packages/catalogue-00/connections/f12bbe0b-a3d4-4a70-847e-e61a6dc56cac",
+      "processCpuMs": 924.5984820000012,
       "sample": 5,
-      "wallMs": 3919.308527
+      "wallMs": 924.5982809999999
+    },
+    {
+      "encodedBytes": 5592,
+      "path": "/api/plugins/instance-access",
+      "processCpuMs": 20.91385600000649,
+      "sample": 5,
+      "wallMs": 20.8516
+    },
+    {
+      "encodedBytes": 3857677,
+      "path": "/api/plugins/packages/catalogue-00/connections",
+      "processCpuMs": 2018.6826999999976,
+      "sample": 5,
+      "wallMs": 2018.6058299999997
+    },
+    {
+      "encodedBytes": 20618,
+      "path": "/api/plugins/packages",
+      "processCpuMs": 2225.757141000002,
+      "sample": 5,
+      "wallMs": 2222.720179
+    },
+    {
+      "encodedBytes": 19226147,
+      "path": "/api/plugins",
+      "processCpuMs": 4528.552772999996,
+      "sample": 5,
+      "wallMs": 4524.860756
     }
   ],
   "reference": "complete owner response, same binary and unchanged record format",
   "versionsCopied": 79,
-  "writes": "existing approval path, identical for both read contracts",
-  "host": {
-    "platform": "Linux-6.12.109-x86_64-with-glibc2.36",
-    "cpuCount": 7,
-    "loadAverage": [
-      1.2333984375,
-      3.04638671875,
-      3.353515625
-    ],
-    "memory": [
-      "MemTotal:       19462272 kB",
-      "MemAvailable:   18793620 kB"
-    ],
-    "startedAt": "2026-10-21T04:18:11.250549+00:00",
-    "context": "Only synthetic catalogue/instance measurement runs; all native tests/compilers, Node tests/build and Gradle probes ended. Owned PostgreSQL and managed AOSP emulator stopped; OS caches retained. Agent and shared VM scheduler active."
-  },
-  "reproduce": "PATH=\"$PATH:/usr/sbin\" CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 mise exec -- pnpm test:backend -p cairn-installation --test plugin_catalogue measure_catalogue -- --ignored --nocapture --test-threads=1",
-  "source": {
-    "parent": "6d73793899bd0592937ae0db39f2720031174e68",
-    "state": "uncommitted R60 at observation; other native inputs unchanged from parent",
-    "sha256": {
-      "crates/installation/src/plugins/connections.rs": "f1f3c63bfbe6aad2196e643ed66b4b8b7cfa80476df56847d051e0a2901fe669",
-      "crates/installation/src/plugins/connections/owner.rs": "9e63c177c4e6a77f67ba2181212dcef2ed398ec919d57ec1078e184eb309a8e9",
-      "crates/installation/src/plugins/mod.rs": "25fc1a7cfd6646df77e032c31e4c0c15efc68c50d14e10e5dd94a5ab9ac8f26b",
-      "crates/installation/src/plugins/registry/owner.rs": "7a8949e81e8b0d3239d2d867e53073fa150638a8fd00f0a7c302fcaca8f654b9",
-      "crates/installation/tests/plugin_catalogue.rs": "7d0e890a2ed0a1e6c8d02668db7e24777e42298246613974f8284bbfda570eef",
-      "Cargo.lock": "ad166c810e0125960ddd6c2b2e12f5e8d5b36c6cba5bd7b1a8c6f985cbb781a0"
-    }
-  }
+  "writes": "existing approval path, identical for both read contracts"
 }

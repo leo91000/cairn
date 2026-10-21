@@ -720,6 +720,7 @@ it('re-reads an instance\'s agents right before sending them back', async () => 
   // Revoked meanwhile from an agent page: the current list is sent, not the editor's snapshot.
   expect(await currentAgentIds([], onePassword, { id: 'prod', agentIds: ['a', 'b'] }, fresh)).toEqual(['b'])
   expect(await currentAgentIds([], onePassword, { id: 'prod', agentIds: ['a'] }, async () => [{ id: 'prod', agentIds: [] }])).toBeUndefined()
+  await expect(currentAgentIds([], onePassword, { id: 'prod', agentIds: ['a'] }, async () => [])).rejects.toThrow('removed')
   // A current installation keeps grants itself: nothing is read nor sent.
   expect(await currentAgentIds([{ grantsOnAgent: true }], onePassword, { id: 'prod', agentIds: ['a'] }, fresh)).toBeUndefined()
   expect(await currentAgentIds([], { manifest: null }, { id: 'prod', agentIds: ['a'] }, fresh)).toBeUndefined()

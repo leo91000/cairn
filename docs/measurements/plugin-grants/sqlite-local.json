@@ -11,8 +11,8 @@
       "write": {
         "records": 521,
         "encodedBytes": 196977,
-        "elapsedMs": 132.14370399964537,
-        "cpuMs": 130.39112399999996
+        "elapsedMs": 78.26606300022831,
+        "cpuMs": 77.91930999999997
       },
       "sqliteBytes": 299008,
       "rules": 512,
@@ -23,46 +23,64 @@
             "decodedRows": 512,
             "selectedEncodedBytes": 196096,
             "metadataLookups": 512,
-            "elapsedMs": 123.12532099986129,
-            "cpuMs": 101.91698900000002
+            "pageItems": 32,
+            "pageEncodedBytes": 14911,
+            "nextCursor": "00000000-0000-0000-0000-000000000407",
+            "elapsedMs": 95.60715799989339,
+            "cpuMs": 95.42246500000017
           },
-          "warmMedianMs": 58.58234400011497,
-          "warmMedianCpuMs": 55.40967900000005,
+          "warmMedianMs": 47.21815799985052,
+          "warmMedianCpuMs": 47.08114799999996,
           "warmTrials": [
             {
               "decodedRows": 512,
               "selectedEncodedBytes": 196096,
               "metadataLookups": 512,
-              "elapsedMs": 110.0952030001281,
-              "cpuMs": 99.24655999999999
+              "pageItems": 32,
+              "pageEncodedBytes": 14911,
+              "nextCursor": "00000000-0000-0000-0000-000000000407",
+              "elapsedMs": 137.09420300028796,
+              "cpuMs": 136.949679
             },
             {
               "decodedRows": 512,
               "selectedEncodedBytes": 196096,
               "metadataLookups": 512,
-              "elapsedMs": 55.403900999863254,
-              "cpuMs": 55.40967900000005
+              "pageItems": 32,
+              "pageEncodedBytes": 14911,
+              "nextCursor": "00000000-0000-0000-0000-000000000407",
+              "elapsedMs": 47.21815799985052,
+              "cpuMs": 47.08114799999996
             },
             {
               "decodedRows": 512,
               "selectedEncodedBytes": 196096,
               "metadataLookups": 512,
-              "elapsedMs": 44.157368000014685,
-              "cpuMs": 44.134096999999926
+              "pageItems": 32,
+              "pageEncodedBytes": 14911,
+              "nextCursor": "00000000-0000-0000-0000-000000000407",
+              "elapsedMs": 96.53968199972951,
+              "cpuMs": 96.42156200000018
             },
             {
               "decodedRows": 512,
               "selectedEncodedBytes": 196096,
               "metadataLookups": 512,
-              "elapsedMs": 58.58234400011497,
-              "cpuMs": 52.36894699999994
+              "pageItems": 32,
+              "pageEncodedBytes": 14911,
+              "nextCursor": "00000000-0000-0000-0000-000000000407",
+              "elapsedMs": 43.09408800008896,
+              "cpuMs": 43.06228000000001
             },
             {
               "decodedRows": 512,
               "selectedEncodedBytes": 196096,
               "metadataLookups": 512,
-              "elapsedMs": 115.08418099992923,
-              "cpuMs": 87.48181200000005
+              "pageItems": 32,
+              "pageEncodedBytes": 14911,
+              "nextCursor": "00000000-0000-0000-0000-000000000407",
+              "elapsedMs": 37.39754899970649,
+              "cpuMs": 37.40497300000012
             }
           ]
         },
@@ -71,46 +89,64 @@
             "decodedRows": 33,
             "selectedEncodedBytes": 12639,
             "metadataLookups": 66,
-            "elapsedMs": 9.003484999993816,
-            "cpuMs": 7.503975000000107
+            "pageItems": 32,
+            "pageEncodedBytes": 14911,
+            "nextCursor": "00000000-0000-0000-0000-000000000407",
+            "elapsedMs": 9.735167000144429,
+            "cpuMs": 9.73844200000018
           },
-          "warmMedianMs": 6.342846000279678,
-          "warmMedianCpuMs": 6.352087999999867,
+          "warmMedianMs": 9.46505399997477,
+          "warmMedianCpuMs": 9.470533000000003,
           "warmTrials": [
             {
               "decodedRows": 33,
               "selectedEncodedBytes": 12639,
               "metadataLookups": 66,
-              "elapsedMs": 6.342846000279678,
-              "cpuMs": 6.352087999999867
+              "pageItems": 32,
+              "pageEncodedBytes": 14911,
+              "nextCursor": "00000000-0000-0000-0000-000000000407",
+              "elapsedMs": 20.692582999799924,
+              "cpuMs": 20.40494599999998
             },
             {
               "decodedRows": 33,
               "selectedEncodedBytes": 12639,
               "metadataLookups": 66,
-              "elapsedMs": 8.50632499987114,
-              "cpuMs": 7.110013999999998
+              "pageItems": 32,
+              "pageEncodedBytes": 14911,
+              "nextCursor": "00000000-0000-0000-0000-000000000407",
+              "elapsedMs": 21.179362000111723,
+              "cpuMs": 21.184988999999987
             },
             {
               "decodedRows": 33,
               "selectedEncodedBytes": 12639,
               "metadataLookups": 66,
-              "elapsedMs": 6.31350800040309,
-              "cpuMs": 6.319991000000025
+              "pageItems": 32,
+              "pageEncodedBytes": 14911,
+              "nextCursor": "00000000-0000-0000-0000-000000000407",
+              "elapsedMs": 9.46505399997477,
+              "cpuMs": 9.470533000000003
             },
             {
               "decodedRows": 33,
               "selectedEncodedBytes": 12639,
               "metadataLookups": 66,
-              "elapsedMs": 6.681800000023941,
-              "cpuMs": 6.686648000000073
+              "pageItems": 32,
+              "pageEncodedBytes": 14911,
+              "nextCursor": "00000000-0000-0000-0000-000000000407",
+              "elapsedMs": 5.3689699998358265,
+              "cpuMs": 5.3767490000000695
             },
             {
               "decodedRows": 33,
               "selectedEncodedBytes": 12639,
               "metadataLookups": 66,
-              "elapsedMs": 6.182547000207705,
-              "cpuMs": 6.1772989999999695
+              "pageItems": 32,
+              "pageEncodedBytes": 14911,
+              "nextCursor": "00000000-0000-0000-0000-000000000407",
+              "elapsedMs": 5.6458460003341315,
+              "cpuMs": 5.650794999999986
             }
           ]
         }
@@ -120,41 +156,41 @@
           "freshConnection": {
             "decodedRows": 512,
             "selectedEncodedBytes": 196096,
-            "elapsedMs": 9.144834000380797,
-            "cpuMs": 9.124741000000158
+            "elapsedMs": 8.103175000087504,
+            "cpuMs": 8.107445999999907
           },
-          "warmMedianMs": 7.231872999909683,
-          "warmMedianCpuMs": 7.238569999999944,
+          "warmMedianMs": 7.429152999975486,
+          "warmMedianCpuMs": 7.43592000000004,
           "warmTrials": [
             {
               "decodedRows": 512,
               "selectedEncodedBytes": 196096,
-              "elapsedMs": 7.364808000147605,
-              "cpuMs": 7.324329000000018
+              "elapsedMs": 7.429152999975486,
+              "cpuMs": 7.43592000000004
             },
             {
               "decodedRows": 512,
               "selectedEncodedBytes": 196096,
-              "elapsedMs": 7.013058000211458,
-              "cpuMs": 7.019891999999972
+              "elapsedMs": 11.26222900029461,
+              "cpuMs": 11.269366999999919
             },
             {
               "decodedRows": 512,
               "selectedEncodedBytes": 196096,
-              "elapsedMs": 7.231872999909683,
-              "cpuMs": 7.238569999999944
+              "elapsedMs": 9.486573000231147,
+              "cpuMs": 9.477171999999978
             },
             {
               "decodedRows": 512,
               "selectedEncodedBytes": 196096,
-              "elapsedMs": 7.204067999737163,
-              "cpuMs": 7.210407000000085
+              "elapsedMs": 6.469708999702561,
+              "cpuMs": 6.270331000000073
             },
             {
               "decodedRows": 512,
               "selectedEncodedBytes": 196096,
-              "elapsedMs": 16.112479000184976,
-              "cpuMs": 8.77291899999988
+              "elapsedMs": 5.771339999682823,
+              "cpuMs": 5.779130999999937
             }
           ]
         },
@@ -162,41 +198,41 @@
           "freshConnection": {
             "decodedRows": 2,
             "selectedEncodedBytes": 124,
-            "elapsedMs": 3.296911000234104,
-            "cpuMs": 3.2892599999998495
+            "elapsedMs": 4.294879000099172,
+            "cpuMs": 4.2996310000000815
           },
-          "warmMedianMs": 2.158757999950467,
-          "warmMedianCpuMs": 2.1661049999999182,
+          "warmMedianMs": 2.3947019999468466,
+          "warmMedianCpuMs": 2.4021320000000568,
           "warmTrials": [
             {
               "decodedRows": 2,
               "selectedEncodedBytes": 124,
-              "elapsedMs": 2.1126280003045395,
-              "cpuMs": 2.116854000000057
+              "elapsedMs": 2.283626999997068,
+              "cpuMs": 2.290823000000053
             },
             {
               "decodedRows": 2,
               "selectedEncodedBytes": 124,
-              "elapsedMs": 2.0382820002851076,
-              "cpuMs": 2.0453630000001333
+              "elapsedMs": 2.3947019999468466,
+              "cpuMs": 2.4021320000000568
             },
             {
               "decodedRows": 2,
               "selectedEncodedBytes": 124,
-              "elapsedMs": 4.027970000151981,
-              "cpuMs": 3.74299499999986
+              "elapsedMs": 2.6544699999249133,
+              "cpuMs": 2.660364000000026
             },
             {
               "decodedRows": 2,
               "selectedEncodedBytes": 124,
-              "elapsedMs": 2.158757999950467,
-              "cpuMs": 2.1661049999999182
+              "elapsedMs": 4.106478999801766,
+              "cpuMs": 4.114630000000119
             },
             {
               "decodedRows": 2,
               "selectedEncodedBytes": 124,
-              "elapsedMs": 2.8804789999412606,
-              "cpuMs": 2.8875379999999673
+              "elapsedMs": 2.217690000179573,
+              "cpuMs": 2.2230920000001486
             }
           ]
         }
@@ -206,8 +242,8 @@
       "write": {
         "records": 521,
         "encodedBytes": 74779505,
-        "elapsedMs": 2363.642893999895,
-        "cpuMs": 2055.6777859999993
+        "elapsedMs": 1536.8059000002177,
+        "cpuMs": 1503.9050509999997
       },
       "sqliteBytes": 75558912,
       "rules": 512,
@@ -218,46 +254,64 @@
             "decodedRows": 512,
             "selectedEncodedBytes": 74778624,
             "metadataLookups": 512,
-            "elapsedMs": 1245.3627199997754,
-            "cpuMs": 1117.2533700000004
+            "pageItems": 27,
+            "pageEncodedBytes": 3945654,
+            "nextCursor": "00000000-0000-0000-0000-000000000402",
+            "elapsedMs": 807.4778670002161,
+            "cpuMs": 799.34789
           },
-          "warmMedianMs": 1026.5312709998398,
-          "warmMedianCpuMs": 864.6662420000002,
+          "warmMedianMs": 571.6676130000451,
+          "warmMedianCpuMs": 571.6645380000002,
           "warmTrials": [
             {
               "decodedRows": 512,
               "selectedEncodedBytes": 74778624,
               "metadataLookups": 512,
-              "elapsedMs": 746.9769869999254,
-              "cpuMs": 727.2461369999999
+              "pageItems": 27,
+              "pageEncodedBytes": 3945654,
+              "nextCursor": "00000000-0000-0000-0000-000000000402",
+              "elapsedMs": 917.8344929996456,
+              "cpuMs": 859.1631059999995
             },
             {
               "decodedRows": 512,
               "selectedEncodedBytes": 74778624,
               "metadataLookups": 512,
-              "elapsedMs": 692.0957180000187,
-              "cpuMs": 634.8485569999998
+              "pageItems": 27,
+              "pageEncodedBytes": 3945654,
+              "nextCursor": "00000000-0000-0000-0000-000000000402",
+              "elapsedMs": 837.2692190000635,
+              "cpuMs": 788.1638759999996
             },
             {
               "decodedRows": 512,
               "selectedEncodedBytes": 74778624,
               "metadataLookups": 512,
-              "elapsedMs": 1106.7961470002956,
-              "cpuMs": 864.6662420000002
+              "pageItems": 27,
+              "pageEncodedBytes": 3945654,
+              "nextCursor": "00000000-0000-0000-0000-000000000402",
+              "elapsedMs": 571.6676130000451,
+              "cpuMs": 571.6645380000002
             },
             {
               "decodedRows": 512,
               "selectedEncodedBytes": 74778624,
               "metadataLookups": 512,
-              "elapsedMs": 1185.9851099998195,
-              "cpuMs": 948.2106020000006
+              "pageItems": 27,
+              "pageEncodedBytes": 3945654,
+              "nextCursor": "00000000-0000-0000-0000-000000000402",
+              "elapsedMs": 521.8196189998707,
+              "cpuMs": 521.8136460000001
             },
             {
               "decodedRows": 512,
               "selectedEncodedBytes": 74778624,
               "metadataLookups": 512,
-              "elapsedMs": 1026.5312709998398,
-              "cpuMs": 980.7872240000002
+              "pageItems": 27,
+              "pageEncodedBytes": 3945654,
+              "nextCursor": "00000000-0000-0000-0000-000000000402",
+              "elapsedMs": 547.7121650001209,
+              "cpuMs": 540.1499889999997
             }
           ]
         },
@@ -266,46 +320,64 @@
             "decodedRows": 33,
             "selectedEncodedBytes": 4819716,
             "metadataLookups": 66,
-            "elapsedMs": 357.09269300014057,
-            "cpuMs": 322.5978119999997
+            "pageItems": 27,
+            "pageEncodedBytes": 3945654,
+            "nextCursor": "00000000-0000-0000-0000-000000000402",
+            "elapsedMs": 267.0403880001686,
+            "cpuMs": 258.5609519999998
           },
-          "warmMedianMs": 283.69981499963615,
-          "warmMedianCpuMs": 275.4177680000005,
+          "warmMedianMs": 466.6750999999749,
+          "warmMedianCpuMs": 459.9986420000004,
           "warmTrials": [
             {
               "decodedRows": 33,
               "selectedEncodedBytes": 4819716,
               "metadataLookups": 66,
-              "elapsedMs": 278.7302299998373,
-              "cpuMs": 237.04954599999974
+              "pageItems": 27,
+              "pageEncodedBytes": 3945654,
+              "nextCursor": "00000000-0000-0000-0000-000000000402",
+              "elapsedMs": 355.7225400004427,
+              "cpuMs": 352.854271
             },
             {
               "decodedRows": 33,
               "selectedEncodedBytes": 4819716,
               "metadataLookups": 66,
-              "elapsedMs": 283.69981499963615,
-              "cpuMs": 275.4177680000005
+              "pageItems": 27,
+              "pageEncodedBytes": 3945654,
+              "nextCursor": "00000000-0000-0000-0000-000000000402",
+              "elapsedMs": 466.6750999999749,
+              "cpuMs": 459.9986420000004
             },
             {
               "decodedRows": 33,
               "selectedEncodedBytes": 4819716,
               "metadataLookups": 66,
-              "elapsedMs": 469.27940099976695,
-              "cpuMs": 357.605779
+              "pageItems": 27,
+              "pageEncodedBytes": 3945654,
+              "nextCursor": "00000000-0000-0000-0000-000000000402",
+              "elapsedMs": 316.76331999960894,
+              "cpuMs": 310.01025900000025
             },
             {
               "decodedRows": 33,
               "selectedEncodedBytes": 4819716,
               "metadataLookups": 66,
-              "elapsedMs": 281.5033950000725,
-              "cpuMs": 271.97397599999994
+              "pageItems": 27,
+              "pageEncodedBytes": 3945654,
+              "nextCursor": "00000000-0000-0000-0000-000000000402",
+              "elapsedMs": 509.1134829999646,
+              "cpuMs": 480.4530549999999
             },
             {
               "decodedRows": 33,
               "selectedEncodedBytes": 4819716,
               "metadataLookups": 66,
-              "elapsedMs": 497.8709870001694,
-              "cpuMs": 393.0082929999994
+              "pageItems": 27,
+              "pageEncodedBytes": 3945654,
+              "nextCursor": "00000000-0000-0000-0000-000000000402",
+              "elapsedMs": 622.299491999911,
+              "cpuMs": 564.5930700000008
             }
           ]
         }
@@ -315,41 +387,41 @@
           "freshConnection": {
             "decodedRows": 512,
             "selectedEncodedBytes": 74778624,
-            "elapsedMs": 626.222214000336,
-            "cpuMs": 534.5901850000008
+            "elapsedMs": 507.59978199994293,
+            "cpuMs": 494.0284379999991
           },
-          "warmMedianMs": 679.172539999854,
-          "warmMedianCpuMs": 636.6047359999989,
+          "warmMedianMs": 519.5846299998266,
+          "warmMedianCpuMs": 432.2708859999995,
           "warmTrials": [
             {
               "decodedRows": 512,
               "selectedEncodedBytes": 74778624,
-              "elapsedMs": 554.0507590003472,
-              "cpuMs": 503.1294270000011
+              "elapsedMs": 422.5382549998358,
+              "cpuMs": 416.1173859999998
             },
             {
               "decodedRows": 512,
               "selectedEncodedBytes": 74778624,
-              "elapsedMs": 848.159325999859,
-              "cpuMs": 757.9245319999987
+              "elapsedMs": 443.75349799975083,
+              "cpuMs": 427.6612040000014
             },
             {
               "decodedRows": 512,
               "selectedEncodedBytes": 74778624,
-              "elapsedMs": 679.172539999854,
-              "cpuMs": 636.6047359999989
+              "elapsedMs": 519.5846299998266,
+              "cpuMs": 432.2708859999995
             },
             {
               "decodedRows": 512,
               "selectedEncodedBytes": 74778624,
-              "elapsedMs": 611.449931000152,
-              "cpuMs": 604.7914370000011
+              "elapsedMs": 542.5694280002062,
+              "cpuMs": 466.059349
             },
             {
               "decodedRows": 512,
               "selectedEncodedBytes": 74778624,
-              "elapsedMs": 722.9159110002001,
-              "cpuMs": 677.8391450000001
+              "elapsedMs": 586.7989540001872,
+              "cpuMs": 530.6117610000011
             }
           ]
         },
@@ -357,45 +429,55 @@
           "freshConnection": {
             "decodedRows": 2,
             "selectedEncodedBytes": 124,
-            "elapsedMs": 186.77380200006155,
-            "cpuMs": 177.93891800000063
+            "elapsedMs": 155.29520800009777,
+            "cpuMs": 152.86409800000024
           },
-          "warmMedianMs": 174.45256200016956,
-          "warmMedianCpuMs": 163.5820189999997,
+          "warmMedianMs": 161.60612000021501,
+          "warmMedianCpuMs": 158.46045099999984,
           "warmTrials": [
             {
               "decodedRows": 2,
               "selectedEncodedBytes": 124,
-              "elapsedMs": 174.45256200016956,
-              "cpuMs": 163.5820189999997
+              "elapsedMs": 164.0219320001961,
+              "cpuMs": 158.46045099999984
             },
             {
               "decodedRows": 2,
               "selectedEncodedBytes": 124,
-              "elapsedMs": 165.12049999982992,
-              "cpuMs": 158.2499419999994
+              "elapsedMs": 161.60612000021501,
+              "cpuMs": 161.47017699999998
             },
             {
               "decodedRows": 2,
               "selectedEncodedBytes": 124,
-              "elapsedMs": 150.323766999918,
-              "cpuMs": 149.58727299999987
+              "elapsedMs": 175.81570699985605,
+              "cpuMs": 171.0644289999994
             },
             {
               "decodedRows": 2,
               "selectedEncodedBytes": 124,
-              "elapsedMs": 211.94301400009863,
-              "cpuMs": 206.71514300000027
+              "elapsedMs": 155.72497900029703,
+              "cpuMs": 153.22490299999993
             },
             {
               "decodedRows": 2,
               "selectedEncodedBytes": 124,
-              "elapsedMs": 204.91274899995915,
-              "cpuMs": 179.9517789999996
+              "elapsedMs": 156.53507600018202,
+              "cpuMs": 156.05356700000073
             }
           ]
         }
       }
     }
+  },
+  "pageBounds": {
+    "items": 32,
+    "bytes": 4000000,
+    "reservedEnvelopeBytes": 256
+  },
+  "sourceSha256": {
+    "scripts/measure-plugin-grants.py": "bfa9633a3d65cefa306190a5bac4f2426d89dfb876055ba026987744d5781ed4",
+    "crates/installation/src/plugins/paging.rs": "949c6a14acf6e648c79c20ee971a77d7d305b1652ae728da1f0cdbd98a9e5ef1",
+    "crates/protocol/src/lib.rs": "f311a67e1e0ecd3a5f841437a1b4123c8b5e625483bfc09306c17b8669b814ae"
   }
 }

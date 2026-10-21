@@ -15,13 +15,15 @@ internal fun PluginResourceAuthorization(
     provider: PluginOAuthProvider,
     setupRevision: String?,
     enabled: Boolean,
+    opened: Boolean,
+    open: () -> Unit,
     blocked: Boolean = false,
     stateChanged: (PluginAuthorizationActivity) -> Unit,
     changed: suspend () -> Unit,
 ) {
     var authorization by remember { mutableStateOf<PluginOAuthStatus?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
-    var loading by remember { mutableStateOf(true) }
+    var loading by remember { mutableStateOf(false) }
     var activity by remember { mutableStateOf(PluginAuthorizationActivity()) }
     var directOrigin by remember { mutableStateOf("") }
     var reload by remember { mutableIntStateOf(0) }
@@ -32,7 +34,8 @@ internal fun PluginResourceAuthorization(
     DisposableEffect(Unit) {
         onDispose { stateChanged(PluginAuthorizationActivity()) }
     }
-    LaunchedEffect(reload) {
+    LaunchedEffect(opened, reload) {
+        if (!opened) return@LaunchedEffect
         loading = true
         error = null
         try {
@@ -63,10 +66,16 @@ internal fun PluginResourceAuthorization(
             )
         error?.let { FormError(it) }
         TextButton(
-            onClick = { reload++ },
+            onClick = { if (opened) reload++ else open() },
             enabled = !loading && !blocked && !activity.busy && !activity.pending,
         ) {
-            Text(if (loading) "Vérification de l’autorisation…" else "Actualiser l’autorisation")
+            Text(
+                when {
+                    loading -> "Vérification de l’autorisation…"
+                    opened -> "Actualiser l’autorisation"
+                    else -> "Gérer l’autorisation"
+                }
+            )
         }
         authorization?.let { initial ->
             Field(

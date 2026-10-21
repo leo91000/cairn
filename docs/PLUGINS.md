@@ -134,7 +134,7 @@ the digest displayed during review; changes require reviewing again.
 Owner package reads also have separate bounded contracts:
 
 - `GET /api/plugins/packages?cursor=…`: up to 32 compact cards, with a last-ID
-  `nextCursor`, `packageReads: true`, `instanceReads: true`, setup support and capability descriptions.
+  `nextCursor`, `packageReads: true`, `instanceReads: true`, `accessReads: true`, setup support and capability descriptions.
   A card's `presentation` contains labels, its brand, capability names and
   contribution counts; it is deliberately not a complete manifest. Cards include
   neither settings, credentials, instance configuration nor version history.
@@ -145,6 +145,8 @@ Owner package reads also have separate bounded contracts:
 - `GET /api/plugins/packages/{id}`: the selected display manifest and package
   approval status, without all version manifests. An approved active version is
   preferred, otherwise the last valid version in lexical order is displayed.
+  Served configuration support is explicit: `instanceReads`, `accessReads`,
+  `setupDrafts` and capability descriptions.
 - `GET /api/plugins/packages/{id}/versions?cursor=…`: up to 32 version metadata
   records in lexical order, with a last-version `nextCursor`. Digest, approval,
   source byte/file counts or an invalid-version diagnostic remain available.
@@ -163,7 +165,17 @@ Owner package reads also have separate bounded contracts:
   Missing source files do not hide saved configuration. Neither read exposes
   vault contents or relaxes the checks on saving or executing an instance.
 
-All three lists also enforce an encoded-byte budget below half the relay body limit.
+- `GET /api/plugins/instance-access?cursor=…`: up to 32 compact saved instance
+  identities and root/resource agent IDs across packages. The query projects these
+  fields before decoding the result in Rust; it returns no settings and does not
+  load credential or activity records. SQLite still reads the instance JSON.
+  Paused and unavailable packages remain represented. Resource memberships are
+  distinct from root grants. Display names use the bundled name or stable package
+  ID; the selected package uses its complete manifest name. These saved rules
+  support owner labels and public-agent restrictions; native checks still decide
+  every write and effect.
+
+All four lists also enforce an encoded-byte budget below half the relay body limit.
 Package IDs and versions are the cursor domain; existing management lists retain
 their UUID cursors. Live approval changes do not invalidate a later page's cursor.
 The current complete `/api/plugins` response also advertises `packageReads: true`
@@ -174,7 +186,13 @@ invalidate pending reads; approval uses the digest of the files actually shown.
 Earlier hosts fall back to their complete response when the new endpoint is
 absent or the required support marker is absent. Failed or malformed supported
 reads remain errors, rather than an empty catalogue. Package instance screens
-and grant selectors still require their separate client migration.
+read one selected manifest, complete all its instance pages and complete compact
+access pages across packages. Public delegation checks include root and resource
+rules, even on paused or other packages. Compatibility saves re-read one exact
+instance with its full current root agent IDs; a deleted instance remains an
+error. A missing package is confirmed using support markers from one compact
+catalogue page, so uninstalling clears the selected screen without an aggregate
+read. Agent/grant selector screens still require their separate migration.
 Status inspection still validates the installed versions of each selected package,
 without retaining all their manifests in compact responses. No summary is persisted.
 
@@ -705,8 +723,10 @@ binding and requester are rechecked when the new turn actually starts. A waiting
 workspace does not block other conversations. Temporary authority lookup failures
 leave the request queued for a later tick without pausing the conversation. A
 revoked request is cancelled individually, allowing the next authorized
-participant's independent request to advance. Editing or withdrawing the queued
-message from Cairn removes its automatic new-turn intent. Omitting `newTurn`
+participant's independent request to advance. These checks also apply after a
+successful preceding turn; its final answer remains available to its own delivery.
+A scheduled continuation still takes priority over queued independent requests.
+Editing or withdrawing the queued message from Cairn removes its automatic new-turn intent. Omitting `newTurn`
 preserves the original-author resume path.
 
 An admitted resource participant can call
@@ -806,6 +826,14 @@ again around I/O. Resource-granted calls also recheck the agent before issuing a
 new provider request after a slow renewal. Preparing a client secret or checking
 remote authority does not preserve an earlier consent: the host checks the exact
 authorization again immediately before sending a code or refresh token.
+
+Shared resource authorization controls load their status only when the owner
+chooses **Manage authorization** (Android: **Gérer l’autorisation**) for that
+resource and provider. Listing many resources does not fetch every provider's
+status. A provider the owner opened is re-read after a resource revision changes;
+its consent state is still recreated under the current revision. Unopened
+providers remain unknown. Pending consent on unchanged resources stays visible
+when a resource page is refreshed.
 
 #### Personal providers
 

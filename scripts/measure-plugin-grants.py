@@ -7,6 +7,7 @@ storage. Cold means a fresh SQLite connection; the OS file cache is not dropped.
 """
 import argparse
 import collections
+import hashlib
 import json
 import os
 import platform
@@ -19,6 +20,9 @@ from pathlib import Path
 
 
 KIND = "plugin-resource-grants"
+# Match plugins/paging.rs: MAX_ITEMS and cairn_protocol::MAX_BODY / 2.
+PAGE_ITEMS = 32
+PAGE_BYTES = 4_000_000
 AGENT = str(uuid.UUID(int=1))
 OTHER = str(uuid.UUID(int=2))
 PAGE_SQL = """SELECT data FROM records WHERE kind=? AND json_extract(data,'$.agentId')=?
@@ -50,14 +54,17 @@ def page(db, bounded):
     size = 256
     for rule in rules:
         encoded = len(json.dumps(rule, separators=(",", ":")).encode()) + 1
-        if len(items) == 32 or size + encoded > 4_194_304:
+        if len(items) == PAGE_ITEMS or size + encoded > PAGE_BYTES:
             break
         size += encoded
         items.append(rule)
     more = len(items) < len(rules)
-    return {"items": items, "nextCursor": items[-1]["id"] if more else None}, {
+    result = {"items": items, "nextCursor": items[-1]["id"] if more else None}
+    return result, {
         "decodedRows": len(decoded), "selectedEncodedBytes": sum(len(row[0].encode()) for row in rows),
-        "metadataLookups": lookups,
+        "metadataLookups": lookups, "pageItems": len(items),
+        "pageEncodedBytes": len(json.dumps(result, separators=(",", ":")).encode()),
+        "nextCursor": result["nextCursor"],
     }
 
 
@@ -127,6 +134,12 @@ def main():
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="cairn-grant-query-") as directory:
         measurements = {"host": {"platform": platform.platform(), "python": platform.python_version(), "sqlite": sqlite3.sqlite_version, "logicalCpus": os.cpu_count()}, "limits": "Local Python SQLite/JSON query boundary; not Rust HTTP, not production latency. Fresh SQLite connections retain the OS file cache. Other qualification jobs may share this host.", "workloads": {}}
+        root = Path(__file__).resolve().parent.parent
+        measurements["pageBounds"] = {"items": PAGE_ITEMS, "bytes": PAGE_BYTES, "reservedEnvelopeBytes": 256}
+        measurements["sourceSha256"] = {
+            path: hashlib.sha256((root / path).read_bytes()).hexdigest()
+            for path in ["scripts/measure-plugin-grants.py", "crates/installation/src/plugins/paging.rs", "crates/protocol/src/lib.rs"]
+        }
         measurements["workloads"]["smallScopes"] = workload(directory, "small", {"channel": ["C111"]})
         scopes = {f"scope{n}": [f"{item:03d}" + "s" * 176 for item in range(100)] for n in range(8)}
         measurements["workloads"]["largeScopes"] = workload(directory, "large", scopes)

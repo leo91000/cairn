@@ -102,6 +102,7 @@ data class PluginCardEntry(
 data class PluginCards(
     val packageReads: Boolean = false,
     val instanceReads: Boolean = false,
+    val accessReads: Boolean = false,
     val setupDrafts: Boolean = false,
     val capabilities: List<PluginCapability> = emptyList(),
     val items: List<PluginCardEntry>,
@@ -219,4 +220,161 @@ internal suspend fun CairnApi.pluginReview(id: String): PluginReviewRead {
         "La liste des versions est incomplète. Rouvrez la revue."
     }
     return PluginReviewRead(detail.copy(versions = versions), true)
+}
+
+/** One configuration manifest; review history is intentionally absent. */
+@Serializable
+internal data class PluginConfigurationEntry(
+    val id: String,
+    val builtin: Boolean,
+    val status: String,
+    val active: String?,
+    val manifest: PluginManifest?,
+    val instanceReads: Boolean = false,
+    val accessReads: Boolean = false,
+    val setupDrafts: Boolean = false,
+    val capabilities: List<PluginCapability>? = null,
+) {
+    val name
+        get() = manifest?.name ?: id
+}
+
+internal fun PluginEntry.configuration() =
+    PluginConfigurationEntry(id, builtin, status, active, manifest)
+
+/** Saved root and resource IDs remain distinct; neither asserts effective authorization. */
+@Serializable
+internal data class PluginInstanceAccess(
+    val id: String,
+    val pluginId: String,
+    val pluginName: String,
+    val name: String,
+    val enabled: Boolean,
+    val agentIds: List<String>,
+    val resourceAgentIds: List<String>,
+)
+
+internal data class PluginConfiguration(
+    val entry: PluginConfigurationEntry?,
+    val capabilities: List<PluginCapability>,
+    val setupDrafts: Boolean,
+    val exactInstanceReads: Boolean,
+    val connections: List<PluginConnection>,
+    val access: List<PluginInstanceAccess>,
+    val resourceAgentIds: List<String> = emptyList(),
+) {
+    fun hasPluginAccess(agentId: String) =
+        agentId in resourceAgentIds ||
+            access.any {
+                agentId in it.agentIds || agentId in it.resourceAgentIds
+            }
+
+    fun grantsOf(agentId: String): List<String> =
+        access
+            .filter {
+                agentId in it.agentIds || agentId in it.resourceAgentIds
+            }
+            .map {
+                "${if (it.pluginId == entry?.id) entry?.name ?: it.pluginName else it.pluginName} · ${it.name}"
+            }
+}
+
+private suspend fun CairnApi.legacyConfiguration(id: String): PluginConfiguration {
+    val catalog = completePluginCatalogue()
+    val entry = catalog.packages.find { it.id == id }
+    return PluginConfiguration(
+        entry?.configuration(),
+        catalog.capabilities,
+        catalog.setupDrafts,
+        false,
+        catalog.connections.filter { it.pluginId == id },
+        catalog.connections.map {
+            PluginInstanceAccess(
+                it.id,
+                it.pluginId,
+                catalog.packages.find { entry -> entry.id == it.pluginId }?.name ?: it.pluginId,
+                it.name,
+                it.enabled,
+                it.agentIds,
+                emptyList(),
+            )
+        },
+        catalog.resourceGrantCounts.orEmpty().filterValues { it > 0 }.keys.toList(),
+    )
+}
+
+/** Discover support from one compact page; a removed package needs no complete catalogue. */
+private suspend fun CairnApi.missingConfiguration(id: String): PluginConfiguration {
+    val support =
+        try {
+            get<PluginCards>("/plugins/packages")
+        } catch (e: ApiException) {
+            if (e.status != 404) throw e
+            return legacyConfiguration(id)
+        }
+    check(support.packageReads) { "Le catalogue de plugins est incomplet. Actualisez-le." }
+    if (!support.instanceReads || !support.accessReads) return legacyConfiguration(id)
+    return PluginConfiguration(
+        null,
+        support.capabilities,
+        support.setupDrafts,
+        true,
+        emptyList(),
+        emptyList(),
+    )
+}
+
+internal suspend fun CairnApi.pluginConfiguration(id: String): PluginConfiguration {
+    val root = "/plugins/packages/${segment(id)}"
+    val detail =
+        try {
+            get<PluginConfigurationEntry>(root)
+        } catch (e: ApiException) {
+            if (e.status != 404) throw e
+            return missingConfiguration(id)
+        }
+    check(detail.id == id) { "La configuration reçue ne correspond pas à ce package." }
+    if (!detail.instanceReads || !detail.accessReads) return legacyConfiguration(id)
+    val capabilities =
+        checkNotNull(detail.capabilities) {
+            "La configuration du plugin est incomplète. Actualisez-la."
+        }
+    val connections = pluginManagementItems<PluginConnection>("$root/connections")
+    val access = pluginManagementItems<PluginInstanceAccess>("/plugins/instance-access")
+    check(
+        connections.all { it.pluginId == id } &&
+            access.all { it.id.isNotEmpty() && it.pluginId.isNotEmpty() }
+    ) {
+        "Les accès enregistrés du plugin sont incomplets. Actualisez-les."
+    }
+    return PluginConfiguration(detail, capabilities, detail.setupDrafts, true, connections, access)
+}
+
+/**
+ * Complete current root IDs for an older-host compatibility save. Never recreate a vanished
+ * instance.
+ */
+internal suspend fun CairnApi.pluginInstance(
+    plugin: String,
+    instance: String,
+    exact: Boolean,
+): PluginConnection {
+    val saved =
+        if (exact) {
+            val value =
+                get<JsonObject>(
+                    "/plugins/packages/${segment(plugin)}/connections/${segment(instance)}"
+                )
+            check(value["agentIds"] is JsonArray) {
+                "Les accès enregistrés de l’instance sont incomplets. Rouvrez le plugin."
+            }
+            wireJson.decodeFromJsonElement<PluginConnection>(value)
+        } else
+            completePluginCatalogue().connections.find {
+                it.id == instance && it.pluginId == plugin
+            } ?: error("Cette instance a été supprimée. Rouvrez le plugin avant d’enregistrer.")
+    check(saved.id == instance && saved.pluginId == plugin) {
+        "L’instance reçue ne correspond pas au plugin. Rouvrez-le."
+    }
+    return saved
 }

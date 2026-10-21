@@ -59,6 +59,45 @@ pub(crate) async fn summaries(s: &Service, packages: Value) -> Result<HashMap<St
         .await
 }
 
+/// Saved access for owner eligibility and labels, independent of package availability.
+/// Project only metadata in SQL, without materializing settings in Rust or loading
+/// credential and history records. SQLite still reads the underlying instance JSON.
+/// Root grants and resource rules remain separate; neither implies an effective grant.
+pub async fn access(s: &Service, cursor: Option<&str>) -> Result<Value> {
+    if let Some(cursor) = cursor {
+        uuid(cursor)?;
+    }
+    let cursor = cursor.unwrap_or("").to_owned();
+    s.store
+        .read(move |db| {
+            let mut rows = db.json_rows(
+                "SELECT json_object(
+                    'id',r.id,'pluginId',json_extract(r.data,'$.pluginId'),
+                    'name',coalesce(json_extract(r.data,'$.name'),''),
+                    'enabled',json(CASE WHEN json_extract(r.data,'$.enabled')=1 THEN 'true' ELSE 'false' END),
+                    'agentIds',json(coalesce(json_extract(r.data,'$.agentIds'),'[]')),
+                    'resourceAgentIds',json((SELECT json_group_array(agent) FROM (
+                        SELECT DISTINCT json_extract(g.data,'$.agentId') AS agent
+                        FROM records g WHERE g.kind='plugin-resource-grants'
+                        AND json_extract(g.data,'$.connectionId')=r.id
+                        AND json_type(g.data,'$.agentId')='text' ORDER BY agent))))
+                 FROM records r WHERE r.kind='plugin-connections' AND r.id>?
+                 ORDER BY r.id LIMIT ?",
+                params![cursor, (paging::MAX_ITEMS + 1) as i64],
+            )?;
+            for row in &mut rows {
+                // Bundled names require no registry scan. An unavailable/custom package
+                // is identified honestly by its stable ID, never by a fabricated manifest.
+                let plugin = text(row, "pluginId");
+                let name = registry::builtin(plugin)
+                    .map_or_else(|| plugin.to_owned(), |package| package.manifest.name);
+                row["pluginName"] = json!(name);
+            }
+            paging::ordered_page(rows, "id", paging::MAX_ITEMS, paging::MAX_BYTES)
+        })
+        .await
+}
+
 /// No approval is required to inspect or delete an already saved instance. A
 /// missing package has no ready override; failed filesystem reads remain errors.
 async fn needs_worker(s: &Service, plugin: &str) -> Result<Option<bool>> {

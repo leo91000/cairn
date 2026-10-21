@@ -300,7 +300,9 @@ export async function currentAgentIds(
   if (!connection || keptAgentIds(agents, entry, { agentIds: ['?'] }) === undefined)
     return undefined
   const fresh = (await connections()).find(item => item.id === connection.id)
-  return keptAgentIds(agents, entry, fresh ?? connection)
+  if (!fresh)
+    throw new Error('This plugin instance was removed. Reopen the plugin before saving.')
+  return keptAgentIds(agents, entry, fresh)
 }
 
 export const updateForGrants = 'Update the installation to grant these from the agent page.'

@@ -43,6 +43,8 @@ abstract class ChatSwipeCases {
     private var expectedPages = 1
     private val historyRequests = java.util.concurrent.CopyOnWriteArrayList<String>()
     private val telemetryReports = java.util.concurrent.CopyOnWriteArrayList<String>()
+    private val sessionRequests = java.util.concurrent.atomic.AtomicInteger()
+    private val connectionChecks = java.util.concurrent.atomic.AtomicInteger()
 
     @Test
     fun automaticPerformanceSharingUsesBeaconWithoutConversationContent() = withChats {
@@ -74,6 +76,15 @@ abstract class ChatSwipeCases {
         compose.onNode(hasSetTextAction()).performTextInput("Brouillon intermédiaire")
         restoration.emulateSavedInstanceStateRestore()
         waitForChat("Chat intermédiaire")
+        compose.waitUntil(10000) {
+            compose.onAllNodes(isRoot()).fetchSemanticsNodes()
+            connectionChecks.get() == 2
+        }
+        Assert.assertEquals(
+            "Restoring the same ViewModel must retain its account connection and drafts",
+            1,
+            sessionRequests.get(),
+        )
         compose.onNode(hasSetTextAction() and hasText("Brouillon intermédiaire")).assertExists()
         history.performTouchInput { swipeLeft() }
         waitForChat("Chat ancien")
@@ -350,6 +361,7 @@ abstract class ChatSwipeCases {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path.orEmpty().substringBefore('?')
+                        if (path == "/api/account/session") sessionRequests.incrementAndGet()
                         if (path == "/api/account/telemetry/performance") {
                             telemetryReports.add(request.body.readUtf8())
                             return MockResponse().setResponseCode(204)
@@ -459,7 +471,10 @@ abstract class ChatSwipeCases {
                         val state by vm.state.collectAsStateWithLifecycle()
                         LaunchedEffect(Unit) {
                             vm.state.first { it.ready }
-                            vm.connect(server.url("/").toString())
+                            // Restoration keeps this ViewModel and its current session.
+                            if (vm.state.value.installation == null)
+                                vm.connect(server.url("/").toString())
+                            connectionChecks.incrementAndGet()
                         }
                         CompositionLocalProvider(
                             LocalPerformanceUploadCadence provides uploadCadence

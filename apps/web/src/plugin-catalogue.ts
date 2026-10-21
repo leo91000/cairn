@@ -2,6 +2,7 @@ import type {
   Catalog,
   Manifest,
   PackageVersion,
+  PluginConnection,
   PluginEntry,
   PluginPage,
 } from './plugins'
@@ -50,6 +51,7 @@ export interface PluginCardEntry {
 export interface PluginCards extends PluginPage<PluginCardEntry> {
   packageReads: boolean
   instanceReads?: boolean
+  accessReads?: boolean
   setupDrafts?: boolean
   capabilities: Catalog['capabilities']
 }
@@ -157,4 +159,146 @@ export async function pluginReview(id: string, signal: AbortSignal): Promise<{ e
   if (versions.some(version => !version.version || (!version.error && (!version.digest || typeof version.approved !== 'boolean'))))
     throw new Error('The plugin version list is incomplete. Reopen the review.')
   return { entry: { ...detail, versions }, lazy: true }
+}
+
+/** Configuration owns one complete manifest; review history is a separate read. */
+export type PluginConfigurationEntry = Omit<PluginEntry, 'versions'>
+
+/** Saved IDs for eligibility and labels. These are not effective permissions. */
+export interface PluginInstanceAccess {
+  id: string
+  pluginId: string
+  pluginName: string
+  name: string
+  enabled: boolean
+  agentIds: string[]
+  resourceAgentIds: string[]
+}
+
+export interface PluginConfiguration {
+  entry: PluginConfigurationEntry | null
+  capabilities: Catalog['capabilities']
+  setupDrafts: boolean
+  exactInstanceReads: boolean
+  connections: PluginConnection[]
+  access: PluginInstanceAccess[]
+  /** Older hosts only supply resource totals per agent across all packages. */
+  resourceAgentIds: string[]
+}
+
+async function legacyConfiguration(id: string, signal: AbortSignal): Promise<PluginConfiguration> {
+  const catalog = await api<Catalog>('/plugins', { signal })
+  if (!Array.isArray(catalog.packages) || !Array.isArray(catalog.connections) || !Array.isArray(catalog.capabilities))
+    throw new Error('The plugin configuration response is incomplete. Refresh before making changes.')
+  const saved = catalog.packages.find(entry => entry.id === id)
+  let entry: PluginConfigurationEntry | null = null
+  if (saved) {
+    const { versions: _versions, ...configuration } = saved
+    entry = configuration
+  }
+
+  return {
+    entry,
+    capabilities: catalog.capabilities,
+    setupDrafts: Boolean(catalog.setupDrafts),
+    exactInstanceReads: false,
+    connections: catalog.connections.filter(instance => instance.pluginId === id),
+    access: catalog.connections.map(instance => ({
+      id: instance.id,
+      pluginId: instance.pluginId,
+      pluginName: catalog.packages.find(entry => entry.id === instance.pluginId)?.manifest?.name ?? instance.pluginId,
+      name: instance.name,
+      enabled: instance.enabled,
+      agentIds: instance.agentIds ?? [],
+      resourceAgentIds: [],
+    })),
+    resourceAgentIds: Object.entries(catalog.resourceGrantCounts ?? {}).filter(([, count]) => count > 0).map(([id]) => id),
+  }
+}
+
+/** A missing selected package is different from an unavailable configuration API. */
+async function missingConfiguration(id: string, signal: AbortSignal): Promise<PluginConfiguration> {
+  let support: PluginCards
+  try {
+    support = await api<PluginCards>('/plugins/packages', { signal })
+  }
+  catch (error) {
+    if (!(error instanceof ApiError) || error.status !== 404)
+      throw error
+    return legacyConfiguration(id, signal)
+  }
+
+  if (support.packageReads !== true || !Array.isArray(support.items) || !Array.isArray(support.capabilities))
+    throw new Error('The plugin catalogue response is incomplete. Refresh before making changes.')
+  if (support.instanceReads !== true || support.accessReads !== true)
+    return legacyConfiguration(id, signal)
+  return {
+    entry: null,
+    capabilities: support.capabilities,
+    setupDrafts: Boolean(support.setupDrafts),
+    exactInstanceReads: true,
+    connections: [],
+    access: [],
+    resourceAgentIds: [],
+  }
+}
+
+export async function pluginConfiguration(id: string, signal: AbortSignal): Promise<PluginConfiguration> {
+  const root = `/plugins/packages/${encodeURIComponent(id)}`
+
+  type Detail = PluginConfigurationEntry & {
+    instanceReads?: boolean
+    accessReads?: boolean
+    setupDrafts?: boolean
+    capabilities?: Catalog['capabilities']
+  }
+
+  let detail: Detail
+  try {
+    detail = await api<Detail>(root, { signal })
+  }
+  catch (error) {
+    if (!(error instanceof ApiError) || error.status !== 404)
+      throw error
+    return missingConfiguration(id, signal)
+  }
+
+  if (detail.id !== id)
+    throw new Error('The plugin configuration response does not match this package.')
+  if (detail.instanceReads !== true || detail.accessReads !== true)
+    return legacyConfiguration(id, signal)
+  if (!Array.isArray(detail.capabilities) || detail.manifest === undefined)
+    throw new Error('The plugin configuration response is incomplete. Refresh before making changes.')
+  const connections = await pluginManagementItems<PluginConnection>(`${root}/connections`, signal)
+  const access = await pluginManagementItems<PluginInstanceAccess>('/plugins/instance-access', signal)
+  if (connections.some(instance => instance.pluginId !== id)
+    || access.some(instance => !instance.id || !instance.pluginId || !Array.isArray(instance.agentIds) || !Array.isArray(instance.resourceAgentIds))) {
+    throw new Error('The saved plugin access response is incomplete. Refresh before making changes.')
+  }
+
+  return {
+    entry: detail,
+    capabilities: detail.capabilities,
+    setupDrafts: Boolean(detail.setupDrafts),
+    exactInstanceReads: true,
+    connections,
+    access,
+    resourceAgentIds: [],
+  }
+}
+
+/** Re-read all saved root IDs immediately before an older-host compatibility save. */
+export async function pluginInstance(plugin: string, instance: string, exact: boolean) {
+  if (!exact) {
+    const catalog = await api<Catalog>('/plugins')
+    const saved = catalog.connections.find(item => item.id === instance && item.pluginId === plugin)
+    if (!saved)
+      throw new Error('This plugin instance was removed. Reopen the plugin before saving.')
+    return saved
+  }
+
+  const saved = await api<PluginConnection>(`/plugins/packages/${encodeURIComponent(plugin)}/connections/${encodeURIComponent(instance)}`)
+  if (saved.id !== instance || saved.pluginId !== plugin || !Array.isArray(saved.agentIds))
+    throw new Error('The saved plugin instance response is incomplete. Reopen the plugin before saving.')
+  return saved
 }

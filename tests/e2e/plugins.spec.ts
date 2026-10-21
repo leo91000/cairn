@@ -13,6 +13,12 @@ import {
 
 const token = `synthetic_browser_discord_token_${'x'.repeat(48)}`
 
+test.beforeEach(async ({ workspace }) => {
+  // Retain the worker's data and sign-in, but do not inherit another scenario's
+  // process-local HTTP request budget. Production limits stay unchanged.
+  await workspace.restart()
+})
+
 async function selectField(scope: Locator, label: string, option: string) {
   await scope.getByRole('combobox', { name: label, exact: true }).fill(option)
   await scope.getByRole('option', { name: option, exact: true }).click()
@@ -88,6 +94,8 @@ test('older hosts keep existing plugin pages without a setup drafts endpoint', a
   })
   try {
     let draftReads = 0
+    await page.route('**/api/plugins/packages/onepassword', route => route.fulfill({ status: 404, json: { error: 'Not found' } }))
+    await page.route('**/api/plugins/packages', route => route.fulfill({ status: 404, json: { error: 'Not found' } }))
     await page.route('**/api/plugins', async (route) => {
       const response = await route.fetch()
       const catalog = await response.json()
@@ -116,6 +124,201 @@ test('older hosts keep existing plugin pages without a setup drafts endpoint', a
     await workspace.api(`/api/plugins/onepassword/connections/${account.id}`, 'DELETE')
   }
 })
+
+test('closing an editor during its exact grant read keeps the original update target and typed secret', async ({ page }) => {
+  await useRelayForHttpMocks(page)
+  const manifest = {
+    id: 'held',
+    name: 'Held package',
+    version: '1',
+    apiVersion: 2,
+    capabilities: [],
+    instances: { singular: 'Account', plural: 'Accounts' },
+    agentAccess: { description: 'Off by default.' },
+    settings: [{
+      key: 'token',
+      title: 'Credential',
+      type: 'secret',
+      required: true,
+    }],
+  }
+  const instance = {
+    id: 'saved',
+    pluginId: 'held',
+    name: 'Original account',
+    settings: {},
+    enabled: false,
+    agentIds: ['before'],
+    secretKeys: ['token'],
+    userIds: [],
+    people: [],
+    accessMode: 'allowlist',
+    agentId: '',
+    projectId: null,
+    maxMessagesPerHour: 0,
+    status: { state: 'ready' },
+    usage: { hour: 0 },
+    requests: [],
+    activity: [],
+  }
+  let globalReads = 0
+  let exactStarted = false
+  let release!: () => void
+  const held = new Promise<void>(resolve => release = resolve)
+  const writes: { method: string, path: string, body: any }[] = []
+  await page.route('**/api/agents', async (route) => {
+    const response = await route.fetch()
+    const agents = await response.json()
+    for (const agent of agents)
+      delete agent.grantsOnAgent
+    await route.fulfill({ response, json: agents })
+  })
+  await page.route('**/api/plugins', (route) => {
+    globalReads++
+    return route.fulfill({ status: 503, json: { error: 'No global catalogue' } })
+  })
+  await page.route('**/api/plugins/packages/held', route => route.fulfill({
+    json: {
+      id: 'held',
+      builtin: false,
+      status: 'active',
+      active: '1',
+      manifest,
+      instanceReads: true,
+      accessReads: true,
+      setupDrafts: false,
+      capabilities: [],
+    },
+  }))
+  await page.route('**/api/plugins/packages/held/connections', route => route.fulfill({ json: { items: [instance] } }))
+  await page.route('**/api/plugins/instance-access', route => route.fulfill({ json: { items: [] } }))
+  await page.route('**/api/plugins/packages/held/connections/saved', async (route) => {
+    exactStarted = true
+    await held
+    await route.fulfill({ json: { ...instance, agentIds: ['concurrent'] } })
+  })
+  await page.route(/\/api\/plugins\/held\/connections(?:\/saved)?$/, async (route) => {
+    writes.push({ method: route.request().method(), path: new URL(route.request().url()).pathname, body: route.request().postDataJSON() })
+    await route.fulfill({ json: {} })
+  })
+  try {
+    await page.goto(workspacePath('/plugins/held'))
+    await signIn(page)
+    await page.getByRole('button', { name: 'Edit Original account', exact: true }).click()
+    const editor = page.getByRole('dialog', { name: 'Edit Original account', exact: true })
+    await editor.getByLabel('Name', { exact: true }).fill('Typed name')
+    await editor.getByLabel('Credential', { exact: true }).fill('synthetic_changed_credential')
+    await editor.getByRole('button', { name: 'Save account', exact: true }).click()
+    await expect.poll(() => exactStarted).toBe(true)
+    await editor.getByRole('button', { name: 'Close dialog', exact: true }).click()
+    await expect(editor).not.toBeVisible()
+    release()
+    await expect.poll(() => writes.length).toBe(1)
+    expect(writes[0].method).toBe('PUT')
+    expect(writes[0].path).toMatch(/\/plugins\/held\/connections\/saved$/)
+    expect(writes[0].body).toMatchObject({ name: 'Typed name', agentIds: ['concurrent'], secrets: { token: 'synthetic_changed_credential' } })
+    expect(globalReads).toBe(0)
+  }
+  finally { release() }
+})
+
+for (const grant of ['root', 'resource'] as const) {
+  test(`selected package pages preserve cross-package ${grant} access restrictions without full catalogue reads`, async ({ page, workspace }) => {
+    const agent = await workspace.api('/api/agents', 'POST', {
+      name: `Public helper ${grant}`,
+      access: {
+        projects: [],
+        skills: [],
+        mcps: [],
+        github: false,
+        installation: false,
+        sandbox: 'read-only',
+      },
+    })
+    await useRelayForHttpMocks(page)
+    let globalReads = 0
+    await page.route('**/api/plugins', (route) => {
+      globalReads++
+      return route.fulfill({ status: 503, json: { error: 'Detail must not load the full catalogue' } })
+    })
+    const manifest = {
+      id: 'selected',
+      name: 'Selected package',
+      version: '1',
+      apiVersion: 2,
+      capabilities: ['conversations.submit'],
+      settings: [],
+    }
+    await page.route('**/api/plugins/packages/selected', route => route.fulfill({
+      json: {
+        id: 'selected',
+        builtin: false,
+        status: 'active',
+        active: '1',
+        manifest,
+        instanceReads: true,
+        accessReads: true,
+        setupDrafts: false,
+        capabilities: [],
+      },
+    }))
+    const instance = (id: string, name: string) => ({
+      id,
+      name,
+      pluginId: 'selected',
+      settings: {},
+      enabled: false,
+      agentIds: [],
+      userIds: [],
+      people: [],
+      accessMode: 'everyone',
+      agentId: agent.id,
+      projectId: null,
+      maxMessagesPerHour: 20,
+      status: { state: 'disconnected' },
+      usage: { hour: 0 },
+      requests: [],
+      activity: [],
+    })
+    await page.route('**/api/plugins/packages/selected/connections*', route => route.fulfill({
+      json: route.request().url().includes('?cursor=')
+        ? { items: [instance('two', 'Second instance')], nextCursor: null }
+        : { items: [instance('one', 'First instance')], nextCursor: 'one' },
+    }))
+    await page.route('**/api/plugins/instance-access*', route => route.fulfill({
+      json: route.request().url().includes('?cursor=')
+        ? {
+            items: [{
+              id: 'other',
+              pluginId: 'elsewhere',
+              pluginName: 'Other package',
+              name: 'Other workspace',
+              enabled: false,
+              agentIds: grant === 'root' ? [agent.id] : [],
+              resourceAgentIds: grant === 'resource' ? [agent.id] : [],
+            }],
+            nextCursor: null,
+          }
+        : { items: [], nextCursor: 'boundary' },
+    }))
+    try {
+      await page.goto(workspacePath('/plugins/selected'))
+      await signIn(page)
+      const second = page.getByRole('article', { name: 'Second instance', exact: true })
+      await expect(second).toBeVisible()
+      await expect(page.getByRole('article', { name: 'First instance', exact: true })).toBeVisible()
+      await second.getByRole('button', { name: 'Edit Second instance', exact: true }).click()
+      const editor = page.getByRole('dialog', { name: 'Edit Second instance', exact: true })
+      await expect(editor.getByRole('radio', { name: new RegExp(agent.name) })).toBeDisabled()
+      await expect(editor.getByText('Has plugin access').first()).toBeVisible()
+      await expect(editor.getByRole('button', { name: 'Save instance', exact: true })).toBeDisabled()
+      expect(globalReads).toBe(0)
+    }
+    finally {
+      await workspace.api(`/api/agents/${agent.id}`, 'DELETE')
+    }
+  })
+}
 
 test('Discord bots are set up through the package’s own form and keep the token private', async ({ page, workspace }) => {
   test.setTimeout(90000)
@@ -994,6 +1197,7 @@ test('owner resource OAuth gates setup until every consent settles and remains m
   const setup = page.getByRole('dialog', { name: 'Set up Owner service' })
   const first = setup.getByRole('article', { name: 'Engineering', exact: true })
   const second = setup.getByRole('article', { name: 'Sales', exact: true })
+  await first.getByRole('button', { name: 'Manage authorization', exact: true }).click()
   await expect(first.getByRole('button', { name: 'Connect', exact: true })).toBeDisabled()
   await expect(setup.getByText('Personal access', { exact: true })).not.toBeVisible()
   await first.getByRole('checkbox', { name: 'messages:read', exact: true }).check()
@@ -1002,6 +1206,7 @@ test('owner resource OAuth gates setup until every consent settles and remains m
   await expect(first.getByRole('link', { name: 'Open authorization page' })).toBeVisible()
   await expect(first.getByText('Callback URL: https://cairn.example.test/callback', { exact: true })).toBeVisible()
   await setup.getByRole('button', { name: 'More workspaces', exact: true }).click()
+  await second.getByRole('button', { name: 'Manage authorization', exact: true }).click()
   await second.getByRole('checkbox', { name: 'messages:read', exact: true }).check()
   await second.getByRole('button', { name: 'Connect', exact: true }).click()
   await expect(second.getByRole('link', { name: 'Open authorization page' })).toBeVisible()
@@ -1039,6 +1244,7 @@ test('owner resource OAuth gates setup until every consent settles and remains m
   await setup.getByRole('button', { name: 'Activate instance', exact: true }).click()
   await expect(setup).not.toBeVisible()
   const live = page.getByRole('article', { name: 'Shared service', exact: true }).getByRole('article', { name: 'Engineering', exact: true })
+  await live.getByRole('button', { name: 'Manage authorization', exact: true }).click()
   await expect(live.getByText('Connected', { exact: true })).toBeVisible()
   await live.getByRole('button', { name: 'Disconnect', exact: true }).click()
   await page.getByRole('dialog', { name: 'Disconnect Workspace authorization?' }).getByRole('button', { name: 'Disconnect', exact: true }).click()
@@ -1120,6 +1326,8 @@ test('shared providers on one resource serialize their revision-changing authori
   const resource = page.getByRole('article', { name: 'Engineering', exact: true })
   const first = resource.getByRole('region', { name: 'First authorization', exact: true })
   const second = resource.getByRole('region', { name: 'Second authorization', exact: true })
+  await first.getByRole('button', { name: 'Manage authorization', exact: true }).click()
+  await second.getByRole('button', { name: 'Manage authorization', exact: true }).click()
   await first.getByRole('checkbox', { name: 'messages:read', exact: true }).check()
   await second.getByRole('checkbox', { name: 'messages:read', exact: true }).check()
   await expect(second.getByRole('button', { name: 'Connect', exact: true })).toBeEnabled()
@@ -1172,6 +1380,7 @@ test('a late resource page cannot duplicate a newer authorization refresh', asyn
     await page.goto(workspacePath(`/plugins/${id}`))
     await signIn(page)
     const first = page.getByRole('article', { name: 'Engineering', exact: true }).getByRole('region', { name: 'First authorization', exact: true })
+    await first.getByRole('button', { name: 'Manage authorization', exact: true }).click()
     await first.getByRole('checkbox', { name: 'messages:read', exact: true }).check()
     await first.getByRole('button', { name: 'Connect', exact: true }).click()
     await page.getByRole('button', { name: 'More workspaces', exact: true }).click()
@@ -2220,20 +2429,22 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
     values,
     submit: { label: 'Apply values', action: 'apply' },
   })
-  await page.route('**/api/plugins', route => route.fulfill({
+  await page.route('**/api/plugins/packages/forms', route => route.fulfill({
     json: {
-      packages: [{
-        id: 'forms',
-        builtin: false,
-        status: 'active',
-        active: '1.0.0',
-        manifest,
-        versions: [],
-      }],
+      id: 'forms',
+      builtin: false,
+      status: 'active',
+      active: '1.0.0',
+      manifest,
+      instanceReads: true,
+      accessReads: true,
+      setupDrafts: false,
       capabilities: [],
-      connections: [connection],
     },
   }))
+  await page.route('**/api/plugins/packages/forms/connections', route => route.fulfill({ json: { items: [connection] } }))
+  await page.route('**/api/plugins/packages/forms/connections/example', route => route.fulfill({ json: connection }))
+  await page.route('**/api/plugins/instance-access', route => route.fulfill({ json: { items: [] } }))
   const initialPanelValues = { password: 'synthetic_never_prefill', unknown: 'drop' }
   await page.route('**/api/plugins/forms/connections/example/view', route => route.fulfill({
     json: { view: [panelNode(initialPanelValues)] },
@@ -2655,8 +2866,8 @@ for (const prepared of [false, true]) {
       await selectField(form, 'Parent', 'Engineering')
       await oldRequest
       if (!prepared) {
-        // Keep the real five-second catalogue refresh inside this regression.
-        await page.waitForResponse(response => response.url().endsWith('/plugins') && response.request().method() === 'GET' && response.ok())
+        // Keep the real five-second selected-package refresh inside this regression.
+        await page.waitForResponse(response => response.url().endsWith(`/plugins/packages/${id}`) && response.request().method() === 'GET' && response.ok())
       }
 
       await expect(form.getByRole('button', { name: 'Save channel', exact: true })).toBeDisabled()

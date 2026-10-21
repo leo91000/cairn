@@ -20,7 +20,7 @@ python3 scripts/measure-plugin-grants.py --output /tmp/plugin-grant-reads.json
 
 [Recorded measurements](measurements/plugin-grants/sqlite-local.json) use Linux
 x86-64, Python 3.14.7 and SQLite 3.53.1 on a host reporting seven logical CPUs.
-Other Android and browser qualification jobs shared the host. Each workload has
+Android lint and browser qualification jobs shared the host. Each workload has
 512 saved rules on eight resources (64 each), split between two agents, with one
 instance and either short channel limits or eight scopes of 100 long values.
 The fixture writes 521 records. The script verifies that both versions return the
@@ -28,17 +28,28 @@ same page and counts, measures the fixture write and encoded/database bytes, and
 records one fresh-connection read and five warm reads with wall and process CPU
 time. Fresh connections retain the OS file cache; this is not a disk-cache flush.
 
+The page budget is 32 items and 4,000,000 bytes, with 256 bytes reserved
+for the envelope, matching native `paging::MAX_BYTES` (`MAX_BODY / 2`). The
+record captures both the returned item count and response bytes, the continuation
+cursor and hashes of the harness and native bound definitions. An earlier
+measurement incorrectly used 4,194,304 bytes in both compared variants; its
+reference/candidate equality check missed that native-boundary discrepancy.
+These refreshed results use the corrected bound; the large fixture now returns
+27 rules rather than 28. The native grant enforcement itself is unchanged.
+
 | Large-scope workload | Reference | Bounded |
 | --- | ---: | ---: |
+| Rules returned in the first page | 27 | 27 |
+| Encoded page response bytes | 3,945,654 | 3,945,654 |
 | Rows decoded for one directory page | 512 | 33 |
 | Encoded rule bytes returned from SQLite | 74,778,624 | 4,819,716 |
 | Metadata lookups for that page | 512 | 66 |
-| Warm page wall time, median | 1,026.5 ms | 283.7 ms |
-| Warm page CPU time, median | 864.7 ms | 275.4 ms |
+| Warm page wall time, median | 571.7 ms | 466.7 ms |
+| Warm page CPU time, median | 571.7 ms | 460.0 ms |
 | Rows decoded for catalogue counts | 512 | 2 |
 | Encoded count-query result bytes | 74,778,624 | 124 |
-| Warm counts wall time, median | 679.2 ms | 174.5 ms |
-| Warm counts CPU time, median | 636.6 ms | 163.6 ms |
+| Warm counts wall time, median | 519.6 ms | 161.6 ms |
+| Warm counts CPU time, median | 432.3 ms | 158.5 ms |
 
 These are local Python SQLite/JSON boundary measurements, not Rust HTTP latency,
 native memory measurements or production network latency. The directory still

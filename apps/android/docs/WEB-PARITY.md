@@ -178,3 +178,18 @@ on-demand S3 block journal and synchronization status as VM conversations. The
 installation reclaims acknowledged clean native cache after one idle hour and
 reloads missing blocks on demand. Web and Android consume the same backend status;
 neither client adds a retention control. Chat and published artifact links remain.
+
+Plugin detail pages on web and Android load the selected configuration, all its
+instance pages, and compact saved access across packages. Public-agent choices
+retain root and resource restrictions on other packages, including paused rules.
+Exact current instance reads preserve concurrently changed root grants on an
+older-host compatibility save; deletion is an error. Review history remains a
+separate read. Both clients explicitly fall back only when the host lacks support,
+and retain a supported read failure as an error. Agent/grant selectors have not
+yet migrated from the complete catalogue.
+
+Shared resource OAuth controls on both clients fetch status when the owner chooses
+Manage authorization / Gérer l’autorisation. An unopened provider has unknown
+status. The owner's viewing choice survives a resource revision, while consent
+state is recreated under that revision. Refreshing resources preserves pending
+consents on unchanged resources and does not load unopened providers.

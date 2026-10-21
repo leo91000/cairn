@@ -557,13 +557,13 @@ fun Agent.eligibleForPlugins() =
  * Why an agent can't answer anyone who reaches an instance, or null when it can. Mirrors the
  * server: read-only sandbox, one project at most, no installation, GitHub, MCP or plugin grants.
  */
-fun Agent.publicProblem(connections: List<PluginConnection>): String? =
+fun Agent.publicProblem(pluginAccess: Boolean): String? =
     when {
         !eligibleForPlugins() -> "Trop large"
         access.sandbox != "read-only" -> "Pas en lecture seule"
         access.github -> "A GitHub"
         access.mcps == null || access.mcps.isNotEmpty() -> "A des MCP"
-        connections.any { id in it.agentIds } -> "A des plugins"
+        pluginAccess -> "A des plugins"
         else -> null
     }
 

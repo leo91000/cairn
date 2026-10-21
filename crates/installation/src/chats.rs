@@ -554,9 +554,10 @@ pub(crate) fn request_next_turn_in(db: &Db<'_>, chat_id: &str, run_id: &str) -> 
     let mut chat = chat(db, chat_id)?;
     require_active(&chat)?;
     let run = required(db.run(run_id)?, "Run not found")?;
+    let succeeded = run["status"] == RunStatus::Succeeded;
     if chat["paused"] == true
         || chat["runId"] != run_id
-        || !RunStatus::of(&run).is_some_and(RunStatus::is_resumable)
+        || !(succeeded || RunStatus::of(&run).is_some_and(RunStatus::is_resumable))
     {
         return Ok(false);
     }
@@ -574,14 +575,17 @@ pub(crate) fn request_next_turn_in(db: &Db<'_>, chat_id: &str, run_id: &str) -> 
         ));
     }
     let old_message = text(&run["chatExecution"], "messageId");
-    db.set(
-        &crate::plugins::turns::abandoned_key(chat_id, old_message),
-        &json!({
-            "runId": run_id,
-            "failed": run["status"] != RunStatus::Cancelled,
-        }),
-        None,
-    )?;
+    // A successful delivery may still be waiting for its final reply pump.
+    if !succeeded {
+        db.set(
+            &crate::plugins::turns::abandoned_key(chat_id, old_message),
+            &json!({
+                "runId": run_id,
+                "failed": run["status"] != RunStatus::Cancelled,
+            }),
+            None,
+        )?;
+    }
     let mut answers = HashSet::new();
     for mut question in questions(db, chat_id)? {
         if question.run_id == run_id && question.turn_id == old_message && question.is_open() {
@@ -1076,14 +1080,15 @@ impl Service {
                 continue;
             }
             let id = text(&chat, "id").to_owned();
-            if needs_attention(&chat, run.as_ref()) {
-                let advance = match crate::plugins::turns::advance(
-                    self,
-                    &chat,
-                    run.as_ref().unwrap(),
-                )
-                .await
-                {
+            let attention = needs_attention(&chat, run.as_ref());
+            // A scheduled wait continues the current task before queued follow-ups.
+            let (waiting_chat, waiting_run) = (chat.clone(), run.clone());
+            let mut waiting = self
+                .store
+                .read(move |db| sleep::holds_queue(db, &waiting_chat, waiting_run.as_ref()))
+                .await?;
+            if let Some(previous) = run.as_ref().filter(|_| attention || !waiting) {
+                let advance = match crate::plugins::turns::advance(self, &chat, previous).await {
                     Ok(value) => value,
                     Err(error) => {
                         self.chat_pause(&id, true).await?;
@@ -1102,8 +1107,9 @@ impl Service {
                     crate::plugins::turns::Advance::Waiting => continue,
                     crate::plugins::turns::Advance::Ready => {
                         chat = self.get("chats", &id).await?;
+                        waiting = false;
                     }
-                    crate::plugins::turns::Advance::NoRequest => {
+                    crate::plugins::turns::Advance::NoRequest if attention => {
                         self.chat_cancel_sleep(&id).await?;
                         if chat["paused"] == true {
                             continue;
@@ -1115,17 +1121,12 @@ impl Service {
                         self.chat_pause(&id, true).await?;
                         continue;
                     }
+                    crate::plugins::turns::Advance::NoRequest => {}
                 }
             }
             if chat["paused"] == true {
                 continue;
             }
-            // A scheduled wait continues the current task before queued follow-ups.
-            let (waiting_chat, waiting_run) = (chat.clone(), run.clone());
-            let waiting = self
-                .store
-                .read(move |db| sleep::holds_queue(db, &waiting_chat, waiting_run.as_ref()))
-                .await?;
             let chat_id = id.clone();
             let message = if waiting {
                 None

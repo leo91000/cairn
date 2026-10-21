@@ -196,11 +196,9 @@ pub async fn list(s: &Service, after: Option<&str>) -> Result<Value> {
     let metadata = json!({
         "packageReads": true,
         "instanceReads": true,
+        "accessReads": true,
         "setupDrafts": true,
-        "capabilities": CAPABILITIES
-            .iter()
-            .map(|(name, description)| json!({ "name": name, "description": description }))
-            .collect::<Vec<_>>(),
+        "capabilities": capability_descriptions(),
     });
     let budget = paging::MAX_BYTES - serde_json::to_vec(&metadata)?.len();
     let mut page = paging::ordered_page(cards, "id", paging::MAX_ITEMS, budget)?;
@@ -212,7 +210,21 @@ pub async fn list(s: &Service, after: Option<&str>) -> Result<Value> {
 
 /// The selected display manifest for configuring one package, without its history.
 pub async fn detail(s: &Service, id: &str) -> Result<Value> {
-    Ok(inspect(s, id, false).await?.detail())
+    let mut detail = inspect(s, id, false).await?.detail();
+    detail["instanceReads"] = json!(true);
+    detail["accessReads"] = json!(true);
+    detail["setupDrafts"] = json!(true);
+    detail["capabilities"] = capability_descriptions();
+    Ok(detail)
+}
+
+fn capability_descriptions() -> Value {
+    json!(
+        CAPABILITIES
+            .iter()
+            .map(|(name, description)| json!({ "name": name, "description": description }))
+            .collect::<Vec<_>>()
+    )
 }
 
 fn version_value(package: &Package, record: &Value, full: bool) -> Value {
