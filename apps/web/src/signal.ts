@@ -133,7 +133,7 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
         subtitle: waitTarget(chat.wakeup).short,
         wakeAt: chat.wakeup.wakeAt,
         condition: !!chat.wakeup.condition,
-        // Recorded by GitHub polling; another run's result is only computed at resumption.
+        // Recorded by plugin condition polling; another run's result is only computed at resumption.
         resolved: !!chat.wakeup.observation,
       })
     }

@@ -1451,3 +1451,55 @@ test('an explicit immediate result replaces the wait despite changed wording', a
     await page.screenshot({ path: test.info().outputPath(`immediate-wait-${width}.png`), animations: 'disabled' })
   }
 })
+
+test('a plugin condition wait reads in its plugin\'s words, with generic fallbacks', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Merge once CI passes' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
+  const detail = await workspace.api(`/api/chats/${chat.id}`)
+  const wakeup = {
+    id: randomUUID(),
+    messageId: detail.run.chatExecution.messageId,
+    reason: 'Merge once CI passes',
+    seconds: 1800,
+    createdAt: Date.now() - 600000,
+    wakeAt: Date.now() + 1200000,
+    condition: {
+      type: 'github_pr_checks',
+      pluginId: 'github',
+      projectId: 'project',
+      prNumber: 7,
+      headSha: 'a'.repeat(40),
+    },
+    display: { title: 'Waiting for required checks on PR #7', short: 'PR #7 checks', details: ['aaaaaaa'] },
+  }
+  workspace.service.store.event(detail.run.id, 'chat.wait', wakeup.reason, wakeup)
+  const observation = {
+    state: 'completed',
+    type: 'github_pr_checks',
+    pluginId: 'github',
+    conclusion: 'success',
+    display: { tone: 'ok', title: 'Required checks passed', detail: '4 checks' },
+  }
+  workspace.service.store.event(detail.run.id, 'chat.wait_ready', 'Wait condition resolved', observation)
+  workspace.service.store.event(detail.run.id, 'chat.wakeup', wakeup.reason, { ...wakeup, observation })
+  // A plugin result without its own words, already available when the agent asked.
+  workspace.service.store.event(detail.run.id, 'chat.wait_ready', 'Wait condition already completed', {
+    immediate: true,
+    reason: 'Check the nightly build',
+    state: 'completed',
+    type: 'nightly',
+    pluginId: 'ci',
+    conclusion: 'action_required',
+  })
+  await workspace.restart()
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const cards = page.locator('.chat-wait')
+  await expect(cards).toHaveCount(2)
+  await expect(cards.first()).toContainText('Required checks passed')
+  await expect(cards.first()).toContainText('PR #7 checks · 4 checks')
+  await expect(cards.last()).toContainText('Action required')
+  await expect(cards.last()).toContainText('A condition · The result was already available')
+  await expect(cards.filter({ hasText: /GitHub|unreachable/ })).toHaveCount(0)
+})

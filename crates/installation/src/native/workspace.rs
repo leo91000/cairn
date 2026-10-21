@@ -108,9 +108,15 @@ fn included(path: &Path) -> bool {
     !matches!(
         relative,
         ".gitconfig" | ".netrc" | ".npmrc" | ".git-credentials" | ".claude.json"
-    ) && ![".ssh", ".aws", ".config/gh", ".config/gcloud"]
-        .iter()
-        .any(|private| relative == *private || relative.starts_with(&format!("{private}/")))
+    ) && ![
+        ".ssh",
+        ".aws",
+        ".config/gh",
+        ".config/gcloud",
+        ".config/cairn",
+    ]
+    .iter()
+    .any(|private| relative == *private || relative.starts_with(&format!("{private}/")))
 }
 
 /// Local conversion is lossless for user/provider state. The old archive
@@ -138,6 +144,7 @@ fn migration_included(path: &Path) -> bool {
         ".aws",
         ".config/gh",
         ".config/gcloud",
+        ".config/cairn",
     ] {
         if relative == Path::new(private) || relative.starts_with(private) {
             return false;

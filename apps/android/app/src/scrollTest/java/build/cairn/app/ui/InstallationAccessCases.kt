@@ -45,7 +45,6 @@ abstract class InstallationAccessCases {
                                     wireJson.encodeToString(updated)
                                 }
                                 path.endsWith("/preview") -> "{}"
-                                path.endsWith("/github-token") -> """{"configured":false}"""
                                 path == "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(listOf(agent.get()))
                                 path == "/api/installations" -> beaconInstallationsFixture()

@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import type { SkillBundle, SkillImport } from '../../../../packages/contracts/contracts'
-import { computed, ref, watch } from 'vue'
+import type { Catalog } from '../plugins'
+import {
+  computed,
+  onMounted,
+  ref,
+  watch,
+} from 'vue'
 import { api, ApiError, state } from '../api'
 import {
   BookOpen,
@@ -8,33 +14,36 @@ import {
   FileArchive,
   Folder,
   FolderGit2,
-  Github,
   Globe,
   LoaderCircle,
+  Puzzle,
   Upload,
 } from '../icons'
-import {
-  defaultSkillLimits,
-  formatBytes,
-  parseGithubSource,
-} from '../skill-bundle'
+import { pluginFormValues, pluginSettings } from '../plugin-form-values'
+import { pluginSources } from '../plugin-sources'
+import { instanceNoun } from '../plugins'
+import { defaultSkillLimits, formatBytes } from '../skill-bundle'
 import Icon from './Icon.vue'
 import Modal from './Modal.vue'
+import PluginFields from './PluginFields.vue'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
 import UiSegments from './UiSegments.vue'
 import VirtualSelect from './VirtualSelect.vue'
 
-// Imports a skill from a .zip/.skill archive or a GitHub folder. When the source holds
-// several skills, the user picks one and the same upload is submitted again.
+// Imports a skill from a .zip/.skill archive or a plugin's skill source, such as a GitHub
+// repository. When the source holds several skills, the user picks one and the same upload or
+// location is submitted again.
 const emit = defineEmits<{ close: [], imported: [bundle: SkillBundle] }>()
-const source = ref<'archive' | 'github'>('archive')
+// "archive", or the key of a plugin's skill source.
+const source = ref('archive')
 const scope = ref('global')
 const archive = ref<File>()
 const upload = ref<{ id: string, file: File }>()
-const repository = ref('')
-const path = ref('')
-const ref_ = ref('')
+const catalog = ref<Catalog>({ packages: [], capabilities: [], connections: [] })
+const instance = ref('')
+const location = ref<Record<string, any>>({})
+const folder = ref('')
 const candidates = ref<string[]>([])
 const candidate = ref('')
 const busy = ref('')
@@ -58,13 +67,34 @@ const scopes = computed(() => [
     icon: FolderGit2,
   })),
 ])
-const ready = computed(() => source.value === 'archive' ? !!archive.value : !!parseGithubSource(repository.value))
+const sources = computed(() => pluginSources(catalog.value, 'skillSources'))
+const plugin = computed(() => sources.value.find(item => item.key === source.value))
+const choices = computed(() => [
+  { value: 'archive', label: 'Archive', icon: FileArchive },
+  ...sources.value.map(item => ({ value: item.key, label: item.title, icon: Puzzle })),
+])
+// An instance is chosen only when the package has several; otherwise its only one is used.
+const instances = computed(() => (plugin.value?.instances ?? []).map(connection => ({ value: connection.id, label: connection.name })))
+const instanceLabel = computed(() => instanceNoun(catalog.value.packages.find(entry => entry.id === plugin.value?.pluginId)?.manifest))
+const missing = computed(() => (plugin.value?.fields ?? []).some(field => field.required && !field.hidden && !String(location.value[field.key] ?? '').trim()))
+const ready = computed(() => source.value === 'archive' ? !!archive.value : !!plugin.value && !missing.value)
 
-watch([source, scope, repository, path, ref_], () => {
+onMounted(async () => {
+  // Members do not see plugins: they import archives.
+  if (state.installationRole === 'owner')
+    catalog.value = await api<Catalog>('/plugins').catch(() => catalog.value)
+})
+
+watch(source, () => {
+  instance.value = plugin.value?.instances[0]?.id ?? ''
+  location.value = pluginFormValues(plugin.value?.fields ?? [])
+  folder.value = ''
+})
+watch([source, scope, instance, location, folder], () => {
   candidates.value = []
   candidate.value = ''
   error.value = ''
-})
+}, { deep: true })
 
 function choose(file: File | undefined) {
   if (busy.value)
@@ -93,37 +123,20 @@ function dropped(event: DragEvent) {
   choose(event.dataTransfer?.files[0])
 }
 
-// GitHub URLs fill in the ref and folder they name.
-function pasteRepository() {
-  const parsed = parseGithubSource(repository.value)
-  if (!parsed || parsed.repository === repository.value)
-    return
-  repository.value = parsed.repository
-  if (parsed.ref && !ref_.value)
-    ref_.value = parsed.ref
-  if (parsed.path && !path.value)
-    path.value = parsed.path
-}
-
-function pasted() {
-  setTimeout(pasteRepository)
-}
-
 async function submit() {
   if (!ready.value || busy.value)
     return
   error.value = ''
-  pasteRepository()
   const kind = source.value
+  const chosen = plugin.value
   const destination = scope.value
   const submittedArchive = archive.value
-  const folder = candidate.value || (kind === 'github' ? path.value.trim().replace(/^\/+|\/+$/g, '') : '')
-  const requestedRef = ref_.value.trim()
-  const requestedRepository = repository.value
-  busy.value = kind === 'archive' ? 'Uploading archive…' : 'Fetching from GitHub…'
+  // A candidate is a folder the source holds; the plugin parses its own locations.
+  const requestedFolder = candidate.value || (chosen ? folder.value.trim().replace(/^\/+|\/+$/g, '') : '')
+  busy.value = chosen ? `Fetching from ${chosen.pluginName}…` : 'Uploading archive…'
   try {
-    let body: Record<string, string>
-    if (kind === 'archive') {
+    let body: Record<string, unknown>
+    if (!chosen) {
       // Uploads are consumed only by a successful import, so a candidate pick reuses this one.
       if (!upload.value || upload.value.file !== submittedArchive) {
         busy.value = 'Uploading archive…'
@@ -132,18 +145,21 @@ async function submit() {
       }
 
       body = { source: 'archive', upload: upload.value.id }
+      if (requestedFolder)
+        body.path = requestedFolder
     }
     else {
-      pasteRepository()
-      body = { source: 'github', repository: parseGithubSource(requestedRepository)!.repository }
-      if (requestedRef)
-        body.ref = requestedRef
+      body = {
+        source: 'plugin',
+        pluginId: chosen.pluginId,
+        skillSource: chosen.source,
+        ...(instance.value ? { instance: instance.value } : {}),
+        location: pluginSettings(chosen.fields, location.value),
+        ...(requestedFolder ? { folder: requestedFolder } : {}),
+      }
     }
 
-    if (folder)
-      body.path = folder
-
-    busy.value = kind === 'github' ? 'Fetching from GitHub…' : 'Importing…'
+    busy.value = chosen ? `Fetching from ${chosen.pluginName}…` : 'Importing…'
     const result = await api<SkillImport>(`/skills/${encodeURIComponent(destination)}/import`, { method: 'POST', body: JSON.stringify(body) })
     if (result.imported) {
       emit('imported', result.imported)
@@ -157,7 +173,7 @@ async function submit() {
     error.value = e instanceof ApiError && e.status === 409 && !/exist/i.test(e.message)
       ? `${e.message} A skill with this name may already exist in this scope.`
       : (e as Error).message
-    if (e instanceof ApiError && e.status === 404 && source.value === 'archive')
+    if (e instanceof ApiError && e.status === 404 && kind === 'archive')
       upload.value = undefined
   }
   finally {
@@ -174,7 +190,7 @@ async function submit() {
           <UiSegments
             v-model="source"
             label="Import from"
-            :options="[{ value: 'archive', label: 'Archive', icon: FileArchive }, { value: 'github', label: 'GitHub', icon: Github }]"
+            :options="choices"
           />
 
           <template v-if="source === 'archive'">
@@ -221,32 +237,29 @@ async function submit() {
             </div>
           </template>
 
-          <template v-else>
-            <label>Repository<input
-              v-model="repository"
-              aria-label="Repository"
-              placeholder="owner/repo or a GitHub URL"
+          <template v-else-if="plugin">
+            <p v-if="plugin.description" class="m-0! text-xs text-muted">
+              {{ plugin.description }}
+            </p>
+            <VirtualSelect
+              v-if="instances.length > 1"
+              v-model="instance"
+              :label="instanceLabel"
+              :options="instances"
+              :disabled="!!busy"
+            />
+            <PluginFields
+              v-model:values="location"
+              :fields="plugin.fields"
+              :disabled="!!busy"
+            />
+            <label>Folder <span class="font-normal text-subtle">(optional)</span><input
+              v-model="folder"
+              aria-label="Folder"
+              placeholder="skills/review"
               autocomplete="off"
               spellcheck="false"
-              @blur="pasteRepository"
-              @paste="pasted"
-            ><small>Uses this installation’s GitHub connection, so private repositories work too.</small></label>
-            <div class="grid grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-4 phone:grid-cols-1">
-              <label>Folder <span class="font-normal text-subtle">(optional)</span><input
-                v-model="path"
-                aria-label="Folder in repository"
-                placeholder="skills/review"
-                autocomplete="off"
-                spellcheck="false"
-              ></label>
-              <label>Branch, tag or commit <span class="font-normal text-subtle">(optional)</span><input
-                v-model="ref_"
-                aria-label="Ref"
-                placeholder="default branch"
-                autocomplete="off"
-                spellcheck="false"
-              ></label>
-            </div>
+            ><small>Where the skill is within this location, when it holds several.</small></label>
           </template>
 
           <VirtualSelect

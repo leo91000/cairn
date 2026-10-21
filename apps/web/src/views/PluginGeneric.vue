@@ -32,7 +32,16 @@ import PluginView from '../components/PluginView.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
 import {
+  credentialInput,
+  signInProblem,
+  useDeviceSignIn,
+  verificationLink,
+} from '../device-sign-in'
+import {
+  ArrowUpRight,
+  Check,
   ChevronRight,
+  Copy,
   KeyRound,
   Pencil,
   Plus,
@@ -63,6 +72,7 @@ import {
   personName,
   publicProblem,
 } from '../plugins'
+import { buttonBase, buttonSizes, buttonVariants } from '../ui'
 
 const route = useRoute()
 const id = computed(() => String(route.params.id))
@@ -80,6 +90,7 @@ const people = ref<{ id: string, name: string }[]>([])
 const person = ref('')
 const completion = ref<FormResult | null>(null)
 const completing = ref(false)
+const copied = ref(false)
 let timer: ReturnType<typeof setInterval> | undefined
 let typing: ReturnType<typeof setTimeout> | undefined
 let asked = 0
@@ -112,6 +123,9 @@ function problem(agent: Agent) {
 const agents = computed(() => [...state.agents].sort((a, b) => Number(Boolean(problem(a))) - Number(Boolean(problem(b)))))
 const singular = computed(() => instanceNoun(manifest.value, 1))
 const plural = computed(() => instanceNoun(manifest.value, 2))
+// A completed device sign-in gives the draft its credential; the package's form handler then
+// says who it signed in as.
+const signIn = useDeviceSignIn(() => id.value, () => void complete('credential'))
 const tones = {
   ok: 'bg-[light-dark(#dff3ee,#163a33)] text-success',
   muted: 'bg-hover text-muted',
@@ -151,6 +165,8 @@ function agentNames(connection: PluginConnection) {
 
 function edit(connection: PluginConnection | null) {
   error.value = ''
+  void signIn.cancel()
+  copied.value = false
   editing.value = connection
   values.value = pluginFormValues(storedFields.value, connection?.settings)
   secrets.value = pluginFormSecrets()
@@ -183,7 +199,7 @@ async function complete(changed?: string) {
       instance: editing.value?.id,
       settings: pluginSettings(storedFields.value, values.value),
       secrets: pluginSecrets(secrets.value),
-      ...(form.value.token ? { token: form.value.token } : {}),
+      ...credentialInput(form.value.token, signIn.flow.value),
       ...(changed ? { changed } : {}),
     })
     if (ask !== asked)
@@ -212,6 +228,11 @@ async function complete(changed?: string) {
 }
 
 function typed() {
+  // A pasted token replaces a sign-in.
+  if (signIn.flow.value)
+    void signIn.cancel()
+  if (!manifest.value?.instanceForm)
+    return
   clearTimeout(typing)
   // Saving waits for the package's answer about the new credential.
   completing.value = true
@@ -235,7 +256,8 @@ async function save() {
     const agentIds = await currentAgentIds(state.agents, entry.value, editing.value, async () => (await api<Catalog>('/plugins')).connections)
     const body = {
       name: form.value.name,
-      ...(form.value.token ? { token: form.value.token } : {}),
+      // The save consumes a completed sign-in.
+      ...credentialInput(form.value.token, signIn.flow.value),
       settings: pluginSettings(storedFields.value, values.value),
       // Blank secret fields keep what is saved.
       secrets: pluginSecrets(secrets.value),
@@ -255,6 +277,7 @@ async function save() {
     }
     const path = `/plugins/${id.value}/connections${editing.value ? `/${editing.value.id}` : ''}`
     await pluginOperation(path, body, editing.value ? 'PUT' : 'POST')
+    signIn.consumed()
     form.value.token = ''
     secrets.value = pluginFormSecrets()
     editing.value = undefined
@@ -285,8 +308,22 @@ async function remove() {
   })
 }
 
+async function copyCode() {
+  const code = signIn.flow.value?.userCode
+  if (!code)
+    return
+  try {
+    await navigator.clipboard.writeText(code)
+    copied.value = true
+  }
+  catch {
+    copied.value = false
+  }
+}
+
 function closeEditor() {
   clearTimeout(typing)
+  void signIn.cancel()
   asked++
   secrets.value = pluginFormSecrets()
   form.value.token = ''
@@ -304,6 +341,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   clearInterval(timer)
   clearTimeout(typing)
+  void signIn.cancel()
   form.value.token = ''
   secrets.value = pluginFormSecrets()
 })
@@ -628,11 +666,61 @@ onBeforeUnmount(() => {
           type="password"
           autocomplete="new-password"
           spellcheck="false"
-          :required="!editing"
-          :placeholder="editing ? 'Saved · leave blank to keep' : ''"
+          :required="!editing && !signIn.completed.value"
+          :placeholder="signIn.completed.value ? 'Signed in · or paste a token instead' : editing ? 'Saved · leave blank to keep' : ''"
           :aria-invalid="Boolean(completion?.errors.credential)"
-          @input="manifest.instanceForm && typed()"
+          @input="typed()"
         ><small :class="completion?.errors.credential ? 'text-coral' : ''">{{ completion?.errors.credential || 'Stored encrypted. Cairn adds it to this plugin’s requests; the plugin never sees it.' }}</small></label>
+        <section v-if="manifest.credential?.deviceFlow" class="grid gap-3" :aria-label="`Sign in with ${manifest.name}`">
+          <UiButton
+            v-if="!signIn.flow.value || signIn.completed.value"
+            class="justify-self-start"
+            :disabled="busy || signIn.starting.value"
+            @click="signIn.start()"
+          >
+            <Icon :name="KeyRound" :size="15" />{{ signIn.completed.value ? 'Sign in with another account' : `Sign in with ${manifest.name}` }}
+          </UiButton>
+          <UiAlert v-if="signIn.error.value || signInProblem(signIn.flow.value)">
+            {{ signIn.error.value || signInProblem(signIn.flow.value) }}
+          </UiAlert>
+          <p v-if="signIn.completed.value" class="flex items-center gap-1.5 text-xs font-semibold text-success" role="status">
+            <Icon :name="Check" :size="14" />Signed in. Save to keep this {{ singular.toLowerCase() }}.
+          </p>
+          <div v-else-if="signIn.pending.value && signIn.flow.value" class="grid gap-3 rounded-2xl bg-inset p-4" role="status">
+            <p class="text-sm">
+              Open {{ manifest.name }} and enter this code. Your password stays with {{ manifest.name }}.
+            </p>
+            <div class="flex flex-wrap items-center gap-2">
+              <code aria-label="Verification code" class="select-all font-mono text-2xl font-bold tracking-widest">{{ signIn.flow.value.userCode }}</code>
+              <UiButton size="small" :aria-label="copied ? 'Code copied' : 'Copy verification code'" @click="copyCode">
+                <Icon :name="copied ? Check : Copy" :size="13" />{{ copied ? 'Copied' : 'Copy' }}
+              </UiButton>
+            </div>
+            <p v-if="signIn.flow.value.message" class="text-xs text-muted">
+              {{ signIn.flow.value.message }}
+            </p>
+            <div class="flex flex-wrap gap-2">
+              <a
+                :class="[buttonBase, buttonVariants.primary, buttonSizes.small]"
+                :href="verificationLink(signIn.flow.value)"
+                target="_blank"
+                rel="noopener noreferrer"
+              >Open {{ manifest.name }}<Icon :name="ArrowUpRight" :size="14" /></a>
+              <UiButton size="small" @click="signIn.cancel()">
+                Cancel sign-in
+              </UiButton>
+            </div>
+          </div>
+          <UiButton
+            v-else-if="signInProblem(signIn.flow.value)"
+            size="small"
+            class="justify-self-start"
+            :disabled="busy || signIn.starting.value"
+            @click="signIn.start()"
+          >
+            Try again
+          </UiButton>
+        </section>
         <div
           v-if="completion?.view.length || completing"
           class="grid gap-2.5"
@@ -694,7 +782,7 @@ onBeforeUnmount(() => {
               type="radio"
               value="everyone"
               class="mt-0.5 w-auto!"
-            >Anyone<small class="col-start-2 font-normal">Needs a read-only agent with at most one project and no GitHub, MCP or plugin access.</small></label>
+            >Anyone<small class="col-start-2 font-normal">Needs a read-only agent with at most one project and no MCP or plugin access.</small></label>
           </fieldset>
           <fieldset class="grid gap-2" :disabled="busy">
             <legend class="mb-1 text-xs font-semibold">

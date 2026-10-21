@@ -944,9 +944,26 @@ async fn refresh_imports(socket: &Path, plan: &Plan) -> Result<()> {
                 host::import(socket, &source, &target).await?;
             }
         }
-        let source = import.source.join(".config/gh");
-        if source.exists() {
-            host::import(socket, &source, "/home/node/.config/gh").await?;
+        // Plugin run credentials, including files a withdrawn grant emptied.
+        let Some(run_directory) = import.source.parent() else {
+            continue;
+        };
+        let mut directories = crate::execution::credential_files(run_directory)
+            .await
+            .iter()
+            .filter_map(|file| Path::new(file).parent().map(Path::to_path_buf))
+            // Files at the root of the home are refreshed with the whole home only.
+            .filter(|directory| !directory.as_os_str().is_empty())
+            .collect::<Vec<_>>();
+        directories.push(".config/cairn".into());
+        directories.sort();
+        directories.dedup();
+        for directory in directories {
+            let source = import.source.join(&directory);
+            if source.is_dir() {
+                let target = format!("{HOME}/{}", directory.display());
+                host::import(socket, &source, &target).await?;
+            }
         }
     }
     Ok(())

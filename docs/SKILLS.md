@@ -36,8 +36,8 @@ current revision returns `409` so that two editors do not overwrite each other.
 ## API
 
 All routes are installation API routes. Members may read skills; only the owner
-writes, imports and uses the source routes, which read GitHub through the
-owner’s connection.
+writes, imports and uses the source routes, which read a plugin's skill source
+through one of the owner's instances.
 
 ### `GET /skills`
 
@@ -115,7 +115,8 @@ skill never shows a partial save.
 
 ### `POST /skills/:scope/import`
 
-Imports a new skill from an archive or from GitHub. The skill name comes from
+Imports a new skill from an archive or from a plugin's skill source (such as a
+GitHub repository). The skill name comes from
 the `SKILL.md` frontmatter; an existing name returns `409`.
 
 From a staged `.zip` or `.skill` upload:
@@ -124,14 +125,17 @@ From a staged `.zip` or `.skill` upload:
 { "source": "archive", "upload": "<upload id>", "path": "optional/folder" }
 ```
 
-From GitHub (`ref` defaults to the default branch):
+From a plugin's skill source, with the location fields it declares (for GitHub,
+`repository` — `owner/repo` or its address — and `ref`, the default branch when
+empty) and an optional instance (else the first enabled one):
 
 ```json
-{ "source": "github", "repository": "owner/repo", "path": "skills/review", "ref": "main" }
+{ "source": "plugin", "pluginId": "github", "skillSource": "repository", "location": { "repository": "owner/repo", "ref": "main" }, "folder": "skills/review" }
 ```
 
-The skill folder is `path`, or the only folder containing a `SKILL.md`, or the
-archive's single top-level folder. When several skill folders match, nothing is
+The skill folder is `path` (`folder` for plugin sources, or the one the location
+names), or the only folder containing a `SKILL.md`, or the archive's single
+top-level folder. When several skill folders match, nothing is
 imported and the response lists them so the user can choose:
 
 ```json
@@ -139,9 +143,9 @@ imported and the response lists them so the user can choose:
 ```
 
 On success: `{ "imported": <bundle>, "candidates": [] }`. Files whose names
-start with `.` and `__MACOSX/` entries are skipped. GitHub imports use the
-installation's GitHub connection, so private repositories work when that
-connection can read them.
+start with `.` and `__MACOSX/` entries are skipped. Plugin sources download with
+the instance's credential, so private repositories work when its account can read
+them.
 
 ### `GET /skills/:scope/:name/archive?offset=0&revision=…`
 
@@ -153,36 +157,43 @@ at most 4 MiB:
 Clients repeat the request with `offset += decoded length` and the same
 `revision` until `offset == size`. A changed skill returns `409`.
 
-### GitHub source
+### Plugin source
 
-A skill imported from GitHub records its **source**:
+A skill imported from a plugin's skill source records its **source**:
 
 ```json
 {
-  "type": "github",
-  "repository": "owner/repo",
-  "path": "skills/review",
-  "ref": "main",
-  "commit": "9b1e…",
+  "pluginId": "github",
+  "source": "repository",
+  "instance": "1f0c…",
+  "label": "owner/repo",
+  "location": { "repository": "owner/repo", "ref": "main" },
+  "url": "https://github.com/owner/repo/tree/main",
+  "folder": "skills/review",
+  "version": "9b1e…",
   "importedAt": 1791976037271,
   "modified": false
 }
 ```
 
+The plugin resolves the location to its latest `version` and lists files; Cairn
+downloads and compares them (see [skill sources](PLUGINS.md#skill-sources)). A
+removed instance falls back to another enabled instance of the plugin.
+
 `modified` is true when the skill changed in Cairn since its import or last
 update.
 
-- `GET /skills/:scope/:name/source` checks `ref` for a newer commit:
-  `{ "source", "latest": { "commit", "message", "date" }, "current": bool, "changes": [...] }`.
+- `GET /skills/:scope/:name/source` checks the location for a newer version:
+  `{ "source", "latest": { "version", "message", "date" }, "current": bool, "changes": [...] }`.
   Each change is `{ "path", "status": "added" | "removed" | "modified", "binary": bool, "lines"?: [{ "kind": "context" | "added" | "removed" | "gap", "text" }] }`.
-  The diff shows upstream changes between the recorded commit and the latest one,
+  The diff shows upstream changes between the recorded version and the latest one,
   with three lines of context; a `gap` line such as "12 unchanged lines" stands
   for the rest.
   Text diffs are omitted for files over 2,000 lines.
-- `POST /skills/:scope/:name/source/update` with `{ "commit", "base" }` replaces
-  the skill with that commit's files. Local edits are lost; clients warn when
+- `POST /skills/:scope/:name/source/update` with `{ "version", "base" }` replaces
+  the skill with that version's files. Local edits are lost; clients warn when
   `modified` is true. If the source was detached, deleted or reimported while
-  GitHub files were downloading, the update returns `409` before replacing files.
+  its files were downloading, the update returns `409` before replacing files.
 - `DELETE /skills/:scope/:name/source` keeps the files and forgets the source.
 
 ## MCP tools

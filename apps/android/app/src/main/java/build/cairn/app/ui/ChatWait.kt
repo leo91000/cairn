@@ -25,11 +25,10 @@ import build.cairn.app.data.wireJson
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.*
 
-/** What a conversation waits for: a timer, PR checks, a workflow run or another Cairn run. */
+/** What a conversation waits for: a timer, a plugin's condition or another Cairn run. */
 internal enum class WaitKind {
     TIMER,
-    PR,
-    WORKFLOW,
+    CONDITION,
     RUN,
 }
 
@@ -84,9 +83,20 @@ internal data class LiveWait(
 
 internal val LocalLiveWait = compositionLocalOf<LiveWait?> { null }
 
-private fun shortSha(value: String) = value.take(7)
+/** A plugin's text, or empty when it gave none. */
+private fun JsonElement?.text() =
+    ((this as? JsonPrimitive)?.takeIf { it.isString }?.content).orEmpty()
 
-private fun JsonObject?.number(key: String) = (this?.get(key) as? JsonPrimitive)?.longOrNull
+private val tones =
+    mapOf(
+        "ok" to WaitTone.OK,
+        "error" to WaitTone.ERROR,
+        "warning" to WaitTone.WARNING,
+        "neutral" to WaitTone.NEUTRAL,
+    )
+
+// Conclusions that read as a failure when a plugin result gives no wording of its own.
+private val failures = setOf("failure", "failed", "error", "startup_failure", "timed_out")
 
 // Codex names the workspace server; Claude and OpenCode prefix the tool with it.
 private val workspaceWaitTool = Regex("^(?:mcp__)?cairn_workspace(?:__|_|\\.)(?:sleep|wait_for)$")
@@ -146,33 +156,31 @@ internal fun waited(ms: Long): String {
 
 internal fun waitTarget(wakeup: ChatWakeup, now: Long = System.currentTimeMillis()): WaitTarget {
     val condition = wakeup.condition
-    return when (condition.string("type")) {
-        "github_pr_checks" -> {
-            val number = condition.number("prNumber")
-            WaitTarget(
-                WaitKind.PR,
-                "Attente des checks requis de la PR #$number",
-                "Checks PR #$number",
-                listOf(shortSha(condition.string("headSha"))),
-            )
-        }
-        "github_workflow" ->
-            WaitTarget(
-                WaitKind.WORKFLOW,
-                "Attente d’un workflow GitHub",
-                "Workflow GitHub",
-                listOf(
-                    "Exécution ${condition.number("runId")}",
-                    shortSha(condition.string("headSha")),
-                ),
-            )
-        "run_finished" ->
+    return when {
+        condition.string("type") == "run_finished" ->
             WaitTarget(
                 WaitKind.RUN,
                 "Attente de la fin d’une autre exécution",
                 "Autre exécution",
                 emptyList(),
             )
+        // A plugin condition reads as its plugin words it.
+        condition != null -> {
+            val display = wakeup.display
+            WaitTarget(
+                WaitKind.CONDITION,
+                display?.get("title").text().ifBlank { "Attente d’une condition" },
+                display?.get("short").text().ifBlank { "Condition" },
+                display
+                    ?.get("details")
+                    .asArray()
+                    .orEmpty()
+                    .map { it.text() }
+                    .filter {
+                        it.isNotBlank()
+                    },
+            )
+        }
         else -> {
             val at = "Reprise à ${wakeTime(wakeup.wakeAt, now)}"
             WaitTarget(WaitKind.TIMER, at, at, emptyList())
@@ -227,11 +235,25 @@ internal fun waitStatus(wakeup: ChatWakeup, now: Long = System.currentTimeMillis
 /** Historical marker for events that predate the explicit immediate boolean. */
 internal const val IMMEDIATE_WAIT_RESULT = "Wait condition already completed"
 
+/** A plugin's words for a result, when it gave a title. */
+private fun resultDisplay(observation: JsonObject): WaitOutcome? {
+    val display = observation["display"].asObject() ?: return null
+    val title = display["title"].text().ifBlank { null } ?: return null
+    return WaitOutcome(
+        tones[display["tone"].text()] ?: WaitTone.NEUTRAL,
+        title,
+        display["detail"].text(),
+    )
+}
+
 /** What Cairn observed when a wait ended; a plain timer observes nothing and reads as neutral. */
 internal fun waitOutcome(observation: JsonObject?): WaitOutcome {
     val state = observation.string("state")
     val finished = WaitOutcome(WaitTone.NEUTRAL, "Attente terminée", "")
     if (observation == null || state.isEmpty()) return finished
+    resultDisplay(observation)?.let {
+        return it
+    }
     when (state) {
         "timed_out" -> return WaitOutcome(WaitTone.WARNING, "Échéance atteinte sans résultat", "")
         "unavailable" ->
@@ -240,107 +262,39 @@ internal fun waitOutcome(observation: JsonObject?): WaitOutcome {
                 "Résultat indisponible",
                 observation.string("message"),
             )
-        "superseded" ->
-            return WaitOutcome(
-                WaitTone.WARNING,
-                "Un nouveau commit a été poussé",
-                "${shortSha(observation.string("headSha"))} → ${shortSha(observation.string("currentHeadSha"))}",
-            )
-        "closed" -> {
-            val merged = observation.string("pullRequestState") == "MERGED"
-            return WaitOutcome(
-                WaitTone.WARNING,
-                "La PR #${observation.number("prNumber")} a été ${if (merged) "fusionnée" else "fermée"}",
+    }
+    if (observation.string("type") == "run_finished")
+        return when (val status = observation.string("status")) {
+            "succeeded" ->
+                WaitOutcome(
+                    WaitTone.OK,
+                    "L’exécution est terminée",
+                    when (observation.string("outcomeStatus")) {
+                        "blocked" -> "Bloquée"
+                        "needs_input" -> "Attend votre réponse"
+                        else -> ""
+                    },
+                )
+            "failed" -> WaitOutcome(WaitTone.ERROR, "L’exécution a échoué", "")
+            else ->
+                WaitOutcome(
+                    WaitTone.WARNING,
+                    if (status == "cancelled") "L’exécution a été annulée"
+                    else "L’exécution a été interrompue",
+                    "",
+                )
+        }
+    // A plugin result without its own wording: its conclusion, when it has one.
+    val conclusion = observation["conclusion"].text()
+    return when {
+        conclusion.isEmpty() -> finished
+        conclusion == "success" -> WaitOutcome(WaitTone.OK, "Réussi", "")
+        else ->
+            WaitOutcome(
+                if (conclusion in failures) WaitTone.ERROR else WaitTone.WARNING,
+                conclusion.replace('_', ' ').replaceFirstChar { it.uppercase() },
                 "",
             )
-        }
-    }
-    return when (observation.string("type")) {
-        "run_finished" ->
-            when (val status = observation.string("status")) {
-                "succeeded" ->
-                    WaitOutcome(
-                        WaitTone.OK,
-                        "L’exécution est terminée",
-                        when (observation.string("outcomeStatus")) {
-                            "blocked" -> "Bloquée"
-                            "needs_input" -> "Attend votre réponse"
-                            else -> ""
-                        },
-                    )
-                "failed" -> WaitOutcome(WaitTone.ERROR, "L’exécution a échoué", "")
-                else ->
-                    WaitOutcome(
-                        WaitTone.WARNING,
-                        if (status == "cancelled") "L’exécution a été annulée"
-                        else "L’exécution a été interrompue",
-                        "",
-                    )
-            }
-        "github_workflow" -> {
-            val conclusion = observation.string("conclusion")
-            val attempt = observation.number("runAttempt")
-            val detail = if (attempt != null && attempt > 1) "Tentative $attempt" else ""
-            // GitHub's conclusions, in French: a plain failure needs no detail.
-            when (conclusion) {
-                "success" -> WaitOutcome(WaitTone.OK, "Workflow réussi", detail)
-                "failure",
-                "startup_failure",
-                "timed_out" ->
-                    WaitOutcome(
-                        WaitTone.ERROR,
-                        "Workflow en échec",
-                        listOf(
-                                when (conclusion) {
-                                    "startup_failure" -> "échec au démarrage"
-                                    "timed_out" -> "délai dépassé"
-                                    else -> ""
-                                },
-                                detail,
-                            )
-                            .filter { it.isNotBlank() }
-                            .joinToString(" · "),
-                    )
-                else ->
-                    WaitOutcome(
-                        WaitTone.WARNING,
-                        when (conclusion) {
-                            "cancelled" -> "Workflow annulé"
-                            "skipped" -> "Workflow ignoré"
-                            "neutral" -> "Workflow neutre"
-                            "action_required" -> "Workflow : action requise"
-                            "stale" -> "Workflow périmé"
-                            else -> "Workflow : ${friendlyStatus(conclusion)}"
-                        },
-                        detail,
-                    )
-            }
-        }
-        "github_pr_checks" -> {
-            val checks = observation["checks"].asArray().orEmpty().mapNotNull { it.asObject() }
-            fun named(wanted: String): String {
-                val names = checks.filter { it.string("state") == wanted }.map { it.string("name") }
-                return if (names.size > 3) "${names.take(3).joinToString(", ")} +${names.size - 3}"
-                else names.joinToString(", ")
-            }
-            when (observation.string("conclusion")) {
-                "success" -> {
-                    val count = observation.number("requiredCount") ?: 0
-                    WaitOutcome(
-                        WaitTone.OK,
-                        "Checks requis réussis",
-                        if (count > 0) "$count check${if (count > 1) "s" else ""}" else "",
-                    )
-                }
-                "failure" -> WaitOutcome(WaitTone.ERROR, "Checks requis en échec", named("failure"))
-                "cancelled" ->
-                    WaitOutcome(WaitTone.WARNING, "Checks requis annulés", named("cancelled"))
-                "no_required_checks" ->
-                    WaitOutcome(WaitTone.WARNING, "Aucun check requis sur cette PR", "")
-                else -> finished
-            }
-        }
-        else -> finished
     }
 }
 
@@ -355,18 +309,27 @@ private data class WaitView(
 private fun waitIcon(kind: WaitKind) =
     when (kind) {
         WaitKind.TIMER -> CairnIcons.Hourglass
-        WaitKind.PR -> CairnIcons.PullRequest
-        WaitKind.WORKFLOW -> CairnIcons.Workflow
+        WaitKind.CONDITION -> CairnIcons.Workflow
         WaitKind.RUN -> CairnIcons.Orbit
     }
 
-/** What a result answers, for a card that has no scheduled wakeup to name it. */
+/**
+ * What a result answers, for a card that has no scheduled wakeup to name it. A plugin result only
+ * names itself when its plugin gives a short wording.
+ */
 internal fun observedTarget(observation: JsonObject?): String =
-    when (observation.string("type")) {
-        "github_pr_checks" -> "Checks PR #${observation.number("prNumber")}"
-        "github_workflow" -> "Workflow GitHub"
-        "run_finished" -> "Autre exécution"
-        else -> ""
+    when {
+        observation == null -> ""
+        observation.string("type") == "run_finished" -> "Autre exécution"
+        else ->
+            observation["display"].asObject()?.get("short").text().ifBlank {
+                if (
+                    observation.string("type").isNotEmpty() ||
+                        observation.string("pluginId").isNotEmpty()
+                )
+                    "Une condition"
+                else ""
+            }
     }
 
 /** Where a wait card stands, from its history and, when known, the conversation's live state. */
@@ -392,8 +355,8 @@ internal data class WaitProgress(
 internal fun waitProgress(wait: ActivityWait, live: LiveWait?): WaitProgress {
     val wakeup = wait.wakeup
     val current = wakeup != null && live?.wakeup?.id == wakeup.id
-    // GitHub polling records the result on the pending wakeup too, which matters when its event
-    // is unloaded. Another run's result is only computed when the conversation resumes.
+    // Plugin condition polling records the result on the pending wakeup too, which matters when
+    // its event is unloaded. Another run's result is only computed when the conversation resumes.
     val observation =
         if (wait.observed) wait.observation else if (current) live?.wakeup?.observation else null
     val finished = wait.finished || observation != null
@@ -449,6 +412,9 @@ internal fun WaitCard(wait: ActivityWait) {
         }
     }
     val reason = wakeup?.reason ?: wait.reason
+    // Cairn updates the pending wakeup, and its plugin's words, as it polls; the event keeps the
+    // original.
+    val latest = if (current) live?.wakeup else wakeup
     fun duration() =
         if (wakeup != null && wait.resumedAt != null)
             "Attente de ${waited(wait.resumedAt - wakeup.createdAt)}"
@@ -490,7 +456,8 @@ internal fun WaitCard(wait: ActivityWait) {
                     // timer's outcome says the latter.
                     listOf(
                             if (wakeup == null) observedTarget(observation)
-                            else if (wakeup.condition != null) waitTarget(wakeup, now).short
+                            else if (wakeup.condition != null)
+                                waitTarget(latest ?: wakeup, now).short
                             else "",
                             outcome.detail,
                             time,
@@ -508,15 +475,22 @@ internal fun WaitCard(wait: ActivityWait) {
                     "",
                 )
             cancelled -> WaitView(null, true, CairnIcons.Hourglass, "Attente annulée", "")
-            paused -> WaitView(null, true, CairnIcons.Pause, waitTarget(wakeup!!, now).title, "")
+            paused ->
+                WaitView(
+                    null,
+                    true,
+                    CairnIcons.Pause,
+                    waitTarget(latest ?: wakeup!!, now).title,
+                    "",
+                )
             // A run's history cannot tell whether the wait still stands: it is shown as recorded.
             else -> {
-                val target = waitTarget(wakeup!!, now)
+                val target = waitTarget(latest ?: wakeup!!, now)
                 WaitView(
                     if (live != null) null else WaitTone.NEUTRAL,
                     false,
                     waitIcon(target.kind),
-                    if (live != null) target.title else recordedTitle(wakeup, now),
+                    if (live != null) target.title else recordedTitle(wakeup!!, now),
                     "",
                 )
             }
@@ -574,21 +548,19 @@ internal fun WaitCard(wait: ActivityWait) {
                         )
                     val chips =
                         if (!finished && !cancelled && !state.replaced && wakeup != null)
-                            waitTarget(wakeup, now).details.filter { it.isNotBlank() }
+                            waitTarget(latest ?: wakeup, now).details
                         else emptyList()
-                    // Cairn updates the pending wakeup as it polls; the event keeps the original.
-                    val latest = if (current) live?.wakeup else wakeup
                     val retrying = pending && !latest?.lastError.isNullOrBlank()
-                    // GitHub conditions are polled: say when Cairn looks again.
-                    // Cairn checks GitHub only once the turn has ended, and until the deadline.
+                    // Plugin conditions are polled: say when Cairn looks again.
+                    // Cairn checks them only once the turn has ended, and until the deadline.
                     val polled =
                         pending &&
                             live?.settled == true &&
                             latest != null &&
                             !waitDue(latest, now) &&
                             !retrying &&
-                            wakeup?.condition.string("type") in
-                                setOf("github_pr_checks", "github_workflow")
+                            wakeup?.condition != null &&
+                            wakeup.condition.string("type") != "run_finished"
                     val next = latest?.nextCheckAt
                     val checked =
                         if (!polled) ""
@@ -609,7 +581,7 @@ internal fun WaitCard(wait: ActivityWait) {
                                 )
                             if (retrying)
                                 WaitChip(
-                                    "GitHub injoignable · nouvel essai",
+                                    "Contrôle échoué · nouvel essai",
                                     signal.warningSoft,
                                     signal.warning,
                                 )

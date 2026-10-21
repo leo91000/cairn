@@ -5,21 +5,21 @@ import { api, ApiError, date } from '../api'
 import {
   ArrowUpRight,
   CircleCheck,
-  GitBranch,
   GitCommit,
-  Github,
+  Import,
   LoaderCircle,
   RefreshCw,
   TriangleAlert,
   Unlink,
 } from '../icons'
-import { plural, shortCommit } from '../skill-bundle'
+import { plural, shortVersion } from '../skill-bundle'
 import Icon from './Icon.vue'
 import SkillDiff from './SkillDiff.vue'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
 
-// Where a GitHub-imported skill came from, whether that ref moved, and what an update changes.
+// Where a skill imported through a plugin came from, whether its source moved, and what an update
+// changes.
 const props = defineProps<{
   scope: string
   name: string
@@ -40,7 +40,6 @@ const error = ref('')
 const confirmUpdate = ref(false)
 const confirmDetach = ref(false)
 const base = computed(() => `/skills/${encodeURIComponent(props.scope)}/${encodeURIComponent(props.name)}/source`)
-const link = computed(() => `https://github.com/${props.source.repository}/tree/${props.source.commit}${props.source.path ? `/${props.source.path}` : ''}`)
 const risky = computed(() => props.source.modified || props.unsaved > 0)
 
 async function run(kind: 'check' | 'update' | 'detach', action: () => Promise<void>) {
@@ -78,7 +77,7 @@ function update() {
   return run('update', async () => {
     const bundle = await api<SkillBundle>(`${base.value}/update`, {
       method: 'POST',
-      body: JSON.stringify({ commit: status.value!.latest.commit, base: props.revision }),
+      body: JSON.stringify({ version: status.value!.latest.version, base: props.revision }),
     })
     status.value = undefined
     confirmUpdate.value = false
@@ -105,34 +104,33 @@ function detach() {
     <div class="mx-auto grid w-full max-w-[860px] gap-5 px-6 py-6 phone:px-4 phone:py-5">
       <section class="rounded-2xl border border-line bg-surface p-5 phone:p-4">
         <div class="flex items-start gap-3.5">
-          <span class="grid size-11 shrink-0 place-items-center rounded-xl bg-ink text-canvas"><Icon :name="Github" :size="22" /></span>
+          <span class="grid size-11 shrink-0 place-items-center rounded-xl bg-ink text-canvas"><Icon :name="Import" :size="22" /></span>
           <div class="min-w-0 flex-1">
             <p class="m-0! text-3xs font-semibold tracking-[0.08em] text-subtle uppercase">
-              GitHub source
+              Imported source
             </p>
             <a
-              :href="link"
+              v-if="source.url"
+              :href="source.url"
               target="_blank"
               rel="noreferrer"
               class="mt-0.5 inline-flex max-w-full items-center gap-1 font-heading text-lg font-[650] text-ink hover:underline"
             >
-              <span class="truncate">{{ source.repository }}</span><Icon :name="ArrowUpRight" :size="15" class="shrink-0 text-muted" />
+              <span class="truncate">{{ source.label }}</span><Icon :name="ArrowUpRight" :size="15" class="shrink-0 text-muted" />
             </a>
+            <p v-else class="m-0! mt-0.5 truncate font-heading text-lg font-[650] text-ink">
+              {{ source.label }}
+            </p>
             <dl class="m-0! mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-xs">
               <dt class="text-muted">
                 Folder
               </dt><dd class="m-0 truncate font-mono text-ink">
-                {{ source.path || '/' }}
+                {{ source.folder || '/' }}
               </dd>
               <dt class="text-muted">
-                Ref
-              </dt><dd class="m-0 flex items-center gap-1.5 font-mono text-ink">
-                <Icon :name="GitBranch" :size="13" class="text-muted" />{{ source.ref }}
-              </dd>
-              <dt class="text-muted">
-                Commit
-              </dt><dd class="m-0 flex items-center gap-1.5 font-mono text-ink">
-                <Icon :name="GitCommit" :size="13" class="text-muted" />{{ shortCommit(source.commit) }}
+                Version
+              </dt><dd class="m-0 flex items-center gap-1.5 font-mono text-ink" :title="source.version">
+                <Icon :name="GitCommit" :size="13" class="text-muted" />{{ shortVersion(source.version) }}
               </dd>
               <dt class="text-muted">
                 Imported
@@ -144,7 +142,7 @@ function detach() {
         </div>
         <div v-if="source.modified" class="mt-4 flex items-start gap-2.5 rounded-xl bg-warning-surface px-3.5 py-3 text-xs leading-relaxed text-warning">
           <Icon :name="TriangleAlert" :size="16" class="mt-px shrink-0" />
-          <span>This skill was edited in Cairn since its last import. Updating from GitHub replaces those edits.</span>
+          <span>This skill was edited in Cairn since its last import. Updating from its source replaces those edits.</span>
         </div>
         <div v-if="!readonly" class="mt-4 flex flex-wrap items-center gap-2.5">
           <UiButton size="small" :disabled="!!busy" @click="check">
@@ -164,7 +162,7 @@ function detach() {
           >
             <Icon :name="Unlink" :size="14" />{{ confirmDetach ? 'Confirm detach' : 'Detach source' }}
           </UiButton>
-          <span v-if="confirmDetach" class="text-2xs text-muted">Files stay; Cairn stops tracking {{ source.repository }}.</span>
+          <span v-if="confirmDetach" class="text-2xs text-muted">Files stay; Cairn stops tracking {{ source.label }}.</span>
         </div>
       </section>
 
@@ -179,7 +177,7 @@ function detach() {
             Up to date
           </p>
           <p class="m-0! text-xs text-muted">
-            {{ source.ref }} still points at {{ shortCommit(status.latest.commit) }}.
+            The source is still at {{ shortVersion(status.latest.version) }}.
           </p>
         </div>
       </section>
@@ -191,11 +189,11 @@ function detach() {
               Update available
             </p>
             <p class="m-0! mt-1 text-sm font-semibold text-ink">
-              {{ status.latest.message.split('\n')[0] || 'Latest commit' }}
+              {{ status.latest.message?.split('\n')[0] || 'Latest version' }}
             </p>
             <p class="m-0! mt-0.5 flex flex-wrap items-center gap-x-2 text-xs text-muted">
-              <span class="inline-flex items-center gap-1 font-mono"><Icon :name="GitCommit" :size="13" />{{ shortCommit(source.commit) }} → {{ shortCommit(status.latest.commit) }}</span>
-              <span>· {{ date(Date.parse(status.latest.date)) }}</span>
+              <span class="inline-flex items-center gap-1 font-mono"><Icon :name="GitCommit" :size="13" />{{ shortVersion(source.version) }} → {{ shortVersion(status.latest.version) }}</span>
+              <span v-if="status.latest.date && !Number.isNaN(Date.parse(status.latest.date))">· {{ date(Date.parse(status.latest.date)) }}</span>
               <span>· {{ plural(status.changes.length, 'file') }} changed</span>
             </p>
           </div>
@@ -212,7 +210,7 @@ function detach() {
               :size="14"
               class="animate-spin"
             />
-            {{ confirmUpdate ? 'Replace my edits' : `Update to ${shortCommit(status.latest.commit)}` }}
+            {{ confirmUpdate ? 'Replace my edits' : `Update to ${shortVersion(status.latest.version)}` }}
           </UiButton>
         </div>
         <div v-if="confirmUpdate" class="flex items-start gap-2.5 rounded-xl bg-warning-surface px-3.5 py-3 text-xs leading-relaxed text-warning" role="alert">

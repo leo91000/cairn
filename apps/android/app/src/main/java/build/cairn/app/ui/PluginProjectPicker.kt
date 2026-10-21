@@ -30,67 +30,63 @@ import java.time.Instant
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
-private enum class Visibility(val label: String) {
-    All("Tous"),
-    Private("Privés"),
-    Public("Publics"),
-}
-
-@OptIn(ExperimentalLayoutApi::class)
+/**
+ * The projects a plugin's project source offers through one instance, e.g. the repositories of a
+ * GitHub account. Pages come from the plugin; the search filters what is loaded and keeps loading
+ * pages while too few match, as a plugin may ignore the query.
+ */
 @Composable
-fun GithubRepositoryPicker(
+fun PluginProjectPicker(
     api: CairnApi,
+    source: ProjectSourceChoice,
+    instance: String,
     selected: String,
     enabled: Boolean = true,
-    select: (GithubRepository) -> Unit,
+    select: (PluginProject) -> Unit,
 ) {
-    var repositories by remember { mutableStateOf(emptyList<GithubRepository>()) }
-    var nextPage by remember { mutableStateOf<Int?>(1) }
-    var loading by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
+    val key = "${source.key}/$instance"
+    var projects by remember(key) { mutableStateOf(emptyList<PluginProject>()) }
+    var nextPage by remember(key) { mutableStateOf<Int?>(1) }
+    var loading by remember(key) { mutableStateOf(false) }
+    var error by remember(key) { mutableStateOf<String?>(null) }
     var query by rememberSaveable { mutableStateOf("") }
-    var visibility by rememberSaveable { mutableStateOf(Visibility.All) }
-    var browsing by rememberSaveable { mutableStateOf(true) }
+    var browsing by rememberSaveable(key) { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
     val scroll = rememberScrollState()
     val needle = query.trim()
-    val filtered = repositories.filter {
-        (visibility == Visibility.All || it.isPrivate == (visibility == Visibility.Private)) &&
-            "${it.fullName} ${it.description} ${it.language}".contains(needle, true)
-    }
-    // Searching and filtering keep fetching pages until enough matches are visible.
-    val needsMore =
-        nextPage != null &&
-            error == null &&
-            (needle.isNotEmpty() || visibility != Visibility.All) &&
-            filtered.size < 8
+    val filtered = projects.filter { it.matches(needle) }
+    // Searching keeps fetching pages until enough matches are visible.
+    val needsMore = nextPage != null && error == null && needle.isNotEmpty() && filtered.size < 8
     suspend fun load() {
         val page = nextPage ?: return
         if (loading) return
         loading = true
         error = null
         try {
-            val result = api.get<GithubRepositoryPage>("/github/repositories?page=$page")
-            repositories = (repositories + result.repositories).distinctBy { it.fullName }
+            val result =
+                api.get<PluginProjectPage>(
+                    pluginProjectsPath(source.entry.id, source.source.name, instance, page)
+                )
+            projects = (projects + result.items).distinctBy { it.id }
             nextPage = result.nextPage
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            error = e.message ?: "GitHub indisponible. Réessayez."
+            error = e.message ?: "${source.entry.name} indisponible. Réessayez."
         } finally {
             loading = false
         }
     }
-    LaunchedEffect(api) { load() }
+    LaunchedEffect(api, key) { load() }
     // Infinite scrolling: fetch the next page as the list approaches its end.
-    val nearEnd = browsing && repositories.isNotEmpty() && scroll.maxValue - scroll.value < 240
+    val nearEnd = browsing && projects.isNotEmpty() && scroll.maxValue - scroll.value < 240
     // Loads run in the picker scope: restarting this effect when `loading` changes must not cancel
     // them.
-    LaunchedEffect(needsMore, nearEnd, loading) {
+    LaunchedEffect(needsMore, nearEnd, loading, key) {
         if ((needsMore || nearEnd) && !loading && error == null) scope.launch { load() }
     }
-    LaunchedEffect(needle, visibility) { scroll.scrollTo(0) }
-    val chosen = repositories.firstOrNull { it.fullName == selected }
+    LaunchedEffect(needle) { scroll.scrollTo(0) }
+    val chosen = projects.firstOrNull { it.id == selected }
 
     Column(
         Modifier.fillMaxWidth().animateContentSize(),
@@ -123,7 +119,7 @@ fun GithubRepositoryPicker(
                             )
                             Spacer(Modifier.width(6.dp))
                             Text(
-                                chosen.fullName,
+                                chosen.name,
                                 fontWeight = FontWeight.SemiBold,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -146,45 +142,25 @@ fun GithubRepositoryPicker(
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                "Choisissez un dépôt de la connexion GitHub partagée. Il sera cloné à l’enregistrement.",
+                source.source.description.ifBlank { "Choisissez un projet." } +
+                    " Il sera cloné à l’enregistrement.",
                 Modifier.weight(1f),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             IconButton(
                 onClick = {
-                    repositories = emptyList()
+                    projects = emptyList()
                     nextPage = 1
                     scope.launch { load() }
                 },
                 enabled = enabled && !loading,
             ) {
                 if (loading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                else Icon(Icons.Default.Refresh, "Recharger les dépôts")
+                else Icon(Icons.Default.Refresh, "Recharger les projets")
             }
         }
-        SearchField("Rechercher un dépôt, un propriétaire, un langage", query, { query = it })
-        val privateCount = repositories.count { it.isPrivate }
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Visibility.entries.forEach { option ->
-                val count =
-                    when (option) {
-                        Visibility.All -> repositories.size
-                        Visibility.Private -> privateCount
-                        Visibility.Public -> repositories.size - privateCount
-                    }
-                FilterChip(
-                    selected = visibility == option,
-                    onClick = { visibility = option },
-                    label = { Text("${option.label} · $count") },
-                    leadingIcon =
-                        if (visibility == option)
-                            ({ Icon(Icons.Default.Check, null, Modifier.size(16.dp)) })
-                        else null,
-                    shape = CircleShape,
-                )
-            }
-        }
+        SearchField("Rechercher un projet", query, { query = it })
         error?.let {
             Surface(
                 color = MaterialTheme.colorScheme.errorContainer,
@@ -207,7 +183,7 @@ fun GithubRepositoryPicker(
                             style = MaterialTheme.typography.bodyMedium,
                         )
                         Text(
-                            "Vérifiez la connexion GitHub dans Connexions.",
+                            "Vérifiez ce ${source.entry.manifest?.noun()?.lowercase() ?: "compte"} dans Atelier → Plugins → ${source.entry.name}.",
                             color = MaterialTheme.colorScheme.onErrorContainer,
                             style = MaterialTheme.typography.bodySmall,
                         )
@@ -231,14 +207,14 @@ fun GithubRepositoryPicker(
                 Modifier.heightIn(max = 380.dp).verticalScroll(scroll).padding(6.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                if (repositories.isEmpty() && loading) repeat(4) { RepositorySkeleton() }
-                filtered.forEach { repo ->
-                    RepositoryRow(repo, needle, selected == repo.fullName, enabled) {
-                        select(repo)
+                if (projects.isEmpty() && loading) repeat(4) { ProjectSkeleton() }
+                filtered.forEach { project ->
+                    ProjectRow(project, needle, selected == project.id, enabled) {
+                        select(project)
                         browsing = false
                     }
                 }
-                if (repositories.isNotEmpty() && !loading && error == null && filtered.isEmpty()) {
+                if (projects.isNotEmpty() && !loading && error == null && filtered.isEmpty()) {
                     Column(
                         Modifier.fillMaxWidth().padding(24.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -250,36 +226,29 @@ fun GithubRepositoryPicker(
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Text(
-                            "Aucun dépôt correspondant.",
+                            "Aucun projet correspondant.",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        if (needle.isNotEmpty() || visibility != Visibility.All)
-                            TextButton(
-                                onClick = {
-                                    query = ""
-                                    visibility = Visibility.All
-                                }
-                            ) {
-                                Text("Effacer les filtres")
-                            }
+                        if (needle.isNotEmpty())
+                            TextButton(onClick = { query = "" }) { Text("Effacer la recherche") }
                     }
                 }
-                if (!loading && error == null && repositories.isEmpty() && nextPage == null) {
+                if (!loading && error == null && projects.isEmpty() && nextPage == null) {
                     Text(
-                        "Aucun dépôt disponible avec cette connexion GitHub.",
+                        "Aucun projet disponible avec ce ${source.entry.manifest?.noun()?.lowercase() ?: "compte"}.",
                         Modifier.padding(24.dp),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                if (repositories.isNotEmpty() && loading)
+                if (projects.isNotEmpty() && loading)
                     LinearProgressIndicator(Modifier.fillMaxWidth().padding(8.dp))
-                if (nextPage != null && repositories.isNotEmpty() && !loading) {
+                if (nextPage != null && projects.isNotEmpty() && !loading) {
                     TextButton(
                         onClick = { scope.launch { load() } },
                         enabled = enabled && error == null,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Text("Charger plus de dépôts")
+                        Text("Charger plus de projets")
                     }
                 }
             }
@@ -289,8 +258,8 @@ fun GithubRepositoryPicker(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun RepositoryRow(
-    repo: GithubRepository,
+private fun ProjectRow(
+    project: PluginProject,
     needle: String,
     selected: Boolean,
     enabled: Boolean,
@@ -299,8 +268,8 @@ private fun RepositoryRow(
     val colors = MaterialTheme.colorScheme
     Surface(
         onClick = choose,
-        enabled = enabled && !repo.imported,
-        modifier = Modifier.fillMaxWidth().alpha(if (repo.imported) .55f else 1f),
+        enabled = enabled && !project.imported,
+        modifier = Modifier.fillMaxWidth().alpha(if (project.imported) .55f else 1f),
         shape = RoundedCornerShape(12.dp),
         color = if (selected) colors.primaryContainer.copy(alpha = .5f) else colors.surface,
         border =
@@ -313,19 +282,19 @@ private fun RepositoryRow(
             Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            OwnerAvatar(owner(repo), 38)
+            OwnerAvatar(owner(project), 38)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Text(
-                        highlight(repo.fullName, needle, owner(repo).length),
+                        highlight(project.name, needle, project.name.lastIndexOf('/')),
                         Modifier.weight(1f, false),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    if (repo.imported) Tag("Déjà ajouté")
+                    if (project.imported) Tag("Déjà ajouté")
                     if (selected)
                         Icon(
                             Icons.Default.Check,
@@ -334,40 +303,45 @@ private fun RepositoryRow(
                             tint = colors.primary,
                         )
                 }
-                if (repo.description.isNotBlank()) {
+                if (project.description.isNotBlank()) {
                     Text(
-                        highlight(repo.description, needle, -1),
+                        highlight(project.description, needle, -1),
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                         style = MaterialTheme.typography.bodySmall,
                         color = colors.onSurfaceVariant,
                     )
                 }
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    Meta(if (repo.isPrivate) "🔒 Privé" else "Public")
-                    if (repo.language.isNotBlank()) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                Modifier.size(8.dp)
-                                    .background(languageColor(repo.language), CircleShape)
-                            )
-                            Spacer(Modifier.width(4.dp))
-                            Meta(repo.language)
-                        }
+                val updated = project.updatedAt?.let { updated(it) }
+                if (
+                    project.badges.isNotEmpty() ||
+                        project.defaultBranch.isNotBlank() ||
+                        updated != null
+                )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        project.badges.forEach { Badge(it) }
+                        if (project.defaultBranch.isNotBlank()) Meta("⎇ ${project.defaultBranch}")
+                        updated?.let { Meta(it) }
                     }
-                    if (repo.stars > 0) Meta("★ ${stars(repo.stars)}")
-                    if (repo.defaultBranch.isNotBlank()) Meta("⎇ ${repo.defaultBranch}")
-                    if (repo.fork) Meta("Fork")
-                    if (repo.archived) Meta("Archivé", colors.tertiary)
-                    updated(repo.pushedAt)?.let { Meta(it) }
-                }
             }
         }
     }
 }
+
+/** One of the plugin's short labels, such as a visibility or a language. */
+@Composable
+private fun Badge(text: String) =
+    Text(
+        text,
+        Modifier.background(MaterialTheme.colorScheme.surfaceContainerHigh, CircleShape)
+            .padding(horizontal = 7.dp, vertical = 1.dp),
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 1,
+    )
 
 @Composable
 private fun Meta(text: String, color: Color = MaterialTheme.colorScheme.onSurfaceVariant) =
@@ -395,7 +369,7 @@ private fun OwnerAvatar(owner: String, size: Int) =
     }
 
 @Composable
-private fun RepositorySkeleton() {
+private fun ProjectSkeleton() {
     val pulse by
         rememberInfiniteTransition(label = "skeleton")
             .animateFloat(
@@ -419,10 +393,11 @@ private fun RepositorySkeleton() {
     }
 }
 
-private fun owner(repo: GithubRepository) =
-    repo.owner.ifBlank { repo.fullName.substringBefore('/') }
+/** The part before the last `/` of a name such as `owner/name`, else the name itself. */
+private fun owner(project: PluginProject) =
+    project.name.substringBeforeLast('/').ifBlank { project.name }
 
-// Bolds the repository name after `owner/` and marks the search match.
+// Bolds a name after its `owner/` prefix and marks the search match.
 @Composable
 private fun highlight(text: String, needle: String, ownerLength: Int): AnnotatedString {
     val mark =
@@ -449,38 +424,8 @@ private fun highlight(text: String, needle: String, ownerLength: Int): Annotated
 private fun hue(value: String) =
     (value.fold(0) { hash, char -> hash * 31 + char.code }.toUInt() % 360u).toFloat()
 
-private val languageColors =
-    mapOf(
-        "TypeScript" to 0xFF3178C6,
-        "JavaScript" to 0xFFF1E05A,
-        "Rust" to 0xFFDEA584,
-        "Kotlin" to 0xFFA97BFF,
-        "Python" to 0xFF3572A5,
-        "Go" to 0xFF00ADD8,
-        "Vue" to 0xFF41B883,
-        "Java" to 0xFFB07219,
-        "Swift" to 0xFFF05138,
-        "Ruby" to 0xFF701516,
-        "PHP" to 0xFF4F5D95,
-        "Shell" to 0xFF89E051,
-        "HTML" to 0xFFE34C26,
-        "CSS" to 0xFF663399,
-        "C#" to 0xFF178600,
-        "C++" to 0xFFF34B7D,
-        "C" to 0xFF555555,
-        "Dart" to 0xFF00B4AB,
-    )
-
-private fun languageColor(language: String) =
-    languageColors[language]?.let { Color(it) } ?: Color.hsl(hue(language), .5f, .55f)
-
-private fun stars(value: Int) =
-    if (value >= 1000)
-        "%.${if (value >= 10000) 0 else 1}fk".format(java.util.Locale.ROOT, value / 1000.0)
-    else "$value"
-
-internal fun updated(pushedAt: String, now: Instant = Instant.now()): String? {
-    val time = runCatching { Instant.parse(pushedAt) }.getOrNull() ?: return null
+internal fun updated(updatedAt: String, now: Instant = Instant.now()): String? {
+    val time = runCatching { Instant.parse(updatedAt) }.getOrNull() ?: return null
     val minutes = Duration.between(time, now).toMinutes().coerceAtLeast(0)
     fun plural(n: Long, unit: String) =
         "Mis à jour il y a $n $unit${if (n > 1 && !unit.endsWith("s")) "s" else ""}"

@@ -20,10 +20,16 @@ import { filOf } from '../src/signal'
 const sha = '0b2ddce3a1b2c3d4e5f60718293a4b5c6d7e8f90'
 const checks = {
   type: 'github_pr_checks',
+  pluginId: 'github',
   projectId: 'project',
   prNumber: 193,
   headSha: sha,
-} as const
+}
+const display = {
+  title: 'Waiting for required checks on PR #193',
+  short: 'PR #193 checks',
+  details: ['0b2ddce'],
+}
 
 function wakeup(values: Partial<ChatWakeup> = {}): ChatWakeup {
   return {
@@ -84,21 +90,20 @@ function toolCall(tool: string, server: string, values: Record<string, unknown> 
 }
 
 describe('scheduled waits', () => {
-  it('names what the conversation waits for', () => {
-    expect(waitTarget(wakeup({ condition: checks }))).toMatchObject({ kind: 'pr', short: 'PR #193 checks', details: ['0b2ddce'] })
-    expect(waitTarget(wakeup({
-      condition: {
-        type: 'github_workflow',
-        projectId: 'project',
-        runId: 42,
-        headSha: sha,
-      },
-    }))).toMatchObject({ kind: 'workflow', details: ['Run 42', '0b2ddce'] })
+  it('names what the conversation waits for in its plugin\'s words', () => {
+    expect(waitTarget(wakeup({ condition: checks, display }))).toEqual({ kind: 'condition', ...display })
+    // Without them, a plugin condition still reads as one.
+    expect(waitTarget(wakeup({ condition: checks }))).toEqual({
+      kind: 'condition',
+      title: 'Waiting for a condition',
+      short: 'Condition',
+      details: [],
+    })
     expect(waitTarget(wakeup({ condition: { type: 'run_finished', runId: 'run' } })).kind).toBe('run')
     expect(waitTarget(wakeup()).short).toMatch(/^Resumes at /)
     // Seen only in a run's history, a wait reads as what was scheduled.
     expect(recordedTitle(wakeup())).toMatch(/^Scheduled to resume at /)
-    expect(recordedTitle(wakeup({ condition: checks }))).toBe('Wait scheduled · PR #193 checks')
+    expect(recordedTitle(wakeup({ condition: checks, display }))).toBe('Wait scheduled · PR #193 checks')
   })
 
   it('counts down to a timer, and to the deadline of a condition', () => {
@@ -115,30 +120,25 @@ describe('scheduled waits', () => {
   })
 
   it('says how the wait ended', () => {
+    // A plugin's own words come first.
+    const passed = { tone: 'ok', title: 'Required checks passed', detail: '4 checks' }
     expect(waitOutcome({
       state: 'completed',
       type: 'github_pr_checks',
-      conclusion: 'success',
-      requiredCount: 4,
-    })).toEqual({ tone: 'ok', title: 'Required checks passed', detail: '4 checks' })
-    expect(waitOutcome({
-      state: 'completed',
-      type: 'github_pr_checks',
+      pluginId: 'github',
       conclusion: 'failure',
-      checks: [{ name: 'lint', state: 'failure' }, { name: 'test', state: 'success' }],
-    })).toEqual({ tone: 'error', title: 'Required checks failed', detail: 'lint' })
-    expect(waitOutcome({ state: 'superseded', headSha: sha, currentHeadSha: `9f1e0aa${sha.slice(7)}` })).toMatchObject({ tone: 'warning', detail: '0b2ddce → 9f1e0aa' })
-    expect(waitOutcome({ state: 'closed', prNumber: 193, pullRequestState: 'MERGED' }).title).toBe('PR #193 was merged')
-    expect(waitOutcome({
-      state: 'completed',
-      type: 'github_workflow',
-      conclusion: 'cancelled',
-      runAttempt: 2,
-    })).toEqual({ tone: 'warning', title: 'Workflow cancelled', detail: 'Attempt 2' })
-    expect(waitOutcome({ state: 'completed', type: 'github_workflow', conclusion: 'failure' })).toEqual({ tone: 'error', title: 'Workflow failed', detail: '' })
-    expect(waitOutcome({ state: 'completed', type: 'github_workflow', conclusion: 'startup_failure' }).detail).toBe('startup failure')
+      display: passed,
+    })).toEqual(passed)
+    expect(waitOutcome({ state: 'superseded', display: { tone: 'warning', title: 'A new commit was pushed', detail: '0b2ddce → 9f1e0aa' } })).toMatchObject({ tone: 'warning', detail: '0b2ddce → 9f1e0aa' })
+    expect(waitOutcome({ state: 'completed', display: { tone: 'loud', title: 'Done' } })).toEqual({ tone: 'neutral', title: 'Done', detail: '' })
+    // Without them, a conclusion still says how it went.
+    expect(waitOutcome({ state: 'completed', type: 'github_workflow', conclusion: 'success' })).toEqual({ tone: 'ok', title: 'Succeeded', detail: '' })
+    expect(waitOutcome({ state: 'completed', type: 'github_workflow', conclusion: 'startup_failure' })).toEqual({ tone: 'error', title: 'Startup failure', detail: '' })
+    expect(waitOutcome({ state: 'completed', type: 'github_workflow', conclusion: 'action_required' })).toEqual({ tone: 'warning', title: 'Action required', detail: '' })
+    expect(waitOutcome({ state: 'closed', type: 'github_pr_checks' })).toEqual({ tone: 'neutral', title: 'Wait finished', detail: '' })
     expect(waitOutcome({ state: 'completed', type: 'run_finished', status: 'failed' })).toMatchObject({ tone: 'error', title: 'The run failed' })
     expect(waitOutcome({ state: 'timed_out' }).title).toBe('Deadline reached without a result')
+    expect(waitOutcome({ state: 'unavailable', message: 'No access' })).toEqual({ tone: 'warning', title: 'Result unavailable', detail: 'No access' })
     expect(waitOutcome(null)).toMatchObject({ tone: 'neutral' })
   })
 
@@ -392,7 +392,19 @@ describe('scheduled waits', () => {
     expect(waitProgress({ wakeup: pending, ended: 'replaced' }, { wakeup: wakeup({ id: 'next' }), paused: false, settled: true })).toMatchObject({ replaced: true, cancelled: false })
     // Without live state, as in a run's history, only the history speaks.
     expect(waitProgress({ wakeup: pending, ended: 'cancelled' })).toMatchObject({ cancelled: true, pending: false })
-    expect(observedTarget({ state: 'completed', type: 'github_pr_checks', prNumber: 193 })).toBe('PR #193 checks')
+    expect(observedTarget({
+      state: 'completed',
+      type: 'github_pr_checks',
+      pluginId: 'github',
+      prNumber: 193,
+    })).toBe('A condition')
+    expect(observedTarget({
+      state: 'completed',
+      type: 'custom',
+      pluginId: 'ci',
+      display: { short: 'Nightly build' },
+    })).toBe('Nightly build')
+    expect(observedTarget({ state: 'completed', type: 'run_finished' })).toBe('Another run')
     expect(observedTarget({ state: 'timed_out' })).toBe('')
     expect(waitLeft({ wakeAt: 600_000, condition: true }, 0)).toBe('≤ 10 min')
     expect(waitLeft({ wakeAt: 45_000 }, 0)).toBe('< 1 min')
@@ -428,7 +440,7 @@ describe('scheduled waits', () => {
 
   it('lists waiting conversations apart, soonest first, unless paused', () => {
     const fil = filOf([
-      chat('later', { unread: true, finishedAt: 1, wakeup: wakeup({ wakeAt: 9000, condition: checks }) }),
+      chat('later', { unread: true, finishedAt: 1, wakeup: wakeup({ wakeAt: 9000, condition: checks, display }) }),
       chat('sooner', { wakeup: wakeup({ wakeAt: 5000 }) }),
       chat('paused', { paused: true, wakeup: wakeup() }),
       chat('done'),

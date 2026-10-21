@@ -28,7 +28,8 @@ import build.cairn.app.data.*
 private const val DIFF_PREVIEW_LINES = 120
 
 /**
- * GitHub origin of an imported skill: check for a newer commit, review the diff, update or detach.
+ * Where an imported skill comes from (a plugin's skill source): check for a newer version, review
+ * the diff, update or detach.
  */
 @Composable
 internal fun SkillSourceSheet(
@@ -62,9 +63,9 @@ internal fun SkillSourceSheet(
                 }
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("Source GitHub", style = MaterialTheme.typography.titleLarge)
+                    Text("Source du skill", style = MaterialTheme.typography.titleLarge)
                     Text(
-                        source.repository,
+                        source.label.ifBlank { source.pluginId },
                         style = MaterialTheme.typography.bodyMedium,
                         fontFamily = FontFamily.Monospace,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -79,16 +80,18 @@ internal fun SkillSourceSheet(
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
                 outlined = false,
             ) {
-                SourceField("Dépôt", source.repository)
-                SourceField("Dossier", source.path.ifBlank { "racine du dépôt" })
-                SourceField("Référence", source.ref.ifBlank { "branche par défaut" })
-                SourceField("Commit importé", source.commit.take(12))
+                SourceField("Source", source.label.ifBlank { source.pluginId })
+                SourceField("Dossier", source.folder.ifBlank { "racine" })
+                SourceField("Version importée", source.shortVersion)
                 SourceField("Importé le", date(source.importedAt))
+                source.url
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { ExternalButton("Ouvrir la source", it) }
             }
             if (source.modified)
                 Banner(
                     "Modifié dans Cairn",
-                    "Une mise à jour remplacera les fichiers par ceux de GitHub ; vos modifications locales seront perdues.",
+                    "Une mise à jour remplacera les fichiers par ceux de la source ; vos modifications locales seront perdues.",
                     signal.warning,
                     signal.warningSoft,
                     Modifier.testTag("skill-source-modified"),
@@ -111,7 +114,7 @@ internal fun SkillSourceSheet(
                 }
                 if (model.sourceLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
             } else {
-                LatestCommit(status)
+                LatestVersion(status)
                 if (!status.current) {
                     Eyebrow(
                         "${plural(status.changes.size, "fichier modifié", "fichiers modifiés")}"
@@ -122,7 +125,7 @@ internal fun SkillSourceSheet(
             if (owner) {
                 if (status != null && !status.current)
                     SignalButton(
-                        "Mettre à jour vers ${status.latest.commit.take(7)}",
+                        "Mettre à jour vers ${shortVersion(status.latest.version)}",
                         Modifier.fillMaxWidth().testTag("skill-source-update"),
                         icon = CairnIcons.Download,
                         container = MaterialTheme.colorScheme.primary,
@@ -137,7 +140,7 @@ internal fun SkillSourceSheet(
                     enabled = !model.busy,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text("Détacher de GitHub")
+                    Text("Détacher de la source")
                 }
             }
         }
@@ -146,15 +149,15 @@ internal fun SkillSourceSheet(
         val blocked = draft.changes().isNotEmpty()
         AlertDialog(
             onDismissRequest = { confirmUpdate = false },
-            title = { Text("Mettre à jour depuis GitHub ?") },
+            title = { Text("Mettre à jour depuis la source ?") },
             text = {
                 Text(
                     when {
                         blocked -> "Enregistrez ou annulez d’abord vos modifications en cours."
                         source.modified ->
-                            "Les fichiers du skill seront remplacés par ceux du commit ${status.latest.commit.take(7)}. Les modifications faites dans Cairn seront perdues."
+                            "Les fichiers du skill seront remplacés par ceux de la version ${shortVersion(status.latest.version)}. Les modifications faites dans Cairn seront perdues."
                         else ->
-                            "Les fichiers du skill seront remplacés par ceux du commit ${status.latest.commit.take(7)}."
+                            "Les fichiers du skill seront remplacés par ceux de la version ${shortVersion(status.latest.version)}."
                     }
                 )
             },
@@ -163,7 +166,7 @@ internal fun SkillSourceSheet(
                     TextButton(
                         onClick = {
                             confirmUpdate = false
-                            model.updateSource(vm, status.latest.commit, close)
+                            model.updateSource(vm, status.latest.version, close)
                         },
                         modifier = Modifier.testTag("skill-source-update-confirm"),
                     ) {
@@ -180,10 +183,10 @@ internal fun SkillSourceSheet(
     if (confirmDetach)
         AlertDialog(
             onDismissRequest = { confirmDetach = false },
-            title = { Text("Détacher de GitHub ?") },
+            title = { Text("Détacher de la source ?") },
             text = {
                 Text(
-                    "Les fichiers restent dans Cairn, mais le skill ne pourra plus être mis à jour depuis ${source.repository}."
+                    "Les fichiers restent dans Cairn, mais le skill ne pourra plus être mis à jour depuis ${source.label.ifBlank { "sa source" }}."
                 )
             },
             confirmButton = {
@@ -221,7 +224,7 @@ private fun SourceField(label: String, value: String) {
 }
 
 @Composable
-private fun LatestCommit(status: SkillSourceStatus) {
+private fun LatestVersion(status: SkillSourceStatus) {
     val color = if (status.current) signal.success else MaterialTheme.colorScheme.primary
     Surface(
         Modifier.fillMaxWidth().testTag("skill-source-latest"),
@@ -244,7 +247,7 @@ private fun LatestCommit(status: SkillSourceStatus) {
                 )
                 Spacer(Modifier.weight(1f))
                 Text(
-                    status.latest.commit.take(7),
+                    shortVersion(status.latest.version),
                     style = MaterialTheme.typography.labelMedium,
                     fontFamily = FontFamily.Monospace,
                 )

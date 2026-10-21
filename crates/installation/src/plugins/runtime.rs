@@ -20,16 +20,34 @@ use tokio_util::sync::CancellationToken;
 
 const ATTEMPTS: u64 = 5;
 
+/// Token formats of active packages, masked in run output. Returns whether they loaded.
+pub async fn load_secret_patterns(s: &Service) -> bool {
+    let Ok(packages) = registry::all_active(s).await else {
+        return false;
+    };
+    let patterns = packages
+        .iter()
+        .flat_map(|package| package.manifest.secret_regexes())
+        .collect();
+    crate::run_output::set_plugin_secret_patterns(patterns);
+    true
+}
+
 pub async fn maintain(s: Arc<Service>) {
     let mut active: HashMap<String, (String, CancellationToken, tokio::task::JoinHandle<()>)> =
         HashMap::new();
     let mut timer = tokio::time::interval(Duration::from_secs(2));
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut patterns_loaded = false;
     loop {
-        tokio::select! {
+        let changed = tokio::select! {
             () = s.shutdown.cancelled() => break,
-            () = s.plugins.changed.notified() => {},
-            _ = timer.tick() => {},
+            () = s.plugins.changed.notified() => true,
+            _ = timer.tick() => false,
+        };
+        // Packages change with approvals and uninstalls, which notify.
+        if changed || !patterns_loaded {
+            patterns_loaded = load_secret_patterns(&s).await;
         }
         let Ok(values) = s.store.list(connections::KIND).await else {
             continue;

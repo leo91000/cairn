@@ -136,7 +136,7 @@ const commands = computed<Command[]>(() => {
       group: 'Actions',
       label: 'Connections',
       icon: Plug,
-      keywords: 'codex claude opencode github accounts',
+      keywords: 'codex claude opencode accounts',
       run: go('/connections'),
     },
     {
@@ -144,7 +144,7 @@ const commands = computed<Command[]>(() => {
       group: 'Actions',
       label: 'Plugins',
       icon: Puzzle,
-      keywords: '1password secrets discord bots packages',
+      keywords: '1password secrets discord github bots packages',
       run: go('/plugins'),
     },
     {

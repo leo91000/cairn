@@ -7,7 +7,9 @@ travail autorisé avec un résultat précis.
 
 ## Ce que cette PR permet déjà
 
-Trois conditions sont disponibles dans `cairn_workspace.wait_for` :
+Cairn fournit une condition ; les plugins accordés à l’agent ajoutent les leurs,
+de type `<plugin>_<nom>` (voir les [conditions de plugins](PLUGINS.md#conditions)).
+Le plugin GitHub livré en ajoute deux :
 
 - `run_finished` : une exécution Cairn autorisée atteint un état terminal. Une
   conversation dont le tour a réussi mais qui possède encore un réveil ou des
@@ -17,8 +19,8 @@ Trois conditions sont disponibles dans `cairn_workspace.wait_for` :
   [l’accès agent](AGENT-ACCESS.md).
 - `github_workflow` : un workflow GitHub Actions identifié par un projet autorisé,
   un identifiant d’exécution et le SHA complet du commit termine. Le résultat
-  inclut sa conclusion et son numéro de tentative. Les credentials existants de
-  l’agent sont utilisés ; ils restent dans l’installation.
+  inclut sa conclusion et son numéro de tentative. Le compte GitHub accordé à
+  l’agent est utilisé ; son jeton reste dans l’installation.
 - `github_pr_checks` : les checks requis d’une PR sont observés sur son head
   exact. Les protections classiques et les règles actives de branche fournissent
   les exigences, y compris les checks qui n’ont pas encore publié de résultat.
@@ -112,8 +114,8 @@ Le gain principal est de retirer l’inférence et la VM de la boucle d’attent
 Les requêtes nécessaires pour observer le service existent toujours.
 
 Une dépendance Cairn est vérifiée par le scheduler existant, normalement chaque
-seconde. GitHub est vérifié par un observateur séparé, normalement toutes les
-30 secondes. Le temps réel de reprise dépend aussi de la libération de
+seconde. Les conditions de plugins sont vérifiées par un observateur séparé,
+normalement toutes les 30 secondes. Le temps réel de reprise dépend aussi de la libération de
 l’exécution précédente, des comptes et de la capacité de la node.
 
 Le test du worker avec un seul créneau vérifie que la conversation se termine,
@@ -173,21 +175,22 @@ périmètre de la demande initiale et des permissions courantes.
 - Les attentes redémarrent depuis les données persistées. L’expiration reste
   utilisable si la source externe est momentanément inaccessible.
 
-Les erreurs temporaires de GitHub maintiennent l’attente jusqu’à la prochaine
-vérification ou au délai de secours. Un changement d’origine du projet ou une
-identité de workflow incompatible produit une observation d’indisponibilité.
-Une réduction des permissions de l’agent bloque la préparation de sa reprise.
+Les erreurs temporaires d’un plugin maintiennent l’attente jusqu’à la prochaine
+vérification ou au délai de secours. Un changement d’origine du projet, une
+identité de workflow incompatible ou le retrait de l’instance accordée à l’agent
+produit une observation d’indisponibilité. Une réduction des permissions de
+l’agent bloque la préparation de sa reprise.
 
 ## Observer GitHub et préparer les prochaines sources
 
-Le prototype réutilise la connexion GitHub existante, sans demander de nouvelle
-configuration de webhook. Les observateurs identiques d’un même agent et des
-mêmes permissions et de la même origine de projet partagent une vérification. Chaque lot contient au plus
-16 cibles et quatre appels CLI simultanés ; un lot est lancé toutes les
-30 secondes. Cela borne la surveillance périodique à environ 1 920 observations
+Le plugin GitHub utilise le compte accordé à l’agent, sans configuration de webhook.
+Les observateurs identiques d’un même agent et des mêmes permissions et de la même
+origine de projet partagent une vérification. Chaque lot contient au plus
+16 cibles et quatre observations simultanées, chacune dans un worker Luau ; un lot
+est lancé toutes les 30 secondes, sauf délai plus long demandé par le plugin. Cela borne la surveillance périodique à environ 1 920 observations
 par heure. Un workflow requiert un appel ; une PR en requiert normalement quatre,
 au plus dix avec pagination : 500 checks, 500 exigences distinctes et moins de
-200 règles de branche. Une observation de PR est bornée à 20 secondes au total.
+200 règles de branche. Une observation est bornée à 40 secondes au total.
 Les appels revalident les règles, le head et l’état de la PR, sans bloquer
 l’admission. Les inscriptions et les autres usages de GitHub s’ajoutent à ce budget.
 Avec beaucoup de cibles, la reprise peut attendre plusieurs lots.
@@ -204,7 +207,7 @@ Les [Tasks MCP](https://modelcontextprotocol.io/specification/2025-11-25/basic/u
 de la spécification 2025-11-25, encore expérimentales, décrivent des identifiants
 durables, des résultats différés et l’annulation. Elles pourraient servir aux
 jobs gérés et à leur interopérabilité. Le réveil de la conversation reste une
-responsabilité du scheduler Cairn. Les trois conditions livrées utilisent le
+responsabilité du scheduler Cairn. Les conditions livrées utilisent le
 protocole ordinaire des outils MCP.
 
 ## Mesures et suite proposée

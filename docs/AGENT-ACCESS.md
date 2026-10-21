@@ -20,19 +20,19 @@ It automatically supplies `cairn_installation` to Codex and Claude Code, without
 a server URL, personal access token, or OAuth setup. This delegates the complete
 public management catalogue across the installation: agents, projects, global
 and project skills, MCP connections, missions and runs. This authority applies
-even when the agent's direct resource, GitHub or node permissions are restricted.
+even when the agent's direct resource, plugin or node permissions are restricted.
 It includes changing other agents' permissions and managing their work. Account
 administration remains outside the public MCP catalogue.
 
 The `delete_agent` management tool removes an unused agent, including its saved
-credentials, portrait and 1Password assignments. Main, agents referenced by tasks
+portrait and plugin grants (GitHub accounts, 1Password). Main, agents referenced by tasks
 (including archived tasks), and agents with active work cannot be deleted. Move
 their tasks to another agent and finish or cancel active work first. Completed
 run history is preserved.
 
 New missions default to the calling agent when no agent ID is supplied; another
 agent can be selected explicitly. A mission uses its selected agent's permissions,
-GitHub credentials and 1Password grants. Installation access can also inspect,
+plugin grants such as GitHub accounts and 1Password. Installation access can also inspect,
 cancel or wait for runs belonging to other agents in the installation. The owner
 delegates these operations through the agent setting; newly created scheduled
 missions use the owner's authorship, as with the existing management MCP. The
@@ -43,9 +43,9 @@ without installation access cannot acquire it by enabling the setting; a new
 run or chat turn receives the updated setting. Older profile editors preserve
 it when omitted.
 
-Other agents can select projects, skills, MCP connections and tools, and disable the shared GitHub
-connection. Agents created on the web or Android page start restricted (no
-projects, skills or MCP connections, no GitHub, the current runner only) and the
+Other agents can select projects, skills, MCP connections and tools. GitHub accounts
+are plugin instances granted on the agent page, like 1Password. Agents created on the web or Android page start restricted (no
+projects, skills, MCP connections or plugins, the current runner only) and the
 owner widens them; the API still defaults omitted settings to full access and YOLO.
 Restricted agents need the isolated runner, which every production installation has.
 A task inherits its
@@ -56,7 +56,7 @@ access to its other authorized projects. A task needs no project;
 it starts in a scratch workspace and opens repositories only when needed through
 `open_project`. Selecting a project prepares only that repository at startup. Runs snapshot the effective resources when
 queued. Reducing an agent's access (fewer projects, skills, MCP servers or tools,
-no GitHub, or a stricter sandbox) prevents its queued runs, resumptions and chat
+or a stricter sandbox) prevents its queued runs, resumptions and chat
 follow-ups from executing under the old grants, and revokes their project and MCP
 access; enqueue again or start a new chat to use the new policy. Unchanged or wider
 access, other agent settings, settings older versions saved and node grants do not
@@ -99,22 +99,27 @@ only the selected account's access-token exchange. Chat steering, answers and
 attachments are delivered to the guest while the agent runs. They do not require
 host filesystem mounts or expose the manager's Docker socket.
 
-## GitHub connections
+## GitHub accounts
 
-The shared GitHub connection requires access to all projects. Agents restricted
-to selected projects can save a dedicated token in their editor. Create a
-fine-grained token on GitHub with only the intended repositories and permissions;
-remote authorization is determined by that token. Selecting projects here does
-not reduce the token's GitHub permissions. Tokens are stored in the private
-application database, never returned by the read API, and copied only to that
-agent's run home. Removing the agent removes its stored token.
+GitHub is the bundled GitHub plugin ([plugins](PLUGINS.md#github)). Each account
+is an instance, connected by signing in with GitHub or with a pasted token, and
+granted to agents on their page; nothing is granted by default, Main included. An
+agent holds one GitHub account: its runs receive that account's credentials for Git
+and the `gh` CLI. Remote authorization is determined by the account or token:
+selecting projects here does not reduce its GitHub permissions, so give restricted
+agents an account with a fine-grained token limited to the intended repositories.
+Tokens are encrypted in the installation's vault, never returned by the API, and
+written only into granted agents' run homes, which lose them when the grant is
+withdrawn or the run ends. Plugin grants are live: withdrawing one does not stop
+queued work, and a pending GitHub wait ends as unavailable.
 
 ## Git commit identity
 
 Isolated runs keep the manager account's global Git `user.name` and `user.email`
 when both are configured. Only these identity values are copied into the run.
-Otherwise, runs with a GitHub connection use that connection's account name
-(or login) and its [GitHub noreply address](https://docs.github.com/en/account-and-profile/reference/email-addresses-reference).
+Otherwise, runs of an agent granted a plugin account with a commit identity use it:
+for GitHub, the account name (or login) and its
+[GitHub noreply address](https://docs.github.com/en/account-and-profile/reference/email-addresses-reference).
 Both commit author and committer use this identity, regardless of the agent name.
 If neither identity is available, Git requires an explicit identity before committing;
 it never substitutes the agent name or `agent@localhost`.

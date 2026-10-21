@@ -33,10 +33,17 @@ pub fn controller_failure_line(message: &str) -> Vec<u8> {
     bytes
 }
 
-static TOKEN: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"\b(?:gh[pousr]_\w{15,}|github_pat_\w{15,}|ops_[\w.-]{15,}|sk-[\w-]{12,})\b")
-        .unwrap()
-});
+static TOKEN: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"\b(?:ops_[\w.-]{15,}|sk-[\w-]{12,})\b").unwrap());
+
+/// Token formats active plugins declare (`secretPatterns`), masked like the above.
+static PLUGIN_TOKENS: LazyLock<std::sync::RwLock<Vec<regex::Regex>>> =
+    LazyLock::new(std::sync::RwLock::default);
+
+/// Replaces the token formats of active plugins.
+pub fn set_plugin_secret_patterns(patterns: Vec<regex::Regex>) {
+    *PLUGIN_TOKENS.write().unwrap() = patterns;
+}
 
 static BEARER: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"(?i)(Bearer\s+)[\w.~-]+").unwrap());
@@ -51,7 +58,10 @@ static EXHAUSTED: LazyLock<regex::Regex> = LazyLock::new(|| {
 });
 
 pub fn redact(text: &str, secrets: &[String]) -> String {
-    let text = TOKEN.replace_all(text, "[redacted]");
+    let mut text = TOKEN.replace_all(text, "[redacted]").into_owned();
+    for pattern in PLUGIN_TOKENS.read().unwrap().iter() {
+        text = pattern.replace_all(&text, "[redacted]").into_owned();
+    }
     let text = BEARER.replace_all(&text, "${1}[redacted]");
     let mut text = CREDENTIAL.replace_all(&text, "${1}[redacted]").into_owned();
     for secret in secrets {

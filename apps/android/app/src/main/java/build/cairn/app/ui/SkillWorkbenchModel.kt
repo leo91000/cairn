@@ -334,15 +334,15 @@ internal class SkillWorkbenchModel : ViewModel() {
         }
     }
 
-    fun updateSource(vm: CairnViewModel, commit: String, done: () -> Unit) {
+    fun updateSource(vm: CairnViewModel, version: String, done: () -> Unit) {
         val current = target ?: return
         val base = draft?.base?.revision ?: return
         if (busy) return
-        progress = "Mise à jour depuis GitHub…"
+        progress = "Mise à jour depuis la source…"
         val session = editorSession
         viewModelScope.launch {
             try {
-                val bundle = vm.api.updateSkillSource(current.scope, current.name, commit, base)
+                val bundle = vm.api.updateSkillSource(current.scope, current.name, version, base)
                 if (editorSession != session) return@launch
                 applyBundle(bundle)
                 source = null
@@ -350,7 +350,7 @@ internal class SkillWorkbenchModel : ViewModel() {
                 ensureLoaded(vm, SKILL_FILE)
                 selected?.let { ensureLoaded(vm, it) }
                 done()
-                vm.notify("Skill mis à jour depuis GitHub")
+                vm.notify("Skill mis à jour depuis sa source")
                 runCatching { vm.refresh() }
             } catch (e: Exception) {
                 if (editorSession != session) return@launch
@@ -375,7 +375,7 @@ internal class SkillWorkbenchModel : ViewModel() {
                 draft = draft?.let { it.copy(base = it.base?.copy(source = null)) }
                 source = null
                 done()
-                vm.notify("Skill détaché de GitHub")
+                vm.notify("Skill détaché de sa source")
                 runCatching { vm.refresh() }
             } catch (e: Exception) {
                 if (editorSession != session) return@launch
