@@ -287,7 +287,7 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
     }
     if native(&run["snapshot"]["agent"]) != native(&agent) && run["id"].is_string() {
         return Err(Error::conflict(
-            "Execution backend changed. Start a new conversation.",
+            "Execution backend changed. Migrate this conversation from its execution-node details before continuing.",
         ));
     }
     let incoming = authorize_origin(db, &agent, source)?;

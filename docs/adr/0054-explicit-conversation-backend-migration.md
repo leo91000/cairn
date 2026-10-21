@@ -35,9 +35,9 @@ conversation's prior pause setting after success.
 The source disk and recovery point remain until ordinary explicit deletion or
 collection can safely reclaim them. Failed migrations stay paused and retain their
 coordination record once a converted point exists. Before conversion, failures
-clear admission guards so prerequisites can be repaired on the source. The queue stays paused after a failed attempt until the user resumes it. Retry
-rechecks authorization and reuses a converted point on
-the same destination, including after a manager restart or a lost restore reply.
+clear admission guards so prerequisites can be repaired on the source. The queue
+stays paused after a failed attempt until the user resumes it. Retry rechecks
+authorization and reuses a converted point on the same destination, including after a manager restart or a lost restore reply.
 The reservation ID is durable; retry releases an interrupted destination admission
 without discarding its materialized disk allocation, then rechecks capacity.
 Do not downgrade the manager while a migration is pending. Legacy native file
@@ -50,7 +50,7 @@ This supersedes the blanket native/VM conversion prohibition in
 Ordinary node moves retain their backend checks; only this explicit conversion
 creates a destination-compatible image. Cross-OS conversion remains unsupported.
 
-The installation data compatibility epoch remains **8**. No new persistent disk,
+The installation data compatibility epoch remains **9**. No new persistent disk,
 manifest or checkpoint encoding is introduced: the result uses existing VM flat
 ext4 or `native-ext4-v1`, existing S3 objects and existing fresh-session handoff.
 The additive migration coordination fields are ignored by old readers and retain
