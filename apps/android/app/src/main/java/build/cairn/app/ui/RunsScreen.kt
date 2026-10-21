@@ -223,6 +223,7 @@ fun RunScreen(
         live.cursor,
         rendering,
         followGesture,
+        lastContentIndex = timeline.lastIndex,
     )
     val task =
         state.tasks.find { mission && run != null && run.trigger != "chat" && it.id == run.taskId }
@@ -394,7 +395,9 @@ fun RunScreen(
                         if (more) LinearProgressIndicator(Modifier.fillMaxWidth())
                         Box(Modifier.weight(1f).fillMaxWidth()) {
                             LazyColumn(
-                                Modifier.fillMaxSize().historyFollowGesture(followGesture),
+                                Modifier.fillMaxSize()
+                                    .historyVisibility(positionReady)
+                                    .historyFollowGesture(followGesture),
                                 state = logState,
                                 overscrollEffect = rememberHistoryOverscroll(),
                                 contentPadding = PaddingValues(16.dp),

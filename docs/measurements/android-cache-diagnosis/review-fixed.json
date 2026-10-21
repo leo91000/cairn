@@ -1,0 +1,54 @@
+{
+  "reference": "882632b539e2ead48b9f0c195d61ac9614c53920",
+  "observedAt": "2026-10-21T03:26:38.853Z",
+  "exitCode": 0,
+  "expectResponsive": true,
+  "sourceHashes": {
+    "apps/android/app/src/main/java/build/cairn/app/data/HistoryCache.kt": "07707b8abfa68c7f7c6d93efc49dd15a138243758d6f6d2a92fd7f1fa01d24d0",
+    "apps/android/app/src/main/java/build/cairn/app/data/HistoryCacheWriter.kt": "c21301b68138e50ebae8632dcb3314750d546eefb7316e6da21eb33390f97ea2",
+    "apps/android/app/src/main/java/build/cairn/app/ui/LiveUi.kt": "ba0daf8ccd4d6e2ccab67db02c057b009651bf0009fb886660dbd3804e9feacd",
+    "apps/android/app/src/scrollTest/java/build/cairn/app/ui/CacheRefreshCases.kt": "186c13fad7ac370cdb70f9b9d3af410106f576ea580df1da9d3ba7968fd51bf4",
+    "apps/android/app/src/test/java/build/cairn/app/data/HistoryCacheCostDiagnosisTest.kt": "6f76a1e48a5ee5851feae1b357d041ff11ee1b42e86e85a22dddd82421a83399"
+  },
+  "host": {
+    "platform": "linux",
+    "release": "7.2.9-arch1-1",
+    "cpu": "Intel(R) Core(TM) i9-14900K",
+    "logicalCpus": 32,
+    "totalMemoryBytes": 101005701120,
+    "loadAverage": [
+      8.25,
+      6.2,
+      5.17
+    ]
+  },
+  "limits": [
+    "Synthetic JVM/Robolectric fixtures; no affected-phone FPS claim",
+    "Identity seal/unseal excludes Android Keystore latency",
+    "Cold read means new HistoryCache instance, with warm host filesystem page cache",
+    "Controlled write gate demonstrates scheduling dependency, not phone storage time"
+  ],
+  "reports": [
+    {
+      "test": "build.cairn.app.data.HistoryCacheCostDiagnosisTest",
+      "suite": "<testsuite name=\"build.cairn.app.data.HistoryCacheCostDiagnosisTest\" tests=\"2\" skipped=\"0\" failures=\"0\" errors=\"0\" timestamp=\"2026-10-21T03:26:32.471Z\" hostname=\"leo-ms7d85\" time=\"3.101\">",
+      "stdout": [
+        "CACHE_HOST cpus=32 java=21.0.12.1 heap=536870912",
+        "{\"diagnostic\":\"CACHE_COST\",\"events\":200,\"retainedEntries\":1,\"memoryEntries\":1,\"diskEntries\":1,\"encodedBytes\":114015,\"diskBytes\":114015,\"recentHistoryWallMs\":0.6089411,\"recentHistoryCpuMs\":0.6061561,\"warmReadP50Ms\":0.118554,\"coldReadP50Ms\":1.179832,\"saveP50Ms\":0.923051,\"forcedWriteP50Ms\":1.492834}",
+        "{\"diagnostic\":\"CACHE_COST\",\"events\":200,\"retainedEntries\":12,\"memoryEntries\":12,\"diskEntries\":12,\"encodedBytes\":114015,\"diskBytes\":1368180,\"recentHistoryWallMs\":0.6089411,\"recentHistoryCpuMs\":0.6061561,\"warmReadP50Ms\":0.08167,\"coldReadP50Ms\":0.632188,\"saveP50Ms\":0.458264,\"forcedWriteP50Ms\":0.70917}",
+        "{\"diagnostic\":\"CACHE_COST\",\"events\":1250,\"retainedEntries\":1,\"memoryEntries\":1,\"diskEntries\":1,\"encodedBytes\":714319,\"diskBytes\":714319,\"recentHistoryWallMs\":1.2705412,\"recentHistoryCpuMs\":1.0524575999999999,\"warmReadP50Ms\":0.159691,\"coldReadP50Ms\":2.811503,\"saveP50Ms\":2.048031,\"forcedWriteP50Ms\":2.799417}",
+        "{\"diagnostic\":\"CACHE_COST\",\"events\":1250,\"retainedEntries\":12,\"memoryEntries\":12,\"diskEntries\":12,\"encodedBytes\":714319,\"diskBytes\":8571828,\"recentHistoryWallMs\":1.2705412,\"recentHistoryCpuMs\":1.0524575999999999,\"warmReadP50Ms\":0.137991,\"coldReadP50Ms\":2.2749,\"saveP50Ms\":1.505291,\"forcedWriteP50Ms\":2.444139}",
+        "{\"diagnostic\":\"CACHE_COST\",\"events\":4000,\"retainedEntries\":1,\"memoryEntries\":1,\"diskEntries\":1,\"encodedBytes\":2292819,\"diskBytes\":2292819,\"recentHistoryWallMs\":2.3106987,\"recentHistoryCpuMs\":2.1264124,\"warmReadP50Ms\":0.181674,\"coldReadP50Ms\":8.293946,\"saveP50Ms\":4.715548,\"forcedWriteP50Ms\":8.60838}",
+        "{\"diagnostic\":\"CACHE_COST\",\"events\":4000,\"retainedEntries\":12,\"memoryEntries\":5,\"diskEntries\":9,\"encodedBytes\":2292819,\"diskBytes\":20635371,\"recentHistoryWallMs\":2.3106987,\"recentHistoryCpuMs\":2.1264124,\"warmReadP50Ms\":0.207618,\"coldReadP50Ms\":7.956928,\"saveP50Ms\":4.268434,\"forcedWriteP50Ms\":9.138844}",
+        "CACHE_LOCK_DIAGNOSIS unrelatedWarmReadBlocked=true releasedSuccessfully=true"
+      ]
+    },
+    {
+      "test": "build.cairn.app.ui.CacheRefreshTest",
+      "suite": "<testsuite name=\"build.cairn.app.ui.CacheRefreshTest\" tests=\"1\" skipped=\"0\" failures=\"0\" errors=\"0\" timestamp=\"2026-10-21T03:26:35.577Z\" hostname=\"leo-ms7d85\" time=\"2.311\">",
+      "stdout": [
+        "CACHE_REFRESH receivedWhileCacheWriteBlocked=true publicationDelayMs=13.65736 cacheHeldAfterReceptionMs=324.610233 visibleAfterReleaseMs=1.732775"
+      ]
+    }
+  ]
+}

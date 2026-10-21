@@ -16,6 +16,8 @@ pub struct Config {
     pub claude_bin: String,
     #[serde(default = "default_opencode_bin")]
     pub opencode_bin: String,
+    #[serde(default = "default_opencode_go_usage_url")]
+    pub opencode_go_usage_url: String,
     pub concurrency: usize,
     pub logger: bool,
     pub worker_enabled: bool,
@@ -105,4 +107,8 @@ pub fn concurrency() -> Result<usize> {
         .ok()
         .filter(|n| *n > 0)
         .ok_or_else(|| Error::bad("CONCURRENCY must be a positive integer."))
+}
+
+fn default_opencode_go_usage_url() -> String {
+    crate::accounts::opencode::USAGE_URL.into()
 }

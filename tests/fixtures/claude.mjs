@@ -214,6 +214,20 @@ else {
     appendFileSync(path.join(home, 'inputs.jsonl'), `${JSON.stringify(value)}\n`)
     const prompt = value.message.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
     const correlation = { user_message_uuid: value.uuid }
+    if (prompt.includes('fixture:spend-limit') || prompt.includes('Corrige le dialogue de révocation.')) {
+      const message = 'You\'ve hit your individual spend limit · run /usage-credits to ask your admin for a higher limit · your weekly limit resets 3pm (UTC)'
+      out(value)
+      out({ type: 'assistant', message: { id: 'saved-work', content: [{ type: 'text', text: 'Le paramètre details est placé avant action. Les modifications sont conservées ; je poursuis les vérifications.' }] } })
+      out({ type: 'assistant', message: { id: 'quota-message', content: [{ type: 'text', text: message }] } })
+      out({
+        type: 'result',
+        subtype: 'error_during_execution',
+        is_error: true,
+        result: message,
+      })
+      return
+    }
+
     if (prompt.includes('fixture:resume-dedup') && !args.includes('--resume')) {
       out(value)
       return

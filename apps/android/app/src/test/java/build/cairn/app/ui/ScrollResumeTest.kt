@@ -166,7 +166,39 @@ class ScrollResumeTest {
                         .onAllNodesWithText("Message %03d".format(number), substring = true)
                         .fetchSemanticsNodes()
                         .any { it.boundsInRoot.height > 0 }
-                fun waitLast() {
+                fun waitLast(verifyOpening: Boolean = false) {
+                    if (verifyOpening) {
+                        compose.mainClock.autoAdvance = false
+                        try {
+                            compose.waitUntil(15000) {
+                                compose.mainClock.advanceTimeByFrame()
+                                val history =
+                                    compose
+                                        .onAllNodesWithTag("conversation-history")
+                                        .fetchSemanticsNodes()
+                                        .firstOrNull()
+                                if (
+                                    history != null &&
+                                        !history.config.contains(
+                                            SemanticsProperties.HideFromAccessibility
+                                        )
+                                ) {
+                                    compose.onRoot().captureToImage()
+                                    assertTrue(
+                                        "The first visible history frame must already show the latest message",
+                                        visible(60),
+                                    )
+                                }
+                                history != null &&
+                                    !history.config.contains(
+                                        SemanticsProperties.HideFromAccessibility
+                                    ) &&
+                                    visible(60)
+                            }
+                        } finally {
+                            compose.mainClock.autoAdvance = true
+                        }
+                    }
                     compose.waitUntil(15000) { visible(60) }
                     compose.onNodeWithText("Message 060", substring = true).assertIsDisplayed()
                 }
@@ -181,7 +213,7 @@ class ScrollResumeTest {
                     assertFalse(visible(20))
                     assertFalse(visible(40))
                 }
-                waitLast()
+                waitLast(verifyOpening = true)
                 compose.runOnIdle { owner.registry.currentState = Lifecycle.State.CREATED }
                 compose.waitUntil(5000) { vm.api.streamCalls.isEmpty() }
                 assertTrue(visible(60))
@@ -198,6 +230,16 @@ class ScrollResumeTest {
                     "/api/installations/fixture/api/chats/diagnostic/stream?after=60&history=v1%3Afixture%3A1&window=1&recent=1",
                     requests[1],
                 )
+                // Reopening from the feed restores the cached tail before its first visible frame.
+                compose.runOnIdle { opened = false }
+                compose.waitForIdle()
+                compose.waitUntil(5000) { vm.api.streamCalls.isEmpty() }
+                compose.runOnIdle { opened = true }
+                waitLast(verifyOpening = true)
+                compose.waitUntil(5000) {
+                    compose.waitForIdle()
+                    requests.size == 3
+                }
                 // A reader who scrolled upward must stay at the same offset on resume.
                 val composerTop =
                     compose
@@ -248,22 +290,6 @@ class ScrollResumeTest {
                 compose.runOnIdle { owner.registry.currentState = Lifecycle.State.RESUMED }
                 compose.waitUntil(5000) {
                     compose.waitForIdle()
-                    requests.size == 3
-                }
-                Thread.sleep(300)
-                compose.waitForIdle()
-                assertEquals(before, position(), 0.01f)
-                assertEquals(
-                    "/api/installations/fixture/api/chats/diagnostic/stream?after=60&history=v1%3Afixture%3A1&window=1",
-                    requests[2],
-                )
-                compose.runOnIdle { opened = false }
-                compose.waitForIdle()
-                compose.waitUntil(5000) { vm.api.streamCalls.isEmpty() }
-                compose.runOnIdle { opened = true }
-                compose.waitForIdle()
-                compose.waitUntil(5000) {
-                    compose.waitForIdle()
                     requests.size == 4
                 }
                 Thread.sleep(300)
@@ -272,6 +298,22 @@ class ScrollResumeTest {
                 assertEquals(
                     "/api/installations/fixture/api/chats/diagnostic/stream?after=60&history=v1%3Afixture%3A1&window=1",
                     requests[3],
+                )
+                compose.runOnIdle { opened = false }
+                compose.waitForIdle()
+                compose.waitUntil(5000) { vm.api.streamCalls.isEmpty() }
+                compose.runOnIdle { opened = true }
+                compose.waitForIdle()
+                compose.waitUntil(5000) {
+                    compose.waitForIdle()
+                    requests.size == 5
+                }
+                Thread.sleep(300)
+                compose.waitForIdle()
+                assertEquals(before, position(), 0.01f)
+                assertEquals(
+                    "/api/installations/fixture/api/chats/diagnostic/stream?after=60&history=v1%3Afixture%3A1&window=1",
+                    requests[4],
                 )
                 // Keep a real drag active long enough for the fade-out to finish.
                 val history = compose.onNodeWithTag("conversation-history")

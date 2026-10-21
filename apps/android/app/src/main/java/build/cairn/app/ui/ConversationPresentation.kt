@@ -70,10 +70,12 @@ internal fun conversationState(
     if (chat == null) return ConversationState(if (newChat) identity else "", null)
 
     val run = chat.run?.status.orEmpty()
+    val quota = chatQuota(chat.run, emptyList())
     val status =
         when {
             chat.paused -> "En pause"
             chat.exclusiveSuspended -> "Suspendue (exclusivité)"
+            quota != null -> "En attente de quota"
             run == "queued" -> "En attente"
             scheduledWakeup(chat) != null -> waitStatus(chat.wakeup!!, now)
             run in listOf("failed", "interrupted") -> "${statusLabel(run)} · $identity"
@@ -82,7 +84,7 @@ internal fun conversationState(
     val tasks = wait?.tasks?.size ?: 0
     val live =
         when {
-            run != "running" || chat.exclusiveSuspended -> null
+            run != "running" || chat.exclusiveSuspended || quota != null -> null
             tasks == 1 -> "Tâche en arrière-plan"
             tasks > 1 -> "$tasks tâches en arrière-plan"
             else -> "$agentName travaille"

@@ -194,6 +194,7 @@ async fn main() -> Result<()> {
         codex_bin: "unused".into(),
         claude_bin: "unused".into(),
         opencode_bin: "unused".into(),
+        opencode_go_usage_url: cairn_installation::accounts::opencode::USAGE_URL.into(),
         concurrency: 1,
         logger: false,
         worker_enabled: false,

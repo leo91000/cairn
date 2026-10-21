@@ -263,7 +263,10 @@ private class RelaxDrawNode(private val effect: OverscrollEffect) :
     }
 }
 
-/** Follow measured content, while allowing the user's touch or fling to take over immediately. */
+/**
+ * Follow measured content, while allowing the user's touch or fling to take over immediately.
+ * [lastContentIndex] is a valid index near the current tail, before any optional footer rows.
+ */
 @Composable
 internal fun FollowHistoryTail(
     list: LazyListState,
@@ -271,9 +274,17 @@ internal fun FollowHistoryTail(
     content: Any?,
     rendering: MarkdownRendering,
     gesture: HistoryFollowGesture? = null,
+    lastContentIndex: Int,
 ) {
     val currentContent by rememberUpdatedState(content)
     val allowed = enabled && gesture?.busy != true
+    SideEffect {
+        if (allowed && gesture?.followRequested != false) {
+            // Apply a new snapshot's tail in the same layout, before an older anchor is painted.
+            // The offset also reaches the bottom when the final message exceeds the viewport.
+            list.requestScrollToItem(lastContentIndex.coerceAtLeast(0), Int.MAX_VALUE)
+        }
+    }
     LaunchedEffect(list, allowed, rendering, gesture) {
         if (allowed)
             snapshotFlow {

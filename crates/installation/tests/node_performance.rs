@@ -110,6 +110,7 @@ async fn service(root: &TempDir, origin: String, runner: String) -> Arc<Service>
         codex_bin: "false".into(),
         claude_bin: "false".into(),
         opencode_bin: "opencode".into(),
+        opencode_go_usage_url: cairn_installation::accounts::opencode::USAGE_URL.into(),
         concurrency: 4,
         runner_url: runner,
         ..common::config(root.path())

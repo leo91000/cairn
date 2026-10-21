@@ -1,0 +1,45 @@
+{
+  "reference": "4b9558e9d90114a663e14562e994df032e96db3c",
+  "observedAt": "2026-10-21T01:54:04.483Z",
+  "host": {
+    "platform": "linux",
+    "release": "7.2.9-arch1-1",
+    "cpu": "Intel(R) Core(TM) i9-14900K",
+    "logicalCpus": 32,
+    "totalMemoryBytes": 101005701120,
+    "loadAverage": [
+      27.34,
+      33.48,
+      17.94
+    ]
+  },
+  "limits": [
+    "Synthetic JVM/Robolectric fixtures; no affected-phone FPS claim",
+    "Identity seal/unseal excludes Android Keystore latency",
+    "Cold cache means a new HistoryCache instance; host filesystem page cache remains warm",
+    "300 ms controlled write gate demonstrates scheduling dependency; it is not measured phone storage time"
+  ],
+  "runs": [
+    {
+      "test": "build.cairn.app.data.HistoryCacheCostDiagnosisTest",
+      "stdout": [
+        "CACHE_HOST cpus=32 java=21.0.12.1 heap=536870912",
+        "{\"diagnostic\":\"CACHE_COST\",\"events\":200,\"retainedEntries\":1,\"memoryEntries\":1,\"diskEntries\":1,\"encodedBytes\":114015,\"diskBytes\":114015,\"recentHistoryWallMs\":0.4668939,\"recentHistoryCpuMs\":0.466451,\"warmReadP50Ms\":0.371345,\"coldReadP50Ms\":1.143827,\"saveP50Ms\":0.683032,\"forcedWriteP50Ms\":1.039121}",
+        "{\"diagnostic\":\"CACHE_COST\",\"events\":200,\"retainedEntries\":12,\"memoryEntries\":12,\"diskEntries\":12,\"encodedBytes\":114015,\"diskBytes\":1368180,\"recentHistoryWallMs\":0.4668939,\"recentHistoryCpuMs\":0.466451,\"warmReadP50Ms\":2.149565,\"coldReadP50Ms\":0.864709,\"saveP50Ms\":2.178442,\"forcedWriteP50Ms\":2.53265}",
+        "{\"diagnostic\":\"CACHE_COST\",\"events\":1250,\"retainedEntries\":1,\"memoryEntries\":1,\"diskEntries\":1,\"encodedBytes\":714319,\"diskBytes\":714319,\"recentHistoryWallMs\":0.8706246,\"recentHistoryCpuMs\":0.8694924,\"warmReadP50Ms\":0.884107,\"coldReadP50Ms\":2.554558,\"saveP50Ms\":1.840202,\"forcedWriteP50Ms\":2.663245}",
+        "{\"diagnostic\":\"CACHE_COST\",\"events\":1250,\"retainedEntries\":12,\"memoryEntries\":12,\"diskEntries\":12,\"encodedBytes\":714319,\"diskBytes\":8571828,\"recentHistoryWallMs\":0.8706246,\"recentHistoryCpuMs\":0.8694924,\"warmReadP50Ms\":8.223853,\"coldReadP50Ms\":2.303662,\"saveP50Ms\":9.080444,\"forcedWriteP50Ms\":9.247768}",
+        "{\"diagnostic\":\"CACHE_COST\",\"events\":4000,\"retainedEntries\":1,\"memoryEntries\":1,\"diskEntries\":1,\"encodedBytes\":2292819,\"diskBytes\":2292819,\"recentHistoryWallMs\":2.1406552000000003,\"recentHistoryCpuMs\":2.0092167,\"warmReadP50Ms\":2.231745,\"coldReadP50Ms\":6.303613,\"saveP50Ms\":4.228467,\"forcedWriteP50Ms\":8.87116}",
+        "{\"diagnostic\":\"CACHE_COST\",\"events\":4000,\"retainedEntries\":12,\"memoryEntries\":5,\"diskEntries\":9,\"encodedBytes\":2292819,\"diskBytes\":20635371,\"recentHistoryWallMs\":2.1406552000000003,\"recentHistoryCpuMs\":2.0092167,\"warmReadP50Ms\":10.799208,\"coldReadP50Ms\":7.667519,\"saveP50Ms\":12.764181,\"forcedWriteP50Ms\":17.421531}",
+        "CACHE_LOCK_DIAGNOSIS unrelatedWarmReadBlocked=true releasedSuccessfully=true"
+      ],
+      "suite": "<testsuite name=\"build.cairn.app.data.HistoryCacheCostDiagnosisTest\" tests=\"2\" skipped=\"0\" failures=\"0\" errors=\"0\" timestamp=\"2026-10-21T01:53:40.319Z\" hostname=\"leo-ms7d85\" time=\"3.745\">"
+    },
+    {
+      "test": "build.cairn.app.ui.CacheRefreshDiagnosisTest",
+      "stdout": [
+        "CACHE_REFRESH_DIAGNOSIS detached=false cacheHeldAfterReceptionMs=306.165668 visibleAfterReleaseMs=5.052216"
+      ],
+      "suite": "<testsuite name=\"build.cairn.app.ui.CacheRefreshDiagnosisTest\" tests=\"1\" skipped=\"0\" failures=\"0\" errors=\"0\" timestamp=\"2026-10-21T01:53:44.069Z\" hostname=\"leo-ms7d85\" time=\"1.88\">"
+    }
+  ]
+}
