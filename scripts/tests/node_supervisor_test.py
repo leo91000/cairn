@@ -17,6 +17,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from supervisor_fixture import write_supervisors
+
 SOURCE = Path(__file__).resolve().parents[2] / 'deploy/nodes/host.py'
 OLD = 'registry.example/cairn@sha256:' + '1' * 64
 NEW = 'registry.example/cairn@sha256:' + '2' * 64
@@ -76,7 +78,7 @@ class Supervisor(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('node_supervisor', SOURCE)
         host = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(host)
-        for config in [{'readyVmPoolSize': value} for value in [0, 5, True, '4', 1.5]] + [{'vmSnapshots': True}, {'diskLayout': 'paired-ext4-v1'}, {'vmSnapshots': 'true'}, {'vmSnapshots': 1}, {'diskLayout': 'invalid'}, {'blockTransport': 'ublk', 'vmSnapshots': True, 'diskLayout': 'flat-ext4-v1'}]:
+        for config in [{'readyVmPoolSize': value} for value in [0, 5, True, '4', 1.5]] + [ {'vmSnapshots': 'true'}, {'vmSnapshots': 1}, {'diskLayout': 'invalid'}, {'blockTransport': 'ublk', 'vmSnapshots': True, 'diskLayout': 'flat-ext4-v1'}]:
             with self.subTest(config=config), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 (root / 'config.json').write_text(json.dumps(config))
@@ -99,7 +101,8 @@ class Supervisor(unittest.TestCase):
             arguments = host.block_device_arguments('ublk')
         self.assertEqual(command.call_args.args[0], ['modprobe', 'ublk_drv'])
         self.assertEqual(arguments, ['--cap-add=SYS_RESOURCE', '--device=/dev/ublk-control', '--device-cgroup-rule=c 507:* rwm', '--device-cgroup-rule=b 260:* rwm', '-e', 'CAIRN_BLOCK_TRANSPORT=ublk'])
-        self.assertEqual(host.block_device_arguments('vhost-user'), [])
+        with patch.object(host, 'command'), patch.object(Path, 'stat', return_value=control), patch.object(Path, 'read_text', lambda path: '0' if path.name == 'io_uring_disabled' else devices):
+            self.assertEqual(host.block_device_arguments('vhost-user'), arguments)
 
         with patch.object(host, 'command'), patch.object(Path, 'stat', return_value=control), patch.object(Path, 'read_text', lambda path: '2' if path.name == 'io_uring_disabled' else devices):
             with self.assertRaisesRegex(RuntimeError, 'requires io_uring'):
@@ -204,8 +207,9 @@ class Supervisor(unittest.TestCase):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             (root / 'config.json').write_text(json.dumps({'image': OLD, 'master': f'http://127.0.0.1:{server.server_port}', 'cacheApprovedRuntimes': cache}))
-            env = {**os.environ, 'PATH': str(root) + os.pathsep + os.environ['PATH'], 'CAIRN_NODE_ROOT': str(root), 'FAIL_CANDIDATE': str(int(fail)), 'FIXTURE_SUPERVISOR': str(SOURCE)}
-            process = subprocess.Popen([sys.executable, str(SOURCE), 'run'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            _, supervisor = write_supervisors(root)
+            env = {**os.environ, 'PATH': str(root) + os.pathsep + os.environ['PATH'], 'CAIRN_NODE_ROOT': str(root), 'FAIL_CANDIDATE': str(int(fail)), 'FIXTURE_SUPERVISOR': str(supervisor)}
+            process = subprocess.Popen([sys.executable, str(supervisor), 'run'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
                 value = completed.get(timeout=40)
                 if retained and cache:

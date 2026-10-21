@@ -127,10 +127,9 @@ def refresh_supervisor():
     os.execv(sys.executable, [sys.executable, str(current), 'run'])
 
 
-def block_device_arguments(transport):
-    if transport == 'vhost-user':
-        return []
-    if transport != 'ublk':
+def block_device_arguments(transport='ublk'):
+    # Upgrade the former persisted selection; no legacy backend is launched.
+    if transport not in ('ublk', 'vhost-user'):
         raise ValueError('Unsupported block transport')
     # Package upgrades can remove the running kernel's module files while the
     # driver is still loaded. Its live devices remain usable until reboot.
@@ -176,8 +175,6 @@ def vm_arguments(config):
     layout = config.get('diskLayout', 'paired-ext4-v1' if snapshots else None)
     if layout not in (None, 'flat-ext4-v1', 'paired-ext4-v1'):
         raise ValueError('Unsupported disk layout')
-    if (snapshots or layout == 'paired-ext4-v1') and config.get('blockTransport', 'vhost-user') != 'ublk':
-        raise ValueError('Paired disks and snapshots require ublk')
     if snapshots and layout != 'paired-ext4-v1':
         raise ValueError('Snapshots require paired disks')
     arguments = []
@@ -198,7 +195,7 @@ def launch(image):
     config_path = ROOT / 'config.json'
     config = json.loads(config_path.read_text()) if config_path.exists() else {}
     vm_options = vm_arguments(config)
-    devices = block_device_arguments(config.get('blockTransport', 'vhost-user'))
+    devices = block_device_arguments(config.get('blockTransport', 'ublk'))
     remove()
     command(['docker', 'run', '-d', '--name', NAME, '--init', '--user', '0:0', '--read-only',
              '--health-cmd', '/usr/local/bin/node -e ' + shlex.quote(HEALTH_CHECK),

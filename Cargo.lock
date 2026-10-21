@@ -1260,11 +1260,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
- "vhost",
- "vhost-user-backend",
- "virtio-bindings",
- "virtio-queue",
- "vm-memory",
  "vmm-sys-util",
  "webrtc",
  "zip",
@@ -6336,7 +6331,6 @@ checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
- "rand 0.10.2",
  "serde_core",
  "wasm-bindgen",
 ]
@@ -6368,63 +6362,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "vhost"
-version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c63c14485260662b4257bd929d5fd4aaf96bbecbe61d2224bad8807849f5f8f"
-dependencies = [
- "bitflags 2.13.2",
- "libc",
- "uuid",
- "vm-memory",
- "vmm-sys-util",
-]
-
-[[package]]
-name = "vhost-user-backend"
-version = "0.23.0"
-dependencies = [
- "libc",
- "log",
- "vhost",
- "virtio-bindings",
- "virtio-queue",
- "vm-memory",
- "vmm-sys-util",
-]
-
-[[package]]
-name = "virtio-bindings"
-version = "0.2.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "091f1f09cfbf2a78563b562e7a949465cce1aef63b6065645188d995162f8868"
-
-[[package]]
-name = "virtio-queue"
-version = "0.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f631bfd09362a9b17f0cfd5ca3b0a1b179d153fa276f9ce86919d560891e61d6"
-dependencies = [
- "libc",
- "log",
- "virtio-bindings",
- "vm-memory",
- "vmm-sys-util",
-]
-
-[[package]]
-name = "vm-memory"
-version = "0.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b55e753c7725603745cb32b2287ef7ef3da05c03c7702cda3fa8abe25ae0465"
-dependencies = [
- "arc-swap",
- "libc",
- "thiserror 2.0.20",
- "winapi",
-]
 
 [[package]]
 name = "vmm-sys-util"

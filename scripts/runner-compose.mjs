@@ -173,8 +173,7 @@ export function firecrackerRunnerCompose(compose) {
   const blockTransport = runnerSetting('CAIRN_BLOCK_TRANSPORT')
   if (blockTransport !== undefined && !['vhost-user', 'ublk'].includes(blockTransport))
     throw new Error('Unsupported runner block transport.')
-  if (blockTransport !== undefined)
-    migratedEnvironment.CAIRN_BLOCK_TRANSPORT = blockTransport
+  migratedEnvironment.CAIRN_BLOCK_TRANSPORT = 'ublk'
 
   const diskLayout = runnerSetting('CAIRN_DISK_LAYOUT')
   const snapshots = runnerSetting('CAIRN_VM_SNAPSHOTS')
@@ -182,8 +181,6 @@ export function firecrackerRunnerCompose(compose) {
     throw new Error('Unsupported runner disk layout.')
   if (snapshots !== undefined && !['true', 'false'].includes(snapshots))
     throw new Error('Runner snapshots must be true or false.')
-  if ((diskLayout === 'paired-ext4-v1' || snapshots === 'true') && blockTransport !== 'ublk')
-    throw new Error('Paired disks and snapshots require ublk.')
   if (snapshots === 'true' && diskLayout !== 'paired-ext4-v1')
     throw new Error('Snapshots require paired disks.')
   if (diskLayout !== undefined)
@@ -192,16 +189,22 @@ export function firecrackerRunnerCompose(compose) {
     migratedEnvironment.CAIRN_VM_SNAPSHOTS = snapshots
 
   const devices = ['/dev/kvm:/dev/kvm', '/dev/fuse:/dev/fuse', '/dev/net/tun:/dev/net/tun']
-  if (blockTransport === 'ublk') {
-    const configuredDevices = runner.get('devices')?.toJSON()
-    const rules = runner.get('device_cgroup_rules')?.toJSON()
-    const control = '/dev/ublk-control:/dev/ublk-control'
-    const validClasses = Array.isArray(rules) && rules.length === 2
-      && ['c', 'b'].every(type => rules.some(rule => typeof rule === 'string' && new RegExp(`^${type} [1-9][0-9]*:\\* rwm$`).test(rule)))
-    if (!Array.isArray(configuredDevices) || !configuredDevices.includes(control) || !validClasses)
-      throw new Error('ublk requires its control device and the two detected host device classes.')
-    devices.push(control)
+  const configuredDevices = runner.get('devices')?.toJSON()
+  const rules = runner.get('device_cgroup_rules')?.toJSON()
+  const control = '/dev/ublk-control:/dev/ublk-control'
+  const requiredClasses = {
+    // eslint-disable-next-line no-template-curly-in-string -- Compose requires host detection.
+    c: 'c ${CAIRN_UBLK_CHAR_MAJOR:?Set CAIRN_UBLK_CHAR_MAJOR from ublk-char}:* rwm',
+    // eslint-disable-next-line no-template-curly-in-string -- Compose requires host detection.
+    b: 'b ${CAIRN_UBLK_BLOCK_MAJOR:?Set CAIRN_UBLK_BLOCK_MAJOR from ublk or blkext}:* rwm',
   }
+  const validClasses = Array.isArray(rules) && rules.length === 2
+    && ['c', 'b'].every(type => rules.some(rule =>
+      typeof rule === 'string'
+      && (rule === requiredClasses[type] || new RegExp(`^${type} [1-9][0-9]*:\\* rwm$`).test(rule))))
+  if (!Array.isArray(configuredDevices) || !configuredDevices.includes(control) || !validClasses)
+    throw new Error('ublk requires its control device and the two detected host device classes.')
+  devices.push(control)
 
   const values = {
     user: '0:0',
@@ -209,7 +212,7 @@ export function firecrackerRunnerCompose(compose) {
     stop_grace_period: '30s',
     read_only: true,
     cap_drop: ['ALL'],
-    cap_add: ['SYS_ADMIN', 'SYS_PTRACE', 'SYS_NICE', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE', ...(blockTransport === 'ublk' ? ['SYS_RESOURCE'] : [])],
+    cap_add: ['SYS_ADMIN', 'SYS_PTRACE', 'SYS_NICE', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE', 'SYS_RESOURCE'],
     security_opt: ['apparmor:unconfined', 'seccomp:unconfined'],
     devices,
     sysctls: { 'net.ipv4.ip_forward': '1', 'net.ipv6.conf.all.disable_ipv6': '1' },

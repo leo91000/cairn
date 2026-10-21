@@ -517,12 +517,11 @@ impl Vm {
         atomic_write(&jail.join("config.json"), &serde_json::to_vec(&config)?).await?;
         std::os::unix::fs::chown(jail.join("config.json"), Some(self.uid), Some(self.uid))?;
         let disk_bytes = self.volume.as_ref().unwrap().disk.size();
-        // A vhost frontend also creates a shared guest-memory file. Shared
-        // node limits may allocate more RAM than the conversation's disk size.
+        // Snapshot memory files may exceed the conversation's disk size.
         let file_bytes = disk_bytes.max(resources.memory_mi_b * 1024 * 1024);
         tracing::info!(target: "cairn_performance", operation = "vm_configuration", id,
             cpu = resources.cpu, memory_mib = resources.memory_mi_b, disk_bytes,
-            file_limit_bytes = file_bytes, vhost = mounted.vhost());
+            file_limit_bytes = file_bytes, transport = "ublk");
         let child = self.child.insert(
             jailer(
                 id,
@@ -760,8 +759,7 @@ impl Vm {
         Ok(())
     }
 
-    /// Allocated shared guest pages plus the VMM's other resident pages. Plain
-    /// RSS alone can miss shared memfd pages held by KVM or the block backend.
+    /// Native virtio-blk uses anonymous guest RAM, included in the VMM RSS.
     pub(super) fn resident_bytes(&self) -> Option<u64> {
         let pid = self.child.as_ref()?.id()?;
         let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
@@ -775,10 +773,7 @@ impl Vm {
                     .checked_mul(1024)
             })
         };
-        let rss = field("VmRSS:")?;
-        let mapped_shared = field("RssShmem:").unwrap_or(0);
-        let allocated = self.mounted.as_ref()?.allocated_memory_bytes().ok()?;
-        Some(rss.saturating_add(allocated.saturating_sub(mapped_shared)))
+        field("VmRSS:")
     }
 
     pub async fn execute(

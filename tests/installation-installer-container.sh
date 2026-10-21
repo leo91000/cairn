@@ -30,7 +30,7 @@ docker network create "$name" >/dev/null
 docker run -d --name "$name-postgres" --network "$name" --network-alias postgres \
   -e POSTGRES_USER=cairn -e POSTGRES_PASSWORD=test-only -e POSTGRES_DB=cairn_beacon_test \
   postgres:17-alpine >/dev/null
-args=(--rm --network "$name" -v "$PWD:/repo:ro" -v "$fixture:/fixture" \
+args=(--rm --device /dev/ublk-control --network "$name" -v "$PWD:/repo:ro" -v "$fixture:/fixture" \
   -v "$storage_test:/fixture/storage-continuity:ro" \
   -v "$(node -p process.execPath):/usr/local/bin/node:ro" \
   -e CAIRN_BEACON_TEST_DATABASE_URL=postgres://cairn:test-only@postgres/cairn_beacon_test)

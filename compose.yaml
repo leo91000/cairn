@@ -45,14 +45,20 @@ services:
     environment:
       DATA_DIR: /data
       CONCURRENCY: ${CONCURRENCY:-4}
+      CAIRN_BLOCK_TRANSPORT: ublk
     read_only: true
     cap_drop: [ALL]
-    cap_add: [SYS_ADMIN, SYS_PTRACE, SYS_NICE, NET_ADMIN, SYS_CHROOT, SETUID, SETGID, MKNOD, CHOWN, FOWNER, KILL, DAC_OVERRIDE]
+    cap_add: [SYS_ADMIN, SYS_PTRACE, SYS_NICE, NET_ADMIN, SYS_CHROOT, SETUID, SETGID, MKNOD, CHOWN, FOWNER, KILL, DAC_OVERRIDE, SYS_RESOURCE]
     security_opt: [apparmor:unconfined, seccomp:unconfined]
     devices:
       - /dev/kvm:/dev/kvm
       - /dev/fuse:/dev/fuse
       - /dev/net/tun:/dev/net/tun
+      - /dev/ublk-control:/dev/ublk-control
+    # Set these from /proc/devices after loading ublk_drv on this host.
+    device_cgroup_rules:
+      - 'c ${CAIRN_UBLK_CHAR_MAJOR:?Set CAIRN_UBLK_CHAR_MAJOR from ublk-char}:* rwm'
+      - 'b ${CAIRN_UBLK_BLOCK_MAJOR:?Set CAIRN_UBLK_BLOCK_MAJOR from ublk or blkext}:* rwm'
     sysctls:
       net.ipv4.ip_forward: '1'
       net.ipv6.conf.all.disable_ipv6: '1'
