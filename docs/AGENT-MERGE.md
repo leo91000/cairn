@@ -21,7 +21,8 @@ database locks. There is no new web or Android control in this change.
 The transaction transfers every source task, including archived tasks, and every
 conversation, including trash. It changes stored run profile IDs so failed or
 stopped sessions can still resume. Run IDs, messages, events, workspaces, selected
-engine, model, instructions and access snapshots are preserved. The destination
+engine, model, instructions and effective access are preserved. Legacy access
+snapshots are made explicit before changing their identity. The destination
 profile, its defaults, credentials and portrait remain unchanged. Future task
 runs use the destination's defaults; existing conversations keep their last
 engine and model unless the user chooses another one. The source profile,
