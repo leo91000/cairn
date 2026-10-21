@@ -169,6 +169,17 @@ jobs:
       - name: Check Rust documentation examples
         run: node scripts/test-backend.mjs --doc --features ublk-prototype
   node-checks:
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        env:
+          POSTGRES_USER: cairn
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: cairn_beacon_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     needs: resolve
     if: needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -176,6 +187,7 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_INCREMENTAL: '0'
+      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@localhost:5432/cairn_beacon_test
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: ./.github/actions/setup-pnpm
@@ -185,6 +197,8 @@ jobs:
       - name: Install native test dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age
       - uses: ./.github/actions/cache-rust
+      - name: Build the frontend used by installer and update fixtures
+        run: pnpm exec vite build --config apps/web/vite.config.ts
       - name: Validate node supervisor and S3 recovery
         run: |
           python3 scripts/tests/guest_trim_test.py

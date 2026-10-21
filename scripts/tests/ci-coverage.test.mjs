@@ -29,6 +29,17 @@ describe('parallel CI coverage', () => {
     expect(owners.map(([name]) => name)).toEqual(['backend'])
   })
 
+  it('gives installer and update fixtures their own database and web assets', () => {
+    const job = quality.jobs['node-checks']
+    expect(job.services.postgres.env.POSTGRES_DB).toBe('cairn_beacon_test')
+    expect(job.services.postgres.ports).toContain('5432:5432')
+    expect(job.env.CAIRN_BEACON_TEST_DATABASE_URL).toBe('postgres://cairn:test-only@localhost:5432/cairn_beacon_test')
+    const web = job.steps.findIndex(step => step.run?.includes('vite build --config apps/web/vite.config.ts'))
+    const containers = job.steps.findIndex(step => step.run?.includes('python3 tests/installation_update_containers.py'))
+    expect(web).toBeGreaterThan(-1)
+    expect(containers).toBeGreaterThan(web)
+  })
+
   it('runs every network topology exactly once on independent hosts', () => {
     const scenarios = quality.jobs['network-bench'].strategy.matrix.include.flatMap(group => group.scenarios.split(' '))
     expect(scenarios.sort()).toEqual(['same-lan', 'mdns-only-client', 'nat-client', 'nat-installation', 'nat-both', 'udp-blocked', 'symmetric-nat', 'symmetric-client', 'same-server', 'network-change', 'packet-loss', 'qualification'].sort())

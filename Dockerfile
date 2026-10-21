@@ -175,8 +175,7 @@ COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/package.json ./package.json
 RUN install -d -o node -g node /data /workspaces /home/node/.agents /home/node/.agents/skills /home/node/.codex \
     && chown node:node /home/node /app
-ARG VCS_REF=development
-ENV APP_COMMIT=$VCS_REF APP_RUNTIME_ID=$VCS_REF APP_CODEX_VERSION=$CODEX_VERSION APP_GH_VERSION=$GH_VERSION
+ENV APP_CODEX_VERSION=$CODEX_VERSION APP_GH_VERSION=$GH_VERSION
 USER node
 VOLUME ["/data", "/home/node", "/workspaces"]
 EXPOSE 4310
@@ -242,4 +241,8 @@ COPY --from=guest-disk /root.ext4.zst /opt/cairn-vm/root.ext4.zst
 COPY --chmod=755 deploy/microvm/init deploy/microvm/docker deploy/microvm/install-docker /opt/cairn-vm/
 COPY --chmod=755 deploy/nodes /opt/cairn-node
 RUN node /opt/cairn-node/bundle-native-tools.mjs && rm -rf /opt/cairn-native-tools
+# Build identity belongs to the shipped image; metadata-only commits must not
+# invalidate the guest filesystem's package installation and compression layers.
+ARG VCS_REF=development
+ENV APP_COMMIT=$VCS_REF APP_RUNTIME_ID=$VCS_REF
 USER node

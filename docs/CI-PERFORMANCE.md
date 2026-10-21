@@ -46,7 +46,9 @@ Compare cold cache initialization separately from subsequent warm runs.
 - The installation image starts immediately after release resolution. Before
   smoke testing it waits for this workflow run's fixture build and fails if that
   build terminates without its artifacts. Image publication requires that build
-  to succeed as well as the image's own validation.
+  to succeed as well as the image's own validation. Static OS package layers
+  precede dynamic CLI version arguments, and commit identity is attached to the
+  final installation image after guest filesystem construction.
 - Android unit tests and lint run independently, and four device shards retain
   the existing PR annotations and full main/tag test selection.
 - Storage measurements keep the production release profile and workload. Their
