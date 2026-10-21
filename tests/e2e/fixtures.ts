@@ -99,10 +99,11 @@ export const test = base.extend<object, { workspace: Workspace }>({
     const go = createServer((request, response) => {
       const key = request.headers.authorization?.replace(/^Bearer /, '') ?? ''
       response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(goUsage.get(key) ?? {
-        useBalance: false,
-        rollingUsage: { status: 'ok', usagePercent: 25, resetInSec: 7200 },
-        weeklyUsage: { status: 'ok', usagePercent: 60, resetInSec: 86400 },
-        monthlyUsage: { status: 'ok', usagePercent: 85, resetInSec: 604800 },
+        usage: {
+          rolling: { status: 'ok', percent: 25, resetsAt: new Date(Date.now() + 7200_000).toISOString() },
+          weekly: { status: 'ok', percent: 60, resetsAt: new Date(Date.now() + 86400_000).toISOString() },
+          monthly: { status: 'ok', percent: 85, resetsAt: new Date(Date.now() + 604800_000).toISOString() },
+        },
       }))
     })
     go.listen(0, '127.0.0.1')
