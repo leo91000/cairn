@@ -63,9 +63,9 @@ to compatible earlier builds. The cache omits incremental artifacts and extracte
 artifacts are retained to reuse unchanged code. Cache ownership avoids storing
 four copies of the same dependency graph.
 
-PR caches remain scoped to their PR; other PRs reuse main's cache. A first run
-with the new cache format must compile dependencies. That initialization is not
-evidence of warm-run performance. Storage release caches also refresh after
+PR caches remain scoped to their PR; other PRs reuse main's cache. The first run with the new cache format can bootstrap from the previous main
+cache when no compiled targets were restored. If both caches are absent, it must
+compile dependencies; that initialization is not evidence of warm-run performance. Storage release caches also refresh after
 source changes rather than staying fixed until Cargo.lock changes.
 
 ### Remaining measurements

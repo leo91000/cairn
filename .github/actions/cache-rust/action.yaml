@@ -15,7 +15,8 @@ runs:
       run: |
         echo "primary=$CACHE_PREFIX-$CACHE_REVISION" >> "$GITHUB_OUTPUT"
         echo "fallback=$CACHE_PREFIX-" >> "$GITHUB_OUTPUT"
-    - uses: actions/cache@v6.1.0
+    - id: writer
+      uses: actions/cache@v6.1.0
       if: inputs.save == 'true'
       env:
         SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
@@ -30,7 +31,8 @@ runs:
         restore-keys: |
           ${{ steps.key.outputs.fallback }}
           rust-v3-${{ runner.os }}-1.97.1-debug0-
-    - uses: actions/cache/restore@v6.1.0
+    - id: reader
+      uses: actions/cache/restore@v6.1.0
       if: inputs.save != 'true'
       env:
         SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
@@ -45,3 +47,23 @@ runs:
         restore-keys: |
           ${{ steps.key.outputs.fallback }}
           rust-v3-${{ runner.os }}-1.97.1-debug0-
+    # Seed the new format once from main's previous cache rather than making
+    # every workload compile its full dependency graph during migration.
+    - id: bootstrap
+      shell: bash
+      run: |
+        if [[ ! -d target/debug/deps ]]; then
+          echo 'needed=true' >> "$GITHUB_OUTPUT"
+        fi
+    - name: Bootstrap from the previous cache format
+      if: steps.bootstrap.outputs.needed == 'true'
+      uses: actions/cache/restore@v6.1.0
+      env:
+        SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
+      with:
+        path: |
+          ~/.cargo/registry/
+          ~/.cargo/git/
+          target/
+        key: rust-${{ runner.os }}-1.97.1-debug0-${{ hashFiles('Cargo.lock') }}
+        restore-keys: rust-${{ runner.os }}-1.97.1-debug0-
