@@ -44,10 +44,10 @@ previous session or fail. Parseable JSON is insufficient to preserve this reques
 
 ### Forward transition
 
-The normal compatibility check must stop automatic rollout across epochs 4 and 5.
-A separately reviewed transition is required before a release; this PR does not
-perform a release or approve deployment. Stop the previous manager before starting
-the epoch-5 binary so the two reader/writer contracts cannot operate concurrently.
+The reviewed [automatic transition to epoch 9](AUTOMATIC-MIGRATIONS.md) includes this
+epoch-4 → 5 boundary. It qualifies the restart regressions and enforces the database
+rollback fence. The installation updater stops the previous manager before starting
+the candidate so the two reader/writer contracts cannot operate concurrently.
 
 No eager SQL migration or storage-object rewrite is needed. Existing chat
 intentions and legacy checkpoint markers are left intact. The new reader accepts

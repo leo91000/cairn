@@ -3,8 +3,9 @@
 Moving GitHub into the bundled GitHub package ([ADR 0053](adr/0053-github-as-a-bundled-plugin.md))
 changes the installation data compatibility epoch from 7 to 8. Merging the
 implementation does not run the migration. The first startup with the new binary
-does, and the automatic production compatibility check stops an upgrade from epoch 7
-until its reviewed forward rollout is carried out. See the
+does. The [reviewed automatic transition to epoch 9](AUTOMATIC-MIGRATIONS.md)
+includes this epoch-7 → 8 conversion and adds its on-disk rollback fence. A stable
+release from a declared source epoch performs it automatically. See the
 [production release contract](PRODUCTION-CAIRN.md#installation-data-compatibility).
 
 ## What changes on disk
@@ -48,11 +49,13 @@ a forward migration without a reverse migration implemented in Cairn.
    presence of `agent-github:*` keys, whether the installation home has a `gh` login,
    GitHub skill sources, and pending GitHub waits. Check the migration regression
    test (`data_saved_before_the_package_moves_into_instances`).
-3. Review the forward-only epoch transition separately from routine releases. The
-   release system creates no backup. Do not change the epoch or legacy tree to bypass
-   the compatibility check.
-4. Deploy through the reviewed operator procedure. Do not roll back to an epoch-7
-   binary after migration; apply a forward fix if startup fails.
+3. Keep the forward transition and its regression in the reviewed automatic
+   migration declaration. CI must observe that test passing before the candidate
+   image is published. The release system creates no backup; do not lower the epoch,
+   database version or legacy tree to bypass the compatibility check.
+4. The stable release deploys the qualified candidate and waits for the installation
+   manager, runner and execution readiness. Do not roll back to an epoch-7 binary
+   after migration; retry the same candidate or apply a forward fix if startup fails.
 5. Verify Plugins → GitHub: the migrated accounts, their login and test, the agents
    granted on each agent page, a run pushing a branch, a `wait_for` on a pull request,
    a project import, and a skill source status check. Conversation VMs started before

@@ -136,7 +136,8 @@ Installation verifies downloads and tool inventory before execution, checks CLI
 compatibility, and selects a version directory atomically. Updates prepare before
 draining, wait for owned work to stop and synchronize, then health-check the
 candidate before selecting it. A failed compatible candidate restores the prior
-version. Different data epochs require a reviewed manual transition. Old coding
+version. Different data epochs require a declared, tested forward transition under
+the [automatic migration contract](AUTOMATIC-MIGRATIONS.md). Old coding
 engines remain available while local conversations pin them; obsolete versions
 are collected without changing a conversation's runtime silently.
 
@@ -147,6 +148,7 @@ GPU and mandatory S3-disk decisions for this backend. Compatibility epoch advanc
 from 5 to 6, retaining epoch 5's durable session-restart contract; the legacy tree
 remains unchanged. This is additive for existing VM state, but epoch-5 binaries
 cannot interpret native backends, provenance, grants
-or file manifests. Routine deployment must stop at this transition. Deployment
-rollback requires a matching pre-transition data backup and prior binary; no
-automatic rollback restores installation data.
+or file manifests. The [automatic epoch-9 transition](AUTOMATIC-MIGRATIONS.md) now
+qualifies this boundary and prevents an older manager from reopening migrated data.
+After a failed migration, retain the candidate and use a forward fix; no automatic
+rollback restores installation data.

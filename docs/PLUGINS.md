@@ -841,14 +841,14 @@ choice defaults remain forbidden. A null default on a non-secret field means
 no default. No values are truncated.
 
 This tightens the set of persisted manifests that the registry can read. The
-installation compatibility epoch advances from 3 to 4; automatic production
-rollout must stop at that boundary under [the production compatibility
-contract](PRODUCTION-CAIRN.md#installation-data-compatibility). This PR does not
-perform a rollout. Both bundled manifests and ordinary valid installed packages
+installation compatibility epoch advances from 3 to 4. The subsequently reviewed
+[automatic transition to epoch 9](AUTOMATIC-MIGRATIONS.md) now covers this boundary
+under [the production compatibility contract](PRODUCTION-CAIRN.md#installation-data-compatibility).
+Both bundled manifests and ordinary valid installed packages
 retain their settings, serialized form and approval digests; no database, secret
 or instance record is rewritten.
 
-Before a separately reviewed epoch transition, inspect installed manifest settings
+When qualifying an epoch transition, inspect installed manifest settings
 for negative, zero, fractional or oversized `maxLength`, reversed numeric bounds,
 and defaults that fail the rules above. The registry revalidates every version on
 read: an incompatible installed version fails with a validation error, remains on
