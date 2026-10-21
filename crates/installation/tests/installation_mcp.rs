@@ -661,6 +661,45 @@ async fn delete_agent_cannot_use_a_revoked_installation_grant() {
 }
 
 #[tokio::test]
+async fn merge_agents_cannot_use_a_revoked_installation_grant() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (run, configuration) = active_run(&s, &main).await;
+    let agent = s
+        .agent(json!({ "name": "Keep this profile" }), None)
+        .await
+        .unwrap();
+    s.mcps
+        .revoke_run(&s, run["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    let token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let (status, _) = request(
+        &s,
+        token,
+        "tools/call",
+        common::mcp_arguments(
+            "merge_agents",
+            &json!({
+                "sourceId": agent["id"], "targetId": MAIN_AGENT_ID, "confirm": true,
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(
+        s.store
+            .get("agents", agent["id"].as_str().unwrap())
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn installation_access_manages_resources_and_other_agents_work() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;

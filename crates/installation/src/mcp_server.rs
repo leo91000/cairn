@@ -712,6 +712,7 @@ pub(crate) async fn invoke(
                 .await?;
             Ok(json!({ "deleted": true }))
         }
+        "merge_agents" => s.merge_agents_authorized(args, authorize).await,
         "run_task" => s.enqueue(text(&args, "taskId"), "mcp", None).await,
         "cancel_run" => {
             s.worker.cancel(s, text(&args, "runId")).await?;

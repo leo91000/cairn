@@ -1,6 +1,7 @@
 pub mod accounts;
 pub mod agent_avatars;
 pub mod agent_grants;
+mod agent_merge;
 mod agent_plan;
 pub mod api;
 pub mod artifacts;

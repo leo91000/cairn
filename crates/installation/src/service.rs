@@ -206,6 +206,12 @@ impl Service {
                 if let Some(previous) = replayed_creation(db, "agents", creation_id.as_deref())? {
                     return Ok((previous, false));
                 }
+                if !creating {
+                    required(
+                        db.get("agents", text(&agent, "id"))?,
+                        "Agent no longer exists",
+                    )?;
+                }
                 if let Some(expected) = &expected_revision
                     && let Some(current) = db.get("agents", text(&agent, "id"))?
                     && current["revision"] != *expected
@@ -513,6 +519,10 @@ impl Service {
         let existing = existing.map(str::to_owned);
         self.store
             .transaction(move |db| {
+                required(
+                    db.get("agents", text(&task, "agentId"))?,
+                    "Agent no longer exists",
+                )?;
                 let previous = existing
                     .as_deref()
                     .map(|id| db.get("tasks", id))
@@ -728,6 +738,10 @@ impl Service {
         let result = self
             .store
             .transaction(move |db| {
+                required(
+                    db.get("agents", text(&run["snapshot"]["agent"], "id"))?,
+                    "Agent no longer exists",
+                )?;
                 let grant = crate::native::policy::authorize_origin(
                     db,
                     &run["snapshot"]["agent"],
@@ -965,7 +979,7 @@ fn ensure_removable(db: &Db<'_>, kind: &str, id: &str) -> Result<()> {
 }
 
 /// Drops an agent's credentials, portrait, plugin grants and exclusive node grants.
-fn forget_agent(db: &Db<'_>, id: &str) -> Result<()> {
+pub(crate) fn forget_agent(db: &Db<'_>, id: &str) -> Result<()> {
     db.delete(&format!("agent-github:{id}"))?;
     db.delete(&format!("agent-avatar:{id}"))?;
     crate::agent_grants::forget_agent(db, id)

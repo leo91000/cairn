@@ -112,6 +112,16 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
         ("GET", ["agent-avatars"]) => json!({ "configured": s.avatars.configured(s).await? }),
         ("POST", ["agents", id, "avatar", "generate"]) => s.avatars.generate(s, id).await?,
         ("POST", ["agents", id, "preview"]) => s.agent_preview(input.body.clone(), id).await?,
+        ("POST", ["agents", id, "merge"]) => {
+            let mut args = input.body.clone();
+            if !args.is_object() {
+                return Err(Error::bad(
+                    "Enter a destination agent and confirm the merge.",
+                ));
+            }
+            args["sourceId"] = (*id).into();
+            s.merge_agents(args).await?
+        }
         ("GET", ["agents"]) => {
             // Never stored: clients tell this release from an earlier or rolled-back one,
             // which does not keep grants on agents.
@@ -508,20 +518,29 @@ async fn connection_routes(
 }
 
 async fn set_github_token(s: &Service, id: &str, input: &Input) -> Result<Value> {
-    s.get("agents", id).await?;
-    let token = input.string("token", 500)?.trim();
-    let key = format!("agent-github:{id}");
-    if token.is_empty() {
-        s.store.delete(&key).await?;
-    } else {
-        s.store.set(&key, token.into(), None).await?;
-    }
-    let detail = json!({
-        "agentId": id,
-        "provider": "github"
-    });
-    s.store.audit("agent.connection.updated", detail).await?;
-    Ok(json!({ "configured": !token.is_empty() }))
+    let token = input.string("token", 500)?.trim().to_owned();
+    let id = id.to_owned();
+    s.store
+        .transaction(move |db| {
+            // Deletion and merge use this same writer: never publish a credential
+            // after the profile that owns it has disappeared.
+            crate::error::required(db.get("agents", &id)?, "Agent not found")?;
+            let key = format!("agent-github:{id}");
+            if token.is_empty() {
+                db.delete(&key)?;
+            } else {
+                db.set(&key, &json!(token), None)?;
+            }
+            db.audit(
+                "agent.connection.updated",
+                &json!({
+                    "agentId": id,
+                    "provider": "github",
+                }),
+            )?;
+            Ok(json!({ "configured": !token.is_empty() }))
+        })
+        .await
 }
 
 fn settings(s: &Service) -> Value {
