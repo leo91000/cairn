@@ -163,6 +163,54 @@ fn settings() -> Value {
     })
 }
 
+#[tokio::test]
+async fn oauth_form_compares_defaulted_scope_settings_without_restoring_cleared_values() {
+    let f = fixture().await;
+    let settings = json!({ "clientId": "fixture-client", "allowSend": true });
+    let started = oauth::start(
+        &f.s,
+        "gmail",
+        &json!({
+            "settings": settings, "secrets": { "clientSecret": "fixture-secret" },
+        }),
+        "cairn-account:fixture-owner",
+    )
+    .await
+    .unwrap();
+    oauth::callback(
+        &f.s,
+        &json!({ "state": started["id"], "code": "alice" }),
+        "cairn-account:fixture-owner",
+    )
+    .await
+    .unwrap();
+
+    let completed = cairn_installation::plugins::forms::form(
+        &f.s,
+        "gmail",
+        &json!({
+            "settings": settings, "credentialFlow": started["id"],
+            "secrets": { "clientSecret": "fixture-secret" },
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(completed["values"]["email"], "alice@example.test");
+    let changed = cairn_installation::plugins::forms::form(
+        &f.s,
+        "gmail",
+        &json!({
+            "settings": { "clientId": "fixture-client", "allowSend": true, "allowModify": true },
+            "credentialFlow": started["id"], "secrets": { "clientSecret": "fixture-secret" },
+        }),
+    )
+    .await;
+    assert!(
+        changed.is_err(),
+        "Changing selected OAuth scopes must still require consent"
+    );
+}
+
 async fn sign_in(f: &Fixture, account: &str, instance: Option<&str>) -> Value {
     let started = oauth::start(&f.s, "gmail", &json!({ "instance": instance, "settings": settings(), "secrets": { "clientSecret": "fixture-secret" } }), "cairn-account:fixture-owner").await.unwrap();
     let url = url::Url::parse(text(&started, "verificationUri")).unwrap();

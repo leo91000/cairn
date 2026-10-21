@@ -33,10 +33,7 @@ fn values(manifest: &Manifest, input: &Value) -> Value {
         .filter(|field| field["type"] != "secret")
     {
         let key = text(field, "key");
-        if let Some(value) = input
-            .get(key)
-            .filter(|value| !value.is_null())
-            .or_else(|| field.get("default"))
+        if let Some(value) = input.get(key).filter(|value| !value.is_null())
             && let Ok(value) = connections::setting(field, value)
         {
             output.insert(key.to_owned(), value);

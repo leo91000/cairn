@@ -106,6 +106,15 @@ test('Gmail connects two explicit mailboxes with OAuth and saves no browser toke
   expect(saves.every(value => !Object.hasOwn(value, 'token'))).toBe(true)
   await expect(page.getByRole('heading', { name: 'alice@example.test', exact: true })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'bob@example.test', exact: true })).toBeVisible()
+
+  const revocationWarning = 'Disconnected locally. Google did not confirm revocation; remove this app from your Google account manually.'
+  await page.route('**/api/plugins/gmail/connections/*/disconnect', async (route) => {
+    expect(route.request().method()).toBe('POST')
+    connections[0]!.enabled = false
+    await route.fulfill({ json: { revoked: false, message: revocationWarning } })
+  })
+  await page.getByRole('button', { name: 'Disconnect', exact: true }).first().click()
+  await expect(page.getByRole('status').filter({ hasText: revocationWarning })).toBeVisible()
 })
 
 test('OAuth callback removes the code from browser history before posting it', async ({ page }) => {

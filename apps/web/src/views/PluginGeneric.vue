@@ -315,6 +315,14 @@ async function test(connection: PluginConnection) {
   })
 }
 
+async function disconnect(connection: PluginConnection) {
+  await action(async () => {
+    const result = await api<{ message: string }>(`/plugins/${id.value}/connections/${connection.id}/disconnect`, { method: 'POST' })
+    await load()
+    notify(`${connection.name}: ${result.message}`)
+  })
+}
+
 async function remove() {
   await action(async () => {
     await api(`/plugins/${id.value}/connections/${removing.value!.id}`, { method: 'DELETE' })
@@ -585,7 +593,7 @@ onBeforeUnmount(() => {
                   v-if="manifest.credential?.oauth"
                   size="small"
                   :disabled="busy"
-                  @click="post(connection, 'disconnect')"
+                  @click="disconnect(connection)"
                 >
                   Disconnect
                 </UiButton>

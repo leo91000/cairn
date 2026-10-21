@@ -170,9 +170,31 @@ pub async fn flow_credential(
                 return Err(expired());
             }
         }
+        // Compare only the client and scope fields, applying their defaults as at
+        // sign-in. A live form draft can omit other fields the owner just cleared.
+        let fields = package
+            .manifest
+            .settings
+            .iter()
+            .filter(|field| {
+                let key = text(field, "key");
+                key == oauth.client_id_setting || oauth.scope_settings.contains_key(key)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let supplied = fields
+            .iter()
+            .filter_map(|field| {
+                let key = text(field, "key");
+                settings
+                    .get(key)
+                    .map(|value| (key.to_owned(), value.clone()))
+            })
+            .collect::<Map<_, _>>();
+        let normalized = connections::settings_with(&fields, &Value::Object(supplied))?;
         s.plugins
             .oauth_flows
-            .credential(plugin, flow, instance, settings, oauth, take)
+            .credential(plugin, flow, instance, &normalized, oauth, take)
     } else {
         Ok(json!({ "token": s.plugins.device_flows.token(plugin, flow, take)? }))
     }
