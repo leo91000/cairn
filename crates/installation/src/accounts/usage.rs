@@ -155,12 +155,17 @@ impl Usage {
         if (!before.allowed && after.allowed) || (!before.uses_balance() && after.uses_balance()) {
             return true;
         }
-        after.windows(model).any(|current| {
-            before.windows(model).any(|old| {
+        // A decrease proves quota recovery only when every limiting window has
+        // capacity. The provider's paid balance is not measured by these windows.
+        let window_capacity = !after.windows(model).any(|window| window.reached)
+            && after.remaining(model).is_some_and(|left| left > 0.);
+        window_capacity
+            && after.windows(model).any(|current| {
+                before.windows(model).any(|old| {
                 old.id == current.id
                     && matches!((old.used(), current.used()), (Some(old), Some(now)) if now < old)
             })
-        })
+            })
     }
 }
 
@@ -230,6 +235,21 @@ mod tests {
         assert!(!recovered(&usage(100., 0.), &usage(100., 0.), ""));
         let before = json!({ "allowed": false, "windows": [{ "id": "w", "usedPercent": 10.0 }] });
         assert!(recovered(&before, &usage(10., 0.), ""));
+    }
+
+    #[test]
+    fn paid_balance_does_not_turn_an_unrelated_window_reset_into_recovery() {
+        let mut before = usage(100., 50.);
+        before["useBalance"] = true.into();
+        before["windows"][0]["reached"] = true.into();
+        let mut after = before.clone();
+        after["windows"][2]["usedPercent"] = 0.into();
+        assert_eq!(remaining(&after, "gpt-spark"), Some(0.));
+        assert!(!recovered(&before, &after, "gpt-spark"));
+
+        after["windows"][0]["usedPercent"] = 20.into();
+        after["windows"][0]["reached"] = false.into();
+        assert!(recovered(&before, &after, "gpt-spark"));
     }
 
     #[test]

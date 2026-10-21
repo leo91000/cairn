@@ -33,7 +33,9 @@ credits. The quota percentages stay unchanged on screen and both clients explain
 the setting. A native rate-limit error still marks the account exhausted, because
 the balance may itself be unavailable. Since the usage endpoint does not measure
 Zen credits, this native-limit fence permits a retry after five minutes even if
-the subscription percentages are unchanged. Cairn does not enable spending or redeem
+the subscription percentages are unchanged. An earlier quota reset restores
+eligibility only when every applicable window has capacity; a decrease in one
+window cannot establish paid-balance recovery. Cairn does not enable spending or redeem
 additional capacity on the user's behalf.
 
 ## Compatibility and tests

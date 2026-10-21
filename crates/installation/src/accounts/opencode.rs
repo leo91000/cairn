@@ -580,9 +580,12 @@ mod tests {
         assert!(usage.available(MODEL));
         assert!(usage.uses_balance());
 
-        // Go quotas do not measure Zen credits: an unchanged reading must keep
-        // the immediate native-limit fence, then permit a bounded retry.
+        // A rolling reset does not measure restored Zen credits while the
+        // monthly quota stays exhausted: keep the fence until the bounded retry.
         s.accounts.exhausted(&s, go_id, MODEL).await.unwrap();
+        let mut rolling_reset = reading(100, true);
+        rolling_reset["rollingUsage"]["usagePercent"] = 0.into();
+        *response.lock().unwrap() = (StatusCode::OK, rolling_reset.to_string());
         expire(&s, go_id).await;
         s.accounts.refresh(&s, go_id).await.unwrap();
         assert!(
