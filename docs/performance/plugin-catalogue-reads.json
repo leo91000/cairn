@@ -1,0 +1,135 @@
+{
+  "approvalWrites": [
+    {
+      "processCpuMs": 83.3122699999949,
+      "wallMs": 87.09947
+    },
+    {
+      "processCpuMs": 67.47070600000006,
+      "wallMs": 74.415356
+    },
+    {
+      "processCpuMs": 74.97253500000079,
+      "wallMs": 75.24291199999999
+    },
+    {
+      "processCpuMs": 72.54334299999755,
+      "wallMs": 71.374587
+    },
+    {
+      "processCpuMs": 69.85101700000087,
+      "wallMs": 69.433242
+    },
+    {
+      "processCpuMs": 62.2977979999996,
+      "wallMs": 64.963188
+    }
+  ],
+  "cache": "first API read then five warm samples, OS caches retained",
+  "candidate": "first compact page; at most 32 cards",
+  "packagesCopied": 40,
+  "reads": [
+    {
+      "encodedBytes": 14404158,
+      "path": "/api/plugins",
+      "processCpuMs": 3765.388427,
+      "sample": 0,
+      "wallMs": 3762.9337459999997
+    },
+    {
+      "encodedBytes": 17174,
+      "path": "/api/plugins/packages",
+      "processCpuMs": 2239.50162,
+      "sample": 0,
+      "wallMs": 2239.056764
+    },
+    {
+      "encodedBytes": 17174,
+      "path": "/api/plugins/packages",
+      "processCpuMs": 2066.1427649999996,
+      "sample": 1,
+      "wallMs": 2063.118437
+    },
+    {
+      "encodedBytes": 14404158,
+      "path": "/api/plugins",
+      "processCpuMs": 3930.136149,
+      "sample": 1,
+      "wallMs": 3927.363606
+    },
+    {
+      "encodedBytes": 14404158,
+      "path": "/api/plugins",
+      "processCpuMs": 3797.0626649999995,
+      "sample": 2,
+      "wallMs": 3795.204997
+    },
+    {
+      "encodedBytes": 17174,
+      "path": "/api/plugins/packages",
+      "processCpuMs": 2083.6427959999983,
+      "sample": 2,
+      "wallMs": 2087.478165
+    },
+    {
+      "encodedBytes": 17174,
+      "path": "/api/plugins/packages",
+      "processCpuMs": 2147.054945,
+      "sample": 3,
+      "wallMs": 2145.6237539999997
+    },
+    {
+      "encodedBytes": 14404158,
+      "path": "/api/plugins",
+      "processCpuMs": 3925.8552759999984,
+      "sample": 3,
+      "wallMs": 3926.372214
+    },
+    {
+      "encodedBytes": 14404158,
+      "path": "/api/plugins",
+      "processCpuMs": 3959.736965,
+      "sample": 4,
+      "wallMs": 3957.770332
+    },
+    {
+      "encodedBytes": 17174,
+      "path": "/api/plugins/packages",
+      "processCpuMs": 1977.542082,
+      "sample": 4,
+      "wallMs": 1978.3444029999998
+    },
+    {
+      "encodedBytes": 17174,
+      "path": "/api/plugins/packages",
+      "processCpuMs": 2061.498792000002,
+      "sample": 5,
+      "wallMs": 2066.961508
+    },
+    {
+      "encodedBytes": 14404158,
+      "path": "/api/plugins",
+      "processCpuMs": 3980.6648289999976,
+      "sample": 5,
+      "wallMs": 3982.784713
+    }
+  ],
+  "reference": "complete owner response, same binary and unchanged record format",
+  "versionsCopied": 79,
+  "writes": "existing approval path, identical for both read contracts",
+  "host": {
+    "platform": "Linux-6.12.109-x86_64-with-glibc2.36",
+    "cpuCount": 7,
+    "loadAverage": [
+      1.95166015625,
+      2.75634765625,
+      2.17822265625
+    ],
+    "memory": [
+      "MemTotal:       19462272 kB",
+      "MemAvailable:   18725188 kB"
+    ],
+    "context": "Only synthetic catalogue measurement running; no Rust compilation, Node test workers, PostgreSQL or emulator. Agent and shared VM scheduler active; OS caches retained. Native defaults86 and serial JS655 finished before measurement."
+  },
+  "reproduce": "PATH=\"$PATH:/usr/sbin\" CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 mise exec -- pnpm test:backend -p cairn-installation --test plugin_catalogue measure_catalogue -- --ignored --nocapture --test-threads=1"
+}

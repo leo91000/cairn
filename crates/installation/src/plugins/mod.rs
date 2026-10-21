@@ -395,6 +395,16 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
             catalog["resourceGrantCounts"] = s.store.read(|db| grants::counts(db)).await?;
             Ok(catalog)
         }
+        ("GET", ["plugins", "packages"]) => {
+            registry::owner::list(s, input.query.get("cursor").map(String::as_str)).await
+        }
+        ("GET", ["plugins", "packages", id]) => registry::owner::detail(s, id).await,
+        ("GET", ["plugins", "packages", id, "versions"]) => {
+            registry::owner::versions(s, id, input.query.get("cursor").map(String::as_str)).await
+        }
+        ("GET", ["plugins", "packages", id, "versions", version]) => {
+            registry::owner::version(s, id, version).await
+        }
         ("POST", ["plugins", "packages"]) => registry::install(s, body).await,
         ("GET", ["plugins", "packages", "operations", id]) => s.plugins.operations.get(id),
         ("POST", ["plugins", "packages", id, "approve"]) => {

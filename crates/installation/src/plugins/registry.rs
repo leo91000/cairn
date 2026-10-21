@@ -1,6 +1,8 @@
 //! Package registry. Bundled packages ship inside the binary. Installed packages live
 //! in `<data>/plugins/<id>/<version>/` and run only once the owner approves that exact
 //! manifest and every Luau file; any later change on disk needs a new approval.
+pub mod owner;
+
 use crate::{
     config::now,
     error::{Error, Result},
@@ -342,17 +344,24 @@ fn read_modules(directory: &Path, prefix: &str, source: &mut Sources) -> Result<
     Ok(())
 }
 
-fn entries(path: &Path) -> Vec<String> {
-    let mut names = std::fs::read_dir(path)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| segment(name))
-        .collect::<Vec<_>>();
+fn entries(path: &Path) -> Result<Vec<String>> {
+    let directory = match std::fs::read_dir(path) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return package_io(Err(error)),
+    };
+    let mut names = Vec::new();
+    for entry in directory {
+        let entry = package_io(entry)?;
+        if package_io(entry.file_type())?.is_dir()
+            && let Ok(name) = entry.file_name().into_string()
+            && segment(&name)
+        {
+            names.push(name);
+        }
+    }
     names.sort();
-    names
+    Ok(names)
 }
 
 async fn record(s: &Service, id: &str) -> Result<Value> {
@@ -410,60 +419,18 @@ fn summary(package: &Package) -> Value {
 /// Everything the owner reviews: requested capabilities, hosts and approval state.
 pub async fn catalog(s: &Service) -> Result<Value> {
     let mut packages = Vec::new();
+    // Preserve the legacy complete response while clients migrate to bounded
+    // owner reads. Both contracts share package selection and approval semantics.
     for (id, _, _, _) in BUILTIN {
-        let package = builtin(id).expect("bundled plugin");
-        packages.push(json!({
-            "id": id,
-            "builtin": true,
-            "status": "active",
-            "active": package.manifest.version,
-            "manifest": package.manifest,
-            "versions": [summary(&package)],
-        }));
+        packages.push(owner::legacy(s, id).await?);
     }
-    for id in entries(&root(s)) {
-        if BUILTIN.iter().any(|(name, _, _, _)| *name == id) {
-            continue;
+    for id in entries(&root(s))? {
+        if !BUILTIN.iter().any(|(name, _, _, _)| *name == id) {
+            packages.push(owner::legacy(s, &id).await?);
         }
-        let record = record(s, &id).await?;
-        let active = record["active"].as_str().unwrap_or("");
-        let mut versions = Vec::new();
-        let mut latest = None;
-        for version in entries(&root(s).join(&id)) {
-            match read_version(s, &id, &version) {
-                Ok(package) => {
-                    let mut item = summary(&package);
-                    item["approved"] = json!(record["approvals"][&version] == package.digest);
-                    versions.push(item);
-                    latest = Some(package);
-                }
-                Err(error) => versions.push(json!({ "version": version, "error": error.message })),
-            }
-        }
-        let current = versions
-            .iter()
-            .find(|item| item["version"] == active && item["approved"] == true);
-        let manifest = current
-            .map(|item| item["manifest"].clone())
-            .or_else(|| latest.map(|package| json!(package.manifest)));
-        let pending = versions
-            .iter()
-            .any(|item| item["approved"] == false && item["error"].is_null());
-        packages.push(json!({
-            "id": id,
-            "builtin": false,
-            "status": match (current.is_some(), pending, manifest.is_some()) {
-                (_, _, false) => "invalid",
-                (true, false, _) => "active",
-                (true, true, _) => "update",
-                (false, _, _) => "needs_approval",
-            },
-            "active": current.map(|item| item["version"].clone()),
-            "manifest": manifest,
-            "versions": versions,
-        }));
     }
     Ok(json!({
+        "packageReads": true,
         "packages": packages,
         "capabilities": CAPABILITIES
             .iter()

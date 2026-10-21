@@ -7,7 +7,7 @@ use crate::{
 use serde_json::{Value, json};
 
 pub(super) const MAX_ITEMS: usize = 32;
-const MAX_BYTES: usize = cairn_protocol::MAX_BODY / 2;
+pub(super) const MAX_BYTES: usize = cairn_protocol::MAX_BODY / 2;
 
 pub(super) fn page(values: Vec<Value>, cursor: Option<&str>) -> Result<Value> {
     page_with_bounds(values, cursor, MAX_ITEMS, MAX_BYTES)
@@ -25,8 +25,19 @@ pub(super) fn page_with_bounds(
     values.retain(|value| cursor.is_none_or(|cursor| text(value, "id") > cursor));
     values.sort_by(|a, b| text(a, "id").cmp(text(b, "id")));
 
+    ordered_page(values, "id", max_items, max_bytes)
+}
+
+/// Already selected and ordered records. The caller validates its own cursor
+/// domain: management records use UUIDs, package IDs and versions use segments.
+pub(super) fn ordered_page(
+    values: Vec<Value>,
+    key: &str,
+    max_items: usize,
+    max_bytes: usize,
+) -> Result<Value> {
     let mut items = Vec::new();
-    // Reserve the envelope and the UUID cursor independently of record content.
+    // Reserve the envelope and a cursor independently of record content.
     let mut bytes = 256;
     let mut more = false;
     for value in values {
@@ -47,6 +58,6 @@ pub(super) fn page_with_bounds(
         bytes += size;
         items.push(value);
     }
-    let next = more.then(|| items.last().unwrap()["id"].clone());
+    let next = more.then(|| items.last().unwrap()[key].clone());
     Ok(json!({ "items": items, "nextCursor": next }))
 }

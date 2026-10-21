@@ -1227,3 +1227,23 @@ routes. It distinguishes route and app counters, repeated requests by one person
 and requests on another route, pending and denied requests, paused/deleted routes,
 owner-only visibility and stable edit revisions. Qualification results are recorded
 in the delivery evidence. Catalogue bounds and the rest of Q1–Q20 remain unfinished.
+
+## Separate package reads
+
+The owner API now separates bounded compact catalogue cards, the selected package
+manifest, paged version metadata and exact version review. It shares approval and
+display-version selection with the existing complete catalogue. Changes to any
+Luau file still withdraw approval, and malformed local versions remain reviewable
+as diagnostics. These reads do not expose instance settings or personal credentials.
+They add no stored format, cache or execution authority.
+
+The new public HTTP fixture includes more than 32 packages and versions, large
+setting defaults, exact file/digest review, changed-module approval rejection,
+invalid/empty packages and owner-only access. Both client catalogue migrations,
+bounded instance and grant selectors, and the remainder of Q1–Q20 remain unfinished.
+
+The synthetic [read/write observation](performance/PLUGIN-CATALOGUE-READS.md)
+compares the complete response and first compact page in the same binary. It
+records bytes, first/warm read wall time and CPU, unchanged approval-write timing,
+workload and host conditions. The compact page is bounded in bytes and count;
+validating approval still scans the versions of each selected package.

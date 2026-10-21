@@ -131,6 +131,33 @@ Routes are generic: `/api/plugins/{id}/connections[/{connection}]` with `enabled
 `/api/plugins/packages[/{id}/approve|activate]` for the registry. Approval includes
 the digest displayed during review; changes require reviewing again.
 
+Owner package reads also have separate bounded contracts:
+
+- `GET /api/plugins/packages?cursor=…`: up to 32 compact cards, with a last-ID
+  `nextCursor`, `packageReads: true`, setup support and capability descriptions.
+  A card's `presentation` contains labels, its brand, capability names and
+  contribution counts; it is deliberately not a complete manifest. Cards include
+  neither settings, credentials, instance configuration nor version history.
+- `GET /api/plugins/packages/{id}`: the selected display manifest and package
+  approval status, without all version manifests. An approved active version is
+  preferred, otherwise the last valid version in lexical order is displayed.
+- `GET /api/plugins/packages/{id}/versions?cursor=…`: up to 32 version metadata
+  records in lexical order, with a last-version `nextCursor`. Digest, approval,
+  source byte/file counts or an invalid-version diagnostic remain available.
+- `GET /api/plugins/packages/{id}/versions/{version}`: the exact manifest, digest
+  and file list to review before approval. The existing approval endpoint still
+  checks that digest against the current files. Invalid local versions return a
+  diagnostic; missing packages or versions return 404.
+
+Both lists also enforce an encoded-byte budget below half the relay body limit.
+Package IDs and versions are the cursor domain; existing management lists retain
+their UUID cursors. Live approval changes do not invalidate a later page's cursor.
+The current complete `/api/plugins` response also advertises `packageReads: true`
+and remains available while the clients
+migrate; these new reads alone do not replace its instance and grant selectors.
+Status inspection still validates the installed versions of each selected package,
+without retaining all their manifests in compact responses. No summary is persisted.
+
 ## Runtime
 
 For each enabled instance of a package that reacts to people, connections or timers,
