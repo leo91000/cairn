@@ -67,7 +67,7 @@ jobs:
         with:
           cache: true
       - run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
-      - name: Install bindings toolchain for the optional ublk transport
+      - name: Install bindings toolchain for the required ublk transport
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev
       - uses: ./.github/actions/cache-rust
       - name: Build the browser-test backend and frontend
@@ -200,6 +200,14 @@ jobs:
       - name: Install native test dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age
       - uses: ./.github/actions/cache-rust
+      - name: Prepare the installation host's required ublk driver
+        run: |
+          if ! sudo modprobe ublk_drv; then
+            sudo apt-get update -qq
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+            sudo modprobe ublk_drv
+          fi
+          test -c /dev/ublk-control
       - name: Build the frontend used by installer and update fixtures
         run: pnpm exec vite build --config apps/web/vite.config.ts
       - name: Validate node supervisor and S3 recovery
@@ -547,6 +555,13 @@ jobs:
       - name: Prepare KVM build host
         run: |
           test -e /dev/kvm
+          if ! sudo modprobe ublk_drv; then
+            sudo apt-get update -qq
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+            sudo modprobe ublk_drv
+          fi
+          test -c /dev/ublk-control
+          test "$(cat /proc/sys/kernel/io_uring_disabled)" = 0
           sudo modprobe fuse
           test -c /dev/fuse
           # A working L0 device alone does not guarantee nested KVM for our guest.

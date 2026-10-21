@@ -17,6 +17,7 @@ import { setTimeout } from 'node:timers/promises'
 import { stripVTControlCharacters } from 'node:util'
 import { blockDigest } from './block-digest.mjs'
 import { prepareStorageOrigin } from './runner-storage-smoke.mjs'
+import { ublkDeviceArguments } from './ublk-devices.mjs'
 
 const peerCode = `
 const http=require('node:http'),crypto=require('node:crypto');
@@ -112,7 +113,8 @@ async function main() {
   function physical(vmId) {
     const script = `(function(){const fs=require('node:fs');const id=process.argv[1];const shmem=Number(fs.readFileSync('/sys/fs/cgroup/memory.stat','utf8').match(/^shmem (\\d+)/m)[1]);const files=new Set();let allocatedShared=0;for(const fd of fs.readdirSync('/proc/1/fd')){try{const path='/proc/1/fd/'+fd;if(!fs.readlinkSync(path).includes('memfd:'))continue;const metadata=fs.statSync(path);const key=metadata.dev+':'+metadata.ino;if(files.has(key))continue;files.add(key);allocatedShared+=metadata.blocks*512;}catch{}}for(const p of fs.readdirSync('/proc')){if(!/^\\d+$/.test(p))continue;try{const cmd=fs.readFileSync('/proc/'+p+'/cmdline','utf8');if(!cmd.includes(id)||fs.readFileSync('/proc/'+p+'/comm','utf8').trim()!=='firecracker')continue;const status=fs.readFileSync('/proc/'+p+'/status','utf8');const rss=Number(status.match(/VmRSS:\\s+(\\d+)/)[1])*1024;const mapped=Number(status.match(/RssShmem:\\s+(\\d+)/)[1])*1024;console.log(JSON.stringify({pid:Number(p),rssBytes:rss,mappedSharedBytes:mapped,cgroupShmemBytes:shmem,cgroupMemoryBytes:Number(fs.readFileSync('/sys/fs/cgroup/memory.current','utf8')),allocatedSharedGuestBytes:allocatedShared,conservativeVmBytes:rss+Math.max(0,allocatedShared-mapped)}));return;}catch{}}throw Error('Owned VMM not found');})()`
     const sample = JSON.parse(docker('exec', name, 'node', '-e', script, vmId))
-    assert.ok(sample.allocatedSharedGuestBytes > 0, 'The observer can inspect the registered guest memfd')
+    assert.equal(sample.allocatedSharedGuestBytes, 0, 'Native virtio-blk uses anonymous guest RAM')
+    assert.ok(sample.rssBytes > 0, 'The observer found the owned VMM')
     return sample
   }
 
@@ -146,7 +148,7 @@ async function main() {
     docker('run', '-d', '--name', peer, '-v', `${root}/peer.cjs:/peer.cjs:ro`, '--entrypoint', 'node', image, '/peer.cjs')
     docker('network', 'connect', '--ip', '93.184.216.3', network, peer)
     const capabilities = ['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE']
-    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(value => ['--cap-add', value]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', `${process.env.CAIRN_RETENTION_MEMORY_GIB ?? 10}g`, '--cpus', cpuQuota, '-e', 'CONCURRENCY=3', '-e', `CAIRN_VM_RETENTION_SECONDS=${retention}`, '-e', 'CAIRN_READY_VM_POOL=false', '--entrypoint', '/usr/local/bin/cairn', image, 'runner-broker')
+    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(value => ['--cap-add', value]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', ...ublkDeviceArguments(), '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', `${process.env.CAIRN_RETENTION_MEMORY_GIB ?? 10}g`, '--cpus', cpuQuota, '-e', 'CONCURRENCY=3', '-e', `CAIRN_VM_RETENTION_SECONDS=${retention}`, '-e', 'CAIRN_READY_VM_POOL=false', '--entrypoint', '/usr/local/bin/cairn', image, 'runner-broker')
     docker('network', 'connect', '--ip', '93.184.216.2', network, name)
     url = `http://${await until(() => {
       try {
@@ -312,7 +314,7 @@ async function main() {
         assert.equal(health.pool.retained, 1, `Turn ${lease} did not retain its VM: ${JSON.stringify({ health, active })}`)
         assert.equal(state(vmId), 'Paused')
         retained = physical(vmId)
-        assert.ok(Math.abs(health.pool.retained_memory_mi_b * 1048576 - retained.conservativeVmBytes) < 32 * 1048576, `Admission agrees with independently sampled backing inodes: ${JSON.stringify({ costMiB: health.pool.retained_memory_mi_b, retained })}`)
+        assert.ok(Math.abs(health.pool.retained_memory_mi_b * 1048576 - retained.conservativeVmBytes) < 32 * 1048576, `Admission agrees with independently sampled VMM memory: ${JSON.stringify({ costMiB: health.pool.retained_memory_mi_b, retained })}`)
         if (previousVm)
           assert.equal(vmId, previousVm, 'Resume keeps the same physical VMM')
         if (evictedVm) {

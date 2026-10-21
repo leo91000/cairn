@@ -57,9 +57,8 @@ where
         eprintln!("Missing supervisor control socket.");
         return ExitCode::FAILURE;
     }
-    #[cfg(feature = "ublk")]
+
     if args.first().is_some_and(|a| a == "runner-broker")
-        && std::env::var("CAIRN_BLOCK_TRANSPORT").is_ok_and(|value| value == "ublk")
         && let Err(error) = cairn_installation::storage::ublk::prepare_io_threads()
     {
         eprintln!("{error}");

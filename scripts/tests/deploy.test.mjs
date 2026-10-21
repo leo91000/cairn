@@ -33,6 +33,9 @@ describe('coolify deployment over HTTP', () => {
     requests = []
     patchStatus = 201
     compose = readFileSync(new URL('../../compose.yaml', import.meta.url), 'utf8')
+    const fixture = parse(compose)
+    fixture.services.runner.device_cgroup_rules = ['c 238:* rwm', 'b 259:* rwm']
+    compose = stringify(fixture)
     persistCompose = true
     normalizeCompose = false
     releaseImage = undefined
@@ -273,7 +276,7 @@ describe('coolify deployment over HTTP', () => {
 
   it('assigns VM resource defaults when migrating a legacy container runner', () => {
     const document = parse(compose)
-    delete document.services.runner.devices
+    document.services.runner.devices = ['/dev/ublk-control:/dev/ublk-control']
     Object.assign(document.services.runner, { mem_limit: '4g', cpus: 2, pids_limit: 128 })
     const result = parse(firecrackerRunnerCompose(stringify(document)))
     expect(result.services.runner).toMatchObject({ mem_limit: '20g', cpus: 8 })
@@ -314,13 +317,14 @@ describe('coolify deployment over HTTP', () => {
     expect(firecrackerRunnerCompose(compose)).toBe(compose)
   })
 
-  it('does not grant the ublk flusher capability to a vhost-user runner', async () => {
+  it('migrates the former transport selection to ublk', async () => {
     const document = parse(compose)
     document.services.runner.cap_add.push('SYS_RESOURCE')
     document.services.runner.environment.CAIRN_BLOCK_TRANSPORT = 'vhost-user'
     compose = stringify(document)
     await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
-    expect(parse(compose).services.runner.cap_add).not.toContain('SYS_RESOURCE')
+    expect(parse(compose).services.runner.cap_add).toContain('SYS_RESOURCE')
+    expect(parse(compose).services.runner.environment.CAIRN_BLOCK_TRANSPORT).toBe('ublk')
     expect(firecrackerRunnerCompose(compose)).toBe(compose)
   })
 
@@ -372,7 +376,6 @@ describe('coolify deployment over HTTP', () => {
 
   it.each([
     { CAIRN_VM_SNAPSHOTS: 'true' },
-    { CAIRN_DISK_LAYOUT: 'paired-ext4-v1' },
     { CAIRN_VM_SNAPSHOTS: 'yes' },
     { CAIRN_DISK_LAYOUT: 'unknown' },
     { CAIRN_VM_SNAPSHOTS: 'true', CAIRN_BLOCK_TRANSPORT: 'ublk', CAIRN_DISK_LAYOUT: 'flat-ext4-v1' },
@@ -387,6 +390,7 @@ describe('coolify deployment over HTTP', () => {
   it('rejects incomplete ublk permissions before changing or restarting the service', async () => {
     const document = parse(compose)
     document.services.runner.environment.CAIRN_BLOCK_TRANSPORT = 'ublk'
+    delete document.services.runner.device_cgroup_rules
     compose = stringify(document)
     await expect(deploy(config, { intervalMs: 0, timeoutMs: 1000 })).rejects.toThrow('ublk')
     expect(requests.some(request => request.method === 'PATCH' || request.method === 'POST')).toBe(false)

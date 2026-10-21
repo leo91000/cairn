@@ -17,7 +17,6 @@ pub async fn prepare(
 }
 
 /// Native host workspaces have one ext4 filesystem and no guest system view.
-#[cfg(feature = "ublk")]
 pub(crate) async fn prepare_native(
     directory: &Path,
     size: u64,
@@ -62,8 +61,10 @@ fn selected_layout(size: u64) -> Result<Layout> {
     {
         "flat-ext4-v1" => Ok(Layout::Flat),
         "paired-ext4-v1" => {
-            if !cfg!(feature = "ublk")
-                || std::env::var("CAIRN_BLOCK_TRANSPORT").as_deref() != Ok("ublk")
+            if super::transport::validate_transport(
+                std::env::var("CAIRN_BLOCK_TRANSPORT").ok().as_deref(),
+            )
+            .is_err()
             {
                 return Err(Error::bad(
                     "Paired disks require the native ublk transport.",

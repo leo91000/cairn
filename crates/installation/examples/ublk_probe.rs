@@ -1,4 +1,4 @@
-//! Disposable qualification harness for the managed ublk and vhost transports.
+//! Disposable qualification harness for the managed ublk transport.
 //! Only explicitly provided fixture paths are touched.
 use cairn_installation::storage::{self, BlockSource, Disk, DiskWrite, LazyDisk};
 use libublk::ctrl::UblkCtrlBuilder;
@@ -221,12 +221,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fs::write(format!("{}.export-request", args[2]), "")?;
         return Ok(());
     }
-    if args.len() != 7 || !["vhost", "ublk-managed"].contains(&args[1].as_str()) {
-        return Err("Usage: ublk_probe vhost|ublk-managed BASE JOURNAL READY METRICS SOCKET_OR_STATE; cleanup-managed STATE; inspect-device ID; export METRICS".into());
+    if args.len() != 7 || args[1] != "ublk-managed" {
+        return Err("Usage: ublk_probe ublk-managed BASE JOURNAL READY METRICS STATE; cleanup-managed STATE; inspect-device ID; export METRICS".into());
     }
-    if args[1] == "ublk-managed" {
-        storage::ublk::prepare_io_threads()?;
-    }
+    storage::ublk::prepare_io_threads()?;
     let disk = disk(Path::new(&args[2]), Path::new(&args[3]))?;
     let metrics = args[5].clone();
     let observer = disk.clone();
@@ -266,7 +264,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    if args[1] == "ublk-managed" {
+    {
         let state = Path::new(&args[6]);
         fs::create_dir_all(state)?;
         let _lock = cairn_installation::file_lock::exclusive(
@@ -300,13 +298,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-    }
-    let mounted = storage::vhost::mount_disk(disk, Path::new(&args[6]), 40001)?;
-    fs::write(&args[4], &args[6])?;
-    loop {
-        if mounted.failed() {
-            return Err("vhost queue failed".into());
-        }
-        std::thread::sleep(Duration::from_millis(200));
     }
 }

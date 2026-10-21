@@ -48,15 +48,14 @@ and retires all spares on shutdown or runtime replacement. `/health` reports `re
 `preparing` within occupied slots. See [the measured comparison](adr/0019-booted-vms-with-ready-codex.md).
 
 Reservations release their slot after teardown, including abandoned HTTP requests.
-If all slots are occupied or shared memory/disk headroom is low, new work waits.
+If all slots are occupied or memory/disk headroom is low, new work waits.
 `/health` exposes capacity, occupied slots, applied budgets, usage and pressure.
 
 Successful Codex conversations may retain their own CPU-paused VM for
 180 seconds (`CAIRN_VM_RETENTION_SECONDS=0..300`; zero disables retention). A
 retained VM is never assigned to another conversation. Its balloon reclaims
-available pages before pausing, with free-page reporting returning shared memfd
-pages to the host. Admission counts allocated memfd pages once, plus the VMM's
-other resident memory; virtual guest RAM is not a reservation. The shared cgroup
+available pages before pausing, with free-page reporting returning anonymous
+pages to the host. Admission counts the VMM's resident memory; virtual guest RAM is not a reservation. The shared cgroup
 remains the hard limit. At most two conversations are retained, with a combined
 cost of at most 2 GiB or one quarter of the node budget, whichever is smaller;
 retention also requires node usage at or below 75% of its RAM budget.
@@ -195,8 +194,8 @@ give memory back while keeping 1 GiB available; below 75%, they get it back.
 This rebalancing skips a VM while idle retention owns its balloon, from its
 statistics read until the CPUs pause. Disk budgets bound local journals and caches;
 retained disks keep their logical size. See [the shared-budget decision](adr/0012-shared-node-budgets.md).
-Guest RAM is a shared memfd, so the host can only reclaim pages the guest gives
-back. Without host swap, a peak above `memory.high` stalls every VM and can still
+Guest RAM is anonymous memory; ballooning and free-page reporting let the guest
+return unused pages to the host. Without host swap, a peak above `memory.high` stalls every VM and can still
 end in an OOM kill at `memory.max`. A compressed host swap lets such peaks slow
 down instead; see [compressed host swap](DEPLOYMENT.md#compressed-host-swap).
 The Compose controller initially allows 8 CPUs, 20 GiB RAM and 256 host processes.
@@ -334,3 +333,26 @@ The image CI requires a nested `KVM_RUN` probe and an actual Android boot/tap an
 restart scenario. The supported lifecycle remains fresh guest boot from disk;
 we do not serialize Firecracker snapshots containing running nested VMs. See
 [research and limitations](NESTED-KVM-RESEARCH.md).
+
+## Required block transport
+
+VM data disks use managed ublk devices through Firecracker native virtio-blk Async.
+Flat and paired ext4 layouts keep their existing journals, manifests, publication
+receipts and recovery rules. Transport changes do not convert persisted disks.
+Native host execution continues to mount ext4 on the same managed ublk backend.
+
+Every VM host needs `ublk_drv`, `/dev/ublk-control`, enabled io_uring and the
+runner's `SYS_RESOURCE` capability for I/O flusher progress. The host supervisors
+check these requirements and detect the character and block device classes before
+stopping an existing workload. They upgrade the former `blockTransport` selection
+to ublk. A manually configured runner must remove a stale
+`CAIRN_BLOCK_TRANSPORT=vhost-user` setting; unset and `ublk` both select ublk.
+There is no fallback backend.
+
+For direct Compose deployments, load `ublk_drv` and set `CAIRN_UBLK_CHAR_MAJOR`
+from the `ublk-char` entry in `/proc/devices`, and `CAIRN_UBLK_BLOCK_MAJOR` from
+its block `ublk` or `blkext` entry. Compose requires these values and exposes only
+the controller and those dynamic device classes. Existing installations must
+refresh their host supervisor (rerunning the installer preserves their identity
+and storage), or provision these permissions before adopting an ublk-only image.
+See [the rollout decision](adr/0054-ublk-only-vm-storage.md).

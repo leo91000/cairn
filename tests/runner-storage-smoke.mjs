@@ -243,7 +243,7 @@ export async function storageSmoke({
       metrics,
       resources,
       unintendedRestarts: 0,
-      source: 'real Firecracker/vhost-user journal, loopback immutable origin; not S3/WAN',
+      source: 'real Firecracker/ublk journal, loopback immutable origin; not S3/WAN',
     }
     if (process.env.CAIRN_STORAGE_SOAK_EVIDENCE)
       await writeFile(process.env.CAIRN_STORAGE_SOAK_EVIDENCE, JSON.stringify(evidence, null, 2))

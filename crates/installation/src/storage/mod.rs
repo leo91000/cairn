@@ -23,11 +23,8 @@ pub use lazy::{BlockSource, LazyDisk};
 
 pub mod fuse;
 
-pub mod vhost;
-
 pub mod transport;
 
-#[cfg(feature = "ublk")]
 pub mod ublk;
 
 pub mod remote;
