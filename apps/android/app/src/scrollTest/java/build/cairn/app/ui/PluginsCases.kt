@@ -6124,6 +6124,8 @@ abstract class PluginsCases {
                 }
             val delegate = server.dispatcher
             val rejectSchema = java.util.concurrent.atomic.AtomicBoolean(true)
+            val choicesRequested = java.util.concurrent.atomic.AtomicBoolean(false)
+            val releaseChoices = java.util.concurrent.CountDownLatch(1)
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
@@ -6136,6 +6138,12 @@ abstract class PluginsCases {
                             return MockResponse()
                                 .setResponseCode(503)
                                 .setBody("""{"error":"Schema temporarily unavailable"}""")
+                        }
+                        if (request.path == root.replace("/resources/", "/resource-choices/")) {
+                            choicesRequested.set(true)
+                            if (!releaseChoices.await(10, java.util.concurrent.TimeUnit.SECONDS)) {
+                                return MockResponse().setResponseCode(503)
+                            }
                         }
                         return delegate.dispatch(request)
                     }
@@ -6190,13 +6198,17 @@ abstract class PluginsCases {
             }
             compose.onAllNodesWithText("Choisir…").onFirst().performScrollTo().performClick()
             compose.onNodeWithText("Workspaces").performClick()
+            compose.waitUntil(10000) { choicesRequested.get() }
+            // A visible field is not an available choice while its request is pending.
+            compose.onNodeWithText("Choisir…").assertIsNotEnabled()
+            releaseChoices.countDown()
             compose.waitUntil(10000) {
                 compose
-                    .onAllNodesWithText("Ressource pour les droits de l’agent")
+                    .onAllNodes(hasText("Choisir…") and isEnabled())
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
-            compose.onAllNodesWithText("Choisir…").onFirst().performScrollTo().performClick()
+            compose.onNodeWithText("Choisir…").performScrollTo().performClick()
             compose.onNodeWithText("Engineering").performClick()
             compose.onNodeWithText("Accès des agents").performScrollTo().performClick()
             compose.waitUntil(10000) {

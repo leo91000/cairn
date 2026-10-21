@@ -3222,20 +3222,20 @@ test('a package with device sign-in saves an account without the token reaching 
     }],
     instanceForm: true,
   }
-  await page.route('**/api/plugins', route => route.fulfill({
+  await page.route('**/api/plugins/packages/codehost', route => route.fulfill({
     json: {
-      packages: [{
-        id: 'codehost',
-        builtin: true,
-        status: 'active',
-        active: '1.0.0',
-        manifest,
-        versions: [],
-      }],
+      id: 'codehost',
+      builtin: true,
+      status: 'active',
+      active: '1.0.0',
+      manifest,
       capabilities: [],
-      connections: [],
+      instanceReads: true,
+      accessReads: true,
     },
   }))
+  await page.route('**/api/plugins/packages/codehost/connections', route => route.fulfill({ json: { items: [] } }))
+  await page.route('**/api/plugins/instance-access', route => route.fulfill({ json: { items: [] } }))
   const flow = (id: string, state: string) => ({
     id,
     pluginId: 'codehost',

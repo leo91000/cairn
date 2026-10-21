@@ -26,10 +26,14 @@ export function chatFixture() {
   const finish = () => {
     if (!active)
       return
-    const text = `I reviewed the workspace. **The approach looks good.**\n\n${active.items.filter(item => item.type === 'userMessage').map(item => item.content[0].text).join('\n\n')}\n\nReady for the next step.`
+    const input = active.items.filter(item => item.type === 'userMessage').map(item => item.content[0].text).join('\n\n')
+    const text = input.endsWith('fixture:short-final') ? 'SECOND_AFTER_FAILED' : `I reviewed the workspace. **The approach looks good.**\n\n${input}\n\nReady for the next step.`
     const item = { id: `reply-${thread.fixtureGeneration || 'legacy'}-${active.id}`, type: 'agentMessage', text }
     active.items.push(item)
-    active.status = 'completed'
+    const failedFinal = active.items.some(item => item.type === 'userMessage' && item.content[0].text.startsWith('fixture:failed-final '))
+    active.status = failedFinal ? 'failed' : 'completed'
+    if (failedFinal)
+      active.error = { message: 'Fixture failed after producing its final text', codexErrorInfo: 'other' }
     save()
     notify('item/completed', { threadId: thread.id, item })
     notify('turn/completed', { threadId: thread.id, turn: active })

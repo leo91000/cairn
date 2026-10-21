@@ -1,4 +1,5 @@
 local api = require("./lib/api")
+local text = require("./lib/text")
 
 -- Reply handlers for an app share one event worker. Luau's os.clock is
 -- monotonic on the supported hosts. Prime a fresh worker for one second too,
@@ -36,10 +37,10 @@ return {
                 nextPost[key] = nil
             end
         end
-        local text = (string.gsub(string.gsub(string.gsub(event.text, "&", "&amp;"), "<", "&lt;"), ">", "&gt;"))
-        if #text > 30000 then
-            error("Slack reply needs chunking before it can be delivered.")
-        end
+        local chunks = text.chunks(event.text)
+        local index = if state and state.nextChunk then state.nextChunk else 1
+        assert(type(index) == "number" and index == math.floor(index) and index >= 1 and index <= #chunks,
+            "The Slack reply checkpoint is invalid; check the thread before retrying.")
         local safe, check = api.channel(event.reply.resource, event.reply.channel, event.reply.workspace)
         if not safe then
             if check.status == 429 then
@@ -47,12 +48,12 @@ return {
             end
             error("The Slack channel is no longer an available public, unshared channel.")
         end
-        cairn.delivery.checkpoint({ status = "sending" })
+        cairn.delivery.checkpoint({ status = "sending", nextChunk = index })
         nextPost[channelKey] = os.clock() + 1
         local result = api.request("POST", "chat.postMessage", {
             channel = event.reply.channel,
             thread_ts = event.reply.thread_ts,
-            text = text,
+            text = chunks[index],
             mrkdwn = "false",
             parse = "none",
             unfurl_links = "false",
@@ -62,14 +63,21 @@ return {
         -- a full second between provider arrivals despite different I/O delays.
         nextPost[channelKey] = os.clock() + 1
         if result.status == 429 then
-            cairn.delivery.checkpoint({ status = "retryable" })
+            cairn.delivery.checkpoint({ status = "retryable", nextChunk = index })
             return { retryAfter = math.min(tonumber(result.headers["retry-after"]) or 5, 300) }
         end
         if result.status ~= 200 or type(result.json) ~= "table" or result.json.ok ~= true
             or result.json.channel ~= event.reply.channel or type(result.json.ts) ~= "string" then
             error("Slack did not confirm the reply. Check the thread before retrying.")
         end
-        cairn.delivery.checkpoint({ status = "sent", ts = result.json.ts })
-        return { done = true }
+        -- Advance only after a confirmed post. Each next part has its own
+        -- durable write intent; a restart cannot repeat an earlier part.
+        local finished = index == #chunks
+        cairn.delivery.checkpoint({
+            status = if finished then "sent" else "retryable",
+            nextChunk = index + 1,
+            ts = result.json.ts,
+        })
+        return if finished then { done = true } else { retryAfter = 1 }
     end,
 }

@@ -46,6 +46,8 @@ struct Slack {
     private: AtomicBool,
     rate_limit_first: AtomicBool,
     post_attempts: AtomicUsize,
+    rate_limit_second: AtomicBool,
+    hold_second_reply: AtomicBool,
     uncertain_first: AtomicBool,
     cooldown_race: AtomicBool,
     channel_attempts: AtomicUsize,
@@ -101,8 +103,23 @@ async fn api(
             json!({"ok": true, "channel": {"id": values["channel"], "name": "cairn", "is_private": slack.private.load(Ordering::SeqCst), "is_archived": false, "is_member": true, "is_shared": false}})
         }
         "/api/chat.postMessage" => {
-            slack.post_attempts.fetch_add(1, Ordering::SeqCst);
+            let attempt = slack.post_attempts.fetch_add(1, Ordering::SeqCst);
             slack.post_times.lock().await.push(Instant::now());
+            if attempt == 1 && slack.rate_limit_second.swap(false, Ordering::SeqCst) {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [(
+                        "retry-after",
+                        if slack.hold_second_reply.load(Ordering::SeqCst) {
+                            "900"
+                        } else {
+                            "1"
+                        },
+                    )],
+                    Json(json!({"ok": false, "error": "ratelimited"})),
+                )
+                    .into_response();
+            }
             if slack.rate_limit_first.swap(false, Ordering::SeqCst) {
                 return (
                     StatusCode::TOO_MANY_REQUESTS,
@@ -286,9 +303,33 @@ async fn unreserved_full_storage_refuses_provider_io_and_admission() {
     exchange(DeliveryScenario::UnreservedStorage).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn long_unicode_answers_arrive_completely_in_order_in_the_same_slack_thread() {
+    exchange(DeliveryScenario::LongReply).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rate_limiting_a_later_chunk_does_not_repeat_earlier_parts_of_the_answer() {
+    exchange(DeliveryScenario::LongReplyRateLimited).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restarting_between_chunks_continues_the_answer_without_repeating_the_first_part() {
+    exchange(DeliveryScenario::LongReplyRestart).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_long_answer_survives_the_next_authorized_slack_turn() {
+    exchange(DeliveryScenario::LongFailedReplyAdvanced).await;
+}
+
 #[derive(Clone, Copy)]
 enum DeliveryScenario {
     Normal,
+    LongReply,
+    LongReplyRateLimited,
+    LongReplyRestart,
+    LongFailedReplyAdvanced,
     FullStorage,
     FullStorageRateLimited,
     UnreservedStorage,
@@ -385,6 +426,13 @@ async fn exchange(scenario: DeliveryScenario) {
         scenario,
         DeliveryScenario::RateLimited | DeliveryScenario::FullStorageRateLimited
     );
+    let long_reply = matches!(
+        scenario,
+        DeliveryScenario::LongReply
+            | DeliveryScenario::LongReplyRateLimited
+            | DeliveryScenario::LongReplyRestart
+            | DeliveryScenario::LongFailedReplyAdvanced
+    );
     let root = TempDir::new().unwrap();
     let mut config = common::config(root.path());
     config.codex_bin = common::fixture("codex.mjs");
@@ -406,7 +454,18 @@ async fn exchange(scenario: DeliveryScenario) {
         "the actual bundled package must load"
     );
     let slack = Arc::new(Slack::default());
+    slack.rate_limit_second.store(
+        matches!(
+            scenario,
+            DeliveryScenario::LongReplyRateLimited | DeliveryScenario::LongFailedReplyAdvanced
+        ),
+        Ordering::SeqCst,
+    );
     slack.rate_limit_first.store(rate_limited, Ordering::SeqCst);
+    slack.hold_second_reply.store(
+        matches!(scenario, DeliveryScenario::LongFailedReplyAdvanced),
+        Ordering::SeqCst,
+    );
     slack.uncertain_first.store(
         matches!(scenario, DeliveryScenario::UncertainRestart),
         Ordering::SeqCst,
@@ -462,8 +521,26 @@ async fn exchange(scenario: DeliveryScenario) {
         "accessMode": "allowlist", "userIds": ["UALICE"], "maxMessagesPerHour": 10, "maxPerPersonPerHour": 5
     })).await;
     let ts = format!("{}.000001", now() / 1000);
+    let prompt = if long_reply {
+        format!(
+            "{}Explain the Slack tracer {}",
+            if matches!(scenario, DeliveryScenario::LongFailedReplyAdvanced) {
+                "fixture:failed-final "
+            } else {
+                ""
+            },
+            "é🙂&<> ".repeat(1500)
+        )
+    } else {
+        "Explain the Slack tracer".to_owned()
+    };
+    // The fake agent emits this exact final answer, after its separate commentary.
+    let expected_answer = format!(
+        "I reviewed the workspace. **The approach looks good.**\n\n{}\n\nReady for the next step.",
+        prompt.trim()
+    );
     let envelope = json!({"type": "event_callback", "api_app_id": "ATEST", "team_id": "TTEST", "event_id": "EvTEST",
-        "event": {"type": "app_mention", "user": "UALICE", "channel": "CTEST", "ts": ts, "text": "<@UBOT> Explain the Slack tracer"}});
+        "event": {"type": "app_mention", "user": "UALICE", "channel": "CTEST", "ts": ts, "text": format!("<@UBOT> {prompt}")}});
     assert_eq!(
         ingress(
             &app,
@@ -571,6 +648,117 @@ async fn exchange(scenario: DeliveryScenario) {
         slack.private.store(true, Ordering::SeqCst);
     }
     let mut manager = start_manager(&file, &slack_origin).await;
+    if matches!(scenario, DeliveryScenario::LongReplyRestart) {
+        common::eventually(
+            Duration::from_secs(20),
+            Duration::from_millis(10),
+            async || {
+                let checkpoints = service
+                    .store
+                    .list("plugin-delivery-checkpoints")
+                    .await
+                    .unwrap();
+                (checkpoints.iter().any(|row| {
+                    row["state"]["status"] == "retryable" && row["state"]["nextChunk"] == 2
+                }))
+                .then_some(())
+            },
+        )
+        .await;
+        stop_manager(&mut manager).await;
+        assert_eq!(slack.posts.lock().await.len(), 1);
+        manager = start_manager(&file, &slack_origin).await;
+    }
+    if matches!(scenario, DeliveryScenario::LongFailedReplyAdvanced) {
+        common::eventually(
+            Duration::from_secs(20),
+            Duration::from_millis(20),
+            async || {
+                let checkpoints = service
+                    .store
+                    .list("plugin-delivery-checkpoints")
+                    .await
+                    .unwrap();
+                (slack.post_attempts.load(Ordering::SeqCst) == 2
+                    && checkpoints.iter().any(|row| {
+                        row["state"]["status"] == "retryable" && row["state"]["nextChunk"] == 2
+                    }))
+                .then_some(())
+            },
+        )
+        .await;
+        let mut next = envelope.clone();
+        next["event"]["ts"] = json!(format!("{}.000007", now() / 1000));
+        next["event"]["thread_ts"] = json!(ts);
+        next["event"]["text"] = json!("<@UBOT> SECOND_AFTER_FAILED fixture:short-final");
+        assert_eq!(
+            ingress(&app, instance_id, next, SIGNING_SECRET).await,
+            (StatusCode::OK, "accepted".into())
+        );
+        common::eventually(
+            Duration::from_secs(20),
+            Duration::from_millis(20),
+            async || {
+                let abandoned = service
+                    .store
+                    .read(|db| db.keys("plugin-turn-abandoned:"))
+                    .await
+                    .unwrap();
+                (!abandoned.is_empty() && controller.plans.lock().await.len() == 2).then_some(())
+            },
+        )
+        .await;
+        let old_id = service
+            .store
+            .list("plugin-delivery-checkpoints")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row["state"]["nextChunk"] == 2)
+            .unwrap()["deliveryId"]
+            .clone();
+        let old = service
+            .store
+            .list(work::DELIVERIES)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row["id"] == old_id)
+            .unwrap();
+        let root_connection = connections::get(&service, "slack", instance_id)
+            .await
+            .unwrap();
+        let pending_reply = work::reply(&service, &root_connection, &old)
+            .await
+            .unwrap()
+            .unwrap();
+        if pending_reply.text != expected_answer {
+            stop_manager(&mut manager).await;
+            panic!(
+                "The failed turn's final reply changed after the next Slack request advanced: {}",
+                pending_reply.text
+            );
+        }
+        // Advance only the simulated REST cooldown and delivery clock. Both agent
+        // turns and their completion events are produced by the real adapter/process.
+        service
+            .store
+            .transaction(|db| {
+                for mut row in db.list("plugin-storage")? {
+                    if text(&row, "key").ends_with(":chat.postMessage") {
+                        row["value"] = json!(0);
+                        db.put("plugin-storage", &row)?;
+                    }
+                }
+                for mut row in db.list("plugin-deliveries")? {
+                    row["nextAttemptAt"] = json!(now());
+                    db.put("plugin-deliveries", &row)?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
     if matches!(scenario, DeliveryScenario::Normal) {
         let key = format!("plugin-status:{instance_id}");
         let ready = tokio::time::timeout(Duration::from_secs(5), async {
@@ -853,7 +1041,17 @@ async fn exchange(scenario: DeliveryScenario) {
 
     let result = tokio::time::timeout(Duration::from_secs(40), async {
         loop {
-            if let Some(post) = slack.posts.lock().await.first().cloned() {
+            let post = slack.posts.lock().await.first().cloned();
+            let settled = !long_reply
+                || service
+                    .store
+                    .list("plugin-deliveries")
+                    .await
+                    .unwrap()
+                    .is_empty();
+            if let Some(post) = post
+                && settled
+            {
                 break post;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -894,7 +1092,54 @@ async fn exchange(scenario: DeliveryScenario) {
         "{post:?}"
     );
     assert!(post["text"].contains("Explain the Slack tracer"));
-    assert_eq!(slack.posts.lock().await.len(), 1);
+    let posts = slack.posts.lock().await;
+    if long_reply {
+        assert!(posts.len() > 1, "the answer was not chunked");
+        assert!(posts.iter().all(|part| part["channel"] == "CTEST"
+            && part["thread_ts"] == ts
+            && part["text"].len() <= 3000));
+        let joined: String = posts
+            .iter()
+            .filter(|part| !part["text"].contains("SECOND_AFTER_FAILED"))
+            .map(|part| part["text"].as_str())
+            .collect();
+        let expected = expected_answer
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+        assert_eq!(
+            joined, expected,
+            "the first answer lost, repeated or mixed chunks"
+        );
+        let escaped = prompt
+            .trim()
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+        assert_eq!(
+            joined.matches(&escaped).count(),
+            1,
+            "answer content missing or repeated"
+        );
+        assert!(!joined.contains('<') && !joined.contains('>'));
+        assert!(
+            joined.ends_with("Ready for the next step."),
+            "the final part is missing"
+        );
+        let attempts = slack.post_attempts.load(Ordering::SeqCst);
+        assert_eq!(
+            attempts,
+            posts.len()
+                + usize::from(matches!(
+                    scenario,
+                    DeliveryScenario::LongReplyRateLimited
+                        | DeliveryScenario::LongFailedReplyAdvanced
+                ))
+        );
+    } else {
+        assert_eq!(posts.len(), 1);
+    }
+    drop(posts);
     assert!(
         service
             .store
@@ -917,7 +1162,14 @@ async fn exchange(scenario: DeliveryScenario) {
         false
     );
     let plans = controller.plans.lock().await;
-    assert_eq!(plans.len(), 1);
+    assert_eq!(
+        plans.len(),
+        if matches!(scenario, DeliveryScenario::LongFailedReplyAdvanced) {
+            2
+        } else {
+            1
+        }
+    );
     assert!(
         plans[0]["chat"]["execution"]["text"]
             .as_str()

@@ -382,3 +382,76 @@ async fn measure_reply_checkpoint_storage() {
         })
     );
 }
+
+#[tokio::test]
+#[ignore = "local abandoned-range KV comparison; run alone with --ignored --exact"]
+async fn measure_ended_reply_range_storage() {
+    use cairn_installation::store::Store;
+    let mut cases = Vec::new();
+    for frozen in [false, true] {
+        let root = TempDir::new().unwrap();
+        let mut value = json!({"runId": "00000000-0000-4000-8000-000000000001", "failed": true});
+        if frozen {
+            value["reply"] = json!({"delivered": 1000, "end": 1002, "failed": true});
+        }
+        let rows: Vec<_> = (0..1000).map(|index| {
+            (format!("plugin-turn-abandoned:00000000-0000-4000-8000-000000000002:{index:08}-0000-4000-8000-000000000000"), value.clone())
+        }).collect();
+        let bytes: usize = rows
+            .iter()
+            .map(|(key, value)| key.len() + serde_json::to_vec(value).unwrap().len())
+            .sum();
+        let store = Store::open(root.path()).unwrap();
+        let seed = rows.clone();
+        store
+            .transaction(move |db| {
+                for (key, value) in seed {
+                    db.set(&key, &value, None)?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        drop(store);
+        let store = Store::open(root.path()).unwrap();
+        let (key, value) = rows.last().unwrap().clone();
+        let lookup = key.clone();
+        let reads = store.read(move |db| {
+            let mut samples = Vec::new();
+            for sample in 0..6 {
+                let cpu = cpu_ms();
+                let at = Instant::now();
+                let value = db.kv(&lookup)?.unwrap();
+                samples.push(json!({"sample": sample, "wallMs": at.elapsed().as_secs_f64()*1000.0,
+                    "processCpuMs": cpu_ms()-cpu, "returnedJsonBytes": serde_json::to_vec(&value)?.len()}));
+            }
+            Ok(samples)
+        }).await.unwrap();
+        let mut writes = Vec::new();
+        for sample in 0..6 {
+            let cpu = cpu_ms();
+            let at = Instant::now();
+            store.set(&key, value.clone(), None).await.unwrap();
+            writes.push(
+                json!({"sample": sample, "wallMs": at.elapsed().as_secs_f64()*1000.0,
+                "processCpuMs": cpu_ms()-cpu}),
+            );
+        }
+        cases.push(
+            json!({"frozenRange": frozen, "records": rows.len(), "encodedKeyAndJsonBytes": bytes,
+            "reads": reads, "writes": writes}),
+        );
+    }
+    eprintln!(
+        "ENDED_REPLY_RANGE_STORAGE {}",
+        json!({
+            "cases": cases,
+            "workload": "1000 private KV markers of the prior shape versus the same keys with an optional already-ended range; six reads and six same-value writes per case",
+            "cache": "fresh Store after seeding; one read actor executes the first connection-cold and five warm reads; OS page cache retained",
+            "limits": "key and serialized JSON bytes exclude SQLite pages, WAL and index overhead; reads exclude actor scheduling, writes include it; no provider/network/whole-turn/SQL-range-selection performance claim",
+            "host": {"parallelism": std::thread::available_parallelism().ok().map(std::num::NonZero::get),
+                "cpuMax": std::fs::read_to_string("/sys/fs/cgroup/cpu.max").ok(),
+                "memoryMax": std::fs::read_to_string("/sys/fs/cgroup/memory.max").ok()},
+        })
+    );
+}

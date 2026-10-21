@@ -653,30 +653,29 @@ test('a GitHub account is granted like any plugin instance, and the server refus
     requests: [],
     activity: [],
   })
-  await page.route('**/api/plugins', route => route.fulfill({
+  await page.route('**/api/plugins/packages', route => route.fulfill({
     json: {
-      packages: [{
+      packageReads: true,
+      agentReads: true,
+      items: [{
         id: 'github',
         builtin: true,
         status: 'active',
         active: '1.0.0',
-        manifest: {
-          id: 'github',
+        presentation: {
           name: 'GitHub',
-          version: '1.0.0',
-          apiVersion: 2,
-          description: 'Agents push as your account.',
-          capabilities: ['http'],
           instances: { singular: 'Account', plural: 'Accounts' },
-          agentAccess: { description: 'Grant one account per agent.' },
-          runCredentials: { git: [] },
+          agentAccess: true,
+          agentAccessDescription: 'Grant one account per agent.',
+          contributions: { operations: 0 },
         },
-        versions: [],
       }],
-      capabilities: [],
-      connections: [account('work', 'Work'), account('personal', 'Personal')],
     },
   }))
+  await page.route('**/api/plugins/instance-access', route => route.fulfill({
+    json: { items: [account('work', 'Work'), account('personal', 'Personal')] },
+  }))
+  await page.route('**/api/plugins/agent-grant-counts', route => route.fulfill({ json: { items: [] } }))
   await page.route(`**/api/agents/${agent.id}/preview`, route => route.fulfill({ json: { runs: { queued: 0, running: 0 }, delegations: [] } }))
   const refusal = 'Grant one GitHub instance per agent: its runs use that instance\'s credentials.'
   const saves: Record<string, any>[] = []

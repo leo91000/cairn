@@ -1172,6 +1172,27 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> 
         text(&chat, "id"),
         text(delivery, "id"),
     ))? {
+        // The run may now be serving another request. Use only the predecessor's
+        // range captured at advancement; never search for a future terminator.
+        let run = text(&ended, "runId");
+        let reply = &ended["reply"];
+        let bounds = (
+            reply["delivered"].as_i64(),
+            reply["end"].as_i64(),
+            reply["failed"].as_bool(),
+        );
+        if let (Some(delivered), Some(end), Some(failed)) = bounds
+            && delivered > 0
+            && end > delivered
+            && !run.is_empty()
+        {
+            return Ok(Turn::Done {
+                delivered,
+                end,
+                run: run.to_owned(),
+                failed,
+            });
+        }
         return Ok(Turn::Stopped {
             failed: ended["failed"] == true,
         });

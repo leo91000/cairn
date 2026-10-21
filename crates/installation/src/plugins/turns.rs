@@ -7,7 +7,8 @@ use crate::{
     store::Db,
     validation::text,
 };
-use serde_json::Value;
+use rusqlite::OptionalExtension;
+use serde_json::{Value, json};
 use std::collections::HashSet;
 
 pub(crate) fn prefix(chat: &str) -> String {
@@ -25,6 +26,39 @@ pub(crate) fn abandoned_prefix(chat: &str) -> String {
 
 pub(crate) fn abandoned_key(chat: &str, message: &str) -> String {
     format!("{}{message}", abandoned_prefix(chat))
+}
+
+/// Freeze only a range that has already ended before the next turn can start.
+/// A request without its own terminator stays fenced from all future output.
+pub(crate) fn abandon(
+    db: &Db<'_>,
+    chat: &str,
+    run: &str,
+    message: &str,
+    failed: bool,
+) -> Result<()> {
+    let reply: Option<Value> =
+        db.0.query_row(
+            "SELECT start.id, terminal.id, terminal.type FROM events AS start
+         JOIN events AS terminal ON terminal.run_id=start.run_id AND terminal.id>start.id
+         WHERE start.run_id=?1 AND start.type='chat.user'
+         AND json_extract(start.payload,'$.messageId')=?2
+         AND terminal.type IN ('turn.completed','turn.failed') ORDER BY terminal.id LIMIT 1",
+            rusqlite::params![run, message],
+            |row| {
+                Ok(json!({
+                    "delivered": row.get::<_, i64>(0)?,
+                    "end": row.get::<_, i64>(1)?,
+                    "failed": row.get::<_, String>(2)? == "turn.failed",
+                }))
+            },
+        )
+        .optional()?;
+    let mut ended = json!({"runId": run, "failed": failed});
+    if let Some(reply) = reply {
+        ended["reply"] = reply;
+    }
+    db.set(&abandoned_key(chat, message), &ended, None)
 }
 
 fn candidate(db: &Db<'_>, chat: &Value, run: &Value) -> Result<Option<(Value, Value)>> {

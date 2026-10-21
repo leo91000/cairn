@@ -577,13 +577,12 @@ pub(crate) fn request_next_turn_in(db: &Db<'_>, chat_id: &str, run_id: &str) -> 
     let old_message = text(&run["chatExecution"], "messageId");
     // A successful delivery may still be waiting for its final reply pump.
     if !succeeded {
-        db.set(
-            &crate::plugins::turns::abandoned_key(chat_id, old_message),
-            &json!({
-                "runId": run_id,
-                "failed": run["status"] != RunStatus::Cancelled,
-            }),
-            None,
+        crate::plugins::turns::abandon(
+            db,
+            chat_id,
+            run_id,
+            old_message,
+            run["status"] != RunStatus::Cancelled,
         )?;
     }
     let mut answers = HashSet::new();

@@ -42,8 +42,13 @@ requests an independent turn with its own native requester proof; the package
 cannot select another agent through message content. The final answer uses
 `chat.postMessage` with the original thread's `thread_ts`, as specified by
 [Slack's message API](https://docs.slack.dev/reference/methods/chat.postMessage/).
-The first slice sends plain text, disables unfurls and prevents special mention
-markup in generated answers. Replies in one channel wait at least one second
+Replies use plain text, disable unfurls and prevent special mention markup in
+generated answers. Long answers are split into parts of at most 3,000 UTF-8 bytes
+after Slack escaping, preserving Unicode code points and complete escape entities.
+Every part stays in the original thread. Each confirmed part advances the native
+delivery checkpoint; a rate limit or manager restart continues from the next
+unsent part. An uncertain part is left for reconciliation without repeating
+confirmed parts. Replies in one channel wait at least one second
 after the preceding response; a fresh worker also waits before its first send. Definite rate limiting persists a verified workspace/method cooldown and honors the full
 `Retry-After`, including deadlines longer than the native scheduler delay. A fresh
 channel check precedes both admission and output; conversion to a private, shared
@@ -72,7 +77,9 @@ reservations refuses admission and provider I/O; expired method slots stay reser
 so a concurrent success cannot erase a newer deadline. Separate native boundary tests check checkpoint
 instance/revision/route/author fences, size limits and lifecycle cleanup.
 Three genuinely completed fixture turns also verify spacing across different
-threads of one channel and a fresh worker after restart.
+threads of one channel and a fresh worker after restart. The long-answer scenarios
+check ordered Unicode content, a 429 on a later part, and a manager restart between
+confirmed parts through the same real worker/agent fixture path.
 A synthetic controller runs Cairn's actual native chat adapter
 with the managed `codex.mjs` test process. No database mutation fabricates the
 completed answer. This controller is not VM isolation evidence, and the test is
@@ -102,7 +109,8 @@ questions, stop/reset, modals, App Home or streaming; authenticated files and
 livrable links; collaboration/productivity tools and scoped agent profiles;
 workflows and bounded owner automations; or private ephemeral RTS search with
 verified engines. Expired mentions currently do not execute, but a private
-Slack-facing resume prompt is still required. Long answers need chunking.
+Slack-facing resume prompt is still required. Rich answer formatting remains a
+later presentation layer over the complete plain-text delivery.
 
 Full web/Android and management MCP/tool parity, provider revoke/exchange and
 wake-delivery audits, data compatibility, independent clean review and complete
