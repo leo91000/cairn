@@ -141,6 +141,34 @@
       "apps/android/app/src/scrollTest/java/build/cairn/app/ui/CacheRefreshCases.kt": "186c13fad7ac370cdb70f9b9d3af410106f576ea580df1da9d3ba7968fd51bf4",
       "apps/android/app/src/test/java/build/cairn/app/data/HistoryCacheCostDiagnosisTest.kt": "6f76a1e48a5ee5851feae1b357d041ff11ee1b42e86e85a22dddd82421a83399"
     },
+    "finalHeadValidation": "Full-suite and device CI must succeed on the final PR head before merge.",
+    "fullUnitTests": {
+      "tests": 591,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 2
+    },
+    "fullUnitTestReference": "882632b539e2ead48b9f0c195d61ac9614c53920"
+  },
+  "fifthReviewFollowUp": {
+    "finding": "A reader restored a trimmed queued history but position validation and persistence still used the raw first event, dropping a valid position.",
+    "regressionBeforeFix": "positionsFromATrimmedQueuedSnapshotSurvivePersistence failed: expected ReadingPosition(1,18,false,3) but was null",
+    "focusedUnitTests": {
+      "tests": 17,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "androidLint": "passed",
+    "spotless": "passed",
+    "measurements": "review-fixed.json: three passing cases",
+    "sourceHashes": {
+      "apps/android/app/src/main/java/build/cairn/app/data/HistoryCache.kt": "07707b8abfa68c7f7c6d93efc49dd15a138243758d6f6d2a92fd7f1fa01d24d0",
+      "apps/android/app/src/main/java/build/cairn/app/data/HistoryCacheWriter.kt": "c21301b68138e50ebae8632dcb3314750d546eefb7316e6da21eb33390f97ea2",
+      "apps/android/app/src/main/java/build/cairn/app/ui/LiveUi.kt": "ba0daf8ccd4d6e2ccab67db02c057b009651bf0009fb886660dbd3804e9feacd",
+      "apps/android/app/src/scrollTest/java/build/cairn/app/ui/CacheRefreshCases.kt": "186c13fad7ac370cdb70f9b9d3af410106f576ea580df1da9d3ba7968fd51bf4",
+      "apps/android/app/src/test/java/build/cairn/app/data/HistoryCacheCostDiagnosisTest.kt": "6f76a1e48a5ee5851feae1b357d041ff11ee1b42e86e85a22dddd82421a83399"
+    },
     "finalHeadValidation": "Full-suite and device CI must succeed on the final PR head before merge."
   }
 }

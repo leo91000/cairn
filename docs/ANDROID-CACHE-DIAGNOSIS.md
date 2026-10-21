@@ -27,7 +27,11 @@ A reader reopening before persistence finishes can restore the queued snapshot.
 Reading positions are retained across queued saves and checked against their
 history and first event. Offering, reading, persisting and recording positions use
 the same cursor ordering rule; an older queued boundary cannot discard a position
-for the retained newer snapshot. The cache's JSON version, encryption, expiry, byte
+for the retained newer snapshot. Queued histories use the same byte-limited
+representation for reads, position validation and persistence. Positions with an
+explicit first-event anchor survive only while that retained boundary matches;
+unanchored legacy positions are cleared when a prefix is trimmed.
+The cache's JSON version, encryption, expiry, byte
 budgets, disk-write throttle and backwards history boundaries are unchanged.
 
 Memory entries retain their estimated size. A warm read moves the entry in the
@@ -141,3 +145,10 @@ accepts a snapshot but before its continuation resumes. Before the recovery fix,
 a fresh cache reads cursor 1 instead of the accepted cursor 2. Afterward, all
 sixteen focused cases pass, including both cancellation scenarios. The pending
 write reference is cleared once that revision is processed.
+
+A fifth regression queues four 1.2 MiB events, reads the retained suffix `[3,4]`,
+records a position anchored at event 3, then persists and reopens. Normalization
+now precedes boundary validation, preserving that position. All seventeen focused
+cases, formatting and Android lint pass. The preceding full-suite run on
+`882632b5` also records 591 cases with no failures and two skipped opt-in benchmarks; earlier
+local timeout runs remain recorded above.

@@ -180,14 +180,17 @@ class HistoryCache(
         }
 
     private fun prepareValue(key: String, value: CachedHistory): CachedHistory {
+        val recent = recentHistory(value)
+        val first = recent.events.firstOrNull()?.id
+        val trimmed = first != value.events.firstOrNull()?.id
         val position =
-            (value.position
+            (recent.position
                     ?: positions[key]?.takeIf { it.history == value.history }?.value
                     ?: memory[key]?.value?.takeIf { it.history == value.history }?.position)
                 ?.takeIf {
-                    it.firstEvent == null || it.firstEvent == value.events.firstOrNull()?.id
+                    if (it.firstEvent == null) !trimmed else it.firstEvent == first
                 }
-        return recentHistory(value.copy(position = position))
+        return recent.copy(position = position)
     }
 
     suspend fun position(key: String, value: ReadingPosition) =
@@ -197,6 +200,7 @@ class HistoryCache(
                 val queued =
                     synchronized(pendingLock) { pending[key]?.value }
                         ?.takeUnless { olderThan(it, retained) }
+                        ?.let { prepareValue(key, it) }
                 val current = queued ?: retained ?: return@withLock
                 if (
                     value.firstEvent != null && value.firstEvent != current.events.firstOrNull()?.id

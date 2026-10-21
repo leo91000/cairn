@@ -42,6 +42,23 @@ class HistoryCacheWriterTest {
     }
 
     @Test
+    fun positionsFromATrimmedQueuedSnapshotSurvivePersistence() = runBlocking {
+        val cache = HistoryCache(directory.root, { _, bytes -> bytes }, { _, bytes -> bytes })
+        val events = (1L..4L).map { RunEvent(it, it, "output", "x".repeat(1200 * 1024)) }
+        val request = cache.prepareSave("chat", record(4).copy(events = events), cache.generation)!!
+        val restored = cache.read("chat")!!
+        assertEquals(listOf(3L, 4L), restored.events.map { it.id })
+        val position = ReadingPosition(1, 18, false, restored.events.first().id)
+
+        cache.position("chat", position)
+        cache.persist(request)
+        cache.flush("chat")
+
+        val disk = HistoryCache(directory.root, { _, bytes -> bytes }, { _, bytes -> bytes })
+        assertEquals(position, disk.read("chat")?.position)
+    }
+
+    @Test
     fun staleCursorsCannotReplacePendingOrRetainedNewerOutput() = runBlocking {
         val cache = HistoryCache(directory.root, { _, bytes -> bytes }, { _, bytes -> bytes })
         val pending = cache.prepareSave("chat", record(10), cache.generation)!!
