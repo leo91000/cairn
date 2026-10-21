@@ -204,6 +204,8 @@ fn route(method: &str, path: &str) -> Result<()> {
     let uuid = |id: &str| crate::validation::uuid(id).is_ok();
     let allowed = match parts.as_slice() {
         ["health"] => method == "GET",
+        ["exclusive"] => method == "GET",
+        ["exclusive", "acquire" | "release"] => method == "POST",
         ["snapshots", id, hash] => {
             uuid(id)
                 && ((method == "GET" && super::snapshots::valid_hash(hash))
@@ -249,6 +251,10 @@ fn route(method: &str, path: &str) -> Result<()> {
 fn controller_timeout(method: &str, path: &str, native: bool) -> Duration {
     Duration::from_secs(if path.ends_with("/restore") {
         120
+    } else if method == "POST" && matches!(path, "/exclusive/acquire" | "/exclusive/release") {
+        // Match the manager's acknowledgement window: suspension and memory
+        // reclamation can legitimately exceed the ordinary control deadline.
+        150
     } else if path.ends_with("snapshot")
         || path.ends_with("snapshot-completed")
         || native
@@ -485,6 +491,89 @@ async fn progressing_upload<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exclusive_commands_cross_the_outbound_relay_with_their_acknowledgement_deadline() {
+        assert!(route("GET", "/exclusive").is_ok());
+        assert_eq!(
+            controller_timeout("GET", "/exclusive", false),
+            Duration::from_secs(25)
+        );
+        for action in ["acquire", "release"] {
+            let path = format!("/exclusive/{action}");
+            assert!(route("POST", &path).is_ok());
+            assert!(route("GET", &path).is_err());
+            assert_eq!(
+                controller_timeout("POST", &path, false),
+                Duration::from_secs(150)
+            );
+        }
+        for (method, path) in [
+            ("POST", "/exclusive"),
+            ("DELETE", "/exclusive"),
+            ("POST", "/exclusive/renew"),
+            ("POST", "/exclusive/acquire/extra"),
+        ] {
+            assert!(route(method, path).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_exclusive_inspection_reaches_the_authenticated_controller() {
+        use axum::{Router, http::StatusCode, routing::get};
+        let controller = Router::new().route(
+            "/exclusive",
+            get(|headers: axum::http::HeaderMap| async move {
+                if headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    != Some("Bearer test-controller")
+                {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        axum::Json(json!({"error": "denied"})),
+                    );
+                }
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({"highestEpoch": 0, "reservation": null})),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = url::Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let stop = tokio_util::sync::CancellationToken::new();
+        let stopped = stop.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, controller)
+                .with_graceful_shutdown(stopped.cancelled_owned())
+                .await
+                .unwrap();
+        });
+        let http = reqwest::Client::new();
+        let master = Master {
+            client: &http,
+            controller: &http,
+            url: &url,
+            token: "test-node",
+        };
+        let command = json!({"method": "GET", "path": "/exclusive", "body": ""});
+        let executor = Executor::default();
+        let response = call_controller(&master, &url, "test-controller", &command, &executor)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.json::<Value>().await.unwrap(),
+            json!({"highestEpoch": 0, "reservation": null})
+        );
+        let denied = call_controller(&master, &url, "wrong-controller", &command, &executor)
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        stop.cancel();
+        server.await.unwrap();
+    }
 
     #[tokio::test(start_paused = true)]
     async fn publication_upload_allows_progress_beyond_the_old_deadline() {
