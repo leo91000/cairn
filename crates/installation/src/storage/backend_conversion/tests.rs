@@ -419,6 +419,7 @@ async fn backend_conversion_measurement() {
 #[tokio::test]
 async fn sparse_work_remains_sparse_and_manager_reserve_is_enforced() {
     use std::os::unix::fs::MetadataExt;
+    const SPARSE_SIZE: u64 = 2 * SIZE;
     let root = tempfile::tempdir().unwrap();
     let tree = root.path().join("vm");
     write(&tree, "upper/home/node/file", b"home");
@@ -426,8 +427,8 @@ async fn sparse_work_remains_sparse_and_manager_reserve_is_enforced() {
     write(&tree, "upper/data/runs/test/workspace/sparse", b"start");
     let sparse = tree.join("upper/data/runs/test/workspace/sparse");
     let file = OpenOptions::new().write(true).open(sparse).unwrap();
-    file.set_len(64 * 1024 * 1024).unwrap();
-    file.write_all_at(b"end", 64 * 1024 * 1024 - 3).unwrap();
+    file.set_len(SPARSE_SIZE).unwrap();
+    file.write_all_at(b"end", SPARSE_SIZE - 3).unwrap();
     let original = image(root.path(), &tree, "vm.ext4").await;
     let staging = root.path().join("staging");
     std::fs::create_dir(&staging).unwrap();
@@ -441,15 +442,40 @@ async fn sparse_work_remains_sparse_and_manager_reserve_is_enforced() {
     .await
     .unwrap();
     let copied = std::fs::metadata(staging.join("tree/workspaces/sparse")).unwrap();
-    assert_eq!(copied.len(), 64 * 1024 * 1024);
+    assert_eq!(copied.len(), SPARSE_SIZE);
     assert!(
         copied.blocks() * 512 < 1024 * 1024,
         "sparse file was expanded on manager"
     );
     let fs = filesystem(&disk, 0, SIZE).unwrap();
-    let bytes = fs.read("/workspaces/sparse").unwrap();
-    assert_eq!(&bytes[..5], b"start");
-    assert_eq!(&bytes[bytes.len() - 3..], b"end");
+    let mut saved = fs.open("/workspaces/sparse").unwrap();
+    let mut bytes = [0; 5];
+    saved.read_bytes(&mut bytes).unwrap();
+    assert_eq!(&bytes, b"start");
+    saved.seek_to(SPARSE_SIZE - 3).unwrap();
+    assert_eq!(saved.read_bytes(&mut bytes).unwrap(), 3);
+    assert_eq!(&bytes[..3], b"end");
+    let reverse = root.path().join("reverse");
+    std::fs::create_dir(&reverse).unwrap();
+    let roundtrip = convert(
+        &disk,
+        &json!({ "kind": "native-ext4-v1", "size": SIZE }),
+        &prepared(),
+        "firecracker",
+        &reverse,
+    )
+    .await
+    .unwrap();
+    let fs = filesystem(&roundtrip, 0, SIZE).unwrap();
+    assert_eq!(
+        fs.metadata("/upper/data/runs/test/workspace/sparse")
+            .unwrap()
+            .len(),
+        SPARSE_SIZE
+    );
+    let copied =
+        std::fs::metadata(reverse.join("tree/upper/data/runs/test/workspace/sparse")).unwrap();
+    assert!(copied.blocks() * 512 < 1024 * 1024);
     let refused = root.path().join("refused");
     std::fs::create_dir(&refused).unwrap();
     let error = super::convert(

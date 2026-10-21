@@ -141,10 +141,6 @@ impl Copy {
                     }
                 }
                 FileType::Regular => {
-                    self.remaining =
-                        self.remaining.checked_sub(metadata.len()).ok_or_else(|| {
-                            Error::new(507, "Saved files exceed the migration disk budget.")
-                        })?;
                     let mut source = fs.open(source.as_path()).map_err(Error::internal)?;
                     let mut output = OpenOptions::new()
                         .write(true)
@@ -163,6 +159,18 @@ impl Copy {
                             if page.iter().all(|byte| *byte == 0) {
                                 output.seek(std::io::SeekFrom::Current(page.len() as i64))?;
                             } else {
+                                // Apparent lengths can exceed the filesystem
+                                // size for sparse files. Bound bytes written,
+                                // including repeated hard links, instead of holes.
+                                self.remaining = self
+                                    .remaining
+                                    .checked_sub(page.len() as u64)
+                                    .ok_or_else(|| {
+                                        Error::new(
+                                            507,
+                                            "Saved data exceeds the migration disk budget.",
+                                        )
+                                    })?;
                                 output.write_all(page)?;
                             }
                         }
