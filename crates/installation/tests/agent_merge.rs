@@ -174,6 +174,7 @@ async fn legacy_restricted_sessions_keep_their_mcp_denial_after_merge_and_resume
     let task = task(&s, &source).await;
     let mut run = s.snapshot(task, "manual").await.unwrap();
     run["status"] = "failed".into();
+    run["chatExecution"] = json!({ "messageId": id() });
     run["snapshot"]["agent"]["access"] = json!({
         "projects": [], "skills": [], "sandbox": "read-only",
     });

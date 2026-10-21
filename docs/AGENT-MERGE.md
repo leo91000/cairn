@@ -25,7 +25,8 @@ engine, model, instructions and effective access are preserved. Legacy access
 snapshots are made explicit before changing their identity. The destination
 profile, its defaults, credentials and portrait remain unchanged. Future task
 runs use the destination's defaults; existing conversations keep their last
-engine and model unless the user chooses another one. The source profile,
+engine and model unless the user chooses another one. Subsequent turns use the
+destination's current access and preapproved live grants. The source profile,
 portrait and redundant live grants are removed. An `agent.merged` audit entry
 records the source, destination and transferred task/chat/run counts.
 
