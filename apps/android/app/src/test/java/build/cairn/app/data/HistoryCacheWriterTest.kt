@@ -5,6 +5,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.*
+import kotlinx.coroutines.test.StandardTestDispatcher
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -158,6 +159,35 @@ class HistoryCacheWriterTest {
         } finally {
             release.countDown()
             scope.cancel()
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun cancellationBetweenChannelHandoffAndResumePersistsTheAcceptedSnapshot() = runBlocking {
+        val cache = HistoryCache(directory.root, { _, bytes -> bytes }, { _, bytes -> bytes })
+        cache.save("chat", record(1), true)
+        val dispatcher = StandardTestDispatcher()
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        val writer = HistoryCacheWriter(cache, "chat", scope, dispatcher)
+        val worker = scope.coroutineContext[Job]!!.children.single()
+        try {
+            // UNDISPATCHED starts the receive; defer its resumption until after cancellation.
+            assertTrue(writer.offer(record(2), cache.generation))
+            scope.cancel()
+            withTimeout(5000) {
+                while (!worker.isCompleted) {
+                    dispatcher.scheduler.runCurrent()
+                    delay(1)
+                }
+                writer.flush()
+            }
+
+            val disk = HistoryCache(directory.root, { _, bytes -> bytes }, { _, bytes -> bytes })
+            assertEquals(2L, disk.read("chat")?.cursor)
+        } finally {
+            scope.cancel()
+            dispatcher.scheduler.runCurrent()
         }
     }
 

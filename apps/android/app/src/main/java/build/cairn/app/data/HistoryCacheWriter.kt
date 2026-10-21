@@ -1,6 +1,7 @@
 package build.cairn.app.data
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -16,6 +17,7 @@ internal class HistoryCacheWriter(
     private val cache: HistoryCache,
     private val key: String,
     scope: CoroutineScope,
+    dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
     private data class Write(val request: HistoryCache.PendingSave, val revision: Long)
 
@@ -23,10 +25,11 @@ internal class HistoryCacheWriter(
     private val monitor = Any()
     private var revision = 0L
     private var closed = false
+    private var outstanding: Write? = null
     private val completed = MutableStateFlow(0L)
 
     init {
-        scope.launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) {
+        scope.launch(dispatcher, start = CoroutineStart.UNDISPATCHED) {
             var active: Write? = null
             suspend fun persist(write: Write) {
                 try {
@@ -38,6 +41,9 @@ internal class HistoryCacheWriter(
                     cache.discard(write.request)
                 }
                 completed.value = write.revision
+                synchronized(monitor) {
+                    if (outstanding === write) outstanding = null
+                }
             }
             try {
                 for (write in queue) {
@@ -54,6 +60,8 @@ internal class HistoryCacheWriter(
                             val write = queue.tryReceive().getOrNull() ?: break
                             persist(write)
                         }
+                        // Prompt cancellation can consume a channel handoff before the loop body.
+                        synchronized(monitor) { outstanding }?.let { persist(it) }
                     } finally {
                         cache.flush(key)
                         completed.value = synchronized(monitor) { revision }
@@ -69,6 +77,7 @@ internal class HistoryCacheWriter(
             val request =
                 cache.prepareSave(key, value, expectedGeneration) ?: return@synchronized false
             val write = Write(request, ++revision)
+            outstanding = write
             check(queue.trySend(write).isSuccess)
             true
         }

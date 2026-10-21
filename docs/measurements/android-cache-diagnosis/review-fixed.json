@@ -1,11 +1,11 @@
 {
-  "reference": "f1f72969323ab16dfda55d0c16a0971d8f0a6854",
-  "observedAt": "2026-10-21T03:03:41.833Z",
+  "reference": "b52c6b4b8dc01feb61776c59a2f2ae7085ee17b4",
+  "observedAt": "2026-10-21T03:14:45.762Z",
   "exitCode": 0,
   "expectResponsive": true,
   "sourceHashes": {
     "apps/android/app/src/main/java/build/cairn/app/data/HistoryCache.kt": "f0b955cd04777c5e5b17c4d63281eb5cd6707dc8763dbf129777529bbbca9528",
-    "apps/android/app/src/main/java/build/cairn/app/data/HistoryCacheWriter.kt": "590b304d750d646d6d2345e2d7e31cbcfbcd3460e632ba225a1534638c797c2e",
+    "apps/android/app/src/main/java/build/cairn/app/data/HistoryCacheWriter.kt": "c21301b68138e50ebae8632dcb3314750d546eefb7316e6da21eb33390f97ea2",
     "apps/android/app/src/main/java/build/cairn/app/ui/LiveUi.kt": "ba0daf8ccd4d6e2ccab67db02c057b009651bf0009fb886660dbd3804e9feacd",
     "apps/android/app/src/scrollTest/java/build/cairn/app/ui/CacheRefreshCases.kt": "186c13fad7ac370cdb70f9b9d3af410106f576ea580df1da9d3ba7968fd51bf4",
     "apps/android/app/src/test/java/build/cairn/app/data/HistoryCacheCostDiagnosisTest.kt": "6f76a1e48a5ee5851feae1b357d041ff11ee1b42e86e85a22dddd82421a83399"
@@ -17,9 +17,9 @@
     "logicalCpus": 32,
     "totalMemoryBytes": 101005701120,
     "loadAverage": [
-      4.52,
-      4.97,
-      5.79
+      4.55,
+      4.76,
+      4.99
     ]
   },
   "limits": [
@@ -31,23 +31,23 @@
   "reports": [
     {
       "test": "build.cairn.app.data.HistoryCacheCostDiagnosisTest",
-      "suite": "<testsuite name=\"build.cairn.app.data.HistoryCacheCostDiagnosisTest\" tests=\"2\" skipped=\"0\" failures=\"0\" errors=\"0\" timestamp=\"2026-10-21T03:03:36.434Z\" hostname=\"leo-ms7d85\" time=\"2.984\">",
+      "suite": "<testsuite name=\"build.cairn.app.data.HistoryCacheCostDiagnosisTest\" tests=\"2\" skipped=\"0\" failures=\"0\" errors=\"0\" timestamp=\"2026-10-21T03:14:40.246Z\" hostname=\"leo-ms7d85\" time=\"3.028\">",
       "stdout": [
         "CACHE_HOST cpus=32 java=21.0.12.1 heap=536870912",
-        "{\"diagnostic\":\"CACHE_COST\",\"events\":200,\"retainedEntries\":1,\"memoryEntries\":1,\"diskEntries\":1,\"encodedBytes\":114015,\"diskBytes\":114015,\"recentHistoryWallMs\":0.44912660000000004,\"recentHistoryCpuMs\":0.448098,\"warmReadP50Ms\":0.127061,\"coldReadP50Ms\":1.535877,\"saveP50Ms\":0.662989,\"forcedWriteP50Ms\":0.908505}",
-        "{\"diagnostic\":\"CACHE_COST\",\"events\":200,\"retainedEntries\":12,\"memoryEntries\":12,\"diskEntries\":12,\"encodedBytes\":114015,\"diskBytes\":1368180,\"recentHistoryWallMs\":0.44912660000000004,\"recentHistoryCpuMs\":0.448098,\"warmReadP50Ms\":0.104539,\"coldReadP50Ms\":0.708419,\"saveP50Ms\":0.62591,\"forcedWriteP50Ms\":0.850548}",
-        "{\"diagnostic\":\"CACHE_COST\",\"events\":1250,\"retainedEntries\":1,\"memoryEntries\":1,\"diskEntries\":1,\"encodedBytes\":714319,\"diskBytes\":714319,\"recentHistoryWallMs\":1.1616746,\"recentHistoryCpuMs\":1.1465178999999999,\"warmReadP50Ms\":0.200703,\"coldReadP50Ms\":3.061293,\"saveP50Ms\":2.076034,\"forcedWriteP50Ms\":3.097384}",
-        "{\"diagnostic\":\"CACHE_COST\",\"events\":1250,\"retainedEntries\":12,\"memoryEntries\":12,\"diskEntries\":12,\"encodedBytes\":714319,\"diskBytes\":8571828,\"recentHistoryWallMs\":1.1616746,\"recentHistoryCpuMs\":1.1465178999999999,\"warmReadP50Ms\":0.128962,\"coldReadP50Ms\":2.127454,\"saveP50Ms\":1.475669,\"forcedWriteP50Ms\":2.356815}",
-        "{\"diagnostic\":\"CACHE_COST\",\"events\":4000,\"retainedEntries\":1,\"memoryEntries\":1,\"diskEntries\":1,\"encodedBytes\":2292819,\"diskBytes\":2292819,\"recentHistoryWallMs\":2.1919767,\"recentHistoryCpuMs\":2.0246020000000002,\"warmReadP50Ms\":0.121015,\"coldReadP50Ms\":7.682302,\"saveP50Ms\":4.199952,\"forcedWriteP50Ms\":7.498165}",
-        "{\"diagnostic\":\"CACHE_COST\",\"events\":4000,\"retainedEntries\":12,\"memoryEntries\":5,\"diskEntries\":9,\"encodedBytes\":2292819,\"diskBytes\":20635371,\"recentHistoryWallMs\":2.1919767,\"recentHistoryCpuMs\":2.0246020000000002,\"warmReadP50Ms\":0.117206,\"coldReadP50Ms\":5.939775,\"saveP50Ms\":4.170473,\"forcedWriteP50Ms\":8.071459}",
+        "{\"diagnostic\":\"CACHE_COST\",\"events\":200,\"retainedEntries\":1,\"memoryEntries\":1,\"diskEntries\":1,\"encodedBytes\":114015,\"diskBytes\":114015,\"recentHistoryWallMs\":0.41258800000000007,\"recentHistoryCpuMs\":0.4121538,\"warmReadP50Ms\":0.121967,\"coldReadP50Ms\":1.075747,\"saveP50Ms\":0.786596,\"forcedWriteP50Ms\":1.337736}",
+        "{\"diagnostic\":\"CACHE_COST\",\"events\":200,\"retainedEntries\":12,\"memoryEntries\":12,\"diskEntries\":12,\"encodedBytes\":114015,\"diskBytes\":1368180,\"recentHistoryWallMs\":0.41258800000000007,\"recentHistoryCpuMs\":0.4121538,\"warmReadP50Ms\":0.09724,\"coldReadP50Ms\":0.664571,\"saveP50Ms\":0.512356,\"forcedWriteP50Ms\":0.757645}",
+        "{\"diagnostic\":\"CACHE_COST\",\"events\":1250,\"retainedEntries\":1,\"memoryEntries\":1,\"diskEntries\":1,\"encodedBytes\":714319,\"diskBytes\":714319,\"recentHistoryWallMs\":1.4852266,\"recentHistoryCpuMs\":1.4591542,\"warmReadP50Ms\":0.273179,\"coldReadP50Ms\":2.827911,\"saveP50Ms\":2.083626,\"forcedWriteP50Ms\":3.034668}",
+        "{\"diagnostic\":\"CACHE_COST\",\"events\":1250,\"retainedEntries\":12,\"memoryEntries\":12,\"diskEntries\":12,\"encodedBytes\":714319,\"diskBytes\":8571828,\"recentHistoryWallMs\":1.4852266,\"recentHistoryCpuMs\":1.4591542,\"warmReadP50Ms\":0.122793,\"coldReadP50Ms\":3.145818,\"saveP50Ms\":2.26909,\"forcedWriteP50Ms\":2.992297}",
+        "{\"diagnostic\":\"CACHE_COST\",\"events\":4000,\"retainedEntries\":1,\"memoryEntries\":1,\"diskEntries\":1,\"encodedBytes\":2292819,\"diskBytes\":2292819,\"recentHistoryWallMs\":2.0973132,\"recentHistoryCpuMs\":2.0924974,\"warmReadP50Ms\":0.118072,\"coldReadP50Ms\":8.252115,\"saveP50Ms\":4.20831,\"forcedWriteP50Ms\":7.481393}",
+        "{\"diagnostic\":\"CACHE_COST\",\"events\":4000,\"retainedEntries\":12,\"memoryEntries\":5,\"diskEntries\":9,\"encodedBytes\":2292819,\"diskBytes\":20635371,\"recentHistoryWallMs\":2.0973132,\"recentHistoryCpuMs\":2.0924974,\"warmReadP50Ms\":0.194876,\"coldReadP50Ms\":7.771848,\"saveP50Ms\":4.235514,\"forcedWriteP50Ms\":8.58089}",
         "CACHE_LOCK_DIAGNOSIS unrelatedWarmReadBlocked=true releasedSuccessfully=true"
       ]
     },
     {
       "test": "build.cairn.app.ui.CacheRefreshTest",
-      "suite": "<testsuite name=\"build.cairn.app.ui.CacheRefreshTest\" tests=\"1\" skipped=\"0\" failures=\"0\" errors=\"0\" timestamp=\"2026-10-21T03:03:39.425Z\" hostname=\"leo-ms7d85\" time=\"2.088\">",
+      "suite": "<testsuite name=\"build.cairn.app.ui.CacheRefreshTest\" tests=\"1\" skipped=\"0\" failures=\"0\" errors=\"0\" timestamp=\"2026-10-21T03:14:43.278Z\" hostname=\"leo-ms7d85\" time=\"2.112\">",
       "stdout": [
-        "CACHE_REFRESH receivedWhileCacheWriteBlocked=true publicationDelayMs=13.468982 cacheHeldAfterReceptionMs=323.370538 visibleAfterReleaseMs=0.971733"
+        "CACHE_REFRESH receivedWhileCacheWriteBlocked=true publicationDelayMs=12.514067 cacheHeldAfterReceptionMs=321.032376 visibleAfterReleaseMs=1.14285"
       ]
     }
   ]

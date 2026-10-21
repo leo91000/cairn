@@ -10,6 +10,8 @@ pending snapshot per reader, rather than launching a task for every update.
 It saves sequentially and conflates pending updates. Foreground exit flushes the
 last published revision; closing or cancelling a reader drains its last pending
 snapshot and flushes disk in a non-cancellable cleanup.
+The latest uncompleted write is retained independently of channel delivery, so
+cancellation after a channel handoff but before worker resumption cannot lose it.
 
 The cache assigns each offered snapshot an identity shared across readers of the
 same key. Superseded requests cannot overwrite later offers. Older cursors cannot
@@ -133,3 +135,9 @@ A third regression checks a queued cursor 9 starting at event 2 against a retain
 cursor 10 starting at event 1. Before the position fix, the retained snapshot's
 position is silently dropped; afterward, all fifteen focused cases pass. The
 fresh measurement and validation record cover the shared cursor comparison.
+
+A controlled dispatcher regression cancels an idle writer after its channel
+accepts a snapshot but before its continuation resumes. Before the recovery fix,
+a fresh cache reads cursor 1 instead of the accepted cursor 2. Afterward, all
+sixteen focused cases pass, including both cancellation scenarios. The pending
+write reference is cleared once that revision is processed.
