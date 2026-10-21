@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import {
   mkdirSync,
   readFileSync,
@@ -21,7 +22,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const android = resolve(root, 'apps/android')
 const classes = [
   'build.cairn.app.data.HistoryCacheCostDiagnosisTest',
-  'build.cairn.app.ui.CacheRefreshDiagnosisTest',
+  'build.cairn.app.ui.CacheRefreshTest',
 ]
 const args = [':app:testDebugUnitTest', '--rerun']
 for (const name of classes)
@@ -57,7 +58,14 @@ const measurement = {
   reference: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(),
   observedAt: new Date().toISOString(),
   exitCode: result.status,
-  expectResponsive: process.env.CAIRN_CACHE_EXPECT_UNBLOCKED === '1',
+  expectResponsive: true,
+  sourceHashes: Object.fromEntries([
+    'apps/android/app/src/main/java/build/cairn/app/data/HistoryCache.kt',
+    'apps/android/app/src/main/java/build/cairn/app/data/HistoryCacheWriter.kt',
+    'apps/android/app/src/main/java/build/cairn/app/ui/LiveUi.kt',
+    'apps/android/app/src/scrollTest/java/build/cairn/app/ui/CacheRefreshCases.kt',
+    'apps/android/app/src/test/java/build/cairn/app/data/HistoryCacheCostDiagnosisTest.kt',
+  ].map(file => [file, createHash('sha256').update(readFileSync(resolve(root, file))).digest('hex')])),
   host: {
     platform: platform(),
     release: release(),

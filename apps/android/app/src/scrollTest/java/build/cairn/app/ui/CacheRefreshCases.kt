@@ -14,34 +14,22 @@ import build.cairn.app.diagnostics.Performance
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.flow.first
 import okhttp3.mockwebserver.*
 import org.junit.Assert.*
-import org.junit.Assume.assumeTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
-import org.junit.runner.RunWith
-import org.robolectric.RobolectricTestRunner
-import org.robolectric.annotation.Config
 
-/** Diagnostic only: hold a real cache write while a second real SSE batch arrives. */
-@RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
-class CacheRefreshDiagnosisTest {
+/** A received update must display even while an earlier cache write is held. */
+abstract class CacheRefreshCases {
     @get:Rule val compose = createComposeRule()
     @get:Rule val directory = TemporaryFolder()
 
     @Test
-    fun networkUpdateWaitsForAnEarlierCacheWrite() {
-        assumeTrue(System.getenv("CAIRN_MEASURE_ANDROID_CACHE") == "1")
+    fun networkUpdateDoesNotWaitForAnEarlierCacheWrite() {
         val app = ApplicationProvider.getApplicationContext<Application>()
-        androidx.work.testing.WorkManagerTestInitHelper.initializeTestWorkManager(
-            app,
-            androidx.work.Configuration.Builder()
-                .setExecutor(androidx.work.testing.SynchronousExecutor())
-                .build(),
-        )
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
         val firstWrite = AtomicBoolean(true)
@@ -70,20 +58,25 @@ class CacheRefreshDiagnosisTest {
                 return "event: batch\nid: $id\ndata: ${wireJson.encodeToString(batch)}\n\n"
             }
             val first = frame(1)
+            val second = frame(2)
+            val streams = AtomicInteger()
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val endpoint = request.requestUrl!!.encodedPath
-                        if (endpoint.endsWith("/chats/cache-refresh/stream"))
+                        if (endpoint.endsWith("/chats/cache-refresh/stream")) {
+                            if (streams.getAndIncrement() == 0)
+                                return MockResponse()
+                                    .setHeader("Content-Type", "text/event-stream")
+                                    .setBody(first)
+                            // A finite first stream reconnects independently of the UI collector.
+                            // Never send batch 2 until batch 1's cache write is actually held.
+                            check(entered.await(10, TimeUnit.SECONDS))
                             return MockResponse()
                                 .setHeader("Content-Type", "text/event-stream")
-                                .setBody(first + frame(2) + ": keepalive\n\n".repeat(1000))
-                                // Deliver batch 1 first so its write has started before batch 2.
-                                .throttleBody(
-                                    first.toByteArray().size.toLong(),
-                                    250,
-                                    TimeUnit.MILLISECONDS,
-                                )
+                                .setBody(second + ": keepalive\n\n".repeat(1000))
+                                .throttleBody(second.toByteArray().size.toLong(), 1, TimeUnit.DAYS)
+                        }
                         val body =
                             when (endpoint) {
                                 "/api/account/session" -> beaconAccountFixture()
@@ -95,7 +88,17 @@ class CacheRefreshDiagnosisTest {
                     }
                 }
             server.start()
-            val vm = CairnViewModel(app, MemoryVault(), beaconOrigin = "")
+            val vault =
+                object : SessionVault {
+                    private val values = mutableMapOf<String, String>()
+
+                    override fun read(origin: String) = values[origin]
+
+                    override fun write(origin: String, cookie: String?) {
+                        if (cookie == null) values.remove(origin) else values[origin] = cookie
+                    }
+                }
+            val vm = CairnViewModel(app, vault, beaconOrigin = "")
             // Exercise the production reader without introducing a product injection API.
             CairnViewModel::class.java.getDeclaredField("historyCache").apply {
                 isAccessible = true
@@ -129,31 +132,22 @@ class CacheRefreshDiagnosisTest {
                         .sumOf { it.count } >= 2
                 }
                 // LIVE_REDUCE proves batch 2 is already parsed and applied upstream.
-                val detached = System.getenv("CAIRN_CACHE_EXPECT_UNBLOCKED") == "1"
-                if (detached) {
-                    compose.waitUntil(10000) {
-                        compose.onAllNodesWithText("Output 2").fetchSemanticsNodes().isNotEmpty()
-                    }
-                    compose.onNodeWithText("Output 2").assertIsDisplayed()
-                } else {
-                    compose.onNodeWithText("Output 1").assertIsDisplayed()
-                    compose.onNodeWithText("Output 2").assertDoesNotExist()
-                }
                 val receivedAt = System.nanoTime()
-                val holdUntil = receivedAt + 300_000_000
-                compose.waitUntil(2000) { System.nanoTime() >= holdUntil }
-                if (detached) compose.onNodeWithText("Output 2").assertIsDisplayed()
-                else {
-                    compose.onNodeWithText("Output 1").assertIsDisplayed()
-                    compose.onNodeWithText("Output 2").assertDoesNotExist()
+                compose.waitUntil(10000) {
+                    compose.onAllNodesWithText("Output 2").fetchSemanticsNodes().isNotEmpty()
                 }
+                val visibleAt = System.nanoTime()
+                compose.onNodeWithText("Output 2").assertIsDisplayed()
+                val holdUntil = visibleAt + 300_000_000
+                compose.waitUntil(2000) { System.nanoTime() >= holdUntil }
+                compose.onNodeWithText("Output 2").assertIsDisplayed()
                 val releasedAt = System.nanoTime()
                 release.countDown()
                 compose.waitUntil(10000) {
                     compose.onAllNodesWithText("Output 2").fetchSemanticsNodes().isNotEmpty()
                 }
                 println(
-                    "CACHE_REFRESH_DIAGNOSIS detached=$detached cacheHeldAfterReceptionMs=${(releasedAt - receivedAt) / 1e6} " +
+                    "CACHE_REFRESH receivedWhileCacheWriteBlocked=true publicationDelayMs=${(visibleAt - receivedAt) / 1e6} cacheHeldAfterReceptionMs=${(releasedAt - receivedAt) / 1e6} " +
                         "visibleAfterReleaseMs=${(System.nanoTime() - releasedAt) / 1e6}"
                 )
             } finally {
@@ -161,7 +155,6 @@ class CacheRefreshDiagnosisTest {
                 compose.runOnIdle { mounted = false }
                 compose.waitForIdle()
                 compose.runOnIdle { models.clear() }
-                androidx.work.testing.WorkManagerTestInitHelper.closeWorkDatabase()
             }
         }
     }

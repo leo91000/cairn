@@ -51,7 +51,17 @@ class HistoryCache(
         private set
 
     private val lock = Mutex()
-    private val memory = linkedMapOf<String, CachedHistory>()
+
+    private data class Entry(val value: CachedHistory, val bytes: Long)
+
+    private data class Position(val history: String, val value: ReadingPosition)
+
+    internal class PendingSave(val key: String, val value: CachedHistory, val generation: Long)
+
+    private val memory = linkedMapOf<String, Entry>()
+    private val pendingLock = Any()
+    private val pending = mutableMapOf<String, PendingSave>()
+    private val positions = mutableMapOf<String, Position>()
     private val written = mutableMapOf<String, Long>()
     private val dirty = mutableSetOf<String>()
     private val maxEntry = 4 * 1024 * 1024
@@ -74,8 +84,10 @@ class HistoryCache(
         withContext(Dispatchers.IO) {
             Performance.measure(PerfOperation.CACHE_READ) {
                 lock.withLock {
+                    val queued = synchronized(pendingLock) { pending[key]?.value }
                     val value =
-                        memory[key]
+                        queued?.let { prepareValue(key, it) }
+                            ?: memory[key]?.value
                             ?: runCatching {
                                 val file = File(root, key)
                                 require(file.length() in 1..(maxEntry + 64).toLong())
@@ -88,8 +100,8 @@ class HistoryCache(
                         removeLocked(key)
                         null
                     } else {
-                        memory.remove(key)
-                        memory[key] = value
+                        val previous = memory.remove(key)
+                        memory[key] = if (previous?.value === value) previous else entry(value)
                         trimMemory()
                         value
                     }
@@ -97,47 +109,100 @@ class HistoryCache(
             }
         }
 
+    internal fun prepareSave(
+        key: String,
+        value: CachedHistory,
+        expectedGeneration: Long,
+    ): PendingSave? =
+        synchronized(pendingLock) {
+            if (expectedGeneration != generation) return@synchronized null
+            val latest = pending[key]?.value
+            if (latest?.history == value.history && latest.cursor > value.cursor)
+                return@synchronized null
+            PendingSave(key, value, expectedGeneration).also { pending[key] = it }
+        }
+
+    private fun isCurrent(request: PendingSave) =
+        synchronized(pendingLock) {
+            request.generation == generation && pending[request.key] === request
+        }
+
+    internal fun discard(request: PendingSave) =
+        synchronized(pendingLock) {
+            if (pending[request.key] === request) pending.remove(request.key)
+            Unit
+        }
+
     suspend fun save(
         key: String,
         value: CachedHistory,
         force: Boolean = false,
         expectedGeneration: Long = generation,
-    ) =
+    ) {
+        val request = prepareSave(key, value, expectedGeneration) ?: return
+        try {
+            persist(request, force)
+        } finally {
+            discard(request)
+        }
+    }
+
+    internal suspend fun persist(request: PendingSave, force: Boolean = false) =
         withContext(Dispatchers.IO) {
             Performance.measure(PerfOperation.CACHE_SAVE) {
                 lock.withLock {
-                    if (expectedGeneration != generation) return@withLock
-                    if (!valid(value)) {
-                        removeLocked(key)
-                        return@withLock
+                    if (!isCurrent(request)) return@withLock
+                    val key = request.key
+                    val value = request.value
+                    try {
+                        if (!valid(value)) {
+                            removeLocked(key)
+                            return@withLock
+                        }
+                        val retained = memory[key]?.value
+                        if (retained?.history == value.history && retained.cursor > value.cursor)
+                            return@withLock
+                        val next = prepareValue(key, value)
+                        memory.remove(key)
+                        memory[key] = entry(next)
+                        if (positions[key]?.history != next.history) positions.remove(key)
+                        dirty.add(key)
+                        trimMemory()
+                        if (force || System.currentTimeMillis() - (written[key] ?: 0) >= 1000)
+                            writeLocked(key)
+                    } finally {
+                        discard(request)
                     }
-                    val position =
-                        (value.position
-                                ?: memory[key]?.takeIf { it.history == value.history }?.position)
-                            ?.takeIf {
-                                it.firstEvent == null ||
-                                    it.firstEvent == value.events.firstOrNull()?.id
-                            }
-                    val original = value.copy(position = position)
-                    val next = recentHistory(original)
-                    memory.remove(key)
-                    memory[key] = next
-                    dirty.add(key)
-                    trimMemory()
-                    if (force || System.currentTimeMillis() - (written[key] ?: 0) >= 1000)
-                        writeLocked(key)
                 }
             }
         }
 
+    private fun prepareValue(key: String, value: CachedHistory): CachedHistory {
+        val position =
+            (value.position
+                    ?: positions[key]?.takeIf { it.history == value.history }?.value
+                    ?: memory[key]?.value?.takeIf { it.history == value.history }?.position)
+                ?.takeIf {
+                    it.firstEvent == null || it.firstEvent == value.events.firstOrNull()?.id
+                }
+        return recentHistory(value.copy(position = position))
+    }
+
     suspend fun position(key: String, value: ReadingPosition) =
         withContext(Dispatchers.IO) {
             lock.withLock {
+                val queued = synchronized(pendingLock) { pending[key]?.value }
+                val current = queued ?: memory[key]?.value ?: return@withLock
+                if (
+                    value.firstEvent != null && value.firstEvent != current.events.firstOrNull()?.id
+                )
+                    return@withLock
+                positions[key] = Position(current.history, value)
                 memory[key]?.let {
-                    if (value.firstEvent != null && value.firstEvent != it.events.firstOrNull()?.id)
-                        return@withLock
-                    memory[key] = it.copy(position = value)
-                    dirty.add(key)
+                    if (it.value.history == current.history) {
+                        memory[key] = it.copy(value = it.value.copy(position = value))
+                        dirty.add(key)
+                    }
                 }
             }
         }
@@ -151,7 +216,11 @@ class HistoryCache(
     suspend fun clear() =
         withContext(Dispatchers.IO) {
             lock.withLock {
-                generation++
+                synchronized(pendingLock) {
+                    generation++
+                    pending.clear()
+                }
+                positions.clear()
                 memory.clear()
                 written.clear()
                 dirty.clear()
@@ -161,35 +230,40 @@ class HistoryCache(
 
     private fun removeLocked(key: String) {
         memory.remove(key)
+        positions.remove(key)
+        synchronized(pendingLock) { pending.remove(key) }
         written.remove(key)
         dirty.remove(key)
         AtomicFile(File(root, key)).delete()
     }
 
+    private fun entry(value: CachedHistory): Entry {
+        val bytes =
+            value.events.sumOf {
+                (it.text.length + it.payload.toString().length).toLong() * 2
+            } + wireJson.encodeToString(value.state).length.toLong() * 2
+        return Entry(value, bytes)
+    }
+
     private fun trimMemory() {
         var total = 0L
-        for ((key, value) in memory.toList().asReversed()) {
-            total +=
-                value.events.sumOf {
-                    (it.text.length + it.payload.toString().length).toLong() * 2
-                } + wireJson.encodeToString(value.state).length.toLong() * 2
-            if (total > maxTotal) {
-                memory.remove(key)
-                written.remove(key)
-                dirty.remove(key)
-            }
+        for ((key, entry) in memory.toList().asReversed()) {
+            total += entry.bytes
+            if (total > maxTotal) evictMemory(key)
         }
-        while (memory.size > 12) {
-            val key = memory.keys.first()
-            memory.remove(key)
-            written.remove(key)
-            dirty.remove(key)
-        }
+        while (memory.size > 12) evictMemory(memory.keys.first())
+    }
+
+    private fun evictMemory(key: String) {
+        memory.remove(key)
+        positions.remove(key)
+        written.remove(key)
+        dirty.remove(key)
     }
 
     private fun writeLocked(key: String) {
         if (key !in dirty) return
-        val value = memory[key] ?: return
+        val value = memory[key]?.value ?: return
         runCatching {
             val bytes = wireJson.encodeToString(value).toByteArray()
             if (bytes.size > maxEntry) {
