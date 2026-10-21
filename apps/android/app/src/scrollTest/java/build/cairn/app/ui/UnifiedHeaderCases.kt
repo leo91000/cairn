@@ -3,7 +3,9 @@ package build.cairn.app.ui
 import android.app.Application
 import android.view.View
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.platform.LocalDensity
@@ -30,14 +32,12 @@ internal fun installationHeader(name: String = "", state: String = ""): Semantic
     hasContentDescription("Installation : $name", substring = true) and
         hasContentDescription(state, substring = true)
 
-/**
- * Issue #176: one header per screen, the status bar inset applied once, and the Connexion sheet.
- */
+/** Issue #176: one header per screen, system insets applied once, and the Connexion sheet. */
 abstract class UnifiedHeaderCases {
     protected open fun capture(name: String) {}
 
-    /** Robolectric has no status bar: its test gives the compose view a real inset here. */
-    protected open fun applyStatusBar(view: View) {}
+    /** Robolectric supplies the status bar and optional camera cutout here. */
+    protected open fun applySystemInsets(view: View) {}
 
     @get:Rule val compose = createComposeRule()
 
@@ -128,10 +128,11 @@ abstract class UnifiedHeaderCases {
         val origin = server.url("/").toString()
         compose.setContent {
             val local = LocalDensity.current
-            val inset = WindowInsets.statusBars.getTop(local).toFloat()
+            val inset =
+                WindowInsets.statusBars.union(WindowInsets.displayCutout).getTop(local).toFloat()
             val current = LocalView.current
             SideEffect {
-                statusBar = inset
+                topInset = inset
                 density = local.density
                 view = current
             }
@@ -143,7 +144,7 @@ abstract class UnifiedHeaderCases {
         }
     }
 
-    private var statusBar = 0f
+    private var topInset = 0f
     private var density = 1f
     private var view: View? = null
 
@@ -158,15 +159,15 @@ abstract class UnifiedHeaderCases {
         }
 
     /**
-     * The first content sits right under a real status bar: applying its inset twice, or not at
-     * all, moves it.
+     * The first content sits below both the status bar and camera cutout. Applying their union
+     * twice, or not at all, moves it.
      */
-    private fun assertTopsUnderStatusBar(node: SemanticsNodeInteraction) {
-        compose.runOnUiThread { applyStatusBar(checkNotNull(view)) }
+    private fun assertTopsUnderSystemInsets(node: SemanticsNodeInteraction) {
+        compose.runOnUiThread { applySystemInsets(checkNotNull(view)) }
         compose.waitForIdle()
-        assertTrue("The status bar inset is $statusBar px", statusBar > 0f)
+        assertTrue("The top system inset is $topInset px", topInset > 0f)
         val top = node.fetchSemanticsNode().boundsInRoot.top
-        assertTrue("Top $top should follow the $statusBar px status bar", abs(top - statusBar) < 2f)
+        assertTrue("Top $top should follow the $topInset px system inset", abs(top - topInset) < 2f)
     }
 
     @Test
@@ -186,7 +187,7 @@ abstract class UnifiedHeaderCases {
                         .isNotEmpty()
                 }
                 compose.onNodeWithText("Cairn").assertDoesNotExist()
-                assertTopsUnderStatusBar(compose.onNodeWithTag("installation-header"))
+                assertTopsUnderSystemInsets(compose.onNodeWithTag("installation-header"))
                 compose.onNodeWithContentDescription("Rechercher").assertIsDisplayed()
                 compose.onNodeWithContentDescription("Compte et paramètres").assertIsDisplayed()
                 compose
@@ -216,7 +217,7 @@ abstract class UnifiedHeaderCases {
                 waitDescription("Fichiers · 4")
                 capture("chat")
                 val header = compose.onNodeWithTag("conversation-header")
-                assertTopsUnderStatusBar(header)
+                assertTopsUnderSystemInsets(header)
                 val height = header.fetchSemanticsNode().boundsInRoot.height / density
                 assertTrue("Conversation chrome is $height dp", height <= 60f)
                 compose

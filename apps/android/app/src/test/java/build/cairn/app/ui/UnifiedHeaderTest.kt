@@ -16,14 +16,21 @@ import kotlin.math.roundToInt
 import kotlinx.coroutines.runBlocking
 import org.junit.*
 import org.junit.runner.RunWith
-import org.robolectric.RobolectricTestRunner
+import org.robolectric.ParameterizedRobolectricTestRunner
+import org.robolectric.ParameterizedRobolectricTestRunner.Parameters
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 
-@RunWith(RobolectricTestRunner::class)
+@RunWith(ParameterizedRobolectricTestRunner::class)
 @Config(sdk = [36], qualifiers = "w412dp-h915dp-mdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
-class UnifiedHeaderTest : UnifiedHeaderCases() {
+class UnifiedHeaderTest(private val cutoutHeightDp: Int) : UnifiedHeaderCases() {
+    companion object {
+        @JvmStatic
+        @Parameters(name = "cutout={0}dp")
+        fun cutouts() = listOf(arrayOf(0), arrayOf(48))
+    }
+
     @Before
     fun setup() {
         val application = ApplicationProvider.getApplicationContext<Application>()
@@ -36,7 +43,7 @@ class UnifiedHeaderTest : UnifiedHeaderCases() {
         runBlocking { NotificationPreferences(application).setEnabled(false) }
     }
 
-    override fun applyStatusBar(view: View) {
+    override fun applySystemInsets(view: View) {
         val statusBars = WindowInsetsCompat.Type.statusBars()
         val height = (24 * view.resources.displayMetrics.density).roundToInt()
         ViewCompat.dispatchApplyWindowInsets(
@@ -44,6 +51,15 @@ class UnifiedHeaderTest : UnifiedHeaderCases() {
             WindowInsetsCompat.Builder()
                 .setInsets(statusBars, Insets.of(0, height, 0, 0))
                 .setVisible(statusBars, true)
+                .setInsets(
+                    WindowInsetsCompat.Type.displayCutout(),
+                    Insets.of(
+                        0,
+                        (cutoutHeightDp * view.resources.displayMetrics.density).roundToInt(),
+                        0,
+                        0,
+                    ),
+                )
                 .build(),
         )
     }
