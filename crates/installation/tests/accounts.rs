@@ -58,6 +58,7 @@ fn config(root: &TempDir) -> Config {
         codex_bin: "/nonexistent-codex".into(),
         claude_bin: common::fixture("claude.mjs"),
         opencode_bin: "opencode".into(),
+        opencode_go_usage_url: cairn_installation::accounts::opencode::USAGE_URL.into(),
         ..common::config(root.path())
     }
 }

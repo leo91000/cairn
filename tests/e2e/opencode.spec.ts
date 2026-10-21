@@ -324,3 +324,45 @@ test('OpenCode explains a regional Privacy refusal and offers retry or a new con
   await expect(page).toHaveURL(/\/chats(?:\?|$)/)
   expect((await workspace.api(`/api/chats/${chat.id}`)).run.status).toBe('failed')
 })
+
+test('OpenCode Go displays three quotas, reset times and the provider balance setting', async ({ page, workspace }, testInfo) => {
+  test.setTimeout(90000)
+  const apiKey = 'synthetic-browser-go-usage-key'
+  const account = await workspace.api('/api/accounts', 'POST', {
+    provider: 'opencode',
+    name: 'Go usage',
+    modelProvider: 'opencode-go',
+    apiKey,
+  })
+  await workspace.api('/api/accounts/refresh', 'POST')
+  await page.goto(workspacePath('/connections'))
+  await signIn(page)
+  const row = page.getByRole('button', { name: /^Go usage, / })
+  await expect(row.getByRole('progressbar', { name: 'Go usage 5-hour window remaining' })).toHaveAttribute('aria-valuenow', '75')
+  await row.click()
+  const panel = page.getByRole('dialog', { name: 'Go usage' })
+  await expect(panel.getByText('5-hour window · 75%')).toBeVisible()
+  await expect(panel.getByText('Weekly · 40%')).toBeVisible()
+  await expect(panel.getByText('Monthly · 15%')).toBeVisible()
+  await expect(panel.getByText(/^Resets /)).toHaveCount(3)
+  await expect(panel.getByText(/paid Zen credits/)).toHaveCount(0)
+  for (const [width, colorScheme] of [[1440, 'light'], [390, 'dark']] as const) {
+    await page.setViewportSize({ width, height: 900 })
+    await page.emulateMedia({ colorScheme })
+    await page.screenshot({ path: testInfo.outputPath(`opencode-go-usage-${width}.png`), animations: 'disabled' })
+  }
+
+  workspace.setOpenCodeGoUsage(account.id, apiKey, {
+    useBalance: true,
+    rollingUsage: { status: 'ok', usagePercent: 25, resetInSec: 7200 },
+    weeklyUsage: { status: 'ok', usagePercent: 60, resetInSec: 86400 },
+    monthlyUsage: { status: 'rate-limited', usagePercent: 100, resetInSec: 604800 },
+  })
+  await workspace.api('/api/accounts/refresh', 'POST')
+  await expect(panel.getByText('Monthly · 0%')).toBeVisible()
+  await expect(panel.getByText(/Requests can use paid Zen credits/)).toBeVisible()
+  const refreshed = (await workspace.api('/api/accounts')).accounts.find((a: { id: string }) => a.id === account.id)
+  expect(refreshed.status).not.toBe('waiting')
+  expect(refreshed.remainingPercent).toBe(0)
+  expect(JSON.stringify(refreshed)).not.toContain(apiKey)
+})

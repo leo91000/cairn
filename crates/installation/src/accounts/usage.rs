@@ -15,13 +15,13 @@ pub struct Usage {
     pub windows: Vec<Window>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checked_at: Option<i64>,
-    /// Claude Code's last reading attempt, successful or not.
+    /// The last reading attempt, successful or not (Claude Code and OpenCode Go).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempted_at: Option<i64>,
     /// Codex banked resets.
     #[serde(default)]
     pub resets: Option<Resets>,
-    /// Kept as written: Claude Code sets `error` to a message or `null`, Codex never sets it.
+    /// Provider-specific readings, including usage errors and OpenCode Go's balance setting.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -114,6 +114,11 @@ impl Usage {
         self.resets.as_ref().map_or(0, |r| r.available)
     }
 
+    /// OpenCode Go can continue on Zen credits when the user enabled it at the provider.
+    pub fn uses_balance(&self) -> bool {
+        self.extra.get("useBalance").and_then(Value::as_bool) == Some(true)
+    }
+
     fn windows<'a>(&'a self, model: &'a str) -> impl Iterator<Item = &'a Window> {
         self.windows.iter().filter(move |w| w.applies(model))
     }
@@ -134,12 +139,12 @@ impl Usage {
     }
 
     pub fn blocked(&self, model: &str) -> bool {
-        !self.allowed || self.windows(model).any(|w| w.reached)
+        !self.allowed || (!self.uses_balance() && self.windows(model).any(|w| w.reached))
     }
 
     /// Unblocked, with capacity left for `model`.
     pub fn available(&self, model: &str) -> bool {
-        !self.blocked(model) && self.remaining(model).unwrap_or(0.) > 0.
+        !self.blocked(model) && (self.uses_balance() || self.remaining(model).unwrap_or(0.) > 0.)
     }
 
     /// Compare each window: one can reset while another still limits total capacity.
@@ -147,7 +152,7 @@ impl Usage {
         if !after.available(model) {
             return false;
         }
-        if !before.allowed && after.allowed {
+        if (!before.allowed && after.allowed) || (!before.uses_balance() && after.uses_balance()) {
             return true;
         }
         after.windows(model).any(|current| {

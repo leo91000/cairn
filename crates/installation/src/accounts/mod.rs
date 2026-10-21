@@ -295,7 +295,13 @@ fn capacity(account: &Account, driver: &dyn Driver, model: &str) -> Option<f64> 
     if !fresh(account, driver) {
         return None;
     }
-    account.usage.as_ref()?.remaining(model)
+    let usage = account.usage.as_ref()?;
+    // Subscription windows still display their true remaining percentage. A Go
+    // account opted into Zen credits can run beyond those windows.
+    if usage.uses_balance() {
+        return None;
+    }
+    usage.remaining(model)
 }
 
 /// Whether usage and state let the account take a new `model` run, ignoring its slots.

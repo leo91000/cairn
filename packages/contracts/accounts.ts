@@ -21,6 +21,8 @@ export interface Usage {
   windows: UsageWindow[]
   checkedAt: number | null
   error?: string | null
+  /** OpenCode Go may use paid Zen credits once its subscription quotas are exhausted. */
+  useBalance?: boolean
   /** Codex banked resets. */
   resets: { available: number } | null
 }

@@ -51,6 +51,7 @@ pub fn config(root: &Path) -> Config {
         codex_bin: "codex".into(),
         claude_bin: "claude".into(),
         opencode_bin: "opencode".into(),
+        opencode_go_usage_url: cairn_installation::accounts::opencode::USAGE_URL.into(),
         gh_bin: "gh".into(),
         concurrency: 1,
         logger: false,
