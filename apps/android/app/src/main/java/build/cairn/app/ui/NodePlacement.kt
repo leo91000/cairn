@@ -230,6 +230,7 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
                     "Node fixe : aucune bascule automatique ailleurs.",
                     style = MaterialTheme.typography.bodySmall,
                 )
+            BackendMigration(vm, run.id)
             Text("Où elle tournera la prochaine fois", style = MaterialTheme.typography.titleSmall)
             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                 listOf("automatic" to "Automatique", "preferred" to "Préférer", "fixed" to "Fixer")

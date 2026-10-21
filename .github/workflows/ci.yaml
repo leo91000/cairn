@@ -126,9 +126,9 @@ jobs:
           cache: true
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
       - name: Install native test dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
       - uses: ./.github/actions/cache-rust
-      - name: Check all Rust targets, including the optional storage transport
+      - name: Check all Rust targets, including the required ublk transport
         run: cargo clippy --locked --workspace --all-targets --features ublk-prototype -- -D warnings
   backend:
     services:
@@ -157,7 +157,7 @@ jobs:
           cache: true
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
       - name: Install native test dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
       - uses: ./.github/actions/cache-rust
         with:
           save: true
@@ -198,7 +198,7 @@ jobs:
           cache: true
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
       - name: Install native test dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
       - uses: ./.github/actions/cache-rust
       - name: Prepare the installation host's required ublk driver
         run: |

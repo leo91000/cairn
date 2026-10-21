@@ -2394,3 +2394,101 @@ async fn installation_access_cannot_grant_secrets_or_exclusive_reservations() {
         .unwrap();
     assert_eq!(instance["agentIds"], json!([manager["id"]]));
 }
+
+#[tokio::test]
+async fn backend_migration_tools_match_and_recheck_management_grants() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let agent_token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let owner_token = common::relay_fixture::grant(&s, &["read", "manage"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let chat = cairn_installation::config::id();
+    let run = cairn_installation::config::id();
+    let node = cairn_installation::config::id();
+    s.store.put("nodes", json!({ "id": node, "runtimeId": "fixture", "capabilities": { "backend": "native" }, "nativeEnabled": true, "nativeAccounts": [] })).await.unwrap();
+    s.store
+        .set(
+            "native-authority",
+            json!({ "observedAt": cairn_installation::config::now(), "accounts": {} }),
+            None,
+        )
+        .await
+        .unwrap();
+    // Neither caller has a traced native host grant. Management access alone
+    // must not allow the migration to manufacture that authority.
+    let profile = s.agent(json!({ "name": "Native destination", "access": { "backend": "native", "nodes": [node] } }), None).await.unwrap();
+    let mut previous = profile.clone();
+    previous["access"]["backend"] = "firecracker".into();
+    common::add_run(&s.store, &json!({ "id": run, "taskId": "fixture", "status": "succeeded", "createdAt": 0, "snapshot": { "agent": previous } })).await;
+    s.store
+        .put(
+            "chats",
+            json!({ "id": chat, "runId": run, "agentId": profile["id"] }),
+        )
+        .await
+        .unwrap();
+    common::set_checkpoint(
+        &s.store,
+        &run,
+        json!({ "prepared": { "projectRoot": "/data/work" } }),
+    )
+    .await;
+    for (endpoint, token) in [
+        ("/mcp", owner_token.as_str()),
+        ("/mcp-installation", agent_token),
+    ] {
+        let (_, preview) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "get_chat_backend_migration",
+            json!({ "chatId": chat }),
+        )
+        .await;
+        assert_eq!(result(&preview)["required"], true);
+        assert!(result(&preview)["nodes"].as_array().unwrap().is_empty());
+        let (_, denied) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "migrate_chat_backend",
+            json!({ "chatId": chat, "nodeId": node, "backend": "native", "confirm": true }),
+        )
+        .await;
+        assert_eq!(denied["result"]["isError"], true, "{denied}");
+        assert!(s.store.run(&run).await.unwrap()["backendMigration"].is_null());
+    }
+    let read = common::relay_fixture::grant(&s, &["read"]).await;
+    let (_, denied) = node_management_call(
+        &app,
+        "/mcp",
+        &read,
+        "migrate_chat_backend",
+        json!({ "chatId": chat, "nodeId": node, "backend": "native", "confirm": true }),
+    )
+    .await;
+    assert_eq!(denied["result"]["isError"], true);
+    assert!(denied["result"]["_meta"]["mcp/www_authenticate"].is_string());
+    s.agent(
+        json!({ "name": "Main agent", "access": { "installation": false } }),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
+    let (status, _) = node_management_call(
+        &app,
+        "/mcp-installation",
+        agent_token,
+        "get_chat_backend_migration",
+        json!({ "chatId": chat }),
+    )
+    .await;
+    assert!(matches!(
+        status,
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    ));
+}

@@ -522,6 +522,19 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
             crate::validation::uuid(run)?;
             moves::request(s, &s.store.run(run).await?, &input.body).await
         }
+        ("GET", ["nodes", "placement", run, "backend-migration"]) => {
+            let chat = crate::backend_migration::chat_id(s, run).await?;
+            crate::backend_migration::preview(s, &chat, |_| Ok(())).await
+        }
+        ("POST", ["nodes", "placement", run, "backend-migration"]) => {
+            let chat = crate::backend_migration::chat_id(s, run).await?;
+            let mut args = input.body.clone();
+            if !args.is_object() {
+                return Err(Error::bad("Confirm the destination backend and node."));
+            }
+            args["chatId"] = chat.into();
+            s.migrate_chat_backend(args, |_| Ok(())).await
+        }
         ("GET", ["nodes", "native-callers"]) => native_callers(s, |_| Ok(())).await,
         ("GET", ["nodes", "alerts"]) => alerts::recent(s).await,
         ("GET", ["nodes", "settings"]) => {

@@ -776,6 +776,84 @@ async fn encrypt_block(s: &Service, scope: String, bytes: Vec<u8>) -> Result<Vec
         .await
 }
 
+/// Publish a converted, offline environment without replacing the source pointer.
+/// The migration commits its checkpoint and this point together after restoration.
+pub(crate) async fn converted_environment(
+    s: &Service,
+    run: &Value,
+    node: &Value,
+    disk: &Path,
+    manifest: Value,
+) -> Result<Value> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let run_id = text(run, "id");
+    let _operation = s.node_backup_operation.lock(run_id).await;
+    let storage = Storage::configured(s)?;
+    let snapshot_id = id();
+    let snapshot = json!({ "manifest": manifest });
+    let publication = Publication {
+        s,
+        run,
+        run_id,
+        attempt: "",
+        node: &node["id"],
+        storage: &storage,
+        base: "",
+        credential: "",
+        snapshot: &snapshot,
+        snapshot_id: &snapshot_id,
+        budget: budget_bytes(&settings(s).await?),
+    };
+    let directory = root(s, run_id);
+    crate::skills::private_dir(&directory.join("blocks")).await?;
+    let mut intent = publication
+        .write_intent(&directory, snapshot["manifest"].clone())
+        .await?;
+    let mut file = tokio::fs::File::open(disk).await?;
+    let mut uploaded = 0;
+    for object in intent.objects.iter().filter(|object| !object.ready) {
+        let block = snapshots::find_block(&intent.manifest, &object.hash)
+            .ok_or_else(|| Error::bad("Converted block missing."))?;
+        file.seek(std::io::SeekFrom::Start(block["offset"].as_u64().unwrap()))
+            .await?;
+        let mut bytes = vec![0; object.size as usize];
+        file.read_exact(&mut bytes).await?;
+        if !crate::storage::digest::matches(&object.hash, &bytes) {
+            return Err(Error::bad("Converted disk changed during publication."));
+        }
+        let scope = shared_blocks::key(&object.hash, &object.id);
+        storage
+            .upload_bytes(encrypt_block(s, scope.clone(), bytes).await?, &scope)
+            .await?;
+        uploaded += object.size;
+    }
+    publication.publish_manifest(&mut intent, uploaded).await?;
+    let (owner, migration, point) = (
+        run_id.to_owned(),
+        run["backendMigration"]["id"].clone(),
+        intent.value.clone(),
+    );
+    s.store
+        .transaction(move |db| {
+            let current = db
+                .run(&owner)?
+                .ok_or_else(|| Error::not_found("Conversation removed."))?;
+            if current["backendMigration"]["id"] != migration {
+                return Err(Error::conflict(
+                    "Backend migration changed during publication.",
+                ));
+            }
+            shared_blocks::verified(db, text(&point, "id"))?;
+            db.put("node-backups", &point)?;
+            let mut migration = current["backendMigration"].clone();
+            migration["convertedBackup"] = point["id"].clone();
+            db.patch_run(&owner, &json!({ "backendMigration": migration }))?;
+            Ok(())
+        })
+        .await?;
+    Ok(intent.value)
+}
+
 /// Blocks of this run's earlier publications, by hash, with the point that holds them.
 type Sources = HashMap<String, (Arc<Value>, Value)>;
 

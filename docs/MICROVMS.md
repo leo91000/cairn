@@ -355,4 +355,4 @@ its block `ublk` or `blkext` entry. Compose requires these values and exposes on
 the controller and those dynamic device classes. Existing installations must
 refresh their host supervisor (rerunning the installer preserves their identity
 and storage), or provision these permissions before adopting an ublk-only image.
-See [the rollout decision](adr/0054-ublk-only-vm-storage.md).
+See [the rollout decision](adr/0055-ublk-only-vm-storage.md).

@@ -58,6 +58,9 @@ _Avoid_ : agent (qui désigne l’agent chargé du travail, et non la machine)
 **Exécution native** :
 Travail d’un agent effectué par le système de la node, avec ses pilotes et les ressources partagées avec son propriétaire. Il exige des agents sélectionnés et des personnes explicitement autorisées, avec une frontière d’isolation plus faible qu’une VM.
 
+**Migration du mode d’exécution d’une conversation** :
+Action explicite qui transfère les fichiers durables entre VM Firecracker et Linux natif après configuration de l’agent, en conservant le même fil et son historique. L’exécution s’arrête ; le prochain message ouvre une nouvelle session du moteur avec le contexte du fil. Les dépendances système peuvent nécessiter une réinstallation. L’autorisation explicite du propriétaire permet de reprendre le travail existant avec ses droits natifs ; une délégation reste bornée par ses droits actuels.
+
 **Capacité d’une node** :
 Possibilité de travail vérifiée sur une node, distincte de la seule présence du matériel et de sa disponibilité au moment de la demande. Une capacité ne donne aucun droit supplémentaire à l’agent.
 
