@@ -15,6 +15,8 @@ The cache assigns each offered snapshot an identity shared across readers of the
 same key. Superseded requests cannot overwrite later offers. Older cursors cannot
 replace newer output in the same history, while a different history can start at
 its own cursor. Cache clearing and terminal removal invalidate queued requests.
+Reads also reject queued snapshots older than the retained cursor, so reopening
+a reader before that stale write runs cannot regress memory or disk.
 
 A reader reopening before persistence finishes can restore the queued snapshot.
 Reading positions are retained across queued saves and checked against their
@@ -104,7 +106,15 @@ The original [findings](measurements/android-cache-diagnosis/findings.json) and
 historical evidence. They do not replace validation of the final fix. No claim is
 made that every observed phone delay came from cache persistence.
 
-[Final validation](measurements/android-cache-diagnosis/fix-validation.json)
+[Fix validation](measurements/android-cache-diagnosis/fix-validation.json)
 records 587 unit tests with no failures and two skipped opt-in benchmarks, eleven
 passing focused cases after the shared fixture update, and four passing native
 emulator cases. Android lint and Kotlin formatting pass.
+
+The review follow-up in the same validation record covers the stale queued-read
+interleaving: its regression fails with cursor 9 instead of 10 before the guard,
+then passes after it. The full local rerun has 588 cases and the same existing
+`NodePlacementTest` timeout recorded in the baseline; that case and the twelve
+cache/delivery cases pass together in isolation. A [fresh measurement](measurements/android-cache-diagnosis/review-fixed.json)
+records the follow-up source hashes and workload results separately from the
+original fixed run above.

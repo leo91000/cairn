@@ -53,6 +53,20 @@ class HistoryCacheWriterTest {
     }
 
     @Test
+    fun readingAStaleQueuedSnapshotCannotRegressMemoryOrDisk() = runBlocking {
+        val cache = HistoryCache(directory.root, { _, bytes -> bytes }, { _, bytes -> bytes })
+        cache.save("chat", record(10), true)
+        val stale = cache.prepareSave("chat", record(9), cache.generation)!!
+
+        assertEquals(10L, cache.read("chat")?.cursor)
+        cache.persist(stale)
+        cache.flush("chat")
+
+        val disk = HistoryCache(directory.root, { _, bytes -> bytes }, { _, bytes -> bytes })
+        assertEquals(10L, disk.read("chat")?.cursor)
+    }
+
+    @Test
     fun queuedUpdatesCoalesceAndCancellationPersistsTheLatestSnapshot() = runBlocking {
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)

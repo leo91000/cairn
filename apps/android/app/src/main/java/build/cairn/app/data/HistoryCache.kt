@@ -84,10 +84,15 @@ class HistoryCache(
         withContext(Dispatchers.IO) {
             Performance.measure(PerfOperation.CACHE_READ) {
                 lock.withLock {
-                    val queued = synchronized(pendingLock) { pending[key]?.value }
+                    val retained = memory[key]?.value
+                    val queued =
+                        synchronized(pendingLock) { pending[key]?.value }
+                            ?.takeUnless {
+                                retained?.history == it.history && retained.cursor > it.cursor
+                            }
                     val value =
                         queued?.let { prepareValue(key, it) }
-                            ?: memory[key]?.value
+                            ?: retained
                             ?: runCatching {
                                 val file = File(root, key)
                                 require(file.length() in 1..(maxEntry + 64).toLong())

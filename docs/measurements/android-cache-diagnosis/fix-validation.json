@@ -44,5 +44,40 @@
     "apps/android/app/src/main/java/build/cairn/app/ui/LiveUi.kt": "ba0daf8ccd4d6e2ccab67db02c057b009651bf0009fb886660dbd3804e9feacd",
     "apps/android/app/src/scrollTest/java/build/cairn/app/ui/CacheRefreshCases.kt": "186c13fad7ac370cdb70f9b9d3af410106f576ea580df1da9d3ba7968fd51bf4",
     "apps/android/app/src/test/java/build/cairn/app/data/HistoryCacheCostDiagnosisTest.kt": "6f76a1e48a5ee5851feae1b357d041ff11ee1b42e86e85a22dddd82421a83399"
+  },
+  "reviewFollowUp": {
+    "finding": "Queued stale cursor reads could regress a newer retained snapshot before persistence checked its cursor.",
+    "regressionBeforeFix": "readingAStaleQueuedSnapshotCannotRegressMemoryOrDisk failed: expected 10 but was 9",
+    "fullUnitTests": {
+      "tests": 588,
+      "failures": 1,
+      "errors": 0,
+      "skipped": 2,
+      "failed": [
+        {
+          "class": "build.cairn.app.ui.NodePlacementTest",
+          "name": "dismissingTheConfigurationOfANewNativeNodeCancelsTheLastStep",
+          "message": "androidx.compose.ui.test.ComposeTimeoutException: Condition still not satisfied after 10000 ms"
+        }
+      ]
+    },
+    "focusedUnitTests": {
+      "tests": 13,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "includes": "HistoryCacheWriterTest, HistoryCacheTest, CacheRefreshTest and the previously timed-out NodePlacementTest case"
+    },
+    "fullSuiteLimit": "The same NodePlacementTest timeout occurs in the baseline validation.json with unchanged product sources; its isolated rerun passes. CI must validate the final PR head before merge.",
+    "androidLint": "passed",
+    "spotless": "passed",
+    "measurements": "review-fixed.json: three passing cases",
+    "sourceHashes": {
+      "apps/android/app/src/main/java/build/cairn/app/data/HistoryCache.kt": "98becfd33e3ffb053667eeeb74e9dd634d5d16735901ea7d074f4515ccbf320b",
+      "apps/android/app/src/main/java/build/cairn/app/data/HistoryCacheWriter.kt": "590b304d750d646d6d2345e2d7e31cbcfbcd3460e632ba225a1534638c797c2e",
+      "apps/android/app/src/main/java/build/cairn/app/ui/LiveUi.kt": "ba0daf8ccd4d6e2ccab67db02c057b009651bf0009fb886660dbd3804e9feacd",
+      "apps/android/app/src/scrollTest/java/build/cairn/app/ui/CacheRefreshCases.kt": "186c13fad7ac370cdb70f9b9d3af410106f576ea580df1da9d3ba7968fd51bf4",
+      "apps/android/app/src/test/java/build/cairn/app/data/HistoryCacheCostDiagnosisTest.kt": "6f76a1e48a5ee5851feae1b357d041ff11ee1b42e86e85a22dddd82421a83399"
+    }
   }
 }
