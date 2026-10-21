@@ -1176,6 +1176,7 @@ internal fun ChatPage(
                             Box(Modifier.weight(1f).fillMaxWidth()) {
                                 LazyColumn(
                                     Modifier.fillMaxSize()
+                                        .historyVisibility(positionReady)
                                         .testTag("conversation-history")
                                         .historyFollowGesture(followGesture),
                                     state = listState,

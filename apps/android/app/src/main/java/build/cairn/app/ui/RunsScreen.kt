@@ -394,7 +394,9 @@ fun RunScreen(
                         if (more) LinearProgressIndicator(Modifier.fillMaxWidth())
                         Box(Modifier.weight(1f).fillMaxWidth()) {
                             LazyColumn(
-                                Modifier.fillMaxSize().historyFollowGesture(followGesture),
+                                Modifier.fillMaxSize()
+                                    .historyVisibility(positionReady)
+                                    .historyFollowGesture(followGesture),
                                 state = logState,
                                 overscrollEffect = rememberHistoryOverscroll(),
                                 contentPadding = PaddingValues(16.dp),

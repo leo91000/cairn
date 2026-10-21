@@ -7,7 +7,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.hideFromAccessibility
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -533,6 +535,13 @@ internal fun rememberHistoryPosition(
                     restoreHistoryPosition(list, saved, rendering)
                 }
             }
+            if (saved?.follow ?: currentFollow) {
+                // Measure the latest rows while hidden, including their async Markdown, before
+                // exposing a position or allowing the paging hook to load older messages.
+                list.scrollToItem(Int.MAX_VALUE, Int.MAX_VALUE)
+                rendering?.awaitLayout()
+                list.scrollToItem(Int.MAX_VALUE, Int.MAX_VALUE)
+            }
             ready = true
         }
     }
@@ -570,6 +579,12 @@ internal fun rememberHistoryPosition(
     }
     return ready
 }
+
+/** Keep measuring during restoration without painting intermediate reading positions. */
+internal fun Modifier.historyVisibility(ready: Boolean): Modifier = graphicsLayer {
+    alpha = if (ready) 1f else 0f
+}
+    .semantics { if (!ready) hideFromAccessibility() }
 
 internal fun RunEvent.item(): JsonObject? = activityData()?.get("item") as? JsonObject
 

@@ -274,6 +274,13 @@ internal fun FollowHistoryTail(
 ) {
     val currentContent by rememberUpdatedState(content)
     val allowed = enabled && gesture?.busy != true
+    SideEffect {
+        if (allowed && gesture?.followRequested != false) {
+            // Apply a new snapshot's tail in the same layout, before an older anchor is painted.
+            // The offset also reaches the bottom when the final message exceeds the viewport.
+            list.requestScrollToItem(Int.MAX_VALUE, Int.MAX_VALUE)
+        }
+    }
     LaunchedEffect(list, allowed, rendering, gesture) {
         if (allowed)
             snapshotFlow {

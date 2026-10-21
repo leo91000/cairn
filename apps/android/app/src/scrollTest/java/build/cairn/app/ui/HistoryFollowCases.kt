@@ -8,6 +8,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
@@ -39,6 +40,69 @@ abstract class HistoryFollowCases {
     private var working by mutableStateOf(true)
     private val history
         get() = compose.onNodeWithTag("history")
+
+    @Test
+    fun reopeningHistoryPaintsItsTailWithoutReplayingOlderMessages() {
+        val painted = mutableListOf<Pair<Int, Boolean>>()
+        var opened by mutableStateOf(false)
+        var content by mutableStateOf(false)
+        compose.setContent {
+            if (opened) {
+                list = rememberLazyListState()
+                rendering = remember { MarkdownRendering() }
+                gesture = rememberHistoryFollowGesture(list, true) {}
+                FollowHistoryTail(list, true, content, rendering, gesture)
+                CairnTheme("dark") {
+                    Surface(Modifier.fillMaxWidth().height(620.dp)) {
+                        CompositionLocalProvider(LocalMarkdownRendering provides rendering) {
+                            LazyColumn(
+                                Modifier.fillMaxSize().drawWithContent {
+                                    drawContent()
+                                    if (list.layoutInfo.totalItemsCount > 0) {
+                                        painted.add(
+                                            list.firstVisibleItemIndex to list.canScrollForward
+                                        )
+                                    }
+                                },
+                                state = list,
+                                contentPadding = PaddingValues(16.dp),
+                            ) {
+                                if (content) {
+                                    items(8, key = { "message:$it" }) { number ->
+                                        Text(
+                                            "Message $number.\n\n" + "Du texte déjà lu. ".repeat(12)
+                                        )
+                                    }
+                                    item("latest") { Text("Dernière activité") }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        compose.runOnIdle { opened = true }
+        compose.waitForIdle()
+        compose.mainClock.autoAdvance = false
+        compose.runOnIdle { content = true }
+        repeat(20) {
+            compose.mainClock.advanceTimeByFrame()
+            compose.onRoot().captureToImage()
+        }
+        compose.mainClock.autoAdvance = true
+        compose.waitUntil(20000) {
+            compose.waitForIdle()
+            rendering.pending == 0 && list.layoutInfo.totalItemsCount == 9 && !list.canScrollForward
+        }
+        compose.onRoot().captureToImage()
+        compose.runOnIdle {
+            assertTrue("The resumed conversation must be painted", painted.isNotEmpty())
+            assertTrue(
+                "Opening must not paint older positions before jumping to the tail: $painted",
+                painted.none { it.second },
+            )
+        }
+    }
 
     @Test
     fun markdownLinksOpenOnTapButNotOnLongPressOrDrag() {
