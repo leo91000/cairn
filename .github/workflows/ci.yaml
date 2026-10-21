@@ -165,7 +165,7 @@ jobs:
         with:
           tool: cargo-nextest@0.9.149
       - name: Run backend tests across binaries with isolated credentials
-        run: node scripts/test-backend.mjs --nextest --features ublk-prototype --test-threads 4 --no-fail-fast
+        run: node scripts/test-backend.mjs --nextest --features ublk-prototype --test-threads 8 --no-fail-fast
       - name: Check Rust documentation examples
         run: node scripts/test-backend.mjs --doc --features ublk-prototype
   node-checks:

@@ -34,7 +34,7 @@ Compare cold cache initialization separately from subsequent warm runs.
 
 - Web checks and generated schemas, Clippy, backend tests, and node/S3 recovery
   run independently. Image validation still requires every group to succeed.
-- Backend tests use pinned cargo-nextest with four concurrent tests across
+- Backend tests use pinned cargo-nextest with eight concurrent tests across
   binaries. The existing launcher strips live agent credentials and builds the
   code worker with the same feature flags. Normal local `pnpm test:backend`
   continues to use cargo test. Doctests run separately because nextest does not
