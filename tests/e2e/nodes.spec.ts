@@ -173,6 +173,11 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await header.click()
   const panel = page.getByRole('dialog', { name: 'Execution node', exact: true })
   await expect(panel).toContainText('Disk synchronized 2 min ago')
+  // The placement choices share the panel's full width.
+  const placement = panel.getByRole('group', { name: 'Placement', exact: true })
+  const group = (await placement.boundingBox())!
+  const fixed = (await placement.getByRole('button', { name: 'Fix to a node' }).boundingBox())!
+  expect(group.x + group.width - (fixed.x + fixed.width)).toBeLessThan(5)
   const save = panel.getByRole('button', { name: 'Save preference' })
   await expect(save).toBeDisabled()
   await panel.getByRole('button', { name: 'Prefer a node' }).click()
@@ -187,6 +192,24 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await page.keyboard.press('Escape')
   await expect(panel).toHaveCount(0)
   await expect(header).toBeFocused()
+  // A legacy native file workspace is only saved once execution stops.
+  workspace.service.store.updateRun(detail.run.id, {
+    status: 'running',
+    executionBackend: 'native',
+    storage: { mode: 'native', localBytes: 191392768, dirtyBytes: 0 },
+  } as any)
+  await heartbeat()
+  await expect(header).toContainText('Local work · saved when execution stops', { timeout: 15000 })
+  // A running native ublk conversation synchronizes like a VM: its last sync stays visible.
+  workspace.service.store.updateRun(detail.run.id, { storage: { mode: 'on-demand', localBytes: 191392768, dirtyBytes: 0 } } as any)
+  await heartbeat()
+  await expect(header).not.toContainText('saved when execution stops', { timeout: 15000 })
+  await expect(header).toContainText('Synced 2 min ago')
+  await header.click()
+  await expect(panel).toContainText('Native process · shared host GPU · files load on demand')
+  await page.keyboard.press('Escape')
+  await expect(panel).toHaveCount(0)
+  workspace.service.store.updateRun(detail.run.id, { status: 'succeeded', executionBackend: null } as any)
   workspace.service.store.updateRun(detail.run.id, {
     storage: {
       mode: 'on-demand',
@@ -401,6 +424,10 @@ test('native enrollment requires explicit people and native agent grants', async
   await expect(dialog.getByLabel('Execution slots')).toBeDisabled()
   await expect(dialog.getByRole('group', { name: 'Exclusive reservations' })).toHaveCount(0)
   await expect(dialog.getByLabel('Enable native execution')).not.toBeChecked()
+  await expect(dialog.getByRole('group', { name: 'Trusted people', exact: true })).toBeVisible()
+  await expect(dialog).toContainText('A native node runs one conversation at a time.')
+  // Native nodes never take exclusive reservations, so no runtime update is suggested.
+  await expect(dialog).not.toContainText('needs an update before exclusive reservations')
   const callers = await workspace.api('/api/nodes/native-callers')
   expect(callers.length).toBeGreaterThan(0)
   await dialog.getByLabel(callers[0].email, { exact: true }).check()
@@ -422,7 +449,17 @@ test('native enrollment requires explicit people and native agent grants', async
   expect((await finishing).postDataJSON()).toEqual({ agentIds: [agent.id], add: true })
   const node = page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'Native desktop' }) })
   await expect(node).toContainText('Native process')
-  await expect(node.getByRole('button', { name: 'Storage', exact: true })).toHaveCount(0)
+  // Native ublk disks honor the node storage policy like VM disks.
+  await expect(node.getByRole('button', { name: 'Storage', exact: true })).toBeVisible()
+  await expect(node).toContainText('ublk is unavailable')
+  await node.getByText('Technical details', { exact: true }).click()
+  await expect(node).toContainText('ublk unavailable')
+  await node.getByRole('button', { name: 'Revoke', exact: true }).click()
+  const revoke = page.getByRole('dialog', { name: 'Revoke node', exact: true })
+  await expect(revoke).toContainText('mounts=$(findmnt -rno TARGET)')
+  await expect(revoke).toContainText('the command lists it and stops before deleting anything')
+  await page.keyboard.press('Escape')
+  await expect(revoke).toHaveCount(0)
   // Agents are granted on their own page; the card lists them read-only.
   await expect(node).toContainText(`1 agent can run here: ${agent.name}`)
   expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id).access.nodes).toContain(desktop)

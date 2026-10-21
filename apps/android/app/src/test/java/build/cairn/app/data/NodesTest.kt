@@ -60,6 +60,27 @@ class NodesTest {
                 .first()
                 .startsWith("Aucun contact depuis 10 min")
         )
+
+        // Native nodes need ublk rather than KVM, and run under their own service.
+        val native =
+            node.copy(
+                nativeEnabled = true,
+                nativeAccounts = listOf("p"),
+                capabilities =
+                    node.capabilities.copy(backend = NATIVE_BACKEND, kvm = false, ublk = true),
+            )
+        assertEquals(emptyList<String>(), nodeDiagnostics(native))
+        assertEquals(
+            listOf(
+                "ublk indisponible : cette node a besoin d’un runtime natif à jour et du module noyau ublk_drv (/dev/ublk-control) pour monter les disques de conversation stockés sur S3."
+            ),
+            nodeDiagnostics(native.copy(capabilities = native.capabilities.copy(ublk = false))),
+        )
+        assertTrue(
+            nodeDiagnostics(native.copy(status = "offline"), 600_000)
+                .first()
+                .contains("le service cairn-native-node tourne")
+        )
     }
 
     @Test

@@ -33,7 +33,6 @@ describe('agent access and task inheritance', () => {
       mcps: null,
       mcpTools: {},
       installation: false,
-      github: true,
       sandbox: 'yolo',
     })
     expect(main).toMatchObject({ exclusiveNodes: [], plugins: [] })
@@ -53,7 +52,7 @@ describe('agent access and task inheritance', () => {
     expect(run.projectId).toBeNull()
   })
   it('enforces project and skill restrictions through task APIs', async () => {
-    const agent = ctx.service.agent({ name: 'Restricted', access: { projects: [], skills: [], github: false } })
+    const agent = ctx.service.agent({ name: 'Restricted', access: { projects: [], skills: [] } })
     expect(isolated(agent)).toBe(true)
     expect(() => ctx.service.task({ ...ctx.task, agentId: agent.id })).toThrow(/unavailable/)
     expect(() => ctx.service.task({
@@ -62,7 +61,6 @@ describe('agent access and task inheritance', () => {
       agentId: agent.id,
       skills: ['global/release'],
     })).toThrow(/outside/)
-    expect(() => ctx.service.agent({ name: 'Leaky credentials', access: { projects: [] } })).toThrow(/GitHub/)
     const task = ctx.service.task({ name: 'No resources', prompt: 'Think', agentId: agent.id })
     const run = await ctx.service.enqueue(task.id)
     expect(run.snapshot.projects).toEqual([])
@@ -70,7 +68,7 @@ describe('agent access and task inheritance', () => {
   })
   it('rejects queued execution after permissions change without widening the snapshot', async () => {
     const run = await ctx.service.enqueue(ctx.task.id)
-    ctx.service.agent({ ...ctx.agent, access: { projects: [], skills: [], github: false } }, ctx.agent.id)
+    ctx.service.agent({ ...ctx.agent, access: { projects: [], skills: [] } }, ctx.agent.id)
     await ctx.worker.tick()
     await expect.poll(() => ctx.service.store.run(run.id)?.status).toBe('failed')
     expect(ctx.service.store.run(run.id)?.summary).toContain('access changed')
@@ -81,15 +79,14 @@ describe('agent access and task inheritance', () => {
       access: {
         projects: [],
         skills: [],
-        github: false,
         sandbox: 'read-only',
       },
     })
     const updated = ctx.service.agent({ name: 'Renamed' }, agent.id)
-    expect(updated.access).toEqual(agent.access)
+    expect(updated.access).toMatchObject(agent.access)
   })
   it('fails closed when an isolated runner is unavailable', async () => {
-    const agent = ctx.service.agent({ name: 'Restricted', access: { github: false } })
+    const agent = ctx.service.agent({ name: 'Restricted', access: { sandbox: 'read-only' } })
     const task = ctx.service.task({ ...ctx.task, agentId: agent.id })
     const run = await ctx.service.enqueue(task.id)
     await expect(prepareExecution(run, ctx.service.config)).rejects.toThrow(/will not fall back/)
@@ -106,7 +103,6 @@ describe('agent access and task inheritance', () => {
       access: {
         projects: [ctx.project.id],
         skills: ['global/review'],
-        github: false,
         sandbox: 'read-only',
       },
     })

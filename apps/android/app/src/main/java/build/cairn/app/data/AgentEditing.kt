@@ -46,7 +46,6 @@ enum class AgentSection(val title: String) {
     Projects("Projets"),
     Skills("Skills"),
     Mcp("MCP & outils"),
-    Github("GitHub"),
     Plugins("Secrets & plugins"),
     Nodes("Nodes"),
     Sandbox("Mode d’exécution"),
@@ -57,61 +56,18 @@ enum class AgentSection(val title: String) {
 }
 
 /** Sections the server fixes for the main agent: always everything, including future ones. */
-val MAIN_LOCKED_SECTIONS =
-    setOf(AgentSection.Projects, AgentSection.Skills, AgentSection.Mcp, AgentSection.Github)
-
-/** How the agent reaches GitHub. */
-enum class GithubMode(val value: String, val label: String) {
-    Shared("shared", "Connexion partagée"),
-    Dedicated("dedicated", "Jeton dédié"),
-    None("none", "Pas de GitHub"),
-}
+val MAIN_LOCKED_SECTIONS = setOf(AgentSection.Projects, AgentSection.Skills, AgentSection.Mcp)
 
 /**
- * The page's single draft. [timeout] keeps the field text so it can be validated; [github] is null
- * until the owner picks a GitHub option. [removeToken] is the owner's explicit removal of the saved
- * dedicated token (« Pas de GitHub » or « Retirer le jeton enregistré »): nothing else ever deletes
- * it. [sharedTurnedOff] records that restricting projects switched the shared connection off for
- * the owner. The dedicated token itself is never part of the draft, so it never reaches saved
- * instance state.
+ * The page's single draft. [timeout] keeps the field text so it can be validated. External accounts
+ * such as GitHub are plugin instances granted in [Agent.plugins], like any other plugin.
  */
 @Serializable
-data class AgentDraft(
-    val agent: Agent,
-    val timeout: String = agent.timeoutMinutes.toString(),
-    val github: String? = null,
-    val sharedTurnedOff: Boolean = false,
-    val removeToken: Boolean = false,
-)
+data class AgentDraft(val agent: Agent, val timeout: String = agent.timeoutMinutes.toString())
 
-/**
- * The owner picks a GitHub option. « Pas de GitHub » removes the token only when one is known to be
- * saved: a token saved later, elsewhere, is never deleted by an earlier choice.
- */
-fun AgentDraft.withGithub(mode: GithubMode, tokenSaved: Boolean) =
-    copy(
-        github = mode.value,
-        sharedTurnedOff = false,
-        removeToken = mode == GithubMode.None && tokenSaved,
-    )
-
-/**
- * « Tous » / « Choisir » for projects. Restricting the projects of an agent using the shared
- * connection switches it off without choosing for the owner: the agent then uses its saved
- * dedicated token (narrower than the shared connection, never deleted), or no GitHub without one,
- * resolved again once the token is known.
- */
-fun AgentDraft.withAllProjects(all: Boolean, tokenSaved: Boolean): AgentDraft {
-    val turnedOff =
-        !all && agent.access.projects == null && githubMode(tokenSaved) == GithubMode.Shared
-    val restricted = agent.copy(access = agent.access.withAllProjects(all))
-    if (!turnedOff) return copy(agent = restricted)
-    return copy(agent = restricted, github = null, sharedTurnedOff = true, removeToken = false)
-}
-
-/** Restricting projects moved this agent from the shared connection to its saved token. */
-fun AgentDraft.switchedToSavedToken(tokenSaved: Boolean) =
-    sharedTurnedOff && tokenSaved && githubMode(tokenSaved) == GithubMode.Dedicated
+/** « Tous » / « Choisir » for projects. */
+fun AgentDraft.withAllProjects(all: Boolean): AgentDraft =
+    copy(agent = agent.copy(access = agent.access.withAllProjects(all)))
 
 /**
  * The draft of a new agent: it starts with no access and gains only what the owner grants. The
@@ -127,7 +83,6 @@ fun newAgent() =
                 mcps = emptyList(),
                 mcpTools = emptyMap(),
                 installation = false,
-                github = false,
                 sandbox = "yolo",
                 backend = VM_BACKEND,
             ),
@@ -167,10 +122,6 @@ data class AgentResources(
     val mcps: List<Mcp> = emptyList(),
     val nodes: List<ExecutionNode> = emptyList(),
     val catalog: PluginCatalog? = null,
-    /** Whether the agent has a dedicated GitHub token saved. */
-    val tokenSaved: Boolean = false,
-    /** False while the dedicated token is loading or failed to load: GitHub is shown as unknown. */
-    val tokenKnown: Boolean = true,
     /** False while the machine list is loading or failed to load. */
     val nodesLoaded: Boolean = true,
     /** Whether the installation's skills have loaded, so a missing one can be reported. */
@@ -192,43 +143,9 @@ fun AccessPolicy.withGrantedTools(existing: Set<String>? = null): AccessPolicy =
             }
     )
 
-/**
- * How the agent will reach GitHub. Without the shared connection, a saved token is used unless the
- * owner explicitly removes it: the server hands it to runs whenever shared GitHub is off.
- */
-fun AgentDraft.githubMode(tokenSaved: Boolean): GithubMode =
-    when (github) {
-        GithubMode.Shared.value -> GithubMode.Shared
-        GithubMode.Dedicated.value -> GithubMode.Dedicated
-        GithubMode.None.value ->
-            if (tokenSaved && !removeToken) GithubMode.Dedicated else GithubMode.None
-        else ->
-            when {
-                agent.access.github -> GithubMode.Shared
-                tokenSaved -> GithubMode.Dedicated
-                else -> GithubMode.None
-            }
-    }
-
-/** The agent as it will be sent: parsed time limit and the GitHub choice applied. */
-fun AgentDraft.resolved(tokenSaved: Boolean): Agent {
-    // Shared GitHub requires every project; restricting projects already turned it off.
-    val shared =
-        githubMode(tokenSaved) == GithubMode.Shared &&
-            (agent.access.projects == null || agent.access.github)
-    return agent.copy(
-        timeoutMinutes = timeout.trim().toIntOrNull() ?: agent.timeoutMinutes,
-        access = agent.access.copy(github = shared),
-    )
-}
-
-/** What happens to the dedicated token when the page is saved: a new value, removal or nothing. */
-fun AgentDraft.tokenChange(tokenSaved: Boolean, newToken: String): String? =
-    when (githubMode(tokenSaved)) {
-        GithubMode.Dedicated -> newToken.trim().takeIf { it.isNotEmpty() }
-        GithubMode.None -> "".takeIf { tokenSaved && removeToken }
-        GithubMode.Shared -> null
-    }
+/** The agent as it will be sent: the parsed time limit applied. */
+fun AgentDraft.resolved(): Agent =
+    agent.copy(timeoutMinutes = timeout.trim().toIntOrNull() ?: agent.timeoutMinutes)
 
 /**
  * Whether [edited] differs from the saved [base] in anything the agent save sends. Identity,
@@ -237,21 +154,9 @@ fun AgentDraft.tokenChange(tokenSaved: Boolean, newToken: String): String? =
 fun profileChanged(base: Agent, edited: Agent): Boolean =
     edited.copy(id = base.id, revision = base.revision, avatar = base.avatar) != base
 
-/**
- * The draft once its profile is saved: the saved agent, keeping the GitHub choice so a token that
- * failed to save stays pending and the next save only retries it, from the new revision.
- */
-fun AgentDraft.afterProfileSaved(saved: Agent) =
-    AgentDraft(saved, github = github, removeToken = removeToken)
-
 /** The section of every unsaved change, once per changed setting. */
-fun agentChanges(
-    original: Agent,
-    draft: AgentDraft,
-    tokenSaved: Boolean,
-    newToken: String,
-): List<AgentSection> {
-    val edited = draft.resolved(tokenSaved)
+fun agentChanges(original: Agent, draft: AgentDraft): List<AgentSection> {
+    val edited = draft.resolved()
     val before = original.access
     val after = edited.access
     return buildList {
@@ -273,8 +178,6 @@ fun agentChanges(
             after.withGrantedTools().mcpTools.mapValues { it.value.toSet() } !=
                 before.withGrantedTools().mcpTools.mapValues { it.value.toSet() }
         if (after.mcps != before.mcps || toolsChanged) add(AgentSection.Mcp)
-        if (after.github != before.github || draft.tokenChange(tokenSaved, newToken) != null)
-            add(AgentSection.Github)
         if (edited.plugins.toSet() != original.plugins.toSet()) add(AgentSection.Plugins)
         if (after.backend != before.backend) add(AgentSection.Nodes)
         if (after.nodes?.toSet() != before.nodes?.toSet()) add(AgentSection.Nodes)
@@ -289,11 +192,7 @@ fun changesLabel(count: Int) =
     if (count == 1) "1 modification non enregistrée" else "$count modifications non enregistrées"
 
 /** Problems that prevent saving, shown in their section. */
-fun agentErrors(
-    draft: AgentDraft,
-    tokenSaved: Boolean,
-    newToken: String,
-): Map<AgentSection, String> = buildMap {
+fun agentErrors(draft: AgentDraft): Map<AgentSection, String> = buildMap {
     val agent = draft.agent
     val identity =
         when {
@@ -313,11 +212,6 @@ fun agentErrors(
         put(AgentSection.Engine, "Choisissez un modèle et un niveau de réflexion valides.")
     if (draft.timeout.trim().toIntOrNull() !in 0..720)
         put(AgentSection.Advanced, "Saisissez une limite entre 1 et 720 minutes.")
-    if (draft.githubMode(tokenSaved) == GithubMode.Dedicated && !tokenSaved && newToken.isBlank())
-        put(
-            AgentSection.Github,
-            "Saisissez le jeton dédié, ou choisissez une autre option GitHub.",
-        )
     if (agent.access.backend == NATIVE_BACKEND && agent.access.nodes.isNullOrEmpty())
         put(
             AgentSection.Nodes,
@@ -331,7 +225,6 @@ fun sectionOfError(message: String): AgentSection? {
     return when {
         "exclusive" in text || "node" in text -> AgentSection.Nodes
         "plugin" in text || "instance" in text || "delegation" in text -> AgentSection.Plugins
-        "github" in text -> AgentSection.Github
         "mcp" in text || "tool" in text -> AgentSection.Mcp
         "skill" in text -> AgentSection.Skills
         "project" in text -> AgentSection.Projects
@@ -454,13 +347,9 @@ fun Agent.withExclusive(node: String, granted: Boolean): Agent =
         exclusiveNodes = if (granted) (exclusiveNodes + node).distinct() else exclusiveNodes - node
     )
 
-/**
- * Choosing projects starts with none selected, as on the web, and turns the shared GitHub
- * connection off. See [AgentDraft.withAllProjects] for the GitHub choice.
- */
+/** Choosing projects starts with none selected, as on the web. */
 fun AccessPolicy.withAllProjects(all: Boolean): AccessPolicy =
-    if (all) copy(projects = null)
-    else copy(projects = this.projects ?: emptyList(), github = false)
+    if (all) copy(projects = null) else copy(projects = this.projects ?: emptyList())
 
 fun skillKey(skill: Skill) = "${skill.scope}/${skill.name}"
 
@@ -521,8 +410,6 @@ fun pluginSummary(agent: Agent, catalog: PluginCatalog?): String {
             }
     return groups.joinToString(" · ").ifBlank { plural(agent.plugins.size, "instance") }
 }
-
-fun githubSummary(mode: GithubMode) = mode.label
 
 fun sandboxLabel(value: String) =
     when (value) {
@@ -726,10 +613,7 @@ enum class ReviewKind(val label: String) {
     Reduction("Réduction"),
 }
 
-/**
- * [opensReview]: a reduction the owner must see before saving, e.g. GitHub switching to a token.
- */
-data class ReviewLine(val kind: ReviewKind, val text: String, val opensReview: Boolean = false)
+data class ReviewLine(val kind: ReviewKind, val text: String)
 
 private val sandboxStrictness = mapOf("yolo" to 0, "workspace-write" to 1, "read-only" to 2)
 
@@ -740,7 +624,6 @@ fun agentReductions(
     original: Agent,
     edited: Agent,
     resources: AgentResources,
-    tokenRemoved: Boolean = false,
 ): List<String> = buildList {
     val before = original.access
     val after = edited.access
@@ -824,8 +707,6 @@ fun agentReductions(
         .forEach { id -> add(pluginGrantLabel(id, resources.catalog)) }
     if (before.installation && !after.installation) add("gestion de l’installation")
     if (before.backend == NATIVE_BACKEND && after.backend != NATIVE_BACKEND) add("exécution native")
-    if (before.github && !after.github) add("connexion GitHub partagée")
-    if (tokenRemoved) add("jeton GitHub dédié")
     if ((sandboxStrictness[after.sandbox] ?: 0) > (sandboxStrictness[before.sandbox] ?: 0))
         add("mode d’exécution « ${sandboxLabel(after.sandbox)} »")
 }
@@ -857,11 +738,6 @@ fun agentReview(
     edited: Agent,
     resources: AgentResources,
     preview: AgentPreview?,
-    tokenRemoved: Boolean = false,
-    /** GitHub goes through the agent's saved dedicated token once saved. */
-    savedToken: Boolean = false,
-    /** Whether a dedicated token is saved is not known yet. */
-    tokenUnknown: Boolean = false,
 ): List<ReviewLine> = buildList {
     val before = original.access
     val after = edited.access
@@ -901,7 +777,7 @@ fun agentReview(
                 )
             )
         }
-    val reductions = agentReductions(original, edited, resources, tokenRemoved)
+    val reductions = agentReductions(original, edited, resources)
     val runs = preview?.runs ?: AgentPreviewRuns()
     val affected = runs.queued + runs.running > 0
     if (reductions.isNotEmpty()) {
@@ -910,27 +786,6 @@ fun agentReview(
     } else if (affected)
         // The server reports work the change stops even when nothing listed here is removed.
         add(ReviewLine(ReviewKind.Reduction, "Accès modifié. ${runsSentence(runs)}"))
-    if (before.github && !after.github && after.projects != null && before.projects == null)
-        add(
-            if (savedToken)
-                ReviewLine(
-                    ReviewKind.Reduction,
-                    "Connexion GitHub partagée désactivée : l’agent utilisera son jeton dédié enregistré.",
-                    opensReview = true,
-                )
-            else if (tokenUnknown)
-                // A saved token may take over: never decided silently.
-                ReviewLine(
-                    ReviewKind.Reduction,
-                    "Connexion GitHub partagée désactivée : l’agent utilisera son jeton dédié enregistré s’il en existe un.",
-                    opensReview = true,
-                )
-            else
-                ReviewLine(
-                    ReviewKind.Reduction,
-                    "Connexion GitHub partagée désactivée : les projets choisis exigent un jeton dédié.",
-                )
-        )
 }
 
 /**
@@ -958,12 +813,12 @@ fun AgentPreview.preselectedReapprovals(): Set<String> =
         .toSet()
 
 /**
- * The review is needed for a power or a secret added, a reduction that stops work or switches
- * GitHub to the saved token, or a delegation this save would suspend. A delegation already
- * suspended by an earlier change does not open it on its own. Otherwise the page saves directly.
+ * The review is needed for a power or a secret added, a reduction that stops work, or a delegation
+ * this save would suspend. A delegation already suspended by an earlier change does not open it on
+ * its own. Otherwise the page saves directly.
  */
 fun needsReview(lines: List<ReviewLine>, preview: AgentPreview?): Boolean =
-    lines.any { it.kind != ReviewKind.Reduction || it.opensReview } ||
+    lines.any { it.kind != ReviewKind.Reduction } ||
         (preview != null &&
             (preview.runs.queued + preview.runs.running > 0 ||
                 preview.suspendedDelegations().any { !it.alreadySuspended }))
@@ -1016,7 +871,6 @@ fun rebaseAgent(
                 mcps = mergeList(a.mcps, m.mcps, t.mcps),
                 mcpTools = tools,
                 installation = pick(a.installation, m.installation, t.installation),
-                github = pick(a.github, m.github, t.github),
                 sandbox = pick(a.sandbox, m.sandbox, t.sandbox),
                 backend = pick(a.backend, m.backend, t.backend),
             ),
@@ -1049,7 +903,7 @@ fun mergeToolChoices(
 
 /**
  * The draft rebased on the newest saved agent ([rebaseAgent]), including the time limit text: an
- * untouched limit takes the newer value, an edited one is kept. The GitHub choice is kept.
+ * untouched limit takes the newer value, an edited one is kept.
  */
 fun AgentDraft.rebased(base: Agent, theirs: Agent, mcpIds: Set<String>? = null): AgentDraft {
     val limitEdited = timeout.trim() != base.timeoutMinutes.toString()

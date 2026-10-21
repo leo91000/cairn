@@ -4,14 +4,19 @@
 pub mod agents;
 pub mod capabilities;
 pub mod cli;
+pub mod conditions;
 pub mod connections;
+pub mod device_flow;
 pub mod forms;
 pub mod legacy;
+pub mod legacy_github;
 pub mod operations;
 pub mod panels;
 pub mod program_installation;
 pub mod programs;
+pub mod projects;
 pub mod registry;
+pub mod run_credentials;
 pub mod runtime;
 pub mod scope;
 pub mod socket;
@@ -49,6 +54,7 @@ pub struct Plugins {
     pub(crate) program_installation: tokio::sync::Mutex<()>,
     pub(crate) installer_host: Host,
     pub operations: operations::Operations,
+    pub device_flows: device_flow::Flows,
     /// When each paced key (e.g. a bot token's Identify budget) may send next.
     paces: socket::pacing::Paces,
 }
@@ -60,6 +66,8 @@ impl Default for Plugins {
             changed: Notify::new(),
             http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                // Some APIs refuse requests without one; packages may set their own.
+                .user_agent("Cairn")
                 .build()
                 .expect("plugin HTTP client"),
             test_origin: Mutex::new(None),
@@ -69,6 +77,7 @@ impl Default for Plugins {
             program_installation: tokio::sync::Mutex::new(()),
             installer_host: Host::with_limits(4, std::time::Duration::from_secs(120)),
             operations: operations::Operations::default(),
+            device_flows: device_flow::Flows::default(),
             paces: socket::pacing::Paces::default(),
         }
     }
@@ -133,6 +142,7 @@ impl Plugins {
     }
 
     pub async fn start(self: Arc<Self>, s: Arc<Service>) {
+        tokio::spawn(legacy_github::complete(s.clone()));
         runtime::maintain(s).await;
     }
 }
@@ -262,6 +272,10 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         }
         ("DELETE", ["plugins", "packages", id]) => registry::uninstall(s, id).await,
         ("POST", ["plugins", id, "form"]) => forms::form(s, id, body).await,
+        ("POST", ["plugins", id, "device-flow"]) => device_flow::start(s, id).await,
+        ("GET", ["plugins", id, "device-flow", flow]) => device_flow::status(s, id, flow),
+        ("DELETE", ["plugins", id, "device-flow", flow]) => Ok(device_flow::cancel(s, id, flow)),
+        ("GET", ["plugins", id, "projects"]) => projects::list(s, id, input).await,
         ("GET", ["plugins", id, "programs"]) => program_installation::list(s, id).await,
         ("POST", ["plugins", id, "programs", name, action]) => {
             let (service, id, name, action, body) = (

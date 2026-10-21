@@ -90,7 +90,6 @@ export const Keyboard = 'i-lucide-keyboard' as const
 export const Navigation = 'i-lucide-navigation' as const
 export const Pin = 'i-lucide-pin' as const
 export const RotateCcw = 'i-lucide-rotate-ccw' as const
-export const Github = 'i-simple-icons-github' as const
 export const BrandOpenAI = 'i-simple-icons-openai' as const
 export const BrandClaude = 'i-simple-icons-claude' as const
 export const BrandOpenCode = 'i-simple-icons-opencode' as const

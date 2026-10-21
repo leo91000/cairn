@@ -20,7 +20,8 @@ allows it, through its relay otherwise, and does not keep the agents' work.
 - Schedule daily, weekly, or custom cron tasks with timezone previews and overlap protection.
 - Follow runs, inspect results and original instructions, cancel, retry, archive tasks, and clean up reviewed worktrees.
 - Edit global and project `.agents/skills`, including supporting files and Markdown previews. In chats, type `$` to pick a skill with autocomplete on web and Android; both Codex and Claude Code apply the invoked skill.
-- Connect multiple ChatGPT accounts through Codex device sign-in. Runs select available capacity automatically, resume across account exhaustion, and show live usage and reset windows. GitHub keeps its own device sign-in.
+- Connect multiple ChatGPT accounts through Codex device sign-in. Runs select available capacity automatically, resume across account exhaustion, and show live usage and reset windows.
+- Connect GitHub accounts through the bundled GitHub plugin (sign in with GitHub or a token) and grant them to agents: their runs push and use the `gh` CLI, owners import repositories and skills, and agents wait for CI. See [GitHub](docs/PLUGINS.md#github).
 - Store multiple 1Password service account tokens and explicitly grant each agent read access on web or Android. See [1Password setup and access](docs/ONEPASSWORD.md).
 - Add remote and command MCP servers from the UI, sign in with OAuth on any device, discover tools, and choose each agent’s connections and tool access.
 - Expose scoped tools through a **stateless MCP 2026-07-28** endpoint, with stateless compatibility for older Streamable HTTP clients, OAuth, PKCE, refresh rotation, and revocation.
@@ -150,7 +151,7 @@ runtime, database compatibility, execution supervision and performance evidence.
 - Retry uses the task's current configuration; the previous run's snapshot stays intact.
 - Worktrees preserve changes for review. Cleanup rejects dirty/untracked files and preserves Git branches.
 - Event output is bounded per run and expires after 30 days for finished runs; audit entries expire after 90 days. Run summaries and worktrees remain until deliberately managed.
-- Tasks choose an agent. The built-in Main agent sees all registered resources; other agents can restrict projects, skills, and GitHub connections. YOLO remains the default, with optional workspace-write and read-only execution. See [agent access](docs/AGENT-ACCESS.md) for isolation and setup. MCP `run` grants can trigger task-authorized external actions.
+- Tasks choose an agent. The built-in Main agent sees all registered resources; other agents can restrict projects, skills, MCP connections and plugin grants such as GitHub accounts. YOLO remains the default, with optional workspace-write and read-only execution. See [agent access](docs/AGENT-ACCESS.md) for isolation and setup. MCP `run` grants can trigger task-authorized external actions.
 - Providers other than Codex and Claude Code, multi-owner tenancy, stateful MCP sessions, and standalone HTTP+SSE transports are outside this version.
 
 [Detailed delivery plan](docs/PLAN.md) · [Validation record](docs/QA.md) ·
@@ -191,20 +192,18 @@ Codex and Claude Code accounts and optional periodic notifications without Fireb
 document the implemented workflows and device/deployment gates. Android builds
 run in their own CI workflow. Native MCP OAuth uses the accompanying server bridge.
 
-### Add a GitHub project
+### Import a project from a plugin
 
-In Projects → Add project, choose **GitHub** to browse repositories accessible to
-the shared connection configured in Connections. Repositories are listed by
-recent activity with their owner, visibility, language, stars, default branch
-and last push. Search highlights matches and fetches further pages until results
-appear; Private/Public filters, infinite scrolling and arrow keys plus Enter
-help choose quickly. Selecting a repository fills its name, description and
-default branch, and collapses the list into a summary that can be changed. Saving clones that branch into a managed directory inside the first
-configured workspace root. Existing registered repositories are marked as added;
+In Projects → Add project, choose a plugin's project source, such as **GitHub
+repository** for a connected GitHub account, to browse what it offers. Items show
+their description, badges (for GitHub: visibility, fork, archived, language),
+default branch and last update. Search filters and fetches further pages until
+results appear; infinite scrolling and arrow keys plus Enter help choose quickly.
+Selecting an item fills its name, description and default branch. Saving clones
+that branch with the account's credentials into a managed directory inside the
+first configured workspace root. Existing registered projects are marked as added;
 failed imports remove their temporary checkout. The server-directory option is
-still available. Web and Android 0.31.0 use the same API (server 0.31.0).
-
-Repository browsing uses GitHub's [authenticated repository listing](https://docs.github.com/en/rest/repos/repos#list-repositories-for-the-authenticated-user).
+still available. See [project sources](docs/PLUGINS.md#project-sources).
 
 ### Execution time limits
 

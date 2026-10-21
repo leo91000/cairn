@@ -60,9 +60,14 @@ data class ChatWakeup(
     val wakeAt: Long,
     val condition: JsonObject? = null,
     val observation: JsonObject? = null,
-    /** GitHub conditions: when Cairn checks again, and why its last check failed. */
+    /** Plugin conditions: when Cairn checks again, and why its last check failed. */
     val nextCheckAt: Long? = null,
     val lastError: String? = null,
+    /**
+     * A plugin condition's words while it waits: `{ title, short, details[] }`. Kept as JSON so a
+     * plugin's unexpected shape never hides the conversation.
+     */
+    val display: JsonObject? = null,
 )
 
 @Serializable
@@ -236,8 +241,6 @@ data class Mcp(
 )
 
 @Serializable data class UrlResult(val url: String)
-
-@Serializable data class Configured(val configured: Boolean = false)
 
 @Serializable
 data class RunWorkspace(

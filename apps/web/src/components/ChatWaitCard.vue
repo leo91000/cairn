@@ -26,7 +26,6 @@ import {
   CircleCheck,
   CircleX,
   Clock,
-  GitPullRequest,
   Hourglass,
   Pause,
   RefreshCw,
@@ -62,13 +61,13 @@ watch(pending, (value) => {
 }, { immediate: true })
 onBeforeUnmount(() => clearInterval(clock))
 
-// Cairn updates the pending wakeup as it polls; the scheduling event keeps the original.
+// Cairn updates the pending wakeup, and its plugin's words, as it polls; the scheduling event
+// keeps the original.
 const polled = computed(() => current.value ? props.live!.wakeup! : wakeup.value)
-const target = computed(() => wakeup.value ? waitTarget(wakeup.value, now.value) : null)
+const target = computed(() => polled.value ? waitTarget(polled.value, now.value) : null)
 const icons: Record<string, IconName> = {
   timer: Hourglass,
-  pr: GitPullRequest,
-  workflow: Workflow,
+  condition: Workflow,
   run: Bot,
 }
 
@@ -185,7 +184,7 @@ function duration() {
 const chips = computed(() => !finished.value && !cancelled.value && !state.value.replaced ? target.value?.details.filter(Boolean) ?? [] : [])
 const checked = computed(() => {
   const next = polled.value?.nextCheckAt
-  // Cairn checks GitHub only once the turn has ended, and until the deadline.
+  // Cairn checks a plugin condition only once the turn has ended, and until the deadline.
   if (!pending.value || !props.live?.settled || waitDue(polled.value!, now.value) || !polled.value?.condition || polled.value.condition.type === 'run_finished')
     return ''
   if (polled.value.lastError)
@@ -240,7 +239,7 @@ const tones: Record<string, string> = {
         <p v-if="chips.length || checked || (pending && polled?.lastError)" class="m-0! mt-2 flex flex-wrap gap-1.5 text-2xs">
           <span v-for="chip in chips" :key="chip" class="rounded-full bg-hover px-2 py-0.5 font-mono text-muted">{{ chip }}</span>
           <span v-if="pending && polled?.lastError" class="flex items-center gap-1 rounded-full bg-warning-surface px-2 py-0.5 font-semibold text-warning" :title="polled.lastError">
-            <Icon :name="TriangleAlert" :size="11" />GitHub unreachable · retrying
+            <Icon :name="TriangleAlert" :size="11" />Check failed · retrying
           </span>
           <span v-else-if="checked" class="flex items-center gap-1 rounded-full bg-soft px-2 py-0.5 font-semibold text-accent">
             <Icon :name="RefreshCw" :size="11" />{{ checked }}

@@ -387,9 +387,10 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
     let mut headers = Map::new();
     for (name, value) in response.headers() {
         let name = name.as_str();
-        if (name == "retry-after" || name == "content-type" || name.starts_with("x-ratelimit"))
-            && let Ok(value) = value.to_str()
-        {
+        // Metadata such as rate limits, granted scopes and pagination; never cookies.
+        let metadata =
+            matches!(name, "retry-after" | "content-type" | "link") || name.starts_with("x-");
+        if metadata && let Ok(value) = value.to_str() {
             headers.insert(name.to_owned(), json!(value));
         }
     }

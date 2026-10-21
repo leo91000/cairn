@@ -1,6 +1,6 @@
 //! Validation and upgrade of a saved execution descriptor before a run resumes.
 use super::{
-    home::github_home,
+    home::{configure_git, run_credentials},
     prepare_execution,
     prepared::{Backend, Mount, Prepared},
     read_only_workspaces, run_directory, uses_vm,
@@ -9,7 +9,8 @@ use super::{
 use crate::{
     config::Config,
     error::{Error, Result},
-    service::{isolated, policy, run_projects},
+    plugins::run_credentials::RunCredentials,
+    service::{isolated, run_projects},
     skills::workspace,
     validation::text,
 };
@@ -38,7 +39,7 @@ pub(super) async fn restore(
     run: &Value,
     mut prepared: Value,
     config: &Config,
-    github: Option<&str>,
+    credentials: &RunCredentials,
 ) -> Result<Value> {
     let microvm = uses_vm(run, config);
     let native = crate::native::policy::native(&run["snapshot"]["agent"]);
@@ -48,7 +49,7 @@ pub(super) async fn restore(
         ));
     }
     if microvm && !native && !is_firecracker(&prepared) {
-        let migrated = migrate_to_vm(run, &prepared, config, github).await?;
+        let migrated = migrate_to_vm(run, &prepared, config, credentials).await?;
         return Ok(serde_json::to_value(migrated)?);
     }
     if is_firecracker(&prepared) && !prepared["projectRoot"].is_string() {
@@ -72,8 +73,9 @@ pub(super) async fn restore(
     verify_saved_paths(run, &prepared, config).await?;
     if is_isolated {
         let root = run_directory(run, config);
-        let github_access = policy(&run["snapshot"]["agent"])["github"] == true;
-        github_home(&root.join("home"), config, github_access, github).await?;
+        run_credentials(&root.join("home"), &root, credentials).await?;
+        // Helpers and identity follow the current grants too.
+        configure_git(&root.join("home"), config, credentials).await?;
     }
     Ok(prepared)
 }
@@ -84,7 +86,7 @@ async fn migrate_to_vm(
     run: &Value,
     prepared: &Value,
     config: &Config,
-    github: Option<&str>,
+    credentials: &RunCredentials,
 ) -> Result<Prepared> {
     let directory = run_directory(run, config);
     let old_home = directory.join(if prepared["isolated"] == true {
@@ -94,7 +96,7 @@ async fn migrate_to_vm(
     });
     let generation = format!("microvm-{}", &crate::config::id()[..8]);
     let mut migrated =
-        prepare_execution(run, config, github, Some(&old_home), Some(&generation)).await?;
+        prepare_execution(run, config, credentials, Some(&old_home), Some(&generation)).await?;
     let saved = prepared["workspaces"]
         .as_array()
         .map_or(&[][..], Vec::as_slice);
@@ -111,7 +113,7 @@ async fn migrate_to_vm(
             .find(|p| p["id"] == old["projectId"])
             .ok_or_else(|| Error::bad("Saved project is no longer authorized."))?;
         let project_root = migrated.project_root.clone().unwrap_or_default();
-        let entry = seed(run, &project, config, &project_root).await?;
+        let entry = seed(run, &project, config, &project_root, credentials).await?;
         migrated
             .mounts
             .push(Mount::same(&entry.path, read_only_workspaces(run)));

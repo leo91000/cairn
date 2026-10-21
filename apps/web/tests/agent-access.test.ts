@@ -12,7 +12,6 @@ import {
   draftOf,
   effectiveExclusive,
   errorSection,
-  githubTokenChange,
   grantableConnection,
   grantablePackages,
   issues,
@@ -23,7 +22,6 @@ import {
   nodesFor,
   olderInstallation,
   rebaseDraft,
-  restrictedGithubMode,
   reviewLines,
   sandboxOptionsFor,
   savedDraft,
@@ -139,6 +137,8 @@ it('summarizes an agent for the list and places server errors in their section',
   expect(accessSummary(agent, { ...context, connections: context.connections.map(connection => ({ ...connection, agentIds: [] })) }, true)).toBe('3 projects · 2 nodes')
   expect(accessSummary({ ...agent, plugins: [] }, { ...context, connections: context.connections.map(connection => connection.id === 'prod' ? { ...connection, agentIds: ['a'] } : connection) }, true)).toBe('3 projects · 2 nodes · 1Password')
   expect(errorSection('A selected plugin instance no longer exists.')).toBe('plugins')
+  // Two instances of a package whose runs use its credentials: GitHub accounts are plugin grants.
+  expect(errorSection('Grant one GitHub instance per agent: its runs use that instance\'s credentials.')).toBe('plugins')
   expect(errorSection('A revoked node cannot be reserved.')).toBe('nodes')
 })
 
@@ -151,7 +151,6 @@ it('starts new agents restricted until the owner widens their access', () => {
     mcps: [],
     mcpTools: {},
     installation: false,
-    github: false,
     sandbox: 'yolo',
   })
   expect(newAgentDraft()).toMatchObject({ exclusiveNodes: [], plugins: [] })
@@ -168,6 +167,7 @@ it('treats live grants the server omits as none, so a loaded agent is not change
       projects: null,
       skills: null,
       mcps: null,
+      // An older installation may still send the removed shared GitHub setting.
       github: true,
       installation: false,
       sandbox: 'yolo',
@@ -175,6 +175,7 @@ it('treats live grants the server omits as none, so a loaded agent is not change
   } as unknown as Agent
   const loaded = draftOf(agent)
   expect(loaded.access).toMatchObject({ mcpTools: {} })
+  expect(loaded.access).not.toHaveProperty('github')
   expect(loaded).toMatchObject({ exclusiveNodes: [], plugins: [] })
   expect(changes(loaded, draftOf(agent))).toEqual([])
   // A draft compared against the raw response, keys absent, is unchanged too.
@@ -285,19 +286,16 @@ it('lists every reduction the Android review lists', () => {
   const saved = newAgentDraft()
   saved.access.mcps = ['m1', 'm2']
   saved.access.mcpTools = { m2: ['read', 'write'] }
-  saved.access.github = true
   saved.access.projects = null
   const draft = structuredClone(saved)
   // Stricter execution mode.
   draft.access.sandbox = 'workspace-write'
   // From all enabled tools to a chosen few, and a tool removed from a chosen list.
   draft.access.mcpTools = { m1: ['echo'], m2: ['read'] }
-  draft.access.github = false
   draft.access.projects = ['p1']
-  const lines = reviewLines(saved, draft, mcpContext, undefined, 'remove')
-  expect(lines.map(line => line.kind)).toEqual(['reduction', 'reduction'])
-  expect(lines[0]!.text).toBe('Removed: all projects (now SheetOM), MCP tools on Design tools (now 1 chosen), MCP tools on Docs (now 1 chosen), shared GitHub connection, dedicated GitHub token, execution mode (now Workspace write).')
-  expect(lines[1]!.text).toBe('Shared GitHub connection turned off: selected projects require a dedicated token.')
+  const lines = reviewLines(saved, draft, mcpContext)
+  expect(lines.map(line => line.kind)).toEqual(['reduction'])
+  expect(lines[0]!.text).toBe('Removed: all projects (now SheetOM), MCP tools on Design tools (now 1 chosen), MCP tools on Docs (now 1 chosen), execution mode (now Workspace write).')
 
   // A looser mode, an added tool or a connection granted with chosen tools reduces nothing.
   const looser = structuredClone(draft)
@@ -333,28 +331,6 @@ it('lists every addition and removal of powers and grants', () => {
   ])
 })
 
-it('removes a saved GitHub token only when the owner asks for it', () => {
-  const kept = {
-    main: false,
-    mode: 'none' as const,
-    token: '',
-    configured: true,
-    removeRequested: false,
-  }
-  // Restricting projects switches the shared connection to a saved token, narrower, or to no GitHub.
-  expect(restrictedGithubMode('shared', true)).toBe('dedicated')
-  expect(restrictedGithubMode('shared', false)).toBe('none')
-  expect(restrictedGithubMode('none', true)).toBe('none')
-  expect(githubTokenChange({ ...kept, mode: restrictedGithubMode('shared', true) })).toBeNull()
-  // A saved token is removed only on the owner's explicit choice.
-  expect(githubTokenChange(kept)).toBeNull()
-  expect(githubTokenChange({ ...kept, removeRequested: true })).toBe('remove')
-  expect(githubTokenChange({ ...kept, configured: false, removeRequested: true })).toBeNull()
-  expect(githubTokenChange({ ...kept, mode: 'dedicated', token: ' new ' })).toBe('set')
-  expect(githubTokenChange({ ...kept, mode: 'dedicated' })).toBeNull()
-  expect(githubTokenChange({ ...kept, main: true, removeRequested: true })).toBeNull()
-})
-
 it('treats an exclusive reservation on a runtime without support as inactive', () => {
   const old = {
     ...gpu,
@@ -379,17 +355,6 @@ it('treats an exclusive reservation on a runtime without support as inactive', (
     exclusiveNodes: ['old'],
   } as unknown as Agent
   expect(accessSummary(agent, { ...context, nodes })).toBe('No projects · 2 nodes')
-})
-
-it('says when restricted projects move the agent to its saved GitHub token', () => {
-  const saved = newAgentDraft()
-  saved.access.projects = null
-  saved.access.github = true
-  const draft = structuredClone(saved)
-  draft.access.projects = ['p1']
-  draft.access.github = false
-  expect(reviewLines(saved, draft, context, undefined, null, true).at(-1)!.text).toBe('Shared GitHub connection turned off: the agent will use its saved dedicated token.')
-  expect(reviewLines(saved, draft, context).at(-1)!.text).toBe('Shared GitHub connection turned off: selected projects require a dedicated token.')
 })
 
 it('raises no plugin issue while the plugin catalogue is not loaded', () => {
@@ -451,8 +416,6 @@ it('opens the review only for what this edit does', () => {
   expect(needsReview(reduction, { ...preview, delegations: [{ ...delegation, blocked: 'Too broad', alreadySuspended: false }] })).toBe(true)
   expect(needsReview(reduction, { ...preview, runs: { queued: 1, running: 0 } })).toBe(true)
   expect(needsReview([{ ...reduction[0]!, kind: 'secret' }], null)).toBe(true)
-  // Moving to the saved GitHub token changes the agent's credentials.
-  expect(needsReview(reduction, null, true)).toBe(true)
 })
 
 it('raises no node issue while the nodes are not loaded', () => {
@@ -597,16 +560,9 @@ it('flags run permissions on removed nodes or nodes of the other backend', () =>
   expect(issues(draft, { ...context, nodes: [], nodesUnavailable: true }, false)).toEqual([])
 })
 
-it('describes execution modes and the GitHub switch for what is known', () => {
+it('describes execution modes for what is known', () => {
   expect(sandboxOptionsFor('firecracker')[0]!.description).toBe('Private VM with sudo and Docker. Default.')
   expect(sandboxOptionsFor('native')[0]!.description).toBe('Native process under a managed account on the host: GPU and system tools, no sudo or Docker. Default.')
-  const saved = newAgentDraft()
-  saved.access.projects = null
-  saved.access.github = true
-  const draft = structuredClone(saved)
-  draft.access.projects = []
-  draft.access.github = false
-  expect(reviewLines(saved, draft, context, undefined, null, 'unknown').at(-1)!.text).toBe('Shared GitHub connection turned off: the agent may use its saved dedicated token if one exists.')
 })
 
 it('never sends tool choices of deleted MCP connections', () => {

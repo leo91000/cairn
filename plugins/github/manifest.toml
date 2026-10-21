@@ -1,0 +1,137 @@
+id = "github"
+name = "GitHub"
+version = "1.0.0"
+description = "Agents clone, push and open pull requests as your account; import repositories and skills, and wait for CI."
+apiVersion = 2
+capabilities = [ "http", ]
+hosts = [
+  "github.com",
+  "api.github.com",
+]
+instanceForm = true
+instanceView = true
+instanceTest = true
+instructions = "GitHub: this run is signed in to GitHub for git over HTTPS and the gh CLI; never ask for, print or store a GitHub token. Push branches and open pull requests with git and gh as usual. To wait for CI, use cairn_workspace.wait_for with github_workflow (project, workflow run ID and full commit SHA) or github_pr_checks (project, PR number and full head SHA) rather than polling."
+secretPatterns = [
+  "\\bgh[pousr]_[A-Za-z0-9_]{15,}\\b",
+  "\\bgithub_pat_[A-Za-z0-9_]{15,}\\b",
+]
+
+[brand]
+color = "#181717"
+path = "M12 .297c-6.63 0-12 5.373-12 12c0 5.303 3.438 9.8 8.205 11.385c.6.113.82-.258.82-.577c0-.285-.01-1.04-.015-2.04c-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729c1.205.084 1.838 1.236 1.838 1.236c1.07 1.835 2.809 1.305 3.495.998c.108-.776.417-1.305.76-1.605c-2.665-.3-5.466-1.332-5.466-5.93c0-1.31.465-2.38 1.235-3.22c-.135-.303-.54-1.523.105-3.176c0 0 1.005-.322 3.3 1.23c.96-.267 1.98-.399 3-.405c1.02.006 2.04.138 3 .405c2.28-1.552 3.285-1.23 3.285-1.23c.645 1.653.24 2.873.12 3.176c.765.84 1.23 1.91 1.23 3.22c0 4.61-2.805 5.625-5.475 5.92c.42.36.81 1.096.81 2.22c0 1.606-.015 2.896-.015 3.286c0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"
+
+[instances]
+singular = "Account"
+plural = "Accounts"
+
+[credential]
+label = "GitHub token"
+header = "authorization"
+prefix = "Bearer "
+
+[credential.deviceFlow]
+authorizationUrl = "https://github.com/login/device/code"
+tokenUrl = "https://github.com/login/oauth/access_token"
+clientId = "Ov23lihPh3R8eqWccn6n"
+scopes = [
+  "repo",
+  "workflow",
+  "read:org",
+]
+
+[[settings]]
+key = "login"
+title = "Account"
+type = "string"
+hidden = true
+maxLength = 100
+
+[[settings]]
+key = "gitName"
+title = "Commit author"
+type = "string"
+hidden = true
+maxLength = 200
+
+[[settings]]
+key = "gitEmail"
+title = "Commit email"
+type = "string"
+hidden = true
+maxLength = 200
+
+[agentAccess]
+description = "Off by default, including for Main agent. Granted agents' runs push and use the GitHub CLI as this account, and can wait for its CI. Grant one account per agent; repository access follows the account or token, not the agent's projects."
+
+[runCredentials]
+files = [ { path = ".config/gh/hosts.yml", content = "github.com:\n    oauth_token: {{credential}}\n    git_protocol: https\n" }, ]
+git = [ { url = "https://github.com", username = "x-access-token", password = "{{credential}}" }, ]
+gitIdentity = { name = "{{settings.gitName}}", email = "{{settings.gitEmail}}" }
+
+[[projectSources]]
+name = "repositories"
+title = "GitHub repository"
+description = "Repositories this account owns, collaborates on or reaches through its organizations."
+
+[[skillSources]]
+name = "repository"
+title = "GitHub repository"
+description = "A public or private repository this account can read."
+
+[[skillSources.fields]]
+key = "repository"
+title = "Repository"
+type = "string"
+required = true
+maxLength = 500
+placeholder = "owner/name or https://github.com/owner/name/tree/main/skills"
+
+[[skillSources.fields]]
+key = "ref"
+title = "Branch, tag or commit"
+type = "string"
+maxLength = 200
+placeholder = "The default branch"
+
+[[conditions]]
+name = "workflow"
+project = true
+description = "A GitHub Actions workflow run of the project finishing, pinned to its run ID and the full commit SHA it runs on. Completion includes failure and cancellation."
+
+[conditions.inputSchema]
+type = "object"
+required = [
+  "runId",
+  "headSha",
+]
+
+[conditions.inputSchema.properties.runId]
+type = "integer"
+minimum = 1
+maximum = 9007199254740991
+
+[conditions.inputSchema.properties.headSha]
+type = "string"
+pattern = "^[a-fA-F0-9]{40}$"
+
+[[conditions]]
+name = "pr_checks"
+project = true
+description = "The required checks of a pull request of the project completing, pinned to its number and full head SHA. A changed PR head returns superseded; a closed or merged PR returns closed. No configured required checks returns no_required_checks, not a CI success or permission to merge. Required check failures and cancellations wake immediately; success waits for all required checks."
+
+[conditions.inputSchema]
+type = "object"
+required = [
+  "prNumber",
+  "headSha",
+]
+
+[conditions.inputSchema.properties.prNumber]
+type = "integer"
+minimum = 1
+maximum = 2147483647
+
+[conditions.inputSchema.properties.headSha]
+type = "string"
+pattern = "^[a-fA-F0-9]{40}$"

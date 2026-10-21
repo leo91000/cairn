@@ -1,5 +1,6 @@
 mod common;
 
+use cairn_installation::plugins::run_credentials::RunCredentials;
 use cairn_installation::{
     config::{Config, MAIN_AGENT_ID, id},
     execution, outcome, project_git, project_workspaces, run_output,
@@ -10,10 +11,8 @@ use cairn_installation::{
 use common::reconfigure;
 use serde_json::{Value, json};
 use std::{
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
 };
 use tempfile::TempDir;
 
@@ -22,7 +21,6 @@ async fn fixture() -> (TempDir, Arc<Service>, Vec<Value>) {
     let root = TempDir::new().unwrap();
     common::managed_codex_home(&root.path().join("home"));
     let s = Service::new(Config {
-        gh_bin: "false".into(),
         concurrency: 2,
         runner_url: "http://runner:4311".into(),
         ..common::config(root.path())
@@ -78,17 +76,12 @@ fn run_home(s: &Service, run: &Value) -> PathBuf {
         .join("home")
 }
 
-/// An agent restricted to no project, skill or MCP, without GitHub.
+/// An agent restricted to no project, skill or MCP.
 fn restricted_agent(name: &str) -> Value {
     json!({
         "name": name,
-        "access": { "projects": [], "skills": [], "mcps": [], "github": false },
+        "access": { "projects": [], "skills": [], "mcps": [] },
     })
-}
-
-fn executable(path: &Path, script: &str) {
-    std::fs::write(path, script).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 #[tokio::test]
@@ -97,7 +90,7 @@ async fn empty_start_does_not_touch_unselected_repositories_and_selected_start_l
     let mut empty = run(&s, Value::Null, MAIN_AGENT_ID).await;
     // An unavailable, unneeded repository must not prevent a simple chat starting.
     std::fs::remove_dir_all(text(&projects[1], "path")).unwrap();
-    let prepared = execution::prepare(&empty, &s.config, None, None, None)
+    let prepared = execution::prepare(&empty, &s.config, &RunCredentials::default(), None, None)
         .await
         .unwrap();
     assert_eq!(prepared["workspaces"], json!([]));
@@ -114,7 +107,7 @@ async fn empty_start_does_not_touch_unselected_repositories_and_selected_start_l
     );
     std::fs::create_dir(text(&projects[1], "path")).unwrap();
     let selected = run(&s, projects[0]["id"].clone(), MAIN_AGENT_ID).await;
-    let prepared = execution::prepare(&selected, &s.config, None, None, None)
+    let prepared = execution::prepare(&selected, &s.config, &RunCredentials::default(), None, None)
         .await
         .unwrap();
     assert_eq!(prepared["workspaces"].as_array().unwrap().len(), 1);
@@ -148,9 +141,10 @@ async fn managed_resume_does_not_depend_on_unopened_project_sources() {
             };
             let mut run = run(&s, project, MAIN_AGENT_ID).await;
             run["snapshot"]["agent"]["access"]["backend"] = backend.into();
-            let prepared = execution::prepare(&run, &s.config, None, None, None)
-                .await
-                .unwrap();
+            let prepared =
+                execution::prepare(&run, &s.config, &RunCredentials::default(), None, None)
+                    .await
+                    .unwrap();
             assert_eq!(prepared["backend"], backend);
             assert_eq!(
                 prepared["workspaces"].as_array().unwrap().len(),
@@ -164,9 +158,14 @@ async fn managed_resume_does_not_depend_on_unopened_project_sources() {
             if !selected {
                 std::fs::remove_dir_all(text(&projects[0], "path")).unwrap();
             }
-            let restored = execution::restore(&run, prepared.clone(), &s.config, None)
-                .await
-                .unwrap();
+            let restored = execution::restore(
+                &run,
+                prepared.clone(),
+                &s.config,
+                &RunCredentials::default(),
+            )
+            .await
+            .unwrap();
             assert_eq!(restored, prepared);
             assert_eq!(
                 std::fs::read(&working_file).unwrap(),
@@ -176,7 +175,7 @@ async fn managed_resume_does_not_depend_on_unopened_project_sources() {
                 // Keep the existing location check for an actually opened project.
                 std::fs::remove_dir_all(text(&projects[0], "path")).unwrap();
                 assert!(
-                    execution::restore(&run, restored, &s.config, None)
+                    execution::restore(&run, restored, &s.config, &RunCredentials::default())
                         .await
                         .is_err()
                 );
@@ -229,11 +228,12 @@ fn access_covers_unchanged_or_wider_grants_but_not_reduced_ones() {
         reduced["access"][key] = value;
         assert!(!covers(&reduced, &granted), "{key}");
     }
+    // GitHub became a plugin grant: the setting older snapshots carry no longer counts.
     let mut github = same.clone();
     github["access"]["github"] = false.into();
     let mut with_github = granted.clone();
     with_github["access"]["github"] = true.into();
-    assert!(!covers(&github, &with_github));
+    assert!(covers(&github, &with_github));
 }
 
 #[tokio::test]
@@ -305,7 +305,7 @@ async fn open_imports_once_reuses_seed_and_restores_loaded_catalog_without_check
     let server = common::serve(listener, router);
     let s = &service;
     let run = run(s, Value::Null, MAIN_AGENT_ID).await;
-    let prepared = execution::prepare(&run, &s.config, None, None, None)
+    let prepared = execution::prepare(&run, &s.config, &RunCredentials::default(), None, None)
         .await
         .unwrap();
     patch_run(
@@ -342,13 +342,13 @@ async fn open_imports_once_reuses_seed_and_restores_loaded_catalog_without_check
     );
     let saved = s.store.run(text(&run, "id")).await.unwrap();
     assert_eq!(saved["workspaces"].as_array().unwrap().len(), 1);
-    let restored = execution::restore(&saved, prepared, &s.config, None)
+    let restored = execution::restore(&saved, prepared, &s.config, &RunCredentials::default())
         .await
         .unwrap();
     assert_eq!(restored["workspaces"], saved["workspaces"]);
     let mut legacy = restored.clone();
     legacy.as_object_mut().unwrap().remove("projectRoot");
-    let upgraded = execution::restore(&saved, legacy, &s.config, None)
+    let upgraded = execution::restore(&saved, legacy, &s.config, &RunCredentials::default())
         .await
         .unwrap();
     assert_eq!(upgraded["projectRoot"], restored["projectRoot"]);
@@ -464,7 +464,7 @@ async fn builtin_mcp_endpoint_exposes_scoped_workspace_tools_and_checks_the_run_
 async fn seed_cleanup_does_not_follow_repository_symlinks_outside_its_private_copy() {
     let (root, s, projects) = fixture().await;
     let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
-    let prepared = execution::prepare(&run, &s.config, None, None, None)
+    let prepared = execution::prepare(&run, &s.config, &RunCredentials::default(), None, None)
         .await
         .unwrap();
     let outside = root.path().join("outside");
@@ -479,6 +479,7 @@ async fn seed_cleanup_does_not_follow_repository_symlinks_outside_its_private_co
         &projects[0],
         &s.config,
         Path::new(text(&prepared, "projectRoot")),
+        &RunCredentials::default(),
     )
     .await
     .unwrap();
@@ -531,7 +532,7 @@ async fn new_git_work_is_fresh_and_local_snapshots_preserve_the_registered_check
         .await
         .unwrap();
     let fresh = root.path().join("fresh");
-    project_git::clone(&source, &fresh, &project, &s.config)
+    project_git::clone(&source, &fresh, &project, &s.config, &[])
         .await
         .unwrap();
     assert_eq!(git(&fresh, &["rev-parse", "HEAD"]), current);
@@ -542,7 +543,7 @@ async fn new_git_work_is_fresh_and_local_snapshots_preserve_the_registered_check
     );
     project["sourceMode"] = "local".into();
     let local = root.path().join("local");
-    project_git::clone(&source, &local, &project, &s.config)
+    project_git::clone(&source, &local, &project, &s.config, &[])
         .await
         .unwrap();
     assert_eq!(git(&local, &["rev-parse", "HEAD"]), old);
@@ -550,9 +551,15 @@ async fn new_git_work_is_fresh_and_local_snapshots_preserve_the_registered_check
     project["sourceMode"] = "remote".into();
     std::fs::rename(&origin, root.path().join("offline")).unwrap();
     assert!(
-        project_git::clone(&source, &root.path().join("failed"), &project, &s.config)
-            .await
-            .is_err()
+        project_git::clone(
+            &source,
+            &root.path().join("failed"),
+            &project,
+            &s.config,
+            &[]
+        )
+        .await
+        .is_err()
     );
     assert_eq!(
         std::fs::read_to_string(source.join("file")).unwrap(),
@@ -596,7 +603,7 @@ async fn partial_clone_missing_blobs_are_fetched_from_the_real_promisor() {
     for mode in ["remote", "local"] {
         project["sourceMode"] = mode.into();
         let target = root.path().join(mode);
-        project_git::clone(&source, &target, &project, &s.config)
+        project_git::clone(&source, &target, &project, &s.config, &[])
             .await
             .unwrap();
         assert_eq!(
@@ -655,49 +662,6 @@ async fn outcome_is_explicit_validated_and_rejected_after_run_revocation() {
         s.store.run(text(&run, "id")).await.unwrap()["outcome"]["status"],
         "blocked"
     );
-}
-
-#[tokio::test]
-async fn github_sign_in_requests_workflow_and_releases_the_startup_fence() {
-    let (root, mut s, _) = fixture().await;
-    let script = root.path().join("gh-fixture");
-    executable(
-        &script,
-        r#"#!/bin/sh
-if [ "$1" = '--version' ]; then echo 'gh fixture'; elif [ "$1" = api ]; then printf 'HTTP/2 200\r\nX-OAuth-Scopes: repo\r\n\r\nfixture\n'; else printf '%s\n' "$@" > "$HOME/login-args"; fi
-"#,
-    );
-    reconfigure(&mut s, |config| {
-        config.gh_bin = script.to_string_lossy().into();
-    })
-    .await;
-    let status = s.connections.status(&s, true).await.unwrap();
-    assert_eq!(status[0]["provider"], "github");
-    assert_eq!(status[0]["connected"], true);
-    assert_eq!(status[0]["workflowPermission"], false);
-    assert_eq!(status[0]["account"], "fixture");
-    s.connections.start(&s).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while s.store.kv("deployment-lease").await.unwrap().is_some() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert!(
-        std::fs::read_to_string(s.config.home.join("login-args"))
-            .unwrap()
-            .contains("--scopes\nworkflow")
-    );
-    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
-    patch_run(
-        &s,
-        &run,
-        json!({ "status": RunStatus::Running, "recoveryPending": true }),
-    )
-    .await;
-    assert_eq!(s.connections.start(&s).await.unwrap_err().status, 409);
-    assert!(s.store.kv("deployment-lease").await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -794,7 +758,7 @@ async fn isolated_commits_keep_the_configured_owner_for_main_and_restricted_agen
         .unwrap();
     for agent_id in [MAIN_AGENT_ID, text(&agent, "id")] {
         let run = run(&s, Value::Null, agent_id).await;
-        let prepared = execution::prepare(&run, &s.config, None, None, None)
+        let prepared = execution::prepare(&run, &s.config, &RunCredentials::default(), None, None)
             .await
             .unwrap();
         let home = run_home(&s, &run);
@@ -815,29 +779,10 @@ async fn isolated_commits_keep_the_configured_owner_for_main_and_restricted_agen
 }
 
 #[tokio::test]
-async fn isolated_commits_fall_back_to_the_connected_github_account() {
-    let (root, mut s, _) = fixture().await;
-    let script = root.path().join("gh-identity");
-    executable(
-        &script,
-        r#"#!/bin/sh
-[ "$*" = 'api --hostname github.com user' ] || exit 1
-[ "$GH_CONFIG_DIR" = "$HOME/.config/gh" ] || exit 1
-[ -z "$GH_TOKEN$GITHUB_TOKEN" ] || exit 1
-[ -f "$GH_CONFIG_DIR/hosts.yml" ] || exit 1
-cat "$HOME/github-profile.json"
-"#,
-    );
-    reconfigure(&mut s, |config| {
-        config.gh_bin = script.to_string_lossy().into_owned();
-    })
-    .await;
-    std::fs::create_dir_all(s.config.home.join(".config/gh")).unwrap();
-    std::fs::write(
-        s.config.home.join(".config/gh/hosts.yml"),
-        "github.com: {}\n",
-    )
-    .unwrap();
+async fn isolated_commits_fall_back_to_the_granted_plugin_account() {
+    let (root, s, _) = fixture().await;
+    let github = common::github::Github::start(root.path()).await;
+    github.attach(&s);
     // An incomplete host identity must not be mixed with a different account.
     std::fs::write(
         s.config.home.join(".gitconfig"),
@@ -848,32 +793,25 @@ cat "$HOME/github-profile.json"
         .agent(restricted_agent("Dedicated agent"), None)
         .await
         .unwrap();
-    for (agent_id, token, name, expected) in [
-        (MAIN_AGENT_ID, None, json!("GitHub Owner"), "GitHub Owner"),
-        (
-            text(&agent, "id"),
-            Some("fixture-token"),
-            Value::Null,
-            "owner-login",
-        ),
+    for (agent_id, name, expected) in [
+        (MAIN_AGENT_ID, json!("GitHub Owner"), "GitHub Owner"),
+        (text(&agent, "id"), Value::Null, "owner-login"),
     ] {
+        github.state(&json!({ "user": { "id": 12345, "login": "owner-login", "name": name } }));
+        let instance = common::github::instance(&s, expected, "fixture-token", &[agent_id]).await;
         let run = run(&s, Value::Null, agent_id).await;
         let home = run_home(&s, &run);
         std::fs::create_dir_all(&home).unwrap();
-        let profile = json!({
-            "id": 12345,
-            "login": "owner-login",
-            "name": name,
-            "email": "public@example.test",
-        });
-        std::fs::write(home.join("github-profile.json"), profile.to_string()).unwrap();
         // Also cover replacing the synthetic identity when preparation is retried.
         std::fs::write(
             home.join(".gitconfig"),
             "[user]\n name = Main agent\n email = agent@localhost\n",
         )
         .unwrap();
-        let prepared = execution::prepare(&run, &s.config, token, None, None)
+        let credentials = cairn_installation::plugins::run_credentials::for_run(&s, agent_id, &[])
+            .await
+            .unwrap();
+        let prepared = execution::prepare(&run, &s.config, &credentials, None, None)
             .await
             .unwrap();
         assert_commit_identity(
@@ -882,6 +820,9 @@ cat "$HOME/github-profile.json"
             expected,
             "12345+owner-login@users.noreply.github.com",
         );
+        cairn_installation::plugins::connections::remove(&s, "github", &instance)
+            .await
+            .unwrap();
     }
 }
 
@@ -896,7 +837,7 @@ async fn missing_account_identity_never_fabricates_an_agent_author() {
         "[user]\n name = Main agent\n email = agent@localhost\n",
     )
     .unwrap();
-    let prepared = execution::prepare(&run, &s.config, None, None, None)
+    let prepared = execution::prepare(&run, &s.config, &RunCredentials::default(), None, None)
         .await
         .unwrap();
     let cwd = Path::new(text(&prepared, "cwd"));

@@ -72,7 +72,6 @@ impl Fixture {
             "host": "127.0.0.1",
             "port": 0,
             "codexBin": codex,
-            "ghBin": "gh",
             "concurrency": 1,
             "logger": false,
             "workerEnabled": false,

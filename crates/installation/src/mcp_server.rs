@@ -765,7 +765,7 @@ async fn skills_tool(s: &Service, name: &str, args: &Value, bearer: Option<&str>
                 return s.skills.read(skill, path, project).await;
             }
             let mut bundle = s.skills.bundle(scope, skill, project).await?;
-            crate::skills::github::source(s, scope, skill, &mut bundle).await?;
+            crate::skills::sources::source(s, scope, skill, &mut bundle).await?;
             Ok(bundle)
         }
         "edit_skill_files" => {
@@ -785,7 +785,7 @@ async fn skills_tool(s: &Service, name: &str, args: &Value, bearer: Option<&str>
                 .await?;
             s.skills.discard(&uploads).await;
             let mut bundle = crate::skills::bundle_response(scope, skill, &saved);
-            crate::skills::github::source(s, scope, skill, &mut bundle).await?;
+            crate::skills::sources::source(s, scope, skill, &mut bundle).await?;
             Ok(bundle)
         }
         _ => {

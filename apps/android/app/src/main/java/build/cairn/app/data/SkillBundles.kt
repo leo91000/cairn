@@ -14,20 +14,38 @@ import kotlinx.serialization.json.put
 
 const val MIB = 1024L * 1024
 
+/** Where a skill was imported from: a plugin's skill source, at a version. */
 @Serializable
 data class SkillSource(
-    val type: String = "github",
-    val repository: String = "",
-    val path: String = "",
-    val ref: String = "",
-    val commit: String = "",
+    val pluginId: String = "",
+    /** The plugin's skill source name. */
+    val source: String = "",
+    val instance: String? = null,
+    /** What the plugin shows for the location, such as `owner/repo`. */
+    val label: String = "",
+    /** The location as the plugin resolved it, such as a repository and a ref. */
+    val location: JsonObject = JsonObject(emptyMap()),
+    val url: String? = null,
+    /** The skill folder within the location; empty at its root. */
+    val folder: String = "",
+    val version: String = "",
     val importedAt: Long = 0,
     val modified: Boolean = false,
 ) {
+    /** The first 7 characters of the version, as cards show it. */
+    val shortVersion: String
+        get() = shortVersion(version)
+
     /** `owner/repo@9b1e2c4`, the compact reference shown on cards. */
-    val label: String
-        get() = if (commit.isBlank()) repository else "$repository@${commit.take(7)}"
+    val reference: String
+        get() =
+            listOf(label.ifBlank { pluginId }, shortVersion)
+                .filter { it.isNotBlank() }
+                .joinToString("@")
 }
+
+/** A version as cards show it: its first 7 characters. */
+fun shortVersion(version: String) = version.take(7)
 
 @Serializable
 data class SkillFile(
@@ -95,9 +113,10 @@ data class SkillSourceChange(
     val lines: List<SkillDiffLine>? = null,
 )
 
+/** The newest version a source offers, with the plugin's description of it. */
 @Serializable
-data class SkillSourceCommit(
-    val commit: String = "",
+data class SkillSourceVersion(
+    val version: String = "",
     val message: String = "",
     val date: String = "",
 )
@@ -105,7 +124,7 @@ data class SkillSourceCommit(
 @Serializable
 data class SkillSourceStatus(
     val source: SkillSource = SkillSource(),
-    val latest: SkillSourceCommit = SkillSourceCommit(),
+    val latest: SkillSourceVersion = SkillSourceVersion(),
     val current: Boolean = true,
     val changes: List<SkillSourceChange> = emptyList(),
 )
@@ -275,28 +294,41 @@ suspend fun CairnApi.applySkillChanges(
     )
 }
 
-suspend fun CairnApi.importSkill(
-    scope: String,
-    upload: String? = null,
-    repository: String? = null,
-    path: String? = null,
-    ref: String? = null,
-): SkillImport =
+/** Imports from a staged archive; [path] is the chosen candidate folder. */
+suspend fun CairnApi.importSkill(scope: String, upload: String, path: String? = null): SkillImport =
     send(
         "POST",
         "/skills/${segment(scope)}/import",
         buildJsonObject {
-            if (upload != null) {
-                put("source", "archive")
-                put("upload", upload)
-            } else {
-                put("source", "github")
-                put("repository", repository.orEmpty())
-                if (!ref.isNullOrBlank()) put("ref", ref)
-            }
+            put("source", "archive")
+            put("upload", upload)
             if (!path.isNullOrBlank()) put("path", path)
         },
     )
+
+/** What a plugin skill import sends: its source, an optional instance and the location's fields. */
+data class PluginSkillImport(
+    val pluginId: String,
+    val skillSource: String,
+    /** Null lets the installation use the package's first enabled instance. */
+    val instance: String? = null,
+    val location: JsonObject = JsonObject(emptyMap()),
+    /** A folder within the location, or a candidate chosen after a first import. */
+    val folder: String = "",
+)
+
+fun pluginSkillImportBody(request: PluginSkillImport): JsonObject = buildJsonObject {
+    put("source", "plugin")
+    put("pluginId", request.pluginId)
+    put("skillSource", request.skillSource)
+    request.instance?.takeIf { it.isNotBlank() }?.let { put("instance", it) }
+    put("location", request.location)
+    request.folder.trim().trim('/').takeIf { it.isNotEmpty() }?.let { put("folder", it) }
+}
+
+/** Imports from a plugin's skill source; candidates come back as folders to choose from. */
+suspend fun CairnApi.importPluginSkill(scope: String, request: PluginSkillImport): SkillImport =
+    send("POST", "/skills/${segment(scope)}/import", pluginSkillImportBody(request))
 
 suspend fun CairnApi.skillSource(scope: String, name: String): SkillSourceStatus =
     get("${skillRoute(scope, name)}/source")
@@ -304,14 +336,14 @@ suspend fun CairnApi.skillSource(scope: String, name: String): SkillSourceStatus
 suspend fun CairnApi.updateSkillSource(
     scope: String,
     name: String,
-    commit: String,
+    version: String,
     base: String,
 ): SkillBundle =
     send(
         "POST",
         "${skillRoute(scope, name)}/source/update",
         buildJsonObject {
-            put("commit", commit)
+            put("version", version)
             put("base", base)
         },
     )
@@ -368,31 +400,3 @@ suspend fun CairnApi.downloadSkillArchive(
         write,
         progress,
     )
-
-/** What the GitHub import needs, read from `owner/repo` or a pasted GitHub URL. */
-data class GithubSkillReference(val repository: String, val ref: String = "", val path: String = "")
-
-private val githubName = Regex("[A-Za-z0-9_.-]+")
-
-fun githubSkillReference(input: String): GithubSkillReference? {
-    val text = input.trim().removeSuffix("/")
-    val relative =
-        text.removePrefix("https://").removePrefix("http://").removePrefix("www.").let {
-            if (it.startsWith("github.com/")) it.removePrefix("github.com/")
-            else if (it == text && !text.contains("://")) it else return null
-        }
-    val parts = relative.split('/').filter { it.isNotEmpty() }
-    if (parts.size < 2) return null
-    val owner = parts[0]
-    val repository = parts[1].removeSuffix(".git")
-    if (!githubName.matches(owner) || !githubName.matches(repository)) return null
-    if (parts.size == 2) return GithubSkillReference("$owner/$repository")
-    if (parts[2] !in setOf("tree", "blob") || parts.size < 4) return null
-    // A link to the SKILL.md itself points at its folder; other file names stay as they are.
-    val segments = parts.drop(4)
-    val path =
-        (if (segments.lastOrNull() == SKILL_FILE) segments.dropLast(1) else segments).joinToString(
-            "/"
-        )
-    return GithubSkillReference("$owner/$repository", parts[3], path)
-}

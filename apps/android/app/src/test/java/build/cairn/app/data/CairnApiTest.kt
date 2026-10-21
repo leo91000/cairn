@@ -403,14 +403,13 @@ class CairnApiTest {
         assertTrue(run.resumeAvailable)
         val agent =
             wireJson.decodeFromString<Agent>(
-                """{"id":"agent","name":"Restricted","access":{"projects":[],"skills":null,"mcps":["mcp"],"mcpTools":{"mcp":["read"]},"installation":true,"github":false,"sandbox":"read-only"}}"""
+                """{"id":"agent","name":"Restricted","access":{"projects":[],"skills":null,"mcps":["mcp"],"mcpTools":{"mcp":["read"]},"installation":true,"sandbox":"read-only"}}"""
             )
         val edited =
             wireJson.decodeFromString<Agent>(wireJson.encodeToString(agent.copy(name = "Renamed")))
         assertEquals(agent.access, edited.access)
         assertEquals(emptyList<String>(), edited.access.projects)
         assertNull(edited.access.skills)
-        assertFalse(edited.access.github)
         assertTrue(edited.access.installation)
         assertFalse(wireJson.decodeFromString<Agent>("""{"name":"Legacy"}""").access.installation)
     }

@@ -29,6 +29,8 @@ import {
 const nodes = ref<ExecutionNode[]>([])
 const nativeCallers = ref<Array<{ id: string, email: string }>>([])
 const enrollmentBackend = ref<'firecracker' | 'native'>('firecracker')
+// Stops before deleting while a conversation disk is mounted and keeps the unit until the rest is gone, so it can be rerun.
+const nativeUninstallCommand = `sudo sh -c 'if [ -e /etc/systemd/system/cairn-native-node.service ]; then systemctl disable --now cairn-native-node || exit; fi; mounts=$(findmnt -rno TARGET) || { echo "findmnt could not list mounts." >&2; exit 1; }; printf "%s\\n" "$mounts" | grep ^/var/lib/cairn-native/; match=$?; if [ "$match" -ne 1 ]; then echo "Mount safety could not be confirmed. Run sudo systemctl start cairn-native-node to release owned conversation disks, then retry." >&2; exit 1; fi; rm -rf /opt/cairn-native /var/lib/cairn-native && { userdel cairn-workload || ! id cairn-workload >/dev/null 2>&1; } && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload'`
 const editing = ref<ExecutionNode | null>(null)
 const tags = ref('')
 const name = ref('')
@@ -301,7 +303,7 @@ function statusLabel(node: ExecutionNode) {
     >
       <section class="node-form">
         <p class="text-sm text-muted">
-          Connect a trusted Linux machine, then choose its execution mode and authorized agents.
+          Connect a trusted Linux machine, then choose its execution backend and authorized agents.
         </p>
         <p class="text-sm text-muted">
           The node must reach the manager directly over your local network, VPN or an optional public URL. It does not use the relay. Disk blocks never pass through the relay.
@@ -319,7 +321,7 @@ function statusLabel(node: ExecutionNode) {
             ]"
           />
           <p v-if="enrollmentBackend === 'native'" class="text-sm text-muted">
-            Shares the host GPU through its installed drivers. Uses weaker isolation than a VM; heavy work can slow your desktop. Linux x86-64 and systemd are required.
+            Shares the host GPU through its installed drivers. Uses weaker isolation than a VM; heavy work can slow your desktop. Requires Linux x86-64 with systemd and the ublk kernel driver.
           </p>
           <label>Machine name<input
             v-model="name"
@@ -343,7 +345,7 @@ function statusLabel(node: ExecutionNode) {
         </form>
         <div v-if="enrollment" class="mt-4 grid gap-2">
           <template v-if="enrollment.installCommand">
-            <p><strong>1.</strong> On the Linux machine ({{ enrollment.backend === 'native' ? 'x86-64 with Python 3, curl and systemd' : 'x86-64 with KVM, Docker, curl and systemd' }}), run:</p>
+            <p><strong>1.</strong> On the Linux machine ({{ enrollment.backend === 'native' ? 'x86-64 with Python 3, curl, systemd, e2fsprogs and the ublk_drv kernel module' : 'x86-64 with KVM, Docker, curl and systemd' }}), run:</p>
             <code class="block break-all select-all" aria-label="Node installation command">{{ enrollment.installCommand }}</code>
             <p><strong>2.</strong> When prompted, enter this single-use code. It expires {{ new Date(enrollment.expiresAt).toLocaleString() }}.</p>
           </template>
@@ -355,7 +357,7 @@ function statusLabel(node: ExecutionNode) {
           </template>
           <code class="block break-all select-all" aria-label="Single-use enrollment code">{{ enrollment.code }}</code>
           <p class="text-sm text-muted">
-            <strong>3.</strong> This page detects the machine once it connects and asks which agents may use it, as the last step.
+            <strong>3.</strong> {{ enrollment.backend === 'native' ? 'This page detects the machine once it connects, opens its configuration to enable native execution and choose trusted people, then asks which agents may use it.' : 'This page detects the machine once it connects and asks which agents may use it, as the last step.' }}
           </p>
           <div>
             <UiButton variant="default" @click="enrollment = null">
@@ -450,7 +452,7 @@ function statusLabel(node: ExecutionNode) {
           <details class="mt-2 text-xs text-muted">
             <summary>Technical details</summary>
             <p class="mt-2">
-              Detected {{ node.capabilities.cpu }} CPU · {{ formatMiB(node.capabilities.memoryMiB) }} RAM · {{ formatMiB(node.capabilities.diskMiB) }} disk · {{ node.capabilities.os }} {{ node.capabilities.arch }} · KVM {{ node.capabilities.kvm ? 'available' : 'unavailable' }}
+              Detected {{ node.capabilities.cpu }} CPU · {{ formatMiB(node.capabilities.memoryMiB) }} RAM · {{ formatMiB(node.capabilities.diskMiB) }} disk · {{ node.capabilities.os }} {{ node.capabilities.arch }} · {{ node.capabilities.backend === 'native' ? `ublk ${node.capabilities.ublk ? 'available' : 'unavailable'}` : `KVM ${node.capabilities.kvm ? 'available' : 'unavailable'}` }}
             </p>
             <p v-if="node.lastSeen">
               Last contact {{ new Date(node.lastSeen).toLocaleString() }}
@@ -466,7 +468,7 @@ function statusLabel(node: ExecutionNode) {
             <UiButton variant="default" @click="edit(node)">
               <Icon :name="Settings2" :size="15" /> Configure
             </UiButton>
-            <NodeStorage v-if="node.capabilities.backend !== 'native'" :node="node" @saved="load" />
+            <NodeStorage :node="node" @saved="load" />
             <UiButton v-if="!node.local" variant="default" @click="revoking = node">
               Revoke
             </UiButton>
@@ -648,14 +650,21 @@ function statusLabel(node: ExecutionNode) {
         <fieldset v-if="editing.capabilities.backend === 'native'" class="form-section">
           <legend>Native execution</legend>
           <p>Only selected native agents and trusted people may run here. Disabling native execution or removing a person stops affected work after its lease expires.</p>
-          <label class="checkbox"><input v-model="editing.nativeEnabled" type="checkbox">Enable native execution</label>
-          <label v-for="person in nativeCallers" :key="person.id" class="checkbox"><input v-model="editing.nativeAccounts" type="checkbox" :value="person.id">{{ person.email }}</label>
+          <label class="access-row"><input v-model="editing.nativeEnabled" type="checkbox">Enable native execution</label>
+          <template v-if="nativeCallers.length">
+            <p id="native-trusted-people" class="mt-4 mb-2!">
+              Trusted people
+            </p>
+            <div class="grid gap-2" role="group" aria-labelledby="native-trusted-people">
+              <label v-for="person in nativeCallers" :key="person.id" class="access-row"><input v-model="editing.nativeAccounts" type="checkbox" :value="person.id"><span class="min-w-0 break-all">{{ person.email }}</span></label>
+            </div>
+          </template>
           <p v-if="!nativeCallers.length" class="text-sm text-muted">
             No current people are available. Refresh the installation connection before granting access.
           </p>
         </fieldset>
         <fieldset class="form-section">
-          <legend>Slots and shared budgets</legend><p>All slots share these budgets. Resources are used on demand.</p><div class="form-grid">
+          <legend>Slots and shared budgets</legend><p>{{ editing.capabilities.backend === 'native' ? 'A native node runs one conversation at a time. Resources are used on demand.' : 'All slots share these budgets. Resources are used on demand.' }}</p><div class="form-grid">
             <label>Execution slots<input
               v-model.number="editing.slots"
               :disabled="editing.capabilities.backend === 'native'"
@@ -704,7 +713,7 @@ function statusLabel(node: ExecutionNode) {
           <p v-if="editing.exclusiveAgents?.length">
             {{ editing.exclusiveAgents.length }} can reserve it exclusively: {{ agentNames(editing.exclusiveAgents) }}
           </p>
-          <p v-if="!editing.exclusiveReservations">
+          <p v-if="!editing.exclusiveReservations && editing.capabilities.backend !== 'native'">
             This runtime needs an update before exclusive reservations can be acquired.
           </p>
           <p class="text-xs">
@@ -730,10 +739,13 @@ function statusLabel(node: ExecutionNode) {
           Conversations running there pause within the disconnection delay, then resume from their latest recovery point on another authorized machine when one has capacity. Conversations fixed to this machine, or without a recovery point, wait.
         </p>
         <p>Files stored on the machine are not deleted. To uninstall it, run on the machine:</p>
-        <code v-if="revoking?.capabilities.backend === 'native'" class="block break-all select-all">sudo systemctl disable --now cairn-native-node; sudo rm -rf /etc/systemd/system/cairn-native-node.service /opt/cairn-native /var/lib/cairn-native</code>
+        <code v-if="revoking?.capabilities.backend === 'native'" class="block break-all select-all">{{ nativeUninstallCommand }}</code>
         <code v-else class="block break-all select-all">sudo systemctl disable --now cairn-node; sudo docker rm -f cairn-execution-node; sudo rm -rf /etc/systemd/system/cairn-node.service /opt/cairn-node /var/lib/cairn-node</code>
         <p class="text-sm text-muted">
-          The last command also deletes the local conversation disks kept on that machine.
+          Removing these directories also deletes the local conversation disks kept on that machine.
+        </p>
+        <p v-if="revoking.capabilities.backend === 'native'" class="text-sm text-muted">
+          If a conversation disk is still mounted, the command lists it and stops before deleting anything: start cairn-native-node so its recovery releases owned disks, then run the command again.
         </p>
         <div>
           <UiButton variant="danger" :disabled="busy" @click="action(async () => { await api(`/nodes/${revoking!.id}/revoke`, { method: 'POST', body: '{}' }); revoking = null })">
