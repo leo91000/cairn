@@ -50,7 +50,6 @@ pub(crate) async fn invoke(
         return Ok(catalog);
     }
     let plugin = text(args, "pluginId");
-    let package = registry::active(s, plugin).await?;
     let action = text(args, "action");
     let data = &args["data"];
     if data.get("agentIds").is_some() {
@@ -90,6 +89,26 @@ pub(crate) async fn invoke(
         })
         .await?;
     let required_instance = || instance.ok_or_else(|| Error::bad("Choose an instanceId."));
+    // Stopping or removing an instance uses no package credentials and remains
+    // available while its package is unavailable or awaiting approval.
+    match action {
+        "enabled" => {
+            return connections::set_enabled_authorized(
+                s,
+                plugin,
+                required_instance()?,
+                data,
+                authorize,
+            )
+            .await;
+        }
+        "delete" => {
+            return connections::remove_authorized(s, plugin, required_instance()?, authorize)
+                .await;
+        }
+        _ => {}
+    }
+    let package = registry::active(s, plugin).await?;
     let is_oauth = package
         .manifest
         .credential
@@ -165,20 +184,6 @@ pub(crate) async fn invoke(
         }
         "save" => {
             return connections::save_authorized(s, plugin, data, instance, authorize, authority)
-                .await;
-        }
-        "enabled" => {
-            return connections::set_enabled_authorized(
-                s,
-                plugin,
-                required_instance()?,
-                data,
-                authorize,
-            )
-            .await;
-        }
-        "delete" => {
-            return connections::remove_authorized(s, plugin, required_instance()?, authorize)
                 .await;
         }
         "disconnect" => return oauth::disconnect(s, plugin, required_instance()?, authorize).await,

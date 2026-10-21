@@ -1811,6 +1811,78 @@ async fn plugin_setup_is_available_on_both_endpoints_without_granting_private_ac
 }
 
 #[tokio::test]
+async fn both_mcp_endpoints_can_pause_and_delete_instances_pending_package_reapproval() {
+    use cairn_installation::{
+        plugins::{connections, registry},
+        validation::text,
+    };
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    s.plugins
+        .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let installed = registry::install(
+        &s,
+        &json!({
+            "manifest": {
+                "id": "pausable", "name": "Pausable", "version": "1.0.0",
+                "apiVersion": 2, "capabilities": [],
+            },
+            "source": "return {}",
+        }),
+    )
+    .await
+    .unwrap();
+    registry::approve(&s, "pausable", "1.0.0", text(&installed, "digest"))
+        .await
+        .unwrap();
+    let saved = connections::save(
+        &s,
+        "pausable",
+        &json!({
+            "name": "Pause me", "enabled": true,
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    std::fs::write(
+        root.path().join("data/plugins/pausable/1.0.0/main.luau"),
+        "return {} -- changed after approval",
+    )
+    .unwrap();
+    assert!(registry::active(&s, "pausable").await.is_err());
+    for internal in [false, true] {
+        let args = json!({
+            "pluginId": "pausable", "action": "enabled", "instanceId": saved["id"],
+            "data": { "enabled": false },
+        });
+        let paused = if internal {
+            call(&s, &configuration, "manage_plugin", args).await
+        } else {
+            public_call(&s, &["manage"], "manage_plugin", args).await
+        };
+        assert_eq!(result(&paused)["enabled"], false, "{paused}");
+    }
+    let removed = call(
+        &s,
+        &configuration,
+        "manage_plugin",
+        json!({
+            "pluginId": "pausable", "action": "delete", "instanceId": saved["id"],
+        }),
+    )
+    .await;
+    assert_ne!(removed["result"]["isError"], true, "{removed}");
+    assert!(
+        connections::get(&s, "pausable", text(&saved, "id"))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn both_mcp_endpoints_manage_chat_queues_and_lifecycle() {
     for internal in [false, true] {
         let root = TempDir::new().unwrap();

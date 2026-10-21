@@ -211,6 +211,91 @@ async fn oauth_form_compares_defaulted_scope_settings_without_restoring_cleared_
     );
 }
 
+#[tokio::test]
+async fn forwarding_filters_require_sharing_for_inline_and_file_bodies() {
+    let f = fixture().await;
+    let mut account = connect(&f, "alice").await;
+    let forwarding = json!({
+        "criteria": { "query": "in:inbox" },
+        "action": { "forward": "verified@example.test" },
+    });
+    let file = tool(
+        &f,
+        std::slice::from_ref(&account),
+        json!({
+            "operation": "fileCreate", "accountId": account.id,
+            "file": { "name": "filter.json", "mediaType": "application/json",
+                "data": forwarding.to_string(), "encoding": "text" },
+        }),
+    )
+    .await
+    .unwrap();
+    let inline = json!({
+        "operation": "request", "accountId": account.id,
+        "method": "users.settings.filters.create", "body": forwarding,
+    });
+    let uploaded = json!({
+        "operation": "request", "accountId": account.id,
+        "method": "users.settings.filters.create",
+        "options": { "bodyFile": { "id": file["id"], "format": "json" } },
+    });
+    for request in [&inline, &uploaded] {
+        assert_eq!(
+            tool(&f, std::slice::from_ref(&account), request.clone())
+                .await
+                .unwrap()["ok"],
+            true
+        );
+    }
+    let mut reduced = account.settings.clone();
+    reduced["allowSharing"] = json!(false);
+    reduced["allowSend"] = json!(false);
+    account = serde_json::from_value(
+        connections::save(
+            &f.s,
+            "gmail",
+            &json!({
+                "name": "alice", "enabled": true, "settings": reduced,
+            }),
+            Some(&account.id),
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    for request in [&inline, &uploaded] {
+        let error = tool(&f, std::slice::from_ref(&account), request.clone())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("allowSharing"), "{error}");
+    }
+    let filter_calls = || {
+        f.google
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| {
+                call["path"]
+                    .as_str()
+                    .is_some_and(|path| path.ends_with("/settings/filters"))
+            })
+            .count()
+    };
+    assert_eq!(filter_calls(), 2, "Denied forwarding never reaches Google");
+    let ordinary = tool(&f, std::slice::from_ref(&account), json!({
+        "operation": "request", "accountId": account.id,
+        "method": "users.settings.filters.create",
+        "body": { "criteria": { "query": "in:inbox" }, "action": { "addLabelIds": ["STARRED"] } },
+    })).await.unwrap();
+    assert_eq!(ordinary["ok"], true);
+    assert_eq!(
+        filter_calls(),
+        3,
+        "Non-forwarding filters still work with settings permission alone"
+    );
+}
+
 async fn sign_in(f: &Fixture, account: &str, instance: Option<&str>) -> Value {
     let started = oauth::start(&f.s, "gmail", &json!({ "instance": instance, "settings": settings(), "secrets": { "clientSecret": "fixture-secret" } }), "cairn-account:fixture-owner").await.unwrap();
     let url = url::Url::parse(text(&started, "verificationUri")).unwrap();

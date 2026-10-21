@@ -36,6 +36,12 @@ Google revocation can affect other tokens for the same Google account and OAuth
 client. Deleting an instance removes its local data; it does not revoke other
 instances' Google grants.
 
+Creating a filter that forwards mail also requires the forwarding permission.
+When that permission is off, submit filter definitions as inline JSON: opaque
+`bodyFile` uploads are rejected because their forwarding actions cannot be checked
+inside the package. Ordinary label/archive filters remain available with settings
+permission alone.
+
 ## API coverage
 
 `catalog.luau` is generated from Google's official Gmail v1 discovery document

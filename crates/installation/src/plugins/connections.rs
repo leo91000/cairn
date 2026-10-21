@@ -1140,12 +1140,16 @@ where
     let enabled = input["enabled"]
         .as_bool()
         .ok_or_else(|| Error::bad("Choose whether the connection accepts work."))?;
-    let oauth = registry::active(s, plugin_id)
-        .await?
-        .manifest
-        .credential
-        .as_ref()
-        .is_some_and(|c| c.oauth.is_some());
+    let oauth = if enabled {
+        registry::active(s, plugin_id)
+            .await?
+            .manifest
+            .credential
+            .as_ref()
+            .is_some_and(|c| c.oauth.is_some())
+    } else {
+        false
+    };
     let id = id.to_owned();
     let value = s
         .store

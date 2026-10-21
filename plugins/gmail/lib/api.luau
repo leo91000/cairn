@@ -59,6 +59,15 @@ function api.request(instance, operation, parameters, body, options)
     if not definition then cairn.fail("Unknown Gmail operation. Call methods to discover the catalog.") end
     local required = permission(operation, definition.method)
     if required and instance.settings[required] ~= true then cairn.fail(`This account does not allow {required}. The owner can change its permissions and reconnect.`) end
+    options = options or {}
+    if operation == "users.settings.filters.create" and instance.settings.allowSharing ~= true then
+        -- A file can replace the inline JSON entirely; never assume its actions
+        -- are harmless when their contents stay outside this worker.
+        if options.bodyFile then cairn.fail("Provide filters as inline JSON when allowSharing is off, so forwarding permissions can be checked.") end
+        if type(body) == "table" and type(body.action) == "table" and body.action.forward ~= nil then
+            cairn.fail("Forwarding filters require allowSharing. The owner can change its permissions and reconnect.")
+        end
+    end
     parameters = table.clone(parameters or {})
     if parameters.userId and parameters.userId ~= "me" then cairn.fail("userId is always me; select a different accountId instead.") end
     parameters.userId = "me"
@@ -84,7 +93,6 @@ function api.request(instance, operation, parameters, body, options)
     if path:find("{", 1, true) then cairn.fail("A Gmail path parameter is missing.") end
     if body ~= nil and not definition.request then cairn.fail("This operation does not accept a body.") end
     if body ~= nil and type(body) ~= "table" then cairn.fail("The request body must be an object.") end
-    options = options or {}
     local request = {
         instance = instance.id, auth = true, method = definition.method,
         url = "https://gmail.googleapis.com/" .. path .. (if #query > 0 then "?" .. table.concat(query, "&") else ""),
