@@ -152,7 +152,9 @@ jobs:
           node --import tsx scripts/backend-schemas.mjs
           git diff --exit-code -- crates/installation/schemas/
           cargo clippy --locked --workspace --all-targets --features ublk-prototype -- -D warnings
-          node scripts/test-backend.mjs --features ublk-prototype
+          set -o pipefail
+          node scripts/test-backend.mjs --features ublk-prototype 2>&1 | tee backend-tests.log
+          node scripts/production-release.mjs qualify backend-tests.log
           # Also compile the browser-test binaries into the cache that later build jobs restore.
           cargo build --locked --bin cairn --example worker_fixture --example network_direct_client --example network_qualification --example native_storage_qualifier --features ublk
           cargo build --locked -p cairn-beacon --bin cairn-beacon --example network_stun_server
