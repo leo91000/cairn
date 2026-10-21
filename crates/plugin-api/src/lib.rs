@@ -12,8 +12,8 @@ mod view;
 pub use arguments::{parse_arguments, usage};
 pub use form::validate_form_result;
 pub use integrations::{
-    Condition, DeviceFlow, GitCredential, GitIdentity, ProjectSource, RunCredentials, RunFile,
-    SkillSource, home_path, render,
+    Condition, DeviceFlow, GitCredential, GitIdentity, OAuth, ProjectSource, RunCredentials,
+    RunFile, SkillSource, home_path, render,
 };
 pub use settings::validate_settings_schema;
 pub use sources::{MAX_MODULES, MAX_SOURCE_BYTES, Sources, module_path, resolve};
@@ -34,6 +34,10 @@ pub const CAPABILITIES: &[(&str, &str)] = &[
         "Answer the agent's questions and stop its work, for people you allow",
     ),
     ("storage", "Keep small private notes for each connection"),
+    (
+        "files",
+        "Transfer private files through temporary instance-scoped handles",
+    ),
     (
         "http",
         "Call the web hosts listed by the package, with the connection's credential when asked",
@@ -58,6 +62,9 @@ pub fn capability(method: &str) -> Option<&'static str> {
     let family = match method {
         "storage.get" | "storage.set" | "storage.delete" | "storage.list" => "storage",
         "http.request" => "http",
+        "files.create" | "files.append" | "files.read" | "files.delete" | "files.composeMime" => {
+            "files"
+        }
         "timers.after" | "timers.cancel" => "timers",
         "conversations.submit" => "conversations.submit",
         "conversations.check" | "conversations.answer" | "conversations.cancel" => {
@@ -86,6 +93,9 @@ pub struct Credential {
     /// The owner may sign in instead of pasting the credential.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_flow: Option<DeviceFlow>,
+    /// Authorization-code sign-in with PKCE and host-owned refresh tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<OAuth>,
 }
 
 /// A program on the installation the package may run through `exec`.

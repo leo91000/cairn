@@ -28,12 +28,25 @@ fn fits(value: &Value, max: usize) -> bool {
 
 /// `{ view }`: the instance's panel, or `null` when the package declares none.
 pub async fn view(s: &Service, plugin_id: &str, connection_id: &str) -> Result<Value> {
+    view_managed(s, plugin_id, connection_id, None).await
+}
+
+pub(crate) async fn view_managed(
+    s: &Service,
+    plugin_id: &str,
+    connection_id: &str,
+    management: Option<super::management::Authority>,
+) -> Result<Value> {
     let connection = connections::get(s, plugin_id, connection_id).await?;
     let package = registry::active(s, plugin_id).await?;
     if !package.manifest.instance_view {
         return Ok(json!({ "view": null }));
     }
     let scope = Scope::Instance(Box::new(connection));
+    let scope = match management {
+        Some(authority) => Scope::Managed(Box::new(scope), authority),
+        None => scope,
+    };
     let payload = json!({ "instance": scope.instances()[0] });
     let view = scope::invoke(s, &package, "view", payload, &scope).await?;
     validate_view(&view).map_err(Error::bad_gateway)?;
@@ -48,6 +61,16 @@ pub async fn action(
     connection_id: &str,
     input: &Value,
 ) -> Result<Value> {
+    action_managed(s, plugin_id, connection_id, input, None).await
+}
+
+pub(crate) async fn action_managed(
+    s: &Service,
+    plugin_id: &str,
+    connection_id: &str,
+    input: &Value,
+    management: Option<super::management::Authority>,
+) -> Result<Value> {
     let connection = connections::get(s, plugin_id, connection_id).await?;
     let package = registry::active(s, plugin_id).await?;
     let name = text(input, "action");
@@ -60,6 +83,10 @@ pub async fn action(
         return Err(Error::bad("The action input is too large or invalid."));
     }
     let scope = Scope::Instance(Box::new(connection));
+    let scope = match management {
+        Some(authority) => Scope::Managed(Box::new(scope), authority),
+        None => scope,
+    };
     let event = json!({
         "action": name,
         "payload": payload,
@@ -73,12 +100,25 @@ pub async fn action(
 
 /// `{ ok, message }` from the package's `test` handler.
 pub async fn test(s: &Service, plugin_id: &str, connection_id: &str) -> Result<Value> {
+    test_managed(s, plugin_id, connection_id, None).await
+}
+
+pub(crate) async fn test_managed(
+    s: &Service,
+    plugin_id: &str,
+    connection_id: &str,
+    management: Option<super::management::Authority>,
+) -> Result<Value> {
     let connection = connections::get(s, plugin_id, connection_id).await?;
     let package = registry::active(s, plugin_id).await?;
     if !package.manifest.instance_test {
         return Err(Error::not_found("This plugin has no connection test."));
     }
     let scope = Scope::Instance(Box::new(connection));
+    let scope = match management {
+        Some(authority) => Scope::Managed(Box::new(scope), authority),
+        None => scope,
+    };
     let payload = json!({ "instance": scope.instances()[0] });
     let result = scope::invoke(s, &package, "test", payload, &scope).await?;
     let message = result["message"]

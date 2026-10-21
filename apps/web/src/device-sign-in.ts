@@ -5,7 +5,7 @@ import { api, ApiError } from './api'
 export interface DeviceFlow {
   id: string
   pluginId: string
-  state: 'pending' | 'completed' | 'failed' | 'expired'
+  state: 'pending' | 'exchanging' | 'completed' | 'failed' | 'expired'
   userCode: string
   verificationUri: string
   verificationUriComplete?: string | null
@@ -42,13 +42,18 @@ export function signInProblem(flow: Pick<DeviceFlow, 'state' | 'message'> | null
  * Signs in to a plugin's service with a device code: start, poll every 2 s until it settles,
  * cancel. `onCompleted` runs once the installation holds the credential.
  */
-export function useDeviceSignIn(plugin: () => string, onCompleted: (flow: DeviceFlow) => void, interval = 2000) {
+export function useDeviceSignIn(plugin: () => string, onCompleted: (flow: DeviceFlow) => void, interval = 2000, options?: {
+  kind: () => 'oauth' | 'device-flow'
+  input: () => Record<string, unknown>
+}) {
   const flow = ref<DeviceFlow | null>(null)
   const starting = ref(false)
   const error = ref('')
   let timer: ReturnType<typeof setTimeout> | undefined
+  let flowKind: 'oauth' | 'device-flow' = 'device-flow'
+  let generation = 0
 
-  const pending = computed(() => flow.value?.state === 'pending')
+  const pending = computed(() => flow.value?.state === 'pending' || flow.value?.state === 'exchanging')
   const completed = computed(() => flow.value?.state === 'completed')
 
   function stop() {
@@ -63,12 +68,12 @@ export function useDeviceSignIn(plugin: () => string, onCompleted: (flow: Device
 
   async function poll() {
     const current = flow.value
-    if (current?.state !== 'pending')
+    if (!current || !['pending', 'exchanging'].includes(current.state))
       return
 
     let next: DeviceFlow
     try {
-      next = await api<DeviceFlow>(`/plugins/${current.pluginId}/device-flow/${current.id}`)
+      next = await api<DeviceFlow>(`/plugins/${current.pluginId}/${flowKind}/${current.id}`)
     }
     catch (e) {
       // Cancelled or replaced while asking: that answer no longer matters.
@@ -89,7 +94,7 @@ export function useDeviceSignIn(plugin: () => string, onCompleted: (flow: Device
       return
     error.value = ''
     flow.value = next
-    if (next.state === 'pending')
+    if (['pending', 'exchanging'].includes(next.state))
       schedule()
     else if (next.state === 'completed')
       onCompleted(next)
@@ -99,26 +104,43 @@ export function useDeviceSignIn(plugin: () => string, onCompleted: (flow: Device
     await cancel()
     starting.value = true
     error.value = ''
+    const attempt = generation
+    const kind = options?.kind() || 'device-flow'
+    const requestedPlugin = plugin()
+    flowKind = kind
     try {
-      flow.value = await api<DeviceFlow>(`/plugins/${plugin()}/device-flow`, { method: 'POST' })
+      const next = await api<DeviceFlow>(`/plugins/${requestedPlugin}/${kind}`, {
+        method: 'POST',
+        ...(options ? { body: JSON.stringify(options.input()) } : {}),
+      })
+      if (generation !== attempt) {
+        await api(`/plugins/${requestedPlugin}/${kind}/${next.id}`, { method: 'DELETE' }).catch(() => {})
+        return
+      }
+
+      flow.value = next
       schedule()
     }
     catch (e) {
-      error.value = (e as Error).message
+      if (generation === attempt)
+        error.value = (e as Error).message
     }
     finally {
-      starting.value = false
+      if (generation === attempt)
+        starting.value = false
     }
   }
 
   /** Forgets the sign-in, on the installation too unless a save consumed it. */
   async function cancel() {
+    generation++
+    starting.value = false
     stop()
     const current = flow.value
     flow.value = null
     error.value = ''
     if (current && current.state !== 'expired')
-      await api(`/plugins/${current.pluginId}/device-flow/${current.id}`, { method: 'DELETE' }).catch(() => {})
+      await api(`/plugins/${current.pluginId}/${flowKind}/${current.id}`, { method: 'DELETE' }).catch(() => {})
   }
 
   /** After a save consumed the sign-in: nothing is left to cancel. */

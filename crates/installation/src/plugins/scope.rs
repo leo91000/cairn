@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
 pub enum Scope {
+    Managed(Box<Scope>, super::management::Authority),
     /// The owner, through one instance: views, actions and tests.
     Instance(Box<Connection>),
     /// The owner editing an instance, before it is saved: its form. Only `http` and
@@ -31,6 +32,7 @@ impl Scope {
     /// What the script receives about the instances it may use. Never secret values.
     pub fn instances(&self) -> Vec<Value> {
         match self {
+            Scope::Managed(scope, _) => scope.instances(),
             Scope::Instance(connection) | Scope::Draft(connection, _) => {
                 vec![summary(connection)]
             }
@@ -52,6 +54,13 @@ pub fn summary(connection: &Connection) -> Value {
 /// Rereads the target instance. Owner scopes need it unchanged; agent scopes also need
 /// it enabled and still granting the agent.
 async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection> {
+    let scope = if let Scope::Managed(inner, authority) = scope {
+        let authority = authority.clone();
+        s.store.read(move |db| authority.authorize(db)).await?;
+        inner.as_ref()
+    } else {
+        scope
+    };
     let requested = args["instance"].as_str();
     if let Scope::Draft(connection, _) = scope {
         if requested.is_some_and(|id| id != connection.id) {
@@ -60,6 +69,7 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
         return Ok((**connection).clone());
     }
     let expected = match scope {
+        Scope::Managed(..) => unreachable!(),
         Scope::Draft(..) => unreachable!(),
         Scope::Instance(connection) => {
             if requested.is_some_and(|id| id != connection.id) {
@@ -84,6 +94,7 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
     let connection: Connection = serde_json::from_value(value)?;
     let unchanged = connection.revision == expected.revision;
     let granted = match scope {
+        Scope::Managed(..) => unreachable!(),
         Scope::Instance(_) | Scope::Draft(..) => true,
         Scope::Agent { agent_id, .. } => connection.grants(agent_id),
     };
@@ -104,6 +115,10 @@ pub async fn call(
     args: &Value,
 ) -> Result<Value> {
     let connection = current(s, scope, args).await?;
+    let (scope, management) = match scope {
+        Scope::Managed(inner, authority) => (inner.as_ref(), Some(authority.clone())),
+        _ => (scope, None),
+    };
     let draft = match scope {
         Scope::Draft(_, draft) => Some(draft.clone()),
         _ => None,
@@ -119,6 +134,7 @@ pub async fn call(
         event: Value::Null,
         link: None,
         draft,
+        management: management.clone(),
     };
     if ["conversations.", "inbound.", "instance.", "socket."]
         .iter()
@@ -130,8 +146,13 @@ pub async fn call(
     }
     let result = capabilities::effect(s, &context, method, args.clone()).await?;
     // Revocation or a changed secret during slow I/O must not deliver its result.
-    if matches!(scope, Scope::Agent { .. }) && matches!(method, "exec.run" | "http.request") {
+    if (matches!(scope, Scope::Agent { .. }) || management.is_some())
+        && (matches!(method, "exec.run" | "http.request") || method.starts_with("files."))
+    {
         current(s, scope, args).await?;
+        if let Some(authority) = management {
+            s.store.read(move |db| authority.authorize(db)).await?;
+        }
     }
     Ok(result)
 }

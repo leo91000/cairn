@@ -767,6 +767,9 @@ pub(crate) async fn invoke(
         "list_skills" | "read_skill" | "save_skill" | "edit_skill_files" => {
             skills_tool(s, name, &args, bearer).await
         }
+        "list_plugins" | "manage_plugin" => {
+            Box::pin(crate::plugins::management::invoke(s, name, &args, bearer)).await
+        }
         "list_mcps" | "create_mcp" | "update_mcp" | "test_mcp" | "disconnect_mcp"
         | "delete_mcp" => connection_tool(s, name, args, bearer).await,
         _ => Err(Error::not_found("Unknown tool")),

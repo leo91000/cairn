@@ -127,6 +127,7 @@ pub async fn run(s: &Service, context: &Context, args: &Value) -> Result<Value> 
         .as_u64()
         .unwrap_or(MAX_SECONDS)
         .clamp(1, MAX_SECONDS);
+    capabilities::authorize_management(s, context).await?;
     let mut child = command.spawn().map_err(|_| {
         Error::unavailable("The program could not start. Is it installed on this server?")
     })?;

@@ -113,3 +113,29 @@ it('keeps polling through a transient error, and reports a failed start', async 
   expect(signIn.flow.value).toBeNull()
   expect(signIn.error.value).toBe('This plugin has no device sign-in.')
 })
+
+it('starts OAuth with per-account settings and keeps its original route while exchanging', async () => {
+  let kind: 'oauth' | 'device-flow' = 'oauth'
+  const completed = vi.fn()
+  const input = { instance: 'mailbox-one', settings: { clientId: 'public-client' }, secrets: { clientSecret: 'test-secret' } }
+  const signIn = useDeviceSignIn(() => 'gmail', completed, 2000, { kind: () => kind, input: () => input })
+  const started = {
+    ...pending,
+    pluginId: 'gmail',
+    userCode: '',
+    verificationUri: 'https://accounts.google.com/oauth',
+  }
+  vi.mocked(api).mockResolvedValueOnce(started).mockResolvedValueOnce({ ...started, state: 'exchanging' }).mockResolvedValueOnce({ ...started, state: 'completed' })
+  await signIn.start()
+  expect(vi.mocked(api).mock.calls[0]).toEqual(['/plugins/gmail/oauth', { method: 'POST', body: JSON.stringify(input) }])
+  kind = 'device-flow'
+  await vi.advanceTimersByTimeAsync(2000)
+  expect(signIn.pending.value).toBe(true)
+  expect(vi.mocked(api).mock.calls[1]).toEqual(['/plugins/gmail/oauth/flow'])
+  await vi.advanceTimersByTimeAsync(2000)
+  expect(signIn.completed.value).toBe(true)
+  expect(completed).toHaveBeenCalledOnce()
+  vi.mocked(api).mockResolvedValueOnce({ cancelled: true })
+  await signIn.cancel()
+  expect(vi.mocked(api).mock.calls.at(-1)).toEqual(['/plugins/gmail/oauth/flow', { method: 'DELETE' }])
+})

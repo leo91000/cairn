@@ -629,6 +629,117 @@ abstract class PluginsCases {
         assertNotNull(manifest.credential?.deviceFlow)
         assertEquals("repositories", manifest.projectSources.single().name)
         assertEquals("repository", manifest.skillSources.single().fields.single().key)
+        val oauth =
+            wireJson.decodeFromString<PluginManifest>(
+                """{"id":"gmail","credential":{"label":"Google authorization","header":"authorization","oauth":{"clientIdSetting":"clientId","requireRefreshToken":true}}}"""
+            )
+        assertNotNull(oauth.credential?.oauth)
+        assertTrue(pending.copy(state = "exchanging", userCode = "").pending)
+    }
+
+    @Test
+    fun oauthAccountsUseTheSameEditorWithoutATokenOrDeviceCode() {
+        val oauth =
+            forge.copy(
+                manifest =
+                    requireNotNull(forge.manifest)
+                        .copy(
+                            credential =
+                                PluginCredential(
+                                    "Google authorization",
+                                    "authorization",
+                                    "Bearer ",
+                                    oauth = buildJsonObject { put("clientIdSetting", "clientId") },
+                                ),
+                            settings =
+                                listOf(
+                                    PluginSetting("clientId", "OAuth client ID", required = true),
+                                    PluginSetting(
+                                        "clientSecret",
+                                        "OAuth client secret",
+                                        type = "secret",
+                                        required = true,
+                                    ),
+                                ),
+                        )
+            )
+        MockWebServer().use { server ->
+            val starts = CopyOnWriteArrayList<JsonObject>()
+            val saved = CopyOnWriteArrayList<JsonObject>()
+            val flow =
+                PluginDeviceFlow(
+                    "oauth-one",
+                    "forge",
+                    "pending",
+                    "",
+                    "https://accounts.google.com/authorize",
+                    expiresAt = 1,
+                )
+            server.dispatcher =
+                dispatcher(includeGet = true, packages = listOf(oauth)) { path, body ->
+                    when (path.removePrefix("/api/installations/fixture/api")) {
+                        "/plugins/forge/form" -> "{}"
+                        "/plugins/forge/oauth" ->
+                            if (body.isEmpty()) {
+                                """{"callbackUrl":"https://cairn.example/plugins/oauth/callback"}"""
+                            } else {
+                                starts += wireJson.parseToJsonElement(body).jsonObject
+                                wireJson.encodeToString(flow)
+                            }
+                        "/plugins/forge/oauth/oauth-one" ->
+                            wireJson.encodeToString(
+                                flow.copy(state = "completed", verificationUri = "")
+                            )
+                        "/plugins/forge/connections" -> {
+                            saved += wireJson.parseToJsonElement(body).jsonObject
+                            "{}"
+                        }
+                        else -> null
+                    }
+                }
+            server.start()
+            show(server) { vm, state -> PluginScreen(vm, state, "forge") {} }
+            compose.waitUntil(30000) {
+                compose.onAllNodesWithText("Ajouter · Account").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Ajouter · Account").performClick()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("OAuth client ID").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Google authorization").assertDoesNotExist()
+            compose.onNodeWithText("Nom").performTextInput("Personal mailbox")
+            compose
+                .onNodeWithText("OAuth client ID")
+                .performScrollTo()
+                .performTextInput("public-client")
+            compose
+                .onNodeWithText("OAuth client secret")
+                .performScrollTo()
+                .performTextInput("synthetic-secret")
+            compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+            compose.onNodeWithText("Se connecter avec Forge").performScrollTo().performClick()
+            compose.waitUntil(10000) { starts.isNotEmpty() }
+            compose.onNodeWithText("Copier le code").assertDoesNotExist()
+            capture("plugin-oauth-sign-in")
+            compose.waitUntil(20000) {
+                compose
+                    .onAllNodes(hasText("Enregistrer") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.waitUntil(10000) { saved.isNotEmpty() }
+            assertEquals(
+                "public-client",
+                starts.single()["settings"]?.jsonObject?.get("clientId")?.jsonPrimitive?.content,
+            )
+            assertEquals(
+                "synthetic-secret",
+                starts.single()["secrets"]?.jsonObject?.get("clientSecret")?.jsonPrimitive?.content,
+            )
+            assertEquals("oauth-one", saved.single()["credentialFlow"]?.jsonPrimitive?.content)
+            assertFalse("token" in saved.single())
+        }
     }
 
     @Test

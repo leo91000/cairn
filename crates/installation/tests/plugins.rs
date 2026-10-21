@@ -168,6 +168,7 @@ async fn interact(
 /// What a handler acts for: here, the Discord package handling `event`.
 fn context(connection: &Connection, event: &Value) -> capabilities::Context {
     capabilities::Context {
+        management: None,
         connection: connection.clone(),
         manifest: registry::builtin("discord").unwrap().manifest,
         event: event.clone(),

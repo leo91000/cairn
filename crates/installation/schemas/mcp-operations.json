@@ -2482,5 +2482,67 @@
       ],
       "additionalProperties": false
     }
+  },
+  {
+    "name": "list_plugins",
+    "description": "List installed plugins, their manifests and configured instances, without credentials.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "manage_plugin",
+    "description": "Configure plugin instances and start/poll OAuth or device sign-in without exposing tokens. setup returns the callback and owner management URL. save takes complete instance data (name, enabled, settings, secrets?, credentialFlow?); instanceId selects an existing account. OAuth consent is completed by the owner in their browser. Agent grants stay in the owner agent editor. File-backed plugin commands use the run-specific plugin tool.",
+    "scope": "manage",
+    "destructive": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "pluginId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "setup",
+            "signin",
+            "signin_status",
+            "signin_cancel",
+            "form",
+            "save",
+            "enabled",
+            "delete",
+            "test",
+            "view",
+            "action",
+            "disconnect"
+          ]
+        },
+        "instanceId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "flowId": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "pluginId",
+        "action"
+      ],
+      "additionalProperties": false
+    }
   }
 ]

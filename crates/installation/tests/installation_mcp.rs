@@ -1737,6 +1737,80 @@ async fn mission_conversion_matches_public_mcp_and_installation_tools() {
 }
 
 #[tokio::test]
+async fn plugin_setup_is_available_on_both_endpoints_without_granting_private_accounts() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let saved = cairn_installation::plugins::connections::save(
+        &s,
+        "onepassword",
+        &json!({
+            "name": "Private", "enabled": true, "secrets": { "token": "ops_fixture_private" },
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    for internal in [false, true] {
+        let list = if internal {
+            call(&s, &configuration, "list_plugins", json!({})).await
+        } else {
+            public_call(&s, &["read"], "list_plugins", json!({})).await
+        };
+        assert!(
+            result(&list)["packages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["id"] == "gmail")
+        );
+        assert!(!list.to_string().contains("ops_fixture_private"));
+        let args = json!({ "pluginId": "gmail", "action": "setup" });
+        let setup = if internal {
+            call(&s, &configuration, "manage_plugin", args).await
+        } else {
+            public_call(&s, &["manage"], "manage_plugin", args).await
+        };
+        assert!(
+            result(&setup)["callbackUrl"]
+                .as_str()
+                .unwrap()
+                .ends_with("/plugins/oauth/callback")
+        );
+        let forbidden = json!({ "pluginId": "onepassword", "action": "save", "instanceId": saved["id"], "data": { "agentIds": [MAIN_AGENT_ID] } });
+        let denied = if internal {
+            call(&s, &configuration, "manage_plugin", forbidden).await
+        } else {
+            public_call(&s, &["manage"], "manage_plugin", forbidden).await
+        };
+        assert_eq!(denied["result"]["isError"], true, "{denied}");
+    }
+    let denied = call(
+        &s,
+        &configuration,
+        "manage_plugin",
+        json!({ "pluginId": "onepassword", "action": "view", "instanceId": saved["id"] }),
+    )
+    .await;
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    let bypass = call(
+        &s,
+        &configuration,
+        "manage_plugin",
+        json!({ "pluginId": "onepassword", "action": "form", "data": { "instance": saved["id"] } }),
+    )
+    .await;
+    assert_eq!(bypass["result"]["isError"], true, "{bypass}");
+    assert_eq!(
+        s.get("plugin-connections", saved["id"].as_str().unwrap())
+            .await
+            .unwrap()["agentIds"],
+        json!([])
+    );
+}
+
+#[tokio::test]
 async fn both_mcp_endpoints_manage_chat_queues_and_lifecycle() {
     for internal in [false, true] {
         let root = TempDir::new().unwrap();
