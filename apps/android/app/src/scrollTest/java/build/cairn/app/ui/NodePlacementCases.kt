@@ -118,7 +118,7 @@ abstract class NodePlacementCases {
         MockWebServer().use { server ->
             val writes = CopyOnWriteArrayList<Pair<String, JsonObject>>()
             val enrolled = AtomicBoolean(false)
-            val configured = AtomicBoolean(false)
+            val enrollmentConfigured = AtomicBoolean(false)
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
@@ -130,7 +130,7 @@ abstract class NodePlacementCases {
                             val body = request.body.readUtf8().ifBlank { "{}" }
                             writes += path to wireJson.parseToJsonElement(body).jsonObject
                             if (request.method == "PUT" && path.endsWith("/nodes/desk"))
-                                configured.set(true)
+                                enrollmentConfigured.set(true)
                         }
                         val body =
                             when (path) {
@@ -141,7 +141,7 @@ abstract class NodePlacementCases {
                                 "/api/installations/fixture/api/nodes/native-callers" ->
                                     """[{"id":"trusted","email":"trusted@example.test"}]"""
                                 "/api/installations/fixture/api/nodes" ->
-                                    if (configured.get())
+                                    if (enrollmentConfigured.get())
                                         """[{"id":"desk","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]}]"""
                                     else if (enrolled.get())
                                         """[{"id":"unrelated","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]},{"id":"desk","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]}]"""
