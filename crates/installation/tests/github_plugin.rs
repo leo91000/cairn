@@ -548,9 +548,21 @@ async fn data_saved_before_the_package_moves_into_instances() {
         )
         .await
         .unwrap();
+    s.store
+        .transaction(|db| {
+            db.0.execute_batch("PRAGMA user_version=7;")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     drop(s);
 
     let s = Service::new(config.clone()).await.unwrap();
+    let database = rusqlite::Connection::open(config.data_dir.join("manager.db")).unwrap();
+    let version: i64 = database
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert!(version > 7, "The old manager must refuse migrated accounts");
     let mut instances = s
         .store
         .list(connections::KIND)

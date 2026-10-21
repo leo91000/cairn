@@ -163,8 +163,10 @@ Cross-node recovery requires native Linux x86-64, ublk and the pinned coding-eng
 runtime on the destination. Different installed application dependencies can still
 prevent a project from running. Native-to-VM and cross-OS environment conversion
 remain unsupported. This storage change advances installation data epoch 6 to 7;
-follow the reviewed transition in [ADR 0052](adr/0052-native-ublk-workspaces-and-idle-eviction.md)
-before upgrading. An older native binary must not be started against the new state.
+the [reviewed automatic transition to epoch 9](AUTOMATIC-MIGRATIONS.md) qualifies its
+conversion and recovery tests alongside the rules in
+[ADR 0052](adr/0052-native-ublk-workspaces-and-idle-eviction.md).
+An older native binary must not be started against the new state.
 
 ## Updates and removal
 

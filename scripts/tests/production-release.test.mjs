@@ -17,12 +17,60 @@ import {
   vi,
 } from 'vitest'
 import { parse } from 'yaml'
-import { checkInstallationCompatibility, verifyInstallation, verifyInstallationCompatibility } from '../production-release.mjs'
+import {
+  checkInstallationCompatibility,
+  qualifyInstallationMigrations,
+  verifyInstallation,
+  verifyInstallationCompatibility,
+} from '../production-release.mjs'
 
 const image = `ghcr.io/owner/cairn@sha256:${'b'.repeat(64)}`
 const now = 1000000
 
 const directories = []
+
+async function compatibilityRepository() {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'cairn-compatibility-git-'))
+  directories.push(directory)
+  const git = (...args) => execFileSync('git', args, { cwd: directory, encoding: 'utf8' }).trim()
+  git('init', '--quiet')
+  const commitAll = () => {
+    git('add', '.')
+    git('-c', 'user.name=Release Test', '-c', 'user.email=release@example.invalid', 'commit', '--quiet', '-m', 'fixture')
+    return git('rev-parse', 'HEAD')
+  }
+
+  const file = path.join(directory, 'deploy/installations/data-compatibility.json')
+  await mkdir(path.dirname(file), { recursive: true })
+  const writeContract = async value => writeFile(file, JSON.stringify(value))
+  return {
+    directory,
+    git,
+    commitAll,
+    writeContract,
+  }
+}
+
+const automaticContract = {
+  schema: 2,
+  epoch: 9,
+  databaseVersion: 8,
+  automaticMigration: {
+    fromEpochs: [3, 7, 8],
+    previousDatabaseVersion: 7,
+    plan: 'docs/migration.md',
+    tests: ['migrates_old_accounts', 'refuses_newer_data'],
+  },
+}
+
+async function automaticRepository(previous = { schema: 1, epoch: 3 }) {
+  const fixture = await compatibilityRepository()
+  await fixture.writeContract(previous)
+  const before = fixture.commitAll()
+  await mkdir(path.join(fixture.directory, 'docs'))
+  await writeFile(path.join(fixture.directory, automaticContract.automaticMigration.plan), 'Migration and forward recovery\n')
+  return { ...fixture, before }
+}
 
 afterEach(async () => {
   for (const directory of directories.splice(0))
@@ -49,22 +97,15 @@ describe('production release', () => {
   })
 
   it('checks reviewed data compatibility, including legacy bootstrap and incompatible or unknown baselines', async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'cairn-recovery-git-'))
-    directories.push(directory)
-    const git = (...args) => execFileSync('git', args, { cwd: directory, encoding: 'utf8' }).trim()
-    const commitAll = () => {
-      git('add', '.')
-      git('-c', 'user.name=Recovery Test', '-c', 'user.email=recovery@example.invalid', 'commit', '--quiet', '-m', 'fixture')
-      return git('rev-parse', 'HEAD')
-    }
-
-    git('init', '--quiet')
+    const {
+      directory,
+      git,
+      commitAll,
+      writeContract,
+    } = await compatibilityRepository()
     await writeFile(path.join(directory, 'vault.rs'), 'legacy format\n')
     const legacy = commitAll()
     const legacyTree = git('rev-parse', `${legacy}^{tree}`)
-    const file = path.join(directory, 'deploy/installations/data-compatibility.json')
-    await mkdir(path.dirname(file), { recursive: true })
-    const writeContract = async value => writeFile(file, JSON.stringify(value))
     await writeContract({ schema: 1, epoch: 1, legacyTree })
     const adoption = commitAll()
     await expect(verifyInstallationCompatibility(legacy, adoption, { cwd: directory })).resolves.toBeUndefined()
@@ -80,7 +121,7 @@ describe('production release', () => {
     await writeContract({ schema: 1, epoch: 2, legacyTree })
     const incompatible = commitAll()
     await expect(verifyInstallationCompatibility(compatible, incompatible, { cwd: directory })).rejects.toThrow('reviewed forward migration')
-    await expect(verifyInstallationCompatibility(incompatible, compatible, { cwd: directory })).rejects.toThrow('reviewed forward migration')
+    await expect(verifyInstallationCompatibility(incompatible, compatible, { cwd: directory })).rejects.toThrow('downgrade refused')
     await expect(verifyInstallationCompatibility(legacy, incompatible, { cwd: directory })).rejects.toThrow('Unknown')
 
     await writeContract({ schema: 1, epoch: 1, legacyTree: '0'.repeat(40) })
@@ -91,11 +132,103 @@ describe('production release', () => {
     await expect(verifyInstallationCompatibility(adoption, invalid, { cwd: directory })).rejects.toThrow('Invalid')
   })
 
+  it('automatically accepts only explicitly reviewed forward baselines and refuses downgrades', async () => {
+    for (const epoch of [3, 7, 8]) {
+      const f = await automaticRepository({ schema: 1, epoch })
+      await f.writeContract(automaticContract)
+      const after = f.commitAll()
+      await expect(verifyInstallationCompatibility(f.before, after, { cwd: f.directory })).resolves.toBeUndefined()
+      await expect(verifyInstallationCompatibility(after, f.before, { cwd: f.directory })).rejects.toThrow('downgrade refused')
+      await writeFile(path.join(f.directory, 'patch.txt'), 'compatible patch')
+      const patch = f.commitAll()
+      await expect(verifyInstallationCompatibility(after, patch, { cwd: f.directory })).resolves.toBeUndefined()
+    }
+  })
+
+  it('refuses unreviewed baselines, a changed database fence and missing committed plans', async () => {
+    const f = await automaticRepository({ schema: 1, epoch: 4 })
+    await f.writeContract(automaticContract)
+    const after = f.commitAll()
+    await expect(verifyInstallationCompatibility(f.before, after, { cwd: f.directory })).rejects.toThrow('reviewed forward migration')
+    await f.writeContract({ ...automaticContract, databaseVersion: 9 })
+    const changedFence = f.commitAll()
+    await expect(verifyInstallationCompatibility(after, changedFence, { cwd: f.directory })).rejects.toThrow('without advancing')
+    await f.writeContract({
+      ...automaticContract,
+      epoch: 10,
+      databaseVersion: 9,
+      automaticMigration: { ...automaticContract.automaticMigration, fromEpochs: [9] },
+    })
+    const wrongPreviousFence = f.commitAll()
+    await expect(verifyInstallationCompatibility(after, wrongPreviousFence, { cwd: f.directory })).rejects.toThrow('reviewed forward migration')
+    await f.writeContract({
+      ...automaticContract,
+      epoch: 10,
+      databaseVersion: 9,
+      automaticMigration: { ...automaticContract.automaticMigration, fromEpochs: [9], previousDatabaseVersion: 8 },
+    })
+    await expect(verifyInstallationCompatibility(after, f.commitAll(), { cwd: f.directory })).resolves.toBeUndefined()
+
+    const missing = await automaticRepository()
+    await missing.writeContract({ ...automaticContract, automaticMigration: { ...automaticContract.automaticMigration, plan: 'docs/missing.md' } })
+    await expect(verifyInstallationCompatibility(missing.before, missing.commitAll(), { cwd: missing.directory })).rejects.toThrow()
+  })
+
+  it('requires a valid recovery plan, monotonic database version and named regression coverage', async () => {
+    const f = await automaticRepository()
+    for (const automaticMigration of [
+      { ...automaticContract.automaticMigration, fromEpochs: [3, 3] },
+      { ...automaticContract.automaticMigration, fromEpochs: [9] },
+      { ...automaticContract.automaticMigration, fromEpochs: [] },
+      { ...automaticContract.automaticMigration, previousDatabaseVersion: 8 },
+      { ...automaticContract.automaticMigration, plan: 'docs/../secret.md' },
+      { ...automaticContract.automaticMigration, tests: [] },
+      { ...automaticContract.automaticMigration, tests: ['../command'] },
+    ]) {
+      await f.writeContract({ ...automaticContract, automaticMigration })
+      await expect(verifyInstallationCompatibility(f.before, f.commitAll(), { cwd: f.directory })).rejects.toThrow('Invalid')
+    }
+  })
+
+  it('qualifies actual passing tests and rejects missing, ignored or failed regression evidence', async () => {
+    const f = await automaticRepository()
+    await f.writeContract(automaticContract)
+    const passing = 'test migrates_old_accounts ... ok\ntest refuses_newer_data ... ok\n'
+    await expect(qualifyInstallationMigrations(passing, { cwd: f.directory })).resolves.toBeUndefined()
+    const nextest = '        PASS [  0.102s] (1/2) cairn-installation::migration migrates_old_accounts\n        PASS [  0.014s] (2/2) cairn-installation::migration refuses_newer_data\n'
+    await expect(qualifyInstallationMigrations(nextest, { cwd: f.directory })).resolves.toBeUndefined()
+    for (const status of ['SKIP', 'FAIL', 'FLAKY'])
+      await expect(qualifyInstallationMigrations(nextest.replace('PASS', status), { cwd: f.directory })).rejects.toThrow('passing backend regression evidence')
+    for (const log of ['', passing.replace('refuses_newer_data', 'different_test'), passing.replace('... ok', '... ignored'), passing.replace('... ok', '... FAILED')])
+      await expect(qualifyInstallationMigrations(log, { cwd: f.directory })).rejects.toThrow('passing backend regression evidence')
+    await writeFile(path.join(f.directory, automaticContract.automaticMigration.plan), '')
+    await expect(qualifyInstallationMigrations(passing, { cwd: f.directory })).rejects.toThrow('recovery plan')
+  })
+
   it('waits through an updater replacement and requires the manager, runner, and execution health', async () => {
     const ssh = vi.fn().mockResolvedValueOnce(Buffer.from('{"ready":false}')).mockResolvedValueOnce(Buffer.from('{"ready":true,"manager":true,"runner":true,"health":true}'))
     const sleep = vi.fn()
     expect(await verifyInstallation({ installationImage: image }, { ssh, sleep, now: () => now })).toMatchObject({ ready: true })
     expect(sleep).toHaveBeenCalledOnce()
+  })
+
+  it('does not accept an unhealthy or mismatched installation after migration', async () => {
+    for (const missing of ['ready', 'manager', 'runner', 'health']) {
+      let clock = 0
+      const result = {
+        ready: true,
+        manager: true,
+        runner: true,
+        health: true,
+        [missing]: false,
+      }
+      await expect(verifyInstallation({ installationImage: image }, {
+        ssh: vi.fn().mockResolvedValue(Buffer.from(JSON.stringify(result))),
+        sleep: vi.fn(),
+        now: () => clock++,
+        timeoutMs: 2,
+      })).rejects.toThrow('did not become healthy')
+    }
   })
 
   it('checks compatibility before deployment and installation readiness afterwards without backups', () => {
@@ -112,5 +245,9 @@ describe('production release', () => {
     expect(steps[deploy].env.COOLIFY_TOKEN).toContain('secrets.CAIRN_RELEASE_COOLIFY_TOKEN')
     expect(workflow.jobs.deploy.if).toContain('startsWith(github.ref, \'refs/tags/v\')')
     expect(workflow.jobs.deploy.concurrency['cancel-in-progress']).toBe(false)
+    const quality = workflow.jobs.backend.steps.map(step => step.run ?? '').join('\n')
+    expect(quality).toContain('set -o pipefail')
+    expect(quality).toContain('node scripts/test-backend.mjs --nextest --features ublk-prototype --test-threads 8 --no-fail-fast --color never --status-level pass 2>&1 | tee backend-tests.log')
+    expect(quality.indexOf('qualify backend-tests.log')).toBeGreaterThan(quality.indexOf('tee backend-tests.log'))
   })
 })
