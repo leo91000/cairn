@@ -342,3 +342,13 @@ tokens ([RFC 6749 §4.1.2](https://www.rfc-editor.org/rfc/rfc6749#section-4.1.2)
 Consumed code digests and bindings remain linked to their grant for detection
 beyond the initial five-minute code expiry; deleting the grant removes them.
 Wrong client or PKCE attempts cannot revoke another client's grant.
+
+Conversation backend migration is available on both public MCP and
+`cairn_installation`: `get_chat_backend_migration` previews the destination after
+an agent profile backend change; `migrate_chat_backend` requires management access,
+`chatId`, `nodeId`, `backend` and `confirm: true`. It returns immediately while the
+owned migration task runs. Poll the preview for `pending`, `required` and `error`.
+An explicit owner may adopt the existing conversation into their native grant;
+installation agents retain their bounded parent grant. Web and Android expose the
+same confirmed operation from execution-node details. See
+[the migration decision](adr/0054-explicit-conversation-backend-migration.md).

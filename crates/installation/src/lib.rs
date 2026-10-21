@@ -7,6 +7,7 @@ pub mod api;
 pub mod artifacts;
 pub mod attachments;
 pub mod auth;
+pub(crate) mod backend_migration;
 mod chat_inbox;
 pub mod chat_process;
 pub mod chat_titles;

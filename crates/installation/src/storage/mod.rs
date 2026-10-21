@@ -1,4 +1,5 @@
 //! Conversation disk storage. Callers hold the conversation lock while preparing or exporting.
+pub(crate) mod backend_conversion;
 pub mod layout;
 mod local;
 
