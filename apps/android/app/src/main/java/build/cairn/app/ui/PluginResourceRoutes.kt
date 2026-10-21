@@ -404,6 +404,18 @@ internal fun PluginResourceRoutes(
                                     else -> "${route.userIds.size} personnes · liste uniquement"
                                 }
                         )
+                        val summary = route.summary
+                        if (summary == null) {
+                            Text("Usage et nombre de demandes indisponibles.")
+                        } else {
+                            Text(
+                                "${summary.messagesThisHour} / ${route.maxMessagesPerHour} messages"
+                            )
+                            Text("Heure commençant le ${date(summary.hourStartedAt)}")
+                            Text(
+                                "${summary.pendingRequests} demande${if (summary.pendingRequests == 1) "" else "s"} d’accès en attente"
+                            )
+                        }
                         TextButton(
                             onClick = { edit(route) },
                             enabled = controls && removing == null,

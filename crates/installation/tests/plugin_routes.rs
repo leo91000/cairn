@@ -301,6 +301,211 @@ async fn deliver(app: &axum::Router, instance: &str, value: Value) -> (StatusCod
 }
 
 #[tokio::test]
+async fn route_summary_pages_report_only_their_own_usage_and_pending_people() {
+    async fn pages(app: &axum::Router, path: &str) -> (usize, Vec<Value>) {
+        let mut cursor = None;
+        let mut rows = Vec::new();
+        let mut pages = 0;
+        loop {
+            let url = cursor
+                .as_ref()
+                .map_or_else(|| path.to_owned(), |value| format!("{path}?cursor={value}"));
+            let response = common::send(app, owner_request("GET", &url, Value::Null)).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let page = common::read_json(response).await;
+            let items = page["items"].as_array().unwrap();
+            assert!(items.len() <= 32);
+            rows.extend(items.iter().cloned());
+            pages += 1;
+            cursor = page["nextCursor"].as_str().map(str::to_owned);
+            if cursor.is_none() {
+                break;
+            }
+            assert!(pages < 3, "route pagination did not terminate");
+        }
+        (pages, rows)
+    }
+    let (_root, s, instance, resource, app) = fixture().await;
+    let agent = s
+        .agent(
+            json!({
+                "name": "Summary helper",
+                "access": {
+                    "projects": [],
+                    "installation": false,
+                    "github": false,
+                },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let path =
+        format!("/api/plugins/router/connections/{instance}/resources/workspace/{resource}/routes");
+    let mut saved = Vec::new();
+    for index in 0..35 {
+        saved.push(
+            create_route(
+                &app,
+                &instance,
+                &resource,
+                json!({
+                    "name": format!("Channel {index}"),
+                    "enabled": true,
+                    "match": { "channel": format!("C{index}") },
+                    "agentId": agent["id"],
+                    "accessMode": "requests",
+                    "maxMessagesPerHour": 100,
+                }),
+            )
+            .await,
+        );
+    }
+    // Existing rate records, including the next hour, keep this read-model test
+    // deterministic across an hour boundary. The root has a different counter.
+    let rates = saved.clone();
+    let root_id = instance.clone();
+    s.store
+        .transaction(move |db| {
+            let hour = now() / 3_600_000;
+            for period in [hour - 1, hour, hour + 1] {
+                db.set(&format!("plugin-rate:{root_id}:{period}"), &json!(99), None)?;
+                for (index, route) in rates.iter().enumerate() {
+                    let count = if period == hour - 1 { 90 } else { index + 1 };
+                    db.set(
+                        &format!("plugin-rate:{}:{period}", text(route, "id")),
+                        &json!(count),
+                        None,
+                    )?;
+                }
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    for (id, channel, author) in [
+        ("first", "C0", "bob"),
+        ("again", "C0", "bob"),
+        ("other", "C1", "jane"),
+    ] {
+        let (status, result) = deliver(
+            &app,
+            &instance,
+            json!({
+                "id": id,
+                "resource": resource,
+                "author": { "id": author },
+                "context": {
+                    "channel": channel,
+                    "thread": id,
+                },
+                "body": { "text": "not admitted" },
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["status"], "requested");
+    }
+    let before_read = now() / 3_600_000 * 3_600_000;
+    let (page_count, rows) = pages(&app, &path).await;
+    let after_read = now() / 3_600_000 * 3_600_000;
+    assert_eq!(page_count, 2);
+    assert_eq!(rows.len(), saved.len());
+    for (index, original) in saved.iter().enumerate() {
+        let row = rows.iter().find(|row| row["id"] == original["id"]).unwrap();
+        assert_eq!(row["summary"]["messagesThisHour"], index + 1, "{row}");
+        assert_eq!(
+            row["summary"]["pendingRequests"],
+            usize::from(index < 2),
+            "{row}"
+        );
+        assert!(
+            [before_read, after_read].contains(&row["summary"]["hourStartedAt"].as_i64().unwrap())
+        );
+        assert_eq!(
+            row["revision"], original["revision"],
+            "volatile summaries changed the edit revision"
+        );
+    }
+    let record_id = text(&saved[0], "id").to_owned();
+    let stored = s
+        .store
+        .read(move |db| db.get("plugin-routes", &record_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        stored.get("summary").is_none(),
+        "summaries must not become persisted route state"
+    );
+
+    let first = &saved[0];
+    let first_path = format!("{path}/{}", text(first, "id"));
+    let response = common::send(
+        &app,
+        owner_request(
+            "POST",
+            &format!("{first_path}/people/bob"),
+            json!({
+                "action": "deny",
+                "revision": first["revision"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let denied = common::read_json(response).await;
+    let response = common::send(
+        &app,
+        owner_request(
+            "PUT",
+            &first_path,
+            json!({
+                "name": "Paused summary",
+                "enabled": false,
+                "match": { "channel": "C0" },
+                "agentId": agent["id"],
+                "accessMode": "requests",
+                "revision": denied["revision"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let second_path = format!("{path}/{}", text(&saved[1], "id"));
+    let response = common::send(
+        &app,
+        owner_request(
+            "DELETE",
+            &second_path,
+            json!({
+                "revision": saved[1]["revision"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let (_, updated) = pages(&app, &path).await;
+    assert_eq!(updated.len(), saved.len() - 1);
+    assert!(updated.iter().all(|row| row["id"] != saved[1]["id"]));
+    let row = updated.iter().find(|row| row["id"] == first["id"]).unwrap();
+    assert_eq!(row["summary"]["pendingRequests"], 0);
+    assert_eq!(row["summary"]["messagesThisHour"], 1);
+    assert_eq!(row["enabled"], false);
+    let mut request = owner_request("GET", &path, Value::Null);
+    request
+        .extensions_mut()
+        .insert(InstallationIdentity::trusted(
+            InstallationRole::Member,
+            "member",
+        ));
+    assert_eq!(
+        common::send(&app, request).await.status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
 async fn resource_routes_choose_the_owner_agent_and_keep_channels_and_workspaces_separate() {
     let (_root, s, instance, resource, app) = fixture().await;
     let first = s.agent(json!({ "name": "First", "access": { "projects": [], "installation": false, "github": false } }), None).await.unwrap();

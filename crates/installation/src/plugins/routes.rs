@@ -395,13 +395,38 @@ pub async fn list(
     s.store
         .transaction(move |db| {
             current_resource(db, &target, &resource)?;
+            let hour = now() / 3_600_000;
+            let mut pending = BTreeMap::<String, usize>::new();
+            for request in db.list("plugin-requests")? {
+                if request["connectionId"] == instance
+                    && request["status"] == "pending"
+                    && let Some(route) = request["routeId"].as_str()
+                {
+                    *pending.entry(route.to_owned()).or_default() += 1;
+                }
+            }
             let items = db
                 .list(KIND)?
                 .into_iter()
                 .filter(|value| {
                     value["connectionId"] == instance && value["resourceId"] == resource.id
                 })
-                .map(|value| serde_json::from_value::<Route>(value)?.owner_value())
+                .map(|value| {
+                    let route: Route = serde_json::from_value(value)?;
+                    // Volatile owner information does not participate in edit
+                    // concurrency or become authority for admitted work.
+                    let mut value = route.owner_value()?;
+                    let used = db
+                        .kv(&format!("plugin-rate:{}:{hour}", route.id))?
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0);
+                    value["summary"] = json!({
+                        "hourStartedAt": hour * 3_600_000,
+                        "messagesThisHour": used,
+                        "pendingRequests": pending.get(&route.id).copied().unwrap_or(0),
+                    });
+                    Ok(value)
+                })
                 .collect::<Result<Vec<_>>>()?;
             super::paging::page(items, cursor.as_deref())
         })

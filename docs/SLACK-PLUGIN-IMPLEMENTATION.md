@@ -142,8 +142,9 @@ measurements document bounded record shape and their limits; full native/storage
 and release qualification remains open. Scoped resource forms retain their app,
 parent, owner and OAuth authority on both clients. Remote query/cursor choices
 are being qualified in all four configuration contexts, with bounded page windows,
-independent selected IDs and a host-owned lookup echo. Catalogue totals and route
-usage summaries remain pending, along with the remaining Slack delivery list.
+independent selected IDs and a host-owned lookup echo. Route-local usage summaries
+are described below; catalogue totals and the remaining Slack delivery list remain
+pending.
 Android route drafts also use the bounded local input store instead of accumulating complete routes and people directories in activity state. Recovered edits require a fresh matching route revision; missing snapshots cannot become broader writes. Validation and independent review of this checkpoint are still in progress.
 
 ## Foundation checkpoint
@@ -1164,8 +1165,8 @@ revalidate and never restore typed secrets. Unknown save outcomes retain the
 existing read-before-another-write recovery. The new native, browser and shared
 JVM/device scenarios qualify this slice; final checkpoint results are recorded
 separately. Guided query/cursor choices now have a shared host contract and web/
-Android renderers; current checkpoint qualification is in progress. Catalogue/
-route summaries and the actual Slack package remain subsequent work. This does
+Android renderers; checkpoint qualification is recorded separately. Catalogue
+summaries and the actual Slack package remain subsequent work. This does
 not complete Q1–Q20.
 
 Unchanged catalog refreshes preserve resource editors and pending owner consent;
@@ -1211,3 +1212,18 @@ The [compatibility inventory](SLACK-PLUGIN-COMPATIBILITY.md) covers this transit
 and keeps actual prior-production-data qualification as a delivery gate.
 Corrected native/client presentation qualification and fresh complete independent
 review remain required. This does not complete the Slack contract.
+
+## Route owner summaries
+
+Paged route management now projects route-local admission usage and pending people
+from the same database transaction as the listed routes. The measured hour is
+explicit. Volatile summaries do not enter stored records, editing revisions or
+execution authority. Web and native Android retain unknown state on older hosts
+and hide the preceding list when a reload fails, rather than displaying zero.
+Management actions reload the summaries with the current route revisions.
+
+The new public HTTP regression first reproduced missing counters on 35 paged
+routes. It distinguishes route and app counters, repeated requests by one person
+and requests on another route, pending and denied requests, paused/deleted routes,
+owner-only visibility and stable edit revisions. Qualification results are recorded
+in the delivery evidence. Catalogue bounds and the rest of Q1–Q20 remain unfinished.

@@ -681,6 +681,14 @@ data class PluginRoute(
     val maxMessagesPerHour: Int = 20,
     val maxPerPersonPerHour: Int = 5,
     val revision: String = "",
+    val summary: PluginRouteSummary? = null,
+)
+
+@Serializable
+data class PluginRouteSummary(
+    val hourStartedAt: Long,
+    val messagesThisHour: Long,
+    val pendingRequests: Int,
 )
 
 @Serializable

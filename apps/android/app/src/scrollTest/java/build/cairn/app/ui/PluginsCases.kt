@@ -2696,6 +2696,136 @@ abstract class PluginsCases {
     }
 
     @Test
+    fun resourceRouteSummariesKeepUnknownAndFailedReadsDistinctFromZero() {
+        val root = "/plugins/summary/connections/app/resources/workspace/engineering"
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val reads = AtomicInteger()
+        val mode = AtomicInteger()
+        val period = 1_700_002_800_000L
+        MockWebServer().use { server ->
+            val normal = dispatcher { _, _ -> null }
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        if (
+                            request.method != "GET" ||
+                                !request.path.orEmpty().endsWith("$root/routes")
+                        )
+                            return normal.dispatch(request)
+                        if (reads.getAndIncrement() == 0) {
+                            started.countDown()
+                            check(release.await(20, TimeUnit.SECONDS))
+                        }
+                        if (mode.get() == 1)
+                            return MockResponse()
+                                .setResponseCode(503)
+                                .setBody("""{"error":"Summary fixture unavailable."}""")
+                        val changed = mode.get() == 2
+                        return MockResponse()
+                            .setBody(
+                                wireJson.encodeToString(
+                                    PluginPage(
+                                        listOf(
+                                            PluginRoute(
+                                                id = "support",
+                                                name = "Support",
+                                                agentId = "helper",
+                                                summary =
+                                                    PluginRouteSummary(
+                                                        period,
+                                                        if (changed) 8 else 7,
+                                                        if (changed) 1 else 2,
+                                                    ),
+                                            ),
+                                            PluginRoute(
+                                                id = "paused",
+                                                name = "Paused",
+                                                enabled = false,
+                                                agentId = "helper",
+                                                maxMessagesPerHour = 10,
+                                                summary = PluginRouteSummary(period, 3, 0),
+                                            ),
+                                            PluginRoute(
+                                                id = "older",
+                                                name = "Earlier host",
+                                                agentId = "helper",
+                                            ),
+                                        )
+                                    )
+                                )
+                            )
+                    }
+                }
+            server.start()
+            val vm =
+                show(server) { model, state ->
+                    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                        PluginResourceRoutes(model, state, root, "Engineering", true) {}
+                    }
+                }
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            try {
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("Routes de conversation")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.onNodeWithText("Routes de conversation").performClick()
+                compose.waitUntil(10000) { started.count == 0L }
+                compose.onNodeWithText("0 demandes d’accès en attente").assertDoesNotExist()
+                compose.onNodeWithText("7 / 20 messages").assertDoesNotExist()
+                release.countDown()
+                compose.waitUntil(10000) {
+                    compose.onAllNodesWithText("7 / 20 messages").fetchSemanticsNodes().isNotEmpty()
+                }
+                compose
+                    .onNodeWithText("2 demandes d’accès en attente")
+                    .performScrollTo()
+                    .assertExists()
+                compose
+                    .onAllNodesWithText("Heure commençant le ${date(period)}")
+                    .assertCountEquals(2)
+                compose.onNodeWithText("Paused · En pause").performScrollTo().assertExists()
+                compose.onNodeWithText("3 / 10 messages").performScrollTo().assertExists()
+                compose
+                    .onNodeWithText("0 demandes d’accès en attente")
+                    .performScrollTo()
+                    .assertExists()
+                compose
+                    .onNodeWithText("Usage et nombre de demandes indisponibles.")
+                    .performScrollTo()
+                    .assertExists()
+                capture("route-summary-known-and-unknown")
+                mode.set(1)
+                compose.onNodeWithText("Actualiser les routes").performScrollTo().performClick()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("Summary fixture unavailable.", substring = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.onNodeWithText("7 / 20 messages").assertDoesNotExist()
+                compose.onNodeWithText("0 demandes d’accès en attente").assertDoesNotExist()
+                mode.set(2)
+                compose.onNodeWithText("Actualiser les routes").performScrollTo().performClick()
+                compose.waitUntil(10000) {
+                    compose.onAllNodesWithText("8 / 20 messages").fetchSemanticsNodes().isNotEmpty()
+                }
+                compose
+                    .onNodeWithText("1 demande d’accès en attente")
+                    .performScrollTo()
+                    .assertExists()
+                capture("route-summary-refreshed")
+            } finally {
+                release.countDown()
+                models.clear()
+            }
+        }
+    }
+
+    @Test
     fun resourceRoutesLoadAllPagesAndCancelAClosedRead() {
         resourceManagementPagesScenario(routes = true)
     }

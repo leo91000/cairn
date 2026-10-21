@@ -1,4 +1,5 @@
 import type { Locator, Route } from '@playwright/test'
+import type { PluginRoute } from '../../apps/web/src/plugins'
 import { Buffer } from 'node:buffer'
 import { createHmac } from 'node:crypto'
 import {
@@ -1801,6 +1802,87 @@ test('resource routes refresh an uncertain creation without repeating the write'
   expect(writes).toBe(1)
 })
 
+test('route summaries distinguish loading missing data and failed refreshes', async ({ page, workspace }) => {
+  test.setTimeout(90000)
+  const { id, agent, path } = await conversationRoutesFixture(workspace, 'routes-summary')
+  const saved: PluginRoute[] = []
+  for (const name of ['Support', 'Paused route', 'Earlier host']) {
+    saved.push(await workspace.api(path, 'POST', {
+      name,
+      enabled: name !== 'Paused route',
+      match: { channel: name },
+      agentId: agent.id,
+      accessMode: 'requests',
+    }))
+  }
+
+  await useRelayForHttpMocks(page)
+  let release!: () => void
+  let requested = false
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let reads = 0
+  let mode = 'initial'
+  const period = 1700002800000
+  await page.route(`**${path.replace('/api', '')}`, async (route) => {
+    if (route.request().method() !== 'GET')
+      return route.continue()
+    if (reads++ === 0) {
+      requested = true
+      await held
+    }
+
+    if (mode === 'failed')
+      return route.fulfill({ status: 503, json: { error: 'Summary fixture unavailable.' } })
+    const items = saved.map((item, index) => ({
+      ...item,
+      summary: index === 2
+        ? undefined
+        : {
+            hourStartedAt: period,
+            messagesThisHour: index === 1 ? 3 : mode === 'changed' ? 8 : 7,
+            pendingRequests: index === 1 ? 0 : mode === 'changed' ? 1 : 2,
+          },
+    }))
+    return route.fulfill({ json: { items, nextCursor: null } })
+  })
+  try {
+    await page.goto(workspacePath(`/plugins/${id}`))
+    await signIn(page)
+    await page.getByRole('article', { name: 'Engineering', exact: true })
+      .getByRole('button', { name: 'Conversation routes', exact: true })
+      .click()
+    const routes = page.getByRole('dialog', { name: 'Conversation routes · Engineering', exact: true })
+    await expect.poll(() => requested).toBe(true)
+    await expect(routes.getByText('0 pending access requests', { exact: true })).toHaveCount(0)
+    await expect(routes.getByText('7 / 20 messages', { exact: true })).toHaveCount(0)
+    release()
+    const support = routes.getByRole('article', { name: 'Support', exact: true })
+    await expect(support.getByText('7 / 20 messages', { exact: true })).toBeVisible()
+    await expect(support.getByText('2 pending access requests', { exact: true })).toBeVisible()
+    await expect(routes.getByText('Hour starting', { exact: false })).toHaveCount(2)
+    await expect(routes.getByRole('article', { name: 'Paused route', exact: true })
+      .getByText('3 / 20 messages', { exact: true })).toBeVisible()
+    const earlier = routes.getByRole('article', { name: 'Earlier host', exact: true })
+    await expect(earlier.getByText('Usage and pending request counts unavailable.', { exact: true })).toBeVisible()
+    await expect(earlier.getByText('0 pending access requests', { exact: true })).toHaveCount(0)
+    mode = 'failed'
+    await routes.getByRole('button', { name: 'Refresh routes', exact: true }).click()
+    await expect(routes.getByRole('alert')).toContainText('Summary fixture unavailable.')
+    await expect(routes.getByText('7 / 20 messages', { exact: true })).toHaveCount(0)
+    await expect(routes.getByText('0 pending access requests', { exact: true })).toHaveCount(0)
+    mode = 'changed'
+    await routes.getByRole('button', { name: 'Refresh routes', exact: true }).click()
+    await expect(support.getByText('8 / 20 messages', { exact: true })).toBeVisible()
+    await expect(support.getByText('1 pending access request', { exact: true })).toBeVisible()
+  }
+  finally {
+    release()
+    await page.unrouteAll({ behavior: 'wait' })
+  }
+})
+
 test('resource routes manage people and requests only on their selected route', async ({ page, workspace }) => {
   test.setTimeout(90000)
   const {
@@ -1848,12 +1930,18 @@ test('resource routes manage people and requests only on their selected route', 
   await page.getByRole('article', { name: 'Engineering', exact: true }).getByRole('button', { name: 'Conversation routes', exact: true }).click()
   const routes = page.getByRole('dialog', { name: 'Conversation routes · Engineering', exact: true })
   const supportRow = routes.getByRole('article', { name: 'Support', exact: true })
+  const operationsRow = routes.getByRole('article', { name: 'Operations', exact: true })
+  await expect(supportRow.getByText('0 / 20 messages', { exact: true })).toBeVisible()
+  await expect(supportRow.getByText('1 pending access request', { exact: true })).toBeVisible()
+  await expect(operationsRow.getByText('1 pending access request', { exact: true })).toBeVisible()
   await supportRow.getByRole('button', { name: 'People and requests', exact: true }).click()
   await expect(routes.getByText('Person U1', { exact: true })).toBeVisible()
   await expect(routes.getByText('Person U2', { exact: true })).toHaveCount(0)
   await expect(routes.getByText('Unapproved content must stay outside the request list', { exact: true })).toHaveCount(0)
   await routes.getByRole('button', { name: 'Approve U1', exact: true }).click()
   await expect(supportRow).toBeVisible()
+  await expect(supportRow.getByText('0 pending access requests', { exact: true })).toBeVisible()
+  await expect(operationsRow.getByText('1 pending access request', { exact: true })).toBeVisible()
   expect((await workspace.api(path)).items.find((item: any) => item.id === support.id).userIds).toEqual(['U1'])
   expect((await workspace.api(`${path}/${support.id}/requests`)).items).toHaveLength(0)
   expect((await workspace.api(`${path}/${operations.id}/requests`)).items).toHaveLength(1)
@@ -1866,6 +1954,7 @@ test('resource routes manage people and requests only on their selected route', 
   await routes.getByRole('button', { name: 'Deny U2', exact: true }).click()
   await expect(routes.getByRole('article', { name: 'Operations', exact: true })).toBeVisible()
   expect((await workspace.api(`${path}/${operations.id}/requests`)).items[0].status).toBe('denied')
+  await expect(operationsRow.getByText('0 pending access requests', { exact: true })).toBeVisible()
 })
 
 test('a stale route editor cannot restore a participant removed by another owner action', async ({ page, workspace }) => {

@@ -7,7 +7,7 @@ import {
   useId,
   watch,
 } from 'vue'
-import { api, state } from '../api'
+import { api, date, state } from '../api'
 import { pluginManagementItems } from '../plugin-management'
 import Modal from './Modal.vue'
 import UiAlert from './UiAlert.vue'
@@ -308,6 +308,20 @@ onBeforeUnmount(() => {
           </p>
           <p class="text-xs">
             {{ route.maxMessagesPerHour }} messages per hour · {{ route.accessMode === 'everyone' ? `${route.maxPerPersonPerHour} per person · anyone` : `${route.userIds.length} people · ${route.accessMode === 'requests' ? 'approve as they ask' : 'listed people only'}` }}
+          </p>
+          <template v-if="route.summary">
+            <p class="text-xs">
+              {{ route.summary.messagesThisHour }} / {{ route.maxMessagesPerHour }} messages
+            </p>
+            <p class="text-xs text-muted">
+              Hour starting {{ date(route.summary.hourStartedAt) }}
+            </p>
+            <p class="text-xs">
+              {{ route.summary.pendingRequests }} pending access {{ route.summary.pendingRequests === 1 ? 'request' : 'requests' }}
+            </p>
+          </template>
+          <p v-else class="text-xs text-muted">
+            Usage and pending request counts unavailable.
           </p>
           <div class="flex flex-wrap gap-2">
             <UiButton size="small" :disabled="busy || Boolean(removing) || !props.enabled" @click="edit(route)">

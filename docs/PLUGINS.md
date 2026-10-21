@@ -568,6 +568,17 @@ It returns `{items: [{agentId, eligible, reason?}]}` without access policies or
 credentials. The result is advisory: save and effects recheck current authority.
 Configuration remains available while the instance or resource is paused.
 
+Listed routes include an owner-only `summary` with `hourStartedAt` (UTC epoch
+milliseconds), `messagesThisHour` and `pendingRequests`. These values come from
+the same database snapshot as the route page. Usage reads the route's admission
+counter, independently of its app's counter; requests count only currently pending
+people on that exact route. They are presentation data: they are not persisted in
+the route and do not change its editing revision. Both clients display the measured
+hour and refresh the counts after management actions. Missing summaries on older
+hosts are shown as unavailable rather than zero; failed reads do not keep showing
+the preceding counts as a successful refresh. Pagination includes summary bytes
+in its existing response budget.
+
 `cairn.inbound.deliver` supplies the configured `resource` and authentic source
 `context` alongside its message. The host selects the most specific matching route.
 A disabled override denies admission; equally specific matching rules conflict.

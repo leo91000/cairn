@@ -468,4 +468,5 @@ export interface PluginRoute {
   maxMessagesPerHour: number
   maxPerPersonPerHour: number
   revision: string
+  summary?: { hourStartedAt: number, messagesThisHour: number, pendingRequests: number } | null
 }
