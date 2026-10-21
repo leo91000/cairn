@@ -111,6 +111,14 @@ Le nombre maximal d’exécutions simultanées sur un compte. Le réduire laisse
 **Réinitialisation en réserve** :
 Une remise à zéro de fenêtre d’usage offerte par Codex, utilisée automatiquement quand la capacité restante d’un compte actif tombe à 2 %. Elle n’existe pas pour Claude Code.
 
+**Demandeur d’une mission** :
+La conversation ou la mission dont l’agent a lancé l’exécution d’une mission. Une mission bloquée qui attend son demandeur lui revient plutôt qu’à l’utilisateur, tant que ce demandeur existe.
+_Avoid_ : parent, orchestrateur
+
+**Mise de côté d’un résultat** :
+Le choix d’un compte de retirer de « Pour vous » le résultat bloqué d’une mission : écarté jusqu’à son prochain résultat, ou reporté jusqu’à une heure donnée. Chaque membre met de côté pour lui seul.
+_Avoid_ : archivage (qui retire la mission elle-même)
+
 **Auteur d’une tâche** :
 Le compte Cairn qui a créé une tâche. Le retrait de cet auteur met fin aux déclenchements planifiés de ses tâches ; leur travail reste partagé avec toute l’installation.
 

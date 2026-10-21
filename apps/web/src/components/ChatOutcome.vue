@@ -38,6 +38,7 @@ const labels = { completed: 'Task completed', blocked: 'Blocked', needs_input: '
     <div v-if="attention" class="outcome-content mt-2 text-ink">
       <Markdown :content="outcome.reason" />
     </div>
+    <slot v-if="attention" />
     <div
       v-if="expanded"
       :id="evidenceId"

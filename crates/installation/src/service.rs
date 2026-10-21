@@ -739,12 +739,13 @@ impl Service {
                 )?;
                 crate::native::policy::apply(&mut run, &grant);
                 if let Some(bearer) = bearer {
-                    crate::installation_mcp::authorize_task_in(
+                    let caller = crate::installation_mcp::authorize_task_in(
                         db,
                         &bearer,
                         &run["snapshot"]["task"],
                         None,
                     )?;
+                    run["requestedBy"] = requester(&caller);
                 }
                 db.add_run(&run, dedupe.as_deref())?;
                 db.event(text(&run, "id"), "status", "Queued", None)?;
@@ -870,6 +871,22 @@ impl Service {
                 )
             })
             .await
+    }
+}
+
+/// The conversation or mission whose agent started a run. A conversation's runs carry its id as
+/// their task, so the requester is named without another lookup.
+fn requester(caller: &Value) -> Value {
+    if caller["trigger"] == "chat" {
+        json!({
+            "runId": caller["id"],
+            "chatId": caller["taskId"],
+        })
+    } else {
+        json!({
+            "runId": caller["id"],
+            "taskId": caller["taskId"],
+        })
     }
 }
 

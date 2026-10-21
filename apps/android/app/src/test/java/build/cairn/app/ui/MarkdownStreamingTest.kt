@@ -80,7 +80,7 @@ class MarkdownStreamingTest {
             val list = rememberLazyListState()
             val rendering = remember { MarkdownRendering() }
             SideEffect { savedList = list }
-            FollowHistoryTail(list, follow, source, rendering)
+            FollowHistoryTail(list, follow, source, rendering, lastContentIndex = 0)
             CairnTheme("dark") {
                 Surface(Modifier.fillMaxSize()) {
                     CompositionLocalProvider(LocalMarkdownRendering provides rendering) {

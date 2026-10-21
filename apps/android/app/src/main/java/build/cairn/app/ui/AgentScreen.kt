@@ -115,7 +115,7 @@ private fun AgentPage(
     // Without the machine list, node access cannot be changed safely.
     var nodesFailed by remember { mutableStateOf(false) }
     var nodesAttempt by remember { mutableIntStateOf(0) }
-    var catalog by remember { mutableStateOf<PluginCatalog?>(null) }
+    var catalog by remember { mutableStateOf<AgentPluginDirectory?>(null) }
     // Without the catalog, held grants cannot be checked: the section stays read-only.
     var catalogFailed by remember { mutableStateOf(false) }
     var catalogAttempt by remember { mutableIntStateOf(0) }
@@ -153,7 +153,7 @@ private fun AgentPage(
     }
     LaunchedEffect(agentId, catalogAttempt) {
         try {
-            catalog = vm.api.get("/plugins")
+            catalog = vm.api.agentPluginDirectory()
             catalogFailed = false
         } catch (e: Exception) {
             if (e is CancellationException) throw e
@@ -1665,7 +1665,7 @@ private fun PluginsSection(
     vm: CairnViewModel,
     state: Workspace,
     agent: Agent,
-    catalog: PluginCatalog?,
+    catalog: AgentPluginDirectory?,
     legacy: Boolean,
     locked: Boolean,
     failed: Boolean,
@@ -1704,33 +1704,30 @@ private fun PluginsSection(
     if (groups.isEmpty())
         Empty(
             "Aucun plugin ne donne d’accès aux agents",
-            "Ajoutez un compte de service 1Password ou une instance de plugin pour l’accorder ici.",
+            "Ajoutez une instance de plugin pour l’accorder ici.",
         )
     groups.forEach { (entry, connections) ->
-        val onePassword = entry.id == "onepassword"
         Panel {
             Text(
-                if (onePassword) "${entry.name} · comptes de service" else entry.name,
+                entry.name,
                 Modifier.semantics { heading() },
                 style = MaterialTheme.typography.titleMedium,
             )
             Note(
-                if (onePassword) "Lecture seule · aucun accès par défaut, Main compris"
-                else
-                    entry.manifest?.agentAccess?.description?.ifBlank { null }
-                        ?: "Outils, commandes et instructions apportés par chaque instance"
+                entry.agentAccessDescription.ifBlank {
+                    "Outils, commandes et instructions apportés par chaque instance"
+                }
             )
             connections.forEach { connection ->
                 val on = connection.id in granted
-                val failed = connection.status.state in setOf("error", "failed")
+                val failed = connection.status.state in setOf("error", "failed", "invalid")
                 Column {
                     SwitchRow(
                         connection.name,
                         when {
                             on && !connection.enabled ->
-                                "L’accès est conservé, mais l’agent ne peut rien utiliser tant que ${if (onePassword) "le compte" else "l’instance"} reste désactivé${if (onePassword) "" else "e"}."
-                            !connection.enabled ->
-                                "Non accordé · désactivé${if (onePassword) "" else "e"}"
+                                "L’accès est conservé, mais l’agent ne peut rien utiliser tant que l’instance reste désactivée."
+                            !connection.enabled -> "Non accordé · désactivée"
                             on -> "Accordé"
                             else -> "Non accordé"
                         },
@@ -1751,25 +1748,24 @@ private fun PluginsSection(
                             when {
                                 !connection.enabled ->
                                     PluginBadge(
-                                        if (onePassword) "Compte désactivé" else "Désactivée",
+                                        "Désactivée",
                                         PluginTone.WARNING,
                                     )
+                                connection.status.state == "needs_review" ->
+                                    PluginBadge("À vérifier", PluginTone.ATTENTION)
                                 failed -> PluginBadge("Test échoué", PluginTone.ATTENTION)
                                 else -> PluginBadge("Actif", PluginTone.OK)
                             }
                         )
                         Spacer(Modifier.weight(1f))
                         TextButton(onClick = { navigate("plugins/${segment(entry.id)}") }) {
-                            Text(if (onePassword) "Configurer le compte ↗" else "Configurer ↗")
+                            Text("Configurer ↗")
                         }
                     }
+                    connection.status.message?.takeIf { it.isNotBlank() }?.let { Note(it) }
                 }
             }
-            if (onePassword)
-                Note(
-                    "Avec un compte accordé, l’agent peut lister les coffres, les éléments et les noms de champs, puis lire une valeur avec cairn plugin onepassword read. Il ne peut ni créer, ni modifier, ni supprimer. Ce que le compte voit se règle dans 1Password : créez un autre compte de service pour d’autres droits. Retirer l’accès bloque immédiatement les lectures suivantes ; un secret déjà lu ne peut pas être rappelé."
-                )
-            else Note("Effectif immédiatement, y compris dans les conversations en cours.")
+            Note("Effectif immédiatement, y compris dans les conversations en cours.")
         }
     }
     unavailable.forEach { connection ->

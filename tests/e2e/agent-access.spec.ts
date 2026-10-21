@@ -689,6 +689,7 @@ test('a held plugin grant whose package cannot give agents access is shown, coun
     const agents = await response.json()
     await route.fulfill({ response, json: agents.map((item: { id: string }) => item.id === agent.id ? { ...item, plugins: ['queue'] } : item) })
   })
+  await page.route('**/api/plugins/packages', route => route.fulfill({ status: 404, json: { error: 'Older host has no compact directory' } }))
   await page.route('**/api/plugins', route => route.fulfill({
     json: {
       packages: [{
@@ -798,6 +799,7 @@ test('when plugins cannot be loaded, plugin access is read-only and no grant loo
     await route.fulfill({ response, json: agents.map((item: { id: string }) => item.id === agent.id ? { ...item, plugins: ['queue'] } : item) })
   })
   let catalogFails = true
+  await page.route('**/api/plugins/packages', route => route.fulfill({ status: 404, json: { error: 'Older host has no compact directory' } }))
   await page.route('**/api/plugins', route => catalogFails
     ? route.fulfill({ status: 500, json: { error: 'Plugin host unavailable' } })
     : route.fulfill({ json: { packages: [], capabilities: [], connections: [] } }))
@@ -1219,6 +1221,7 @@ test('on an older installation, grants read from resources appear once plugins l
     })
   })
   let pluginsFail = true
+  await page.route('**/api/plugins/packages', route => route.fulfill({ status: 404, json: { error: 'Older host has no compact directory' } }))
   await page.route('**/api/plugins', async (route) => {
     if (pluginsFail) {
       await route.fulfill({ status: 500, json: { error: 'Plugin host unavailable' } })

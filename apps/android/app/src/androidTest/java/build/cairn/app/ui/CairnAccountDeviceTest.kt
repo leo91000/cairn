@@ -23,6 +23,12 @@ class CairnAccountDeviceTest : CairnAccountCases() {
         switchingToASharedInstallationHidesManagementAndRestoresTheSelection()
 
     @Test
+    fun installationRoleSurvivesLateAccountDetails() =
+        switchingToASharedInstallationHidesManagementAndRestoresTheSelection(
+            deferAccountMethods = true
+        )
+
+    @Test
     fun revokedLastAccessExplainsTheAccountPage() =
         revokedLastInstallationShowsTheAccountPageAndExplainsTheChange()
 

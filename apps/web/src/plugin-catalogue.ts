@@ -21,6 +21,7 @@ export interface PluginPresentation {
   needsWorker: boolean
   delegates: boolean
   agentAccess: boolean
+  agentAccessDescription?: string | null
   contributions: {
     commands: number
     tools: number
@@ -29,6 +30,7 @@ export interface PluginPresentation {
     test: boolean
     form: boolean
     collections: number
+    operations?: number
   }
 }
 
@@ -52,6 +54,7 @@ export interface PluginCards extends PluginPage<PluginCardEntry> {
   packageReads: boolean
   instanceReads?: boolean
   accessReads?: boolean
+  agentReads?: boolean
   setupDrafts?: boolean
   capabilities: Catalog['capabilities']
 }

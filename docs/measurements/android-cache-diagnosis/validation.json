@@ -1,0 +1,21 @@
+{
+  "tests": 581,
+  "failures": 1,
+  "skipped": 3,
+  "failed": [
+    {
+      "file": "TEST-build.cairn.app.ui.NodePlacementTest.xml",
+      "message": "androidx.compose.ui.test.ComposeTimeoutException: Condition still not satisfied after 10000 ms",
+      "test": "dismissingTheConfigurationOfANewNativeNodeCancelsTheLastStep"
+    }
+  ],
+  "androidLint": "passed",
+  "spotless": "passed",
+  "lintFix": "passed",
+  "productSources": "unchanged",
+  "isolatedExistingFailureRerun": {
+    "suite": "<testsuite name=\"build.cairn.app.ui.NodePlacementTest\" tests=\"1\" skipped=\"0\" failures=\"0\" errors=\"0\" timestamp=\"2026-10-21T02:02:55.821Z\" hostname=\"leo-ms7d85\" time=\"4.436\">",
+    "result": "passed",
+    "interpretation": "Passed alone; the earlier full-suite timeout remains recorded and its cause is not established"
+  }
+}

@@ -1,6 +1,7 @@
 mod chat_files;
 mod chat_tools;
 pub mod code_mode;
+mod plugin_reads;
 
 use crate::{
     error::{Error, Result, required},
@@ -668,6 +669,11 @@ pub(crate) async fn invoke(
 ) -> Result<Value> {
     let authorize = crate::installation_mcp::management_authorization(bearer);
     match name {
+        "list_plugin_packages"
+        | "get_plugin_package"
+        | "list_plugin_instance_access"
+        | "list_plugin_agent_grant_counts"
+        | "list_plugin_resource_choices" => plugin_reads::invoke(s, name, args, bearer).await,
         "list_chat_artifacts"
         | "read_chat_artifact"
         | "set_chat_artifact_visibility"

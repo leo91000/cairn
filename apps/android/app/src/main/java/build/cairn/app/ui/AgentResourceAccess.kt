@@ -16,7 +16,7 @@ internal fun AgentResourceAccess(
     vm: CairnViewModel,
     state: Workspace,
     agentId: String,
-    catalog: PluginCatalog,
+    catalog: AgentPluginDirectory,
     changed: () -> Unit,
 ) =
     key(agentId) {
@@ -32,7 +32,7 @@ internal fun AgentResourceAccess(
         var instance by rememberForm("", agentId)
         var collection by rememberForm("", agentId)
         var selected by rememberForm("", agentId)
-        var resources by remember { mutableStateOf(emptyList<PluginResource>()) }
+        var resources by remember { mutableStateOf(emptyList<AgentResourceChoice>()) }
         var resourcesNext by remember { mutableStateOf<String?>(null) }
         var resourcesBusy by remember { mutableStateOf(false) }
         var resourceError by remember { mutableStateOf<String?>(null) }
@@ -44,23 +44,49 @@ internal fun AgentResourceAccess(
         val candidates =
             catalog.connections.filter { connection ->
                 catalog.packages.any {
-                    it.id == connection.pluginId &&
-                        it.active != null &&
-                        it.manifest?.operations?.isNotEmpty() == true
+                    it.id == connection.pluginId && it.active != null && it.operations > 0
                 }
             }
         val instanceNameCounts = candidates.groupingBy { it.name }.eachCount()
         val instanceGroupCounts = candidates.groupingBy { it.pluginId to it.name }.eachCount()
         val packagesById = catalog.packages.associateBy { it.id }
         val connection = candidates.find { it.id == instance }
-        val manifest = catalog.packages.find { it.id == connection?.pluginId }?.manifest
+        val selectedPackage = packagesById[connection?.pluginId]
+        val legacySchema = catalog.legacyPackages != null
+        // A changed target cannot render the previous target's schema even before
+        // its asynchronous effect starts. Count-only refreshes preserve the editor.
+        var manifest by
+            remember(instance, selectedPackage, legacySchema) {
+                mutableStateOf<PluginManifest?>(null)
+            }
+        var schemaError by
+            remember(instance, selectedPackage, legacySchema) { mutableStateOf<String?>(null) }
+        var schemaBusy by
+            remember(instance, selectedPackage, legacySchema) { mutableStateOf(false) }
+        var schemaAttempt by
+            remember(instance, selectedPackage, legacySchema) { mutableIntStateOf(0) }
+        LaunchedEffect(instance, selectedPackage, legacySchema, schemaAttempt) {
+            manifest = null
+            collection = ""
+            schemaError = null
+            schemaBusy = connection != null
+            val plugin = connection?.pluginId ?: return@LaunchedEffect
+            try {
+                manifest = vm.api.agentPluginManifest(catalog, plugin)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                schemaError = e.message
+            } finally {
+                schemaBusy = false
+            }
+        }
         val collections =
             manifest?.resources.orEmpty().filter { item ->
                 manifest?.operations.orEmpty().any { it.collection == item.name }
             }
         val resourcePath =
             connection
-                ?.takeIf { collection.isNotBlank() }
+                ?.takeIf { collection.isNotBlank() && manifest != null }
                 ?.let {
                     "/plugins/${segment(it.pluginId)}/connections/${segment(it.id)}/resources/${segment(collection)}"
                 }
@@ -112,7 +138,11 @@ internal fun AgentResourceAccess(
             resourceError = null
             resourceRequest = scope.launch {
                 try {
-                    val page = vm.api.get<PluginPage<PluginResource>>(target + cursor)
+                    val listPath =
+                        if (catalog.legacyPackages == null)
+                            target.replace("/resources/", "/resource-choices/")
+                        else target
+                    val page = vm.api.get<PluginPage<AgentResourceChoice>>(listPath + cursor)
                     if (resourceGeneration == current) {
                         resources =
                             if (more)
@@ -245,7 +275,17 @@ internal fun AgentResourceAccess(
                     selected = ""
                 }
             }
-            if (instance.isNotBlank())
+            schemaError?.let {
+                Text(it, color = MaterialTheme.colorScheme.error)
+                SignalButton(
+                    "Réessayer le schéma des droits",
+                    enabled = !schemaBusy && !writing && !editorActive,
+                ) {
+                    schemaAttempt++
+                }
+            }
+            if (schemaBusy) LinearProgressIndicator(Modifier.fillMaxWidth())
+            if (manifest != null)
                 Choice(
                     "Collection de ressources",
                     collection,

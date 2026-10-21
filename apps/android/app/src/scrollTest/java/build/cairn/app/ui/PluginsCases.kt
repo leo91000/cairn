@@ -5892,12 +5892,21 @@ abstract class PluginsCases {
                 )
             }
         val writes = CopyOnWriteArrayList<JsonObject>()
+        val reads = CopyOnWriteArrayList<String>()
         val root =
             "/api/installations/fixture/api/plugins/scoped-rights/connections/app/resources/workspace"
         val directory = "/api/installations/fixture/api/agents/helper/plugin-resource-grants"
         MockWebServer().use { server ->
             server.dispatcher =
-                dispatcher(includeGet = true) { path, body ->
+                dispatcher(
+                    includeGet = true,
+                    read = { path ->
+                        reads += path
+                        if (path == "/api/installations/fixture/api/plugins/packages/scoped-rights")
+                            wireJson.encodeToString(entry.configuration())
+                        else null
+                    },
+                ) { path, body ->
                     when (path.substringBefore('?')) {
                         directory -> buildJsonObject {
                                 put(
@@ -5924,7 +5933,7 @@ abstract class PluginsCases {
                             rules.clear()
                             "{}"
                         }
-                        root ->
+                        root.replace("/resources/", "/resource-choices/") ->
                             """{"items":[{"id":"team","name":"Engineering","collection":"workspace"}]}"""
                         "$root/team/grants" -> {
                             if (body.isNotBlank()) {
@@ -5944,10 +5953,34 @@ abstract class PluginsCases {
                         else -> null
                     }
                 }
+            val delegate = server.dispatcher
+            val rejectSchema = java.util.concurrent.atomic.AtomicBoolean(true)
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        if (
+                            request.path ==
+                                "/api/installations/fixture/api/plugins/packages/scoped-rights" &&
+                                rejectSchema.getAndSet(false)
+                        ) {
+                            reads += request.path.orEmpty()
+                            return MockResponse()
+                                .setResponseCode(503)
+                                .setBody("""{"error":"Schema temporarily unavailable"}""")
+                        }
+                        return delegate.dispatch(request)
+                    }
+                }
             server.start()
             show(server) { vm, state ->
                 Column(Modifier.verticalScroll(rememberScrollState())) {
-                    AgentResourceAccess(vm, state, "helper", scoped, changed = {})
+                    AgentResourceAccess(
+                        vm,
+                        state,
+                        "helper",
+                        scoped.agentDirectory().copy(legacyPackages = null),
+                        changed = {},
+                    )
                 }
             }
             compose.waitUntil(15000) {
@@ -5969,6 +6002,23 @@ abstract class PluginsCases {
             compose
                 .onNodeWithText("Application · app · scoped-rights (Resource service)")
                 .performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Réessayer le schéma des droits")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Collection de ressources").assertDoesNotExist()
+            compose
+                .onNodeWithText("Réessayer le schéma des droits")
+                .performScrollTo()
+                .performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Collection de ressources")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
             compose.onAllNodesWithText("Choisir…").onFirst().performScrollTo().performClick()
             compose.onNodeWithText("Workspaces").performClick()
             compose.waitUntil(10000) {
@@ -5998,6 +6048,11 @@ abstract class PluginsCases {
                 },
             )
             assertTrue(scoped.connections.all { it.agentIds.isEmpty() })
+            assertTrue(
+                reads.contains("/api/installations/fixture/api/plugins/packages/scoped-rights")
+            )
+            assertTrue(reads.none { it.endsWith("/plugins/packages/other-rights") })
+            assertTrue(reads.any { it.contains("/resource-choices/workspace") })
             capture("agent-resource-permissions")
         }
     }

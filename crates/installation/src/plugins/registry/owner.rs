@@ -23,6 +23,18 @@ struct Entry {
     versions: Vec<Value>,
 }
 
+/// Decode one URL component, then retain the registry's package/version boundary.
+/// MCP callers already supply literal IDs and do not use this HTTP adapter.
+pub(crate) fn path_segment(encoded: &str) -> Result<String> {
+    let decoded = percent_encoding::percent_decode_str(encoded)
+        .decode_utf8()
+        .map_err(|_| Error::not_found("Plugin package or version not found."))?;
+    if !segment(&decoded) {
+        return Err(Error::not_found("Plugin package or version not found."));
+    }
+    Ok(decoded.into_owned())
+}
+
 impl Entry {
     fn detail(&self) -> Value {
         json!({
@@ -48,6 +60,7 @@ impl Entry {
                 "needsWorker": manifest.needs_worker(),
                 "delegates": manifest.permits_capability("conversations.submit") && !resource_delegation,
                 "agentAccess": manifest.agent_access.is_some(),
+                "agentAccessDescription": manifest.agent_access.as_ref().map(|access| &access.description),
                 "contributions": {
                     "commands": manifest.commands.len(),
                     "tools": manifest.tools.len(),
@@ -56,6 +69,7 @@ impl Entry {
                     "test": manifest.instance_test,
                     "form": manifest.instance_form,
                     "collections": manifest.resources.len(),
+                    "operations": manifest.operations.len(),
                 },
             })
         });
@@ -197,6 +211,7 @@ pub async fn list(s: &Service, after: Option<&str>) -> Result<Value> {
         "packageReads": true,
         "instanceReads": true,
         "accessReads": true,
+        "agentReads": true,
         "setupDrafts": true,
         "capabilities": capability_descriptions(),
     });

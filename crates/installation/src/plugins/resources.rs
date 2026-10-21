@@ -430,6 +430,39 @@ pub async fn list(
     list_for(s, target, collection, cursor).await
 }
 
+/// A chosen collection's selector does not receive configuration or credential
+/// field names. SQL applies the instance, collection and cursor before decoding.
+pub async fn choices(
+    s: &Service,
+    plugin: &str,
+    instance: &str,
+    collection: &str,
+    cursor: Option<&str>,
+) -> Result<Value> {
+    if let Some(cursor) = cursor {
+        uuid(cursor)?;
+    }
+    let target = Target::active(s, plugin, instance).await?;
+    declared(target.manifest(), collection)?;
+    let collection = collection.to_owned();
+    let cursor = cursor.unwrap_or("").to_owned();
+    s.store.read(move |db| {
+        let transaction = rusqlite::Transaction::new_unchecked(db.0, rusqlite::TransactionBehavior::Deferred)?;
+        let db = &Db(&transaction);
+        target.current(db)?;
+        let rows = db.json_rows(
+            "SELECT json_object('id',id,'name',json_extract(data,'$.name'),
+                'connectionId',json_extract(data,'$.connectionId'),
+                'collection',json_extract(data,'$.collection'),'parentId',json_extract(data,'$.parentId'),
+                'enabled',json(CASE WHEN json_extract(data,'$.enabled')=1 THEN 'true' ELSE 'false' END))
+             FROM records WHERE kind='plugin-resources' AND json_extract(data,'$.connectionId')=?1
+             AND json_extract(data,'$.collection')=?2 AND id>?3 ORDER BY id LIMIT ?4",
+            rusqlite::params![target.instance(), collection, cursor, (super::paging::MAX_ITEMS + 1) as i64],
+        )?;
+        super::paging::ordered_page(rows, "id", super::paging::MAX_ITEMS, super::paging::MAX_BYTES)
+    }).await
+}
+
 async fn list_for(
     s: &Service,
     target: Arc<Target>,

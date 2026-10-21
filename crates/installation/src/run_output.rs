@@ -47,7 +47,7 @@ static CREDENTIAL: LazyLock<regex::Regex> = LazyLock::new(|| {
 
 // Codex and Claude Code subscription limits. Claude Code reports them as the turn's result.
 static EXHAUSTED: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"(?i)^(?:you['’]ve hit your (?:usage |session |weekly )?limit|you have hit your (?:usage )?limit|usage limit (?:has been )?(?:reached|exceeded)|claude ai usage limit reached|(?:5-hour|session|weekly|opus) limit reached)\b").unwrap()
+    regex::Regex::new(r"(?i)^(?:you['’]ve hit your (?:usage |session |weekly |(?:individual )?spend )?limit|you have hit your (?:usage )?limit|usage limit (?:has been )?(?:reached|exceeded)|claude ai usage limit reached|(?:5-hour|session|weekly|opus) limit reached)\b").unwrap()
 });
 
 pub fn redact(text: &str, secrets: &[String]) -> String {
@@ -349,7 +349,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             unopened repositories are not on disk):\n{}\n\n{tooling}\n\nSelected skills (read a skill's SKILL.md before using it; its \
             scripts and references sit beside it):\n{skills}\n\n{plugins}\n\nRun this task to completion within \
             its stated scope. Preserve unrelated files. Do not expose credentials. \
-            {interaction}\n{deliverables}\n{waiting} All task-authorized effects such as creating \
+            {interaction}\n{deliverables}{requested}\n{waiting} All task-authorized effects such as creating \
             PRs or releasing must follow their checks. Use .agents/skills for skills. \
             Summarize actual changes, validation, external links and remaining blockers \
             at the end.",
@@ -359,6 +359,13 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             "No projects assigned; use the task workspace."
         } else {
             &projects
+        },
+        requested = if run["requestedBy"].is_object() && run["isolated"] == true {
+            " Another agent's work started this run. When the steps left belong to that work, \
+                for example because it asked you to stop before them, report the outcome with \
+                waitingOn requester so it goes back to that work rather than to the user."
+        } else {
+            ""
         },
         waiting = if chat && run["isolated"] == true {
             crate::chats::sleep::INSTRUCTIONS
@@ -504,6 +511,9 @@ mod tests {
     fn subscription_limits_of_both_coding_agents_are_exhaustion() {
         for message in [
             "You've hit your usage limit. Upgrade or try again later.",
+            "You've hit your individual spend limit · run /usage-credits to ask your admin for a higher limit · your weekly limit resets 3pm (UTC)",
+            "You’ve hit your individual spend limit",
+            "You've hit your spend limit",
             "Usage limit reached for this plan",
             "Claude AI usage limit reached|1790000000",
             "You've hit your limit · resets 3pm (Europe/Paris)",

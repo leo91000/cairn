@@ -6,6 +6,7 @@ import {
   expect,
   expectSingleScroll,
   test,
+  useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
 
@@ -212,4 +213,137 @@ test('phones use the floating dock and read conversations full screen', async ({
   await page.getByRole('link', { name: 'Back to the Fil' }).click()
   await expect(page).toHaveURL(workspacePath('/'))
   await expect(dock).toBeVisible()
+  // Free the runner for the next journey in this worker.
+  await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
+})
+
+// Blocked missions: one waits on the user, one on the conversation that started it, one on an
+// outside check, and one needs input that can only be snoozed.
+async function blockedMission(workspace: Workspace, agentId: string, name: string, outcome: Record<string, unknown>, requestedBy?: Record<string, unknown>) {
+  const task = workspace.service.task({
+    name,
+    prompt: 'Prove it on a device.',
+    agentId,
+    projectId: null,
+    skills: null,
+    worktree: false,
+    enabled: false,
+    cron: null,
+  })
+  const run = await workspace.service.enqueue(task.id)
+  await expect.poll(() => workspace.service.store.run(run.id)?.status, { timeout: 30000 }).toBe('succeeded')
+  workspace.service.store.updateRun(run.id, {
+    outcome: { evidence: ['RetryNoticeDeviceTest 2/2 on API 36 AOSP'], reportedAt: Date.now(), ...outcome },
+    ...(requestedBy ? { requestedBy } : {}),
+  } as any)
+  return { task, run }
+}
+
+test('blocked missions ask only when they wait on the user, and can be set aside', async ({ page, workspace }, testInfo) => {
+  test.setTimeout(180000)
+  await useRelayForHttpMocks(page)
+  const { id: agent } = workspace.service.agent({ name: 'Claude' })
+  const parent = await workspace.api('/api/chats', 'POST', {})
+  workspace.service.store.put('chats', { ...parent, title: 'Orchestrate the F8 architecture work' })
+  const proof = await blockedMission(workspace, agent, 'F8 · device proof c9f939e5', {
+    status: 'blocked',
+    reason: 'The device proof passed; delivery waits for the CI run and the merge.',
+  })
+  const scope = await blockedMission(workspace, agent, 'Release notes for 0.53', {
+    status: 'needs_input',
+    reason: 'Choose whether the notes cover the Android release.',
+  })
+  const handedBack = await blockedMission(workspace, agent, 'F8 · PR315 checks', {
+    status: 'blocked',
+    reason: 'The parent merges once CI is green, as it asked.',
+    waitingOn: 'requester',
+  }, { runId: randomUUID(), chatId: parent.id })
+  const external = await blockedMission(workspace, agent, 'Nightly staging deploy', {
+    status: 'blocked',
+    reason: 'The staging deploy waits for the cloud provider to finish its maintenance.',
+    waitingOn: 'external',
+  })
+  await page.emulateMedia({ colorScheme: 'dark', reducedMotion: 'reduce' })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await signIn(page)
+
+  const forYou = page.getByRole('region', { name: 'For you', exact: true })
+  const recent = page.getByRole('region', { name: 'Recent', exact: true })
+  const card = (task: { id: string }) => forYou.locator(`[data-fil-key="task:${task.id}"]`)
+  await expect(card(proof.task)).toContainText('Blocked · The device proof passed')
+  await expect(card(proof.task).getByRole('button', { name: `Dismiss “${proof.task.name}”` })).toBeVisible()
+  // Input the agent asked for can only be snoozed.
+  await expect(card(scope.task)).toBeVisible()
+  await expect(card(scope.task).getByRole('button', { name: /^Dismiss/ })).toHaveCount(0)
+  // What waits on the conversation that started it, or on an outside check, never asks the user.
+  await expect(forYou.locator(`[data-fil-key="task:${handedBack.task.id}"], [data-fil-key="task:${external.task.id}"]`)).toHaveCount(0)
+  await expect(recent.locator(`[data-fil-key="task:${handedBack.task.id}"]`)).toContainText('Waiting on Orchestrate the F8 architecture work')
+  await expect(recent.locator(`[data-fil-key="task:${external.task.id}"]`)).toContainText('Waiting on an outside check')
+  await capture(page, testInfo, 'blocked-fil-for-you')
+
+  // A refused write must roll back even when the following activity read is unavailable.
+  const dismissalsRoute = '**/api/dismissals'
+  const activityRoute = '**/api/tasks/activity'
+  await page.route(dismissalsRoute, route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Dismissal unavailable' }) }))
+  await page.route(activityRoute, route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Activity unavailable' }) }))
+  const refusedDismissal = page.waitForResponse(response => response.url().endsWith('/api/dismissals') && response.status() === 503)
+  await card(proof.task).getByRole('button', { name: `Dismiss “${proof.task.name}”` }).click()
+  await refusedDismissal
+  await expect(card(proof.task)).toBeVisible()
+  await page.unroute(dismissalsRoute)
+  await page.unroute(activityRoute)
+
+  await card(scope.task).getByRole('button', { name: `More actions for “${scope.task.name}”` }).click()
+  const menu = page.getByRole('menu')
+  await expect(menu.getByRole('menuitem')).toHaveText(['Remind me tomorrow', 'Run again', 'Archive mission'])
+  await capture(page, testInfo, 'blocked-fil-menu')
+  await menu.getByRole('menuitem', { name: 'Remind me tomorrow' }).click()
+  const waiting = page.getByRole('region', { name: 'Waiting', exact: true })
+  await expect(waiting.locator(`[data-fil-key="task:${scope.task.id}"]`)).toContainText('Snoozed')
+
+  // The run page says what the account can do, under the outcome itself.
+  await card(proof.task).getByRole('button', { name: `Open “${proof.task.name}”` }).click()
+  const actions = page.getByTestId('mission-outcome-actions')
+  await expect(actions.getByRole('button', { name: 'Remind me tomorrow' })).toBeVisible()
+  await capture(page, testInfo, 'blocked-run-actions')
+
+  await actions.getByRole('button', { name: 'Dismiss' }).click()
+  await expect(forYou.locator(`[data-fil-key="task:${proof.task.id}"]`)).toHaveCount(0)
+  await expect(recent.locator(`[data-fil-key="task:${proof.task.id}"]`)).toContainText('Dismissed')
+  await expect(actions).toContainText('Dismissed: it stays out of For you until the mission reports again.')
+  await capture(page, testInfo, 'blocked-run-dismissed')
+
+  // Set aside for this account, on every device: it stays so after a reload.
+  await page.reload()
+  await expect(recent.locator(`[data-fil-key="task:${proof.task.id}"]`)).toContainText('Dismissed')
+  await expect(waiting.locator(`[data-fil-key="task:${scope.task.id}"]`)).toContainText('Snoozed')
+
+  await recent.locator(`[data-fil-key="task:${handedBack.task.id}"]`).click()
+  await expect(actions).toContainText('Waiting on Orchestrate the F8 architecture work, which started this mission.')
+  await capture(page, testInfo, 'blocked-run-waiting-on-requester')
+  await actions.getByRole('link', { name: 'Orchestrate the F8 architecture work' }).click()
+  await expect(page).toHaveURL(/\/chats\//)
+
+  // The Fil once both have been set aside.
+  await page.goto(workspacePath('/'))
+  await expect(waiting.locator(`[data-fil-key="task:${scope.task.id}"]`)).toBeVisible()
+  await capture(page, testInfo, 'blocked-fil-set-aside')
+
+  await waiting.locator(`[data-fil-key="task:${scope.task.id}"]`).click()
+  await actions.getByRole('button', { name: 'Back to For you' }).click()
+  await expect(card(scope.task)).toBeVisible()
+
+  // The keyboard dismisses a blocked mission as it reads finished work.
+  await page.goto(workspacePath(`/fil/runs/${proof.run.id}`))
+  await actions.getByRole('button', { name: 'Back to For you' }).click()
+  await expect(card(proof.task)).toBeVisible()
+  await page.goto(workspacePath('/'))
+  await expect(card(proof.task)).toBeVisible()
+  // K climbs to the top of the Fil; what needs an answer comes newest first, then the device proof.
+  for (let step = 0; step < 6; step++)
+    await page.keyboard.press('k')
+  await page.keyboard.press('j')
+  await expect(forYou.locator('article.border-accent')).toContainText(proof.task.name)
+  await page.keyboard.press('e')
+  await expect(recent.locator(`[data-fil-key="task:${proof.task.id}"]`)).toContainText('Dismissed')
 })

@@ -1235,6 +1235,7 @@ dependencies = [
  "libublk",
  "lru",
  "md-5 0.11.0",
+ "percent-encoding",
  "rand 0.9.5",
  "regex",
  "reqwest",

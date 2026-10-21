@@ -3144,6 +3144,19 @@ for (const prepared of [false, true]) {
 
 test('agent pages show scoped resource rights independently from instance grants', async ({ page, workspace }) => {
   test.setTimeout(90000)
+  await useRelayForHttpMocks(page)
+  const reads: string[] = []
+  let schemaReads = 0
+  await page.route('**/api/plugins/packages/agent-resource-access', async (route) => {
+    if (schemaReads++ === 0)
+      await route.fulfill({ status: 503, json: { error: 'Schema temporarily unavailable' } })
+    else
+      await route.continue()
+  })
+  page.on('request', (request) => {
+    if (request.method() === 'GET')
+      reads.push(new URL(request.url()).pathname)
+  })
   const { agent, path, instance } = await resourceAccessFixture(workspace, 'agent-resource-access')
   await resourceAccessFixture(workspace, 'agent-resource-access-other')
   await workspace.api('/api/plugins/agent-resource-access/connections', 'POST', { name: 'Application', enabled: true })
@@ -3159,9 +3172,17 @@ test('agent pages show scoped resource rights independently from instance grants
   await access.getByRole('button', { name: 'Confirm revoke', exact: true }).click()
   await expect(access.getByText('No saved resource access rules.', { exact: true })).toBeVisible()
   expect((await workspace.api(path)).items).toEqual([])
+  expect(reads.some(path => path.endsWith('/api/plugins'))).toBe(false)
+  expect(reads.some(path => path.endsWith('/api/plugins/packages/agent-resource-access'))).toBe(false)
   await selectField(access, 'Resource app instance', `Application · ${instance.id} · agent-resource-access (Resource access)`)
+  await expect(access.getByRole('button', { name: 'Retry permission schema', exact: true })).toBeVisible()
+  await expect(access.getByRole('combobox', { name: 'Resource collection', exact: true })).toHaveCount(0)
+  await access.getByRole('button', { name: 'Retry permission schema', exact: true }).click()
   await selectField(access, 'Resource collection', 'Workspaces')
   await selectField(access, 'Resource for agent access', 'Engineering')
+  expect(reads.some(path => path.endsWith('/api/plugins/packages/agent-resource-access'))).toBe(true)
+  expect(reads.some(path => path.endsWith('/api/plugins/packages/agent-resource-access-other'))).toBe(false)
+  expect(reads.some(path => path.includes('/resource-choices/workspace'))).toBe(true)
   await access.getByRole('button', { name: 'Agent access', exact: true }).click()
   const editor = page.getByRole('dialog', { name: 'Agent access · Engineering', exact: true })
   await editor.getByRole('button', { name: 'Add access rule', exact: true }).click()

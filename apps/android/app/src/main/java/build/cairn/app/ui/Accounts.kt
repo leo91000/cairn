@@ -84,6 +84,7 @@ internal fun resetsIn(
 
 /** "5 heures", "Semaine" or a model window such as "Semaine · Opus". */
 internal fun windowLabel(window: AccountWindow): String {
+    if (window.label == "Monthly") return "Mois"
     val minutes = window.durationMins
     if (window.models.isEmpty() && minutes != null)
         when {
@@ -187,7 +188,8 @@ internal fun AccountRow(account: Account, open: () -> Unit) {
         when {
             account.state != "ready" -> null
             account.usage?.error != null -> "Usage indisponible"
-            account.modelProvider != null -> "Usage non consulté"
+            account.modelProvider != null && account.modelProvider != "opencode-go" ->
+                "Usage non consulté"
             windows.isEmpty() -> "Usage pas encore connu"
             else -> null
         }
@@ -587,6 +589,13 @@ internal fun AccountSheet(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
 
+            if (account.usage?.useBalance == true)
+                Text(
+                    "L’option Use balance est activée dans OpenCode. Les requêtes peuvent utiliser des crédits Zen payants une fois les limites Go atteintes.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
             Eyebrow("En cours · ${account.activeRunIds.size} sur ${account.maxConcurrentRuns}")
             if (account.activeRunIds.isEmpty())
                 Text(
@@ -932,7 +941,10 @@ internal fun AccountSignInSheet(
                             modifier = Modifier.fillMaxWidth(),
                         )
                         Text(
-                            "La clé est chiffrée sur votre installation. L’usage de ces clés n’est pas consulté ici.",
+                            if (modelProvider == "opencode-go")
+                                "La clé est chiffrée sur votre installation. L’usage OpenCode Go est vérifié automatiquement."
+                            else
+                                "La clé est chiffrée sur votre installation. L’usage de ces clés n’est pas consulté ici.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

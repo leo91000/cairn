@@ -18,6 +18,7 @@ data class PluginPresentation(
     val delegates: Boolean,
     val agentAccess: Boolean,
     val contributions: PluginContributionCounts,
+    val agentAccessDescription: String? = null,
 )
 
 @Serializable
@@ -29,6 +30,7 @@ data class PluginContributionCounts(
     val test: Boolean,
     val form: Boolean,
     val collections: Int,
+    val operations: Int? = null,
 )
 
 @Serializable
@@ -101,6 +103,7 @@ data class PluginCardEntry(
 @Serializable
 data class PluginCards(
     val packageReads: Boolean = false,
+    val agentReads: Boolean = false,
     val instanceReads: Boolean = false,
     val accessReads: Boolean = false,
     val setupDrafts: Boolean = false,
@@ -159,7 +162,7 @@ private fun PluginCatalog.cards() =
             },
     )
 
-private suspend fun CairnApi.completePluginCatalogue(): PluginCatalog {
+internal suspend fun CairnApi.completePluginCatalogue(): PluginCatalog {
     val value = get<JsonObject>("/plugins")
     check(listOf("packages", "connections", "capabilities").all { value[it] is JsonArray }) {
         "Le catalogue de plugins est incomplet. Actualisez-le."

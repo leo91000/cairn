@@ -1,6 +1,7 @@
 <script setup lang="ts">
+import type { AgentPluginDirectory } from '../agent-plugin-directory'
 import type {
-  Catalog,
+  Manifest,
   PluginPage,
   PluginResource,
   PluginResourceGrant,
@@ -11,6 +12,7 @@ import {
   ref,
   watch,
 } from 'vue'
+import { agentPluginManifest } from '../agent-plugin-directory'
 import { api } from '../api'
 import PluginResourceGrants from './PluginResourceGrants.vue'
 import UiAlert from './UiAlert.vue'
@@ -25,7 +27,7 @@ interface Rule extends PluginResourceGrant {
   resourceName: string | null
 }
 
-const props = defineProps<{ agentId: string, catalog: Catalog }>()
+const props = defineProps<{ agentId: string, catalog: AgentPluginDirectory }>()
 const emit = defineEmits<{ changed: [] }>()
 const rows = ref<Rule[]>([])
 const next = ref<string | null>()
@@ -41,17 +43,17 @@ let reader: AbortController | undefined
 const instance = ref('')
 const collection = ref('')
 const selected = ref('')
-const resources = ref<PluginResource[]>([])
+const resources = ref<Pick<PluginResource, 'id' | 'name'>[]>([])
 const resourcesNext = ref<string | null>()
 const resourcesBusy = ref(false)
 const resourceError = ref('')
 let resourceGeneration = 0
 let resourceReader: AbortController | undefined
-const candidates = computed(() => props.catalog.connections.filter(connection => props.catalog.packages.some(entry => entry.id === connection.pluginId && entry.active && entry.manifest?.operations?.length)))
+const candidates = computed(() => props.catalog.connections.filter(connection => props.catalog.packages.some(entry => entry.id === connection.pluginId && entry.active && entry.operations)))
 const instanceOptions = computed(() => {
   const names = new Map<string, number>()
   const groups = new Map<string, number>()
-  const packages = new Map(props.catalog.packages.map(entry => [entry.id, entry.manifest?.name ?? entry.id]))
+  const packages = new Map(props.catalog.packages.map(entry => [entry.id, entry.name]))
   for (const item of candidates.value) {
     names.set(item.name, (names.get(item.name) ?? 0) + 1)
     const key = JSON.stringify([item.pluginId, item.name])
@@ -70,7 +72,12 @@ const instanceOptions = computed(() => {
   })
 })
 const connection = computed(() => candidates.value.find(item => item.id === instance.value))
-const manifest = computed(() => props.catalog.packages.find(entry => entry.id === connection.value?.pluginId)?.manifest)
+const manifest = ref<Manifest>()
+const schemaBusy = ref(false)
+const schemaAttempt = ref(0)
+const schemaError = ref('')
+let schemaReader: AbortController | undefined
+let schemaGeneration = 0
 const collections = computed(() => manifest.value?.resources?.filter(item => manifest.value?.operations?.some(operation => operation.collection === item.name)) ?? [])
 const operations = computed(() => manifest.value?.operations?.filter(operation => operation.collection === collection.value) ?? [])
 const resourcePath = computed(() => connection.value && collection.value ? `/plugins/${encodeURIComponent(connection.value.pluginId)}/connections/${encodeURIComponent(connection.value.id)}/resources/${encodeURIComponent(collection.value)}` : '')
@@ -117,7 +124,8 @@ async function pageResources(more = false) {
   resourceError.value = ''
   try {
     const cursor = more ? `?cursor=${encodeURIComponent(resourcesNext.value!)}` : ''
-    const result = await api<PluginPage<PluginResource>>(`${resourcePath.value}${cursor}`, { signal: controller.signal })
+    const listPath = props.catalog.legacyPackages ? resourcePath.value : resourcePath.value.replace('/resources/', '/resource-choices/')
+    const result = await api<PluginPage<Pick<PluginResource, 'id' | 'name'>>>(`${listPath}${cursor}`, { signal: controller.signal })
     if (ask !== resourceGeneration)
       return
     resources.value = more ? [...resources.value.filter(row => !result.items.some(item => item.id === row.id)), ...result.items] : result.items
@@ -159,8 +167,34 @@ watch(() => props.agentId, () => {
   rows.value = []
   void load()
 }, { immediate: true })
-watch(instance, () => {
+watch([instance, schemaAttempt, () => {
+  const entry = props.catalog.packages.find(item => item.id === connection.value?.pluginId)
+  return JSON.stringify([entry?.id, entry?.active, entry?.status, Boolean(props.catalog.legacyPackages)])
+}], async () => {
+  const current = ++schemaGeneration
+  schemaReader?.abort()
+  manifest.value = undefined
   collection.value = ''
+  schemaError.value = ''
+  const id = connection.value?.pluginId
+  schemaBusy.value = Boolean(id)
+  if (!id)
+    return
+  const controller = new AbortController()
+  schemaReader = controller
+  try {
+    const value = await agentPluginManifest(props.catalog, id, controller.signal)
+    if (current === schemaGeneration)
+      manifest.value = value
+  }
+  catch (error) {
+    if (current === schemaGeneration)
+      schemaError.value = (error as Error).message
+  }
+  finally {
+    if (current === schemaGeneration)
+      schemaBusy.value = false
+  }
 })
 watch(resourcePath, () => {
   resourceGeneration++
@@ -177,6 +211,8 @@ onBeforeUnmount(() => {
   resourceGeneration++
   reader?.abort()
   resourceReader?.abort()
+  schemaGeneration++
+  schemaReader?.abort()
 })
 </script>
 
@@ -243,8 +279,22 @@ onBeforeUnmount(() => {
       :options="instanceOptions"
       :disabled="busy || writing || editorActive"
     />
+    <UiAlert v-if="schemaError">
+      {{ schemaError }}
+    </UiAlert>
+    <UiButton
+      v-if="schemaError"
+      size="small"
+      :disabled="schemaBusy || writing || editorActive"
+      @click="schemaAttempt++"
+    >
+      Retry permission schema
+    </UiButton>
+    <p v-if="schemaBusy" class="text-xs text-muted">
+      Loading permission schema…
+    </p>
     <VirtualSelect
-      v-if="instance"
+      v-if="manifest"
       v-model="collection"
       label="Resource collection"
       :options="collections.map(item => ({ value: item.name, label: item.title }))"

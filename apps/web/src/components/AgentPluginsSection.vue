@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { PluginConnection, PluginEntry } from '../plugins'
+import type { AgentPluginInstance, AgentPluginPackage } from '../agent-plugin-directory'
 import { computed, ref } from 'vue'
 import { grantablePackages, instanceState } from '../agent-access'
 import {
@@ -17,8 +17,8 @@ import UiSwitch from './UiSwitch.vue'
 // delegations (e.g. a Discord bot) that answer as this agent, which are set on the instance.
 const props = defineProps<{
   agentId: string | null
-  packages: PluginEntry[]
-  connections: PluginConnection[]
+  packages: AgentPluginPackage[]
+  connections: AgentPluginInstance[]
   // Delegations currently stopped until their new access is reapproved.
   suspended: string[]
   // Why grants cannot be changed here, e.g. on an older installation.
@@ -36,7 +36,7 @@ const groups = computed(() => {
     .map(entry => ({
       entry,
       instances: instances.value.filter(connection => connection.pluginId === entry.id
-        && (!words || `${connection.name} ${entry.manifest?.name}`.toLowerCase().includes(words))),
+        && (!words || `${connection.name} ${entry.name}`.toLowerCase().includes(words))),
     }))
     .filter(group => group.instances.length || !words)
 })
@@ -46,7 +46,7 @@ const missing = computed(() => plugins.value.filter(id => !props.connections.som
 const unusable = computed(() => props.connections.filter(connection => plugins.value.includes(connection.id) && !grantable.value.some(entry => entry.id === connection.pluginId)))
 
 function packageName(pluginId: string) {
-  return props.packages.find(entry => entry.id === pluginId)?.manifest?.name ?? pluginId
+  return props.packages.find(entry => entry.id === pluginId)?.name ?? pluginId
 }
 
 function set(id: string, on: boolean) {
@@ -71,14 +71,14 @@ function set(id: string, on: boolean) {
       v-for="{ entry, instances: rows } in groups"
       :key="entry.id"
       class="min-w-0 overflow-hidden rounded-xl border border-line bg-surface"
-      :aria-label="entry.id === 'onepassword' ? '1Password · service accounts' : entry.manifest?.name"
+      :aria-label="entry.name"
     >
       <header class="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-line px-5 py-3.5 phone:px-4">
         <h3 class="text-sm! font-semibold">
-          {{ entry.id === 'onepassword' ? '1Password · service accounts' : entry.manifest?.name }}
+          {{ entry.name }}
         </h3>
         <p class="text-2xs text-muted">
-          {{ entry.id === 'onepassword' ? 'Read-only · no access by default, including Main' : 'Commands, tools and instructions from each instance' }}
+          {{ 'Commands, tools and instructions from each instance' }}
         </p>
       </header>
       <ul v-if="rows.length" class="divide-y divide-line">
@@ -107,22 +107,17 @@ function set(id: string, on: boolean) {
             </p>
           </div>
           <RouterLink :to="`/plugins/${connection.pluginId}`" class="inline-flex min-h-11 items-center gap-1 text-xs font-medium text-accent hover:underline phone:ml-auto">
-            {{ entry.id === 'onepassword' ? 'Configure account' : 'Configure' }}<Icon :name="ArrowUpRight" :size="13" />
+            {{ 'Configure' }}<Icon :name="ArrowUpRight" :size="13" />
           </RouterLink>
         </li>
       </ul>
       <p v-else class="px-5 py-4 text-sm text-muted phone:px-4">
-        No {{ entry.manifest?.instances?.plural.toLowerCase() ?? 'instances' }} yet. <RouterLink :to="`/plugins/${entry.id}`" class="text-accent hover:underline">
+        No {{ entry.instances?.plural.toLowerCase() ?? 'instances' }} yet. <RouterLink :to="`/plugins/${entry.id}`" class="text-accent hover:underline">
           Add one ›
         </RouterLink>
       </p>
       <p class="mx-5 mb-4 rounded-lg bg-soft px-4 py-3 text-xs leading-relaxed phone:mx-4" :class="rows.length ? '' : 'mt-0'">
-        <template v-if="entry.id === 'onepassword'">
-          With a granted account the agent can list vaults, items and field names, and read a value with <code>cairn plugin onepassword read</code>. It cannot create, change or delete anything. What the account can see is set in 1Password; create another service account for different rights. Removing access blocks the next reads immediately; secrets already read cannot be recalled.
-        </template>
-        <template v-else>
-          {{ entry.manifest?.agentAccess?.description || 'Agents with access receive this instance’s commands, tools and instructions.' }}
-        </template>
+        {{ entry.agentAccessDescription || 'Agents with access receive this instance’s commands, tools and instructions.' }}
       </p>
     </section>
 

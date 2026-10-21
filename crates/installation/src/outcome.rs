@@ -13,7 +13,11 @@ pub fn tool() -> Value {
         "description": "Before your final response, report whether the user's current request was completed, \
             blocked, or needs user input. Include concrete validation/delivery evidence and a precise \
             reason. Process exit success alone is not task completion. Replace your report if \
-            circumstances change.",
+            circumstances change. When the work is blocked or needs input, waitingOn says who \
+            must act next: user (the person using Cairn, the default), requester (the agent \
+            conversation or mission that started this run, when it kept the remaining steps for \
+            itself), or external (a CI run, a reviewer or another system that finishes on its \
+            own).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -25,6 +29,10 @@ pub fn tool() -> Value {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 4000
+                },
+                "waitingOn": {
+                    "type": "string",
+                    "enum": ["user", "requester", "external"]
                 },
                 "evidence": {
                     "type": "array",
@@ -50,6 +58,12 @@ pub async fn report(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
         ));
     }
     let mut outcome = crate::run_output::payload(input, &[]);
+    // Completed work waits on nobody.
+    if outcome["status"] == "completed"
+        && let Some(fields) = outcome.as_object_mut()
+    {
+        fields.remove("waitingOn");
+    }
     outcome["reportedAt"] = now().into();
     let bearer = bearer.to_owned();
     s.store

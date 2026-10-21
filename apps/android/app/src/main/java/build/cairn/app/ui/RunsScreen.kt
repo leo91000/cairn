@@ -171,6 +171,16 @@ fun RunScreen(
             if (run?.status != "running" || currentPlan(timeline) == null) null
             else timeline.lastOrNull { it.plan != null }?.key
         }
+    val blocked = run?.takeIf {
+        it.trigger != "chat" &&
+            it.status == "succeeded" &&
+            it.outcome != null &&
+            it.outcome.status != "completed"
+    }
+    val outcomeItem = if (blocked != null) rememberOutcomeItem(vm, state, blocked.id) else null
+    val outcomeActions: (@Composable () -> Unit)? = outcomeItem?.let { item ->
+        { MissionOutcomeActions(vm, item, openChat, openRun) }
+    }
     var menu by remember { mutableStateOf(false) }
     var details by rememberSaveable(id) { mutableStateOf(false) }
     var fullscreen by rememberSaveable(id) { mutableStateOf(false) }
@@ -213,6 +223,7 @@ fun RunScreen(
         live.cursor,
         rendering,
         followGesture,
+        lastContentIndex = timeline.lastIndex,
     )
     val task =
         state.tasks.find { mission && run != null && run.trigger != "chat" && it.id == run.taskId }
@@ -370,7 +381,13 @@ fun RunScreen(
                             }
                             current.outcome
                                 ?.takeIf { current.status == "succeeded" }
-                                ?.let { CompletionEvidence(it, current.snapshot.agent.name) }
+                                ?.let {
+                                    CompletionEvidence(
+                                        it,
+                                        current.snapshot.agent.name,
+                                        outcomeActions,
+                                    )
+                                }
                             if (live.state.artifacts.isNotEmpty())
                                 ArtifactStrip(vm, latestArtifacts(live.state.artifacts))
                         }
@@ -378,7 +395,9 @@ fun RunScreen(
                         if (more) LinearProgressIndicator(Modifier.fillMaxWidth())
                         Box(Modifier.weight(1f).fillMaxWidth()) {
                             LazyColumn(
-                                Modifier.fillMaxSize().historyFollowGesture(followGesture),
+                                Modifier.fillMaxSize()
+                                    .historyVisibility(positionReady)
+                                    .historyFollowGesture(followGesture),
                                 state = logState,
                                 overscrollEffect = rememberHistoryOverscroll(),
                                 contentPadding = PaddingValues(16.dp),
@@ -403,6 +422,7 @@ fun RunScreen(
                                                 CompletionEvidence(
                                                     outcome,
                                                     current.snapshot.agent.name,
+                                                    outcomeActions,
                                                 )
                                             }
                                         }

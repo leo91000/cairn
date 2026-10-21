@@ -71,6 +71,16 @@ class ActivityPresentationTest {
         }
     }
 
+    @Test
+    fun `the technical source is the recorded JSON or the event text`() {
+        val recorded = tool("pnpm test")
+        assertEquals(
+            activityJson.encodeToString(JsonObject(checkNotNull(recorded.payload))),
+            presentActivity(recorded).raw,
+        )
+        assertEquals("Plain output", presentActivity(event("output", "Plain output")).raw)
+    }
+
     private fun event(type: String, text: String) = RunEvent(1, 1000, type, text)
 
     @Test

@@ -187,6 +187,10 @@ data class Run(
     val workspaces: List<RunWorkspace> = emptyList(),
     val isolated: Boolean = false,
     val outcome: TaskOutcome? = null,
+    /** The conversation or mission whose agent started this run. */
+    val requestedBy: RunRequester? = null,
+    /** This account set the run's outcome aside: dismissed, or snoozed until a time. */
+    val dismissal: OutcomeDismissal? = null,
     val chatExecution: ChatExecution? = null,
     val error: String? = null,
     /** A mission run that finished after this account last opened its mission. */
@@ -302,7 +306,15 @@ data class TaskOutcome(
     val evidence: List<String> = emptyList(),
     val reportedAt: Long = 0,
     val messageId: String? = null,
+    /** Who must act next on blocked work: user (the default), requester or external. */
+    val waitingOn: String? = null,
 )
+
+@Serializable
+data class RunRequester(val runId: String, val chatId: String? = null, val taskId: String? = null)
+
+/** A dismissed outcome has no [until]; a snoozed one asks again then. */
+@Serializable data class OutcomeDismissal(val until: Long? = null)
 
 @Serializable
 data class ChatExecution(

@@ -6,6 +6,136 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ConversationPresentationTest {
+    @Test
+    fun `later admission waits do not borrow a recovered quota message or reset`() {
+        val old = "You've hit your individual spend limit · resets Monday 3pm (UTC)"
+        fun failure(id: Long, message: String) =
+            RunEvent(
+                id,
+                id,
+                "turn.failed",
+                "",
+                buildJsonObject { put("error", buildJsonObject { put("message", message) }) },
+                runId = "run",
+            )
+        val failed = listOf(failure(1, old))
+        val recovered =
+            failed +
+                listOf(
+                    RunEvent(2, 2, "turn.started", "", runId = "run"),
+                    RunEvent(3, 3, "turn.completed", "", runId = "run"),
+                    RunEvent(4, 4, "status", "succeeded", runId = "run"),
+                )
+        val admission =
+            Run(
+                "run",
+                status = "queued",
+                accountWaitReason = "Waiting for a Codex account with available usage.",
+                snapshot = Snapshot(agent = Agent(provider = "codex")),
+            )
+        val quota = chatQuota(admission, recovered)!!
+        assertEquals("Codex", quota.provider)
+        assertEquals("", quota.message)
+        assertFalse(quota.spend)
+        assertNull(quota.reset)
+        assertTrue(quota.automatic)
+        assertEquals("", chatQuota(admission, failed)!!.message)
+
+        val waiting = admission.copy(status = "running", accountWaitReason = "Usage exhausted.")
+        assertEquals("", chatQuota(waiting, recovered)!!.message)
+        val current = "You've hit your usage limit · resets Tuesday 9am (UTC)"
+        val interrupted = recovered + failure(5, current)
+        assertEquals(current, chatQuota(waiting, interrupted)!!.message)
+        assertEquals("Tuesday 9am (UTC)", chatQuota(waiting, interrupted)!!.reset)
+        assertEquals(
+            current,
+            chatQuota(waiting.copy(status = "failed", error = current), failed)!!.message,
+        )
+    }
+
+    @Test
+    fun `quota history supports structured failures retry notices and plain legacy replies`() {
+        val text = "Account usage is exhausted."
+        fun event(id: Long, type: String, payload: JsonObject? = null, raw: String = "") =
+            RunEvent(id, id, type, raw, payload, runId = "run")
+        val reply =
+            event(
+                2,
+                "item.completed",
+                buildJsonObject {
+                    put(
+                        "item",
+                        buildJsonObject {
+                            put("id", "echo")
+                            put("type", "agent_message")
+                            put("text", text)
+                        },
+                    )
+                },
+            )
+        for ((key, value) in
+            listOf("code" to "usage_limit_reached", "codexErrorInfo" to "usageLimitExceeded")) {
+            val failure = buildJsonObject {
+                put(key, value)
+                put("message", text)
+            }
+            val history = listOf(event(1, "turn.started"), reply, event(3, "error", failure))
+            assertEquals(setOf(2L, 3L), quotaHiddenEvents(history))
+            val waiting = Run("run", status = "running", accountWaitReason = "Usage exhausted.")
+            assertEquals(text, chatQuota(waiting, history)!!.message)
+            val retrying =
+                history.dropLast(1) +
+                    event(3, "error", JsonObject(failure + ("willRetry" to JsonPrimitive(true))))
+            assertTrue(quotaHiddenEvents(retrying).isEmpty())
+        }
+        val message = "You've hit your individual spend limit"
+        val legacy =
+            listOf(
+                event(1, "turn.started"),
+                event(2, "item.started", raw = "cat log"),
+                event(3, "item.completed", raw = message),
+                event(4, "item.completed", raw = message),
+                event(
+                    5,
+                    "turn.failed",
+                    raw = """{"type":"turn.failed","error":{"message":"$message"}}""",
+                ),
+            )
+        assertEquals(setOf(4L, 5L), quotaHiddenEvents(legacy))
+        val entries = quotaTimeline(timelineEntries(legacy, chat = true), legacy)
+        assertEquals(1, entries.size)
+        assertFalse(entries.single().message)
+    }
+
+    @Test
+    fun `quota waits stop the working label and saved failures require manual resume`() {
+        val message = "You've hit your individual spend limit · your weekly limit resets 3pm (UTC)"
+        val run =
+            Run(
+                "run",
+                status = "running",
+                accountWaitReason =
+                    "Usage exhausted. Waiting for an available Claude Code account to resume.",
+            )
+        val chat = Chat("chat", run = run)
+        assertEquals(
+            ConversationState("En attente de quota", null),
+            conversationState(chat, "Agent", null),
+        )
+        assertTrue(chatQuota(run, emptyList())!!.automatic)
+        val paused = chat.copy(paused = true)
+        assertEquals("En pause", conversationState(paused, "Agent", null).status)
+        assertTrue(chatQuota(paused.run, emptyList())!!.automatic)
+        val saved = chatQuota(run.copy(status = "failed", error = message), emptyList())!!
+        assertFalse(saved.automatic)
+        assertEquals("3pm (UTC)", saved.reset)
+        assertTrue(saved.spend)
+        assertNull(
+            chatQuota(run.copy(status = "failed", error = "Authentication failed"), emptyList())
+        )
+        assertNull(chatQuota(run.copy(status = "succeeded", accountWaitReason = null), emptyList()))
+    }
+
     private val first = ChatMessage("one", text = "Bonjour")
     private val second = ChatMessage("two", text = "Ensuite")
 

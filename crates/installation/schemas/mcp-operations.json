@@ -2148,5 +2148,118 @@
       ],
       "additionalProperties": false
     }
+  },
+  {
+    "name": "list_plugin_packages",
+    "description": "List bounded plugin package cards and saved access summaries. Follow nextCursor for every page. These summaries confer no execution access.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[A-Za-z0-9+-][A-Za-z0-9.+-]*$"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_plugin_package",
+    "description": "Read one chosen plugin manifest for its resource collections, operations and permission profiles. Does not return instance settings, secrets or source files.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "pluginId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[A-Za-z0-9+-][A-Za-z0-9.+-]*$"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pluginId"
+      ]
+    }
+  },
+  {
+    "name": "list_plugin_instance_access",
+    "description": "List bounded saved instance metadata, delegated agents, root and resource memberships and diagnostic state. Includes unavailable packages; saved rules are not current execution authority.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_plugin_agent_grant_counts",
+    "description": "List complete saved resource-rule totals per agent, including held rules whose resource or instance was removed. Follow nextCursor; a count is not effective permission.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_plugin_resource_choices",
+    "description": "List resource IDs, names and parent metadata of one chosen collection without settings or secret field names. Disabled resources remain visible as saved choices. Follow nextCursor.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "pluginId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[A-Za-z0-9+-][A-Za-z0-9.+-]*$"
+        },
+        "instanceId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "collection": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "^[a-z0-9][a-z0-9_-]*$"
+        },
+        "cursor": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pluginId",
+        "instanceId",
+        "collection"
+      ]
+    }
   }
 ]

@@ -75,15 +75,19 @@ pub async fn access(s: &Service, cursor: Option<&str>) -> Result<Value> {
                     'id',r.id,'pluginId',json_extract(r.data,'$.pluginId'),
                     'name',coalesce(json_extract(r.data,'$.name'),''),
                     'enabled',json(CASE WHEN json_extract(r.data,'$.enabled')=1 THEN 'true' ELSE 'false' END),
+                    'agentId',coalesce(json_extract(r.data,'$.agentId'),''),
+                    'status',json(coalesce(k.data,'{\"state\":\"disconnected\"}')),
                     'agentIds',json(coalesce(json_extract(r.data,'$.agentIds'),'[]')),
                     'resourceAgentIds',json((SELECT json_group_array(agent) FROM (
                         SELECT DISTINCT json_extract(g.data,'$.agentId') AS agent
                         FROM records g WHERE g.kind='plugin-resource-grants'
                         AND json_extract(g.data,'$.connectionId')=r.id
                         AND json_type(g.data,'$.agentId')='text' ORDER BY agent))))
-                 FROM records r WHERE r.kind='plugin-connections' AND r.id>?
-                 ORDER BY r.id LIMIT ?",
-                params![cursor, (paging::MAX_ITEMS + 1) as i64],
+                 FROM records r LEFT JOIN kv k ON k.key='plugin-status:'||r.id
+                    AND (k.expires IS NULL OR k.expires>?2)
+                 WHERE r.kind='plugin-connections' AND r.id>?1
+                 ORDER BY r.id LIMIT ?3",
+                params![cursor, now(), (paging::MAX_ITEMS + 1) as i64],
             )?;
             for row in &mut rows {
                 // Bundled names require no registry scan. An unavailable/custom package
@@ -93,6 +97,28 @@ pub async fn access(s: &Service, cursor: Option<&str>) -> Result<Value> {
                     .map_or_else(|| plugin.to_owned(), |package| package.manifest.name);
                 row["pluginName"] = json!(name);
             }
+            paging::ordered_page(rows, "id", paging::MAX_ITEMS, paging::MAX_BYTES)
+        })
+        .await
+}
+
+/// Totals count saved rules even when their instance, resource or package is
+/// unavailable. They are presentation metadata, never effective authorization.
+pub async fn agent_grant_counts(s: &Service, cursor: Option<&str>) -> Result<Value> {
+    if let Some(cursor) = cursor {
+        uuid(cursor)?;
+    }
+    let cursor = cursor.unwrap_or("").to_owned();
+    s.store
+        .read(move |db| {
+            let rows = db.json_rows(
+                "SELECT json_object('id',json_extract(data,'$.agentId'),'count',count(*))
+                 FROM records WHERE kind='plugin-resource-grants'
+                 AND json_type(data,'$.agentId')='text' AND json_extract(data,'$.agentId')>?1
+                 GROUP BY json_extract(data,'$.agentId') ORDER BY json_extract(data,'$.agentId')
+                 LIMIT ?2",
+                params![cursor, (paging::MAX_ITEMS + 1) as i64],
+            )?;
             paging::ordered_page(rows, "id", paging::MAX_ITEMS, paging::MAX_BYTES)
         })
         .await

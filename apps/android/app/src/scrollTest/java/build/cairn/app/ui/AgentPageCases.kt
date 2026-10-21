@@ -76,6 +76,7 @@ abstract class AgentPageCases {
                             PluginManifest(
                                 id = "onepassword",
                                 name = "1Password",
+                                instances = PluginInstances("compte", "comptes"),
                                 agentAccess = PluginAgentAccess("Read-only secrets"),
                             ),
                     ),
@@ -158,6 +159,8 @@ abstract class AgentPageCases {
                             .removePrefix("/api/installations/fixture/api")
                     val text = request.body.readUtf8()
                     val response = MockResponse().setHeader("Content-Type", "application/json")
+                    // This fixture models an older host; unsupported reads are explicit.
+                    if (path == "/plugins/packages") return response.setResponseCode(404)
                     if (request.method == "POST" && path == "/agents") {
                         val body = wireJson.parseToJsonElement(text).jsonObject
                         saved += path to body
@@ -408,6 +411,181 @@ abstract class AgentPageCases {
     }
 
     @Test
+    fun compactPluginDirectoryKeepsEveryPageAndPackageOwnedLabels() {
+        val reads = CopyOnWriteArrayList<String>()
+        journey(
+            "agent",
+            prepare = { fixture ->
+                fixture.agents.set(
+                    fixture.agents.get().map {
+                        if (it.id == "agent") it.copy(plugins = listOf("prod", "held")) else it
+                    }
+                )
+                val delegate = fixture.server.dispatcher
+                fixture.server.dispatcher =
+                    object : Dispatcher() {
+                        override fun dispatch(request: RecordedRequest): MockResponse {
+                            val path = request.path!!.removePrefix("/api/installations/fixture/api")
+                            reads += path
+                            val card =
+                                PluginCardEntry(
+                                    "team-notes",
+                                    false,
+                                    "active",
+                                    "1",
+                                    versionCount = 1,
+                                    presentation =
+                                        PluginPresentation(
+                                            "Team notes",
+                                            "Custom package",
+                                            "1",
+                                            capabilities = emptyList(),
+                                            needsWorker = false,
+                                            delegates = false,
+                                            agentAccess = true,
+                                            agentAccessDescription =
+                                                "Help supplied by the custom package",
+                                            contributions =
+                                                PluginContributionCounts(
+                                                    0,
+                                                    0,
+                                                    false,
+                                                    false,
+                                                    false,
+                                                    false,
+                                                    0,
+                                                    0,
+                                                ),
+                                        ),
+                                )
+                            fun page(value: JsonElement) =
+                                MockResponse()
+                                    .setBody(value.toString())
+                                    .setHeader("Content-Type", "application/json")
+                            return when (path) {
+                                "/plugins" ->
+                                    error(
+                                        "The compact selector must not load the aggregate catalogue"
+                                    )
+                                "/plugins/packages" ->
+                                    page(
+                                        wireJson.encodeToJsonElement(
+                                            PluginCards(
+                                                packageReads = true,
+                                                agentReads = true,
+                                                items = listOf(card),
+                                                nextCursor = "team-notes",
+                                            )
+                                        )
+                                    )
+                                "/plugins/packages?cursor=team-notes" ->
+                                    page(
+                                        buildJsonObject {
+                                            put(
+                                                "items",
+                                                wireJson.encodeToJsonElement(
+                                                    listOf(
+                                                        PluginCardEntry(
+                                                            "unavailable",
+                                                            false,
+                                                            "invalid",
+                                                            null,
+                                                            versionCount = 0,
+                                                        )
+                                                    )
+                                                ),
+                                            )
+                                        }
+                                    )
+                                "/plugins/instance-access" ->
+                                    page(
+                                        buildJsonObject {
+                                            put(
+                                                "items",
+                                                wireJson.encodeToJsonElement(
+                                                    listOf(
+                                                        AgentPluginInstance(
+                                                            "prod",
+                                                            "team-notes",
+                                                            "Production",
+                                                            true,
+                                                            "agent",
+                                                            listOf("agent"),
+                                                            PluginStatus(
+                                                                "needs_review",
+                                                                "Review required",
+                                                            ),
+                                                        )
+                                                    )
+                                                ),
+                                            )
+                                            put("nextCursor", "prod")
+                                        }
+                                    )
+                                "/plugins/instance-access?cursor=prod" ->
+                                    page(
+                                        buildJsonObject {
+                                            put(
+                                                "items",
+                                                wireJson.encodeToJsonElement(
+                                                    listOf(
+                                                        AgentPluginInstance(
+                                                            "held",
+                                                            "removed-package",
+                                                            "Retained workspace",
+                                                            false,
+                                                            "",
+                                                            listOf("agent"),
+                                                            PluginStatus(),
+                                                        )
+                                                    )
+                                                ),
+                                            )
+                                        }
+                                    )
+                                "/plugins/agent-grant-counts" ->
+                                    page(
+                                        wireJson.parseToJsonElement(
+                                            """{"items":[{"id":"another","count":1}],"nextCursor":"another"}"""
+                                        )
+                                    )
+                                "/plugins/agent-grant-counts?cursor=another" ->
+                                    page(
+                                        wireJson.parseToJsonElement(
+                                            """{"items":[{"id":"agent","count":2}]}"""
+                                        )
+                                    )
+                                "/agents/agent/plugin-resource-grants" ->
+                                    page(wireJson.parseToJsonElement("""{"items":[]}"""))
+                                else -> delegate.dispatch(request)
+                            }
+                        }
+                    }
+            },
+        ) { _ ->
+            waitForText("2 règles sur les ressources", substring = true)
+            compose
+                .onNodeWithTag("agent-section-Plugins")
+                .assert(hasContentDescription("2 règles sur les ressources", substring = true))
+            open(AgentSection.Plugins)
+            waitForDescription("Accès à Production")
+            compose.onNodeWithContentDescription("Accès à Production").assertIsOn()
+            compose.onNodeWithText("Help supplied by the custom package").assertExists()
+            compose.onNodeWithText("À vérifier").assertExists()
+            compose.onNodeWithText("Review required").assertExists()
+            compose.onNodeWithText("Retained workspace", substring = true).assertExists()
+            compose
+                .onNodeWithText("Répond en tant que cet agent sur « Production » (Team notes)")
+                .assertExists()
+            assertTrue(reads.contains("/plugins/packages?cursor=team-notes"))
+            assertTrue(reads.contains("/plugins/instance-access?cursor=prod"))
+            assertTrue(reads.contains("/plugins/agent-grant-counts?cursor=another"))
+            assertFalse(reads.contains("/plugins"))
+            capture("agent-compact-plugin-access")
+        }
+    }
+
+    @Test
     fun mainAgentShowsFixedAccessAndKeepsItsEditableGrants() {
         val releaseCatalog = CountDownLatch(1)
         journey(
@@ -442,7 +620,7 @@ abstract class AgentPageCases {
 
                 open(AgentSection.Plugins)
                 waitForDescription("Accès à Production")
-                compose.onNodeWithText("1Password · comptes de service").assertExists()
+                compose.onNodeWithText("1Password").assertExists()
                 compose
                     .onNodeWithContentDescription("Accès à Production")
                     .assertIsOff()
@@ -540,11 +718,9 @@ abstract class AgentPageCases {
 
             open(AgentSection.Plugins)
             waitForDescription("Accès à Production")
-            compose.onNodeWithText("1Password · comptes de service").assertExists()
-            compose
-                .onNodeWithText("Lecture seule · aucun accès par défaut, Main compris")
-                .assertExists()
-            compose.onNodeWithText("Compte désactivé").assertExists()
+            compose.onNodeWithText("1Password").assertExists()
+            compose.onNodeWithText("Read-only secrets").assertExists()
+            compose.onNodeWithText("Désactivée").assertExists()
             compose
                 .onNodeWithText("Répond en tant que cet agent sur « #support »", substring = true)
                 .performScrollTo()

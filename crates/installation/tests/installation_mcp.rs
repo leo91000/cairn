@@ -462,6 +462,10 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
     )
     .await;
     let queued_id = result(&queued)["id"].clone();
+    // The mission remembers which agent work started it, so it can wait on that work.
+    let requested_by = &s.store.run(queued_id.as_str().unwrap()).await.unwrap()["requestedBy"];
+    assert_eq!(requested_by["runId"], run["id"]);
+    assert_eq!(requested_by["taskId"], run["taskId"]);
     let cancelled = call(
         &s,
         &configuration,
@@ -2020,4 +2024,356 @@ async fn installation_access_cannot_grant_secrets_or_exclusive_reservations() {
         .unwrap()
         .unwrap();
     assert_eq!(instance["agentIds"], json!([manager["id"]]));
+}
+
+#[tokio::test]
+async fn plugin_selector_reads_match_owner_ui_public_mcp_and_installation_tool() {
+    use cairn_installation::{
+        config::{id, now},
+        plugins::{connections, registry},
+    };
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    s.plugins
+        .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+    let package = registry::install(&s, &json!({
+        "manifest": {
+            "id": "selector", "name": "Selector fixture", "apiVersion": 2, "version": "1",
+            "capabilities": ["resources"], "resources": [{
+                "name": "workspace", "title": "Workspaces", "singular": "Workspace", "settings": []
+            }]
+        }, "source": "return {}"
+    })).await.unwrap();
+    registry::approve(&s, "selector", "1", package["digest"].as_str().unwrap())
+        .await
+        .unwrap();
+    let instance = connections::save(
+        &s,
+        "selector",
+        &json!({"name": "Selected instance", "enabled": false}),
+        None,
+    )
+    .await
+    .unwrap();
+    let instance_id = instance["id"].as_str().unwrap().to_owned();
+    let instance_for_write = instance_id.clone();
+    s.store.transaction(move |db| {
+        for n in 0..40 {
+            let agent = id();
+            db.put("plugin-resource-grants", &json!({
+                "id": id(), "connectionId": instance_for_write, "agentId": agent,
+                "resourceId": id(), "profile": null, "operations": ["read"], "deniedOperations": [],
+                "scopes": {}, "ownerAccessId": "held-access", "revision": id(), "updatedAt": now(),
+            }))?;
+            db.put("plugin-resources", &json!({
+                "id": id(), "connectionId": instance_for_write, "collection": "workspace",
+                "name": format!("Workspace {n}"), "parentId": null, "enabled": n % 2 == 0,
+                "settings": { "privateNote": "not selector metadata" }, "secretKeys": ["privateToken"],
+                "revision": id(), "updatedAt": now(),
+            }))?;
+        }
+        Ok(())
+    }).await.unwrap();
+    // Copied invalid packages still have inspectable IDs in the registry's full
+    // path domain; MCP must accept their IDs and continuations just as the UI does.
+    std::fs::create_dir_all(s.config.data_dir.join("plugins/Z+copied")).unwrap();
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let read_token = common::relay_fixture::grant(&s, &["read"]).await;
+    let manage_token = common::relay_fixture::grant(&s, &["manage"]).await;
+    let public = async |token: &str, name: &str, args: &Value| {
+        let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": common::mcp_arguments(name, args)});
+        let request = common::request("POST", "/mcp")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = common::send(&app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        common::read_json(response).await
+    };
+    for (name, path, input) in [
+        (
+            "list_plugin_packages",
+            "/api/plugins/packages".to_owned(),
+            json!({}),
+        ),
+        (
+            "list_plugin_packages",
+            "/api/plugins/packages?cursor=Z%2Bcopied".to_owned(),
+            json!({"cursor": "Z+copied"}),
+        ),
+        (
+            "get_plugin_package",
+            "/api/plugins/packages/Z%2Bcopied".to_owned(),
+            json!({"pluginId": "Z+copied"}),
+        ),
+        (
+            "get_plugin_package",
+            "/api/plugins/packages/selector".to_owned(),
+            json!({"pluginId": "selector"}),
+        ),
+        (
+            "list_plugin_instance_access",
+            "/api/plugins/instance-access".to_owned(),
+            json!({}),
+        ),
+        (
+            "list_plugin_agent_grant_counts",
+            "/api/plugins/agent-grant-counts".to_owned(),
+            json!({}),
+        ),
+        (
+            "list_plugin_resource_choices",
+            format!("/api/plugins/selector/connections/{instance_id}/resource-choices/workspace"),
+            json!({"pluginId": "selector", "instanceId": instance_id, "collection": "workspace"}),
+        ),
+    ] {
+        let denied = public(&manage_token, name, &input).await;
+        assert_eq!(
+            denied["result"]["isError"], true,
+            "read scope required for {name}"
+        );
+        let mut cursor = None::<String>;
+        let mut seen = std::collections::BTreeSet::new();
+        loop {
+            let mut args = input.clone();
+            let target = if let Some(cursor) = &cursor {
+                args["cursor"] = json!(cursor);
+                format!("{path}?cursor={cursor}")
+            } else {
+                path.clone()
+            };
+            let mut request = common::request("GET", &target).body(Body::empty()).unwrap();
+            request.extensions_mut().insert(
+                cairn_installation::auth::InstallationIdentity::trusted(
+                    cairn_installation::auth::InstallationRole::Owner,
+                    "fixture-owner",
+                ),
+            );
+            let ui = common::send(&app, request).await;
+            assert_eq!(ui.status(), StatusCode::OK, "{name}: {target}");
+            let ui = common::read_json(ui).await;
+            let external = public(&read_token, name, &args).await;
+            let internal = call(&s, &configuration, name, args).await;
+            for response in [&external, &internal] {
+                assert!(serde_json::to_vec(response).unwrap().len() < 1024 * 1024);
+                let value = result(response);
+                if name == "list_plugin_packages" {
+                    assert_eq!(value["agentReads"], true);
+                    assert_eq!(
+                        value["items"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|v| &v["id"])
+                            .collect::<Vec<_>>(),
+                        ui["items"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|v| &v["id"])
+                            .collect::<Vec<_>>()
+                    );
+                } else {
+                    assert_eq!(value, &ui, "{name}");
+                }
+                if name != "get_plugin_package" {
+                    assert!(!value.to_string().contains("privateNote"));
+                    assert!(!value.to_string().contains("privateToken"));
+                }
+            }
+            let value = result(&external);
+            if let Some(items) = value["items"].as_array() {
+                for item in items {
+                    assert!(seen.insert(item["id"].as_str().unwrap().to_owned()));
+                }
+            }
+            cursor = value["nextCursor"].as_str().map(str::to_owned);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        if name == "list_plugin_agent_grant_counts" || name == "list_plugin_resource_choices" {
+            assert_eq!(seen.len(), 40);
+        }
+    }
+    // Reducing installation access invalidates the same tool, independently of saved plugin rules.
+    s.agent(
+        json!({ "name": "Main agent", "access": { "installation": false } }),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
+    let token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let (status, _) = request(
+        &s,
+        token,
+        "tools/call",
+        common::mcp_arguments("list_plugin_instance_access", &json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn full_instance_membership_is_readable_through_ui_and_both_management_tools() {
+    use cairn_installation::{
+        config::{id, now},
+        plugins::{connections, registry},
+    };
+    async fn read_metadata_response(response: axum::response::Response) -> Value {
+        // Code-mode returns both text and structured copies. Bound this envelope
+        // by the actual relay limit, rather than the ordinary 1 MiB test helper.
+        let bytes = axum::body::to_bytes(response.into_body(), cairn_protocol::MAX_BODY)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    s.plugins
+        .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+    let package = registry::install(
+        &s,
+        &json!({
+            "manifest": {
+                "id":"membership", "name":"Membership", "apiVersion":2, "version":"1",
+                "capabilities":["resources"], "resources":[{
+                    "name":"workspace", "title":"Workspaces", "singular":"Workspace", "settings":[]
+                }]
+            }, "source":"return {}"
+        }),
+    )
+    .await
+    .unwrap();
+    registry::approve(&s, "membership", "1", package["digest"].as_str().unwrap())
+        .await
+        .unwrap();
+    let mut instances = Vec::new();
+    for name in ["One", "Two"] {
+        instances.push(
+            connections::save(
+                &s,
+                "membership",
+                &json!({"name":name,"enabled":false}),
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    instances.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    let large_id = instances[0]["id"].as_str().unwrap().to_owned();
+    let large_for_write = large_id.clone();
+    s.store
+        .transaction(move |db| {
+            let mut root_agents = Vec::new();
+            for n in 0..100 {
+                let agent = id();
+                db.put(
+                    "agents",
+                    &json!({"id":agent,"name":format!("Root agent {n}")}),
+                )?;
+                root_agents.push(agent);
+            }
+            let mut instance = db.get(connections::KIND, &large_for_write)?.unwrap();
+            instance["agentIds"] = json!(root_agents);
+            db.put(connections::KIND, &instance)?;
+            // Seed the supported limits without doing 16,384 unrelated grant mutations:
+            // 256 resources, 64 distinct saved agent rules each, plus 100 held root IDs.
+            for r in 0..256 {
+                let resource = id();
+                db.put("plugin-resources", &json!({
+                "id":resource,"connectionId":large_for_write,"collection":"workspace",
+                "name":format!("Workspace {r}"),"enabled":true,"settings":{},"secretKeys":[],
+                "revision":id(),"updatedAt":now()
+            }))?;
+                for n in 0..64 {
+                    let agent = id();
+                    db.put(
+                        "agents",
+                        &json!({"id":agent,"name":format!("Resource agent {r}/{n}")}),
+                    )?;
+                    db.put("plugin-resource-grants", &json!({
+                    "id":id(),"connectionId":large_for_write,"resourceId":resource,"agentId":agent,
+                    "profile":"read","operations":[],"deniedOperations":[],"scopes":{},
+                    "ownerAccessId":"saved-owner-access","revision":id(),"updatedAt":now()
+                }))?;
+                }
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let token = common::relay_fixture::grant(&s, &["read"]).await;
+    let mut owner_read = common::request("GET", "/api/plugins/instance-access")
+        .body(Body::empty())
+        .unwrap();
+    owner_read
+        .extensions_mut()
+        .insert(cairn_installation::auth::InstallationIdentity::trusted(
+            cairn_installation::auth::InstallationRole::Owner,
+            "fixture-owner",
+        ));
+    let ui = common::send(&app, owner_read).await;
+    assert_eq!(ui.status(), StatusCode::OK);
+    let ui = read_metadata_response(ui).await;
+    assert_eq!(ui["items"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        ui["items"][0]["resourceAgentIds"].as_array().unwrap().len(),
+        256 * 64
+    );
+    assert_eq!(ui["items"][0]["agentIds"].as_array().unwrap().len(), 100);
+    assert!(serde_json::to_vec(&ui["items"][0]).unwrap().len() > 256 * 1024);
+    let installation_app = cairn_installation::http::router(s.clone()).await.unwrap();
+    let run_token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let mut cursor = None;
+    let mut all = Vec::new();
+    for page_index in 0..2 {
+        let args = cursor
+            .as_ref()
+            .map_or(json!({}), |cursor| json!({"cursor":cursor}));
+        let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":common::mcp_arguments("list_plugin_instance_access", &args)});
+        let request = common::request("POST", "/mcp")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let external = common::send(&app, request).await;
+        assert_eq!(external.status(), StatusCode::OK);
+        let external = read_metadata_response(external).await;
+        let internal_request = common::request("POST", "/mcp-installation")
+            .header("authorization", format!("Bearer {run_token}"))
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let internal = common::send(&installation_app, internal_request).await;
+        assert_eq!(internal.status(), StatusCode::OK);
+        let internal = read_metadata_response(internal).await;
+        assert_eq!(result(&external), result(&internal));
+        assert!(serde_json::to_vec(result(&external)).unwrap().len() < 1024 * 1024);
+        assert!(serde_json::to_vec(&external).unwrap().len() < cairn_protocol::MAX_BODY);
+        let page = result(&external);
+        let items = page["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0], ui["items"][page_index]);
+        all.extend(items.iter().cloned());
+        cursor = page["nextCursor"].as_str().map(str::to_owned);
+        assert_eq!(
+            cursor,
+            if page_index == 0 {
+                Some(large_id.clone())
+            } else {
+                None
+            }
+        );
+    }
+    assert_eq!(all, ui["items"].as_array().unwrap().clone());
 }

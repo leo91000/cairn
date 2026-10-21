@@ -12,6 +12,11 @@
   `apps/web` ships in `apps/android` in the same change, and vice versa. Use native
   presentation, and record the feature and any platform difference in
   [web parity](apps/android/docs/WEB-PARITY.md).
+- Every capability available through the web or Android UI must also be available
+  through the public Cairn MCP and the built-in `cairn_installation` tool for agents
+  granted installation access. When adding or changing a UI capability, update
+  both tool interfaces in the same change, preserve their authorization checks,
+  and verify equivalent behavior across the UI, public MCP and agent tool.
 - Separate logical steps with blank lines. Give complex expressions descriptive
   intermediate names when that makes the flow easier to follow. Avoid arbitrary
   function-size limits or extracting helpers solely to reduce line counts.

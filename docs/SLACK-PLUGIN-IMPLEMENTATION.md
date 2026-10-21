@@ -1366,3 +1366,38 @@ plugin fixture already does. A regression waits for the restored connection chec
 and asserts one actual account-session read across restoration; it first observed
 two. The corrected isolated scenario passes while retaining all original draft
 and swipe assertions. Complete final-source Android qualification remains pending.
+
+
+## Agent selectors use compact metadata and selected schemas
+
+Both clients now read every compact package, instance-access and saved-rule-count
+page for agent summaries and whole-instance selectors. The directory has its own
+DTOs rather than pretending that metadata is a complete manifest or instance
+configuration. Disabled or unavailable held grants remain visible, including
+saved rules whose resource or instance has disappeared. Counts describe saved
+rules and never grant execution authority. Package-owned nouns and access help
+replace the previous 1Password-specific selector presentation.
+
+Resource/profile editors fetch only the chosen package schema and projected
+resource choices. A failed supported read stays an error with an explicit retry;
+only an older host takes the complete-catalogue adapter. Closing or changing the
+selected instance discards an obsolete schema, while refreshing only saved-rule
+counts preserves an unchanged open editor. Grant writes retain their existing
+host checks. The complete-read measurement and its limitations are recorded in
+[selector measurements](PLUGIN-SELECTOR-MEASUREMENTS.md).
+
+The shared management catalogue adds five read operations for these selectors:
+`list_plugin_packages`, `get_plugin_package`, `list_plugin_instance_access`,
+`list_plugin_agent_grant_counts` and `list_plugin_resource_choices`. Public MCP
+requires read scope; the installation tool rechecks its current execution grant.
+MCP pages retain room for both the text and structured result copies. The HTTP
+package/version reads decode individual URL components before validating the
+registry's path domain; encoded separators and traversal remain refused.
+
+These reads do not complete the new UI/public-MCP/installation-tool parity gate.
+Owner and personal effects, configuration, resources, routes, participant controls
+and OAuth still need equivalent management operations with their original
+identity and revocation checks. In particular, existing installation-agent
+restrictions on granting owner secrets or exclusive reservations are preserved.
+The Slack package, transport/files, remaining provider lifecycle, wake delivery,
+tools, automations, transient search and complete final qualification remain open.

@@ -12,7 +12,7 @@ import type {
   SectionId,
   SelectionItem,
 } from '../agent-access'
-import type { Catalog } from '../plugins'
+import type { AgentPluginDirectory } from '../agent-plugin-directory'
 import {
   computed,
   nextTick,
@@ -54,6 +54,7 @@ import {
   updateForGrants,
   withResourceGrants,
 } from '../agent-access'
+import { agentPluginDirectory } from '../agent-plugin-directory'
 import {
   api,
   ApiError,
@@ -128,7 +129,7 @@ const agent = ref<Agent | null>(null)
 const saved = ref<AgentDraft>(newAgentDraft())
 const draft = ref<AgentDraft>(newAgentDraft())
 const nodes = ref<ExecutionNode[]>([])
-const catalog = ref<Catalog>({ packages: [], capabilities: [], connections: [] })
+const catalog = ref<AgentPluginDirectory>({ packages: [], connections: [] })
 // Only a loaded catalogue says which grants exist: on failure, plugin access is shown read-only.
 const catalogError = ref('')
 // Never restrict from an empty list: when nodes cannot be loaded, node access is read-only.
@@ -263,12 +264,12 @@ const sandbox = computed(() => modes.value.find(option => option.value === acces
 const exclusiveNodes = computed(() => effectiveExclusive(draft.value, nodes.value))
 const delegations = computed(() => isNew.value ? [] : catalog.value.connections.filter(connection => connection.agentId === id.value))
 const resourceCount = computed(() => isNew.value ? 0 : catalog.value.resourceGrantCounts?.[id.value] ?? 0)
-const resourceCountsKnown = computed(() => catalog.value.resourceGrantCounts !== undefined || !catalog.value.packages.some(entry => entry.manifest?.operations?.length))
+const resourceCountsKnown = computed(() => catalog.value.resourceGrantCounts !== undefined || !catalog.value.packages.some(entry => entry.operations))
 const pluginSummary = computed(() => {
   const counts = new Map<string, number>()
   for (const granted of draft.value.plugins) {
     const connection = catalog.value.connections.find(item => item.id === granted)
-    const name = catalog.value.packages.find(entry => entry.id === connection?.pluginId)?.manifest?.name ?? 'Plugin'
+    const name = catalog.value.packages.find(entry => entry.id === connection?.pluginId)?.name ?? 'Plugin'
     counts.set(name, (counts.get(name) ?? 0) + 1)
   }
 
@@ -510,7 +511,7 @@ async function retryWorkspace() {
 // An installation without plugins still edits every other permission.
 async function loadCatalog() {
   try {
-    const loadedCatalog = await api<Catalog>('/plugins')
+    const loadedCatalog = await agentPluginDirectory(new AbortController().signal)
     catalogError.value = ''
     return loadedCatalog
   }

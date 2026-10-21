@@ -300,14 +300,7 @@ async fn instance_reads_are_bounded_exact_and_keep_unapproved_configuration_mana
     assert_eq!(saved["pluginName"], plugin);
     assert!(access.iter().any(|row| row["pluginName"] == "Discord"));
     for row in &access {
-        for key in [
-            "settings",
-            "secretKeys",
-            "status",
-            "usage",
-            "requests",
-            "activity",
-        ] {
+        for key in ["settings", "secretKeys", "usage", "requests", "activity"] {
             assert!(row.get(key).is_none(), "Access metadata must omit {key}");
         }
     }
@@ -565,6 +558,35 @@ async fn broken_and_empty_packages_do_not_hide_other_cards_or_invent_an_approval
         assert_eq!(card["status"], "invalid");
         assert!(card["active"].is_null() && card["presentation"].is_null());
     }
+    // Browser components encode package/version components independently. Decode
+    // those components once, while refusing encoded traversal or separators.
+    std::fs::create_dir_all(service.config.data_dir.join("plugins/Z+copied")).unwrap();
+    assert_eq!(
+        get(&app, "/api/plugins/packages/Z%2Bcopied").await["id"],
+        "Z+copied"
+    );
+    let encoded_version = get(
+        &app,
+        "/api/plugins/packages/invalid-package/versions/v1%2Bbuild",
+    )
+    .await;
+    assert!(encoded_version["error"].as_str().unwrap().contains("UTF-8"));
+    for path in [
+        "/api/plugins/packages/%2e%2e",
+        "/api/plugins/packages/Z%2fcopied",
+        "/api/plugins/packages/Z%252Bcopied",
+        "/api/plugins/packages/%FF",
+        "/api/plugins/packages/invalid-package/versions/%2e%2e",
+        "/api/plugins/packages/invalid-package/versions/v1%2fbuild",
+    ] {
+        assert_eq!(
+            common::send(&app, request(path, InstallationRole::Owner))
+                .await
+                .status(),
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
     let versions = get(&app, "/api/plugins/packages/invalid-package/versions").await;
     assert_eq!(versions["items"].as_array().unwrap().len(), 1);
     assert_eq!(versions["items"][0]["version"], "v1+build");
@@ -692,6 +714,245 @@ async fn measure_catalogue_reads_and_unchanged_approval_writes() {
             "writes": "existing approval path, identical for both read contracts",
             "reads": reads,
             "approvalWrites": writes,
+        })
+    );
+}
+
+#[tokio::test]
+async fn agent_selector_reads_keep_complete_saved_metadata_without_configuration() {
+    use cairn_installation::{
+        config::{id, now},
+        plugins::connections::Connection,
+    };
+    let (_directory, service, app) = fixture().await;
+    let mut instance = Connection::draft(
+        &id(),
+        "missing-package",
+        json!({ "private": "settings are not selector metadata" }),
+        vec!["token".to_owned()],
+    );
+    instance.name = "Unavailable workspace".to_owned();
+    instance.enabled = false;
+    instance.agent_id = id();
+    let root_agent = id();
+    instance.agent_ids = vec![root_agent.clone()];
+    let saved = serde_json::to_value(&instance).unwrap();
+    let mut agents = (0..40).map(|_| id()).collect::<Vec<_>>();
+    agents.sort();
+    let expected = agents.clone();
+    let instance_id = instance.id.clone();
+    service
+        .store
+        .transaction(move |db| {
+            db.put("plugin-connections", &saved)?;
+            db.set(
+                &format!("plugin-status:{instance_id}"),
+                &json!({ "state": "needs_review", "message": "Access changed" }),
+                None,
+            )?;
+            for (n, agent) in agents.into_iter().enumerate() {
+                for _ in 0..=n % 3 {
+                    db.put("plugin-resource-grants", &json!({
+                    "id": id(), "connectionId": instance_id, "resourceId": id(),
+                    "agentId": agent, "profile": null, "operations": ["read"],
+                    "deniedOperations": [], "scopes": {}, "ownerAccessId": "previous-owner-access",
+                    "revision": id(), "updatedAt": now(),
+                }))?;
+                }
+            }
+            // A retained rule with missing instance metadata still contributes to the saved total.
+            db.put(
+                "plugin-resource-grants",
+                &json!({
+                    "id": id(), "connectionId": id(), "resourceId": id(), "agentId": expected[0],
+                    "profile": null, "operations": ["read"], "deniedOperations": [], "scopes": {},
+                    "ownerAccessId": "previous-owner-access", "revision": id(), "updatedAt": now(),
+                }),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let cards = get(&app, "/api/plugins/packages").await;
+    assert_eq!(cards["agentReads"], true);
+    let onepassword = cards["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["id"] == "onepassword")
+        .unwrap();
+    assert!(
+        onepassword["presentation"]["agentAccessDescription"]
+            .as_str()
+            .unwrap()
+            .contains("agent")
+    );
+    assert!(onepassword["presentation"]["contributions"]["operations"].is_number());
+    let rows = pages(&app, "/api/plugins/instance-access", "id").await;
+    let row = rows.iter().find(|v| v["id"] == instance.id).unwrap();
+    assert_eq!(row["agentId"], instance.agent_id);
+    assert_eq!(row["agentIds"], json!([root_agent]));
+    assert_eq!(
+        row["status"],
+        json!({ "state": "needs_review", "message": "Access changed" })
+    );
+    for key in ["settings", "secretKeys", "usage", "requests", "activity"] {
+        assert!(row.get(key).is_none(), "Selectors must not receive {key}");
+    }
+    let counts = pages(&app, "/api/plugins/agent-grant-counts", "id").await;
+    assert_eq!(counts.len(), 40);
+    for (n, count) in counts.iter().enumerate() {
+        assert_eq!(count["count"], (1 + n % 3 + usize::from(n == 0)) as u64);
+    }
+    for path in [
+        "/api/plugins/agent-grant-counts",
+        "/api/plugins/instance-access",
+    ] {
+        assert_eq!(
+            common::send(&app, request(path, InstallationRole::Member))
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    let bad = common::send(
+        &app,
+        request(
+            "/api/plugins/agent-grant-counts?cursor=invalid",
+            InstallationRole::Owner,
+        ),
+    )
+    .await;
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+}
+
+/// Compare complete owner selector workloads, including every compact page and
+/// JSON decoding. API-cold is not OS-cache cold; no timing assertions.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "local complete-selector read/write measurement; run alone"]
+async fn measure_complete_agent_selector_reads() {
+    use cairn_installation::{
+        config::{id, now},
+        plugins::connections::Connection,
+    };
+    let (_directory, service, app) = fixture().await;
+    for n in 0..40 {
+        copied_version(&service, &format!("selector-{n:02}"), "1");
+    }
+    for n in 2..=40 {
+        copied_version(&service, "selector-00", &format!("{n:02}"));
+    }
+    let agents = (0..40).map(|_| id()).collect::<Vec<_>>();
+    let mut instances = Vec::new();
+    for n in 0..40 {
+        let settings = json!(
+            (0..6)
+                .map(|n| (format!("field{n}"), json!("\"".repeat(10000))))
+                .collect::<serde_json::Map<_, _>>()
+        );
+        let mut instance = Connection::draft(&id(), "selector-00", settings, Vec::new());
+        instance.name = format!("Instance {n}");
+        instance.agent_ids = agents.clone();
+        instances.push(serde_json::to_value(instance).unwrap());
+    }
+    service.store.transaction(move |db| {
+        for instance in &instances { db.put("plugin-connections", instance)?; }
+        for n in 0..2000 {
+            db.put("plugin-resource-grants", &json!({
+                "id": id(), "connectionId": instances[n % 40]["id"], "resourceId": id(),
+                "agentId": agents[n % 40], "profile": null, "operations": ["read"],
+                "deniedOperations": [], "scopes": {}, "ownerAccessId": "held-access", "revision": id(), "updatedAt": now(),
+            }))?;
+        }
+        Ok(())
+    }).await.unwrap();
+    let mut samples = Vec::new();
+    for sample in 0..6 {
+        let mut workloads = ["complete-catalogue", "complete-selector-directory"];
+        if sample % 2 == 1 {
+            workloads.reverse();
+        }
+        for workload in workloads {
+            let cpu = process_cpu_ms();
+            let started = std::time::Instant::now();
+            let mut bytes = 0;
+            let mut requests = 0;
+            let paths: &[&str] = if workload == "complete-catalogue" {
+                &["/api/plugins"]
+            } else {
+                &[
+                    "/api/plugins/packages",
+                    "/api/plugins/instance-access",
+                    "/api/plugins/agent-grant-counts",
+                ]
+            };
+            for path in paths {
+                let mut cursor = None::<String>;
+                let mut total = 0;
+                loop {
+                    let target = cursor.as_ref().map_or_else(
+                        || path.to_string(),
+                        |cursor| format!("{path}?cursor={cursor}"),
+                    );
+                    let response =
+                        common::send(&app, request(&target, InstallationRole::Owner)).await;
+                    assert_eq!(response.status(), StatusCode::OK);
+                    let encoded = axum::body::to_bytes(response.into_body(), usize::MAX)
+                        .await
+                        .unwrap();
+                    bytes += encoded.len();
+                    requests += 1;
+                    let value: Value = serde_json::from_slice(&encoded).unwrap();
+                    if workload == "complete-catalogue" {
+                        assert_eq!(value["connections"].as_array().unwrap().len(), 40);
+                        assert_eq!(value["resourceGrantCounts"].as_object().unwrap().len(), 40);
+                        break;
+                    }
+                    total += value["items"].as_array().unwrap().len();
+                    cursor = value["nextCursor"].as_str().map(str::to_owned);
+                    if cursor.is_none() {
+                        break;
+                    }
+                }
+                if workload != "complete-catalogue" {
+                    assert_eq!(
+                        total,
+                        if *path == "/api/plugins/packages" {
+                            42
+                        } else {
+                            40
+                        }
+                    );
+                }
+            }
+            samples.push(
+                json!({ "sample": sample, "workload": workload, "requests": requests,
+                "encodedBytes": bytes, "wallMs": started.elapsed().as_secs_f64()*1000.0,
+                "processCpuMs": process_cpu_ms()-cpu }),
+            );
+        }
+    }
+    let review = get(&app, "/api/plugins/packages/selector-00/versions/1").await;
+    let mut writes = Vec::new();
+    for _ in 0..6 {
+        let cpu = process_cpu_ms();
+        let started = std::time::Instant::now();
+        registry::approve(&service, "selector-00", "1", text(&review, "digest"))
+            .await
+            .unwrap();
+        writes.push(json!({"wallMs": started.elapsed().as_secs_f64()*1000.0,"processCpuMs":process_cpu_ms()-cpu}));
+    }
+    eprintln!(
+        "SELECTOR_MEASUREMENT {}",
+        json!({
+            "packagesCopied":40,"versionsCopied":79,"instancesCopied":40,"agents":40,"savedRules":2000,
+            "cache":"one API-cold and five warm samples; OS caches retained; local HTTP router in same Rust process",
+            "reference":"complete catalogue decoded as JSON, including every manifest, version and instance setting",
+            "candidate":"all package cards, all instance access pages and all grant-count pages decoded as JSON; no selected schema yet",
+            "writes":"existing approval path unchanged, six samples after reads; no new persisted format",
+            "samples":samples,"approvalWrites":writes,
         })
     );
 }

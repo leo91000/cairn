@@ -398,21 +398,62 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         ("GET", ["plugins", "instance-access"]) => {
             connections::owner::access(s, input.query.get("cursor").map(String::as_str)).await
         }
+        ("GET", ["plugins", "agent-grant-counts"]) => {
+            connections::owner::agent_grant_counts(s, input.query.get("cursor").map(String::as_str))
+                .await
+        }
+        (
+            "GET",
+            [
+                "plugins",
+                id,
+                "connections",
+                instance,
+                "resource-choices",
+                collection,
+            ],
+        ) => {
+            resources::choices(
+                s,
+                id,
+                instance,
+                collection,
+                input.query.get("cursor").map(String::as_str),
+            )
+            .await
+        }
         ("GET", ["plugins", "packages"]) => {
             registry::owner::list(s, input.query.get("cursor").map(String::as_str)).await
         }
-        ("GET", ["plugins", "packages", id]) => registry::owner::detail(s, id).await,
+        ("GET", ["plugins", "packages", id]) => {
+            registry::owner::detail(s, &registry::owner::path_segment(id)?).await
+        }
         ("GET", ["plugins", "packages", id, "connections"]) => {
-            connections::owner::list(s, id, input.query.get("cursor").map(String::as_str)).await
+            connections::owner::list(
+                s,
+                &registry::owner::path_segment(id)?,
+                input.query.get("cursor").map(String::as_str),
+            )
+            .await
         }
         ("GET", ["plugins", "packages", id, "connections", instance]) => {
-            connections::owner::get(s, id, instance).await
+            connections::owner::get(s, &registry::owner::path_segment(id)?, instance).await
         }
         ("GET", ["plugins", "packages", id, "versions"]) => {
-            registry::owner::versions(s, id, input.query.get("cursor").map(String::as_str)).await
+            registry::owner::versions(
+                s,
+                &registry::owner::path_segment(id)?,
+                input.query.get("cursor").map(String::as_str),
+            )
+            .await
         }
         ("GET", ["plugins", "packages", id, "versions", version]) => {
-            registry::owner::version(s, id, version).await
+            registry::owner::version(
+                s,
+                &registry::owner::path_segment(id)?,
+                &registry::owner::path_segment(version)?,
+            )
+            .await
         }
         ("POST", ["plugins", "packages"]) => registry::install(s, body).await,
         ("GET", ["plugins", "packages", "operations", id]) => s.plugins.operations.get(id),

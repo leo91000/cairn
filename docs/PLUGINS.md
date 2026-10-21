@@ -134,7 +134,7 @@ the digest displayed during review; changes require reviewing again.
 Owner package reads also have separate bounded contracts:
 
 - `GET /api/plugins/packages?cursor=…`: up to 32 compact cards, with a last-ID
-  `nextCursor`, `packageReads: true`, `instanceReads: true`, `accessReads: true`, setup support and capability descriptions.
+  `nextCursor`, `packageReads: true`, `instanceReads: true`, `accessReads: true`, `agentReads: true`, setup support and capability descriptions.
   A card's `presentation` contains labels, its brand, capability names and
   contribution counts; it is deliberately not a complete manifest. Cards include
   neither settings, credentials, instance configuration nor version history.
@@ -166,7 +166,8 @@ Owner package reads also have separate bounded contracts:
   vault contents or relaxes the checks on saving or executing an instance.
 
 - `GET /api/plugins/instance-access?cursor=…`: up to 32 compact saved instance
-  identities and root/resource agent IDs across packages. The query projects these
+  identities, delegated agent ID, diagnostic status and root/resource agent IDs
+  across packages. The query projects these
   fields before decoding the result in Rust; it returns no settings and does not
   load credential or activity records. SQLite still reads the instance JSON.
   Paused and unavailable packages remain represented. Resource memberships are
@@ -174,8 +175,16 @@ Owner package reads also have separate bounded contracts:
   ID; the selected package uses its complete manifest name. These saved rules
   support owner labels and public-agent restrictions; native checks still decide
   every write and effect.
+- `GET /api/plugins/agent-grant-counts?cursor=…`: up to 32 saved resource-rule
+  totals keyed by agent UUID. Rules whose instance, resource or package is no longer
+  available still count. An absent agent in a completed list has zero saved rules;
+  a failed or unsupported read is unknown, never an inferred zero.
+- `GET /api/plugins/{id}/connections/{instance}/resource-choices/{collection}?cursor=…`:
+  up to 32 resource identities, names, parent IDs and enabled flags for the chosen
+  collection. This read returns no settings or secret field names. The current
+  instance and approved package are checked before projecting the page.
 
-All four lists also enforce an encoded-byte budget below half the relay body limit.
+These lists also enforce an encoded-byte budget below half the relay body limit.
 Package IDs and versions are the cursor domain; existing management lists retain
 their UUID cursors. Live approval changes do not invalidate a later page's cursor.
 The current complete `/api/plugins` response also advertises `packageReads: true`
@@ -192,7 +201,26 @@ rules, even on paused or other packages. Compatibility saves re-read one exact
 instance with its full current root agent IDs; a deleted instance remains an
 error. A missing package is confirmed using support markers from one compact
 catalogue page, so uninstalling clears the selected screen without an aggregate
-read. Agent/grant selector screens still require their separate migration.
+read. Agent/grant selector screens complete the compact card, saved-access and
+per-agent rule-count pages before showing the directory. Only choosing an instance
+loads its complete package schema for resource profiles and operations. Package
+labels and agent-access help come from the manifest, including custom packages.
+An older host falls back explicitly; failures on a host advertising `agentReads`
+keep the selector unavailable rather than restoring a partial or stale directory.
+
+The public management MCP and the opt-in installation tool expose these same reads
+through `list_plugin_packages`, `get_plugin_package`, `list_plugin_instance_access`,
+`list_plugin_agent_grant_counts` and `list_plugin_resource_choices`. Public callers
+need the `read` scope; installation callers need their current revocable installation
+grant, rechecked after reading. MCP pages target 256 KiB of encoded JSON. One
+indivisible metadata record may use up to 768 KiB, so an instance's complete
+supported saved membership still fits below the code worker's 1 MiB result
+ceiling. Larger records return an explicit error. Both structured and text copies
+remain within the relay limit. Follow `nextCursor` until absent. These operations
+read saved metadata and do not grant plugin access, approve packages, or expose
+credentials. The rest of the generic plugin management interfaces still require
+separate MCP parity work; existing restrictions on installation agents changing
+owner-only plugin grants and exclusive reservations remain enforced.
 Status inspection still validates the installed versions of each selected package,
 without retaining all their manifests in compact responses. No summary is persisted.
 
