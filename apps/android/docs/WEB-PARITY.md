@@ -50,6 +50,19 @@ coverage used, not a claim that every production account/provider was exercised.
 
 ## Platform equivalents
 
+- Quota exhaustion appears once as an inline conversation card on both clients.
+  It folds the current quota's assistant echo, failed-turn notice and failed-status
+  notice, while the run activity retains its diagnostics. Recovered quota
+  interruptions stay hidden in the chat after account rotation or manual resume.
+  The card distinguishes
+  spending from usage limits, keeps any announced reset time and zone without
+  inventing a date, and offers account management to owners. An active account
+  wait promises automatic recovery; an older failed or paused conversation offers
+  manual resume. Android uses native Material controls and French copy; web uses
+  its existing English copy and a native HTML disclosure for technical details.
+  Coverage: `chat-quota.test.ts`, the Claude spend-limit browser journey,
+  `ConversationPresentationTest`, and shared `BackgroundWaitCases` on JVM/device.
+
 - Navigation uses Android system Back, bottom sheets and a navigation rail on wide
   windows. Chat and run readers hide the global phone navigation to maximize room.
 - The agent page is a list of sections that each open as a pushed screen on every window

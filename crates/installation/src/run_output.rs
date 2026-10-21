@@ -47,7 +47,7 @@ static CREDENTIAL: LazyLock<regex::Regex> = LazyLock::new(|| {
 
 // Codex and Claude Code subscription limits. Claude Code reports them as the turn's result.
 static EXHAUSTED: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"(?i)^(?:you['’]ve hit your (?:usage |session |weekly )?limit|you have hit your (?:usage )?limit|usage limit (?:has been )?(?:reached|exceeded)|claude ai usage limit reached|(?:5-hour|session|weekly|opus) limit reached)\b").unwrap()
+    regex::Regex::new(r"(?i)^(?:you['’]ve hit your (?:usage |session |weekly |(?:individual )?spend )?limit|you have hit your (?:usage )?limit|usage limit (?:has been )?(?:reached|exceeded)|claude ai usage limit reached|(?:5-hour|session|weekly|opus) limit reached)\b").unwrap()
 });
 
 pub fn redact(text: &str, secrets: &[String]) -> String {
@@ -511,6 +511,9 @@ mod tests {
     fn subscription_limits_of_both_coding_agents_are_exhaustion() {
         for message in [
             "You've hit your usage limit. Upgrade or try again later.",
+            "You've hit your individual spend limit · run /usage-credits to ask your admin for a higher limit · your weekly limit resets 3pm (UTC)",
+            "You’ve hit your individual spend limit",
+            "You've hit your spend limit",
             "Usage limit reached for this plan",
             "Claude AI usage limit reached|1790000000",
             "You've hit your limit · resets 3pm (Europe/Paris)",

@@ -31,6 +31,7 @@ import {
 } from '../attachments'
 import { chatDelivery, chatWaitNotice, scheduledWakeup } from '../chat-delivery'
 import { chatListCarried, chatList as chats, publishChats } from '../chat-list'
+import { chatQuota, isQuotaMessage } from '../chat-quota'
 import { liveWakeup, waitStatus } from '../chat-wait'
 import ActivityFeed from '../components/ActivityFeed.vue'
 import AgentAvatar from '../components/AgentAvatar.vue'
@@ -212,7 +213,16 @@ function switcherAnchor() {
 
 const error = ref('')
 const dismissedError = ref(false)
-const visibleError = computed(() => error.value || detail.value?.error || (detail.value?.run?.status === 'failed' ? detail.value.run.error || 'The response stopped before finishing. Resume the conversation to continue.' : ''))
+const quota = computed(() => chatQuota(detail.value?.run, events.value, detail.value?.paused))
+const visibleError = computed(() => {
+  if (error.value)
+    return error.value
+  const chatError = detail.value?.error
+  if (quota.value && (!chatError || isQuotaMessage(chatError) || chatError === quota.value.message))
+    return ''
+  const failedRun = detail.value?.run?.status === 'failed' ? detail.value.run : null
+  return chatError || (failedRun ? failedRun.error || 'The response stopped before finishing. Resume the conversation to continue.' : '')
+})
 const openCodeRegionBlocked = computed(() => visibleError.value.startsWith('OpenCode Go requires Global regions for this model.'))
 watch(() => [visibleError.value, detail.value?.id, detail.value?.run?.finishedAt], () => {
   dismissedError.value = false
@@ -356,6 +366,8 @@ const liveWait = computed<LiveWait | undefined>(() => detail.value
   : undefined)
 const backgroundTasks = computed(() => detail.value?.run?.status === 'running' ? backgroundWait(events.value)?.tasks.length ?? 0 : 0)
 const chatStatus = computed(() => {
+  if (quota.value && !detail.value?.paused)
+    return 'Waiting for quota'
   const status = detail.value?.run?.status
   if (status === 'failed')
     return 'Failed'
@@ -613,6 +625,23 @@ async function action(name: 'pause' | 'stop' | 'restore' | 'new-session', body?:
   finally { busy.value = false }
 }
 
+async function resumeQuota() {
+  const chat = detail.value
+  if (!chat || busy.value)
+    return
+  busy.value = true
+  error.value = ''
+  try {
+    if (chat.run?.status === 'failed')
+      await api(`/runs/${chat.run.id}/resume`, { method: 'POST' })
+    await api(`/chats/${chat.id}/pause`, { method: 'POST', body: JSON.stringify({ paused: false }) })
+  }
+  catch (e) {
+    error.value = (e as Error).message
+  }
+  finally { busy.value = false }
+}
+
 async function update(message: ChatMessage, mode?: 'steer') {
   error.value = ''
   try {
@@ -826,7 +855,7 @@ function key(event: KeyboardEvent) {
             :name="heading.agentName"
             :identity="heading.agentId"
             :size="36"
-            :working="detail?.run?.status === 'running' && !detail.paused && !suspended"
+            :working="detail?.run?.status === 'running' && !detail.paused && !suspended && !quota"
           />
           <div class="min-w-0 flex-1">
             <div class="flex min-w-0 items-center gap-1">
@@ -966,8 +995,11 @@ function key(event: KeyboardEvent) {
             :outcome="detail?.run?.status === 'succeeded' ? detail.run.outcome : null"
             :sending="delivery.sending"
             :events="events"
+            :quota="quota"
+            :can-manage-accounts="state.installationRole === 'owner'"
+            :busy="busy"
             :wakeup="liveWait"
-            :active="detail?.run?.status === 'running'"
+            :active="detail?.run?.status === 'running' && !quota"
             :suspended="suspended"
             :agent-id="detail?.agentId || selectedAgent?.id"
             :agent="detail?.agentName || selectedAgent?.name || 'Main agent'"
@@ -981,6 +1013,7 @@ function key(event: KeyboardEvent) {
             :subagent-bar="subagentBar"
             compact-toolbar
             chat
+            @resume-quota="resumeQuota"
             @load="live.loadOlder"
             @position="live.savePosition"
             @pause-wait="busy || action('pause', { paused: true })"
@@ -1046,7 +1079,7 @@ function key(event: KeyboardEvent) {
                 <Icon :name="X" :size="14" />
               </button>
             </UiAlert>
-            <div v-if="waitNotice" class="mb-3 rounded-lg border border-line bg-soft px-4 py-3 text-sm" role="status">
+            <div v-if="waitNotice && !quota" class="mb-3 rounded-lg border border-line bg-soft px-4 py-3 text-sm" role="status">
               <p v-if="waitNotice.account" class="mb-1 font-semibold">
                 {{ waitNotice.account }} account needed
               </p>

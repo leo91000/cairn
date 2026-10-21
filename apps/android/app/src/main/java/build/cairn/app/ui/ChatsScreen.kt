@@ -426,6 +426,10 @@ internal fun ChatPage(
         }
     }
     val timelineKeys = remember(id) { TimelineKeys() }
+    val quota =
+        remember(chat?.run, chat?.paused, live.events) {
+            chatQuota(chat?.run, live.events, chat?.paused == true)
+        }
     // A failed or interrupted turn never resumes its wakeup, even when the record lingers.
     val pendingWakeup = liveWakeup(chat)
     val history =
@@ -443,7 +447,7 @@ internal fun ChatPage(
                 live.state?.artifacts.orEmpty(),
             )
         }
-    val timeline = history
+    val timeline = remember(history, live.events) { quotaTimeline(history, live.events) }
     var asking by remember { mutableStateOf<ChatQuestion?>(null) }
     var stopping by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf<ChatMessage?>(null) }
@@ -465,7 +469,7 @@ internal fun ChatPage(
     // Neighbors need a real preview, not an unbounded backwards history crawl.
     val loadOlder = rememberHistoryPaging(live, listState, selected && positionReady && !gallery)
     val active = chat?.run?.active == true
-    val running = chat?.run?.status == "running"
+    val running = chat?.run?.status == "running" && quota == null
     val waitingTasks =
         remember(live.events, running) {
             if (running) backgroundWait(live.events) else null
@@ -503,7 +507,10 @@ internal fun ChatPage(
                         .copy(subagents = waitingForSubagents(live.events, currentSubagents))
                 } ?: workingStep(live.events, chat?.agentName.orEmpty(), chat?.run?.startedAt)
         }
-    val error = conversationError(chat)
+    val conversationError = conversationError(chat)
+    val error = conversationError?.takeUnless {
+        quota != null && (isQuotaMessage(it) || it == quota.message)
+    }
     var errorDismissed by
         remember(error, chat?.id, chat?.run?.id, chat?.run?.finishedAt) { mutableStateOf(false) }
     val selectedAgent = state.agents.find { it.id == (chat?.agentId ?: agent) }
@@ -1050,7 +1057,7 @@ internal fun ChatPage(
                         )
                         ActionIcon("Masquer l’erreur", CairnIcons.Close) { errorDismissed = true }
                     }
-                ChatRunWaitingNotice(chat?.run, openConnections, state.isOwner)
+                if (quota == null) ChatRunWaitingNotice(chat?.run, openConnections, state.isOwner)
                 if (gallery) {
                     ModalBottomSheet(
                         onDismissRequest = { gallery = false },
@@ -1222,6 +1229,34 @@ internal fun ChatPage(
                                                 hideRunning = chat?.run?.status == "running",
                                                 active = active,
                                                 livePlan = livePlan,
+                                            )
+                                        }
+                                    }
+                                    quota?.let { notice ->
+                                        item(key = "quota:${chat?.run?.id}") {
+                                            ChatQuotaCard(
+                                                notice,
+                                                canManage = state.isOwner,
+                                                busy = state.busy,
+                                                openConnections = openConnections,
+                                                resume = {
+                                                    chat?.let { current ->
+                                                        vm.perform {
+                                                            if (current.run?.status == "failed")
+                                                                api.request(
+                                                                    "POST",
+                                                                    "/runs/${segment(current.run.id)}/resume",
+                                                                )
+                                                            api.request(
+                                                                "POST",
+                                                                "/chats/${segment(current.id)}/pause",
+                                                                buildJsonObject {
+                                                                    put("paused", false)
+                                                                },
+                                                            )
+                                                        }
+                                                    }
+                                                },
                                             )
                                         }
                                     }
