@@ -59,6 +59,8 @@ below these roots are preserved. This prevents a saved root link from becoming a
 host bind source. Staging lives in a dedicated manager directory. Before another
 conversion starts, both storage locks exclude live converters while abandoned
 staging from a terminated manager is reclaimed, including on a retry.
+Cleanup preserves the staging root so it can be a separate mounted filesystem;
+it removes only that directory's abandoned contents without following symlinks.
 
 This supersedes the blanket native/VM conversion prohibition in
 [native journal storage](0052-native-ublk-workspaces-and-idle-eviction.md).
