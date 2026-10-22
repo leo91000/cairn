@@ -1,7 +1,7 @@
 mod common;
 
 use cairn_installation::{
-    chats::sleep,
+    chats::wait_for,
     config::{id, now},
     project_workspaces,
     service::Service,
@@ -73,13 +73,14 @@ impl Fixture {
     }
 
     async fn schedule(&self) -> Value {
-        sleep::schedule(
+        wait_for::schedule(
             &self.service,
             &self.token,
-            &json!({ "seconds": 420, "reason": "Wait for CI" }),
+            &json!({ "condition": { "type": "delay", "seconds": 420 }, "reason": "Wait for CI" }),
         )
         .await
-        .unwrap()
+        .unwrap()["wakeup"]
+            .clone()
     }
 
     async fn finish(&self) {
@@ -101,7 +102,7 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn sleep_is_idempotent_durable_and_resumes_same_workspace_once_without_user_input() {
+async fn delay_is_idempotent_durable_and_resumes_same_workspace_once_without_user_input() {
     let f = Fixture::new().await;
     let wake = f.schedule().await;
     assert_eq!(wake, f.schedule().await);
@@ -118,7 +119,7 @@ async fn sleep_is_idempotent_durable_and_resumes_same_workspace_once_without_use
             .as_array()
             .unwrap()
             .iter()
-            .any(|tool| tool["name"] == "sleep")
+            .any(|tool| tool["name"] == "wait_for")
     );
     f.finish().await;
     assert_eq!(
@@ -160,10 +161,10 @@ async fn sleep_is_idempotent_durable_and_resumes_same_workspace_once_without_use
         .unwrap();
     assert_eq!(count, 1);
     assert!(
-        sleep::schedule(
+        wait_for::schedule(
             &restarted,
             &f.token,
-            &json!({ "seconds": 1, "reason": "stale" })
+            &json!({ "condition": { "type": "delay", "seconds": 1 }, "reason": "stale" })
         )
         .await
         .is_err()
@@ -171,7 +172,7 @@ async fn sleep_is_idempotent_durable_and_resumes_same_workspace_once_without_use
 }
 
 #[tokio::test]
-async fn sleep_waits_for_success_and_pause_holds_the_original_deadline() {
+async fn delay_waits_for_success_and_pause_holds_the_original_deadline() {
     let f = Fixture::new().await;
     f.schedule().await;
     f.due().await;
@@ -189,21 +190,23 @@ async fn sleep_waits_for_success_and_pause_holds_the_original_deadline() {
 async fn replacing_waits_and_expired_turn_grants_cannot_reschedule_the_next_turn() {
     let f = Fixture::new().await;
     let original = f.schedule().await;
-    let integral_float = sleep::schedule(
+    let integral_float = wait_for::schedule(
         &f.service,
         &f.token,
-        &json!({ "seconds": 420.0, "reason": "Wait for CI" }),
+        &json!({ "condition": { "type": "delay", "seconds": 420.0 }, "reason": "Wait for CI" }),
     )
     .await
-    .unwrap();
+    .unwrap()["wakeup"]
+        .clone();
     assert_eq!(original, integral_float);
-    let replacement = sleep::schedule(
+    let replacement = wait_for::schedule(
         &f.service,
         &f.token,
-        &json!({ "seconds": 1, "reason": "Wait for review" }),
+        &json!({ "condition": { "type": "delay", "seconds": 1 }, "reason": "Wait for review" }),
     )
     .await
-    .unwrap();
+    .unwrap()["wakeup"]
+        .clone();
     assert_ne!(original["id"], replacement["id"]);
     f.finish().await;
     f.due().await;
@@ -224,18 +227,19 @@ async fn replacing_waits_and_expired_turn_grants_cannot_reschedule_the_next_turn
         .await
         .unwrap();
     let token = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
-    let next = sleep::schedule(
+    let next = wait_for::schedule(
         &f.service,
         token,
-        &json!({ "seconds": 420, "reason": "Next wait" }),
+        &json!({ "condition": { "type": "delay", "seconds": 420 }, "reason": "Next wait" }),
     )
     .await
-    .unwrap();
+    .unwrap()["wakeup"]
+        .clone();
     assert!(
-        sleep::schedule(
+        wait_for::schedule(
             &f.service,
             &f.token,
-            &json!({ "seconds": 1, "reason": "Old turn" })
+            &json!({ "condition": { "type": "delay", "seconds": 1 }, "reason": "Old turn" })
         )
         .await
         .is_err()
@@ -435,16 +439,20 @@ async fn queued_follow_ups_are_not_held_by_a_wakeup_that_cannot_resume() {
 }
 
 #[tokio::test]
-async fn sleep_rejects_invalid_inputs_non_chat_runs_and_pending_steering() {
+async fn delay_rejects_invalid_inputs_non_chat_runs_and_pending_steering() {
     let f = Fixture::new().await;
     for input in [
-        json!({ "seconds": 0, "reason": "CI" }),
-        json!({ "seconds": 86401, "reason": "CI" }),
-        json!({ "seconds": 1.5, "reason": "CI" }),
-        json!({ "seconds": 1, "reason": " " }),
-        json!({ "seconds": 1, "reason": "CI", "extra": true }),
+        json!({ "condition": { "type": "delay", "seconds": 0 }, "reason": "CI" }),
+        json!({ "condition": { "type": "delay", "seconds": 86401 }, "reason": "CI" }),
+        json!({ "condition": { "type": "delay", "seconds": 1.5 }, "reason": "CI" }),
+        json!({ "condition": { "type": "delay", "seconds": 1 }, "reason": " " }),
+        json!({ "condition": { "type": "delay", "seconds": 1 }, "reason": "CI", "extra": true }),
     ] {
-        assert!(sleep::schedule(&f.service, &f.token, &input).await.is_err());
+        assert!(
+            wait_for::schedule(&f.service, &f.token, &input)
+                .await
+                .is_err()
+        );
     }
     assert!(f.service.chat_detail(&f.chat).await.unwrap()["wakeup"].is_null());
     f.service
@@ -455,10 +463,10 @@ async fn sleep_rejects_invalid_inputs_non_chat_runs_and_pending_steering() {
         .await
         .unwrap();
     assert!(
-        sleep::schedule(
+        wait_for::schedule(
             &f.service,
             &f.token,
-            &json!({ "seconds": 1, "reason": "CI" })
+            &json!({ "condition": { "type": "delay", "seconds": 1 }, "reason": "CI" })
         )
         .await
         .is_err()
@@ -489,9 +497,13 @@ async fn sleep_rejects_invalid_inputs_non_chat_runs_and_pending_steering() {
         .unwrap();
     let token = text(&config["env"], "CAIRN_MCP_RUN_TOKEN");
     assert!(
-        sleep::schedule(&f.service, token, &json!({ "seconds": 1, "reason": "CI" }))
-            .await
-            .is_err()
+        wait_for::schedule(
+            &f.service,
+            token,
+            &json!({ "condition": { "type": "delay", "seconds": 1 }, "reason": "CI" })
+        )
+        .await
+        .is_err()
     );
 }
 
@@ -577,4 +589,206 @@ async fn replacing_a_native_session_retires_its_pending_questions_before_startup
             );
         }
     }
+}
+
+#[tokio::test]
+async fn time_conditions_are_available_without_plugin_or_installation_access() {
+    let f = Fixture::new().await;
+    let mut agent = f
+        .service
+        .get("agents", cairn_installation::config::MAIN_AGENT_ID)
+        .await
+        .unwrap();
+    agent["access"]["installation"] = false.into();
+    f.service.store.put("agents", agent.clone()).await.unwrap();
+    let mut run = f.service.store.run(&f.run).await.unwrap();
+    run["snapshot"]["agent"] = agent;
+    f.service
+        .store
+        .patch_run(&f.run, json!({ "snapshot": run["snapshot"] }))
+        .await
+        .unwrap();
+    let listing = project_workspaces::rpc(&f.service, &f.token, "tools/list", &json!({}))
+        .await
+        .unwrap();
+    let tools = listing["tools"].as_array().unwrap();
+    assert!(!tools.iter().any(|tool| tool["name"] == "sleep"));
+    assert!(
+        project_workspaces::rpc(
+            &f.service,
+            &f.token,
+            "tools/call",
+            &json!({ "name": "sleep", "arguments": { "seconds": 1, "reason": "Removed" } })
+        )
+        .await
+        .is_err()
+    );
+    let schema = &tools
+        .iter()
+        .find(|tool| tool["name"] == "wait_for")
+        .unwrap()["inputSchema"];
+    for condition in [
+        json!({ "type": "delay", "seconds": 60 }),
+        json!({ "type": "at", "date": "2026-01-01T00:00:00Z" }),
+    ] {
+        let input = json!({ "condition": condition, "reason": "Resume later" });
+        assert!(jsonschema::is_valid(schema, &input));
+        let result = project_workspaces::rpc(
+            &f.service,
+            &f.token,
+            "tools/call",
+            &json!({ "name": "wait_for", "arguments": input }),
+        )
+        .await
+        .unwrap();
+        assert_ne!(result["isError"], true, "{result}");
+    }
+    for input in [
+        json!({ "condition": { "type": "delay", "seconds": 60 }, "reason": "Wait", "timeoutSeconds": 100 }),
+        json!({ "condition": { "type": "run_finished", "runId": id() }, "reason": "Wait" }),
+    ] {
+        assert!(!jsonschema::is_valid(schema, &input));
+        assert!(
+            wait_for::schedule(&f.service, &f.token, &input)
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn dates_are_absolute_timezone_aware_and_repeated_calls_keep_the_deadline() {
+    let f = Fixture::new().await;
+    let deadline = now() + 3_600_000;
+    let date = chrono::DateTime::from_timestamp_millis(deadline).unwrap();
+    let request = json!({ "condition": { "type": "at", "date": date.to_rfc3339() }, "reason": "Wait until date" });
+    let result = wait_for::schedule(&f.service, &f.token, &request)
+        .await
+        .unwrap();
+    assert_eq!(result["deferred"], true);
+    let wake = &result["wakeup"];
+    assert_eq!(wake["wakeAt"], deadline);
+    assert!(
+        wake["condition"].is_null(),
+        "Keep the legacy timer shape for older binaries"
+    );
+    let offset = chrono::FixedOffset::east_opt(7200).unwrap();
+    let equivalent = json!({ "condition": { "type": "at", "date": date.with_timezone(&offset).to_rfc3339() }, "reason": "Wait until date" });
+    assert_eq!(
+        wait_for::schedule(&f.service, &f.token, &equivalent)
+            .await
+            .unwrap(),
+        result
+    );
+    assert_ne!(
+        f.schedule().await["id"],
+        wake["id"],
+        "A duration replaces the date wait"
+    );
+
+    for condition in [
+        json!({ "type": "at", "date": "tomorrow" }),
+        json!({ "type": "at", "date": "2026-10-23T09:00:00" }),
+        json!({ "type": "at", "date": "2026-02-30T09:00:00Z" }),
+        json!({ "type": "at", "date": chrono::DateTime::from_timestamp_millis(now() + 86_500_000).unwrap().to_rfc3339() }),
+        json!({ "type": "at", "date": date.to_rfc3339(), "seconds": 10 }),
+    ] {
+        assert!(
+            wait_for::schedule(
+                &f.service,
+                &f.token,
+                &json!({ "condition": condition, "reason": "Wait" })
+            )
+            .await
+            .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn past_dates_complete_immediately_and_replace_pending_waits() {
+    let f = Fixture::new().await;
+    f.schedule().await;
+    let deadline = now() - 1000;
+    let result = wait_for::schedule(&f.service, &f.token, &json!({
+        "condition": { "type": "at", "date": chrono::DateTime::from_timestamp_millis(deadline).unwrap().to_rfc3339() },
+        "reason": "Time already reached",
+    })).await.unwrap();
+    assert_eq!(
+        result,
+        json!({ "deferred": false, "observation": { "state": "completed", "type": "time", "wakeAt": deadline } })
+    );
+    let detail = f.service.chat_detail(&f.chat).await.unwrap();
+    assert!(detail["wakeup"].is_null());
+    assert_eq!(detail["run"]["status"], "running");
+}
+
+#[tokio::test]
+async fn timer_completion_is_a_result_and_existing_timer_records_still_resume() {
+    let f = Fixture::new().await;
+    let wake = f.schedule().await;
+    // Exact persisted shape used by sleep before the unified interface.
+    let mut chat = f.service.get("chats", &f.chat).await.unwrap();
+    let deadline = now() - 1000;
+    chat["wakeup"] = json!({
+        "id": wake["id"], "messageId": wake["messageId"], "reason": wake["reason"],
+        "createdAt": deadline - 420_000, "wakeAt": deadline, "seconds": 420,
+    });
+    f.service.store.put("chats", chat).await.unwrap();
+    f.finish().await;
+    let restarted = Service::new(f.service.config.clone()).await.unwrap();
+    restarted.chat_tick(&HashSet::new()).await.unwrap();
+    let detail = restarted.chat_detail(&f.chat).await.unwrap();
+    assert_eq!(detail["run"]["status"], "queued");
+    let run = f.run.clone();
+    let events = restarted
+        .store
+        .read(move |db| db.events(&run, 0, 100))
+        .await
+        .unwrap();
+    let event = events
+        .iter()
+        .find(|event| event["type"] == "chat.wakeup")
+        .unwrap();
+    assert_eq!(
+        event["payload"]["observation"],
+        json!({ "state": "completed", "type": "time", "wakeAt": deadline })
+    );
+}
+
+#[tokio::test]
+async fn fractional_dates_never_schedule_before_the_requested_instant() {
+    let f = Fixture::new().await;
+    let millis = now() + 60_000;
+    let date =
+        chrono::DateTime::from_timestamp_millis(millis).unwrap() + chrono::Duration::nanoseconds(1);
+    let result = wait_for::schedule(&f.service, &f.token, &json!({ "condition": { "type": "at", "date": date.to_rfc3339() }, "reason": "Precise date" })).await.unwrap();
+    assert_eq!(result["wakeup"]["wakeAt"], millis + 1);
+}
+
+#[tokio::test]
+async fn switching_between_a_date_and_duration_replaces_the_request() {
+    let f = Fixture::new().await;
+    let date = chrono::DateTime::from_timestamp_millis(now() + 420_000).unwrap();
+    let at = wait_for::schedule(
+        &f.service,
+        &f.token,
+        &json!({
+            "condition": { "type": "at", "date": date.to_rfc3339() }, "reason": "Wait for CI",
+        }),
+    )
+    .await
+    .unwrap();
+    let delay = f.schedule().await;
+    assert_ne!(delay["id"], at["wakeup"]["id"]);
+    assert_eq!(
+        delay["timeCondition"],
+        json!({ "type": "delay", "seconds": 420 })
+    );
+    let same_instant =
+        chrono::DateTime::from_timestamp_millis(delay["wakeAt"].as_i64().unwrap()).unwrap();
+    let at = wait_for::schedule(&f.service, &f.token, &json!({
+        "condition": { "type": "at", "date": same_instant.to_rfc3339() }, "reason": "Wait for CI",
+    })).await.unwrap();
+    assert_ne!(at["wakeup"]["id"], delay["id"]);
 }

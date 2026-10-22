@@ -375,6 +375,27 @@ abstract class BackgroundWaitCases {
     }
 
     @Test
+    fun completedTimeAndExternalTimeoutHaveDifferentCards() {
+        val reached = buildJsonObject {
+            put("state", "completed")
+            put("type", "time")
+            put("wakeAt", 1000)
+        }
+        val timedOut = buildJsonObject { put("state", "timed_out") }
+        compose.setContent {
+            CairnTheme {
+                androidx.compose.foundation.layout.Column {
+                    WaitCard(ActivityWait(null, reached, observed = true))
+                    WaitCard(ActivityWait(null, timedOut, observed = true))
+                }
+            }
+        }
+        compose.onNodeWithText("Échéance atteinte").assertExists()
+        compose.onNodeWithText("Heure prévue", substring = true).assertExists()
+        compose.onNodeWithText("Échéance atteinte sans résultat").assertExists()
+    }
+
+    @Test
     fun explicitImmediateResultReplacesPendingWaitWithChangedWording() {
         val wakeup =
             ChatWakeup(

@@ -197,10 +197,10 @@ async fn manager_acquisition_is_idempotent_fenced_and_released_before_waiting() 
     );
     assert_eq!(renewed["renewalPending"], true);
     f.until(|record| record["renewalPending"] == false).await;
-    cairn_installation::chats::sleep::schedule(
+    cairn_installation::chats::wait_for::schedule(
         &f.s,
         &f.token,
-        &json!({ "seconds": 30, "reason": "Remote result" }),
+        &json!({ "condition": { "type": "delay", "seconds": 30 }, "reason": "Remote result" }),
     )
     .await
     .unwrap();

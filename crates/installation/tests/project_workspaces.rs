@@ -421,27 +421,21 @@ async fn builtin_mcp_endpoint_exposes_scoped_workspace_tools_and_checks_the_run_
         assert!(value["error"].is_null(), "{value}");
         if method == "tools/list" {
             // Plugin tools such as 1Password's appear only for agents granted an instance.
-            assert_eq!(value["result"]["tools"].as_array().unwrap().len(), 14);
+            let tools = value["result"]["tools"].as_array().unwrap();
+            assert_eq!(tools.len(), 13);
             assert!(
-                !value["result"]["tools"]
-                    .as_array()
-                    .unwrap()
+                !tools
                     .iter()
-                    .any(|tool| tool["name"] == "onepassword")
+                    .any(|tool| tool["name"] == "onepassword" || tool["name"] == "sleep")
             );
             for name in [
+                "wait_for",
                 "acquire_exclusive",
                 "release_exclusive",
                 "exclusive_status",
                 "renew_exclusive",
             ] {
-                assert!(
-                    value["result"]["tools"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|tool| tool["name"] == name)
-                );
+                assert!(tools.iter().any(|tool| tool["name"] == name));
             }
             assert_eq!(value["result"]["tools"][2]["name"], "list_nodes");
             assert_eq!(value["result"]["tools"][1]["name"], "publish_artifact");

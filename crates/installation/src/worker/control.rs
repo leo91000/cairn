@@ -62,7 +62,7 @@ impl Worker {
                 authorize(db)?;
                 let chat = crate::chats::pause_in(db, &id, true)?;
                 if let Some(run_id) = chat["runId"].as_str() {
-                    crate::chats::sleep::cancel_for_run(db, run_id)?;
+                    crate::chats::continuation::cancel_for_run(db, run_id)?;
                     let run = required(db.run(run_id)?, "Run not found")?;
                     if RunStatus::of(&run).is_some_and(RunStatus::is_active) {
                         request_cancel(db, run_id, executing.contains(run_id))?;
@@ -163,7 +163,7 @@ impl Worker {
 
 fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
     let run = required(db.run(id)?, "Run not found")?;
-    let waiting = crate::chats::sleep::cancel_for_run(db, id)?;
+    let waiting = crate::chats::continuation::cancel_for_run(db, id)?;
     if !RunStatus::of(&run).is_some_and(RunStatus::is_active) {
         if waiting {
             return db.audit("run.wakeup.cancelled", &json!({ "id": id }));
@@ -222,7 +222,7 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
     }
     // A manual resume may arrive before chat_tick observes the terminal turn.
     // Its scheduled continuation must not survive into the resumed execution.
-    crate::chats::sleep::cancel_for_run(db, id)?;
+    crate::chats::continuation::cancel_for_run(db, id)?;
     if let Some(mut checkpoint) = checkpoint {
         checkpoint.remaining_ms = Some(crate::run_limits::budget_ms(&run["snapshot"]["agent"]));
         if !before_launch {
@@ -375,7 +375,7 @@ async fn pause_chat(s: &Service, input: &crate::http::Input, id: &str) -> Result
 async fn stop_chat(s: &Service, id: &str) -> Result<Value> {
     let chat = s.get("chats", id).await?;
     s.chat_pause(id, true).await?;
-    s.chat_cancel_sleep(id).await?;
+    s.chat_cancel_wait(id).await?;
     if let Some(run_id) = chat["runId"].as_str()
         && RunStatus::of(&s.store.run(run_id).await?).is_some_and(RunStatus::is_active)
     {

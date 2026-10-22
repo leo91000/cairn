@@ -294,7 +294,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             merely because it is a deliverable. Store export files in the current run \
             workspace or /tmp. Wait for successful publication and include the returned \
             durable URL in your reply. Before your final response, unless ending a \
-            confirmed deferred wait with cairn_workspace.sleep or cairn_workspace.wait_for, call \
+            confirmed deferred wait with cairn_workspace.wait_for, call \
             cairn_workspace.report_outcome with completed, blocked, or needs_input, a \
             concrete reason, and validation/delivery evidence. A successful process or \
             local commit is not a completed request when an authorized push, CI check, \
@@ -378,7 +378,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             ""
         },
         waiting = if chat && run["isolated"] == true {
-            crate::chats::sleep::INSTRUCTIONS
+            crate::chats::continuation::INSTRUCTIONS
         } else {
             ""
         },

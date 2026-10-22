@@ -182,7 +182,7 @@ test('a durable scheduled wait survives restart and resumes without a user messa
   expect((await workspace.api(`/api/chats/${chat.id}`)).run.status).toBe('succeeded')
   await page.getByRole('button', { name: 'Resume', exact: true }).click()
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.summary).toContain('Cairn resumed this conversation')
-  await expect(card).toContainText(/Resumed as scheduled.*Wait for CI/)
+  await expect(card).toContainText(/Scheduled time reached.*Wait for CI/)
   await expect(card.getByRole('button', { name: 'Pause wait' })).toHaveCount(0)
   await expect(waiting).toHaveCount(0)
   const resumed = await workspace.api(`/api/chats/${chat.id}`)

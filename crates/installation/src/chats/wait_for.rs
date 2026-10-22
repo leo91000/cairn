@@ -1,7 +1,7 @@
 //! Named, durable conditions that resume an existing conversation without keeping its VM active.
-//! Cairn's own condition is another run finishing; plugins granted to the agent add
+//! Cairn provides time waits and run dependencies; plugins granted to the agent add
 //! theirs (see `plugins::conditions`).
-use super::{chat_for_run, sleep};
+use super::{chat_for_run, continuation};
 use crate::{
     config::{id, now},
     conversation_lifecycle::require_active,
@@ -12,6 +12,7 @@ use crate::{
     store::Db,
     validation::{text, uuid},
 };
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
@@ -27,23 +28,62 @@ fn run_finished() -> Value {
     })
 }
 
-/// The tool with the conditions of plugins granted to the agent.
+fn delay() -> Value {
+    json!({
+        "type": "object",
+        "description": "Resume after 1 to 86400 seconds. Do not provide timeoutSeconds.",
+        "properties": {
+            "type": { "const": "delay" },
+            "seconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
+        },
+        "required": ["type", "seconds"],
+        "additionalProperties": false,
+    })
+}
+
+fn at() -> Value {
+    json!({
+        "type": "object",
+        "description": "Resume at an RFC 3339 date with an explicit timezone, at most 24 hours ahead. A past date completes immediately. Do not provide timeoutSeconds.",
+        "properties": {
+            "type": { "const": "at" },
+            "date": { "type": "string", "format": "date-time" },
+        },
+        "required": ["type", "date"],
+        "additionalProperties": false,
+    })
+}
+
+fn temporal(condition: &Value) -> bool {
+    matches!(text(condition, "type"), "delay" | "at")
+}
+
+fn date_millis(condition: &Value) -> Result<i64> {
+    let date = DateTime::parse_from_rfc3339(text(condition, "date"))
+        .map_err(|_| Error::bad("Provide an RFC 3339 date with an explicit timezone."))?;
+    // Round up to the scheduler's millisecond precision: never resume before the requested date.
+    let extra_millisecond = i64::from(!date.timestamp_subsec_nanos().is_multiple_of(1_000_000));
+    Ok(date.timestamp_millis() + extra_millisecond)
+}
+
+/// The single wait tool: native time/run conditions and conditions of granted plugins.
 pub fn tool(plugin_conditions: &[Value]) -> Value {
-    let mut conditions = vec![run_finished()];
+    let mut conditions = vec![delay(), at(), run_finished()];
     conditions.extend(plugin_conditions.iter().cloned());
     json!({
         "name": "wait_for",
-        "description": "Wait durably for an authorized Cairn run to finish or for a condition \
-            provided by a plugin granted to this agent, such as a remote check pinned to a commit. \
-            If already complete, returns the observed result: continue this turn. \
-            Otherwise saves a wakeup: end this turn so execution resources can be released. Cairn checks \
-            the condition without waking the LLM and resumes this conversation when a result is available \
-            or the timeout expires, subject to capacity. Completion includes failure and cancellation; \
-            inspect the result before taking action. Each plugin condition describes what it observes \
-            and what its results mean. Never use this for local background processes that need this VM. \
-            Run dependencies require the existing installation grant; plugin conditions use the \
-            agent's plugin grants. One wait is stored per conversation. Identical repeated requests \
-            preserve the deadline; a different request replaces the previous wait, including sleep. \
+        "description": "Wait durably for a duration (delay), a date (at), an authorized Cairn run \
+            to finish, or a condition provided by a plugin granted to this agent. Time conditions \
+            take no timeoutSeconds; external conditions require it (1 to 86400 seconds). \
+            If already complete, returns deferred=false and the observation: continue this turn. \
+            Otherwise saves a wakeup and returns deferred=true: end this turn so execution resources \
+            can be released. Cairn checks the condition without waking the LLM and resumes this \
+            conversation when the time or result arrives or the timeout expires, subject to capacity. \
+            A time reached is completed, not timed_out. External completion includes failure and \
+            cancellation; inspect the result before acting. Never use this for local background \
+            processes that need this execution. Run dependencies require installation access; plugin \
+            conditions use the agent's plugin grants. One wait is stored per conversation. Identical \
+            repeated requests preserve the deadline; a different request replaces the previous wait. \
             Queued follow-ups start after the continuation. A new user message, stop, deletion, \
             terminal turn failure or manual run resume cancels the wait; queue pause holds it.",
         "inputSchema": {
@@ -53,14 +93,22 @@ pub fn tool(plugin_conditions: &[Value]) -> Value {
                 "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
                 "reason": { "type": "string", "minLength": 1, "maxLength": 1000 },
             },
-            "required": ["condition", "timeoutSeconds", "reason"],
+            "required": ["condition", "reason"],
+            "allOf": [{
+                "if": {
+                    "properties": {
+                        "condition": { "properties": { "type": { "enum": ["delay", "at"] } } },
+                    },
+                },
+                "then": { "not": { "required": ["timeoutSeconds"] } },
+                "else": { "required": ["timeoutSeconds"] },
+            }],
             "additionalProperties": false,
         },
     })
 }
 
-/// Checks the request; plugin conditions are checked against their package's schema
-/// and record their plugin.
+/// Check native inputs or validate against the granted plugin's condition schema.
 async fn input(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
     let base = json!({
         "type": "object",
@@ -69,21 +117,49 @@ async fn input(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
             "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
             "reason": { "type": "string", "minLength": 1, "maxLength": 1000 },
         },
-        "required": ["condition", "timeoutSeconds", "reason"],
+        "required": ["condition", "reason"],
         "additionalProperties": false,
     });
     let invalid = || {
         Error::bad(
-            "Provide a supported condition, a concrete reason and a timeout of 1 to 86400 seconds.",
+            "Provide a supported condition and a concrete reason. Time conditions take no timeoutSeconds; external conditions require 1 to 86400 seconds.",
         )
     };
     if !jsonschema::is_valid(&base, input) || text(input, "reason").trim().is_empty() {
         return Err(invalid());
     }
     let mut input = crate::run_output::payload(input, &[]);
-    // JSON Schema accepts integral floats; canonicalize them for idempotency.
-    input["timeoutSeconds"] = (input["timeoutSeconds"].as_f64().unwrap() as i64).into();
     let run = crate::project_workspaces::authorize(s, bearer).await?;
+    if temporal(&input["condition"]) {
+        let schema = if input["condition"]["type"] == "delay" {
+            delay()
+        } else {
+            at()
+        };
+        if input.get("timeoutSeconds").is_some()
+            || !jsonschema::is_valid(&schema, &input["condition"])
+        {
+            return Err(invalid());
+        }
+        if input["condition"]["type"] == "delay" {
+            input["condition"]["seconds"] =
+                (input["condition"]["seconds"].as_f64().unwrap() as i64).into();
+        } else {
+            let deadline = date_millis(&input["condition"])?;
+            if deadline > now() + 86_400_000 {
+                return Err(Error::bad("The date must be at most 24 hours ahead."));
+            }
+            input["condition"]["date"] = DateTime::<Utc>::from_timestamp_millis(deadline)
+                .ok_or_else(invalid)?
+                .to_rfc3339_opts(SecondsFormat::Millis, true)
+                .into();
+        }
+        return Ok(input);
+    }
+    let Some(timeout) = input["timeoutSeconds"].as_f64() else {
+        return Err(invalid());
+    };
+    input["timeoutSeconds"] = (timeout as i64).into();
     let agent_id = text(&run["snapshot"]["agent"], "id");
     match conditions::normalize(s, agent_id, &input["condition"]).await? {
         Some(condition) => input["condition"] = condition,
@@ -98,11 +174,26 @@ async fn input(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
 }
 
 fn same_request(previous: &Value, run: &Value, input: &Value) -> bool {
+    let condition = &input["condition"];
+    let same_condition = if temporal(condition) {
+        !previous["condition"].is_object()
+            && if previous["timeCondition"].is_object() {
+                previous["timeCondition"] == *condition
+            } else {
+                // Existing sleep records only describe a duration.
+                condition["type"] == "delay" && previous["seconds"] == condition["seconds"]
+            }
+    } else {
+        previous["condition"] == *condition && previous["seconds"] == input["timeoutSeconds"]
+    };
     previous.is_object()
         && previous["messageId"] == run["chatExecution"]["messageId"]
-        && previous["condition"] == input["condition"]
-        && previous["seconds"] == input["timeoutSeconds"]
+        && same_condition
         && previous["reason"] == input["reason"]
+}
+
+fn time_result(wake_at: i64) -> Value {
+    json!({ "state": "completed", "type": "time", "wakeAt": wake_at })
 }
 
 fn input_revision(db: &Db<'_>, run: &Value, chat: &Value) -> Result<(i64, Vec<String>)> {
@@ -127,12 +218,14 @@ fn registering(db: &Db<'_>, bearer: &str, input: &Value) -> Result<(Value, Value
     let chat = chat_for_run(db, text(&run, "id"))?
         .ok_or_else(|| Error::conflict("Waiting requires an interactive conversation."))?;
     require_active(&chat)?;
-    if chat["paused"] == true || sleep::has_unhandled_input(db, &chat)? {
+    if chat["paused"] == true || continuation::has_unhandled_input(db, &chat)? {
         return Err(Error::conflict(
             "Handle pending user input before registering a wait.",
         ));
     }
-    access(db, &run, &input["condition"])?;
+    if !temporal(&input["condition"]) {
+        access(db, &run, &input["condition"])?;
+    }
     if input["condition"]["type"] == "run_finished" {
         crate::installation_mcp::authorize_in(db, bearer)?;
     }
@@ -202,7 +295,7 @@ fn run_result(db: &Db<'_>, condition: &Value) -> Result<Option<Value>> {
     if status == RunStatus::Succeeded
         && target["trigger"] == "chat"
         && let Some(chat) = chat_for_run(db, text(&target, "id"))?
-        && (chat["wakeup"].is_object() || sleep::has_pending_input(db, &chat)?)
+        && (chat["wakeup"].is_object() || continuation::has_pending_input(db, &chat)?)
     {
         return Ok(None);
     }
@@ -259,13 +352,27 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
             if same_request(&chat["wakeup"], &run, &input) {
                 return Ok(json!({ "deferred": true, "wakeup": chat["wakeup"] }));
             }
-            let observed = if input["condition"]["type"] == "run_finished" {
-                run_result(db, &input["condition"])?
+            let created = now();
+            let condition = &input["condition"];
+            let deadline = if condition["type"] == "at" {
+                date_millis(condition)?
+            } else {
+                let seconds = if condition["type"] == "delay" {
+                    condition["seconds"].as_i64().unwrap()
+                } else {
+                    input["timeoutSeconds"].as_i64().unwrap()
+                };
+                created + seconds * 1000
+            };
+            let observed = if condition["type"] == "at" && deadline <= created {
+                Some(time_result(deadline))
+            } else if condition["type"] == "run_finished" {
+                run_result(db, condition)?
             } else {
                 observed
             };
             if let Some(observed) = observed {
-                sleep::cancel(db, text(&chat, "id"))?;
+                continuation::cancel(db, text(&chat, "id"))?;
                 // An immediate result has its own card; retain the text for older clients.
                 // No wakeup records the reason when the condition is already complete.
                 let mut announced = observed.clone();
@@ -279,17 +386,22 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
                 )?;
                 return Ok(json!({ "deferred": false, "observation": observed }));
             }
-            let created = now();
-            let seconds = input["timeoutSeconds"].as_i64().unwrap();
+            // Time waits keep the existing timer record (no condition), readable by older binaries.
+            let seconds = (deadline - created + 999) / 1000;
             let mut wakeup = json!({
                 "id": id(),
                 "messageId": run["chatExecution"]["messageId"],
                 "seconds": seconds,
                 "reason": input["reason"],
                 "createdAt": created,
-                "wakeAt": created + seconds * 1000,
-                "condition": input["condition"],
+                "wakeAt": deadline,
             });
+            if temporal(condition) {
+                // Additive request identity; older binaries still schedule this as a plain timer.
+                wakeup["timeCondition"] = condition.clone();
+            } else {
+                wakeup["condition"] = condition.clone();
+            }
             if conditions::is_condition(&input["condition"]) {
                 wakeup["nextCheckAt"] = created.into();
                 if let Some(display) = &display {
@@ -323,7 +435,10 @@ pub(super) fn observation(
     let wakeup = &chat["wakeup"];
     let condition = &wakeup["condition"];
     if !condition.is_object() {
-        return Ok(None);
+        return Ok(wakeup["wakeAt"]
+            .as_i64()
+            .filter(|deadline| *deadline <= time)
+            .map(time_result));
     }
     if let Err(error) = access(db, run, condition) {
         return Ok(Some(

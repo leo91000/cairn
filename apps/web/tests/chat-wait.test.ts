@@ -140,6 +140,8 @@ describe('scheduled waits', () => {
     expect(waitOutcome({ state: 'timed_out' }).title).toBe('Deadline reached without a result')
     expect(waitOutcome({ state: 'unavailable', message: 'No access' })).toEqual({ tone: 'warning', title: 'Result unavailable', detail: 'No access' })
     expect(waitOutcome(null)).toMatchObject({ tone: 'neutral' })
+    expect(waitOutcome({ state: 'completed', type: 'time', wakeAt: 1000 })).toEqual({ tone: 'neutral', title: 'Scheduled time reached', detail: '' })
+    expect(observedTarget({ state: 'completed', type: 'time' })).toBe('Scheduled time')
   })
 
   it('folds the wait tool and its events into one card that ends with the resumption', () => {

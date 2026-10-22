@@ -246,7 +246,7 @@ private fun resultDisplay(observation: JsonObject): WaitOutcome? {
     )
 }
 
-/** What Cairn observed when a wait ended; a plain timer observes nothing and reads as neutral. */
+/** What Cairn observed when a wait ended; time reached differs from an external timeout. */
 internal fun waitOutcome(observation: JsonObject?): WaitOutcome {
     val state = observation.string("state")
     val finished = WaitOutcome(WaitTone.NEUTRAL, "Attente terminée", "")
@@ -254,6 +254,8 @@ internal fun waitOutcome(observation: JsonObject?): WaitOutcome {
     resultDisplay(observation)?.let {
         return it
     }
+    if (state == "completed" && observation.string("type") == "time")
+        return WaitOutcome(WaitTone.NEUTRAL, "Échéance atteinte", "")
     when (state) {
         "timed_out" -> return WaitOutcome(WaitTone.WARNING, "Échéance atteinte sans résultat", "")
         "unavailable" ->
@@ -321,6 +323,7 @@ internal fun observedTarget(observation: JsonObject?): String =
     when {
         observation == null -> ""
         observation.string("type") == "run_finished" -> "Autre exécution"
+        observation.string("type") == "time" -> "Heure prévue"
         else ->
             observation["display"].asObject()?.get("short").text().ifBlank {
                 if (
