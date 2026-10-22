@@ -574,6 +574,9 @@ fn continue_run(
     let restart_requested =
         chat["sessionRestartRequested"] == true || checkpoint["freshSession"] == true;
     if provider != Provider::of_run(run)? || restart_requested {
+        if run["sessionId"].is_string() {
+            checkpoint["workspaceInitialized"] = true.into();
+        }
         // The next provider cannot resolve requests from the session being replaced.
         questions::release(db, run_id, None)?;
         checkpoint["freshSession"] = false.into();
@@ -1194,6 +1197,7 @@ mod tests {
                         let checkpoint = db.kv("run-checkpoint:run")?.unwrap();
                         assert_eq!(checkpoint["prepared"], prepared);
                         assert_eq!(checkpoint["launched"], false);
+                        assert_eq!(checkpoint["workspaceInitialized"], true);
                         assert_eq!(checkpoint["freshSession"], false);
                         assert!(checkpoint["controllerRecoveries"].is_null());
                         let chat = db.get("chats", "chat")?.unwrap();

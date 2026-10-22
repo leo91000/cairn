@@ -909,6 +909,11 @@ async fn watch_backend(backend: Option<&crate::storage::transport::MountedDisk>)
 
 /// First boot of a disk: copy every import into the guest.
 async fn import_workspace(socket: &Path, plan: &Plan) -> Result<()> {
+    if plan.as_value()["workspaceSeeded"] == false {
+        return Err(Error::conflict(
+            "Resuming requires an initialized VM disk; source files are preserved.",
+        ));
+    }
     let mut imported = Vec::new();
     for import in plan.imports() {
         // The workspace root already includes its projects. Separate
@@ -1084,6 +1089,16 @@ mod tests {
     use super::*;
     use crate::microvm::budget;
     use std::os::unix::process::CommandExt;
+
+    #[tokio::test]
+    async fn reduced_resume_seed_cannot_initialize_an_empty_guest() {
+        let plan = Plan::new(json!({"workspaceSeeded":false,"imports":[]}));
+        let error = import_workspace(Path::new("/no-guest.sock"), &plan)
+            .await
+            .unwrap_err();
+        assert!(error.is_conflict(), "{error}");
+        assert!(error.message.contains("initialized"));
+    }
 
     #[tokio::test]
     async fn oversized_inbox_is_rejected_before_guest_import_and_can_be_retried() {

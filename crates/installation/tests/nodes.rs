@@ -25,7 +25,7 @@ use cairn_installation::{
     run_status::RunStatus,
     service::Service,
     storage::{Disk, LazyDisk, bootstrap, policy::Policy, remote::RemoteSource, runtime},
-    validation::parse,
+    validation::{parse, text},
 };
 use common::RelayContext;
 use serde_json::{Value, json};
@@ -1145,6 +1145,268 @@ fn mcp_agent_updates_preserve_omitted_node_permissions() {
     assert_eq!(restricted["agent"]["access"]["nodes"], json!([]));
     let created = parse("mcp:save_agent", json!({ "name": "Default" })).unwrap();
     assert_eq!(created["access"]["nodes"], json!([LOCAL_NODE_ID]));
+}
+
+#[tokio::test]
+async fn workspace_seed_omits_projects_only_for_an_explicit_vm_resume() {
+    let owner = Owner::new().await;
+    let identity = owner
+        .enroll("Worker", &capabilities(true, 4, 8192, 65536))
+        .await;
+    let node = text(&identity, "nodeId");
+    owner.grant_nodes(MAIN_AGENT_ID, json!([node])).await;
+
+    for (backend, resume, selection, expect_project) in [
+        (
+            "firecracker",
+            true,
+            json!({"kind":"initial", "workspace":false}),
+            false,
+        ),
+        (
+            "firecracker",
+            false,
+            json!({"kind":"initial", "workspace":false}),
+            true,
+        ),
+        (
+            "native",
+            true,
+            json!({"kind":"initial", "workspace":false}),
+            true,
+        ),
+        ("firecracker", true, json!({"kind":"initial"}), true),
+    ] {
+        let (run, attempt) = (id(), id());
+        let mut record = run_record(&run, RunStatus::Running);
+        record["taskId"] = run.clone().into();
+        record["snapshot"] = json!({"agent":{"id":MAIN_AGENT_ID}});
+        owner.add_run(&record).await;
+        owner
+            .put(
+                "node-attempts",
+                json!({
+                    "id": attempt,
+                    "runId": run,
+                    "nodeId": node,
+                    "released": false,
+                }),
+            )
+            .await;
+        owner
+            .set_checkpoint(&run, json!({"nodeId":node,"runnerId":attempt}))
+            .await;
+        let data = &owner.service.config.data_dir;
+        let root = data.join("runs").join(&run);
+        for directory in ["workspace/project", "home/.config/cairn", "chat-input"] {
+            std::fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        std::fs::write(
+            root.join("workspace/project/unpublished"),
+            "project contents",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("home/.config/cairn/credentials"),
+            "fixture credentials",
+        )
+        .unwrap();
+        std::fs::write(root.join("chat-input/messages.json"), "[]").unwrap();
+        std::fs::write(root.join("credential-files.json"), "[]").unwrap();
+        std::fs::create_dir_all(data.join("runner-plans")).unwrap();
+        std::fs::write(
+            data.join("runner-plans").join(format!("{attempt}.json")),
+            json!({
+                "id": attempt,
+                "runId": run,
+                "backend": backend,
+                "resumeWorkspace": resume,
+                "projectRoot": root.join("workspace"),
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let request = owner
+            .request("POST", &format!("/internal/node-workspace/{attempt}/seed"))
+            .header("authorization", bearer(text(&identity, "token")))
+            .header("content-type", "application/json")
+            .body(Body::from(selection.to_string()))
+            .unwrap();
+        let response = common::send(&owner.app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let destination = TempDir::new().unwrap();
+        files::receive(&mut bytes.as_ref(), destination.path(), 1_000_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            destination
+                .path()
+                .join("workspace/project/unpublished")
+                .exists(),
+            expect_project,
+            "{backend}/resume={resume}/selection={selection}"
+        );
+        assert_eq!(
+            std::fs::read(destination.path().join("home/.config/cairn/credentials")).unwrap(),
+            b"fixture credentials"
+        );
+        assert!(destination.path().join("chat-input/messages.json").exists());
+        assert!(destination.path().join("credential-files.json").exists());
+        assert!(
+            root.join("workspace/project/unpublished").exists(),
+            "source must remain untouched"
+        );
+    }
+}
+
+#[tokio::test]
+async fn node_preparations_isolate_conversations_and_coalesce_duplicate_attempts() {
+    let owner = Owner::new().await;
+    let identity = owner
+        .enroll("Worker", &capabilities(true, 4, 8192, 65536))
+        .await;
+    let node = text(&identity, "nodeId");
+    owner.grant_nodes(MAIN_AGENT_ID, json!([node])).await;
+    let data = &owner.service.config.data_dir;
+    let mut attempts = Vec::new();
+    for _ in 0..2 {
+        let (run, attempt) = (id(), id());
+        let mut record = run_record(&run, RunStatus::Running);
+        record["taskId"] = run.clone().into();
+        record["snapshot"] = json!({"agent":{"id":MAIN_AGENT_ID}});
+        owner.add_run(&record).await;
+        owner
+            .put(
+                "node-attempts",
+                json!({
+                    "id": attempt,
+                    "runId": run,
+                    "nodeId": node,
+                    "released": false,
+                }),
+            )
+            .await;
+        owner
+            .set_checkpoint(&run, json!({"nodeId":node,"runnerId":attempt}))
+            .await;
+        let root = data.join("runs").join(&run);
+        std::fs::create_dir_all(root.join("workspace/project")).unwrap();
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        std::fs::write(
+            root.join("workspace/project/source"),
+            "unneeded bootstrap source",
+        )
+        .unwrap();
+        std::fs::write(root.join("home/fixture"), "fresh credentials").unwrap();
+        std::fs::create_dir_all(data.join("runner-plans")).unwrap();
+        std::fs::write(
+            data.join("runner-plans").join(format!("{attempt}.json")),
+            json!({
+                "id": attempt,
+                "runId": run,
+                "backend": "firecracker",
+                "resumeWorkspace": true,
+                "projectRoot": root.join("workspace"),
+                "chat": { "provider": "codex" },
+                "imports": [
+                    { "source": root.join("workspace"), "target": root.join("workspace") },
+                    { "source": root.join("workspace/project"), "target": root.join("workspace/project") },
+                ],
+            }).to_string(),
+        ).unwrap();
+        attempts.push((run, attempt));
+    }
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = CancellationToken::new();
+    let seeds = Arc::new(AtomicUsize::new(0));
+    let slow_seed = format!("/internal/node-workspace/{}/seed", attempts[0].1);
+    let app = owner.app.clone().layer(axum::middleware::from_fn({
+        let entered = entered.clone();
+        let release = release.clone();
+        let seeds = seeds.clone();
+        move |request: Request<Body>, next: axum::middleware::Next| {
+            let blocked = request.uri().path() == slow_seed;
+            let entered = entered.clone();
+            let release = release.clone();
+            let seeds = seeds.clone();
+            async move {
+                if blocked {
+                    seeds.fetch_add(1, Ordering::SeqCst);
+                    entered.notify_one();
+                    release.cancelled().await;
+                }
+                next.run(request).await
+            }
+        }
+    }));
+    let (manager_url, manager) = common::serve_locally(app).await;
+    let controller = Router::new()
+        .route("/health", axum::routing::get(async || Json(json!({}))))
+        .route(
+            "/runs/{id}/lease",
+            axum::routing::post(async || Json(json!({}))),
+        );
+    let (runner, runner_server) = common::serve_locally(controller).await;
+    let node_directory = owner.root().join("node");
+    std::fs::create_dir(&node_directory).unwrap();
+    std::fs::write(
+        node_directory.join("identity.json"),
+        json!({
+            "master":manager_url,"nodeId":node,"token":identity["token"],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut connector = tokio::process::Command::new(env!("CARGO_BIN_EXE_cairn"))
+        .args(["node-connect", node_directory.to_str().unwrap()])
+        .env("DATA_DIR", data)
+        .env("RUNNER_URL", runner)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let prepare = |attempt: String| {
+        let transport = owner.service.node_transport.clone();
+        let node = node.to_owned();
+        tokio::spawn(async move {
+            transport
+                .request(&node, "POST", &format!("/prepare/{attempt}"), vec![])
+                .await
+                .unwrap()
+        })
+    };
+    let slow = prepare(attempts[0].1.clone());
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    let duplicate = prepare(attempts[0].1.clone());
+    let fast = prepare(attempts[1].1.clone());
+    let response = tokio::time::timeout(Duration::from_secs(5), fast)
+        .await
+        .expect("another conversation must not wait for the held seed")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        !duplicate.is_finished(),
+        "the duplicate must wait for its own seed"
+    );
+    let fast_root = data.join("runs").join(&attempts[1].0);
+    assert!(fast_root.join("workspace/project").is_dir());
+    assert!(!fast_root.join("workspace/project/source").exists());
+    assert_eq!(
+        std::fs::read(fast_root.join("home/fixture")).unwrap(),
+        b"fresh credentials"
+    );
+    release.cancel();
+    assert_eq!(slow.await.unwrap().status(), StatusCode::OK);
+    assert_eq!(duplicate.await.unwrap().status(), StatusCode::OK);
+    assert_eq!(seeds.load(Ordering::SeqCst), 1);
+    connector.kill().await.unwrap();
+    manager.abort();
+    runner_server.abort();
 }
 
 #[tokio::test]

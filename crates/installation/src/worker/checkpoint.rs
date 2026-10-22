@@ -30,6 +30,9 @@ pub fn key(run_id: &str) -> String {
 pub struct RunCheckpoint {
     #[serde(default, with = "lenient", skip_serializing_if = "Option::is_none")]
     pub launched: Option<bool>,
+    /// Preserved when an engine session is replaced on the same workspace disk.
+    #[serde(default, with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub workspace_initialized: Option<bool>,
     /// Explicit controller rejection of this attempt; absent is not proof of rejection.
     #[serde(default, with = "lenient", skip_serializing_if = "Option::is_none")]
     pub start_rejected: Option<bool>,
@@ -179,10 +182,6 @@ impl RunCheckpoint {
 
     pub fn runner_id(&self) -> Option<&str> {
         self.runner_id.as_ref()?.as_deref()
-    }
-
-    pub fn node_id(&self) -> Option<&str> {
-        self.node_id.as_ref()?.as_deref()
     }
 
     pub fn process(&self) -> Option<&ProcessIdentity> {
@@ -375,6 +374,7 @@ mod tests {
     fn round_trips_null_absent_and_unknown_fields() {
         let stored = json!({
             "launched": true,
+            "workspaceInitialized": true,
             "remainingMs": null,
             "process": null,
             "settled": null,
@@ -384,6 +384,7 @@ mod tests {
         });
         let checkpoint = RunCheckpoint::from_value(stored.clone()).unwrap();
         assert!(checkpoint.launched());
+        assert_eq!(checkpoint.workspace_initialized, Some(true));
         assert_eq!(checkpoint.remaining_ms, Some(None));
         assert_eq!(checkpoint.deadline(), None);
         assert!(checkpoint.isolated() && checkpoint.managed());

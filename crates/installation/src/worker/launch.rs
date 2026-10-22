@@ -158,6 +158,7 @@ enum Attempt {
 struct RunnerPlan<'a> {
     id: &'a str,
     run_id: &'a str,
+    resume_workspace: bool,
     args: &'a [String],
     cwd: &'a Value,
     project_root: &'a Value,
@@ -685,9 +686,15 @@ impl Execution<'_> {
             .patch_run(&self.id, json!({ "storage": { "mode": "on-demand" } }))
             .await?;
         placement::renew_local(s, &self.id).await?;
+        let resume_workspace = resume.is_some()
+            || self
+                .checkpoint
+                .read(|saved| saved.workspace_initialized == Some(true))
+                .await;
         let plan = RunnerPlan {
             id: runner,
             run_id: &self.id,
+            resume_workspace,
             args: &launch.args,
             cwd: &prepared["cwd"],
             project_root: &prepared["projectRoot"],
@@ -725,8 +732,17 @@ impl Execution<'_> {
             .await
             .map_err(|_| Error::unavailable("Remote workspace preparation interrupted."))?;
         if !response.status().is_success() {
-            return Err(Error::unavailable(
-                "Remote workspace preparation failed; source files are preserved.",
+            let status = response.status().as_u16();
+            if status == 504 {
+                return Err(Error::unavailable(
+                    "Remote workspace preparation timed out after 280 seconds; source files are preserved.",
+                ));
+            }
+            return Err(Error::new(
+                status,
+                format!(
+                    "Remote workspace preparation failed (HTTP {status}); source files are preserved.",
+                ),
             ));
         }
         let message = format!("Executing on node {node_id}");

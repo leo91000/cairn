@@ -120,7 +120,7 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
             let messages: Value = serde_json::from_slice(&bytes)?;
             Ok(Json(json!({ "messages": messages })).into_response())
         }
-        "seed" => seed_source(&run, &root, &input.body).await,
+        "seed" => seed_source(&run, &plan, &root, &input.body).await,
         "auth" => {
             let socket = root
                 .join("home")
@@ -169,7 +169,12 @@ async fn renew_lease(s: &Service, attempt: &str) -> Result<u64> {
 }
 
 /// Streams the selected staging directory of the run to the node.
-async fn seed_source(run: &Value, root: &Path, selection: &Value) -> Result<Response> {
+async fn seed_source(
+    run: &Value,
+    plan: &Value,
+    root: &Path,
+    selection: &Value,
+) -> Result<Response> {
     let source = match text(selection, "kind") {
         "initial" => root.to_path_buf(),
         "inbox" => root.join("chat-input"),
@@ -189,10 +194,27 @@ async fn seed_source(run: &Value, root: &Path, selection: &Value) -> Result<Resp
     if tokio::fs::canonicalize(&source).await? != source {
         return Err(Error::bad("Workspace seed changed location."));
     }
+    // Older nodes omit `workspace` and keep receiving a complete seed. Never
+    // let a node omit bootstrap files for a fresh VM or a native environment.
+    let resumed_vm = plan["backend"] == "firecracker" && plan["resumeWorkspace"] == true;
+    let skip_projects =
+        text(selection, "kind") == "initial" && selection["workspace"] == false && resumed_vm;
+    let project_root = if skip_projects {
+        plan["projectRoot"]
+            .as_str()
+            .and_then(|path| Path::new(path).strip_prefix(root).ok())
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+    } else {
+        None
+    };
     let (mut writer, reader) = tokio::io::duplex(131072);
     tokio::spawn(async move {
         // A failed transfer ends the stream early, which the receiver rejects.
-        let _ = super::files::send(&source, &mut writer).await;
+        let _ = super::files::send_filtered(&source, &mut writer, |path| {
+            project_root.as_deref() != Some(path)
+        })
+        .await;
     });
     Ok(Response::new(Body::from_stream(
         tokio_util::io::ReaderStream::new(reader),
