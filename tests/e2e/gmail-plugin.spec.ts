@@ -164,6 +164,7 @@ test('central OAuth callback keeps a declined response through email sign-in wit
       updateRequired: false,
     }],
   }
+  await page.route('**/api/installations', route => route.fulfill({ json: session.installations }))
   await page.route('**/api/account/session', route => route.fulfill({
     json: {
       authenticated: false,
@@ -207,6 +208,7 @@ test('central OAuth callback resumes after Cairn provider sign-in instead of a r
       updateRequired: false,
     }],
   }
+  await page.route('**/api/installations', route => route.fulfill({ json: session.installations }))
   await page.route('**/api/account/session', route => route.fulfill({
     json: authenticated
       ? session
