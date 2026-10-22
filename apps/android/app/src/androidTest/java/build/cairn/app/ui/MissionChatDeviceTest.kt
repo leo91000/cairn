@@ -90,6 +90,7 @@ class MissionChatDeviceTest {
                             .setBody(body)
                     }
                 }
+            val origin = server.url("/").toString()
             val vm =
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
@@ -99,7 +100,7 @@ class MissionChatDeviceTest {
             compose.setContent {
                 LaunchedEffect(Unit) {
                     vm.state.first { it.ready }
-                    vm.connect(server.url("/").toString())
+                    vm.connect(origin)
                 }
                 val state = vm.state.collectAsState().value
                 CairnTheme("light") {
