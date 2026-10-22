@@ -615,6 +615,8 @@ internal data class TimelineEntry(
     val plan: AgentPlan? = null,
     /** Where an update changed the plan. */
     val planUpdate: PlanUpdate? = null,
+    /** Cairn retries this failure itself: the notice says so instead of reporting a dead end. */
+    val retried: String = "",
 )
 
 /** Fold updates in place within a turn; keep messages and errors in chronological order. */
@@ -731,6 +733,9 @@ internal fun timelineEntries(
         // the history does.
         var scheduled: Int? = null
         val moves = mutableMapOf<Int, Int>()
+        // A conversation shows one notice per failed attempt. The adapter, the worker and the
+        // final status may each repeat the provider's error; only a new reason adds a notice.
+        val failures = mutableMapOf<String, FailedAttempt>()
         fun placeScheduled() {
             val index = scheduled ?: return
             flushActivity()
@@ -744,6 +749,12 @@ internal fun timelineEntries(
             )
                 placeScheduled()
             if (event.type == "turn.started") waitReason = ""
+            if (
+                event.type == "turn.started" ||
+                    (event.type == "status" &&
+                        event.activityData()?.get("attempt") == JsonPrimitive(true))
+            )
+                failures.remove(event.runId)
             when (event.type) {
                 "chat.sleep",
                 "chat.wait",
@@ -1009,6 +1020,17 @@ internal fun timelineEntries(
                     )
                 )
             } else {
+                val reason = if (chat) failureReason(event) else null
+                val shown = failures[event.runId]
+                if (reason != null && shown != null && shown.repeats(event, reason)) {
+                    shown.reasons.add(reason)
+                    continue
+                }
+                if (chat && event.type == "retry.scheduled" && shown?.notice != null) {
+                    val index = shown.notice!!
+                    result[index] = result[index].copy(retried = retryTitle(event))
+                    continue
+                }
                 val presentation = if (chat) presentActivity(event) else null
                 if (presentation?.kind == ActivityKind.NOTICE) {
                     val interrupted =
@@ -1021,6 +1043,13 @@ internal fun timelineEntries(
                                 presentation.connectionInterrupted())
                     ) {
                         flushActivity()
+                        if (reason != null)
+                            failures
+                                .getOrPut(event.runId) { FailedAttempt() }
+                                .apply {
+                                    reasons.add(reason)
+                                    notice = result.size
+                                }
                         result.add(
                             TimelineEntry("notice:${event.id}", listOf(event), false, notice = true)
                         )
@@ -1163,7 +1192,7 @@ internal fun TimelineRow(
     else if (entry.wait != null) WaitCard(entry.wait)
     else if (entry.plan != null) PlanCard(entry.plan, live = active && livePlan == entry.key)
     else if (entry.planUpdate != null) PlanUpdateRow(entry.planUpdate)
-    else if (entry.notice) ChatNotice(presentActivity(entry.events.single()))
+    else if (entry.notice) ChatNotice(presentActivity(entry.events.single()), entry.retried)
     else {
         val presentations = remember(entry.events) { entry.events.map(::presentActivity) }
         AgentActions(entry.key, presentations, hideRunning)

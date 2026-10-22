@@ -443,7 +443,8 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
                                 "turn.completed",
                             )
                     ) {
-                        if (event.type == "status") ""
+                        // A final status may say why the run ended.
+                        if (event.type == "status") data?.get("error").asObject().string("message")
                         else if (data != null) plain
                         else plain.takeUnless { it.startsWith('{') }.orEmpty()
                     } else plain.ifBlank { if (data == null) event.text else "" },

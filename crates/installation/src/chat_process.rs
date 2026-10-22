@@ -973,10 +973,11 @@ impl Chat<'_> {
             let error = turn
                 .get("error")
                 .cloned()
+                .filter(|error| !text(error, "message").is_empty())
                 .unwrap_or_else(|| json!({ "message": "Conversation interrupted." }));
             self.emit(json!({ "type": "turn.failed", "error": error }))
                 .await?;
-            return Err(Error::conflict("Conversation interrupted."));
+            return Err(Error::conflict(text(&error, "message")));
         }
         self.finish(plan).await
     }

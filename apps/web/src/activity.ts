@@ -113,6 +113,12 @@ const immediateResult = 'Wait condition already completed'
 // Where a scheduled wait's card is placed: its turn ended, or a message or another wait event came.
 const waitBoundaries = new Set(['turn.started', 'turn.completed', 'turn.failed', 'chat.user', 'chat.sleep', 'chat.wait', 'chat.wait_ready', 'chat.wakeup', 'run.wait', 'run.wait_ready', 'run.wakeup'])
 const terminalStatuses = new Set(['succeeded', 'failed', 'cancelled', 'interrupted'])
+const statusTitles: Record<string, string> = {
+  succeeded: 'Run succeeded',
+  failed: 'Run failed',
+  cancelled: 'Run cancelled',
+  interrupted: 'Run interrupted',
+}
 
 // Codex names the workspace server; Claude and OpenCode prefix the tool with it.
 const workspaceWaitTool = /^(?:mcp__)?cairn_workspace(?:__|_|\.)(?:sleep|wait_for)$/
@@ -205,6 +211,9 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
 
   const agentKey = (event: RunEvent, id: string) => `${event.runId}:${aliases.get(`${event.runId}:${id}`) ?? id}`
   let connectionNotices: ActivityArtifact[] = []
+  // A conversation shows one card per failed attempt. The adapter, the worker and the final
+  // status may each repeat the provider's error; only a new reason adds a card.
+  const failures = new Map<string, { messages: Set<string>, notice?: ActivityArtifact }>()
 
   function recovered() {
     for (const notice of connectionNotices) {
@@ -421,6 +430,26 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
 
     if (event.type === 'turn.failed')
       connectionNotices = []
+    if (event.type === 'turn.started' || (event.type === 'status' && data.attempt === true))
+      failures.delete(event.runId)
+    const failure = chat && (['turn.failed', 'runner.failed'].includes(event.type) || (event.type === 'error' && data.willRetry !== true) || (event.type === 'status' && event.text === 'failed'))
+    const failureMessage = failure ? text(record(data.error).message) || text(data.message) || (event.type === 'status' ? '' : event.text) : ''
+    const shown = failures.get(event.runId)
+    if (failure && shown && (event.type === 'status' || !failureMessage || failureMessage === 'Conversation interrupted.' || shown.messages.has(failureMessage))) {
+      shown.messages.add(failureMessage)
+      continue
+    }
+
+    // Cairn retries a temporary failure itself: its card says so instead of reporting a dead end.
+    if (chat && event.type === 'retry.scheduled' && shown?.notice) {
+      const retry = record(data.retry)
+      shown.notice.status = 'info'
+      shown.notice.title = typeof retry.attempt === 'number' && typeof retry.limit === 'number'
+        ? `Temporary error — automatic retry ${retry.attempt}/${retry.limit}`
+        : 'Temporary error — retrying automatically'
+      continue
+    }
+
     if (event.type === 'turn.completed' || (type === 'command_execution' && event.type === 'item.completed' && item.exit_code === 0 && item.status !== 'failed'))
       recovered()
     const itemId = text(item.id)
@@ -659,10 +688,10 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
         'error': 'Worker reported an error',
         'item.started': 'Tool activity',
         'item.completed': 'Work completed',
-        'turn.failed': 'Turn failed',
+        'turn.failed': 'The agent ran into an error',
         'turn.waiting': 'Waiting for background tasks',
       }
-      artifact.title = event.type === 'status' ? (event.text.includes(' ') ? event.text : readable(event.text)) : type ? readable(type) : labels[event.type] || readable(event.type)
+      artifact.title = event.type === 'status' ? (statusTitles[event.text] ?? (event.text.includes(' ') ? event.text : readable(event.text))) : type ? readable(type) : labels[event.type] || readable(event.type)
       const message = text(item.message) || text(data.message) || text(record(data.error).message)
       if (message)
         block('Details', message)
@@ -689,6 +718,13 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       artifact.title = 'Connection interrupted'
       artifact.attention = true
       connectionNotices.push(artifact)
+    }
+
+    if (failure) {
+      const attempt = failures.get(event.runId) ?? { messages: new Set<string>() }
+      attempt.messages.add(failureMessage)
+      attempt.notice = artifact
+      failures.set(event.runId, attempt)
     }
 
     // A scheduled wait shows as its own card; only a call that failed stays among the tools.

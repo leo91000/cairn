@@ -85,7 +85,8 @@ impl Cause {
                 | "server_overloaded"
                 | "server_is_overloaded"
                 | "service_unavailable_error"
-                | "internalServerError" => Some(FailureKind::Server),
+                | "internalServerError"
+                | "serverOverloaded" => Some(FailureKind::Server),
                 _ => None,
             })
             .or(match status {
@@ -176,6 +177,19 @@ mod tests {
         });
         let cause = Cause::classify(&error).expect("The production Codex timeout must recover");
         assert_eq!(cause.kind, FailureKind::Timeout);
+        assert_eq!(cause.message, error["message"]);
+    }
+
+    #[test]
+    fn native_codex_model_capacity_is_retriable() {
+        let error = json!({
+            "additionalDetails": null,
+            "codexErrorInfo": "serverOverloaded",
+            "message": "Selected model is at capacity. Please try a different model.",
+            "misalignment": null,
+        });
+        let cause = Cause::classify(&error).expect("A model at capacity must recover");
+        assert_eq!(cause.kind, FailureKind::Server);
         assert_eq!(cause.message, error["message"]);
     }
 

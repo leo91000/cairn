@@ -161,9 +161,45 @@ describe('conversation activity', () => {
     expect(chat[0]).toMatchObject({ artifacts: [{ status: 'error' }] })
     expect(chat[1]).toMatchObject({ artifact: { blocks: [{ code: 'Validation failed' }] } })
     expect(chat[2]).toMatchObject({ artifacts: [{ status: 'running' }] })
-    expect(chat[3]).toMatchObject({ artifact: { title: 'Interrupted' } })
+    expect(chat[3]).toMatchObject({ artifact: { title: 'Run interrupted' } })
     for (const text of ['failed', 'cancelled', 'interrupted'])
       expect(activityEntries([{ ...input[4], text }], true)).toHaveLength(1)
+  })
+  it('shows one card per failed attempt and marks it when Cairn retries', () => {
+    const capacity = 'Selected model is at capacity. Please try a different model.'
+    const event = (id: number, type: string, text: string, payload?: Record<string, unknown>): RunEvent => ({
+      id,
+      runId: 'chat',
+      createdAt: id,
+      type,
+      text,
+      ...(payload ? { payload } : {}),
+    })
+    const attempt = (start: number) => [
+      event(start, 'turn.started', ''),
+      event(start + 1, 'turn.failed', capacity, { type: 'turn.failed', error: { message: capacity, codexErrorInfo: 'serverOverloaded' } }),
+      event(start + 2, 'turn.failed', 'Conversation interrupted.', { type: 'turn.failed', error: { message: 'Conversation interrupted.' } }),
+    ]
+    const failed = [...attempt(1), event(4, 'status', 'failed', { error: { message: capacity } })]
+    const notices = (events: RunEvent[]) => activityEntries(events, true).flatMap(entry => entry.kind === 'notice' ? [entry.artifact] : [])
+
+    expect(notices(failed)).toEqual([expect.objectContaining({ title: 'The agent ran into an error', status: 'error', blocks: [{ label: 'Details', code: capacity, language: 'plaintext' }] })])
+    expect(notices([...attempt(1), event(4, 'error', capacity)])).toHaveLength(1)
+
+    const retried = [
+      ...attempt(1),
+      event(4, 'retry.scheduled', 'Temporary agent error. Retrying in 33 seconds (attempt 1/3).', { retry: { attempt: 1, limit: 3, nextAttemptAt: 40_000 } }),
+      ...attempt(5),
+      event(8, 'error', capacity),
+    ]
+    expect(notices(retried).map(notice => [notice.title, notice.status])).toEqual([
+      ['Temporary error — automatic retry 1/3', 'info'],
+      ['The agent ran into an error', 'error'],
+    ])
+
+    const stopped = [event(1, 'turn.started', ''), event(2, 'status', 'failed', { error: { message: 'Run exceeded its time limit.' } })]
+    expect(notices(stopped)).toEqual([expect.objectContaining({ title: 'Run failed', blocks: [expect.objectContaining({ code: 'Run exceeded its time limit.' })] })])
+    expect(notices([...attempt(1).slice(0, 2), event(4, 'runner.failed', 'Controller cleanup failed', { error: { message: 'Controller cleanup failed' } })])).toHaveLength(2)
   })
   it('hides recovered connection retries but keeps unresolved ones visible in chat', () => {
     const connection: RunEvent = {

@@ -50,10 +50,45 @@ internal fun recoveredChatConnections(events: List<RunEvent>, messages: Set<Long
     return recovered
 }
 
+/** The failures a conversation shows for one attempt, and the index of its notice. */
+internal class FailedAttempt(
+    val reasons: MutableSet<String> = mutableSetOf(),
+    var notice: Int? = null,
+) {
+    /** The final status and the generic adapter error only repeat the reason already shown. */
+    fun repeats(event: RunEvent, reason: String) =
+        event.type == "status" ||
+            reason.isBlank() ||
+            reason == "Conversation interrupted." ||
+            reason in reasons
+}
+
+/** The reason a failure event gives, or null when the event does not report a failure. */
+internal fun failureReason(event: RunEvent): String? {
+    val data = event.activityData()
+    val failure =
+        event.type in listOf("turn.failed", "runner.failed") ||
+            (event.type == "error" && data?.get("willRetry") != JsonPrimitive(true)) ||
+            (event.type == "status" && event.text == "failed")
+    if (!failure) return null
+    return data?.get("error").asObject().string("message").ifBlank {
+        data.string("message").ifBlank { if (event.type == "status") "" else event.text }
+    }
+}
+
+internal fun retryTitle(event: RunEvent): String {
+    val retry = event.activityData()?.get("retry").asObject()
+    val attempt = (retry?.get("attempt") as? JsonPrimitive)?.intOrNull
+    val limit = (retry?.get("limit") as? JsonPrimitive)?.intOrNull
+    return if (attempt != null && limit != null)
+        "Erreur temporaire — nouvelle tentative automatique $attempt/$limit"
+    else "Erreur temporaire — nouvelle tentative automatique"
+}
+
 @Composable
-internal fun ChatNotice(presentation: ActivityPresentation) {
+internal fun ChatNotice(presentation: ActivityPresentation, retried: String = "") {
     val connection = presentation.connectionInterrupted()
-    val failed = presentation.failed && !connection
+    val failed = presentation.failed && !connection && retried.isBlank()
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color =
@@ -66,7 +101,7 @@ internal fun ChatNotice(presentation: ActivityPresentation) {
     ) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
-                if (connection) "Connexion interrompue" else presentation.title,
+                if (connection) "Connexion interrompue" else retried.ifBlank { presentation.title },
                 style = MaterialTheme.typography.labelLarge,
             )
             val detail = presentation.output.ifBlank { presentation.subtitle }

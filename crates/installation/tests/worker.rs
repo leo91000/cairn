@@ -283,7 +283,9 @@ async fn transient_agent_failure_resumes_same_session_and_workspace_after_restar
 async fn agent_retries_stop_after_three_attempts_or_when_the_error_becomes_terminal() {
     for terminal in [false, true] {
         let mut fixture = Fixture::new().await;
-        let transient = json!({ "code": "server_error", "message": "Temporary upstream error" });
+        // Codex's report for a model at capacity.
+        let capacity = "Selected model is at capacity. Please try a different model.";
+        let transient = json!({ "codexErrorInfo": "serverOverloaded", "message": capacity });
         let failures = if terminal {
             vec![
                 transient,
@@ -320,9 +322,27 @@ async fn agent_retries_stop_after_three_attempts_or_when_the_error_becomes_termi
         let expected = if terminal {
             "Reconnect account"
         } else {
-            "Temporary upstream error"
+            capacity
         };
         assert_eq!(failed["summary"], expected);
+        let id = run_id.clone();
+        let events = fixture
+            .service
+            .store
+            .read(move |db| db.events(&id, 0, 1000))
+            .await
+            .unwrap();
+        let failures = events
+            .iter()
+            .filter(|event| event["type"] == "turn.failed")
+            .map(|event| text(&event["payload"]["error"], "message"))
+            .collect::<Vec<_>>();
+        let mut reported = vec![capacity; attempts as usize];
+        reported.push(expected);
+        assert_eq!(
+            failures, reported,
+            "Each failed attempt reports its reason once"
+        );
         let marker: Value = serde_json::from_slice(
             &tokio::fs::read(Path::new(text(&failed, "workspace")).join("fixture-retry-work.json"))
                 .await

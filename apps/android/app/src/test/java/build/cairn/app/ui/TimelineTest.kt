@@ -203,8 +203,9 @@ class TimelineTest {
                 event(6, "status").copy(text = "interrupted"),
             )
         val rows = timelineEntries(events, chat = true)
-        assertEquals(listOf(false, true, false, true, true, true), rows.map { it.notice })
-        assertEquals(events.map { it.id }, rows.flatMap { it.events }.map { it.id })
+        // The final failed status repeats the error already shown.
+        assertEquals(listOf(false, true, false, true, true), rows.map { it.notice })
+        assertEquals(events.map { it.id } - 4L, rows.flatMap { it.events }.map { it.id })
         assertTrue(presentActivity(rows[2].events.single()).failed)
     }
 
@@ -239,6 +240,69 @@ class TimelineTest {
             )
         assertEquals(2, timelineEntries(failed, chat = true).count { it.notice })
         assertEquals(4, timelineEntries(failed).single().events.size)
+    }
+
+    @Test
+    fun `chat shows one notice per failed attempt and marks it when Cairn retries`() {
+        val capacity = "Selected model is at capacity. Please try a different model."
+        fun failure(id: Long, type: String, message: String, text: String = message) =
+            RunEvent(
+                id,
+                id,
+                type,
+                text,
+                mapOf(
+                    "error" to
+                        buildJsonObject {
+                            put("message", message)
+                            put("codexErrorInfo", "serverOverloaded")
+                        }
+                ),
+                runId = "run",
+            )
+        fun plain(id: Long, type: String, text: String = "", payload: JsonObject? = null) =
+            RunEvent(id, id, type, text, payload, runId = "run")
+        fun attempt(start: Long) =
+            listOf(
+                plain(start, "turn.started"),
+                failure(start + 1, "turn.failed", capacity),
+                failure(start + 2, "turn.failed", "Conversation interrupted."),
+            )
+        fun notices(events: List<RunEvent>) =
+            timelineEntries(events, chat = true).filter {
+                it.notice
+            }
+
+        val failed = attempt(1) + failure(4, "status", capacity, text = "failed")
+        val notice = notices(failed).single()
+        assertEquals(2L, notice.events.single().id)
+        assertEquals(capacity, presentActivity(notice.events.single()).output)
+        assertEquals(1, notices(attempt(1) + plain(4, "error", capacity)).size)
+
+        val retry = buildJsonObject {
+            put(
+                "retry",
+                buildJsonObject {
+                    put("attempt", 1)
+                    put("limit", 3)
+                },
+            )
+        }
+        val retried =
+            attempt(1) + plain(4, "retry.scheduled", "Temporary agent error.", retry) + attempt(5)
+        assertEquals(
+            listOf("Erreur temporaire — nouvelle tentative automatique 1/3", ""),
+            notices(retried).map { it.retried },
+        )
+
+        val timedOut =
+            listOf(
+                plain(1, "turn.started"),
+                failure(2, "status", "Run exceeded its time limit.", text = "failed"),
+            )
+        val stopped = presentActivity(notices(timedOut).single().events.single())
+        assertEquals("Exécution en échec", stopped.title)
+        assertEquals("Run exceeded its time limit.", stopped.output)
     }
 
     private fun event(
