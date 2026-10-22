@@ -1,5 +1,4 @@
 import type { Route } from '@playwright/test'
-import gmail from '../../plugins/gmail/manifest.json' with { type: 'json' }
 import {
   expect,
   signIn,
@@ -8,8 +7,10 @@ import {
   workspacePath,
 } from './fixtures'
 
-test('Gmail connects two explicit mailboxes with OAuth and saves no browser token', async ({ page }) => {
+test('Gmail connects two explicit mailboxes with OAuth and saves no browser token', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
+  const catalog = await workspace.api('/api/plugins')
+  const gmail = catalog.packages.find((item: { id: string }) => item.id === 'gmail').manifest
   const connections: Record<string, unknown>[] = []
   const starts: Record<string, any>[] = []
   const saves: Record<string, any>[] = []
