@@ -118,7 +118,8 @@ class MissionChatDeviceTest {
                     .onAllNodesWithText("Attendre la CI de la mission", substring = true)
                     .onFirst()
                     .assertExists()
-                compose.onAllNodesWithText("Arrêté", substring = true).onFirst().assertExists()
+                // Stopped teams are collapsed; their summary still exposes the stopped state.
+                compose.onNodeWithText("1 arrêté").assertExists()
                 compose.onNodeWithText("Mettre en pause").assertDoesNotExist()
                 compose.onNodeWithContentDescription("Arrêter").performClick()
                 compose.onNodeWithText("Confirmer").performClick()
