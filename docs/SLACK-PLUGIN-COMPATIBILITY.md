@@ -120,3 +120,25 @@ closed questions, content-free recovery instructions and idempotence. It does
 not replace qualification against actual prior production data. The
 [storage-shape observation](performance/QUESTION-TURN-MIGRATION.md) records the
 bounded additional records and its measurement limits.
+
+## Socket slice and optional queued-work hint
+
+The first Socket slice adds no credential envelope or persistent socket ticket.
+Temporary connection URLs and the event payload budget remain in memory. Its
+optional `eventTimeout` connect argument is runtime input, not a stored manifest
+field. Slack settings add the optional `transport` selection and `appToken` secret
+using the existing settings/encrypted-secret formats. Existing HTTP settings still
+select HTTP when the transport field is absent.
+
+A new inbound `startsWork = true` hint adds the optional same-name boolean to the
+native queued-event record. It is absent for controls and existing packages. The
+new reader defaults absent hints to false; the previous event reader ignores the
+unknown top-level property and processes the existing name/payload/revision fields.
+No authority is derived from the hint. Limits remain mandatory at submission;
+source, route, person, owner and approval proofs still apply. Capacity postponement
+updates the existing `nextAttemptAt` field without incrementing error attempts or
+rewriting identity. It never recreates a deleted or changed admission. Earlier
+readers can process these records but retain their earlier finite-retry behavior.
+The additive hint alone therefore does not change epoch10 / SQLite9 or the legacy
+tree. The full-PR inventory, forward migration/recovery and final qualification
+remain required. See the separately recorded pending-event storage observation.

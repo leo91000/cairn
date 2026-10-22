@@ -57,6 +57,14 @@ pub(super) async fn round_trip(
         },
     )
     .await;
+    // Reset is a control, not new work: native saturation must not block it.
+    let current = service
+        .store
+        .get(connections::KIND, instance)
+        .await
+        .unwrap()
+        .unwrap();
+    let occupied = capacity::occupy(service, &current).await;
     let ts = text(&envelope["event"], "ts");
     let action_ts = format!("{}.000100", now() / 1000);
     let payload = json!({
@@ -130,6 +138,8 @@ pub(super) async fn round_trip(
         control(app, instance, &payload, SIGNING_SECRET).await,
         (StatusCode::OK, "duplicate".into())
     );
+
+    capacity::release(service, occupied).await;
 
     let mut next = envelope.clone();
     next["event"]["ts"] = json!(format!("{}.000009", now() / 1000));

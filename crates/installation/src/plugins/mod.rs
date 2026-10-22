@@ -63,6 +63,7 @@ pub struct Plugins {
     pub http: reqwest::Client,
     test_origin: Mutex<Option<String>>,
     socket_origin: Mutex<Option<String>>,
+    socket_tls: Mutex<Option<Arc<rustls::ClientConfig>>>,
     worker: Mutex<Option<std::path::PathBuf>>,
     programs: Mutex<HashMap<(String, String), PathBuf>>,
     pub(crate) program_installation: tokio::sync::Mutex<()>,
@@ -73,6 +74,7 @@ pub struct Plugins {
     pub files: files::Files,
     /// When each paced key (e.g. a bot token's Identify budget) may send next.
     paces: socket::pacing::Paces,
+    socket_events: Arc<tokio::sync::Semaphore>,
     oauth: oauth::Authorizations,
 }
 
@@ -89,6 +91,7 @@ impl Default for Plugins {
                 .expect("plugin HTTP client"),
             test_origin: Mutex::new(None),
             socket_origin: Mutex::new(None),
+            socket_tls: Mutex::new(None),
             worker: Mutex::new(None),
             programs: Mutex::new(HashMap::new()),
             program_installation: tokio::sync::Mutex::new(()),
@@ -98,6 +101,7 @@ impl Default for Plugins {
             oauth_flows: oauth::Flows::default(),
             files: files::Files::default(),
             paces: socket::pacing::Paces::default(),
+            socket_events: Arc::new(tokio::sync::Semaphore::new(socket::MAX_QUEUED_EVENT_BYTES)),
             oauth: oauth::Authorizations::default(),
         }
     }
@@ -118,10 +122,27 @@ impl Plugins {
     #[doc(hidden)]
     pub fn route_sockets_to(&self, origin: Option<String>) {
         *self.socket_origin.lock().unwrap() = origin;
+        *self.socket_tls.lock().unwrap() = None;
     }
 
     pub(crate) fn socket_origin(&self) -> Option<String> {
         self.socket_origin.lock().unwrap().clone()
+    }
+
+    /// Tests only: route to a loopback WSS fixture, trusting its explicit CA.
+    /// Production connections retain the normal WebPKI roots and verification.
+    #[doc(hidden)]
+    pub fn route_sockets_with_tls_to(&self, origin: String, config: Arc<rustls::ClientConfig>) {
+        *self.socket_origin.lock().unwrap() = Some(origin);
+        *self.socket_tls.lock().unwrap() = Some(config);
+    }
+
+    pub(crate) fn socket_connector(&self) -> Option<tokio_tungstenite::Connector> {
+        self.socket_tls
+            .lock()
+            .unwrap()
+            .clone()
+            .map(tokio_tungstenite::Connector::Rustls)
     }
 
     /// Tests only: integration tests run from a test binary, not `cairn`.

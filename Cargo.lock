@@ -1254,6 +1254,7 @@ dependencies = [
  "subtle",
  "tempfile",
  "tokio",
+ "tokio-rustls 0.26.5",
  "tokio-tungstenite",
  "tokio-util",
  "tokio-vsock",

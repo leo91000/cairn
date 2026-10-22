@@ -50,6 +50,9 @@ pub const RESERVED: &[&str] = &[
 pub struct Inbound {
     /// The event plugins receive: `message`, or e.g. `interaction` for buttons.
     pub kind: String,
+    /// An optional capacity preflight for a message that will submit new work.
+    /// Control messages omit it; submission always enforces native limits.
+    pub starts_work: bool,
     /// The platform's message ID, used for deduplication and replies.
     pub id: String,
     pub author: super::connections::Label,
@@ -75,26 +78,28 @@ pub(crate) fn enqueue(
     name: &str,
     payload: &Value,
     author: Option<&str>,
+    starts_work: bool,
 ) -> Result<()> {
     let routing = match author {
         Some(author) => super::routes::admit_person(db, connection, author)?,
         None => connection.routing.clone(),
     };
-    db.put(
-        EVENTS,
-        &json!({
-            "id": id(),
-            "connectionId": connection.id,
-            "revision": connection.revision,
-            "routing": routing,
-            "name": name,
-            "payload": payload,
-            "authorId": author,
-            "attempts": 0,
-            "createdAt": now(),
-            "nextAttemptAt": now(),
-        }),
-    )?;
+    let mut event = json!({
+        "id": id(),
+        "connectionId": connection.id,
+        "revision": connection.revision,
+        "routing": routing,
+        "name": name,
+        "payload": payload,
+        "authorId": author,
+        "attempts": 0,
+        "createdAt": now(),
+        "nextAttemptAt": now(),
+    });
+    if starts_work {
+        event["startsWork"] = json!(true);
+    }
+    db.put(EVENTS, &event)?;
     Ok(())
 }
 
@@ -185,12 +190,20 @@ async fn deliver_approved(
             if pending >= 50 {
                 return Ok(Admission::Busy);
             }
+            if inbound.starts_work {
+                match limits(db, &current, &inbound.author.id) {
+                    Err(error) if error.status == 429 => return Ok(Admission::Busy),
+                    Err(error) => return Err(error),
+                    Ok(_) => {}
+                }
+            }
             enqueue(
                 db,
                 &current,
                 &inbound.kind,
                 &merge(&merge(&inbound.context, &inbound.body), &identity),
                 Some(&inbound.author.id),
+                inbound.starts_work,
             )?;
             db.set(&dedupe, &json!(true), Some(now() + 30 * 86_400_000))?;
             Ok(Admission::Accepted)
@@ -257,7 +270,7 @@ fn request(
             "updatedAt": now(),
         }),
     )?;
-    enqueue(db, connection, "access_requested", payload, None)?;
+    enqueue(db, connection, "access_requested", payload, None, false)?;
     db.audit(
         "plugin.access.requested",
         &json!({ "connectionId": connection.id }),
@@ -302,7 +315,12 @@ pub(crate) async fn inbound(
     let author = &args["author"];
     let extra = args.get("context").cloned().unwrap_or_else(|| json!({}));
     let body = args.get("body").cloned().unwrap_or_else(|| json!({}));
-    if !valid_kind
+    let starts_work = args["startsWork"].as_bool().unwrap_or(false);
+    if args
+        .get("startsWork")
+        .is_some_and(|value| !value.is_boolean())
+        || (starts_work && kind != "message")
+        || !valid_kind
         || id.is_empty()
         || id.len() > 200
         || id.chars().any(char::is_control)
@@ -316,6 +334,7 @@ pub(crate) async fn inbound(
     }
     let inbound = Inbound {
         kind: kind.to_owned(),
+        starts_work,
         id: id.to_owned(),
         author: Label {
             id: text(author, "id").to_owned(),
@@ -368,6 +387,39 @@ fn admit(db: &Db<'_>, expected: &Connection, event: &Value) -> Result<(Connectio
         return Err(Error::forbidden("This person is no longer allowed."));
     }
     Ok((connection, author))
+}
+
+/// Queued messages can outlive the capacity available at admission. Check the
+/// current native policy before invoking package effects. Submitted events must
+/// still reach their idempotent receipt even if their own delivery fills the queue.
+pub(crate) async fn submission_ready(
+    s: &Service,
+    expected: &Connection,
+    event: &Value,
+) -> Result<bool> {
+    let expected = expected.clone();
+    let event = event.clone();
+    s.store
+        .read(move |db| {
+            let (connection, author) = admit(db, &expected, &event)?;
+            let namespace = connection.routing.as_ref().map_or_else(
+                || connection.id.clone(),
+                |r| format!("{}:{}", connection.id, r.resource),
+            );
+            let receipt = format!(
+                "plugin-submitted:{namespace}:{}",
+                text(&event["payload"], "id")
+            );
+            if db.kv(&receipt)?.is_some() {
+                return Ok(true);
+            }
+            match limits(db, &connection, &author) {
+                Err(error) if error.status == 429 => Ok(false),
+                Err(error) => Err(error),
+                Ok(_) => Ok(true),
+            }
+        })
+        .await
 }
 
 /// Hourly counters to increment when the submission is accepted.

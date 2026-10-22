@@ -589,7 +589,7 @@ async fn handle(
     connection: &Connection,
     session: &mut cairn_plugin_host::Session,
     link: &socket::Link,
-    commands: &mut tokio::sync::mpsc::UnboundedReceiver<socket::Command>,
+    commands: &mut tokio::sync::mpsc::Receiver<socket::Command>,
     event: Value,
 ) -> Vec<socket::Command> {
     // The lifecycle script awaits many dispatches in one debug test frame.
@@ -839,7 +839,22 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
             json!({ "op": 10, "d": { "heartbeat_interval": 30000 } }),
         )
         .await;
-        assert_eq!(receive(&mut socket).await["op"], 2);
+        // The randomized initial heartbeat may precede Identify. Acknowledge
+        // valid pre-dispatch beats rather than assuming they cannot arrive yet.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let frame = receive(&mut socket).await;
+                if frame["op"] == 1 {
+                    assert!(frame["d"].is_null());
+                    send(&mut socket, json!({ "op": 11 })).await;
+                } else {
+                    assert_eq!(frame["op"], 2);
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
         send(
             &mut socket,
             json!({ "op": 0, "s": 1, "t": "READY", "d": {
@@ -871,9 +886,25 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
         )
         .await;
         send(&mut socket, json!({ "op": 1 })).await;
-        let heartbeat = tokio::time::timeout(Duration::from_secs(1), receive(&mut socket))
-            .await
-            .expect("oversized thread routing must not block heartbeats on REST");
+        let heartbeat = tokio::time::timeout(Duration::from_secs(1), async {
+            let mut previous = 0;
+            loop {
+                let heartbeat = receive(&mut socket).await;
+                assert_eq!(heartbeat["op"], 1);
+                if let Some(sequence) = heartbeat["d"].as_u64() {
+                    assert!((previous..=3).contains(&sequence));
+                    previous = sequence;
+                } else {
+                    assert!(heartbeat["d"].is_null() && previous == 0);
+                }
+                send(&mut socket, json!({ "op": 11 })).await;
+                if heartbeat["d"] == 3 {
+                    break heartbeat;
+                }
+            }
+        })
+        .await
+        .expect("oversized thread routing must not block heartbeats on REST");
         assert_eq!(
             heartbeat,
             json!({ "op": 1, "d": 3 }),

@@ -1,3 +1,7 @@
+#[path = "slack/admission.rs"]
+mod admission;
+#[path = "slack/capacity.rs"]
+mod capacity;
 #[path = "slack/checkpoints.rs"]
 mod checkpoints;
 mod common;
@@ -5,6 +9,8 @@ mod common;
 mod controller;
 #[path = "slack/reset.rs"]
 mod reset;
+#[path = "slack/socket.rs"]
+mod socket;
 
 use aws_lc_rs::hmac;
 use axum::{
@@ -41,10 +47,13 @@ use tokio::{
 
 const SIGNING_SECRET: &str = "synthetic-slack-signature";
 const BOT_TOKEN: &str = "xoxb-synthetic-slack-test";
+const APP_TOKEN: &str = "xapp-synthetic-slack-test";
 
 #[derive(Default)]
 struct Slack {
     posts: Mutex<Vec<HashMap<String, String>>>,
+    socket_opens: AtomicUsize,
+    interrupt_socket_open: AtomicBool,
     private: AtomicBool,
     rate_limit_first: AtomicBool,
     post_attempts: AtomicUsize,
@@ -65,6 +74,32 @@ async fn api(
     headers: HeaderMap,
     request: axum::extract::Request,
 ) -> Response {
+    if request.uri().path() == "/api/apps.connections.open" {
+        assert_eq!(
+            headers.get("authorization").unwrap(),
+            format!("Bearer {APP_TOKEN}").as_str()
+        );
+        slack.socket_opens.fetch_add(1, Ordering::SeqCst);
+        if slack.interrupt_socket_open.swap(false, Ordering::SeqCst) {
+            let first =
+                futures_util::stream::once(async { Ok::<_, std::io::Error>(b"{\"ok\":".to_vec()) });
+            let interrupted = futures_util::stream::once(async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Err::<Vec<u8>, _>(std::io::Error::other("synthetic interrupted response body"))
+            });
+            let stream = futures_util::StreamExt::chain(first, interrupted);
+            return Response::builder()
+                .status(200)
+                .header("content-type", "application/json")
+                .header("content-length", "128")
+                .body(Body::from_stream(stream))
+                .unwrap();
+        }
+        return Json(
+            json!({"ok": true, "url": "wss://wss-primary.slack.com/link/?ticket=synthetic-ticket"}),
+        )
+        .into_response();
+    }
     assert_eq!(
         headers.get("authorization").unwrap(),
         format!("Bearer {BOT_TOKEN}").as_str()
@@ -169,8 +204,18 @@ async fn save(app: &Router, path: &str, input: Value) -> Value {
 }
 
 async fn ingress(app: &Router, instance: &str, value: Value, secret: &str) -> (StatusCode, String) {
+    ingress_at(app, instance, value, secret, now() / 1000).await
+}
+
+async fn ingress_at(
+    app: &Router,
+    instance: &str,
+    value: Value,
+    secret: &str,
+    signed_at: i64,
+) -> (StatusCode, String) {
     let body = value.to_string();
-    let timestamp = (now() / 1000).to_string();
+    let timestamp = signed_at.to_string();
     let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
     let signature =
         hex::encode(hmac::sign(&key, format!("v0:{timestamp}:{body}").as_bytes()).as_ref());
@@ -197,6 +242,10 @@ fn app_manifest(form: &Value) -> Value {
 /// Run the owner setup handlers, not a preactivated connection fixture. Applying
 /// this generated manifest in Slack's dashboard remains a separate live step.
 async fn configure(app: &Router, service: &Service) -> (Value, Value) {
+    configure_transport(app, service, false).await
+}
+
+async fn configure_transport(app: &Router, service: &Service, socket_mode: bool) -> (Value, Value) {
     let collection = "/api/plugins/slack/setup-drafts";
     let draft = save(
         app,
@@ -208,20 +257,37 @@ async fn configure(app: &Router, service: &Service) -> (Value, Value) {
     let form_path = format!("{root}/form");
     let form = save(app, &form_path, json!({"revision": draft["revision"]})).await;
     assert!(app_manifest(&form)["settings"]["event_subscriptions"].is_null());
-    let response = common::send(app, owner("PATCH", &root, &json!({
-        "revision": draft["revision"], "name": "Test Slack app",
-        "settings": {"appId": "ATEST", "sharingAcknowledged": true, "maxRequestAgeMinutes": 15},
-        "secrets": {"signingSecret": SIGNING_SECRET},
-    }))).await;
+    let transport = if socket_mode { "socket" } else { "http" };
+    let mut secrets = json!({ "signingSecret": SIGNING_SECRET });
+    if socket_mode {
+        secrets["appToken"] = APP_TOKEN.into();
+    }
+    let input = json!({
+        "revision": draft["revision"],
+        "name": "Test Slack app",
+        "settings": {
+            "appId": "ATEST",
+            "sharingAcknowledged": true,
+            "maxRequestAgeMinutes": 15,
+            "transport": transport,
+        },
+        "secrets": secrets,
+    });
+    let response = common::send(app, owner("PATCH", &root, &input)).await;
     assert_eq!(response.status(), StatusCode::OK);
     let draft = common::read_json(response).await;
     let id = text(&draft, "id");
     let form = save(app, &form_path, json!({"revision": draft["revision"]})).await;
     let manifest = app_manifest(&form);
-    assert!(
-        text(&manifest["settings"]["event_subscriptions"], "request_url")
-            .ends_with(&format!("/plugins/{id}/events"))
-    );
+    assert_eq!(manifest["settings"]["socket_mode_enabled"], socket_mode);
+    if socket_mode {
+        assert!(manifest["settings"]["event_subscriptions"]["request_url"].is_null());
+    } else {
+        assert!(
+            text(&manifest["settings"]["event_subscriptions"], "request_url")
+                .ends_with(&format!("/plugins/{id}/events"))
+        );
+    }
     assert_eq!(
         manifest["settings"]["event_subscriptions"]["bot_events"],
         json!(["app_mention"])
@@ -333,6 +399,13 @@ async fn a_signed_slack_control_starts_a_fresh_conversation_without_retiring_its
 #[derive(Clone, Copy)]
 enum DeliveryScenario {
     Normal,
+    Socket,
+    SocketSlowMetadata,
+    SocketTls,
+    SocketOverdueMetadata,
+    SocketOpenInterrupted,
+    SocketStaleRoute,
+    CapacityAfterAdmission,
     LongReply,
     LongReplyRateLimited,
     LongReplyRestart,
@@ -348,11 +421,30 @@ enum DeliveryScenario {
 }
 
 async fn start_manager(file: &std::path::Path, slack_origin: &str) -> tokio::process::Child {
+    start_manager_socket(file, slack_origin, None).await
+}
+
+async fn start_manager_socket(
+    file: &std::path::Path,
+    slack_origin: &str,
+    socket_origin: Option<&str>,
+) -> tokio::process::Child {
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_cairn"))
         .parent()
         .unwrap()
         .join("examples/worker_fixture");
-    let mut manager = Command::new(executable)
+    let mut command = Command::new(executable);
+    if let Some(origin) = socket_origin {
+        command.env("CAIRN_FIXTURE_PLUGIN_SOCKET_ORIGIN", origin);
+        if origin.starts_with("wss://") {
+            command.env(
+                "CAIRN_FIXTURE_PLUGIN_SOCKET_CA",
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/fixtures/slack-socket/ca.der"),
+            );
+        }
+    }
+    let mut manager = command
         .arg("serve")
         .env("CAIRN_CONFIG", file)
         .env("CAIRN_FIXTURE_PLUGIN_HTTP_ORIGIN", slack_origin)
@@ -426,6 +518,20 @@ async fn fill_storage(service: &Service, instance_id: &str) {
 }
 
 async fn exchange(scenario: DeliveryScenario) {
+    let socket_mode = matches!(
+        scenario,
+        DeliveryScenario::Socket
+            | DeliveryScenario::SocketSlowMetadata
+            | DeliveryScenario::SocketTls
+            | DeliveryScenario::SocketOverdueMetadata
+            | DeliveryScenario::SocketOpenInterrupted
+            | DeliveryScenario::SocketStaleRoute
+    );
+    let mut socket_fixture = if socket_mode {
+        Some(socket::Fixture::start(matches!(scenario, DeliveryScenario::SocketTls)).await)
+    } else {
+        None
+    };
     let prefill_receipts = matches!(
         scenario,
         DeliveryScenario::FullStorage | DeliveryScenario::FullStorageRateLimited
@@ -462,6 +568,10 @@ async fn exchange(scenario: DeliveryScenario) {
         "the actual bundled package must load"
     );
     let slack = Arc::new(Slack::default());
+    slack.interrupt_socket_open.store(
+        matches!(scenario, DeliveryScenario::SocketOpenInterrupted),
+        Ordering::SeqCst,
+    );
     slack.rate_limit_second.store(
         matches!(
             scenario,
@@ -486,7 +596,7 @@ async fn exchange(scenario: DeliveryScenario) {
     let app = cairn_installation::http::router(service.clone())
         .await
         .unwrap();
-    let (instance, resource) = configure(&app, &service).await;
+    let (instance, resource) = configure_transport(&app, &service, socket_mode).await;
     let instance_id = text(&instance, "id");
     if matches!(scenario, DeliveryScenario::UnreservedStorage) {
         fill_storage(&service, instance_id).await;
@@ -528,6 +638,9 @@ async fn exchange(scenario: DeliveryScenario) {
         "name": "Authorized channel", "enabled": true, "match": {"channel": "CTEST"}, "agentId": agent["id"],
         "accessMode": "allowlist", "userIds": ["UALICE"], "maxMessagesPerHour": 10, "maxPerPersonPerHour": 5
     })).await;
+    if matches!(scenario, DeliveryScenario::SocketStaleRoute) {
+        admission::stale_second_route(&app, &service, &base).await;
+    }
     let ts = format!("{}.000001", now() / 1000);
     let prompt = if long_reply {
         format!(
@@ -599,14 +712,16 @@ async fn exchange(scenario: DeliveryScenario) {
         );
         slack.private.store(false, Ordering::SeqCst);
     }
-    assert_eq!(
-        ingress(&app, instance_id, envelope.clone(), SIGNING_SECRET).await,
-        (StatusCode::OK, "accepted".into())
-    );
-    assert_eq!(
-        ingress(&app, instance_id, envelope.clone(), SIGNING_SECRET).await,
-        (StatusCode::OK, "duplicate".into())
-    );
+    if !socket_mode {
+        assert_eq!(
+            ingress(&app, instance_id, envelope.clone(), SIGNING_SECRET).await,
+            (StatusCode::OK, "accepted".into())
+        );
+        assert_eq!(
+            ingress(&app, instance_id, envelope.clone(), SIGNING_SECRET).await,
+            (StatusCode::OK, "duplicate".into())
+        );
+    }
 
     if rate_limited {
         let another_resource = save(&app, &base, json!({"name": "Same workspace, another channel", "settings": {"channelId": "CSECOND"}, "secrets": {"botToken": BOT_TOKEN}})).await;
@@ -655,7 +770,120 @@ async fn exchange(scenario: DeliveryScenario) {
         // real manager starts the actual turn, so only the export must fail.
         slack.private.store(true, Ordering::SeqCst);
     }
-    let mut manager = start_manager(&file, &slack_origin).await;
+    let capacity_admission = if matches!(scenario, DeliveryScenario::CapacityAfterAdmission) {
+        Some(service.store.list(work::EVENTS).await.unwrap().remove(0))
+    } else {
+        None
+    };
+    let occupied_slots = if matches!(scenario, DeliveryScenario::CapacityAfterAdmission) {
+        capacity::occupy(&service, &instance).await
+    } else {
+        Vec::new()
+    };
+    let mut manager = start_manager_socket(
+        &file,
+        &slack_origin,
+        socket_fixture
+            .as_ref()
+            .map(|fixture| fixture.origin.as_str()),
+    )
+    .await;
+    if !occupied_slots.is_empty() {
+        capacity::keep_accepted_work(&service, &mut manager, &occupied_slots).await;
+    }
+    if let Some(fixture) = &mut socket_fixture {
+        if matches!(scenario, DeliveryScenario::SocketOpenInterrupted) {
+            let retried = tokio::time::timeout(Duration::from_secs(3), async {
+                while slack.socket_opens.load(Ordering::SeqCst) < 2 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            if retried.is_err() {
+                stop_manager(&mut manager).await;
+                panic!(
+                    "The first interrupted apps.connections.open never retried: {} calls",
+                    slack.socket_opens.load(Ordering::SeqCst)
+                );
+            }
+        }
+        if matches!(scenario, DeliveryScenario::SocketStaleRoute) {
+            let mut invalid_route = envelope.clone();
+            invalid_route["event"]["channel"] = json!("CSECOND");
+            invalid_route["event"]["text"] =
+                json!("<@UBOT> This source no longer has an approved agent");
+            fixture.send(invalid_route, "fixture-stale-route").await;
+            fixture.ack("fixture-stale-route").await;
+            assert!(
+                service.store.list(work::EVENTS).await.unwrap().is_empty(),
+                "The stale route imported work"
+            );
+        }
+        let overdue = matches!(scenario, DeliveryScenario::SocketOverdueMetadata);
+        let slow = overdue || matches!(scenario, DeliveryScenario::SocketSlowMetadata);
+        slack.hold_reply_check.store(slow, Ordering::SeqCst);
+        fixture.send(envelope.clone(), "fixture-first").await;
+        if slow {
+            tokio::time::timeout(Duration::from_secs(5), slack.channel_entered.notified())
+                .await
+                .unwrap();
+            // A protocol control frame must not wait for an unrelated provider API.
+            let ping = fixture.ping_while_metadata_is_held().await;
+            if overdue {
+                tokio::time::sleep(Duration::from_millis(3100)).await;
+            }
+            slack.release_channel.notify_one();
+            if ping.is_err() {
+                stop_manager(&mut manager).await;
+                panic!(
+                    "Socket Mode stopped answering peer Ping while Slack metadata was pending: {ping:?}"
+                );
+            }
+        }
+        if overdue {
+            let late_ack = fixture.unexpected_ack().await;
+            stop_manager(&mut manager).await;
+            assert!(
+                !late_ack,
+                "Slack received a late ACK after its admission deadline"
+            );
+            assert!(
+                service
+                    .store
+                    .list("plugin-events")
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "Expired metadata handler imported a request"
+            );
+            let runs = service
+                .store
+                .read(|db| db.runs(None, None, 20, 0, true))
+                .await
+                .unwrap();
+            assert!(
+                runs.is_empty(),
+                "Expired metadata handler started native work"
+            );
+            service.shutdown.cancel();
+            slack_server.abort();
+            controller_server.abort();
+            return;
+        }
+        fixture.ack("fixture-first").await;
+        fixture
+            .send(envelope.clone(), "fixture-retry-with-another-id")
+            .await;
+        fixture.ack("fixture-retry-with-another-id").await;
+        assert_eq!(
+            slack.socket_opens.load(Ordering::SeqCst),
+            if matches!(scenario, DeliveryScenario::SocketOpenInterrupted) {
+                2
+            } else {
+                1
+            }
+        );
+    }
     if matches!(scenario, DeliveryScenario::LongReplyRestart) {
         common::eventually(
             Duration::from_secs(20),
@@ -1091,6 +1319,9 @@ async fn exchange(scenario: DeliveryScenario) {
         )
         .await;
     }
+    if let Some(admission) = capacity_admission {
+        capacity::reuse_submitted_request(&service, &instance, admission, &slack).await;
+    }
     if matches!(scenario, DeliveryScenario::ResetThread) {
         reset::round_trip(
             &app,
@@ -1211,6 +1442,9 @@ async fn exchange(scenario: DeliveryScenario) {
     assert_eq!(principal["connectionId"], instance_id);
     assert_eq!(principal["binding"]["id"], route["id"]);
     assert_eq!(principal["binding"]["resource"], resource["id"]);
+    if let Some(fixture) = socket_fixture {
+        fixture.stop().await;
+    }
     service.shutdown.cancel();
     slack_server.abort();
     controller_server.abort();

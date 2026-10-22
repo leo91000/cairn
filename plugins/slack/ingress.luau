@@ -13,36 +13,7 @@ local function timestamp(value)
     return type(value) == "string" and #value <= 32 and string.match(value, "^%d+%.%d+$") ~= nil
 end
 
-return { webhook = function(event)
-    local contentType = string.match(event.headers["content-type"] or "", "^[^;]+")
-    if contentType == "application/x-www-form-urlencoded" then
-        local encoded = string.match(event.body, "^payload=(.*)$")
-        if not encoded or string.find(encoded, "&", 1, true) then
-            return response(400, "Invalid interaction form")
-        end
-        local decoded = string.gsub(encoded, "%+", " ")
-        decoded = string.gsub(decoded, "%%(%x%x)", function(byte)
-            return string.char(tonumber(byte, 16))
-        end)
-        local ok, payload = pcall(cairn.json.decode, decoded)
-        if not ok or type(payload) ~= "table" or payload.type ~= "block_actions" then
-            return response(400, "Invalid interaction")
-        end
-        return controls.webhook(event, payload)
-    end
-    local ok, envelope = pcall(cairn.json.decode, event.body)
-    if not ok or type(envelope) ~= "table" then
-        return response(400, "Invalid event")
-    end
-    if envelope.type == "url_verification" then
-        if type(envelope.challenge) ~= "string" or #envelope.challenge > 1000 then
-            return response(400, "Invalid challenge")
-        end
-        return response(200, envelope.challenge)
-    end
-    if event.setup or envelope.type ~= "event_callback" then
-        return response(200, "Ignored")
-    end
+local function accept(event, envelope)
     if envelope.api_app_id ~= event.instance.settings.appId or not identifier(envelope.team_id) then
         return response(403, "Wrong app or workspace")
     end
@@ -55,7 +26,9 @@ return { webhook = function(event)
         return response(400, "Invalid mention")
     end
     -- Retries are freshly signed, but must not start arbitrarily old work.
-    local received = tonumber(event.headers["x-slack-request-timestamp"])
+    -- Signature freshness is checked by the host. Work age is measured now,
+    -- independently of an earlier, still-valid signing timestamp.
+    local received = os.time()
     local sent = tonumber(string.match(message.ts, "^(%d+)"))
     local minutes = event.instance.settings.maxRequestAgeMinutes or 15
     if not received or not sent or received - sent > minutes * 60 or sent - received > 300 then
@@ -93,6 +66,7 @@ return { webhook = function(event)
         return response(if check.status == 429 or check.status >= 500 then 503 else 403, "Channel unavailable")
     end
     local result = cairn.inbound.deliver({
+        startsWork = true,
         id = "message:" .. envelope.team_id .. ":" .. message.channel .. ":" .. message.ts,
         resource = selected.id,
         author = { id = message.user, name = message.user },
@@ -100,4 +74,37 @@ return { webhook = function(event)
         body = { text = text },
     })
     return response(if result.status == "busy" then 503 else 200, result.status)
-end }
+end
+
+return { webhook = function(event)
+    local contentType = string.match(event.headers["content-type"] or "", "^[^;]+")
+    if contentType == "application/x-www-form-urlencoded" then
+        local encoded = string.match(event.body, "^payload=(.*)$")
+        if not encoded or string.find(encoded, "&", 1, true) then
+            return response(400, "Invalid interaction form")
+        end
+        local decoded = string.gsub(encoded, "%+", " ")
+        decoded = string.gsub(decoded, "%%(%x%x)", function(byte)
+            return string.char(tonumber(byte, 16))
+        end)
+        local ok, payload = pcall(cairn.json.decode, decoded)
+        if not ok or type(payload) ~= "table" or payload.type ~= "block_actions" then
+            return response(400, "Invalid interaction")
+        end
+        return controls.webhook(event, payload)
+    end
+    local ok, envelope = pcall(cairn.json.decode, event.body)
+    if not ok or type(envelope) ~= "table" then
+        return response(400, "Invalid event")
+    end
+    if envelope.type == "url_verification" then
+        if type(envelope.challenge) ~= "string" or #envelope.challenge > 1000 then
+            return response(400, "Invalid challenge")
+        end
+        return response(200, envelope.challenge)
+    end
+    if event.setup or envelope.type ~= "event_callback" then
+        return response(200, "Ignored")
+    end
+    return accept(event, envelope)
+end, accept = accept }

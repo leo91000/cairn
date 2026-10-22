@@ -160,6 +160,7 @@ export type FormResult = {
 -- capability "inbound": something an allowed person wrote, received by the package.
 export type Inbound = {
     kind: string?, -- handler to call, default "message"
+    startsWork: boolean?, -- optional new-work capacity preflight, message only; omit for controls
     id: string, -- platform message ID, deduplicated for 30 days
     resource: string?, -- required for collections declaring delegation; host selects its route
     author: Author,
@@ -257,6 +258,9 @@ export type Cairn = {
             auth: (boolean | { secret: string, header: string?, prefix: string? })?,
             after: number?,
             oversized: { string }?,
+            -- Milliseconds from wire receipt, including queue time, 100..35000.
+            -- Expiry closes/stops this worker; unacknowledged inputs may be retried.
+            eventTimeout: number?,
         }) -> (),
         -- Queued outside the handler; paced actual writes share the credential's budget.
         -- `name` emits { type = "sent", name, sent = true } after writing, or sent=false

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Start Cairn work from an authorized Slack mention and receive its answer in the same thread."
 apiVersion = 2
 capabilities = [
+  "socket",
   "webhooks",
   "inbound",
   "resources",
@@ -12,7 +13,10 @@ capabilities = [
   "http",
   "storage"
 ]
-hosts = [ "slack.com" ]
+hosts = [
+  "slack.com",
+  "*.slack.com"
+]
 instanceForm = true
 instanceView = true
 
@@ -23,6 +27,24 @@ path = "M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm10 0h6v6h-6z"
 [instances]
 singular = "App"
 plural = "Apps"
+
+[[settings]]
+key = "transport"
+title = "Receive Slack events using"
+type = "select"
+default = "http"
+refresh = true
+options = [
+  { value = "http", label = "Signed public HTTP" },
+  { value = "socket", label = "Socket Mode (outgoing connection)" }
+]
+
+[[settings]]
+key = "appToken"
+title = "App-level Socket Mode token"
+type = "secret"
+maxLength = 16384
+description = "For Socket Mode, create an app-level token with connections:write. It is separate from each workspace's bot token."
 
 [[settings]]
 key = "appId"

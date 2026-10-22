@@ -7,28 +7,36 @@ end
 
 local function rootForm(event)
     local url = event.setup and event.setup.urls.webhooks.events
+    local socketMode = event.values.transport == "socket"
     local manifest = {
         display_information = { name = "Cairn" },
         features = { bot_user = { display_name = "Cairn", always_online = false } },
         oauth_config = { scopes = { bot = { "app_mentions:read", "chat:write", "channels:read", "users:read" } } },
-        settings = { socket_mode_enabled = false },
+        settings = { socket_mode_enabled = socketMode },
     }
     local ready = event.values.appId and table.find(event.secrets or {}, "signingSecret") ~= nil
-    if url and ready then
-        manifest.settings.event_subscriptions = { request_url = url, bot_events = { "app_mention" } }
-        manifest.settings.interactivity = { is_enabled = true, request_url = url }
+    if socketMode or (url and ready) then
+        manifest.settings.event_subscriptions = { bot_events = { "app_mention" } }
+        manifest.settings.interactivity = { is_enabled = true }
+        if not socketMode then
+            manifest.settings.event_subscriptions.request_url = url
+            manifest.settings.interactivity.request_url = url
+        end
     end
     local view = {
         notice(),
-        { type = "text", text = "Create a private Slack app from this manifest. Copy its app ID and signing secret from Basic Information. Install it, then add a Workspace resource with its bot token and a public channel. Invite the app there. Activate the completed draft, then configure the workspace’s allowed-person route and agent; activation alone admits nobody. This first delivery handles mentions over signed HTTP; the other accepted Slack features are still being implemented." },
+        { type = "text", text = "Create a private Slack app from this manifest. Copy its app ID and signing secret from Basic Information. Install it, then add a Workspace resource with its bot token and a public channel. Invite the app there. Activate the completed draft, then configure the workspace’s allowed-person route and agent; activation alone admits nobody. Choose signed HTTP or Socket Mode. Socket Mode also needs an app-level token with connections:write; bot tokens remain on the workspace resources. Other accepted Slack features are still being implemented." },
         { type = "link", label = "Create a Slack app", url = "https://api.slack.com/apps?new_app=1" },
         { type = "code", text = cairn.json.encode(manifest) },
     }
-    if url then
+    if url and not socketMode then
         table.insert(view, { type = "code", text = url })
         table.insert(view, { type = "text", text = "Save the app ID and signing secret in this draft before asking Slack to verify the Events URL. URL verification is supported before activation; ordinary events are not." })
     end
     local errors = {}
+    if event.submit and socketMode and not table.find(event.secrets or {}, "appToken") then
+        errors.appToken = "Add an app-level token with connections:write for Socket Mode."
+    end
     if event.submit and event.values.sharingAcknowledged ~= true then
         errors.sharingAcknowledged = "Acknowledge the shared visibility and retention before activation."
     end
@@ -84,6 +92,6 @@ return {
         return if event.resource then workspaceForm(event) else rootForm(event)
     end,
     view = function()
-        return { notice(), { type = "text", text = "The current Slack slice accepts authorized mentions in each configured public channel over signed HTTP, and returns the answer in its Slack thread. No agent or person is granted access by default. Manage the workspace's Routes to select the agent, project and people." } }
+        return { notice(), { type = "text", text = "The current Slack slice accepts authorized mentions in each configured public channel over signed HTTP or Socket Mode, and returns the answer in its Slack thread. No agent or person is granted access by default. Manage the workspace's Routes to select the agent, project and people." } }
     end,
 }

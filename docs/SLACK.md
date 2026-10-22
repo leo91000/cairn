@@ -4,9 +4,12 @@ The Slack implementation is in progress on draft PR #226. The first slice in
 `plugins/slack/` configures a private app and a public channel, admits an authorized
 mention, starts a requester-bound Cairn turn and posts its answer in the source
 thread. It is not the complete accepted Q1–Q20 delivery or a release candidate.
-The actual-worker HTTP journeys pass, including inert owner setup and activation,
-visibility changes, uncertain-write restart and long rate-limit deadlines. Further
-client and protocol qualification remains open; no real Slack workspace has been connected.
+Actual-worker HTTP journeys cover inert owner setup and activation, visibility
+changes, uncertain-write restart and long rate-limit deadlines. The first Socket
+Mode journeys cover the same requester-bound exchange over WS and verified WSS,
+independent peer-Ping handling and refusal of overdue admission. Full Socket
+lifecycle, client and protocol qualification remains open; no real Slack workspace
+has been connected.
 
 ## First exchange
 
@@ -15,6 +18,14 @@ configuration: the app must exist before its signing secret can be saved. After
 saving its app ID and signing secret in the setup draft, the form adds the draft's
 stable Events URL and the `app_mention` subscription. A signed URL-verification
 challenge works while the draft is inert. Ordinary events require activation.
+
+Alternatively, select **Socket Mode (outgoing connection)**. Create an app-level
+token with `connections:write` in Slack and store it in **App-level Socket Mode
+token**. It is separate from the bot token on each Workspace resource. The form
+then generates a Socket Mode manifest with the same mention subscription and
+interactivity, without an HTTP Request URL. The app ID, signing secret and sharing
+acknowledgement remain part of this draft's configuration. A verified workspace
+resource and explicit participant/agent route are still required.
 
 The workspace resource form checks the installed bot with `auth.test`, its app
 with `bots.info`, and the selected channel with `conversations.info`. The host
@@ -57,6 +68,29 @@ a native delivery checkpoint and are left for reconciliation rather than posted
 a second time after a worker or manager restart. Checkpoints are bounded per
 pending delivery and removed on settlement, rather than accumulating permanent
 plugin storage receipts.
+
+## First Socket Mode exchange
+
+The package calls [`apps.connections.open`](https://docs.slack.dev/reference/methods/apps.connections.open/)
+with the app-level credential injected into its Authorization header, then connects
+to the temporary WSS URL. The URL stays in worker memory. A `hello` must identify
+the configured app before events are handled. The event payload then uses exactly
+the same app/workspace/channel/author checks and native durable routing as HTTP.
+A new envelope ID for the same Slack message still cannot start a second turn.
+
+Cairn continues reading control frames and flushing queued commands while the
+Luau handler awaits metadata or authority. A peer Ping is answered while a
+`conversations.info` response is held; the envelope remains unacknowledged until
+visibility and admission checks finish. The package sets a 2,500 ms per-message
+handler deadline from wire receipt, including time waiting behind other messages.
+An overdue handler stops its worker and socket without a late ACK; Slack may retry.
+A request already committed at the boundary remains subject to native deduplication.
+This cutoff is a cancellation policy, not a guarantee of end-to-end network latency.
+
+Basic Hello timeout, reconnect/backoff and `Retry-After` handling exist. Complete
+refresh/overlap, active liveness, app-level quota/restart and protocol qualification
+remain open before this transport is ready for the complete delivery. See
+[Slack's Socket Mode protocol](https://docs.slack.dev/apis/events-api/using-socket-mode/).
 
 ## Start a fresh conversation from Slack
 
@@ -106,6 +140,17 @@ with the managed `codex.mjs` test process. No database mutation fabricates the
 completed answer. This controller is not VM isolation evidence, and the test is
 not an exchange with the Slack service or a real agent model.
 
+`tests/slack/socket.rs` additionally runs real transport/event workers and the same
+native adapter through a loopback HTTP/WS fixture and a WSS fixture with an explicit
+synthetic CA and normal certificate/server-name verification. A client without
+that CA is refused before any envelope arrives. These certificates are unrelated
+to Slack's public certificate or deployment trust. Five Socket cases cover the
+requester/route/thread answer, changed-envelope-ID deduplication, peer Ping while
+metadata is held, rejection of a late ACK/admission after a held provider response,
+and positive/negative TLS validation. The Ping and overdue-admission cases first
+reproduced failures in the previous implementation. They do not constitute a real
+Slack workspace conversation or complete Socket Mode lifecycle qualification.
+
 Reproduce using the repository's pinned environment and credential-isolating
 backend launcher:
 
@@ -115,7 +160,8 @@ pnpm test:backend -p cairn-installation --test slack -- --nocapture
 ```
 
 For a real workspace, the owner still needs to configure a private Slack app,
-its app ID and signing secret, an installed bot with the scopes above, a public
+its app ID and signing secret (plus an app-level `connections:write` token for
+Socket Mode), an installed bot with the scopes above, a public
 channel the bot has joined, and the person's route to an available Cairn agent.
 Secrets belong in the encrypted plugin configuration, never in repository files,
 test logs or the PR. No such live resources have been accessed or created here.
@@ -123,7 +169,7 @@ test logs or the PR. No such live resources have been accessed or created here.
 ## Remaining accepted features
 
 The complete contract remains [SLACK-PLUGIN-SPEC.md](SLACK-PLUGIN-SPEC.md). The first
-slice does not finish Socket Mode; Slack OAuth installation and personal OAuth;
+slice does not finish Socket Mode lifecycle/overlap/liveness qualification; Slack OAuth installation and personal OAuth;
 private channels, Slack Connect, DMs/group DMs; automatic following of engaged
 threads or authorized initial thread history; slash commands, shortcuts, buttons,
 questions, stop, modals, App Home or streaming; authenticated files and
@@ -136,3 +182,32 @@ later presentation layer over the complete plain-text delivery.
 Full web/Android and management MCP/tool parity, provider revoke/exchange and
 wake-delivery audits, data compatibility, independent clean review and complete
 CI qualification remain delivery gates. The PR stays in draft and unmerged.
+
+### Capacity and initial transport failure
+
+Slack mention admission opts into native new-work preflight. A full pending-work
+or hourly budget returns `busy` without a permanent duplicate marker, so the same
+provider event can succeed after capacity returns. If capacity fills after an
+ACK, the bounded accepted queue waits without exhausting the handler-error retry
+budget. The original requester/source proofs are rechecked before execution;
+controls remain available and submitted receipts remain idempotent while full.
+The fixture fills pending slots synthetically, releases them, and only then lets
+the actual native adapter/provider process produce the answer. No completed work
+is seeded. A separate Discord package regression keeps textual stop callable
+under the same saturation policy.
+
+Socket startup also recovers when the first `apps.connections.open` HTTP response
+is interrupted before a socket or timer exists. This is tested with a response
+body terminated mid-transfer, followed by a new request and the actual exchange.
+This does not qualify full app-wide connection quotas, overlapping replacement,
+client-initiated liveness detection, restart policy or a real Slack workspace.
+
+
+The age window is checked against current receipt processing time for both
+transports, independently of HTTP signature freshness. A still-valid signature
+cannot restart work whose source timestamp is outside that window. A Socket
+admission refusal scoped to one route/resource is contained to that envelope;
+the root owner/instance/package must still authorize its ACK, while other valid
+channels keep their transport. Explicit app configuration failures still stop it.
+Active silent-connection liveness and overlapping replacement remain the next
+Socket protocol work, together with app-wide connection quotas/restart policy.

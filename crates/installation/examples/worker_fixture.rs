@@ -22,6 +22,32 @@ async fn router(
         }
         service.plugins.route_http_to(Some(origin));
     }
+    if let Ok(origin) = std::env::var("CAIRN_FIXTURE_PLUGIN_SOCKET_ORIGIN") {
+        let url = url::Url::parse(&origin)
+            .map_err(|_| cairn_installation::error::Error::bad("Invalid fixture socket origin."))?;
+        if !matches!(url.scheme(), "ws" | "wss") || url.host_str() != Some("127.0.0.1") {
+            return Err(cairn_installation::error::Error::bad(
+                "Fixture socket origin must be loopback WS or WSS.",
+            ));
+        }
+        if url.scheme() == "wss"
+            && let Ok(ca) = std::env::var("CAIRN_FIXTURE_PLUGIN_SOCKET_CA")
+        {
+            let der = std::fs::read(ca)?;
+            let mut roots = rustls::RootCertStore::empty();
+            roots
+                .add(rustls::pki_types::CertificateDer::from(der))
+                .map_err(|_| cairn_installation::error::Error::bad("Invalid fixture CA."))?;
+            let client = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            service
+                .plugins
+                .route_sockets_with_tls_to(origin, std::sync::Arc::new(client));
+        } else {
+            service.plugins.route_sockets_to(Some(origin));
+        }
+    }
     relay_fixture::router(service).await
 }
 

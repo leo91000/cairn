@@ -336,7 +336,7 @@ A package that keeps its own connection, such as a chat platform's gateway, decl
 | `tick` | a timer set with `every` or `after` fired | `name` |
 | `close` | the server closed or the connection failed | `code?`, `reason`, `error?` |
 
-- `cairn.socket.connect{ url, auth?, after?, oversized? }`: WSS to a declared host,
+- `cairn.socket.connect{ url, auth?, after?, oversized?, eventTimeout? }`: WSS to a declared host,
   default port, no credentials in the URL. Reconnections slow down (1 s doubling to
   60 s) until the package reports `connected`; `after` waits longer (seconds, a day at
   most). `auth` adds the instance's credential or a secret to the handshake headers,
@@ -346,13 +346,23 @@ A package that keeps its own connection, such as a chat platform's gateway, decl
   other fields. The complete worker frame, including JSON escaping, must fit in 1 MB.
   A smaller wire message can also require projection because of escaping. When even
   the projection cannot fit, `text` is null and the socket remains open.
+  `eventTimeout` optionally limits each received message handler to 100–35,000 ms
+  from wire receipt, including time waiting in its event queue. Expiry stops the
+  worker and closes its socket; the manager may restart it. The plugin must leave
+  unfinished inputs unacknowledged and support provider retries/deduplication.
+  An already committed effect is not undone by cancellation.
 - `cairn.socket.send(text, { auth = true | { secret }, pace?, budget?, name? }?)`: with
   `auth`, the host replaces `{{secret}}` with the JSON-escaped secret. `pace` (ms, a
   minute at most) queues sends outside the handler and spaces actual writes with the
   same credential across every instance. Reads, heartbeats and cancellation keep
   running while queued; at most 16 sends may be pending per worker. Completion
-  callbacks share the event loop with socket reads and timers; cancellation is checked
-  between callbacks. A worker exceeding 128 queued socket events is stopped.
+  callbacks run sequentially in the worker, while socket reads, peer Ping/Pong and
+  command flushing proceed independently of slow capability calls. Cancellation can
+  interrupt a running handler. Each transport has at most 64 queued commands and 128
+  queued events. Across the installation, queued/in-flight event payloads have a
+  32 MiB encoded-JSON budget; wire buffers, IPC and deserialized-value overhead are
+  additional. Queue or budget pressure closes the transport instead of accepting
+  unlimited data; unfinished inputs require the provider's retry protocol.
   `budget = { remaining, resetAfter }` reserves a send from a shared balance until reset
   (`resetAfter` in milliseconds, a day at most). Observations can lower the balance;
   they never replenish it before reset. Unsent reservations are released on close.
@@ -375,7 +385,7 @@ changes run in the transport worker, separate from the worker handling queued ev
 so a slow reply never delays a heartbeat or a three-second acknowledgement. Transport
 handlers still run sequentially: avoid synchronous REST hydration in them.
 
-`cairn.inbound.accept{ kind?, id, author: { id, name }, context?, body? }` (capability
+`cairn.inbound.accept{ kind?, startsWork?, id, author: { id, name }, context?, body? }` (capability
 `inbound`) hands Cairn something a person wrote, from the transport worker or from a
 timer that polls an API. Cairn applies the instance's admission rules before keeping
 anything: people who aren't allowed are dropped without a trace, approval mode
@@ -383,6 +393,17 @@ records a request without content, IDs deduplicate for 30 days, and at most 50 e
 wait per instance. Accepted messages reach the package's `kind` handler (`message` by
 default) with `context` and `body` merged under the host's `id` and `author`, and may
 start conversations for that person. Returns whether it was queued.
+
+A `message` known to start a new turn may opt into `startsWork = true`. Admission
+then returns `busy` before writing an event or deduplication marker when current
+submission quotas or the 20-pending-delivery ceiling are full. This hint grants no
+rights and reserves no capacity: `conversations.submit` always rechecks the native
+limits. Already accepted work waits without spending the finite handler-error
+retry budget when those limits become full later. The 50-event admission ceiling
+still applies. Omit this hint for messages that may answer questions, stop work or
+perform other controls; they must remain callable while submissions are full.
+Non-message events cannot set it to true. A previously submitted event can still
+resolve its idempotent receipt while its own delivery occupies the last slot.
 
 Separate processes, capability checks and Luau's sandbox are dogfood boundaries,
 not yet a marketplace guarantee: a public catalogue still needs signed packages,

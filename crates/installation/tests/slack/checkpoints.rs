@@ -262,7 +262,7 @@ async fn checkpoints_cannot_escape_the_current_reply_and_are_retired_with_the_de
     service.shutdown.cancel();
 }
 
-fn cpu_ms() -> f64 {
+pub(super) fn cpu_ms() -> f64 {
     let mut value = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,

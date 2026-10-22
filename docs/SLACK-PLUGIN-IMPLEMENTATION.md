@@ -1471,3 +1471,53 @@ before final delivery and merge; a green Slack fixture or CI checkpoint does not
 waive them. Current Slack work continues with concrete protocol and conversation
 features under the accepted Q1–Q20 scope. The PR remains a draft, and no live Slack
 workspace or production OAuth exchange has qualified these combinations.
+
+
+## First Socket Mode exchange and measured protocol blockers
+
+The Luau package now selects signed HTTP or Socket Mode from its existing generic
+form. Its Socket worker obtains an ephemeral URL with a distinct app-level
+`connections:write` credential, verifies Hello's app ID, and shares HTTP's exact
+mention/resource/native requester admission path. Tests drive the actual manager,
+transport/event workers and native adapter, checking the same restrictive agent,
+original person and exact reply thread. Replaying the message with another envelope
+ID starts no extra work. This is fixture evidence, without a live Slack workspace.
+
+A held conversations.info fixture reproduced two concrete failures: peer Ping
+stalled behind the Luau handler, and an ACK was sent after Slack's three-second
+window. The native I/O supervisor now runs independently of sequential handlers,
+with 64 command slots, 128 event slots and a 32 MiB installation-wide encoded-payload
+budget (additional wire/IPC/value overhead remains). Optional eventTimeout limits
+message handling from receipt, including queue time; Slack requests 2500 ms. Expiry
+stops that worker/socket, leaves the envelope unacknowledged and preserves any
+already committed work's native deduplication. With metadata held beyond 3 seconds,
+no request is imported and no native turn starts.
+
+The five current Socket journeys pass, including real WSS with an explicit
+synthetic CA and ordinary certificate/name validation; an untrusted CA fails
+before envelope handling. Earlier plain WS evidence was not TLS evidence. The
+provider/model/controller remain synthetic, without VM isolation or production
+storage evidence. Full Slack/Discord regressions, fresh checkpoint review and
+exact-head CI qualification remain required. Socket lifecycle/overlap/active
+liveness and app quota/restart handling, all other Q1–Q20 lots and the three R72
+integration findings remain open before final delivery or merge.
+
+
+### Socket and capacity checkpoint follow-through
+
+The first Socket exchange uses app-level connection authorization, a verified app
+Hello, durable admission and the same requester-bound turn/reply path as HTTP.
+Its actual-worker fixtures also exercise verified WSS, refusal of an untrusted
+fixture CA, peer Ping/Pong while metadata is held and cancellation of overdue
+metadata before a late ACK/import. No live Slack service was used.
+
+Review reproduced two additional failures: the first interrupted connection-URL
+response had no recovery timer, and native pending-work saturation deleted an
+already-ACKed event after five failed handler attempts. The package now retains a
+startup recovery path. A new optional inbound work hint preflights fresh Slack
+requests while preserving controls; accepted work waits outside the finite error
+budget and still checks its current source/requester authority. Tests must prove
+busy admission leaves no duplicate marker, six saturated scheduler wakeups retain
+the request, releasing capacity produces the actual answer, submitted receipts
+remain usable while full, and Slack reset/Discord textual stop still work. These
+are checkpoint assertions, not completion of Socket lifecycle or Q1–Q20.

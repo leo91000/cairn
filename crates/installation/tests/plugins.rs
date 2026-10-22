@@ -870,11 +870,34 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
         chat,
         "same thread, same conversation"
     );
+    // Fill only unrelated pending-delivery slots. A textual stop is a message
+    // handler too, but must remain available while new submissions are saturated.
+    let mut occupied = Vec::new();
+    for _ in 0..20 {
+        let id = cairn_installation::config::id();
+        s.store
+            .put(
+                work::DELIVERIES,
+                json!({
+                    "id": id,
+                    "connectionId": connection.id,
+                    "revision": connection.revision,
+                    "createdAt": now(),
+                    "nextAttemptAt": now() + 86_400_000,
+                }),
+            )
+            .await
+            .unwrap();
+        occupied.push(id);
+    }
     let mut stop = message("502", "300", "<@400> stop");
     stop["channel_id"] = json!("500");
-    accept_in(&s, &connection, &threads, stop.clone())
-        .await
-        .unwrap();
+    assert!(
+        accept_in(&s, &connection, &threads, stop.clone())
+            .await
+            .unwrap(),
+        "A full work queue refused a textual stop"
+    );
     runtime::pump(&s, &connection, &mut session).await.unwrap();
     assert_eq!(s.get("chats", &chat).await.unwrap()["paused"], true);
     assert_eq!(
@@ -885,6 +908,15 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
         .await,
         1
     );
+    s.store
+        .transaction(move |db| {
+            for id in occupied {
+                db.remove(work::DELIVERIES, &id)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
     session.stop().await;
     server.abort();
 }

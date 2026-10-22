@@ -15,10 +15,30 @@ use crate::{
 };
 use cairn_plugin_host::{InvocationError, Session};
 use serde_json::{Value, json};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use tokio_util::sync::CancellationToken;
 
 const ATTEMPTS: u64 = 5;
+
+/// Native submission backpressure is distinct from a failed package handler:
+/// accepted work waits without spending the finite error retry budget.
+enum DispatchError {
+    Invocation(InvocationError),
+    SubmissionLimited,
+}
+
+impl From<InvocationError> for DispatchError {
+    fn from(error: InvocationError) -> Self {
+        Self::Invocation(error)
+    }
+}
 
 /// Token formats of active packages, masked in run output. Returns whether they loaded.
 pub async fn load_secret_patterns(s: &Service) -> bool {
@@ -199,8 +219,13 @@ pub async fn begin(s: &Service, connection: &Connection, session: &mut Session) 
     // Package start refusals remain retryable (502), unlike socket start's
     // explicit 403/needs_review policy. Preserve its existing diagnostic text.
     .map_err(|error| match error {
-        InvocationError::Rejected(message) => Error::bad_gateway(format!("rejected: {message}")),
-        InvocationError::Failed(message) => Error::bad_gateway(message),
+        DispatchError::Invocation(InvocationError::Rejected(message)) => {
+            Error::bad_gateway(format!("rejected: {message}"))
+        }
+        DispatchError::Invocation(InvocationError::Failed(message)) => Error::bad_gateway(message),
+        DispatchError::SubmissionLimited => {
+            Error::too_many_requests("Connection has too much pending work.")
+        }
     })
 }
 
@@ -227,6 +252,7 @@ pub async fn pump(s: &Service, connection: &Connection, session: &mut Session) -
         .await;
         match result {
             Ok(_) => remove(s, EVENTS, &event).await?,
+            Err(DispatchError::SubmissionLimited) => postpone_submission(s, &event).await?,
             Err(_) => {
                 if retry_later(s, EVENTS, &mut event).await? {
                     audit_failure(s, connection, &name).await?;
@@ -412,7 +438,7 @@ async fn dispatch(
     event: &Value,
     name: &str,
     payload: Value,
-) -> std::result::Result<Value, InvocationError> {
+) -> std::result::Result<Value, DispatchError> {
     let digest = registry::digest(session.manifest(), session.sources())
         .map_err(|e| InvocationError::Failed(e.message))?;
     registry::require_digest(s, &connection.plugin_id, &digest)
@@ -425,6 +451,14 @@ async fn dispatch(
         super::routes::require_person(&connection, author)
             .map_err(|e| InvocationError::Failed(e.message))?;
     }
+    if name == "message"
+        && event["startsWork"] == true
+        && !work::submission_ready(s, &connection, event)
+            .await
+            .map_err(|error| InvocationError::Failed(error.message))?
+    {
+        return Err(DispatchError::SubmissionLimited);
+    }
     let context = Context {
         connection,
         management: None,
@@ -436,13 +470,25 @@ async fn dispatch(
     };
     let context = &context;
     let digest_ref = &digest;
+    // Recheck in submit remains authoritative if capacity changes after preflight.
+    // Only that native refusal, never an arbitrary provider failure, can defer work.
+    let limited = AtomicBool::new(false);
+    let limited_ref = &limited;
     let result = session
         .dispatch(name, payload, |method, args| async move {
-            capabilities::approved(s, context, digest_ref, &method, args)
-                .await
-                .map_err(|error| cairn_plugin_host::Denied(capabilities::code(&error)))
+            let result = capabilities::approved(s, context, digest_ref, &method, args).await;
+            if method == "conversations.submit"
+                && result.as_ref().is_err_and(|error| error.status == 429)
+            {
+                limited_ref.store(true, Ordering::Relaxed);
+            }
+            result.map_err(|error| cairn_plugin_host::Denied(capabilities::code(&error)))
         })
-        .await?;
+        .await;
+    if result.is_err() && limited.load(Ordering::Relaxed) {
+        return Err(DispatchError::SubmissionLimited);
+    }
+    let result = result?;
     registry::require_digest(s, &context.manifest.id, &digest)
         .await
         .map_err(|e| InvocationError::Failed(e.message))?;
@@ -469,6 +515,24 @@ async fn remove(s: &Service, kind: &'static str, value: &Value) -> Result<()> {
             } else {
                 db.remove(kind, &id)
             }
+        })
+        .await
+}
+
+/// Keep only an existing, unchanged admission waiting. This is not a new
+/// authorization or a generic retry of uncertain package/provider side effects.
+async fn postpone_submission(s: &Service, event: &Value) -> Result<()> {
+    let expected = event.clone();
+    s.store
+        .transaction(move |db| {
+            let id = text(&expected, "id");
+            if let Some(mut current) = db.get(EVENTS, id)?
+                && current == expected
+            {
+                current["nextAttemptAt"] = json!(now() + 5000);
+                db.put(EVENTS, &current)?;
+            }
+            Ok(())
         })
         .await
 }
@@ -515,6 +579,7 @@ async fn release_timers(s: &Service, connection: &Connection) -> Result<()> {
                         "timer",
                         &json!({ "id": timer["id"], "name": timer["name"], "payload": timer["payload"] }),
                         None,
+                        false,
                     )?;
                 }
             }
