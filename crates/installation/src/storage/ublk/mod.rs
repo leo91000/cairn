@@ -509,7 +509,7 @@ pub(crate) fn mount_named_disk(
     uid: u32,
     name: &str,
 ) -> stdio::Result<MountedDisk> {
-    mount_named(disk, state, jail, uid, name, false)
+    mount_named(disk, state, jail, uid, name, None)
 }
 
 /// Host consumers must not share the backend's mount namespace: namespace exit
@@ -519,11 +519,12 @@ pub(crate) fn mount_host_disk(
     disk: Arc<dyn Disk>,
     state: &Path,
     jail: &Path,
+    inherited_mounts: Vec<PathBuf>,
 ) -> stdio::Result<MountedDisk> {
-    mount_named(disk, state, jail, 0, "disk.blk", true)
+    mount_named(disk, state, jail, 0, "disk.blk", Some(inherited_mounts))
 }
 
-pub(crate) fn private_mount_namespace() -> stdio::Result<()> {
+fn private_mount_namespace(inherited_mounts: &[PathBuf]) -> stdio::Result<()> {
     if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
         return Err(stdio::Error::last_os_error());
     }
@@ -539,6 +540,15 @@ pub(crate) fn private_mount_namespace() -> stdio::Result<()> {
     {
         return Err(stdio::Error::last_os_error());
     }
+    // A new namespace also copies earlier consumers. They pin those devices
+    // through DEL_DEV even after the controller unmounts its own view. Drop
+    // only the caller's verified copies, after making propagation private.
+    for path in inherited_mounts {
+        let target = CString::new(path.as_os_str().as_bytes())?;
+        if unsafe { libc::umount2(target.as_ptr(), 0) } != 0 {
+            return Err(stdio::Error::last_os_error());
+        }
+    }
     Ok(())
 }
 
@@ -548,7 +558,7 @@ fn mount_named(
     jail: &Path,
     uid: u32,
     name: &str,
-    private_namespace: bool,
+    private_namespace: Option<Vec<PathBuf>>,
 ) -> stdio::Result<MountedDisk> {
     if !matches!(name, "disk.blk" | "workspace.blk") {
         return Err(stdio::Error::other("Invalid VM block node name"));
@@ -577,8 +587,8 @@ fn mount_named(
             // Fail before ADD without the required capability. All newly
             // created I/O threads inherit the validated flusher state.
             io::enable_io_flusher()?;
-            if private_namespace {
-                private_mount_namespace()?;
+            if let Some(inherited_mounts) = private_namespace {
+                private_mount_namespace(&inherited_mounts)?;
             }
             let token = (uuid::Uuid::new_v4().as_u128() as u64).max(1);
             let mut record = Record {
@@ -693,6 +703,55 @@ fn mount_named(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires CAP_SYS_ADMIN; uses disposable private mount namespaces"]
+    fn private_backend_namespace_releases_only_selected_inherited_mounts() {
+        std::thread::spawn(|| {
+            private_mount_namespace(&[]).unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let first = root.path().join("first");
+            let unrelated = root.path().join("unrelated");
+            for path in [&first, &unrelated] {
+                fs::create_dir(path).unwrap();
+                let target = CString::new(path.as_os_str().as_bytes()).unwrap();
+                assert_eq!(
+                    unsafe {
+                        libc::mount(
+                            c"tmpfs".as_ptr(),
+                            target.as_ptr(),
+                            c"tmpfs".as_ptr(),
+                            0,
+                            std::ptr::null(),
+                        )
+                    },
+                    0
+                );
+                fs::write(path.join("sentinel"), b"retained in parent").unwrap();
+            }
+            let (copied, retained) = (first.clone(), unrelated.clone());
+            let child = std::thread::spawn(move || {
+                private_mount_namespace(std::slice::from_ref(&copied)).unwrap();
+                assert!(
+                    !copied.join("sentinel").exists(),
+                    "backend still pins an earlier filesystem"
+                );
+                assert!(
+                    retained.join("sentinel").exists(),
+                    "unrelated mount was removed"
+                );
+            })
+            .join();
+            for path in [&first, &unrelated] {
+                assert!(path.join("sentinel").exists(), "parent mount was changed");
+                let target = CString::new(path.as_os_str().as_bytes()).unwrap();
+                assert_eq!(unsafe { libc::umount2(target.as_ptr(), 0) }, 0);
+            }
+            child.unwrap();
+        })
+        .join()
+        .unwrap();
+    }
 
     #[test]
     fn owner_identity_rejects_pid_reuse_and_pending_intent_stays_durable() {
