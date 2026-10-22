@@ -84,9 +84,49 @@ PRAGMA user_version=8;",
     let version: i64 = db
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 9);
+    assert!(version >= 9);
     assert!(
         version > 8,
         "Older managers must refuse mission wait records"
+    );
+}
+
+#[tokio::test]
+async fn upgrades_version_nine_preserving_native_nodes_and_fences_older_binaries() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    let node = json!({ "id": "desktop", "slots": 1, "nativeAccounts": ["owner"], "capabilities": { "backend": "native" } });
+    let agent = json!({ "id": "omni", "access": { "backend": "native", "nodes": ["desktop"] } });
+    store.put("nodes", node.clone()).await.unwrap();
+    store.put("agents", agent.clone()).await.unwrap();
+    store
+        .transaction(|db| {
+            db.0.execute_batch("PRAGMA user_version=9;")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    drop(store);
+
+    let upgraded = Store::open(root.path()).unwrap();
+    assert_eq!(upgraded.get("nodes", "desktop").await.unwrap(), Some(node));
+    assert_eq!(upgraded.get("agents", "omni").await.unwrap(), Some(agent));
+    let db = Connection::open(root.path().join("manager.db")).unwrap();
+    let version: i64 = db
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 10);
+    // Epoch-10 managers enforce a maximum of nine before opening application records.
+    assert!(version > 9);
+    drop(upgraded);
+    db.pragma_update(None, "user_version", version + 1).unwrap();
+    assert_eq!(
+        Store::open(root.path()).err().unwrap().message,
+        "This database belongs to a newer application version."
+    );
+    assert_eq!(
+        db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        version + 1
     );
 }

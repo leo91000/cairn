@@ -11,6 +11,7 @@ use cairn_installation::{
     native::policy,
     nodes::placement,
     service::Service,
+    validation::text,
 };
 use common::{RelayContext, read_json};
 use serde_json::{Value, json};
@@ -711,18 +712,26 @@ async fn retained_conversations_exhaust_the_shared_native_admission_budget() {
 }
 
 #[tokio::test]
-async fn wildcard_access_and_untrusted_contributors_do_not_authorize_native_execution() {
+async fn wildcard_node_access_still_requires_trusted_contributors() {
     let f = Fixture::new().await;
+    let mut agent = f.agent.clone();
+    agent["access"]["nodes"] = Value::Null;
+    let agent = f
+        .service
+        .agent(agent, f.agent["id"].as_str())
+        .await
+        .unwrap();
+    assert!(agent["access"]["nodes"].is_null());
+    let mut run = f.run();
+    let trusted = run.clone();
+    let node = f.node.clone();
     assert!(
         f.service
-            .agent(
-                json!({ "name": "Wildcard", "access": { "backend": "native", "nodes": null } }),
-                None
-            )
+            .store
+            .read(move |db| policy::allows(db, &trusted, &node))
             .await
-            .is_err()
+            .unwrap()
     );
-    let mut run = f.run();
     run["nativePrincipals"] = json!([TRUSTED, OTHER]);
     let node = f.node.clone();
     assert!(
@@ -732,6 +741,78 @@ async fn wildcard_access_and_untrusted_contributors_do_not_authorize_native_exec
             .await
             .unwrap()
     );
+}
+
+#[tokio::test]
+async fn native_nodes_admit_six_attempts_only_after_the_configured_budget_is_applied() {
+    let f = Fixture::new().await;
+    let (status, configured) = f
+        .owner_call(
+            "PUT",
+            &format!("/api/nodes/{}", text(&f.node, "id")),
+            json!({
+                "name": f.node["name"], "tags": [], "accepting": true,
+                "limits": f.node["limits"], "slots": 6,
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{configured}");
+    let token = auth::token();
+    f.service
+        .store
+        .set(
+            &format!("node-token:{}", auth::digest(&token)),
+            f.node["id"].clone(),
+            None,
+        )
+        .await
+        .unwrap();
+    let send = |slots| {
+        let body = json!({
+            "runtimeId": "development", "runtimes": ["development"],
+            "capabilities": f.node["capabilities"], "dataRoot": "/private/native-node/data",
+            "backend": "native", "nodeProtocol": 2, "executionReady": true,
+            "budget": { "slots": slots, "limits": f.node["limits"] },
+            "pool": { "capacity": slots },
+        });
+        common::send(
+            &f.router,
+            Request::builder()
+                .method("POST")
+                .uri("/internal/nodes/heartbeat")
+                .header("host", common::HOST)
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+    };
+    assert_eq!(send(1).await.status(), StatusCode::OK);
+    let run = f.run();
+    common::add_run(&f.service.store, &run).await;
+    assert!(placement::reserve(&f.service, &run, &id()).await.is_err());
+    assert_eq!(send(6).await.status(), StatusCode::OK);
+    let mut attempts = Vec::new();
+    for _ in 0..6 {
+        let run = f.run();
+        common::add_run(&f.service.store, &run).await;
+        let attempt = id();
+        placement::reserve(&f.service, &run, &attempt)
+            .await
+            .unwrap();
+        attempts.push(attempt);
+    }
+    let overflow = f.run();
+    common::add_run(&f.service.store, &overflow).await;
+    assert!(
+        placement::reserve(&f.service, &overflow, &id())
+            .await
+            .is_err()
+    );
+    placement::release(&f.service, &attempts[0]).await.unwrap();
+    placement::reserve(&f.service, &overflow, &id())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

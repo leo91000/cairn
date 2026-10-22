@@ -1,11 +1,11 @@
 {
   "schema": 2,
-  "epoch": 10,
-  "databaseVersion": 9,
+  "epoch": 11,
+  "databaseVersion": 10,
   "legacyTree": "a6aae371f1d76cceb2f510180531f0ef17ec3e60",
   "automaticMigration": {
-    "fromEpochs": [3, 4, 5, 6, 7, 8, 9],
-    "previousDatabaseVersion": 8,
+    "fromEpochs": [3, 4, 5, 6, 7, 8, 9, 10],
+    "previousDatabaseVersion": 9,
     "plan": "docs/AUTOMATIC-MIGRATIONS.md",
     "tests": [
       "settings::tests::length_limits_are_positive_integers_with_type_specific_caps",
@@ -19,7 +19,12 @@
       "native::workspace::tests::incompatible_native_restore_leaves_existing_files_untouched",
       "data_saved_before_the_package_moves_into_instances",
       "upgrades_version_five_without_changing_records_and_fences_older_binaries",
-      "upgrades_version_eight_and_keeps_waiting_missions_in_the_active_slot"
+      "upgrades_version_eight_and_keeps_waiting_missions_in_the_active_slot",
+      "upgrades_version_nine_preserving_native_nodes_and_fences_older_binaries",
+      "native_nodes_admit_six_attempts_only_after_the_configured_budget_is_applied",
+      "wildcard_node_access_still_requires_trusted_contributors",
+      "native::service::tests::native_budget_supports_six_slots_and_rejects_invalid_capacities",
+      "native::service::tests::controller_enforces_all_configured_slots_before_preparing_an_attempt"
     ]
   }
 }

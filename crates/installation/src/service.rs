@@ -1104,11 +1104,6 @@ fn restricted(access: &Value) -> bool {
 }
 
 fn validate_access(agent: &Value, access: &Value) -> Result<()> {
-    if access["backend"] == "native" && access["nodes"].as_array().is_none_or(Vec::is_empty) {
-        return Err(Error::bad(
-            "Native execution requires selected nodes; wildcard access is not sufficient.",
-        ));
-    }
     if agent["id"] == MAIN_AGENT_ID && restricted(access) {
         return Err(Error::bad(
             "The main agent always has access to all resources. Create another agent for restricted access.",

@@ -21,6 +21,18 @@ bounded, revocable agent delegation. Shared installation membership alone never
 grants native execution. Unknown historical/plugin provenance fails closed. The
 manager requires fresh Beacon membership evidence before extending host leases.
 
+Update, 2026-10-22: the owner may grant an agent all nodes, including future ones.
+This replaces the original requirement for an explicit agent-side selection;
+node-side opt-in, trusted people, provenance, delegation ceilings and revocations
+remain mandatory. Existing VM environments keep their backend and may use VM
+nodes under an all-node grant. Native slots are configurable and share one
+systemd workload slice's CPU/RAM ceiling, alongside the existing shared disk
+accounting. The supervisor and lease guardians remain outside that slice so an
+exhausted workload budget cannot prevent fencing. Epoch 11 and SQLite version 10
+fence older binaries, which refuse a persisted multi-slot native budget. The
+reviewed forward transition and native supervisor procedure are recorded in
+[automatic migrations](../AUTOMATIC-MIGRATIONS.md#current-transition-epochs-310-to-11).
+
 The reviewed compatibility epoch advances from 5 to 6 for persisted native backend,
 provenance, node grants and checkpoint formats. Forward migration is additive;
 legacy VM data is unchanged and the legacy tree stays fixed. Epoch transitions

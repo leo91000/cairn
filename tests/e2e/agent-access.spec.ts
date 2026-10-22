@@ -812,11 +812,11 @@ test('the execution backend chooses which nodes an agent can be granted', async 
   await expect(page.getByRole('switch', { name: 'Can run its conversations on Current runner' })).not.toBeChecked()
   await expect(nodes.getByRole('listitem', { name: 'native-box' })).toHaveCount(0)
 
-  // Native agents choose native nodes one by one; switching starts the selection over.
+  // Native agents may grant all nodes; each host still controls trusted people.
   await page.getByRole('combobox', { name: 'Agent execution backend' }).click()
   await page.getByRole('option', { name: 'Native process · trusted people only', exact: true }).click()
   await expect(page.getByText('Uses the host GPU and OS tools with weaker isolation.')).toBeVisible()
-  await expect(page.getByRole('switch', { name: 'All nodes, including future' })).toHaveCount(0)
+  await expect(page.getByRole('switch', { name: 'All nodes, including future' })).toBeVisible()
   await expect(nodes.getByRole('listitem', { name: 'vm-box' })).toHaveCount(0)
   await expect(nodes.getByRole('listitem', { name: 'Current runner' })).toHaveCount(0)
   const run = page.getByRole('switch', { name: 'Can run its conversations on native-box' })
@@ -830,6 +830,10 @@ test('the execution backend chooses which nodes an agent can be granted', async 
   await expect(review).toHaveCount(0)
   const saved = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id)
   expect(saved.access).toMatchObject({ backend: 'native', nodes: [native] })
+  await page.getByRole('switch', { name: 'All nodes, including future' }).check()
+  await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(review).toHaveCount(0)
+  await expect.poll(async () => (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id).access.nodes).toBeNull()
   await page.getByRole('link', { name: 'Overview', exact: true }).click()
   await expect(page.getByRole('button', { name: /^Execution Native process/ })).toContainText('Native process')
 })

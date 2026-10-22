@@ -803,16 +803,15 @@ internal fun NodeEditor(
                 "Slots d’exécution",
                 slots,
                 { slots = it },
-                enabled = !state.busy && node.capabilities.backend != "native",
+                enabled = !state.busy,
             )
             Field("Budget CPU partagé", cpu, { cpu = it }, enabled = !state.busy)
             Field("Budget RAM partagé (Gio)", memory, { memory = it }, enabled = !state.busy)
             Field("Budget disque partagé (Gio)", disk, { disk = it }, enabled = !state.busy)
-            if (node.capabilities.backend == NATIVE_BACKEND)
-                Text(
-                    "Une node native exécute une conversation à la fois.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
+            Text(
+                "Tous les slots partagent ces budgets. Les ressources sont utilisées à la demande.",
+                style = MaterialTheme.typography.bodySmall,
+            )
             Text(
                 "Détecté sur cette machine : ${node.capabilities.cpu} CPU · ${formatMiB(node.capabilities.memoryMiB)} RAM · ${formatMiB(node.capabilities.diskMiB)} disque.",
                 style = MaterialTheme.typography.bodySmall,

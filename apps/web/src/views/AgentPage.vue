@@ -508,8 +508,6 @@ function validate() {
   const limit = draft.value.timeoutMinutes
   if (limit !== 0 && !(Number.isInteger(limit) && limit >= 1 && limit <= 720))
     errors.advanced = 'Enter a time limit between 1 and 720 minutes, or choose no time limit.'
-  if (backendOf(draft.value.access) === 'native' && !draft.value.access.nodes?.length)
-    errors.nodes = 'Choose at least one native node: native execution never applies to all nodes.'
   fieldErrors.value = errors
   return !Object.keys(errors).length
 }

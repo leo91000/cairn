@@ -117,6 +117,63 @@ fn supervisor_unit() -> Result<String> {
     Ok(unit)
 }
 
+fn workload_slice() -> Result<String> {
+    Ok(format!(
+        "{}-workloads.slice",
+        supervisor_unit()?.trim_end_matches(".service")
+    ))
+}
+
+/// All attempts share one host ceiling. Per-attempt limits alone multiply the
+/// owner's CPU/RAM budget when several conversations execute concurrently.
+pub(super) async fn apply_budget(budget: &crate::microvm::budget::Budget) -> Result<()> {
+    let slice = workload_slice()?;
+    let started = output("/usr/bin/systemctl", &["start", &slice]).await?;
+    if !started.status.success() {
+        return Err(Error::unavailable(
+            "Could not start the shared native workload slice.",
+        ));
+    }
+    let usage = output(
+        "/usr/bin/systemctl",
+        &["show", &slice, "--property=MemoryCurrent", "--value"],
+    )
+    .await?;
+    let current = std::str::from_utf8(&usage.stdout)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    let current = current
+        .filter(|value| *value != u64::MAX)
+        .ok_or_else(|| Error::unavailable("Native shared memory usage is unavailable."))?;
+    let memory = budget.limits.memory_mi_b.saturating_mul(1_048_576);
+    if !usage.status.success() || current > memory {
+        return Err(Error::conflict(
+            "Shared native RAM budget is below current usage.",
+        ));
+    }
+    let properties = budget_properties(budget);
+    let mut args = vec!["set-property", "--runtime", &slice];
+    args.extend(properties.iter().map(String::as_str));
+    if !output("/usr/bin/systemctl", &args).await?.status.success() {
+        return Err(Error::unavailable(
+            "Could not apply the shared native CPU/RAM budget.",
+        ));
+    }
+    Ok(())
+}
+
+fn budget_properties(budget: &crate::microvm::budget::Budget) -> Vec<String> {
+    let memory = budget.limits.memory_mi_b.saturating_mul(1_048_576);
+    vec![
+        format!("CPUQuota={}%", u64::from(budget.limits.cpu) * 100),
+        format!("MemoryMax={memory}"),
+        format!("MemoryHigh={}", memory - memory / 10),
+        "MemorySwapMax=0".into(),
+        "CPUWeight=10".into(),
+        "IOWeight=10".into(),
+    ]
+}
+
 /// Begin fencing before aborting a dead backend's I/O. Completion is confirmed
 /// separately so a task blocked in that I/O can exit after the device is stopped.
 pub(super) async fn request_stop(attempt: &str) -> Result<()> {
@@ -310,6 +367,7 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
     ));
     property(format!("CPUQuota={}%", cpu * 100));
     property(format!("MemoryMax={}M", memory));
+    property(format!("Slice={}", workload_slice()?));
     property(format!("RootDirectory={}", path_property(launch.root)?));
     property(format!(
         "WorkingDirectory={}",
@@ -576,6 +634,23 @@ pub async fn set_paused(attempt: &str, paused: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_attempts_share_the_owner_budget() {
+        let budget = crate::microvm::budget::Budget {
+            slots: 6,
+            limits: crate::nodes::Resources {
+                cpu: 12,
+                memory_mi_b: 32768,
+                disk_mi_b: 512000,
+            },
+        };
+        let properties = budget_properties(&budget);
+        assert!(properties.contains(&"CPUQuota=1200%".into()));
+        assert!(properties.contains(&format!("MemoryMax={}", 32768_u64 * 1_048_576)));
+        assert!(properties.contains(&"MemorySwapMax=0".into()));
+        assert!(workload_slice().unwrap().ends_with("-workloads.slice"));
+    }
 
     #[tokio::test]
     async fn legacy_or_incomplete_cgroups_cannot_admit_native_execution() {

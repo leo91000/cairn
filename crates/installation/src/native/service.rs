@@ -33,6 +33,15 @@ use tokio_util::sync::CancellationToken;
 const MAX_PLAN: u64 = 8_000_000;
 const MAX_LOG: u64 = 64 * 1024 * 1024;
 
+fn native_budget(value: &Value) -> Result<crate::microvm::budget::Budget> {
+    let budget: crate::microvm::budget::Budget = serde_json::from_value(value.clone())?;
+    budget.limits.validate()?;
+    if !(1..=4096).contains(&budget.slots) {
+        return Err(Error::bad("Use between 1 and 4096 execution slots."));
+    }
+    Ok(budget)
+}
+
 struct Attempt {
     run: String,
     stop: CancellationToken,
@@ -129,7 +138,9 @@ impl Controller {
                 "Native execution lease is missing or expired.",
             ));
         }
-        if !self.active.lock().await.is_empty() {
+        if self.active.lock().await.len() as u64
+            >= self.budget.lock().await["slots"].as_u64().unwrap_or(0)
+        {
             return Err(Error::unavailable("The native execution slot is occupied."));
         }
         let plan = self.plan(id).await?;
@@ -891,13 +902,14 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
     if path == "/health" && method == "GET" {
         let capabilities = crate::nodes::connector::capabilities(&controller.state)?;
         let usage = controller.usage().await?;
+        let budget = controller.budget.lock().await.clone();
         return Ok(Json(json!({
             "status": "ok", "backend": "native", "nodeProtocol": 2,
             "runtimeId": std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into()),
             "dataRoot": controller.data, "capabilities": capabilities,
             "runtimes": systemd::runtimes()?,
-            "pool": { "capacity": 1 }, "activeRuns": controller.active.lock().await.len(),
-            "sharedResources": true, "exclusiveReservations": false, "budget": *controller.budget.lock().await,
+            "pool": { "capacity": budget["slots"] }, "activeRuns": controller.active.lock().await.len(),
+            "sharedResources": true, "exclusiveReservations": false, "budget": budget,
             "usage": usage, "pressure": null
         })).into_response());
     }
@@ -910,11 +922,10 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
     let value = match (method.as_str(), parts.as_slice()) {
         ("POST", ["node-budget"]) => {
             let value = input(request, 16384).await?;
-            let resources: crate::nodes::Resources =
-                serde_json::from_value(value["limits"].clone())?;
-            resources.validate()?;
-            if value["slots"] != 1 {
-                return Err(Error::bad("Native nodes support one active execution."));
+            let budget = native_budget(&value)?;
+            let _admission = controller.admission.lock().await;
+            if value["limits"] != controller.budget.lock().await["limits"] {
+                systemd::apply_budget(&budget).await?;
             }
             atomic_write(
                 &controller.state.join(crate::microvm::budget::FILE),
@@ -1486,11 +1497,8 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         }
         Err(error) => return Err(error.into()),
     };
-    let limits: crate::nodes::Resources = serde_json::from_value(budget["limits"].clone())?;
-    limits.validate()?;
-    if budget["slots"] != 1 {
-        return Err(Error::bad("Native nodes support one execution slot."));
-    }
+    let checked = native_budget(&budget)?;
+    systemd::apply_budget(&checked).await?;
     atomic_write(&budget_path, &serde_json::to_vec(&budget)?).await?;
     let controller = Controller {
         data,
@@ -2018,17 +2026,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_budget_refuses_concurrent_execution_slots() {
+    async fn native_budget_supports_six_slots_and_rejects_invalid_capacities() {
         let (_root, controller) = fixture().await;
-        let error = route(
-            controller,
+        route(
+            controller.clone(),
             request(
                 "/node-budget",
-                &json!({ "slots": 2, "limits": { "cpu": 1, "memoryMiB": 1024, "diskMiB": 1024 } }),
+                &json!({ "slots": 6, "limits": { "cpu": 1, "memoryMiB": 1024, "diskMiB": 1024 } }),
             ),
         )
         .await
-        .unwrap_err();
-        assert_eq!(error.status, 400);
+        .unwrap();
+        assert_eq!(controller.budget.lock().await["slots"], 6);
+        for slots in [json!(0), json!(4097), json!(1.5), json!(null)] {
+            assert!(route(controller.clone(), request("/node-budget", &json!({
+                "slots": slots, "limits": { "cpu": 1, "memoryMiB": 1024, "diskMiB": 1024 }
+            }))).await.is_err());
+        }
+        assert_eq!(controller.budget.lock().await["slots"], 6);
+    }
+
+    #[tokio::test]
+    async fn controller_enforces_all_configured_slots_before_preparing_an_attempt() {
+        let (_root, controller) = fixture().await;
+        controller.budget.lock().await["slots"] = 6.into();
+        let attempt = crate::config::id();
+        controller
+            .leases
+            .lock()
+            .await
+            .insert(attempt.clone(), crate::nodes::boot_ms() + 60000);
+        for _ in 0..5 {
+            controller.active.lock().await.insert(
+                crate::config::id(),
+                Attempt {
+                    run: crate::config::id(),
+                    stop: CancellationToken::new(),
+                    started: true,
+                    protection: None,
+                },
+            );
+        }
+        // Five occupied slots still admit a sixth attempt as far as plan loading.
+        assert_ne!(controller.start(&attempt).await.unwrap_err().status, 503);
+        let existing = crate::config::id();
+        controller.active.lock().await.insert(
+            existing.clone(),
+            Attempt {
+                run: crate::config::id(),
+                stop: CancellationToken::new(),
+                started: true,
+                protection: None,
+            },
+        );
+        assert_eq!(controller.start(&attempt).await.unwrap_err().status, 503);
+        // Retrying an existing attempt never consumes a second slot.
+        controller.start(&existing).await.unwrap();
+        controller.active.lock().await.remove(&existing);
+        assert_ne!(controller.start(&attempt).await.unwrap_err().status, 503);
     }
 }

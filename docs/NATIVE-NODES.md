@@ -76,7 +76,16 @@ neither install nor uninstall a runtime on the host.
 
 ## Daily use
 
-The controller uses one slot, low CPU/I/O priority and conservative default budgets.
+An agent can use all nodes, including future ones, or an explicit selection.
+New conversations use its selected execution backend. Existing VM environments
+keep using VM nodes until migrated; an all-node grant also permits that existing
+work to resume. Native execution still requires the node owner's opt-in, trust
+in every originating person, and fresh membership and delegation evidence.
+
+The controller defaults to one slot and supports configurable concurrent executions.
+All slots share the configured CPU/RAM ceiling through a systemd workload slice,
+and the existing disk budget. Per-conversation limits are ceilings, not reservations.
+It uses low CPU/I/O priority and conservative default budgets.
 Keep interactive applications running during qualification. Start with a short,
 small GPU workload and inspect memory use and desktop responsiveness before larger
 jobs. VRAM has no universal hard per-agent quota. Disabling native execution or
