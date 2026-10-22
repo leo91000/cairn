@@ -213,6 +213,7 @@ internal fun statusLabel(value: String): String =
         "suspended-exclusive" -> "Suspendue (exclusivité)"
         "running" -> "En cours"
         "queued" -> "En attente"
+        "waiting" -> "Attente programmée"
         "succeeded" -> "Terminée"
         "failed" -> "Échec"
         "cancelled" -> "Annulée"
@@ -221,7 +222,8 @@ internal fun statusLabel(value: String): String =
     }
 
 internal fun runPresentationStatus(run: Run): String =
-    if (run.active && run.suspendedByExclusive != null) "suspended-exclusive" else run.status
+    if (run.status == "running" && run.suspendedByExclusive != null) "suspended-exclusive"
+    else run.status
 
 @Composable
 fun Status(value: String) {
@@ -232,6 +234,7 @@ fun Status(value: String) {
             "interrupted" -> signal.attentionSoft to signal.attention
             "suspended-exclusive" -> signal.warning.copy(alpha = 0.14f) to signal.warning
             "running",
+            "waiting",
             "queued" ->
                 MaterialTheme.colorScheme.primaryContainer to
                     MaterialTheme.colorScheme.onPrimaryContainer

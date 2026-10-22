@@ -280,9 +280,9 @@ impl Artifacts {
             .kv(&format!("run-checkpoint:{run_id}"))
             .await?
             .unwrap_or_default();
-        let message_id = &run["chatExecution"]["messageId"];
+        let message_id = crate::waits::execution_id(&run);
         if current_checkpoint["runnerId"] != checkpoint["runnerId"]
-            || current["chatExecution"]["messageId"] != *message_id
+            || crate::waits::execution_id(&current) != message_id
         {
             return Err(Error::conflict(
                 "The active turn changed. Publish again from the current turn.",
@@ -413,7 +413,7 @@ async fn commit(
             let checkpoint = db.kv(&format!("run-checkpoint:{run}"))?.unwrap_or_default();
             if current["id"] != run
                 || checkpoint["runnerId"] != expected_attempt
-                || current["chatExecution"]["messageId"] != record["messageId"]
+                || *crate::waits::execution_id(&current) != record["messageId"]
             {
                 return Err(Error::conflict(
                     "The active turn changed during publication.",

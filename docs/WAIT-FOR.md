@@ -192,7 +192,7 @@ périmètre de la demande initiale et des permissions courantes.
 
 ## Contrat de reprise
 
-- Un seul réveil par conversation. Une répétition identique conserve l’échéance ;
+- Un seul réveil par conversation ou exécution de mission. Une répétition identique conserve l’échéance ;
   une autre demande remplace la précédente, y compris entre durée, date et résultat.
 - Le timeout est obligatoire pour une condition externe, entre 1 seconde et
   24 heures, et interdit pour les conditions temporelles. Dans une attente
@@ -263,3 +263,24 @@ carte unique par attente dans la conversation. L’attente ne commence qu’à l
 du tour : sa carte suit donc ce que l’agent a fait après l’appel, et sa raison est
 limitée à trois lignes, dépliables. Les notifications doivent encore la distinguer
 d’un travail achevé.
+
+
+## Missions
+
+L’outil est également disponible pendant les missions. Une attente différée
+reste attachée à l’exécution de la mission, sans créer de conversation cachée.
+Après la fin réussie du tour, le statut devient `waiting`, sans `finishedAt` ni
+résultat final. La mission conserve son emplacement actif : aucun second lancement
+de cette même mission n’est admis pendant l’attente.
+
+Cairn arrête et clôture l’exécution précédente, libère son compte et ses jetons,
+puis observe la condition sans LLM. À l’échéance ou au résultat, la même exécution
+repart avec sa session et son espace de travail, une nouvelle identité de tour
+et les données observées. Le temps passé en attente ne consomme pas le budget
+d’exécution restant. Une fin de tour en erreur ou une annulation supprime l’attente.
+
+Arrêter la mission annule l’attente. Mettre sa **planification** en pause ne touche
+que ses futurs lancements. Les outils de questions restent réservés aux conversations
+interactives ; une mission qui nécessite une décision utilise `report_outcome`.
+Le web, Android, le MCP public et `cairn_installation` exposent `waiting`, son
+`wakeup` et l’annulation via les interfaces d’exécution existantes.

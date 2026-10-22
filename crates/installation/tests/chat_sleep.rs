@@ -439,7 +439,7 @@ async fn queued_follow_ups_are_not_held_by_a_wakeup_that_cannot_resume() {
 }
 
 #[tokio::test]
-async fn delay_rejects_invalid_inputs_non_chat_runs_and_pending_steering() {
+async fn delay_rejects_invalid_inputs_and_pending_steering_but_accepts_missions() {
     let f = Fixture::new().await;
     for input in [
         json!({ "condition": { "type": "delay", "seconds": 0 }, "reason": "CI" }),
@@ -496,14 +496,19 @@ async fn delay_rejects_invalid_inputs_non_chat_runs_and_pending_steering() {
         .await
         .unwrap();
     let token = text(&config["env"], "CAIRN_MCP_RUN_TOKEN");
-    assert!(
-        wait_for::schedule(
-            &f.service,
-            token,
-            &json!({ "condition": { "type": "delay", "seconds": 1 }, "reason": "CI" })
-        )
-        .await
-        .is_err()
+    let wait = wait_for::schedule(
+        &f.service,
+        token,
+        &json!({
+            "condition": { "type": "delay", "seconds": 1 }, "reason": "CI",
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(wait["deferred"], true);
+    assert_eq!(
+        f.service.store.run(text(&run, "id")).await.unwrap()["wakeup"],
+        wait["wakeup"]
     );
 }
 

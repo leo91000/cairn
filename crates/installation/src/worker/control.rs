@@ -171,8 +171,10 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
         return Err(Error::conflict("This run has already finished."));
     }
     db.patch_run(id, &json!({ "cancelRequestedAt": now() }))?;
-    // An executing or recovering run is settled by its worker once it stops.
-    if !is_active && run["recoveryPending"] != true {
+    // Waiting means the agent process already exited. Release may still hold
+    // its in-memory slot; cancellation must settle this wait even in that gap.
+    // Executing or recovering runs are settled by their worker once stopped.
+    if (!is_active || run["status"] == RunStatus::Waiting) && run["recoveryPending"] != true {
         let patch = json!({
             "status": RunStatus::Cancelled,
             "finishedAt": now(),
@@ -220,6 +222,10 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
     if db.active()?.iter().any(|a| a["taskId"] == run["taskId"]) {
         return Err(Error::conflict("This task already has an active run."));
     }
+    // A parked mission completed its provider turn. Explicitly continuing it
+    // creates a new turn, while recovery of interrupted turns keeps its identity.
+    let completed_mission =
+        run["trigger"] != "chat" && checkpoint.as_ref().is_some_and(RunCheckpoint::completed);
     // A manual resume may arrive before chat_tick observes the terminal turn.
     // Its scheduled continuation must not survive into the resumed execution.
     crate::chats::continuation::cancel_for_run(db, id)?;
@@ -233,7 +239,7 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
         checkpoint.store_in(db, id)?;
     }
     let wait_reason = (!before_launch).then_some("Resuming saved conversation.");
-    let patch = json!({
+    let mut patch = json!({
         "status": RunStatus::Queued,
         "error": null,
         "outcome": null,
@@ -243,6 +249,10 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
         "accountWaitReason": wait_reason,
         "retry": null,
     });
+    if completed_mission {
+        patch["missionTurnId"] = crate::config::id().into();
+        patch["waitContinuation"] = Value::Null;
+    }
     let result = db.patch_run(id, &patch)?;
     db.event(id, "status", "Resume requested", None)?;
     Ok(result)
@@ -382,4 +392,64 @@ async fn stop_chat(s: &Service, id: &str) -> Result<Value> {
         s.worker.cancel(s, run_id).await?;
     }
     Ok(json!({ "stopped": true }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn manual_mission_resume_changes_completed_turn_identity_but_keeps_interrupted_turns() {
+        for completed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let store = crate::store::Store::open(root.path()).unwrap();
+            store
+                .transaction(move |db| {
+                    db.add_run(&json!({
+                    "id": "mission", "taskId": "task", "status": "cancelled", "createdAt": 0,
+                    "resumeAvailable": true, "missionTurnId": "previous-turn",
+                    "waitContinuation": { "observation": { "state": "completed" } },
+                }), None)?;
+                    db.set("run-checkpoint:mission", &json!({
+                    "completed": completed, "launched": true, "prepared": { "cwd": "/workspace" },
+                }), None)?;
+                    let resumed = requeue(db, "mission")?;
+                    assert_eq!(resumed["status"], "queued");
+                    if completed {
+                        assert_ne!(resumed["missionTurnId"], "previous-turn");
+                        assert!(resumed["waitContinuation"].is_null());
+                    } else {
+                        assert_eq!(resumed["missionTurnId"], "previous-turn");
+                        assert!(resumed["waitContinuation"].is_object());
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_settles_a_wait_even_while_release_still_holds_the_worker_slot() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.add_run(
+                    &json!({
+                        "id": "mission", "taskId": "task", "status": "waiting", "createdAt": 0,
+                        "wakeup": { "id": "wake" },
+                    }),
+                    None,
+                )?;
+                request_cancel(db, "mission", true)?;
+                let run = db.run("mission")?.unwrap();
+                assert_eq!(run["status"], "cancelled");
+                assert!(run["finishedAt"].is_number());
+                assert!(run["wakeup"].is_null());
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
 }

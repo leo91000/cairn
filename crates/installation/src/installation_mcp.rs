@@ -24,7 +24,7 @@ pub(crate) fn authorize_in(db: &Db<'_>, bearer: &str) -> Result<Value> {
     let grant = RunGrant::deserialize(&grant)?;
     let run = db.run(&grant.run_id)?.ok_or_else(denied)?;
     if !grant.installation
-        || grant.message_id != run["chatExecution"]["messageId"]
+        || grant.message_id != *crate::waits::execution_id(&run)
         || run["status"] != RunStatus::Running
         || !run["cancelRequestedAt"].is_null()
     {

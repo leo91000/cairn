@@ -141,6 +141,8 @@ export interface LiveWait {
   settled: boolean
   /** Another action is under way, so pausing would be ignored. */
   busy?: boolean
+  /** Mission waits can be cancelled with the run, but have no conversation pause. */
+  canPause?: boolean
 }
 
 /** Where a wait card stands, from its history and, when known, the conversation's live state. */
@@ -178,7 +180,7 @@ export function waitProgress(wait: ActivityWait, live?: LiveWait): WaitProgress 
     cancelled,
     paused,
     pending: current && !paused && !finished,
-    pausable: current && !paused && !wait.resumedAt && live!.settled,
+    pausable: current && !paused && !wait.resumedAt && live!.settled && live!.canPause !== false,
   }
 }
 

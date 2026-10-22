@@ -489,3 +489,24 @@ describe('shared wait_ready corpus', () => {
     })
   }
 })
+
+it('keeps mission wait events in one live card and resumes without a conversation pause', () => {
+  const scheduled = wakeup({ messageId: null })
+  const observation = { state: 'completed', type: 'time', wakeAt: scheduled.wakeAt }
+  const entries = activityEntries([
+    event('run.wait', scheduled as unknown as Record<string, unknown>),
+    event('run.wakeup', { ...scheduled, observation }),
+  ])
+  const waits = entries.filter(entry => entry.kind === 'wait')
+  expect(waits).toHaveLength(1)
+  if (waits[0]?.kind !== 'wait')
+    throw new Error('Missing mission wait card')
+  expect(waits[0].wait.observation).toEqual(observation)
+  expect(waits[0].wait.resumedAt).toBeTruthy()
+  expect(waitProgress({ wakeup: scheduled }, {
+    wakeup: scheduled,
+    paused: false,
+    settled: true,
+    canPause: false,
+  })).toMatchObject({ current: true, pending: true, pausable: false })
+})

@@ -207,10 +207,11 @@ data class Run(
     val backup: NodeBackup? = null,
     val storage: RunStorage? = null,
     val suspendedByExclusive: ExclusiveReservation? = null,
+    val wakeup: ChatWakeup? = null,
     val executionBackend: String? = null,
 ) {
     val active
-        get() = status == "running" || status == "queued"
+        get() = status in listOf("running", "queued", "waiting")
 
     val title
         get() = taskName.ifBlank { snapshot.task.name }.ifBlank { "Exécution" }

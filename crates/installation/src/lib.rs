@@ -66,4 +66,5 @@ pub mod tls;
 pub mod toolkit;
 pub mod validation;
 pub mod vault;
+pub mod waits;
 pub mod worker;

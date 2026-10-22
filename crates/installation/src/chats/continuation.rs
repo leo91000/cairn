@@ -6,22 +6,6 @@ use crate::{
 };
 use serde_json::{Value, json};
 
-pub const INSTRUCTIONS: &str = "When waiting before continuing the current task, use \
-    cairn_workspace.wait_for. Its native conditions are delay (seconds) and at (an RFC 3339 date \
-    with an explicit timezone); neither takes timeoutSeconds. Use a supported external condition \
-    when available: an authorized Cairn run finishing or a condition a granted plugin lists, \
-    such as remote checks pinned to a commit. External conditions require timeoutSeconds. \
-    If deferred=false, inspect the observation and continue this turn. If deferred=true, end \
-    this turn; Cairn saves the wakeup, releases execution resources and resumes this same \
-    conversation after the time or result arrives, subject to capacity. Only promise to return \
-    after the tool confirms the wakeup. This is a scheduled continuation, not task completion \
-    or a request for user input; no outcome report is needed when ending a turn for this wait. \
-    For other remote results, use a delay then verify the result when resumed. Local background \
-    processes must use native waiting tools while their execution stays active. Queued follow-ups \
-    start after the continuation; a new user message replaces the wait. Pause holds it; stop or \
-    deletion cancels it. At wakeup, continue the original authorized task and verify external \
-    effects before repeating actions.";
-
 pub(crate) fn has_pending_input(db: &Db<'_>, chat: &Value) -> Result<bool> {
     Ok(db
         .messages(text(chat, "id"))?
@@ -138,6 +122,13 @@ pub(crate) fn cancel_for_run(db: &Db<'_>, run: &str) -> Result<bool> {
     if let Some(chat) = chat_for_run(db, run)? {
         let waiting = chat["wakeup"].is_object();
         cancel(db, text(&chat, "id"))?;
+        return Ok(waiting);
+    }
+    if let Some(record) = db.run(run)? {
+        let waiting = record["wakeup"].is_object();
+        if waiting {
+            db.patch_run(run, &json!({ "wakeup": null }))?;
+        }
         return Ok(waiting);
     }
     Ok(false)

@@ -1,6 +1,7 @@
 import type { Page, TestInfo } from '@playwright/test'
 import type { Workspace } from './fixtures'
 import { randomUUID } from 'node:crypto'
+import { MAIN_AGENT_ID } from '../../packages/contracts/constants'
 import {
   signIn as authenticateWorkspace,
   expect,
@@ -346,4 +347,39 @@ test('blocked missions ask only when they wait on the user, and can be set aside
   await expect(forYou.locator('article.border-accent')).toContainText(proof.task.name)
   await page.keyboard.press('e')
   await expect(recent.locator(`[data-fil-key="task:${proof.task.id}"]`)).toContainText('Dismissed')
+})
+
+test('a waiting mission stays live, shows its wait and can be stopped', async ({ page, workspace }) => {
+  const task = await workspace.api('/api/tasks', 'POST', {
+    agentId: MAIN_AGENT_ID,
+    name: 'Mission waiting for CI',
+    prompt: 'Watch CI',
+    worktree: false,
+  })
+  const run = await workspace.api(`/api/tasks/${task.id}/run`, 'POST')
+  await expect.poll(() => workspace.service.store.run(run.id)?.status).toBe('succeeded')
+  const wakeup = {
+    id: randomUUID(),
+    messageId: null,
+    seconds: 420,
+    reason: 'Wait for mission CI',
+    createdAt: Date.now(),
+    wakeAt: Date.now() + 420000,
+  }
+  workspace.service.store.updateRun(run.id, { status: 'waiting', finishedAt: null, wakeup })
+  workspace.service.store.event(run.id, 'run.wait', wakeup.reason, wakeup)
+  await signIn(page)
+  const live = page.getByRole('region', { name: 'Live', exact: true })
+  await expect(live.getByText(task.name, { exact: true })).toBeVisible()
+  await live.locator(`[data-fil-key="task:${task.id}"]`).click()
+  const card = page.locator('.chat-wait')
+  await expect(card).toHaveCount(1)
+  await expect(card).toContainText('Wait for mission CI')
+  await expect(card).toContainText(/in \d+ min/)
+  await expect(card.getByRole('button', { name: 'Pause' })).toHaveCount(0)
+  await expect(page.locator('.activity-working')).toHaveCount(0)
+  await page.getByRole('button', { name: 'Stop run', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Stop run', exact: true }).click()
+  await expect.poll(() => workspace.service.store.run(run.id)?.status).toBe('cancelled')
+  expect(workspace.service.store.run(run.id)?.wakeup).toBeNull()
 })

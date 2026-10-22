@@ -487,7 +487,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                   </span>
                 </span>
                 <span
-                  v-if="item.kind === 'waiting' || item.kind === 'snoozed'"
+                  v-if="(item.kind === 'waiting' || item.kind === 'snoozed') && item.wakeAt !== undefined"
                   class="shrink-0 self-start pt-0.5 text-[11px] font-semibold tabular-nums text-accent"
                   :title="item.kind === 'snoozed' ? 'Time left before it is back in For you' : item.condition ? 'Resumes when the result arrives, at the latest by its deadline' : 'Time left before it resumes'"
                 >{{ waitLeft({ wakeAt: item.wakeAt!, condition: item.condition, resolved: item.resolved }, now) }}</span>

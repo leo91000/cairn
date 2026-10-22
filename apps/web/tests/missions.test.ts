@@ -59,3 +59,14 @@ describe('missions', () => {
     expect(successRate([{ status: 'queued' }])).toBeNull()
   })
 })
+
+it('keeps waiting missions active and out of the finished success rate', () => {
+  const missions = [task('done'), task('waiting')]
+  const latest = new Map<string, Pick<RunListItem, 'status' | 'outcome'>>([
+    ['done', { status: 'succeeded' }],
+    ['waiting', { status: 'waiting' }],
+  ])
+  expect(missionOrder(missions, latest).map(task => task.id)).toEqual(['waiting', 'done'])
+  expect(successRate([{ status: 'waiting' }])).toBeNull()
+  expect(successRate([{ status: 'waiting' }, { status: 'succeeded' }])).toBe(100)
+})

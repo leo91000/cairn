@@ -33,12 +33,12 @@ const S3: &str = "s3";
 /// `blockFormat` of publications whose blocks are shared objects. Legacy points have none.
 const SHARED_V1: &str = "shared-v1";
 
-/// Conversations the scheduler may publish: running ones, and completed on-demand
-/// disks that still have unpublished writes or an unfinished publication.
+/// Running executions and stopped on-demand disks with unpublished writes or an
+/// unfinished publication, including a mission parked before demand was saved.
 const SYNC_CANDIDATES: &str =
     "SELECT data FROM runs WHERE status='running'
         OR json_extract(data,'$.backup.requestedRevision') > COALESCE(json_extract(data,'$.backup.acknowledgedRevision'),0)
-        OR (status IN ('succeeded','queued')
+        OR (status IN ('succeeded','queued','waiting')
              AND json_extract(data,'$.storage.mode')='on-demand'
              AND (json_extract(data,'$.storage.dirtyBytes')>0
                   OR json_extract(data,'$.backup.status') IN ('pending','saving','error')))";
@@ -1826,6 +1826,35 @@ async fn local_locations(s: &Service, run: &str) -> Result<Vec<Value>> {
 #[cfg(test)]
 mod capture_policy_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn waiting_mission_dirty_publication_is_recovered_after_a_crash_before_demand() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store.transaction(|db| {
+            for (id, dirty, backup) in [("dirty", 4096, "synced"), ("pending", 0, "pending"), ("error", 0, "error"), ("clean", 0, "synced")] {
+                db.add_run(&json!({
+                    "id": id, "taskId": id, "status": "waiting", "createdAt": 0,
+                    "isolated": true, "storage": { "mode": "on-demand", "dirtyBytes": dirty },
+                    "backup": { "status": backup, "requestedRevision": 1, "acknowledgedRevision": 1 },
+                    "wakeup": { "reason": "Wait for CI", "wakeAt": i64::MAX },
+                }), None)?;
+            }
+            Ok(())
+        }).await.unwrap();
+        drop(store);
+        // Restart sees the committed waiting state without outstanding demand.
+        let restarted = crate::store::Store::open(root.path()).unwrap();
+        let mut candidates = restarted
+            .read(|db| db.json_rows(SYNC_CANDIDATES, []))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|run| text(&run, "id").to_owned())
+            .collect::<Vec<_>>();
+        candidates.sort();
+        assert_eq!(candidates, ["dirty", "error", "pending"]);
+    }
 
     #[test]
     fn final_requested_and_moving_captures_keep_filesystem_consistency() {
