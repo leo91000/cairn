@@ -238,7 +238,8 @@ def main():
                 script += 'test "$(cat /home/node/.claude/CLAUDE.md)" = "legacy user instructions"\n'
                 script += 'test "$(cat /home/node/.codex/sessions/keep)" = "session state"\n'
             script += 'if test -e persisted; then test "$(cat persisted)" = "' + expected + '"; fi\n'
-            script += 'printf changed > persisted\nprintf temporary-artifact > /tmp/native-artifact\nprintf ready > ready\n'
+            script += 'printf changed > persisted\nprintf temporary-artifact > /tmp/native-artifact\n'
+            script += f'printf %s {attempt} > ready\n'
             if measure:
                 script += "while ! test -e measure-go; do sleep 0.05; done\n/usr/bin/python3 - <<'MEASURE' > measure.json\n" + MEASURE + '\nMEASURE\n'
                 script += 'printf measured > measure-ready\n'
@@ -254,7 +255,13 @@ def main():
             manager('checkpoint', run=run, attempt=attempt)
             api('/runs/' + attempt + '/lease', {'remainingMs': lease})
             api('/runs/' + attempt)
-            eventually(lambda: (managed(run) / 'ready').exists() or (state / (attempt + '.exit')).exists())
+            def execution_ready():
+                if (state / (attempt + '.exit')).exists():
+                    return True
+                # A preceding short execution can retain its readiness file.
+                return (managed(run) / 'ready').read_text() == attempt
+
+            eventually(execution_ready)
             if (state / (attempt + '.exit')).exists() and int((state / (attempt + '.exit')).read_text()) != 0:
                 for record in (state / (attempt + '.log')).read_text().splitlines():
                     event = json.loads(record)
