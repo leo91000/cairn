@@ -10,7 +10,8 @@ Schema 2 records the installation `epoch`, its SQLite `databaseVersion`, and an
 optional `automaticMigration` with:
 
 - `fromEpochs`: the exact earlier epochs this candidate can migrate;
-- `previousDatabaseVersion`: the previous binaries' database version ceiling;
+- `previousDatabaseVersion`: the maximum SQLite version of the explicitly listed
+  source epochs; an earlier listed epoch may have a lower version;
 - `plan`: a committed document describing conversion and forward recovery;
 - `tests`: the exact Rust regression names that must pass in the backend suite.
 
