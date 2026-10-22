@@ -751,3 +751,57 @@ async fn carriage_return_diagnostics_survive_adjacent_performance_records() {
         assert_eq!(diagnostics, expected, "input: {input:?}");
     }
 }
+
+#[tokio::test]
+async fn performance_names_inside_diagnostics_are_retained_and_manager_logs_are_redacted() {
+    use tracing::instrument::WithSubscriber;
+
+    // Keep scoped tracing capture independent of other tests' callsite registration.
+    let _callsite_registration =
+        tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let mut fixture = Fixture::new().await;
+    let log_path = fixture._root.path().join("manager.log");
+    let log_file = std::fs::File::create(&log_path).unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_writer(Arc::new(log_file))
+        .finish();
+    let input = concat!(
+        "WARN native: invalid record cairn_performance: sensitive-tool-credential\n",
+        "2026-10-22T12:08:49Z WARN native: invalid record cairn_performance: sensitive-tool-credential\n",
+        "2026-10-22T12:08:49Z INFO cairn_performance: operation=agent_activity id=sensitive-tool-credential\n",
+    );
+    let (sender, mut receiver) = mpsc::channel(32);
+    assert!(
+        forward_diagnostics(
+            input.as_bytes(),
+            &sender,
+            &["sensitive-tool-credential".into()]
+        )
+        .with_subscriber(subscriber)
+        .await
+    );
+    drop(sender);
+    while let Some(output) = receiver.recv().await {
+        fixture.output(output).await;
+    }
+
+    let events = fixture.events().await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0]["text"],
+        concat!(
+            "WARN native: invalid record cairn_performance: [redacted]\n",
+            "2026-10-22T12:08:49Z WARN native: invalid record cairn_performance: [redacted]\n",
+        )
+    );
+    let logs = std::fs::read_to_string(log_path).unwrap();
+    assert!(logs.contains("source=\"agent_process\""), "{logs}");
+    assert!(
+        logs.contains("operation=agent_activity id=[redacted]"),
+        "{logs}"
+    );
+    assert!(!logs.contains("sensitive-tool-credential"), "{logs}");
+    assert!(!logs.contains("invalid record"), "{logs}");
+}

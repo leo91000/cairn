@@ -1,6 +1,7 @@
 use super::checkpoint::{Checkpoint, RunCheckpoint};
 use crate::{error::Result, run_output, service::Service, validation::text};
 use serde_json::Value;
+use std::sync::LazyLock;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     sync::mpsc,
@@ -48,6 +49,16 @@ const LOG_BUDGET: usize = 500_000;
 const ITEM_DETAIL_LIMIT: usize = run_output::ACTIVITY_DETAIL_LIMIT;
 const LINE_LIMIT: usize = 2_000_000;
 const DIAGNOSTIC_FRAGMENT_LIMIT: usize = 8192;
+
+// Match the runner's timestamp, level, optional field-bearing spans and target.
+// A target name mentioned in another logger's message is still a diagnostic.
+static AGENT_PERFORMANCE_RECORD: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+(?:TRACE|DEBUG|INFO|WARN|ERROR)\s+(?:[A-Za-z_][A-Za-z0-9_]*\{[^{}\r\n]*\}:\s*)*cairn_performance: ",
+    )
+    .unwrap()
+});
+
 // Match the resident Codex transport: supported tool frames must reach the JSON
 // parser intact before shortening. Large buffers are released after each frame.
 const TOOL_FRAME_LIMIT: usize = 100_000_000;
@@ -73,7 +84,7 @@ pub(super) async fn read_output(
     secrets: Vec<String>,
 ) {
     if diagnostic {
-        return read_diagnostics(reader, events).await;
+        return read_diagnostics(reader, events, &secrets).await;
     }
 
     let mut bytes = [0; 8192];
@@ -118,7 +129,11 @@ pub(super) async fn read_output(
 
 /// Forwards agent stderr by whole lines, so styling and performance records are
 /// recognized intact. A long fragment without a line end is still forwarded.
-async fn read_diagnostics(mut reader: impl AsyncRead + Unpin, events: mpsc::Sender<Output>) {
+async fn read_diagnostics(
+    mut reader: impl AsyncRead + Unpin,
+    events: mpsc::Sender<Output>,
+    secrets: &[String],
+) {
     let mut bytes = [0; 8192];
     let mut pending = Vec::new();
     loop {
@@ -137,30 +152,35 @@ async fn read_diagnostics(mut reader: impl AsyncRead + Unpin, events: mpsc::Send
             None => continue,
         };
         let lines: Vec<u8> = pending.drain(..complete).collect();
-        if !forward_diagnostics(&lines, &events).await {
+        if !forward_diagnostics(&lines, &events, secrets).await {
             return;
         }
     }
     if !pending.is_empty() {
         // The receiver only disappears once the run stopped listening.
-        forward_diagnostics(&pending, &events).await;
+        forward_diagnostics(&pending, &events, secrets).await;
     }
 }
 
 /// Sends readable diagnostics to the run. The agent process's own performance
 /// records belong to the manager log, like the worker's.
-async fn forward_diagnostics(bytes: &[u8], events: &mpsc::Sender<Output>) -> bool {
+async fn forward_diagnostics(
+    bytes: &[u8],
+    events: &mpsc::Sender<Output>,
+    secrets: &[String],
+) -> bool {
     let text = String::from_utf8_lossy(bytes);
     let text = run_output::strip_terminal_styling(&text);
     let mut diagnostics = String::new();
     let mut lines = text.split_inclusive(['\r', '\n']).peekable();
     while let Some(line) = lines.next() {
-        if line.contains(" cairn_performance: ") {
+        if AGENT_PERFORMANCE_RECORD.is_match(line) {
             // CRLF is one terminator; do not leave its LF as an empty diagnostic.
             if line.ends_with('\r') && lines.peek() == Some(&"\n") {
                 lines.next();
             }
-            tracing::info!(target: "cairn_performance", source = "agent_process", record = %line.trim_end());
+            let record = run_output::redact(line.trim_end(), secrets);
+            tracing::info!(target: "cairn_performance", source = "agent_process", record = %record);
         } else {
             diagnostics.push_str(line);
         }
