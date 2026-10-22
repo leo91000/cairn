@@ -524,7 +524,7 @@ pub(crate) fn mount_host_disk(
     mount_named(disk, state, jail, 0, "disk.blk", Some(inherited_mounts))
 }
 
-fn private_mount_namespace(inherited_mounts: &[PathBuf]) -> stdio::Result<()> {
+pub(crate) fn private_mount_namespace(inherited_mounts: &[PathBuf]) -> stdio::Result<()> {
     if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
         return Err(stdio::Error::last_os_error());
     }
