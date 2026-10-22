@@ -184,6 +184,12 @@ const elapsed = computed(() => {
             language="markdown"
           />
         </div>
+        <ActivityCode
+          v-else-if="artifact.verbatim"
+          :label="block.label"
+          :code="block.code"
+          :language="block.language"
+        />
         <ActivityContent
           v-else
           :label="block.label"

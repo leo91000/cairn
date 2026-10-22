@@ -57,6 +57,25 @@ test('chat groups visible calls despite diagnostics, updates and global event ID
   ])
 })
 
+test('agent diagnostics preserve embedded JSON as terminal text', async ({ page, workspace }) => {
+  const original = workspace.service.store.runs().find(run => run.status === 'succeeded')!
+  const run = workspace.service.store.addRun({
+    ...original,
+    id: randomUUID(),
+    taskId: randomUUID(),
+    trigger: 'diagnostic-fixture',
+  })
+  const diagnostic = '2026-10-22T12:08:49Z WARN native: request failed: {"error":{"message":"disk full"}}\npartial result: {"error":\n'
+  workspace.service.store.event(run.id, 'diagnostic', `\x1B[33m${diagnostic}\x1B[0m`)
+  await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
+  await authenticateWorkspace(page)
+  await page.getByTestId('agent-actions').locator(':scope > button').click()
+  await page.getByTestId('agent-step').filter({ hasText: 'Agent diagnostic' }).click()
+  const card = page.getByTestId('agent-step-sheet')
+  await expect(card.locator('.activity-code pre code')).toHaveText(diagnostic)
+  await expect(card.locator('.activity-data')).toHaveCount(0)
+})
+
 test('markdown tables wrap prose and keep wide columns reachable within the conversation', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!

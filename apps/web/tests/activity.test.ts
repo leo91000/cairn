@@ -483,6 +483,7 @@ describe('expected command outcomes and connection recovery', () => {
       text: '\x1B[2m2026-10-22T12:08:49Z\x1B[0m \x1B[33m WARN\x1B[0m \x1B[2mcodex\x1B[0m\x1B[2m:\x1B[0m disk full\n',
     }
     const [result] = artifacts([styled])
+    expect(result).toMatchObject({ title: 'Agent diagnostic', verbatim: true })
     expect(result.raw).toBe('2026-10-22T12:08:49Z  WARN codex: disk full\n')
     expect(result.blocks).toEqual([{ label: 'Output', code: '2026-10-22T12:08:49Z  WARN codex: disk full\n', language: 'plaintext' }])
   })

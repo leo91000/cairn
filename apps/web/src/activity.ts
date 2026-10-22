@@ -56,6 +56,8 @@ export interface ActivityArtifact {
   historical?: boolean
   statusLabel?: string
   attention?: boolean
+  /** Process output must be displayed as written, without interpreting embedded data. */
+  verbatim?: boolean
   subagent?: ActivitySubagent
 }
 export type ActivityEntry
@@ -663,8 +665,11 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
         block('Details', message)
       else if (!['status', 'thread.started', 'turn.started', 'turn.completed'].includes(event.type))
         block('Output', event.text, Object.keys(data).length ? 'json' : 'plaintext')
-      if (event.type === 'diagnostic')
+      if (event.type === 'diagnostic') {
         artifact.status = 'info'
+        artifact.verbatim = true
+      }
+
       const usage = record(data.usage)
       if (typeof usage.input_tokens === 'number' && typeof usage.output_tokens === 'number')
         artifact.subtitle = `${usage.input_tokens.toLocaleString()} input · ${usage.output_tokens.toLocaleString()} output tokens`

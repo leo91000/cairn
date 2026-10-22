@@ -128,8 +128,11 @@ async fn read_diagnostics(mut reader: impl AsyncRead + Unpin, events: mpsc::Send
         };
         pending.extend_from_slice(&bytes[..n]);
 
-        let complete = match pending.iter().rposition(|b| matches!(b, b'\n' | b'\r')) {
-            Some(end) => end + 1,
+        // Keep a trailing CR until the next byte, so a split CRLF stays together.
+        let complete = match pending.iter().enumerate().rfind(|(index, byte)| {
+            **byte == b'\n' || (**byte == b'\r' && index + 1 < pending.len())
+        }) {
+            Some((end, _)) => end + 1,
             None if pending.len() >= DIAGNOSTIC_FRAGMENT_LIMIT => pending.len(),
             None => continue,
         };
@@ -150,8 +153,13 @@ async fn forward_diagnostics(bytes: &[u8], events: &mpsc::Sender<Output>) -> boo
     let text = String::from_utf8_lossy(bytes);
     let text = run_output::strip_terminal_styling(&text);
     let mut diagnostics = String::new();
-    for line in text.split_inclusive('\n') {
+    let mut lines = text.split_inclusive(['\r', '\n']).peekable();
+    while let Some(line) = lines.next() {
         if line.contains(" cairn_performance: ") {
+            // CRLF is one terminator; do not leave its LF as an empty diagnostic.
+            if line.ends_with('\r') && lines.peek() == Some(&"\n") {
+                lines.next();
+            }
             tracing::info!(target: "cairn_performance", source = "agent_process", record = %line.trim_end());
         } else {
             diagnostics.push_str(line);

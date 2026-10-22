@@ -717,3 +717,37 @@ async fn diagnostics_are_plain_text_without_agent_performance_records() {
         .collect();
     assert_eq!(diagnostics, " WARN Reconnecting... 2/5\nAgent exited");
 }
+
+#[tokio::test]
+async fn carriage_return_diagnostics_survive_adjacent_performance_records() {
+    let performance = "2026-10-22T12:08:49Z INFO cairn_performance: operation=agent_activity";
+    for (input, expected) in [
+        (format!("disk full\r{performance}\n"), "disk full\r"),
+        (format!("{performance}\rdisk full\r"), "disk full\r"),
+        (format!("{performance}\r\ndisk full\r"), "disk full\r"),
+        (format!("{performance}\r\n"), ""),
+    ] {
+        let mut fixture = Fixture::new().await;
+        let (reader, mut writer) = tokio::io::duplex(1);
+        let (sender, mut receiver) = mpsc::channel(32);
+        let reading = tokio::spawn(read_output(reader, true, sender, Vec::new()));
+        let streamed = input.clone();
+        let writing = tokio::spawn(async move {
+            writer.write_all(streamed.as_bytes()).await.unwrap();
+        });
+        while let Some(output) = receiver.recv().await {
+            fixture.output(output).await;
+        }
+        writing.await.unwrap();
+        reading.await.unwrap();
+
+        let diagnostics: String = fixture
+            .events()
+            .await
+            .iter()
+            .filter(|event| event["type"] == "diagnostic")
+            .map(|event| event["text"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(diagnostics, expected, "input: {input:?}");
+    }
+}
