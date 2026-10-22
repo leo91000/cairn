@@ -6,8 +6,6 @@ import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
 import androidx.activity.compose.LocalActivity
 import androidx.compose.runtime.*
 import androidx.compose.ui.test.*
@@ -20,6 +18,9 @@ import build.cairn.app.ui.installationHeader
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.*
@@ -30,8 +31,11 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Response
+import okhttp3.ResponseBody
 import okhttp3.ResponseBody.Companion.toResponseBody
 import okio.Buffer
+import okio.ForwardingSource
+import okio.buffer
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -201,7 +205,10 @@ class DirectTransportDeviceTest {
                 assertEquals(0, directReads)
             } else {
                 awaitDirect()
-                if (scenario == "same-lan") assertTrue(refusedCandidates.get() > 0)
+                if (scenario == "same-lan") {
+                    assertTrue(refusedCandidates.get() > 0)
+                    assertDelayedOfferAcknowledgement()
+                }
                 primaryRoute = api.transport.route.value
                 assertTrue(control.contains("authorize:200"))
                 assertTrue(control.contains("signal:204"))
@@ -331,48 +338,11 @@ class DirectTransportDeviceTest {
                             1,
                             capacityAttempts.get(),
                         )
-                        try {
-                            withTimeout(25000) {
-                                do {
-                                    delay(200)
-                                    assertEquals("[]", capacity.request("GET", "/chats"))
-                                } while (capacity.transport.route.value != "direct")
-                            }
-                        } catch (error: TimeoutCancellationException) {
-                            val snapshot = CompletableDeferred<String>()
-                            val handler = Handler(Looper.getMainLooper())
-                            val readLifecycle = Runnable {
-                                val lifecycle =
-                                    androidx.lifecycle.ProcessLifecycleOwner.get()
-                                        .lifecycle
-                                        .currentState
-                                        .name
-                                snapshot.complete(
-                                    "lifecycle=$lifecycle, focused=${activity.hasWindowFocus()}"
-                                )
-                            }
-                            handler.post(readLifecycle)
-                            val lifecycleSnapshot =
-                                try {
-                                    withTimeoutOrNull(1000) { snapshot.await() }
-                                        ?: "lifecycle=unavailable, focused=unavailable"
-                                } finally {
-                                    handler.removeCallbacks(readLifecycle)
-                                    snapshot.cancel()
-                                }
-                            val nativeTrace =
-                                instrumentation.uiAutomation
-                                    .executeShellCommand("logcat -d -t 200 -s CairnDirect:D")
-                                    .use { descriptor ->
-                                        android.os.ParcelFileDescriptor.AutoCloseInputStream(
-                                                descriptor
-                                            )
-                                            .use { it.bufferedReader().readText() }
-                                    }
-                            throw AssertionError(
-                                "Capacity recovery timed out: authorizationCalls=${capacityAttempts.get()}, route=${capacity.transport.route.value}, elapsedMs=${(System.nanoTime() - rejectedAt.get()) / 1000000}, $lifecycleSnapshot, control=$capacityControl\n$nativeTrace",
-                                error,
-                            )
+                        withTimeout(25000) {
+                            do {
+                                delay(200)
+                                assertEquals("[]", capacity.request("GET", "/chats"))
+                            } while (capacity.transport.route.value != "direct")
                         }
                         assertTrue(
                             "Retry must retain its fifteen-second deadline",
@@ -616,6 +586,109 @@ class DirectTransportDeviceTest {
         } finally {
             api.closeStreams()
             if (scenario == "network-change") shell("svc wifi enable")
+        }
+    }
+
+    @Test
+    fun answerMayArriveBeforeTheOfferHttpAcknowledgement() = runBlocking {
+        compose.setContent {}
+        assertDelayedOfferAcknowledgement()
+    }
+
+    private suspend fun assertDelayedOfferAcknowledgement() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val configuration =
+            wireJson
+                .parseToJsonElement(File(context.filesDir, "direct-fixture.json").readText())
+                .jsonObject
+        val vault =
+            object : SessionVault {
+                override fun read(origin: String) =
+                    configuration["cookie"]!!.jsonPrimitive.content + "; Path=/; HttpOnly"
+
+                override fun write(origin: String, cookie: String?) {}
+            }
+        val delayedOffers = AtomicInteger()
+        val answerRead = CountDownLatch(1)
+        val answerBeforeAcknowledgement = AtomicBoolean()
+        val client =
+            OkHttpClient.Builder()
+                .addInterceptor { chain ->
+                    val request = chain.request()
+                    val isOffer =
+                        request.url.encodedPath.endsWith("/signal") &&
+                            wireJson
+                                .parseToJsonElement(
+                                    Buffer().also { request.body!!.writeTo(it) }.readUtf8()
+                                )
+                                .jsonObject["kind"]!!
+                                .jsonPrimitive
+                                .content == "offer"
+                    val response = chain.proceed(request)
+                    if (request.url.encodedPath.endsWith("/events") && response.isSuccessful) {
+                        val body = response.body
+                        var tail = ""
+                        val source =
+                            object : ForwardingSource(body.source()) {
+                                    override fun read(sink: Buffer, byteCount: Long): Long {
+                                        val count = super.read(sink, byteCount)
+                                        if (count > 0) {
+                                            val window = tail + sink.clone().readUtf8()
+                                            if (window.contains("\"kind\":\"answer\""))
+                                                answerRead.countDown()
+                                            tail = window.takeLast(32)
+                                        }
+                                        return count
+                                    }
+                                }
+                                .buffer()
+                        response
+                            .newBuilder()
+                            .body(
+                                object : ResponseBody() {
+                                    override fun contentType() = body.contentType()
+
+                                    override fun contentLength() = body.contentLength()
+
+                                    override fun source() = source
+                                }
+                            )
+                            .build()
+                    } else {
+                        if (isOffer && response.isSuccessful) {
+                            delayedOffers.incrementAndGet()
+                            // Deliver the real answer while its offer acknowledgement is held.
+                            // Leave candidates and native SDK callbacks free to run.
+                            answerBeforeAcknowledgement.set(answerRead.await(5, TimeUnit.SECONDS))
+                            Thread.sleep(500)
+                        }
+                        response
+                    }
+                }
+                .build()
+        val api =
+            CairnApi(
+                configuration["origin"]!!.jsonPrimitive.content.toHttpUrl(),
+                vault,
+                client,
+                configuration["installation"]!!.jsonPrimitive.content,
+            )
+        api.csrf = configuration["csrf"]!!.jsonPrimitive.content
+        try {
+            api.startDirect(context)
+            withTimeout(12000) {
+                do {
+                    delay(100)
+                    assertEquals("[]", api.request("GET", "/chats"))
+                } while (api.transport.route.value != "direct")
+            }
+            assertTrue("The real offer acknowledgement must be delayed", delayedOffers.get() > 0)
+            assertTrue(
+                "The real answer must precede that acknowledgement",
+                answerBeforeAcknowledgement.get(),
+            )
+        } finally {
+            api.closeStreams()
         }
     }
 }

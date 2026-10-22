@@ -194,7 +194,7 @@ fn valid_record(db: &Db<'_>, record: &Value) -> Result<bool> {
         && (chat["paused"] == true
             || chat["wakeup"].is_object()
             || !crate::conversation_lifecycle::is_active(&chat)
-            || crate::chats::sleep::has_unhandled_input(db, &chat)?)
+            || crate::chats::continuation::has_unhandled_input(db, &chat)?)
     {
         return Ok(false);
     }

@@ -1428,6 +1428,11 @@ required = [ "sha" ]
 properties.sha = { type = "string", pattern = "^[0-9a-f]{40}$" }
 ```
 
+`wait_for` provides native `delay`, `at` and `run_finished` conditions. Plugins add
+service-specific conditions through the same `condition` handler; no host-side
+service-specific dispatch is needed. Temporal waits take no `timeoutSeconds`;
+plugin conditions require it.
+
 Granted agents see each condition in `wait_for` as type `<plugin>_<name>` (plugin
 IDs have no `_`, so types never collide), with `projectId` when `project = true`; Cairn records the plugin
 (`pluginId`) and checks, before every observation, that the agent still holds an

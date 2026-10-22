@@ -3,7 +3,7 @@ mod common;
 mod pr_checks;
 
 use cairn_installation::{
-    chats::{sleep, wait_for},
+    chats::wait_for,
     config::{MAIN_AGENT_ID, id, now},
     plugins::{conditions, connections},
     service::Service,
@@ -270,10 +270,10 @@ async fn already_finished_sources_return_results_without_scheduling_or_ending_th
             .patch_run(text(&target, "id"), json!({ "status": status }))
             .await
             .unwrap();
-        sleep::schedule(
+        wait_for::schedule(
             &f.s,
             &f.token,
-            &json!({ "seconds": 420, "reason": "Old delay" }),
+            &json!({ "condition": { "type": "delay", "seconds": 420 }, "reason": "Old delay" }),
         )
         .await
         .unwrap();
@@ -560,7 +560,7 @@ async fn permissions_origins_and_workflow_commit_mismatches_are_rechecked() {
 }
 
 #[tokio::test]
-async fn sleep_replaces_condition_waits_and_private_tokens_follow_agent_identity() {
+async fn delay_replaces_condition_waits_and_private_tokens_follow_agent_identity() {
     let f = Fixture::new().await;
     connections::remove(&f.s, "github", &f.instance)
         .await
@@ -568,13 +568,14 @@ async fn sleep_replaces_condition_waits_and_private_tokens_follow_agent_identity
     github::instance(&f.s, "Main's own", "fixture-only-token", &[MAIN_AGENT_ID]).await;
     let wait = f.schedule(f.github_condition()).await;
     assert_eq!(f.calls()[0]["token"], "fixture-only-token");
-    let replaced = sleep::schedule(
+    let replaced = wait_for::schedule(
         &f.s,
         &f.token,
-        &json!({ "seconds": 420, "reason": "Wait for result" }),
+        &json!({ "condition": { "type": "delay", "seconds": 420 }, "reason": "Wait for result" }),
     )
     .await
-    .unwrap();
+    .unwrap()["wakeup"]
+        .clone();
     assert!(replaced["condition"].is_null());
     assert_ne!(replaced["id"], wait["wakeup"]["id"]);
 
@@ -726,10 +727,10 @@ async fn newly_queued_input_during_the_initial_probe_cannot_be_held_by_a_wait() 
         .await
         .unwrap();
         if replacing_wakeup {
-            sleep::schedule(
+            wait_for::schedule(
                 &f.s,
                 &f.token,
-                &json!({ "seconds": 420, "reason": "Earlier wait" }),
+                &json!({ "condition": { "type": "delay", "seconds": 420 }, "reason": "Earlier wait" }),
             )
             .await
             .unwrap();
@@ -1066,8 +1067,8 @@ fn child_cpu_ms() -> f64 {
 
 #[tokio::test]
 #[ignore = "reproducible local metadata measurements; run explicitly without other tests"]
-async fn measure_wait_metadata_against_sleep() {
-    for mode in ["sleep", "run_finished", "github_pr_checks"] {
+async fn measure_wait_metadata() {
+    for mode in ["delay", "at", "run_finished", "github_pr_checks"] {
         let f = Fixture::new().await;
         let target = f.target().await;
         if mode == "github_pr_checks" {
@@ -1079,7 +1080,7 @@ async fn measure_wait_metadata_against_sleep() {
         for i in 0..100 {
             let reason = format!("Measurement {i}");
             let started = std::time::Instant::now();
-            if mode != "sleep" {
+            if !matches!(mode, "delay" | "at") {
                 let condition = if mode == "run_finished" {
                     json!({ "type": "run_finished", "runId": target["id"] })
                 } else {
@@ -1097,9 +1098,18 @@ async fn measure_wait_metadata_against_sleep() {
                 .await
                 .unwrap();
             } else {
-                sleep::schedule(&f.s, &f.token, &json!({ "seconds": 420, "reason": reason }))
-                    .await
-                    .unwrap();
+                let condition = if mode == "delay" {
+                    json!({ "type": "delay", "seconds": 420 })
+                } else {
+                    json!({ "type": "at", "date": chrono::DateTime::from_timestamp_millis(now() + 420_000).unwrap().to_rfc3339() })
+                };
+                wait_for::schedule(
+                    &f.s,
+                    &f.token,
+                    &json!({ "condition": condition, "reason": reason }),
+                )
+                .await
+                .unwrap();
             }
             writes.push(started.elapsed().as_secs_f64() * 1000.0);
         }

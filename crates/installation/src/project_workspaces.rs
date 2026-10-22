@@ -227,21 +227,13 @@ async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Resul
             crate::chats::wait_for::schedule(s, bearer, args).await,
             |result| {
                 if result["deferred"] == true {
-                    "Wait saved. End this turn; Cairn will resume when the condition resolves or the timeout expires, subject to capacity.".into()
+                    "Wait saved. End this turn; Cairn will resume when the scheduled time arrives, the condition resolves or the timeout expires, subject to capacity.".into()
                 } else {
                     "Condition already completed. Inspect the observation and continue this turn; no wakeup was scheduled.".into()
                 }
             },
         ),
-        "sleep" => ToolResult::from_result(
-            crate::chats::sleep::schedule(s, bearer, args).await,
-            |result| {
-                format!(
-                    "Wakeup saved for {} (Unix milliseconds). End this turn; Cairn will resume automatically when due and capacity is available.",
-                    result["wakeAt"]
-                )
-            },
-        ),
+
         "list_nodes" => {
             let run = authorize(s, bearer).await?;
             ToolResult::from_result(crate::nodes::moves::list(s, &run).await, summary)
@@ -331,7 +323,6 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         crate::outcome::tool(),
         crate::chats::questions::list_tool(),
         crate::chats::questions::cancel_tool(),
-        crate::chats::sleep::tool(),
         crate::chats::wait_for::tool(&conditions),
         crate::nodes::exclusive::acquire_tool(),
         crate::nodes::exclusive::release_tool(),

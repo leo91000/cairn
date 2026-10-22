@@ -78,7 +78,7 @@ An admitted task keeps its reply delivery while native execution is queued,
 waiting or recovering, including beyond 24 hours. This does not change the
 configurable freshness window for newly received requests.
 
-Before `cairn_workspace.sleep` or a deferred `wait_for` commits, Cairn reserves
+Before a deferred `cairn_workspace.wait_for` commits, Cairn reserves
 another delivery for that exact host-generated continuation input. It retains
 its Slack destination, requester and route proof, with a separate reply checkpoint.
 A full 20-delivery queue refuses the wait atomically; replacing or repeating a
@@ -95,7 +95,7 @@ and Android omit it from presentation. Cancellation/replacement, source revocati
 and ordinary owner/package/person checks remain enforced. The package cannot
 select another participant's later output by naming a conversation.
 
-Actual-worker fixtures exercise sleep, replacement, a granted package condition,
+Actual-worker fixtures exercise a timed `wait_for`, replacement, a granted package condition,
 manager restart while paused, and aging an accepted delivery beyond 24 hours.
 They use a fake model process and local Slack HTTP fixtures; they do not prove a
 real Slack workspace, physical VM restoration or production object storage.

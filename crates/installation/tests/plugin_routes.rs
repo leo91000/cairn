@@ -1761,18 +1761,18 @@ async fn routed_runs_use_only_the_oauth_subject_proved_by_their_external_request
     server.abort();
 }
 
-// Native lifecycle fixture: actual sleep API and scheduler, with a prepared
+// Native lifecycle fixture: actual time-wait API and scheduler, with a prepared
 // completed checkpoint instead of a launched process/VM.
 async fn wake_after_sleep(s: &Service, chat: &str, run: &Value, bearer: &str) -> Value {
     let run_id = text(run, "id");
     s.chat_acknowledge(run_id, text(&run["chatExecution"], "messageId"))
         .await
         .unwrap();
-    cairn_installation::chats::sleep::schedule(
+    cairn_installation::chats::wait_for::schedule(
         s,
         bearer,
         &json!({
-            "seconds": 1,
+            "condition": { "type": "delay", "seconds": 1 },
             "reason": "Await a provider response as the same requester",
         }),
     )
@@ -4485,11 +4485,11 @@ async fn an_authorized_participant_can_reset_a_settled_thread_without_erasing_it
             .patch_run(run, json!({ "status": "running" }))
             .await
             .unwrap();
-        cairn_installation::chats::sleep::schedule(
+        cairn_installation::chats::wait_for::schedule(
             &s,
             bearer,
             &json!({
-                "seconds": if mode == "due" { 1 } else { 3600 }, "reason": "Await provider result",
+                "condition": { "type": "delay", "seconds": if mode == "due" { 1 } else { 3600 } }, "reason": "Await provider result",
             }),
         )
         .await
@@ -4550,10 +4550,10 @@ async fn an_authorized_participant_can_reset_a_settled_thread_without_erasing_it
         .patch_run(run, json!({ "status": "running" }))
         .await
         .unwrap();
-    let late_wait = cairn_installation::chats::sleep::schedule(
+    let late_wait = cairn_installation::chats::wait_for::schedule(
         &s,
         bearer,
-        &json!({ "seconds": 3600, "reason": "After the reply already settled" }),
+        &json!({ "condition": { "type": "delay", "seconds": 3600 }, "reason": "After the reply already settled" }),
     )
     .await
     .unwrap_err();

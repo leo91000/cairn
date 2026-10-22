@@ -4,6 +4,10 @@ Measured on 2026-10-13 against `cairn_workspace.sleep`, including the new
 `github_pr_checks` condition. All cases use the same SQLite schema and JSON
 encoding. No codec, compression or journal policy changes.
 
+The historical reproduction below uses the old `sleep` entry point. For the
+current unified interface, use the command and results in
+[the 2026-10-22 comparison](#unified-interface-2026-10-22).
+
 ## Reproduction
 
 ```sh
@@ -80,3 +84,63 @@ Checks are capped at 500, distinct requirements at 500 and active rules at fewer
 than 200. Returned details share a 100-entry budget across present and missing
 checks. Identical watchers share results only for the same agent, granted policy,
 registered project origin and condition. No request holds the scheduler tick.
+
+## Unified interface (2026-10-22)
+
+Compared the removed `sleep` at commit
+`eceb949e86b0e0f75721a9afc777a3757277db5c` with `wait_for`'s `delay` and `at`
+conditions. The [raw measurements](measurements/unified-wait-for.json) also retain
+`run_finished` and `github_pr_checks` results for both versions.
+
+Current reproduction:
+
+```sh
+CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  pnpm test:backend -p cairn-installation --test wait_for \
+  measure_wait_metadata -- --ignored --exact --nocapture
+```
+
+For the reference, check out the commit above in a separate worktree and run the
+same command with `measure_wait_metadata_against_sleep`. Run each measurement
+alone, after compilation and other tests finish. The launcher isolates agent
+credentials. Both versions use the same fixture schema and SQLite settings:
+100 distinct registrations/replacements, 500 warm reads, then 20 fresh SQLite
+pools and their first reads. The date case schedules approximately 420 seconds
+ahead, matching the duration case. Different reasons avoid the idempotent shortcut.
+
+Host: shared Linux 6.12.109 x86_64 KVM VM, 12 Intel Xeon vCPUs, about 30 GiB RAM,
+overlay filesystem (`/tmp` is on that filesystem). Rust 1.97.1, dev/test profile,
+debug info and incremental compilation disabled, four build jobs. No other test
+or build was active during timing; the physical host was not reserved. Compilation
+finished before timing. Fresh-pool reads reset connection/statement/page caches;
+OS caches were left warm. They are local metadata reads, not cold-disk or
+production-network latency. Process CPU includes manager threads; child CPU is
+reported separately. GitHub cases run sandboxed Luau workers against a local HTTP
+fixture, with four requests per PR registration and no external GitHub calls.
+
+| Metric | Reference `sleep` | `wait_for` / `delay` | `wait_for` / `at` |
+| --- | ---: | ---: | ---: |
+| Encoded wakeup JSON bytes | 185 | 232 | 249 |
+| Encoded conversation JSON bytes | 679 | 725 | 743 |
+| Registration/write median, ms | 0.346 | 0.901 | 0.925 |
+| Registration/write p95, ms | 0.429 | 1.304 | 1.070 |
+| Process CPU for 100 registrations, ms | 68.639 | 128.652 | 96.180 |
+| Child process CPU for 100 registrations, ms | 0.000 | 0.000 | 0.000 |
+| Warm read median, ms | 0.038 | 0.038 | 0.035 |
+| Warm read p95, ms | 0.062 | 0.064 | 0.056 |
+| First read with fresh pool median, ms | 0.315 | 0.327 | 0.272 |
+| First read with fresh pool p95, ms | 0.378 | 0.399 | 0.351 |
+| Fresh pool open median, ms | 0.636 | 0.675 | 0.684 |
+
+The `delay` request identity adds 47 encoded wakeup bytes; `at` adds 64. The
+optional `timeCondition` field distinguishes a repeated request from switching
+between a date and duration, while older binaries still consume the original
+timer fields and `wakeAt`. Conversation byte counts also include generated slugs.
+No codec, compression, journal policy, database schema or compatibility epoch
+changes. Time completion observations reuse the existing event payload format.
+
+Registration now uses the common `wait_for` validation and short transactions,
+including the message-revision checks used by external conditions. This adds
+about 0.56 ms to the local duration median in this sample. Warm read medians are
+about 0.04 ms in both versions. These samples establish local costs for this
+workload; they provide no production latency or physical-disk performance claim.

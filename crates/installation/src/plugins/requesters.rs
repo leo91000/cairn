@@ -391,7 +391,7 @@ impl Observation {
             || run["chatExecution"]["messageId"] != self.run["chatExecution"]["messageId"]
             || chat["runId"] != run["id"]
             || chat["wakeup"] != self.wakeup
-            || !crate::chats::sleep::resumable(&chat, Some(&run))
+            || !crate::chats::continuation::resumable(&chat, Some(&run))
             || chat["wakeup"]["wakeAt"]
                 .as_i64()
                 .is_none_or(|at| at <= crate::config::now())

@@ -1,6 +1,6 @@
+pub(crate) mod continuation;
 mod handoff;
 pub(crate) mod questions;
-pub mod sleep;
 pub mod wait_for;
 
 pub use handoff::{execution_text, with_invoked_skills};
@@ -802,7 +802,7 @@ fn launch_turn(
     let waking = message["wakeup"].is_object();
     let unchanged = if waking {
         let current = db.run(text(&chat, "runId"))?;
-        sleep::ready(db, &chat, current.as_ref(), now())?
+        continuation::ready(db, &chat, current.as_ref(), now())?
             && chat["wakeup"] == message["wakeup"]
             && current.as_ref().map(|run| &run["id"]) == run.as_ref().map(|run| &run["id"])
             && (!message["wakeup"]["condition"].is_object()
@@ -1261,7 +1261,7 @@ impl Service {
             let (waiting_chat, waiting_run) = (chat.clone(), run.clone());
             let mut waiting = self
                 .store
-                .read(move |db| sleep::holds_queue(db, &waiting_chat, waiting_run.as_ref()))
+                .read(move |db| continuation::holds_queue(db, &waiting_chat, waiting_run.as_ref()))
                 .await?;
             if let Some(previous) = run.as_ref().filter(|_| attention || !waiting) {
                 let advance = match crate::plugins::turns::advance(self, &chat, previous).await {
@@ -1286,7 +1286,7 @@ impl Service {
                         waiting = false;
                     }
                     crate::plugins::turns::Advance::NoRequest if attention => {
-                        self.chat_cancel_sleep(&id).await?;
+                        self.chat_cancel_wait(&id).await?;
                         if chat["paused"] == true {
                             continue;
                         }
@@ -1318,7 +1318,7 @@ impl Service {
                     let run = run.clone();
                     let Some(message) = self
                         .store
-                        .read(move |db| sleep::message(db, &chat, run.as_ref(), now()))
+                        .read(move |db| continuation::message(db, &chat, run.as_ref(), now()))
                         .await?
                     else {
                         continue;

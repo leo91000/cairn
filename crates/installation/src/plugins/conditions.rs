@@ -336,7 +336,7 @@ pub async fn observe(
 
 fn watchable(chat: &Value, run: &Value, time: i64) -> bool {
     let wakeup = &chat["wakeup"];
-    crate::chats::sleep::resumable(chat, Some(run))
+    crate::chats::continuation::resumable(chat, Some(run))
         && is_condition(&wakeup["condition"])
         && !wakeup["observation"].is_object()
         && wakeup["wakeAt"]

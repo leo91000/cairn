@@ -1,7 +1,7 @@
 //! Native lifecycle/occupancy fixtures. Actual Slack provider/manager recovery
 //! is proved separately by slack::recovery, without seeded execution results.
 use super::*;
-use cairn_installation::{chats::sleep, plugins::work};
+use cairn_installation::{chats::wait_for, plugins::work};
 use tokio::sync::{Mutex, Notify};
 
 struct Started {
@@ -98,12 +98,16 @@ impl Started {
     }
 
     async fn wait(&self, reason: &str) -> cairn_installation::error::Result<Value> {
-        sleep::schedule(
+        wait_for::schedule(
             &self.s,
             &self.bearer,
-            &json!({ "seconds": 3600, "reason": reason }),
+            &json!({ "condition": { "type": "delay", "seconds": 3600 }, "reason": reason }),
         )
         .await
+        .map(|result| {
+            assert_eq!(result["deferred"], true);
+            result["wakeup"].clone()
+        })
     }
 
     async fn occupy(&self, count: usize) -> Vec<String> {

@@ -1,0 +1,258 @@
+{
+  "date": "2026-10-22",
+  "referenceCommit": "eceb949e86b0e0f75721a9afc777a3757277db5c",
+  "candidateSourceTree": "08bc355e15ce1fe199aaa1daa01b7ea91aa863e2",
+  "conditions": {
+    "host": "Shared Linux 6.12.109 x86_64 KVM VM; Intel Xeon; 12 vCPUs",
+    "memory": "32363536 kB",
+    "filesystem": "overlay; temporary SQLite databases under /tmp",
+    "rust": "1.97.1",
+    "profile": "dev/test; debug info disabled; incremental disabled; 4 build jobs",
+    "workload": "Each mode: 100 distinct registrations, 500 warm reads, 20 fresh pools and first reads. Same temporary fixture schema and SQLite settings.",
+    "cache": "Fresh SQLite pools reset connection/statement/page caches; OS caches stay warm, no cache eviction.",
+    "isolation": "Compilation finished before timing. No other test/build active during timing; shared host not reserved. Public source download completed before candidate timing.",
+    "network": "GitHub fixture is HTTP loopback, with sandboxed Luau workers. No production network or external GitHub requests."
+  },
+  "reference": [
+    {
+      "availableCpuThreads": 12,
+      "chatEncodedBytes": 679,
+      "externalProbeRequests": 0,
+      "firstReadFreshPool": {
+        "meanMs": 0.30277220000000005,
+        "medianMs": 0.315182,
+        "p95Ms": 0.377786,
+        "samples": 20
+      },
+      "freshPoolOpen": {
+        "meanMs": 0.63828205,
+        "medianMs": 0.636202,
+        "p95Ms": 0.6894699999999999,
+        "samples": 20
+      },
+      "mode": "sleep",
+      "userInputIndexBytes": 4096,
+      "wakeupEncodedBytes": 185,
+      "warmRead": {
+        "meanMs": 0.04370470800000002,
+        "medianMs": 0.037616000000000004,
+        "p95Ms": 0.062442,
+        "samples": 500
+      },
+      "write": {
+        "meanMs": 0.67957716,
+        "medianMs": 0.345551,
+        "p95Ms": 0.428726,
+        "samples": 100
+      },
+      "writeChildCpuMs": 0.0,
+      "writeProcessCpuMs": 68.638569
+    },
+    {
+      "availableCpuThreads": 12,
+      "chatEncodedBytes": 762,
+      "externalProbeRequests": 0,
+      "firstReadFreshPool": {
+        "meanMs": 0.28782995,
+        "medianMs": 0.266461,
+        "p95Ms": 0.36688699999999996,
+        "samples": 20
+      },
+      "freshPoolOpen": {
+        "meanMs": 0.6830814999999999,
+        "medianMs": 0.681767,
+        "p95Ms": 0.730918,
+        "samples": 20
+      },
+      "mode": "run_finished",
+      "userInputIndexBytes": 4096,
+      "wakeupEncodedBytes": 268,
+      "warmRead": {
+        "meanMs": 0.042130353999999995,
+        "medianMs": 0.0385,
+        "p95Ms": 0.059773,
+        "samples": 500
+      },
+      "write": {
+        "meanMs": 1.5681428699999995,
+        "medianMs": 1.508181,
+        "p95Ms": 1.9116160000000002,
+        "samples": 100
+      },
+      "writeChildCpuMs": 0.0,
+      "writeProcessCpuMs": 160.248625
+    },
+    {
+      "availableCpuThreads": 12,
+      "chatEncodedBytes": 988,
+      "externalProbeRequests": 400,
+      "firstReadFreshPool": {
+        "meanMs": 0.28459639999999997,
+        "medianMs": 0.273928,
+        "p95Ms": 0.36137600000000003,
+        "samples": 20
+      },
+      "freshPoolOpen": {
+        "meanMs": 0.6884168,
+        "medianMs": 0.68127,
+        "p95Ms": 0.7327180000000001,
+        "samples": 20
+      },
+      "mode": "github_pr_checks",
+      "userInputIndexBytes": 4096,
+      "wakeupEncodedBytes": 494,
+      "warmRead": {
+        "meanMs": 0.04929384799999998,
+        "medianMs": 0.042011,
+        "p95Ms": 0.070798,
+        "samples": 500
+      },
+      "write": {
+        "meanMs": 32.333537760000006,
+        "medianMs": 30.718371,
+        "p95Ms": 42.765215000000005,
+        "samples": 100
+      },
+      "writeChildCpuMs": 1271.136,
+      "writeProcessCpuMs": 2078.20074
+    }
+  ],
+  "candidate": [
+    {
+      "availableCpuThreads": 12,
+      "chatEncodedBytes": 725,
+      "externalProbeRequests": 0,
+      "firstReadFreshPool": {
+        "meanMs": 0.32417964999999993,
+        "medianMs": 0.326502,
+        "p95Ms": 0.39869,
+        "samples": 20
+      },
+      "freshPoolOpen": {
+        "meanMs": 0.7316592,
+        "medianMs": 0.675134,
+        "p95Ms": 0.99853,
+        "samples": 20
+      },
+      "mode": "delay",
+      "userInputIndexBytes": 4096,
+      "wakeupEncodedBytes": 232,
+      "warmRead": {
+        "meanMs": 0.045236710000000006,
+        "medianMs": 0.037508,
+        "p95Ms": 0.06426,
+        "samples": 500
+      },
+      "write": {
+        "meanMs": 1.25811711,
+        "medianMs": 0.9013209999999999,
+        "p95Ms": 1.304043,
+        "samples": 100
+      },
+      "writeChildCpuMs": 0.0,
+      "writeProcessCpuMs": 128.65204
+    },
+    {
+      "availableCpuThreads": 12,
+      "chatEncodedBytes": 743,
+      "externalProbeRequests": 0,
+      "firstReadFreshPool": {
+        "meanMs": 0.29659825,
+        "medianMs": 0.272214,
+        "p95Ms": 0.350798,
+        "samples": 20
+      },
+      "freshPoolOpen": {
+        "meanMs": 0.6812774,
+        "medianMs": 0.6839310000000001,
+        "p95Ms": 0.72219,
+        "samples": 20
+      },
+      "mode": "at",
+      "userInputIndexBytes": 4096,
+      "wakeupEncodedBytes": 249,
+      "warmRead": {
+        "meanMs": 0.039023583999999986,
+        "medianMs": 0.035369,
+        "p95Ms": 0.056155000000000004,
+        "samples": 500
+      },
+      "write": {
+        "meanMs": 0.9335920999999998,
+        "medianMs": 0.9246700000000001,
+        "p95Ms": 1.069665,
+        "samples": 100
+      },
+      "writeChildCpuMs": 0.0,
+      "writeProcessCpuMs": 96.17973999999998
+    },
+    {
+      "availableCpuThreads": 12,
+      "chatEncodedBytes": 763,
+      "externalProbeRequests": 0,
+      "firstReadFreshPool": {
+        "meanMs": 0.30136769999999996,
+        "medianMs": 0.270815,
+        "p95Ms": 0.459541,
+        "samples": 20
+      },
+      "freshPoolOpen": {
+        "meanMs": 0.72551665,
+        "medianMs": 0.686036,
+        "p95Ms": 0.948391,
+        "samples": 20
+      },
+      "mode": "run_finished",
+      "userInputIndexBytes": 4096,
+      "wakeupEncodedBytes": 268,
+      "warmRead": {
+        "meanMs": 0.043585623999999976,
+        "medianMs": 0.037383,
+        "p95Ms": 0.062516,
+        "samples": 500
+      },
+      "write": {
+        "meanMs": 1.6153273800000003,
+        "medianMs": 1.5591050000000002,
+        "p95Ms": 2.0115279999999998,
+        "samples": 100
+      },
+      "writeChildCpuMs": 0.0,
+      "writeProcessCpuMs": 164.81240000000003
+    },
+    {
+      "availableCpuThreads": 12,
+      "chatEncodedBytes": 987,
+      "externalProbeRequests": 400,
+      "firstReadFreshPool": {
+        "meanMs": 0.31444380000000005,
+        "medianMs": 0.29336199999999996,
+        "p95Ms": 0.38114699999999996,
+        "samples": 20
+      },
+      "freshPoolOpen": {
+        "meanMs": 0.7291932499999999,
+        "medianMs": 0.7366020000000001,
+        "p95Ms": 0.793578,
+        "samples": 20
+      },
+      "mode": "github_pr_checks",
+      "userInputIndexBytes": 4096,
+      "wakeupEncodedBytes": 494,
+      "warmRead": {
+        "meanMs": 0.05327966599999996,
+        "medianMs": 0.04751,
+        "p95Ms": 0.075574,
+        "samples": 500
+      },
+      "write": {
+        "meanMs": 33.48617148999999,
+        "medianMs": 32.381799,
+        "p95Ms": 40.700815,
+        "samples": 100
+      },
+      "writeChildCpuMs": 1361.549,
+      "writeProcessCpuMs": 2109.413733
+    }
+  ]
+}

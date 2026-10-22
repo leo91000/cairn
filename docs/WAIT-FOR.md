@@ -1,16 +1,22 @@
 # Explorer `wait_for`
 
-`wait_for` vaut le coup quand une conversation attend un état vérifiable ailleurs :
-fin d’une CI, résultat d’une tâche ou réponse d’un service. Cairn peut effectuer les
+`wait_for` est l’outil unique d’attente durable : durée, date, fin d’une CI,
+résultat d’une tâche ou réponse d’un service. Cairn peut effectuer les
 vérifications pendant que la conversation libère son exécution, puis reprendre le
 travail autorisé avec un résultat précis.
 
 ## Ce que cette PR permet déjà
 
-Cairn fournit une condition ; les plugins accordés à l’agent ajoutent les leurs,
+Cairn fournit les conditions temporelles `delay` et `at`, ainsi que `run_finished` ;
+les plugins accordés à l’agent ajoutent les leurs,
 de type `<plugin>_<nom>` (voir les [conditions de plugins](PLUGINS.md#conditions)).
 Le plugin GitHub livré en ajoute deux :
 
+- `delay` : reprendre après 1 à 86 400 secondes.
+- `at` : reprendre à une date RFC 3339 avec fuseau explicite (`Z` ou décalage), au
+  plus 24 heures dans le futur. Une date passée renvoie un résultat immédiatement.
+  Les fractions de seconde sont arrondies à la milliseconde supérieure pour ne
+  jamais programmer une reprise avant la date demandée.
 - `run_finished` : une exécution Cairn autorisée atteint un état terminal. Une
   conversation dont le tour a réussi mais qui possède encore un réveil ou des
   messages à traiter reste une dépendance en attente. Cette source exige l’accès
@@ -27,6 +33,38 @@ Le plugin GitHub livré en ajoute deux :
   Un échec ou une annulation réveille immédiatement ; la réussite exige que tous
   les checks requis soient satisfaits. Les checks facultatifs restent hors de
   cette condition.
+
+## Attendre une durée ou une date
+
+```json
+{
+  "condition": { "type": "delay", "seconds": 300 },
+  "reason": "Revérifier le déploiement après cinq minutes"
+}
+```
+
+```json
+{
+  "condition": { "type": "at", "date": "2026-10-23T09:00:00+02:00" },
+  "reason": "Reprendre à neuf heures"
+}
+```
+
+Les conditions temporelles ne prennent pas de `timeoutSeconds`. Atteindre l’heure
+produit `{ "state": "completed", "type": "time", "wakeAt": … }`, tandis qu’un
+état externe non résolu dans son délai produit `state: timed_out`. Les conditions
+externes gardent un `timeoutSeconds` obligatoire de 1 à 86 400 secondes.
+
+`sleep` disparaît de la liste des outils et de leur dispatcher. Les attentes
+qu’il a déjà enregistrées continuent à fonctionner après redémarrage. Les nouvelles
+attentes temporelles gardent les champs historiques du minuteur, sans `condition` ;
+un champ optionnel `timeCondition` conserve la demande canonique pour distinguer
+les répétitions des remplacements entre durée et date. Les anciens binaires
+ignorent ce champ et reprennent au même `wakeAt` ; les nouveaux lisent aussi les
+anciens minuteurs. L’epoch de compatibilité des données reste donc inchangée.
+Les événements historiques `chat.sleep` restent lisibles sur le web et Android.
+
+## Attendre un résultat externe
 
 Exemple pour une dépendance Cairn :
 
@@ -106,8 +144,8 @@ Pour une attente illustrative de 20 minutes :
 | Approche | Travail du LLM pendant l’attente | Vérifications de la source | Ressources de la conversation |
 | --- | --- | --- | --- |
 | Commande de statut toutes les 60 secondes | Environ 20 reprises d’inférence pour décider d’attendre encore | Environ 20 appels | L’exécution reste active si le processus attend dans la VM |
-| `sleep` de 60 secondes, puis vérification | Environ 20 continuations et vérifications | Environ 20 appels | Libérées entre les continuations |
-| `wait_for` | Une inscription, puis une continuation avec le résultat | Effectuées par Cairn ; environ 40 vérifications avec une cadence de 30 secondes | Libérées pendant l’attente |
+| `wait_for` avec `delay: 60`, puis vérification | Environ 20 continuations et vérifications | Environ 20 appels | Libérées entre les continuations |
+| `wait_for` avec condition externe | Une inscription, puis une continuation avec le résultat | Effectuées par Cairn ; environ 40 vérifications avec une cadence de 30 secondes | Libérées pendant l’attente |
 
 Ces comptes illustrent le mécanisme ; ils ne mesurent ni des tokens ni un prix.
 Le gain principal est de retirer l’inférence et la VM de la boucle d’attente.
@@ -145,7 +183,7 @@ des VM suivent la politique existante des réveils durables.
 | Message d’un plugin ou connecteur | Inspecter un événement reçu, par exemple dans une intégration de discussion | Nécessite une source installée et autorisée, un événement identifié et une politique sur les données reçues |
 | Credential reconnecté | Continuer après intervention du propriétaire | La file des comptes gère déjà une partie de ce cas ; une attente dédiée ne doit pas accorder de nouveaux droits |
 | Capacité ou node disponible | Reprendre quand un travail peut être admis | L’admission et le placement le gèrent déjà ; une observation ne remplace pas une réservation |
-| Date ou retry après délai | Continuer après une heure donnée ou un délai de service | `sleep` et les tâches planifiées restent adaptés aux conditions purement temporelles |
+| Date ou retry après délai | Continuer après une heure donnée ou un délai de service | Disponible avec `wait_for` et ses conditions `delay` / `at` ; les tâches planifiées servent aux travaux récurrents |
 | Processus local ou fichier produit dans la VM courante | Attendre une commande locale sans interrompre son travail | Utiliser l’attente native ; une attente qui libère la VM exige un job ayant sa propre exécution |
 
 Cette matrice sépare les capacités livrées des extensions à concevoir. Une
@@ -155,8 +193,9 @@ périmètre de la demande initiale et des permissions courantes.
 ## Contrat de reprise
 
 - Un seul réveil par conversation. Une répétition identique conserve l’échéance ;
-  une autre demande remplace la précédente, y compris entre `sleep` et `wait_for`.
-- Le timeout est obligatoire, entre 1 seconde et 24 heures. Dans une attente
+  une autre demande remplace la précédente, y compris entre durée, date et résultat.
+- Le timeout est obligatoire pour une condition externe, entre 1 seconde et
+  24 heures, et interdit pour les conditions temporelles. Dans une attente
   conditionnelle, `wakeAt` représente l’échéance de secours, pas l’heure minimale
   de reprise. Un résultat disponible peut provoquer une reprise plus tôt.
 - Les résultats indiquent `completed`, `timed_out`, `unavailable`, `superseded`

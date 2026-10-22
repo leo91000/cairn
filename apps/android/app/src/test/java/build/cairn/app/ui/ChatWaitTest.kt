@@ -62,6 +62,17 @@ class ChatWaitTest {
         )
 
     @Test
+    fun `time reached completes a timer without an external timeout warning`() {
+        val result = buildJsonObject {
+            put("state", "completed")
+            put("type", "time")
+            put("wakeAt", 1000)
+        }
+        assertEquals(WaitOutcome(WaitTone.NEUTRAL, "Échéance atteinte", ""), waitOutcome(result))
+        assertEquals("Heure prévue", observedTarget(result))
+    }
+
+    @Test
     fun `names what the conversation waits for and counts down to it`() {
         assertEquals(
             WaitTarget(

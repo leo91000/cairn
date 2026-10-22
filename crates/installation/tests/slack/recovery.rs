@@ -236,42 +236,48 @@ async fn exchange(scenario: Scenario) {
                 1
             };
             if scenario == Scenario::Replaced {
-                let old = cairn_installation::chats::sleep::schedule(
+                let old = cairn_installation::chats::wait_for::schedule(
                     &service,
                     bearer,
                     &json!({
-                        "seconds": 3600, "reason": "Superseded wait must never execute",
+                        "condition": { "type": "delay", "seconds": 3600 }, "reason": "Superseded wait must never execute",
                     }),
                 )
                 .await
                 .unwrap();
-                let replacement = cairn_installation::chats::sleep::schedule(
+                let replacement = cairn_installation::chats::wait_for::schedule(
                     &service,
                     bearer,
                     &json!({
-                        "seconds": duration, "reason": reason,
+                        "condition": { "type": "delay", "seconds": duration }, "reason": reason,
                     }),
                 )
                 .await
                 .unwrap();
-                assert_ne!(old["id"], replacement["id"]);
+                assert_eq!(old["deferred"], true);
+                assert_eq!(replacement["deferred"], true);
+                assert_ne!(old["wakeup"]["id"], replacement["wakeup"]["id"]);
                 assert!(
                     service
                         .store
-                        .get(work::DELIVERIES, text(&old, "id"))
+                        .get(work::DELIVERIES, text(&old["wakeup"], "id"))
                         .await
                         .unwrap()
                         .is_none()
                 );
             }
-            cairn_installation::chats::sleep::schedule(
+            cairn_installation::chats::wait_for::schedule(
                 &service,
                 bearer,
                 &json!({
-                    "seconds": duration, "reason": reason,
+                    "condition": { "type": "delay", "seconds": duration }, "reason": reason,
                 }),
             )
             .await
+            .map(|result| {
+                assert_eq!(result["deferred"], true);
+                result["wakeup"].clone()
+            })
             .unwrap()
         };
         assert_eq!(wakeup["messageId"], delivery["id"]);
