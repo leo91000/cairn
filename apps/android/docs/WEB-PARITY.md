@@ -226,3 +226,11 @@ Manage authorization / Gérer l’autorisation. An unopened provider has unknown
 status. The owner's viewing choice survives a resource revision, while consent
 state is recreated under that revision. Refreshing resources preserves pending
 consents on unchanged resources and does not load unopened providers.
+
+### Native continuation receipts (Slack recovery checkpoint)
+
+Web and Android both omit the internal `chat.wakeup.delivered` receipt from chat
+and run timelines. Existing wait/resumption cards and answers remain visible;
+no human message row is added. This changes no management action or tool surface:
+`sleep` and `wait_for` retain their existing native interfaces and authorization.
+The broader Slack setup/route/OAuth mutation parity audit remains open.

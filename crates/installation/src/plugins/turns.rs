@@ -41,7 +41,7 @@ pub(crate) fn abandon(
         db.0.query_row(
             "SELECT start.id, terminal.id, terminal.type FROM events AS start
          JOIN events AS terminal ON terminal.run_id=start.run_id AND terminal.id>start.id
-         WHERE start.run_id=?1 AND start.type='chat.user'
+         WHERE start.run_id=?1 AND start.type IN ('chat.user','chat.wakeup.delivered')
          AND json_extract(start.payload,'$.messageId')=?2
          AND terminal.type IN ('turn.completed','turn.failed') ORDER BY terminal.id LIMIT 1",
             rusqlite::params![run, message],

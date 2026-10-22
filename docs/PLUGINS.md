@@ -266,6 +266,21 @@ later, for example after a platform rate limit. This scheduler delay is capped a
 300 seconds. Persist a provider's longer cooldown and avoid its HTTP method until
 the actual deadline, including when another delivery becomes due.
 
+Accepted deliveries follow their native task rather than expiring solely after
+24 hours. Native sleep and deferred condition waits atomically reserve a separate
+delivery for the exact continuation input, preserving the source, requester and
+reply metadata. Reservations share the existing 20-pending-delivery ceiling;
+a full queue refuses the wait without committing it. Repeated registration is
+idempotent, and replacement reuses the prior reservation's slot. Continuations
+have fresh retry state/checkpoints and do not charge another incoming-message
+quota. Cancelled or replaced inputs cannot export later conversation output.
+`chat.wakeup.delivered` records the native input's actual acknowledgement once,
+with its `messageId`; it is an internal output boundary, hidden by both clients.
+Independent `newTurn` requests queue behind the current task and its scheduled
+continuations, including when another participant submits them. Ordinary native
+steering retains its existing cancellation behavior. The waiting and resumed
+turns can each produce their own scoped reply.
+
 A reply handler can call `cairn.delivery.checkpoint(value)` before an external
 write. The current delivery's next `reply` receives `event.checkpoint`, including
 after an exception or worker restart. It is separate from the return-only retry

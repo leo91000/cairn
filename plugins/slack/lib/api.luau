@@ -61,12 +61,31 @@ local function request(method, name, values, auth, workspace)
     if type(retryAt) == "number" and retryAt > os.time() then
         return { status = 429, headers = { ["retry-after"] = tostring(retryAt - os.time()) } }
     end
-    local response = cairn.http.request({
+    local args = {
         method = method,
         url = url,
         form = if method == "GET" then nil else values,
         auth = auth,
-    })
+    }
+    local response
+    if method == "GET" then
+        local ok, result = pcall(cairn.http.request, args)
+        if not ok then
+            -- The bridge exposes a short native code, never provider content.
+            -- Only unavailable reads are retryable. Invalid/forbidden calls and
+            -- a broken bridge retain their original failure behavior.
+            local firstLine = string.match(tostring(result), "^[^\r\n]+")
+            if firstLine == "unavailable" or firstLine == "runtime error: unavailable" then
+                return { status = 503, headers = {} }
+            end
+            error(result)
+        end
+        response = result
+    else
+        -- A failed POST may have committed. Preserve its uncertain-write
+        -- checkpoint rather than treating it as a retryable read.
+        response = cairn.http.request(args)
+    end
     -- A documented JSON rate rejection is definite, even for a write. Other
     -- transient errors are retryable only for reads: a mutation may have committed.
     response = classifyResponse(method, response)

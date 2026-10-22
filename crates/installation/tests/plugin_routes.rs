@@ -1,4 +1,6 @@
 mod common;
+#[path = "plugin_routes/continuations.rs"]
+mod continuations;
 
 use aws_lc_rs::hmac;
 use axum::{body::Body, http::StatusCode, response::IntoResponse};
@@ -172,7 +174,12 @@ async fn configured_fixture_with_runner(
             end,
             message = function(event)
                 return cairn.conversations.submit({text = event.text, thread = event.context.thread, shared = true, newTurn = event.newTurn,
-                    reply = {resource = event.resource, route = event.route, channel = event.context.channel, trace = event.trace}})
+                    reply = {resource = event.resource, route = event.route, channel = event.context.channel, trace = event.trace, holdProgress = event.holdProgress}})
+            end,
+            progress = function(event)
+                if event.reply.holdProgress then
+                    return cairn.http.request({url = 'https://api.example.test/progress-result', method = 'POST', json = event})
+                end
             end,
             reply = function(event)
                 if event.reply.trace then
@@ -1783,7 +1790,7 @@ async fn wake_after_sleep(s: &Service, chat: &str, run: &Value, bearer: &str) ->
     s.store
         .patch_run(
             run_id,
-            json!({"status": "succeeded", "recoveryPending": false}),
+            json!({ "status": "succeeded", "recoveryPending": false }),
         )
         .await
         .unwrap();
@@ -4465,19 +4472,8 @@ async fn an_authorized_participant_can_reset_a_settled_thread_without_erasing_it
         "refused",
         "reset orphaned active work"
     );
-    s.store
-        .event(run, "turn.completed", "", None)
-        .await
-        .unwrap();
-    s.store
-        .patch_run(
-            run,
-            json!({"status": "succeeded", "recoveryPending": false}),
-        )
-        .await
-        .unwrap();
-    runtime::pump(&s, &connection, &mut session).await.unwrap();
-
+    // Register waits while their source delivery is still active. Scheduling
+    // after the reply settles would create a continuation with no destination.
     let configuration = s
         .mcps
         .run_configuration(&s, &s.store.run(run).await.unwrap())
@@ -4536,6 +4532,37 @@ async fn an_authorized_participant_can_reset_a_settled_thread_without_erasing_it
         s.worker.cancel(&s, run).await.unwrap();
         assert!(s.chat_detail(chat).await.unwrap()["wakeup"].is_null());
     }
+
+    s.store
+        .event(run, "turn.completed", "", None)
+        .await
+        .unwrap();
+    s.store
+        .patch_run(
+            run,
+            json!({ "status": "succeeded", "recoveryPending": false }),
+        )
+        .await
+        .unwrap();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+
+    s.store
+        .patch_run(run, json!({ "status": "running" }))
+        .await
+        .unwrap();
+    let late_wait = cairn_installation::chats::sleep::schedule(
+        &s,
+        bearer,
+        &json!({ "seconds": 3600, "reason": "After the reply already settled" }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(late_wait.status, 409);
+    assert!(s.chat_detail(chat).await.unwrap()["wakeup"].is_null());
+    s.store
+        .patch_run(run, json!({ "status": "succeeded" }))
+        .await
+        .unwrap();
 
     s.store
         .patch_run(run, json!({ "recoveryPending": true }))

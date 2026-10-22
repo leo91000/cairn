@@ -41,7 +41,12 @@ fn tls_acceptor() -> tokio_rustls::TlsAcceptor {
     let key = rustls::pki_types::PrivatePkcs8KeyDer::from(
         include_bytes!("../../../../tests/fixtures/slack-socket/server-key.der").to_vec(),
     );
-    let config = rustls::ServerConfig::builder()
+    // Workspace feature unification enables both crypto backends. The fixture
+    // must select its provider independently of other tests or the host binary.
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
         .with_no_client_auth()
         .with_single_cert(vec![cert], key.into())
         .unwrap();
@@ -294,6 +299,9 @@ async fn overdue_metadata_does_not_late_ack_or_import_the_slack_event() {
 async fn an_untrusted_wss_certificate_never_reaches_a_slack_envelope() {
     use cairn_installation::plugins::{connections::Connection, socket as transport};
     use tokio_util::sync::CancellationToken;
+    // This test starts the ordinary transport in-process instead of through
+    // Cairn's main, which installs this same provider before any TLS client.
+    cairn_installation::tls::install_provider();
     let root = TempDir::new().unwrap();
     let service = Service::new(common::config(root.path())).await.unwrap();
     common::relay_fixture::claimed(&service).await.unwrap();

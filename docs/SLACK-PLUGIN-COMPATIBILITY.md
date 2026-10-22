@@ -142,3 +142,38 @@ readers can process these records but retain their earlier finite-retry behavior
 The additive hint alone therefore does not change epoch10 / SQLite9 or the legacy
 tree. The full-PR inventory, forward migration/recovery and final qualification
 remain required. See the separately recorded pending-event storage observation.
+
+## Accepted native continuation delivery
+
+`plugin-deliveries` gains an optional `continuationOf` input ID. Absent values keep
+ordinary delivery behavior. A native wait reserves one row under its wakeup ID,
+retaining the original instance/revision, resource/route/person proof and reply
+metadata, without copying per-reply retry state or a predecessor's checkpoint.
+Repeated registration keeps the same ID; replacement removes the previous unused
+reservation in the same transaction. The existing 20-row ceiling includes these
+reservations, and failed reservation rolls back the wait. Progress persistence
+compares its original row before updating, preventing a delayed callback from
+recreating a removed reservation. Activity follows the logical task's newest
+reservation. Existing new-turn intent is committed before native admission, so
+an independent external contribution queues behind the task without cancelling
+its wakeup; its serialized shape is unchanged. Existing revision/deletion cleanup applies to all its rows.
+
+A `chat.wakeup.delivered` event stores only `{ messageId }` at the actual native
+acknowledgement, requiring both the current execution ID and exact `chat.wakeup`
+launch provenance. Repeated acknowledgements do not create another boundary.
+Ordinary human message rows and events keep their shape; no synthetic human row
+is inserted. Reply selection and frozen predecessor ranges recognize both input
+receipt kinds. Clients explicitly omit the internal receipt from presentation.
+
+Accepted delivery retention now follows native work rather than a 24-hour age
+cutoff. Fresh-message age policy is separate. No pending limit, authority fence or
+finite handler-error budget is removed. Earlier development snapshots' already
+settled/orphaned deliveries are not reconstructed from arbitrary later output;
+start a new source request when no forwarding record remains.
+
+These are additive records inside the already incompatible, unreleased epoch-10
+/ SQLite-9 contract above; no additional table, vault envelope, transition,
+automatic migration or legacy-tree change is introduced. Pre-Slack downgrade and
+production deployment remain fenced. This is a checkpoint inventory, not final
+whole-contract compatibility qualification. Local overhead is recorded in
+[continuation measurements](performance/SLACK-CONTINUATION-DELIVERY.md).

@@ -460,17 +460,82 @@ fn limits(db: &Db<'_>, connection: &Connection, author: &str) -> Result<Counters
         }
         counters.push((key, personal));
     }
+    pending_capacity(db, &connection.id)?;
+    Ok(Counters(counters))
+}
+
+fn pending_capacity(db: &Db<'_>, connection: &str) -> Result<()> {
     let outstanding = db
         .list(DELIVERIES)?
         .iter()
-        .filter(|value| value["connectionId"] == connection.id)
+        .filter(|value| value["connectionId"] == connection)
         .count();
     if outstanding >= 20 {
         return Err(Error::too_many_requests(
             "Connection has too much pending work.",
         ));
     }
-    Ok(Counters(counters))
+    Ok(())
+}
+
+/// Reserve forwarding before a native wait is committed. Each continuation has
+/// its own native input ID and reply checkpoint, with the original source scope.
+pub(crate) fn reserve_continuation(
+    db: &Db<'_>,
+    chat: &Value,
+    run: &Value,
+    wakeup: &Value,
+) -> Result<()> {
+    let source = text(&run["chatExecution"], "messageId");
+    let Some(mut delivery) = db.get(DELIVERIES, source)? else {
+        if matches!(
+            super::requesters::recorded(db, text(chat, "id"), source)?,
+            Some(super::requesters::Principal::External(_))
+        ) {
+            return Err(Error::conflict(
+                "This external turn's reply already settled. Start a new request before waiting.",
+            ));
+        }
+        return Ok(());
+    };
+    if delivery["chatId"] != chat["id"] || wakeup["messageId"] != source {
+        return Err(Error::conflict("The continuation's source turn changed."));
+    }
+    let previous = text(&chat["wakeup"], "id");
+    if let Some(replaced) = db.get(DELIVERIES, previous)?
+        && replaced["continuationOf"] == source
+        && replaced["chatId"] == chat["id"]
+        && replaced["connectionId"] == delivery["connectionId"]
+    {
+        if db.get(CHECKPOINTS, &checkpoint_key(previous))?.is_some() {
+            return Err(Error::conflict(
+                "The previous continuation already began its reply.",
+            ));
+        }
+        db.remove(DELIVERIES, previous)?;
+    }
+    pending_capacity(db, text(&delivery, "connectionId"))?;
+    let fields = delivery.as_object_mut().unwrap();
+    for field in ["questionRetryAt", "progressAt", "state"] {
+        fields.remove(field);
+    }
+    delivery["id"] = wakeup["id"].clone();
+    delivery["continuationOf"] = json!(source);
+    delivery["asked"] = json!([]);
+    delivery["attempts"] = json!(0);
+    delivery["createdAt"] = json!(now());
+    delivery["nextAttemptAt"] = json!(now());
+    db.put(DELIVERIES, &delivery)?;
+    for mut activity in db.list("plugin-activity")? {
+        if activity["chatId"] == chat["id"]
+            && (activity["deliveryId"] == source || activity["deliveryId"] == previous)
+        {
+            activity["deliveryId"] = wakeup["id"].clone();
+            activity["updatedAt"] = json!(now());
+            db.put("plugin-activity", &activity)?;
+        }
+    }
+    Ok(())
 }
 
 /// Files a person attached, fetched from hosts the plugin declares (at most four,
@@ -775,6 +840,13 @@ pub(crate) async fn submit_approved(
             let message_id = id();
             let message = json!({ "id": message_id, "text": content, "attachmentIds": attachment_ids });
             let principal = super::requesters::Principal::admitted(&connection, &author);
+            if new_turn {
+                // Native admission must already know this request queues behind
+                // the current task, including its scheduled continuations.
+                let key = super::turns::key(&chat_id, &message_id);
+                let binding = binding(&connection, &author, &thread, shared);
+                db.set(&key, &json!({ "binding": binding }), None)?;
+            }
             let queued = crate::chats::send_in(
                 db,
                 &chat_id,
@@ -782,11 +854,6 @@ pub(crate) async fn submit_approved(
                 principal.as_ref(),
                 &crate::native::policy::Origin::default(),
             )?;
-            if new_turn {
-                let key = super::turns::key(&chat_id, &message_id);
-                let binding = binding(&connection, &author, &thread, shared);
-                db.set(&key, &json!({ "binding": binding }), None)?;
-            }
             counters.increment(db)?;
             let receipt = json!({ "chatId": chat_id, "messageId": queued["id"] });
             db.set(&dedupe, &receipt, Some(now() + 30 * 86_400_000))?;
@@ -1262,11 +1329,21 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> 
         return Ok(Turn::Waiting);
     }
     let delivered: Option<i64> = db.0.query_row(
-        "SELECT id FROM events WHERE run_id=?1 AND type='chat.user' AND json_extract(payload,'$.messageId')=?2 ORDER BY id LIMIT 1",
+        "SELECT id FROM events WHERE run_id=?1 AND type IN ('chat.user','chat.wakeup.delivered') AND json_extract(payload,'$.messageId')=?2 ORDER BY id LIMIT 1",
         rusqlite::params![run_id, delivery["id"].as_str()], |row| row.get(0),
     ).optional()?;
     let Some(delivered) = delivered else {
         let run = db.run(&run_id)?;
+        if delivery["continuationOf"].is_string()
+            && chat["wakeup"]["id"] != delivery["id"]
+            && run
+                .as_ref()
+                .is_none_or(|run| run["chatExecution"]["messageId"] != delivery["id"])
+        {
+            return Err(Error::forbidden(
+                "The scheduled continuation was cancelled or replaced.",
+            ));
+        }
         // Queued requests can fail before their message reaches the agent.
         return Ok(match run.as_ref().and_then(|run| run["status"].as_str()) {
             Some("failed" | "interrupted") => Turn::Stopped { failed: true },

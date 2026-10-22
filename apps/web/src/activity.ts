@@ -228,7 +228,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
   }
 
   for (const [eventIndex, event] of events.entries()) {
-    if (event.type === 'artifact')
+    if (event.type === 'artifact' || event.type === 'chat.wakeup.delivered')
       continue
     if (waitBoundaries.has(event.type) || (event.type === 'status' && terminalStatuses.has(event.text)))
       placeScheduled()

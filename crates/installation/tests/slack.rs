@@ -7,6 +7,8 @@ mod checkpoints;
 mod common;
 #[path = "slack/controller.rs"]
 mod controller;
+#[path = "slack/recovery.rs"]
+mod recovery;
 #[path = "slack/reset.rs"]
 mod reset;
 #[path = "slack/socket.rs"]
@@ -141,6 +143,15 @@ async fn api(
                 }
             }
             if let Some(error) = slack.metadata_errors.lock().await.pop_front() {
+                if error == "fixture_interrupted_body" {
+                    // A real broken HTTP body, not a synthetic JSON error.
+                    // The host must surface a transport failure to Luau.
+                    return Body::from_stream(futures_util::stream::iter([
+                        Ok(b"{\"ok\":".to_vec()),
+                        Err(std::io::Error::other("Synthetic metadata body interrupted")),
+                    ]))
+                    .into_response();
+                }
                 return (
                     StatusCode::OK,
                     [("retry-after", "1")],
@@ -449,6 +460,7 @@ enum DeliveryScenario {
     SocketPeerSilent,
     SocketTransientMetadata,
     ReplyTransientMetadata,
+    ReplyInterruptedMetadata,
     CapacityAfterAdmission,
     LongReply,
     LongReplyRateLimited,
@@ -866,8 +878,16 @@ async fn exchange(scenario: DeliveryScenario) {
     } else {
         Vec::new()
     };
-    let transient_reads_before = if matches!(scenario, DeliveryScenario::ReplyTransientMetadata) {
-        *slack.metadata_errors.lock().await = vec!["internal_error".to_owned(); 6].into();
+    let transient_reads_before = if matches!(
+        scenario,
+        DeliveryScenario::ReplyTransientMetadata | DeliveryScenario::ReplyInterruptedMetadata
+    ) {
+        let error = if matches!(scenario, DeliveryScenario::ReplyInterruptedMetadata) {
+            "fixture_interrupted_body"
+        } else {
+            "internal_error"
+        };
+        *slack.metadata_errors.lock().await = vec![error.to_owned(); 6].into();
         Some(slack.metadata_attempts.load(Ordering::SeqCst))
     } else {
         None

@@ -18,6 +18,7 @@ use crate::{
 };
 use handoff::handoff_context;
 use questions::{find_question, questions, save_question};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -326,7 +327,14 @@ pub(crate) fn send(
         };
     }
     touch(&mut chat);
-    chat["wakeup"] = Value::Null;
+    // An independently admitted external turn waits behind the current task.
+    // Its author does not acquire control over that task's scheduled wakeup.
+    let independent = db
+        .kv(&crate::plugins::turns::key(chat_id, text(&values, "id")))?
+        .is_some();
+    if !independent {
+        chat["wakeup"] = Value::Null;
+    }
     db.put("chats", &chat)?;
     if let Some((mut question, answers)) = answer {
         question.status = QuestionStatus::Answering;
@@ -394,7 +402,7 @@ fn acknowledge(db: &Db<'_>, run_id: &str, message_id: &str) -> Result<()> {
     };
     let chat_id = text(&chat, "id").to_owned();
     let Some(mut message) = find_message(db, &chat_id, message_id)? else {
-        return Ok(());
+        return acknowledge_wakeup(db, &chat, run_id, message_id);
     };
     let settled = message["status"] == MessageStatus::Delivered
         || message["status"] == MessageStatus::Cancelled;
@@ -426,6 +434,37 @@ fn acknowledge(db: &Db<'_>, run_id: &str, message_id: &str) -> Result<()> {
     db.event(run_id, "chat.user", text, Some(&payload))?;
     touch(&mut chat);
     db.put("chats", &chat)?;
+    Ok(())
+}
+
+/// A scheduled continuation is native input, without a human message row. Its
+/// actual receipt still delimits output, independently of the launch event.
+fn acknowledge_wakeup(db: &Db<'_>, chat: &Value, run_id: &str, message_id: &str) -> Result<()> {
+    if !is_active(chat) {
+        return Ok(());
+    }
+    let Some(run) = db.run(run_id)? else {
+        return Ok(());
+    };
+    if run["chatExecution"]["messageId"] != message_id {
+        return Ok(());
+    }
+    let launched = db.0.query_row(
+        "SELECT EXISTS(SELECT 1 FROM events WHERE run_id=?1 AND type='chat.wakeup' AND json_extract(payload,'$.id')=?2)",
+        rusqlite::params![run_id, message_id], |row| row.get::<_, bool>(0),
+    )?;
+    let received: Option<i64> = db.0.query_row(
+        "SELECT id FROM events WHERE run_id=?1 AND type='chat.wakeup.delivered' AND json_extract(payload,'$.messageId')=?2 LIMIT 1",
+        rusqlite::params![run_id, message_id], |row| row.get(0),
+    ).optional()?;
+    if launched && received.is_none() {
+        db.event(
+            run_id,
+            "chat.wakeup.delivered",
+            "",
+            Some(&json!({ "messageId": message_id })),
+        )?;
+    }
     Ok(())
 }
 

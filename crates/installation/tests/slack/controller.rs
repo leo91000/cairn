@@ -2,6 +2,7 @@
 //! process. It supplies no VM isolation proof; it never fabricates completed work.
 use axum::{
     Json, Router,
+    body::Body,
     extract::{FromRequest, Request, State},
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -10,15 +11,19 @@ use axum::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use cairn_installation::{chat_process, config::Config};
 use serde_json::{Value, json};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, convert::Infallible, sync::Arc};
 use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
 
-type Completion = watch::Receiver<Option<(String, i32)>>;
+#[derive(Clone)]
+struct Attempt {
+    done: watch::Receiver<Option<i32>>,
+    logs: watch::Receiver<String>,
+}
 
 pub struct Controller {
     config: Config,
-    attempts: Mutex<HashMap<String, Completion>>,
+    attempts: Mutex<HashMap<String, Attempt>>,
     pub plans: Mutex<Vec<Value>>,
     budget: Mutex<Value>,
 }
@@ -68,22 +73,43 @@ async fn handle(State(state): State<Arc<Controller>>, request: Request) -> Respo
     }
     let attempt = path.split('/').nth(2).unwrap().to_owned();
     if path.ends_with("/logs") || path.ends_with("/wait") {
-        let Some(mut done) = state.attempts.lock().await.get(&attempt).cloned() else {
+        let Some(mut attempt) = state.attempts.lock().await.get(&attempt).cloned() else {
             return StatusCode::NOT_FOUND.into_response();
         };
+        if path.ends_with("/logs") {
+            // Deliver real adapter events while the provider is still running.
+            // Buffering until completion prevents a native wait from observing
+            // its acknowledged input during the turn that schedules it.
+            let stream = futures_util::stream::unfold(
+                (attempt.logs, 0),
+                |(mut logs, mut offset)| async move {
+                    loop {
+                        let chunk = {
+                            let current = logs.borrow_and_update();
+                            let chunk = current[offset..].to_owned();
+                            offset = current.len();
+                            chunk
+                        };
+                        if !chunk.is_empty() {
+                            return Some((Ok::<_, Infallible>(chunk), (logs, offset)));
+                        }
+                        if logs.changed().await.is_err() {
+                            return None;
+                        }
+                    }
+                },
+            );
+            return Body::from_stream(stream).into_response();
+        }
         let result = loop {
-            if let Some(result) = done.borrow().clone() {
+            if let Some(result) = *attempt.done.borrow() {
                 break result;
             }
-            if done.changed().await.is_err() {
+            if attempt.done.changed().await.is_err() {
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
         };
-        if path.ends_with("/wait") {
-            return Json(json!({ "StatusCode": result.1 })).into_response();
-        }
-        let frame = json!({"type": "output", "stderr": false, "data": STANDARD.encode(result.0)});
-        return format!("{frame}\n").into_response();
+        return Json(json!({ "StatusCode": result })).into_response();
     }
     // Only the actual start endpoint launches a process. This fixture does not
     // implement VM snapshots/artifacts or project exports; reject their paths.
@@ -98,12 +124,19 @@ async fn handle(State(state): State<Arc<Controller>>, request: Request) -> Respo
     let plan: Value = serde_json::from_slice(&tokio::fs::read(path).await.unwrap()).unwrap();
     state.plans.lock().await.push(plan.clone());
     let (done, receiver) = watch::channel(None);
+    let (logs, output) = watch::channel(String::new());
     assert!(
         state
             .attempts
             .lock()
             .await
-            .insert(attempt, receiver)
+            .insert(
+                attempt,
+                Attempt {
+                    done: receiver,
+                    logs: output
+                }
+            )
             .is_none(),
         "a read must not launch twice"
     );
@@ -122,16 +155,20 @@ async fn handle(State(state): State<Arc<Controller>>, request: Request) -> Respo
         chat["inputDirectory"] = source("/run/cairn-chat").into();
         let cwd = chat["cwd"].as_str().unwrap().to_owned();
         let (events, mut received) = tokio::sync::mpsc::channel(128);
+        let collected = logs.clone();
         let output = tokio::spawn(async move {
-            let mut lines = String::new();
             while let Some(event) = received.recv().await {
-                lines.push_str(&format!("{event}\n"));
+                let frame = json!({
+                    "type": "output",
+                    "stderr": false,
+                    "data": STANDARD.encode(format!("{event}\n")),
+                });
+                collected.send_modify(|output| output.push_str(&format!("{frame}\n")));
             }
-            lines
         });
         let result =
             chat_process::run(&config, &home, chat, events, CancellationToken::new()).await;
-        let mut output = output.await.unwrap();
+        output.await.unwrap();
         if let Err(error) = &result {
             eprintln!(
                 "fixture adapter failed: {}; binary={} exists={}; cwd={} exists={}",
@@ -141,12 +178,15 @@ async fn handle(State(state): State<Arc<Controller>>, request: Request) -> Respo
                 cwd,
                 std::path::Path::new(&cwd).exists()
             );
-            output.push_str(&format!(
-                "{}\n",
-                json!({"type": "fixture.error", "message": error.message})
-            ));
+            let event = json!({ "type": "fixture.error", "message": error.message });
+            let frame = json!({
+                "type": "output",
+                "stderr": false,
+                "data": STANDARD.encode(format!("{event}\n")),
+            });
+            logs.send_modify(|output| output.push_str(&format!("{frame}\n")));
         }
-        let _ = done.send(Some((output, if result.is_ok() { 0 } else { 1 })));
+        let _ = done.send(Some(if result.is_ok() { 0 } else { 1 }));
     });
     Json(json!({})).into_response()
 }

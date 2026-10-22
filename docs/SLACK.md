@@ -67,7 +67,41 @@ or otherwise unavailable channel refuses the operation. Uncertain writes persist
 a native delivery checkpoint and are left for reconciliation rather than posted
 a second time after a worker or manager restart. Checkpoints are bounded per
 pending delivery and removed on settlement, rather than accumulating permanent
-plugin storage receipts.
+plugin storage receipts. A native connection failure, timeout or interrupted body
+while reading channel metadata yields a retryable unavailable read, without
+spending the finite package-error budget. Native authority/validation refusals
+remain failures; uncertain message writes retain their separate handling.
+
+## Accepted work across native waits
+
+An admitted task keeps its reply delivery while native execution is queued,
+waiting or recovering, including beyond 24 hours. This does not change the
+configurable freshness window for newly received requests.
+
+Before `cairn_workspace.sleep` or a deferred `wait_for` commits, Cairn reserves
+another delivery for that exact host-generated continuation input. It retains
+its Slack destination, requester and route proof, with a separate reply checkpoint.
+A full 20-delivery queue refuses the wait atomically; replacing or repeating a
+registration does not accumulate reservations. No new admission quota is consumed.
+Another authorized participant’s independent mention queues behind that task;
+it does not cancel the author’s scheduled continuation.
+The waiting turn may post its own answer; the resumed turn posts its own final
+answer in the same source thread. An uncertain earlier post is not copied or
+replayed as the continuation's output.
+
+Native acknowledgement records `chat.wakeup.delivered` only for the current,
+actually launched continuation. That internal receipt delimits its output; web
+and Android omit it from presentation. Cancellation/replacement, source revocation
+and ordinary owner/package/person checks remain enforced. The package cannot
+select another participant's later output by naming a conversation.
+
+Actual-worker fixtures exercise sleep, replacement, a granted package condition,
+manager restart while paused, and aging an accepted delivery beyond 24 hours.
+They use a fake model process and local Slack HTTP fixtures; they do not prove a
+real Slack workspace, physical VM restoration or production object storage.
+The [storage observation](performance/SLACK-CONTINUATION-DELIVERY.md) describes
+reservation overhead and its limits. Questions, stop, full recovery qualification
+and all remaining Q1–Q20 functions remain required.
 
 ## First Socket Mode exchange
 

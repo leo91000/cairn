@@ -13,6 +13,19 @@ const events: RunEvent[] = sample.slice(0, 15).map((payload, index) => ({
   payload,
 }))
 describe('conversation activity', () => {
+  it('keeps native continuation receipts out of chat and run presentation', () => {
+    const receipt: RunEvent = {
+      id: 1,
+      runId: 'chat',
+      createdAt: 1,
+      type: 'chat.wakeup.delivered',
+      text: '',
+      payload: { messageId: 'native-wakeup' },
+    }
+    for (const chat of [true, false])
+      expect(activityEntries([receipt], chat)).toEqual([])
+  })
+
   it('keeps question-retirement recovery instructions visible in chat', () => {
     const instructions = 'Questions saved before this update could not be matched to their original turn. They were withdrawn without answering. Ask the agent to repeat them in this conversation.'
     const entries = activityEntries([{

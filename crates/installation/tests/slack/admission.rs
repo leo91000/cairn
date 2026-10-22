@@ -49,6 +49,60 @@ async fn transient_reply_metadata_does_not_exhaust_accepted_delivery() {
     exchange(DeliveryScenario::ReplyTransientMetadata).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupted_metadata_reads_do_not_exhaust_a_completed_accepted_reply() {
+    exchange(DeliveryScenario::ReplyInterruptedMetadata).await;
+}
+
+#[tokio::test]
+async fn read_transport_recovery_does_not_hide_native_authority_or_write_failures() {
+    let root = TempDir::new().unwrap();
+    let service = Service::new(common::config(root.path())).await.unwrap();
+    let package = registry::builtin("slack").unwrap();
+    let mut source = package.source;
+    source.main = r#"
+        local api = require('./lib/api')
+        return { test = function(event)
+            return api.request(event.method, 'conversations.info', nil, nil, nil)
+        end }
+    "#
+    .to_owned();
+    for (method, code, retryable) in [
+        ("GET", "unavailable", true),
+        ("GET", "forbidden", false),
+        ("GET", "invalid", false),
+        ("GET", "not_found", false),
+        ("POST", "unavailable", false),
+    ] {
+        let mut session = service
+            .plugins
+            .host
+            .start(
+                &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+                &package.manifest,
+                &source,
+            )
+            .await
+            .unwrap();
+        let response = session
+            .dispatch("test", json!({ "method": method }), |name, _| async move {
+                assert_eq!(name, "http.request");
+                Err(cairn_plugin_host::Denied(code))
+            })
+            .await;
+        session.stop().await;
+        if retryable {
+            assert_eq!(response.unwrap()["status"], 503);
+        } else {
+            assert!(
+                response.is_err(),
+                "{method} {code} was treated as a transient read"
+            );
+        }
+    }
+    service.shutdown.cancel();
+}
+
 #[tokio::test]
 async fn transient_json_metadata_keeps_http_mentions_retryable() {
     let root = TempDir::new().unwrap();

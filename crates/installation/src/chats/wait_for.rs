@@ -296,6 +296,7 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
                     wakeup["display"] = display.clone();
                 }
             }
+            crate::plugins::work::reserve_continuation(db, &chat, &run, &wakeup)?;
             chat["wakeup"] = wakeup.clone();
             crate::nodes::exclusive::release_before_wait(db, text(&run, "id"))?;
             chat["updatedAt"] = created.into();

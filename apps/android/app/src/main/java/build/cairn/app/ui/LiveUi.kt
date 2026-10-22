@@ -738,6 +738,7 @@ internal fun timelineEntries(
             scheduled = null
         }
         for ((eventIndex, event) in folded.withIndex()) {
+            if (event.type == "chat.wakeup.delivered") continue
             if (
                 event.type in WAIT_BOUNDARIES ||
                     (event.type == "status" && event.text in TERMINAL_STATUSES)

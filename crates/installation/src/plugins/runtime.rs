@@ -264,9 +264,7 @@ pub async fn pump(s: &Service, connection: &Connection, session: &mut Session) -
         }
     }
     for mut delivery in owned(s, DELIVERIES, connection).await? {
-        if delivery["revision"] != connection.revision
-            || now() - delivery["createdAt"].as_i64().unwrap_or(0) > 86_400_000
-        {
+        if delivery["revision"] != connection.revision {
             work::finish(s, &delivery, "failed").await?;
             continue;
         }
@@ -357,6 +355,7 @@ async fn follow(
     session: &mut Session,
     delivery: &mut Value,
 ) -> Result<()> {
+    let previous = delivery.clone();
     let mut changed = false;
     for question in work::questions(s, connection, delivery).await? {
         let asked = delivery["asked"]
@@ -426,7 +425,17 @@ async fn follow(
         changed = true;
     }
     if changed {
-        s.store.put(DELIVERIES, delivery.clone()).await?;
+        let updated = delivery.clone();
+        s.store
+            .transaction(move |db| {
+                // A native wait may have replaced this reservation during dispatch.
+                // Never resurrect it or overwrite a newer scheduler decision.
+                if db.get(DELIVERIES, text(&previous, "id"))?.as_ref() == Some(&previous) {
+                    db.put(DELIVERIES, &updated)?;
+                }
+                Ok(())
+            })
+            .await?;
     }
     Ok(())
 }
