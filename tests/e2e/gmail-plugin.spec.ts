@@ -11,6 +11,8 @@ test('Gmail connects two explicit mailboxes with OAuth and saves no browser toke
   await useRelayForHttpMocks(page)
   const catalog = await workspace.api('/api/plugins')
   const gmail = catalog.packages.find((item: { id: string }) => item.id === 'gmail').manifest
+  expect(gmail.brand?.color).toBe('#EA4335')
+  expect(gmail.brand?.path).toBeTruthy()
   const connections: Record<string, unknown>[] = []
   const starts: Record<string, any>[] = []
   const saves: Record<string, any>[] = []
@@ -83,6 +85,11 @@ test('Gmail connects two explicit mailboxes with OAuth and saves no browser toke
   })
   await page.goto(workspacePath('/plugins/gmail'))
   await signIn(page)
+  const logo = page.getByRole('heading', { name: 'Gmail', exact: true }).locator('../..').locator('svg')
+  await expect(logo).toBeVisible()
+  await expect(logo.locator('path')).toHaveAttribute('d', gmail.brand.path)
+  await expect(logo.locator('..')).toHaveCSS('background-color', 'rgb(234, 67, 53)')
+
   for (const email of ['alice@example.test', 'bob@example.test']) {
     await page.getByRole('button', { name: 'Add account', exact: true }).click()
     const editor = page.getByRole('dialog', { name: 'New account' })
