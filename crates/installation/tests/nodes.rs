@@ -3893,6 +3893,75 @@ async fn node_agent_grants_are_edited_from_the_node_without_narrowing_all_node_a
 }
 
 #[tokio::test]
+async fn mission_wait_and_node_move_exclude_each_other_without_leaking_destination_capacity() {
+    for ordering in ["wait-first", "move-first", "concurrent"] {
+        let owner = Owner::new().await;
+        let (node, run_id) = (id(), id());
+        let mut destination = schedulable_node(&node, &limits(2, 4096, 65536));
+        destination["slots"] = 1.into();
+        owner.put("nodes", destination).await;
+        owner.grant_nodes(MAIN_AGENT_ID, json!([node])).await;
+        let mut record = run_record(&run_id, RunStatus::Running);
+        record["trigger"] = "manual".into();
+        record["snapshot"] = agent_run(&run_id, MAIN_AGENT_ID)["snapshot"].clone();
+        owner.add_run(&record).await;
+        let token = "synthetic-mission-move-wait";
+        owner
+            .service
+            .store
+            .set(
+                &format!("mcp-grant:{}", auth::hex_digest(token)),
+                json!({ "runId": run_id, "messageId": null, "servers": {}, "workspace": true }),
+                None,
+            )
+            .await
+            .unwrap();
+        let input = json!({
+            "condition": { "type": "delay", "seconds": 3600 }, "reason": "Wait for CI",
+        });
+        let args = json!({ "nodeId": node });
+        let register_wait = || cairn_installation::waits::schedule(&owner.service, token, &input);
+        // Retain the pre-wait run snapshot: the movement transaction must check
+        // the current durable wait, not only its earlier request snapshot.
+        let register_move = || moves::request_by_agent(&owner.service, &record, &args);
+        let (wait, movement) = match ordering {
+            "wait-first" => (register_wait().await, register_move().await),
+            "move-first" => {
+                let movement = register_move().await;
+                (register_wait().await, movement)
+            }
+            _ => tokio::join!(register_wait(), register_move()),
+        };
+        assert_ne!(
+            wait.is_ok(),
+            movement.is_ok(),
+            "{ordering}: {wait:?} {movement:?}"
+        );
+        let current = owner.run(&run_id).await;
+        assert_ne!(
+            current["wakeup"].is_object(),
+            current["moveRequest"].is_object()
+        );
+        let attempts = owner.service.store.list("node-attempts").await.unwrap();
+        let reservations = attempts
+            .iter()
+            .filter(|attempt| attempt["released"] != true)
+            .count();
+        assert_eq!(
+            reservations,
+            usize::from(movement.is_ok()),
+            "{ordering}: {attempts:?}"
+        );
+        if let Err(error) = wait {
+            assert_eq!(error.status, 409);
+        }
+        if let Err(error) = movement {
+            assert_eq!(error.status, 409);
+        }
+    }
+}
+
+#[tokio::test]
 async fn agents_choose_nodes_and_legacy_resource_limits_are_not_exposed() {
     let owner = Owner::new().await;
     let (status, agent) = owner

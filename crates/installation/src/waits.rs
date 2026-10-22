@@ -235,6 +235,11 @@ fn input_revision(db: &Db<'_>, run: &Value, chat: &Value) -> Result<(i64, Vec<St
 fn registering(db: &Db<'_>, bearer: &str, input: &Value) -> Result<(Value, Owner)> {
     let run = crate::project_workspaces::authorize_in(db, bearer)?;
     let owner = Owner::for_run(db, &run)?;
+    if !owner.chat && (run["moveRequest"].is_object() || run["moveReservation"].is_string()) {
+        return Err(Error::conflict(
+            "Finish the node move before registering a mission wait.",
+        ));
+    }
     if owner.chat {
         require_active(&owner.record)?;
         if owner.record["paused"] == true || continuation::has_unhandled_input(db, &owner.record)? {
