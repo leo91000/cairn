@@ -40,6 +40,9 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharin
     && printf 'fn main() {}\n' > crates/beacon/src/main.rs \
     && printf '' > crates/protocol/src/lib.rs \
     && printf '' > crates/beacon/src/lib.rs && cargo build --locked --release --bin cairn --features ublk
+# Workspace tuning must not invalidate the third-party dependency layer.
+COPY .cargo/config.toml ./.cargo/config.toml
+COPY --chmod=755 scripts/rust-release-inline75-v1.sh ./scripts/rust-release-inline75-v1.sh
 COPY crates/plugin-api ./crates/plugin-api
 COPY crates/plugin-host ./crates/plugin-host
 COPY crates/plugin-runtime ./crates/plugin-runtime
@@ -78,6 +81,8 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharin
     && printf '' > crates/beacon/src/lib.rs \
     && printf '' > crates/protocol/src/lib.rs \
     && cargo build --locked --release --bin cairn-beacon
+COPY .cargo/config.toml ./.cargo/config.toml
+COPY --chmod=755 scripts/rust-release-inline75-v1.sh ./scripts/rust-release-inline75-v1.sh
 COPY crates/beacon ./crates/beacon
 COPY crates/protocol ./crates/protocol
 COPY deploy/installations ./deploy/installations
