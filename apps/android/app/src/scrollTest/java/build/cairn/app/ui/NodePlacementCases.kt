@@ -72,7 +72,7 @@ abstract class NodePlacementCases {
     }
 
     @Test
-    fun nativeNodeEditorRequiresExplicitPeopleAndKeepsOneExecutionSlot() {
+    fun nativeNodeEditorRequiresExplicitPeopleAndSupportsSixExecutionSlots() {
         var saved: NodeConfiguration? = null
         val node =
             ExecutionNode(
@@ -93,8 +93,10 @@ abstract class NodePlacementCases {
                 )
             }
         }
-        compose.onNodeWithText("Slots d’exécution").assertIsNotEnabled()
-        compose.onNodeWithText("Une node native exécute une conversation à la fois.").assertExists()
+        compose.onNodeWithText("Slots d’exécution").assertIsEnabled().performTextReplacement("6")
+        compose
+            .onNodeWithText("Tous les slots partagent ces budgets.", substring = true)
+            .assertExists()
         compose.onNodeWithText("Réservation exclusive").assertDoesNotExist()
         compose.onNodeWithText("Mettez à jour le runtime", substring = true).assertDoesNotExist()
         compose.onNodeWithText("Personnes de confiance").performScrollTo().assertExists()
@@ -105,7 +107,7 @@ abstract class NodePlacementCases {
         compose.runOnIdle {
             assertEquals(true, saved?.nativeEnabled)
             assertEquals(listOf("trusted"), saved?.nativeAccounts)
-            assertEquals(1, saved?.slots)
+            assertEquals(6, saved?.slots)
         }
     }
 

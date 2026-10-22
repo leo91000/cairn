@@ -123,13 +123,13 @@ function exclusiveBlocked(node: ExecutionNode) {
       </p>
     </div>
 
-    <div v-if="backend === 'firecracker'" class="flex items-center justify-between gap-4 rounded-xl border border-line bg-surface px-5 py-4 phone:px-4">
+    <div class="flex items-center justify-between gap-4 rounded-xl border border-line bg-surface px-5 py-4 phone:px-4">
       <div class="min-w-0">
         <p class="text-sm font-semibold">
           All nodes, including future
         </p>
         <p class="text-xs text-muted">
-          New VM machines become usable by this agent as soon as they are enrolled. Native nodes are always chosen one by one.
+          {{ backend === 'native' ? 'Native machines must also enable execution and trust everyone directing the conversation.' : 'New VM machines become usable by this agent as soon as they are enrolled.' }}
         </p>
       </div>
       <UiSwitch v-model="allNodes" label="All nodes, including future" />

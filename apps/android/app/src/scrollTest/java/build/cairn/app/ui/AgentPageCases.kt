@@ -747,6 +747,30 @@ abstract class AgentPageCases {
     }
 
     @Test
+    fun nativeAgentCanUseAllCurrentAndFutureNodes() {
+        journey("agent") { fixture ->
+            open(AgentSection.Nodes)
+            waitForDescription("Exécution native sur l’hôte")
+            compose.onNodeWithContentDescription("Exécution native sur l’hôte").performClick()
+            compose
+                .onNodeWithContentDescription("Toutes les nodes natives, y compris futures")
+                .assertIsOff()
+                .performClick()
+                .assertIsOn()
+            back()
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.waitUntil(15000) {
+                compose.onAllNodesWithTag("agent-review").fetchSemanticsNodes().isNotEmpty()
+            }
+            confirmReview()
+            compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
+            val access = fixture.saved.single().second["access"]!!.jsonObject
+            assertEquals(JsonPrimitive("native"), access["backend"])
+            assertEquals(JsonNull, access["nodes"])
+        }
+    }
+
+    @Test
     fun everyMcpConnectionCanBeChosenEvenBeforeAnyExists() {
         journey(
             "agent",

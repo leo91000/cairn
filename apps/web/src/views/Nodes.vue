@@ -197,7 +197,6 @@ function edit(node: ExecutionNode) {
   if (editing.value && node.capabilities.backend === 'native') {
     editing.value.nativeEnabled ??= false
     editing.value.nativeAccounts ??= []
-    editing.value.slots = 1
   }
 
   tags.value = node.tags.join(', ')
@@ -746,10 +745,9 @@ function statusLabel(node: ExecutionNode) {
           </p>
         </fieldset>
         <fieldset class="form-section">
-          <legend>Slots and shared budgets</legend><p>{{ editing.capabilities.backend === 'native' ? 'A native node runs one conversation at a time. Resources are used on demand.' : 'All slots share these budgets. Resources are used on demand.' }}</p><div class="form-grid">
+          <legend>Slots and shared budgets</legend><p>All slots share these budgets. Resources are used on demand.</p><div class="form-grid">
             <label>Execution slots<input
               v-model.number="editing.slots"
-              :disabled="editing.capabilities.backend === 'native'"
               class="mt-1 block"
               type="number"
               min="1"

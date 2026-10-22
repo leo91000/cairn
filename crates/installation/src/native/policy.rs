@@ -223,7 +223,7 @@ fn allows_agent(db: &Db<'_>, run: &Value, node: &Value, agent: &Value) -> Result
         || !node_native(node)
         || node["nativeEnabled"] != true
         || node["revoked"] == true
-        || !explicit(&policy(agent)["nodes"], text(node, "id"))
+        || !crate::service::allowed(&policy(agent)["nodes"], text(node, "id"))
     {
         return Ok(false);
     }

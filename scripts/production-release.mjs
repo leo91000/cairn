@@ -121,7 +121,7 @@ export async function verifyInstallationCompatibility(before, after, { cwd } = {
 
     const migration = candidate.automaticMigration
     if (candidate.schema === 2 && migration?.fromEpochs.includes(previous.epoch)
-      && (previous.schema === 1 || previous.databaseVersion === migration.previousDatabaseVersion)) {
+      && (previous.schema === 1 || previous.databaseVersion <= migration.previousDatabaseVersion)) {
       const { stdout: plan } = await exec('git', ['show', `${after}:${migration.plan}`], { cwd })
       if (!plan.trim())
         throw new Error('The automatic migration requires a forward recovery plan')

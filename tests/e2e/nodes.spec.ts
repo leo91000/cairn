@@ -421,11 +421,12 @@ test('native enrollment requires explicit people and native agent grants', async
   // Once connected, the machine is configured first: trusted people, then who may use it.
   const dialog = page.getByRole('dialog', { name: 'Configure node' })
   await expect(dialog).toBeVisible({ timeout: 20000 })
-  await expect(dialog.getByLabel('Execution slots')).toBeDisabled()
+  await expect(dialog.getByLabel('Execution slots')).toBeEnabled()
+  await dialog.getByLabel('Execution slots').fill('6')
   await expect(dialog.getByRole('group', { name: 'Exclusive reservations' })).toHaveCount(0)
   await expect(dialog.getByLabel('Enable native execution')).not.toBeChecked()
   await expect(dialog.getByRole('group', { name: 'Trusted people', exact: true })).toBeVisible()
-  await expect(dialog).toContainText('A native node runs one conversation at a time.')
+  await expect(dialog).toContainText('All slots share these budgets.')
   // Native nodes never take exclusive reservations, so no runtime update is suggested.
   await expect(dialog).not.toContainText('needs an update before exclusive reservations')
   const callers = await workspace.api('/api/nodes/native-callers')
@@ -435,7 +436,7 @@ test('native enrollment requires explicit people and native agent grants', async
   await dialog.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(dialog).toHaveCount(0)
   const configured = (await workspace.api('/api/nodes')).find((value: { id: string }) => value.id === desktop)
-  expect(configured).toMatchObject({ nativeEnabled: true, nativeAccounts: [callers[0].id], slots: 1 })
+  expect(configured).toMatchObject({ nativeEnabled: true, nativeAccounts: [callers[0].id], slots: 6 })
 
   const grant = page.getByRole('dialog', { name: 'Who can use “Native desktop”?' })
   await expect(grant).toBeVisible()
@@ -465,6 +466,7 @@ test('native enrollment requires explicit people and native agent grants', async
   expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id).access.nodes).toContain(desktop)
 
   await node.getByRole('button', { name: 'Configure', exact: true }).click()
+  await expect(dialog.getByLabel('Execution slots')).toHaveValue('6')
   await expect(dialog.getByLabel(callers[0].email, { exact: true })).toBeChecked()
   await dialog.getByLabel('Enable native execution').uncheck()
   await dialog.getByRole('button', { name: 'Save', exact: true }).click()
@@ -472,6 +474,7 @@ test('native enrollment requires explicit people and native agent grants', async
   // Configuring it again does not ask who may use it.
   await expect(grant).toHaveCount(0)
   expect((await workspace.api('/api/nodes')).find((value: { id: string }) => value.id === desktop).nativeEnabled).toBe(false)
+  expect((await workspace.api('/api/nodes')).find((value: { id: string }) => value.id === desktop).slots).toBe(6)
 })
 
 test('on an older installation, finishing the first step sends the machine\'s whole list', async ({ page, workspace }) => {

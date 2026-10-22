@@ -465,9 +465,6 @@ impl Usage<'_> {
 
 /// Legacy nodes inherit the runner's slot count, or the historical four slots.
 pub(crate) fn slots(node: &Value) -> u64 {
-    if crate::native::policy::node_native(node) {
-        return 1;
-    }
     node["slots"]
         .as_u64()
         .or(node["runtimeSlots"].as_u64())
@@ -739,13 +736,6 @@ pub(crate) async fn configure_node(
             record["limits"] = serde_json::to_value(&request.limits)?;
             if let Some(slots) = request.slots {
                 record["slots"] = slots.into();
-            }
-            if crate::native::policy::node_native(&record)
-                && request.slots.is_some_and(|slots| slots != 1)
-            {
-                return Err(Error::bad(
-                    "Native nodes currently support one active execution.",
-                ));
             }
             if let Some(enabled) = request.native_enabled {
                 record["nativeEnabled"] = enabled.into();
@@ -1283,7 +1273,7 @@ fn execution_ready(node: &Value, body: &Value, expected: &Expectations) -> bool 
             && body["dataRoot"]
                 .as_str()
                 .is_some_and(|path| std::path::Path::new(path).is_absolute())
-            && body["budget"] == json!({ "slots": 1, "limits": node["limits"] });
+            && body["budget"] == json!({ "slots": slots(node), "limits": node["limits"] });
     }
     body["executionReady"] == true
         && body["pool"]["quarantined"] != true

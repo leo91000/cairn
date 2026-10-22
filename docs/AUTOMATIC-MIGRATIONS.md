@@ -10,7 +10,8 @@ Schema 2 records the installation `epoch`, its SQLite `databaseVersion`, and an
 optional `automaticMigration` with:
 
 - `fromEpochs`: the exact earlier epochs this candidate can migrate;
-- `previousDatabaseVersion`: the previous binaries' database version ceiling;
+- `previousDatabaseVersion`: the maximum SQLite version of the explicitly listed
+  source epochs; an earlier listed epoch may have a lower version;
 - `plan`: a committed document describing conversion and forward recovery;
 - `tests`: the exact Rust regression names that must pass in the backend suite.
 
@@ -82,7 +83,7 @@ against this database. Compatible same-epoch failures retain the normal image
 fallback. The release creates no backup or automatic data restore point.
 
 
-## Current transition: epochs 3–9 to 10
+## Retained transition: epochs 3–9 to 10
 
 Epoch 10 adds durable mission waits. SQLite advances from version 8 to 9 in the
 same transaction that rebuilds `runs_active_task` to include `waiting`. Existing
@@ -104,3 +105,33 @@ reviewed forward fix. Preserve the installation data; never lower SQLite's
 `user_version` or roll an older binary onto the migrated database. Merging this
 change does not deploy an installation. Local storage measurements and the
 reproduction command are in [mission waits](MISSION-WAITS.md).
+
+## Current transition: epochs 3–10 to 11
+
+Epoch 11 permits configurable concurrent native slots and an owner-selected
+all-node agent grant. SQLite advances from version 9 to 10 before admission,
+without rewriting existing records or changing workspace/checkpoint formats.
+Existing one-slot budgets, explicit node grants, native trust, provenance and
+delegation bounds remain intact. The previous controller refuses a persisted
+native budget with more than one slot, so matching JSON shapes do not make a
+rollback compatible. The version-10 fence prevents earlier managers from
+reopening the installation after this transition.
+
+`upgrades_version_nine_preserving_native_nodes_and_fences_older_binaries` verifies
+record preservation and the forward fence. Native placement and controller tests
+verify the applied-budget handshake, six admissions, overflow, release and trust
+checks; earlier migration regressions remain mandatory in exact-tree validation.
+
+Native supervisors retain their independent epoch gate. For an existing native
+host, prepare and verify the exact released candidate and its pinned tool bundle,
+drain admission and confirm no active attempts or owned workload cgroups remain,
+then stop the supervisor. Preserve its identity, state and previous tool bundles;
+select the reviewed candidate while stopped and restart the supervisor. Verify
+its runtime, health and applied budget before clearing maintenance or raising
+slots. Do not use the supervisor's compatible-version rollback activation path
+across this boundary. If startup fails after migration, keep the candidate and
+state, diagnose and retry it or apply a reviewed forward fix. Never lower
+`user_version` or restart the previous controller over the migrated state.
+
+Manager/runner rollout uses the existing automatic migration gate. This release
+does not create or restore backups, convert conversations, or grant host trust.

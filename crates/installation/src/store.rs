@@ -41,7 +41,7 @@ const READERS: usize = 4;
 
 // Advanced before Service::new runs any data migration. Older managers refuse
 // this database, and installed host updaters retain the candidate after a failure.
-const DATABASE_VERSION: i64 = 9;
+const DATABASE_VERSION: i64 = 10;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
