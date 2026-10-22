@@ -40,6 +40,8 @@ pub async fn maintain(s: Arc<Service>) {
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut patterns_loaded = false;
     loop {
+        s.plugins.files.expire();
+        s.plugins.oauth_flows.expire();
         let changed = tokio::select! {
             () = s.shutdown.cancelled() => break,
             () = s.plugins.changed.notified() => true,
@@ -425,6 +427,7 @@ async fn dispatch(
     }
     let context = Context {
         connection,
+        management: None,
         manifest: session.manifest().clone(),
         event: event.clone(),
         link: None,

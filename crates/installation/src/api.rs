@@ -41,7 +41,9 @@ async fn dispatch_inner(s: &Arc<Service>, input: &Input) -> Result<Value> {
         return crate::accounts::routes(s, input).await;
     }
     if under(&input.path, "/api/plugins") {
-        return crate::plugins::routes(s, input).await;
+        // Plugin handlers compose form workers, credential refreshes and HTTP I/O.
+        // Keep their future off this dispatcher's stack without changing task-local authority.
+        return Box::pin(crate::plugins::routes(s, input)).await;
     }
     if under(&input.path, "/api/mcps") {
         return crate::mcp_server::routes(s, input).await;
@@ -208,6 +210,7 @@ async fn run_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result
             crate::live::history(s, kind, id, input).await?
         }
         ("GET", ["runs", id]) => s.store.run(id).await?,
+        ("POST", ["runs", id, "chat"]) => s.chat_from_run(id).await?,
         ("GET", ["runs", id, "events"]) => {
             s.store.run(id).await?;
             let after = input.number("after", 0, 0, i64::MAX)?;

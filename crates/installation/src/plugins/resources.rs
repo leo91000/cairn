@@ -37,6 +37,13 @@ pub(crate) enum Access {
 }
 
 impl Access {
+    pub(crate) fn receipt_authority(&self) -> Value {
+        match self {
+            Self::Operational(reference) => json!(reference.revisions),
+            Self::Configuration { resource, .. } => json!([[resource.id, resource.revision]]),
+        }
+    }
+
     pub(crate) fn resource(&self) -> &Resource {
         match self {
             Self::Operational(reference) => &reference.resource,

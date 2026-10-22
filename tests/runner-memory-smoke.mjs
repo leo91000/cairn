@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
+import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -7,8 +8,7 @@ import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
 import { prepareStorageOrigin } from './runner-storage-smoke.mjs'
 
-// Physical memory counters complement the balloon's acknowledgement. A shared
-// memfd can retain all pages even when the guest reports successful inflation.
+// Physical anonymous-memory counters complement the balloon acknowledgement.
 export async function memorySmoke({
   root,
   docker,
@@ -58,26 +58,42 @@ export async function memorySmoke({
     catch { return '' }
   }
 
-  function sharedBytes() {
+  function anonymousBytes() {
     const stat = docker('exec', name, 'cat', '/sys/fs/cgroup/memory.stat')
-    const row = stat.split('\n').find(line => line.startsWith('shmem '))
+    const row = stat.split('\n').find(line => line.startsWith('anon '))
     assert.ok(row)
     return Number(row.split(' ')[1])
   }
 
   let started = false
+  let balloonOwner
   try {
     await api(`/runs/${id}`, 'POST')
     started = true
     await until(async () => (await output()).includes('ram.allocated'))
     // cgroup counters are periodically batched; allow their update before measuring.
     await setTimeout(2000)
-    const allocatedBytes = sharedBytes()
+    const allocatedBytes = anonymousBytes()
     const { vmId } = JSON.parse(docker('exec', name, 'cat', `/runner-state/${id}.vm.json`))
     const socket = `/runner-state/jails/firecracker/${vmId}/root/api.sock`
     const config = JSON.parse(docker('exec', name, 'cat', `/runner-state/jails/firecracker/${vmId}/root/config.json`))
     assert.equal(config['machine-config'].mem_size_mib, memoryMiB)
-    assert.equal(config.drives[1].socket, 'disk.sock')
+    assert.equal(config.drives[1].path_on_host, 'disk.blk')
+    assert.equal(config.drives[1].socket, undefined)
+
+    // The controller's rebalance loop returns ballooned memory when pressure
+    // clears. Hold its existing directory lease while testing a manual target.
+    balloonOwner = spawn('docker', ['--context', 'default', 'exec', '-i', name, 'flock', '--exclusive', `/runner-state/jails/firecracker/${vmId}`, 'node', '-e', 'process.stdout.write(\'owned\'); process.stdin.resume(); process.stdin.once(\'end\', () => process.exit(0))'], { stdio: ['pipe', 'pipe', 'pipe'] })
+    let owned = false
+    let ownerError = ''
+    balloonOwner.stdout.on('data', data => owned ||= data.toString().includes('owned'))
+    balloonOwner.stderr.on('data', data => ownerError += data.toString())
+    balloonOwner.on('error', error => ownerError += error.message)
+    await until(() => {
+      assert.equal(ownerError, '')
+      assert.equal(balloonOwner.exitCode, null, 'Balloon lease exited before acquisition')
+      return owned
+    })
 
     function balloon(method, endpoint, body) {
       const request = JSON.stringify({ socketPath: socket, path: endpoint, method })
@@ -105,7 +121,7 @@ export async function memorySmoke({
     const samples = []
     for (let index = 0; index < 5; index++) {
       await setTimeout(3000)
-      samples.push(sharedBytes())
+      samples.push(anonymousBytes())
     }
 
     const response = balloon('GET', '/balloon/statistics')
@@ -113,12 +129,12 @@ export async function memorySmoke({
     const statistics = JSON.parse(response.data)
     assert.ok(statistics.actual_mib >= amountMiB - 128)
     const reclaimedBytes = allocatedBytes - samples.at(-1)
-    assert.ok(reclaimedBytes >= 384 * 1024 * 1024, `Shared guest RAM stayed allocated: ${reclaimedBytes} bytes reclaimed`)
+    assert.ok(reclaimedBytes >= 384 * 1024 * 1024, `Anonymous guest RAM stayed allocated: ${reclaimedBytes} bytes reclaimed`)
     const lines = await output()
     assert.ok((lines.match(/ram.alive/g) || []).length >= 15, 'Live guest memory must survive reclamation')
     assert.equal((await (await api('/health')).json()).activeRuns, 1)
     const evidence = {
-      kind: 'shared-guest-memory-reclamation',
+      kind: 'anonymous-guest-memory-reclamation',
       memoryMiB,
       allocatedBytes,
       samples,
@@ -130,6 +146,7 @@ export async function memorySmoke({
     process.stdout.write(`${JSON.stringify(evidence)}\n`)
   }
   finally {
+    balloonOwner?.stdin.end()
     if (started) {
       await api(`/runs/${id}`, 'DELETE')
       await until(async () => (await (await api('/health')).json()).activeRuns === 0)

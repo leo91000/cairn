@@ -34,7 +34,7 @@ type Bundled = (
 const BUILTIN: &[Bundled] = include!(concat!(env!("OUT_DIR"), "/bundled_plugins.rs"));
 
 /// Path segments of the management API; never usable as package IDs.
-const RESERVED: &[&str] = &["packages"];
+const RESERVED: &[&str] = &["packages", "oauth"];
 
 #[derive(Clone)]
 pub struct Package {

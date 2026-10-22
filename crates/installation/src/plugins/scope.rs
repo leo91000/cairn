@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
 pub enum Scope {
+    Managed(Box<Scope>, super::management::Authority),
     /// The owner, through one instance: views, actions and tests.
     Instance(Box<Connection>, Arc<super::operations::Owner>),
     /// A signed public request. It has no Cairn account or owner authority.
@@ -41,7 +42,7 @@ pub struct Agent {
 }
 
 impl Scope {
-    pub(crate) async fn for_agent(
+    pub async fn for_agent(
         s: &Service,
         run: &Value,
         instances: Vec<Connection>,
@@ -109,6 +110,7 @@ impl Scope {
     /// What the script receives about the instances it may use. Never secret values.
     pub fn instances(&self) -> Vec<Value> {
         match self {
+            Scope::Managed(scope, _) => scope.instances(),
             Scope::Instance(connection, _)
             | Scope::Ingress(connection)
             | Scope::Draft(connection, _) => {
@@ -134,6 +136,12 @@ pub fn summary(connection: &Connection) -> Value {
 /// Rereads the target instance. Owner scopes need it unchanged; agent scopes also need
 /// it enabled and still granting the agent.
 async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection> {
+    let scope = if let Scope::Managed(inner, authority) = scope {
+        authority.recheck(s).await?;
+        inner.as_ref()
+    } else {
+        scope
+    };
     match scope {
         Scope::Instance(_, owner) => owner.recheck(s).await?,
         Scope::Draft(_, values) => {
@@ -194,7 +202,9 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
         return Ok((**connection).clone());
     }
     let expected = match scope {
-        Scope::Draft(..) | Scope::ResourceAgent(_) | Scope::Setup(_) => unreachable!(),
+        Scope::Managed(..) | Scope::Draft(..) | Scope::ResourceAgent(_) | Scope::Setup(_) => {
+            unreachable!()
+        }
         Scope::Instance(connection, _) | Scope::Ingress(connection) => {
             if requested.is_some_and(|id| id != connection.id) {
                 return Err(Error::forbidden("Another instance is not available here."));
@@ -242,7 +252,7 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
     let granted = match scope {
         Scope::Instance(..) | Scope::Draft(..) => true,
         Scope::Ingress(_) => connection.enabled,
-        Scope::ResourceAgent(_) | Scope::Setup(_) => unreachable!(),
+        Scope::Managed(..) | Scope::ResourceAgent(_) | Scope::Setup(_) => unreachable!(),
         Scope::Agent(agent) => connection.grants(&agent.agent_id),
     };
     if !unchanged || !granted {
@@ -261,12 +271,17 @@ pub async fn call(
     method: &str,
     args: &Value,
 ) -> Result<Value> {
+    let original_scope = scope;
+    let (scope, management) = match scope {
+        Scope::Managed(inner, authority) => (inner.as_ref(), Some(authority.clone())),
+        _ => (scope, None),
+    };
     if matches!(scope, Scope::Setup(_)) {
         return Err(Error::forbidden(
             "Setup challenges cannot use operational capabilities.",
         ));
     }
-    let connection = current(s, scope, args).await?;
+    let connection = current(s, original_scope, args).await?;
     if registry::active(s, &package.manifest.id).await?.digest != package.digest {
         return Err(Error::forbidden("The plugin approval changed."));
     }
@@ -296,6 +311,7 @@ pub async fn call(
         link: None,
         draft,
         resource_grant: None,
+        management: management.clone(),
     };
     if matches!(scope, Scope::Ingress(_)) && matches!(method, "inbound.accept" | "inbound.deliver")
     {
@@ -316,16 +332,18 @@ pub async fn call(
         ));
     }
     let result = capabilities::effect(s, &context, method, args.clone(), || async {
-        current(s, scope, args).await?;
+        current(s, original_scope, args).await?;
         registry::require_digest(s, &package.manifest.id, &package.digest).await
     })
     .await?;
     // Revocation or a changed secret during slow I/O must not deliver its result.
     let bound_form = matches!(scope, Scope::Draft(_, values) if values.setup.is_some() || values.resource.is_some() || values.root.is_some());
-    if (matches!(scope, Scope::Agent(_)) || bound_form)
-        && matches!(method, "exec.run" | "http.request")
+    if (matches!(scope, Scope::Agent(_) | Scope::Instance(..))
+        || bound_form
+        || management.is_some())
+        && (matches!(method, "exec.run" | "http.request") || method.starts_with("files."))
     {
-        current(s, scope, args).await?;
+        current(s, original_scope, args).await?;
     }
     Ok(result)
 }

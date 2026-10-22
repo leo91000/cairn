@@ -1450,3 +1450,24 @@ rights from ordinary agent access.
 These adaptations preserve the newer generic provider interfaces from main; they
 do not deliver the Slack package, token lifecycle, socket primitives or remaining
 UI/public-MCP/installation-tool management parity. PR #226 remains a draft.
+
+## Main credential OAuth integration: remaining configuration gates
+
+The composed branch preserves main's credential OAuth, Gmail and transfer APIs
+alongside the resource and personal OAuth model. The demonstrated Slack HTTP
+journey uses a root signing secret and a workspace bot secret; it does not prove
+root `credential.oauth` combined with inert setup.
+
+That generic combination remains unfinished: web and Android choose inert setup
+for packages declaring resources or webhooks, but those setup editors and
+activation do not yet carry an owner-bound root OAuth flow. The activation path
+must also distinguish a setup ID from a saved connection ID. For an already saved
+instance, resource configuration forms must use the root credential engine's
+serialized refresh rather than inject a potentially expired vault token.
+
+These are unresolved integration gates, together with the documented equivalent
+public-MCP/installation-tool configuration operations. They must be completed
+before final delivery and merge; a green Slack fixture or CI checkpoint does not
+waive them. Current Slack work continues with concrete protocol and conversation
+features under the accepted Q1–Q20 scope. The PR remains a draft, and no live Slack
+workspace or production OAuth exchange has qualified these combinations.

@@ -1,7 +1,11 @@
 //! OAuth code capture and exchange are host operations. Anonymous callbacks can
 //! only deposit one code; the initiating account or admitted external person must
 //! finish through their own authorized interface.
+pub mod credential;
 pub(crate) mod personal;
+
+pub use credential::{Flows, access_token, callback_url, flow_credential};
+pub(crate) use credential::{access_token_managed, disconnect, draft_token};
 
 use super::{
     capabilities, connections, registry,
@@ -20,7 +24,7 @@ use axum::{
     extract::Request,
     response::{IntoResponse, Response},
 };
-use cairn_plugin_api::{Manifest, OAuth, OAuthTokenResponse};
+use cairn_plugin_api::{Manifest, OAuthProvider as OAuth, OAuthTokenResponse};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -163,6 +167,21 @@ pub(crate) struct Reference {
     digest: String,
     actor: Option<Actor>,
     subject_link: Option<(String, Value)>,
+}
+
+impl Reference {
+    /// Native identity and authorization generation, never a credential value.
+    pub(crate) fn receipt_authority(&self) -> Value {
+        json!({
+            "key": self.key,
+            "revision": self.revision,
+            "ownerAccess": self.owner_access,
+            "plugin": self.plugin,
+            "digest": self.digest,
+            "actor": self.actor,
+            "subjectLink": self.subject_link,
+        })
+    }
 }
 
 fn pending_key(state: &str) -> String {

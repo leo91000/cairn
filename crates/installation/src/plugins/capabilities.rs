@@ -1,6 +1,6 @@
 //! Host capabilities exposed to plugin scripts. Each call is checked against the
 //! manifest (by the host crate), then against the live connection here.
-use super::connections::{Connection, authorize, credential, ensure_owner, secret_values};
+use super::connections::{Connection, authorize, ensure_owner, secret_values};
 use crate::{
     config::{id, now},
     error::{Error, Result},
@@ -15,6 +15,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 /// What a handler acts for: its connection and the event being handled.
 pub struct Context {
+    pub management: Option<super::management::Authority>,
     pub connection: Connection,
     pub manifest: Manifest,
     pub event: Value,
@@ -162,14 +163,18 @@ where
 {
     match method {
         "storage.get" | "storage.set" | "storage.max" | "storage.delete" | "storage.list" => {
-            storage(s, &context.connection, method, &args).await
+            storage(s, context, method, &args).await
         }
         "http.request" => http(s, context, &args, authorize).await,
         "resources.get" | "resources.list" => {
             super::resources::call(s, context, method, &args).await
         }
-        "timers.after" | "timers.cancel" => timers(s, &context.connection, method, &args).await,
+        "timers.after" | "timers.cancel" => timers(s, context, method, &args).await,
         "exec.run" => super::programs::run(s, context, &args, authorize).await,
+        "files.create" | "files.append" | "files.read" | "files.delete" | "files.composeMime" => {
+            authorize_management(s, context).await?;
+            s.plugins.files.call(&context.connection, method, &args)
+        }
         _ => Err(Error::forbidden("Unknown plugin capability.")),
     }
 }
@@ -183,18 +188,17 @@ fn key(args: &Value) -> Result<String> {
 }
 
 /// Small connection-scoped values. Removed with the connection.
-async fn storage(
-    s: &Service,
-    connection: &Connection,
-    method: &str,
-    args: &Value,
-) -> Result<Value> {
+async fn storage(s: &Service, context: &Context, method: &str, args: &Value) -> Result<Value> {
     const KIND: &str = "plugin-storage";
-    let connection = connection.id.clone();
+    let connection = context.connection.id.clone();
+    let management = context.management.clone();
     let method = method.to_owned();
     let args = args.clone();
     s.store
         .transaction(move |db| {
+            if let Some(authority) = management {
+                authority.authorize(db)?;
+            }
             let owned = || {
                 db.list(KIND).map(|values| {
                     values
@@ -390,7 +394,14 @@ pub(crate) async fn authorization(
             .ok_or_else(|| Error::forbidden("This plugin declares no credential."))?;
         let secret = match &context.draft {
             Some(draft) => draft.credential.clone(),
-            None => credential(s, &context.connection).await?,
+            None => {
+                super::oauth::access_token_managed(
+                    s,
+                    &context.connection,
+                    context.management.as_ref(),
+                )
+                .await?
+            }
         }
         .ok_or_else(|| Error::forbidden("This connection has no credential."))?;
         return Ok(Some((rule.header.clone(), rule.prefix.clone(), secret)));
@@ -533,7 +544,7 @@ where
         if !form
             .as_object()
             .is_some_and(|form| form.len() <= 50 && form.values().all(Value::is_string))
-            || ["json", "body", "multipart"]
+            || ["json", "body", "multipart", "bodyFile"]
                 .iter()
                 .any(|key| args.get(*key).is_some_and(|value| !value.is_null()))
         {
@@ -547,6 +558,43 @@ where
             return Err(Error::too_large("Request body is too large."));
         }
         request = request.form(&fields);
+    } else if let Some(spec) = args.get("bodyFile").filter(|value| value.is_object()) {
+        if !context.manifest.permits_capability("files") {
+            return Err(Error::forbidden("File transfers are not approved."));
+        }
+        let bytes = s
+            .plugins
+            .files
+            .bytes(&context.connection, text(spec, "id"))?;
+        match text(spec, "format") {
+            "base64url" => {
+                use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+                let mut body = args.get("json").cloned().unwrap_or_else(|| json!({}));
+                let pointer = spec["jsonPointer"].as_str().unwrap_or("/raw");
+                if pointer.len() > 200 || !pointer.starts_with('/') {
+                    return Err(Error::bad(
+                        "Provide a JSON pointer to the encoded file field.",
+                    ));
+                }
+                let (parent, key) = pointer.rsplit_once('/').unwrap();
+                let key = key.replace("~1", "/").replace("~0", "~");
+                let object = if parent.is_empty() {
+                    body.as_object_mut()
+                } else {
+                    body.pointer_mut(parent).and_then(Value::as_object_mut)
+                }
+                .ok_or_else(|| Error::bad("The file's JSON parent must be an object."))?;
+                object.insert(key, json!(URL_SAFE_NO_PAD.encode(bytes)));
+                request = request.json(&body);
+            }
+            "raw" => request = request.body(bytes),
+            "json" => {
+                request = request
+                    .header("content-type", "application/json")
+                    .body(bytes);
+            }
+            _ => return Err(Error::bad("Choose raw, json or base64url file format.")),
+        }
     } else if let Some(spec) = args.get("multipart").filter(|value| value.is_object()) {
         let (kind, body) = multipart(s, context, spec).await?;
         request = request.header("content-type", kind).body(body);
@@ -595,6 +643,20 @@ where
     // Retire the caller's proof after that I/O, before starting another request.
     authorize().await?;
     recheck_http_access(s, context, resource.as_ref(), oauth.as_ref()).await?;
+    let file_response = args.get("responseFile").filter(|v| v.is_object());
+    if file_response.is_some() && !context.manifest.permits_capability("files") {
+        return Err(Error::forbidden("File transfers are not approved."));
+    }
+    authorize_management(s, context).await?;
+    let claim =
+        super::idempotency::claim(s, context, args, resource.as_ref(), oauth.as_ref()).await?;
+    if let Some(super::idempotency::Claim::Cached(response)) = &claim {
+        authorize().await?;
+        recheck_http_access(s, context, resource.as_ref(), oauth.as_ref()).await?;
+        return Ok(response.clone());
+    }
+    authorize().await?;
+    recheck_http_access(s, context, resource.as_ref(), oauth.as_ref()).await?;
     let response = request
         .send()
         .await
@@ -614,22 +676,56 @@ where
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| Error::bad_gateway("The response was interrupted."))?;
-        if body.len() + chunk.len() > 1_048_576 {
-            return Err(Error::too_large("The response is larger than 1 MB."));
+        let limit = if file_response.is_some() && (200..300).contains(&status) {
+            super::files::MAX_BYTES * 4 / 3 + 65_536
+        } else {
+            1_048_576
+        };
+        if body.len() + chunk.len() > limit {
+            return Err(Error::too_large(
+                "The response is too large. Use a transfer file for large payloads.",
+            ));
         }
         body.extend_from_slice(&chunk);
+    }
+    authorize().await?;
+    recheck_http_access(s, context, resource.as_ref(), oauth.as_ref()).await?;
+    if let Some(spec) = file_response
+        && (200..300).contains(&status)
+    {
+        let media_type = headers
+            .get("content-type")
+            .and_then(Value::as_str)
+            .unwrap_or("application/octet-stream");
+        let file = s
+            .plugins
+            .files
+            .response(&context.connection, spec, &body, media_type)?;
+        return Ok(json!({ "status": status, "headers": headers, "file": file }));
     }
     let json = serde_json::from_slice::<Value>(&body).ok();
     if let Some(oauth) = &oauth {
         super::oauth::recheck(s, oauth).await?;
     }
     recheck_http_access(s, context, resource.as_ref(), oauth.as_ref()).await?;
-    Ok(json!({
+    let response = json!({
         "status": status,
         "headers": headers,
         "json": json,
         "text": if json.is_none() { json!(String::from_utf8_lossy(&body)) } else { Value::Null },
-    }))
+    });
+    if let Some(super::idempotency::Claim::Fresh(id)) = claim {
+        super::idempotency::complete(
+            s,
+            &context.connection,
+            &id,
+            &response,
+            context.management.as_ref(),
+            http_access_check(s, context, resource.as_ref(), oauth.as_ref()),
+        )
+        .await?;
+    }
+    Ok(response)
 }
 
 /// After awaited authority checks, inspect the resource chain and credential
@@ -640,56 +736,70 @@ async fn recheck_http_access(
     resource: Option<&super::resources::Access>,
     oauth: Option<&super::oauth::Reference>,
 ) -> Result<()> {
+    let checked = resource.is_some()
+        || oauth.is_some()
+        || context.resource_grant.is_some()
+        || context
+            .draft
+            .as_ref()
+            .is_some_and(|draft| draft.resource.is_some() || draft.root.is_some());
+    if checked {
+        let check = http_access_check(s, context, resource, oauth);
+        s.store.transaction(move |db| check(db)).await?;
+    }
+    Ok(())
+}
+
+/// The final publication fence also runs inside a receipt's completion transaction.
+/// No awaited write may separate an OAuth/resource snapshot from publication.
+fn http_access_check(
+    s: &Service,
+    context: &Context,
+    resource: Option<&super::resources::Access>,
+    oauth: Option<&super::oauth::Reference>,
+) -> impl FnOnce(&crate::store::Db<'_>) -> Result<()> + Send + 'static {
     let form = context
         .draft
         .as_ref()
         .and_then(|draft| draft.resource.clone());
     let root = context.draft.as_ref().and_then(|draft| draft.root.clone());
-    if resource.is_some()
-        || oauth.is_some()
-        || context.resource_grant.is_some()
-        || form.is_some()
-        || root.is_some()
-    {
-        let connection = context.connection.clone();
-        let resource = resource.cloned();
-        let oauth = oauth.cloned();
-        let grant = context.resource_grant.clone();
-        let vault = s.vault.clone();
-        // No network lookup follows this snapshot: a late owner check must not
-        // revive a disconnected credential or a revoked run/resource grant.
-        s.store
-            .transaction(move |db| {
-                if let Some(grant) = &grant {
-                    super::grants::recheck_in(db, grant)?;
-                }
-                if let Some(resource) = &resource {
-                    resource.current(db, &connection)?;
-                }
-                if let Some(form) = &form {
-                    form.current(db)?;
-                }
-                if let Some(root) = &root {
-                    root.current(db)?;
-                }
-                if let Some(oauth) = &oauth {
-                    super::oauth::recheck_in(&vault, db, oauth)?;
-                }
-                Ok(())
-            })
-            .await?;
+    let connection = context.connection.clone();
+    let resource = resource.cloned();
+    let oauth = oauth.cloned();
+    let grant = context.resource_grant.clone();
+    let vault = s.vault.clone();
+    move |db| {
+        if let Some(grant) = &grant {
+            super::grants::recheck_in(db, grant)?;
+        }
+        if let Some(resource) = &resource {
+            resource.current(db, &connection)?;
+        }
+        if let Some(form) = &form {
+            form.current(db)?;
+        }
+        if let Some(root) = &root {
+            root.current(db)?;
+        }
+        if let Some(oauth) = &oauth {
+            super::oauth::recheck_in(&vault, db, oauth)?;
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 /// Durable timers delivered later as `timer` events.
-async fn timers(s: &Service, connection: &Connection, method: &str, args: &Value) -> Result<Value> {
+async fn timers(s: &Service, context: &Context, method: &str, args: &Value) -> Result<Value> {
     const KIND: &str = "plugin-timers";
-    let connection = connection.clone();
+    let connection = context.connection.clone();
+    let management = context.management.clone();
     let method = method.to_owned();
     let args = args.clone();
     s.store
         .transaction(move |db| {
+            if let Some(authority) = management {
+                authority.authorize(db)?;
+            }
             let owned = db
                 .list(KIND)?
                 .into_iter()
@@ -736,4 +846,11 @@ async fn timers(s: &Service, connection: &Connection, method: &str, args: &Value
             Ok(json!(timer))
         })
         .await
+}
+
+pub(crate) async fn authorize_management(s: &Service, context: &Context) -> Result<()> {
+    if let Some(authority) = &context.management {
+        authority.recheck(s).await?;
+    }
+    Ok(())
 }

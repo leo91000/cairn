@@ -31,6 +31,13 @@ cairn.delivery = {
 cairn.http = {
     request = function(request) return call("http.request", request) end,
 }
+cairn.files = {
+    create = function(request) return call("files.create", request) end,
+    composeMime = function(request) return call("files.composeMime", request) end,
+    append = function(request) return call("files.append", request) end,
+    read = function(request) return call("files.read", request) end,
+    delete = function(request) return call("files.delete", request) end,
+}
 cairn.timers = {
     after = function(seconds, name, payload)
         return call("timers.after", { seconds = seconds, name = name, payload = payload })

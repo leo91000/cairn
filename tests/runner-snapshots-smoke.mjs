@@ -4,7 +4,6 @@ import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
 import {
   copyFile,
   mkdir,
@@ -18,6 +17,7 @@ import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
 import { blockDigest } from './block-digest.mjs'
 import { prepareStorageOrigin } from './runner-storage-smoke.mjs'
+import { ublkDeviceArguments } from './ublk-devices.mjs'
 
 async function main() {
   const image = process.argv[2]
@@ -36,10 +36,6 @@ async function main() {
   const peer = `${name}-peer`
   const network = `${name}-public`
   const endpoint = 'http://93.184.216.3:8080'
-  const devices = readFileSync('/proc/devices', 'utf8')
-  const charMajor = Number(devices.match(/(?:^|\n)\s*(\d+) ublk-char(?:\n|$)/)?.[1])
-  const blockMajor = Number(devices.split('Block devices:')[1]?.match(/(?:^|\n)\s*(\d+) (?:ublk|blkext)(?:\n|$)/)?.[1])
-  assert.ok(charMajor > 0 && blockMajor > 0, 'Load ublk_drv before running this native test')
   const brokers = []
   const plans = []
   let url
@@ -111,7 +107,7 @@ async function main() {
     docker('network', 'connect', '--ip', '93.184.216.3', network, peer)
     // SYS_PTRACE is observer-only: it permits smaps inspection of other UIDs.
     const capabilities = ['SYS_RESOURCE', 'SYS_PTRACE', 'SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE']
-    docker('run', '-d', '--name', name, '--user', '0:0', '--no-healthcheck', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(value => ['--cap-add', value]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/ublk-control', '--device-cgroup-rule', `c ${charMajor}:* rwm`, '--device-cgroup-rule', `b ${blockMajor}:* rwm`, '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', `${memoryGiB}g`, '--cpus', `${cpuQuota}`, '-e', `CONCURRENCY=${slots}`, '-e', `APP_RUNTIME_ID=snapshots-test-${imageId.slice(7)}`, '-e', 'CAIRN_READY_VM_POOL=true', '-e', `CAIRN_READY_VM_POOL_SIZE=${poolSize}`, '-e', 'CAIRN_BLOCK_TRANSPORT=ublk', '-e', 'CAIRN_DISK_LAYOUT=paired-ext4-v1', '-e', `CAIRN_VM_SNAPSHOTS=${snapshots}`, '-e', 'RUST_LOG=warn,cairn_performance=info', '--entrypoint', '/usr/local/bin/cairn', imageId, 'runner-broker')
+    docker('run', '-d', '--name', name, '--user', '0:0', '--no-healthcheck', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(value => ['--cap-add', value]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', ...ublkDeviceArguments(), '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', `${memoryGiB}g`, '--cpus', `${cpuQuota}`, '-e', `CONCURRENCY=${slots}`, '-e', `APP_RUNTIME_ID=snapshots-test-${imageId.slice(7)}`, '-e', 'CAIRN_READY_VM_POOL=true', '-e', `CAIRN_READY_VM_POOL_SIZE=${poolSize}`, '-e', 'CAIRN_BLOCK_TRANSPORT=ublk', '-e', 'CAIRN_DISK_LAYOUT=paired-ext4-v1', '-e', `CAIRN_VM_SNAPSHOTS=${snapshots}`, '-e', 'RUST_LOG=warn,cairn_performance=info', '--entrypoint', '/usr/local/bin/cairn', imageId, 'runner-broker')
     docker('network', 'connect', '--ip', '93.184.216.2', network, name)
     await reconnect()
     const fixture = await prepareStorageOrigin({

@@ -341,37 +341,6 @@ diff --git a/src/vmm/src/devices/virtio/block/virtio/io/mod.rs b/src/vmm/src/dev
 +        );
 +    }
 +}
-diff --git a/src/vmm/src/devices/virtio/block/vhost_user/device.rs b/src/vmm/src/devices/virtio/block/vhost_user/device.rs
---- a/src/vmm/src/devices/virtio/block/vhost_user/device.rs
-+++ b/src/vmm/src/devices/virtio/block/vhost_user/device.rs
-@@ -16,7 +16,7 @@
- use crate::devices::virtio::ActivateError;
- use crate::devices::virtio::block::CacheType;
- use crate::devices::virtio::device::{ActiveState, DeviceState, VirtioDevice, VirtioDeviceType};
--use crate::devices::virtio::generated::virtio_blk::{VIRTIO_BLK_F_FLUSH, VIRTIO_BLK_F_RO};
-+use crate::devices::virtio::generated::virtio_blk::{VIRTIO_BLK_F_DISCARD, VIRTIO_BLK_F_FLUSH, VIRTIO_BLK_F_RO};
- use crate::devices::virtio::generated::virtio_config::VIRTIO_F_VERSION_1;
- use crate::devices::virtio::generated::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
- use crate::devices::virtio::queue::Queue;
-@@ -41,7 +41,9 @@
-     | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
-     // We always try to negotiate readonly with the backend.
-     // If the backend is configured as readonly, we will accept it.
--    | (1 << VIRTIO_BLK_F_RO);
-+    | (1 << VIRTIO_BLK_F_RO)
-+    // Pass discard through only when the backend advertises support.
-+    | (1 << VIRTIO_BLK_F_DISCARD);
- 
- /// Use this structure to set up the Block Device before booting the kernel.
- #[derive(Debug, PartialEq, Eq)]
-@@ -637,6 +639,7 @@
-         };
-         let mut vhost_block = VhostUserBlockImpl::<MockMaster>::new(vhost_block_config).unwrap();
- 
-+        assert_ne!(vhost_block.avail_features & (1 << VIRTIO_BLK_F_DISCARD), 0);
-         // If backend has all features, features offered by block device
-         // should be negotiated and header flags should be set.
-         assert_eq!(
 diff --git a/src/vmm/src/devices/virtio/block/virtio/mod.rs b/src/vmm/src/devices/virtio/block/virtio/mod.rs
 --- a/src/vmm/src/devices/virtio/block/virtio/mod.rs
 +++ b/src/vmm/src/devices/virtio/block/virtio/mod.rs

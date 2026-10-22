@@ -33,6 +33,7 @@
 --                     or a collection declaring form=true: {instance, app, resource,
 --                     values, changed?, submit}. resource={collection,id?,parent?,secrets};
 --                     app/parent contain nonsecret settings; secrets are names only.
+    --                     { values, previous?, credential, secrets, instance?, changed?, submit }
 --                     -> FormResult; http and exec use the draft's credential and secrets
 --   webhook           a verified signed public POST         {endpoint, method, headers, body, instance, setup}
 --                     setup=true accepts only declared setup challenges; all host capabilities are refused
@@ -74,6 +75,13 @@ export type HttpRequest = {
     json: Json?,
     form: { [string]: string }?, -- URL encoded text fields, exclusive with other body types
     body: string?,
+    -- capability "files": a private handle, outside the worker's memory limit.
+    bodyFile: { id: string, format: "raw" | "json" | "base64url", jsonPointer: string? }?,
+    responseFile: { name: string?, mediaType: string?, jsonPointer: string?, encoding: ("base64" | "base64url")? }?,
+    -- Durable per-instance mutation receipt. An interrupted request with the same
+    -- key is refused until its outcome has been checked with the provider.
+    idempotencyKey: string?,
+    idempotencyInput: Json?, -- stable intent when MIME boundaries/file handles vary
     -- multipart/form-data: a JSON part plus deliverables of the reply being handled.
     multipart: {
         json: Json?,
@@ -190,6 +198,16 @@ export type HttpResponse = {
     headers: { [string]: string },
     json: Json?,
     text: string?,
+    file: TransferFile?,
+}
+
+export type TransferFile = { id: string, name: string, mediaType: string, size: number, expiresAt: number, messageId: string?, contentDigest: string? }
+export type MailAddress = string | { email: string, name: string? }
+export type MimeMessage = {
+    instance: string?, from: MailAddress, to: { MailAddress }?, cc: { MailAddress }?, bcc: { MailAddress }?, replyTo: { MailAddress }?,
+    subject: string?, text: string?, html: string?, messageId: string?, messageKey: string?,
+    inReplyTo: { string }?, references: { string }?,
+    attachments: { { id: string, name: string?, mediaType: string, contentId: string? } }?,
 }
 
 export type Cairn = {
@@ -207,6 +225,15 @@ export type Cairn = {
     },
     -- capability "http".
     http: { request: (request: HttpRequest) -> HttpResponse },
+    -- capability "files": one-hour, instance-bound handles. Chunks <= 64 KiB;
+    -- files <= 40 MiB; 200 MiB/instance, 1 GiB/installation, 256 handles.
+    files: {
+        create: (request: { instance: string?, name: string?, mediaType: string?, data: string?, encoding: string? }) -> TransferFile,
+        append: (request: { instance: string?, id: string, offset: number, data: string, encoding: string? }) -> Json,
+        read: (request: { instance: string?, id: string, offset: number?, limit: number? }) -> Json,
+        delete: (request: { instance: string?, id: string }) -> Json,
+        composeMime: (request: MimeMessage) -> TransferFile,
+    },
     -- capability "exec".
     exec: { run: (request: ExecRequest) -> ExecResult },
     -- Installer install(input) only. Download the exact URL/checksum selected by

@@ -455,6 +455,18 @@ pub struct Authorization {
     bearer: String,
 }
 
+impl Authorization {
+    pub(crate) fn receipt_authority(&self) -> Value {
+        json!({
+            "grant": self.grant,
+            "resources": self.reference.revisions,
+            "operation": self.operation.name,
+            "scopes": self.scopes,
+            "requester": self.requester.as_ref().map(|requester| &requester.principal),
+        })
+    }
+}
+
 pub async fn authorize(
     s: &Service,
     run: &Value,
@@ -506,6 +518,7 @@ pub async fn authorize(
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
     let context = Context {
+        management: None,
         connection: connection.clone(),
         manifest: package.manifest.clone(),
         event: Value::Null,
@@ -637,6 +650,7 @@ fn request_permitted(authorization: &Authorization, args: &Value) -> bool {
         if !rule.bindings.is_empty() {
             if args.get("body").is_some_and(|value| !value.is_null())
                 || args.get("multipart").is_some_and(|value| !value.is_null())
+                || args.get("bodyFile").is_some_and(|value| !value.is_null())
             {
                 return false;
             }
@@ -724,6 +738,7 @@ pub async fn call(
         }
         "http.request" if request_permitted(authorization, args) => {
             let context = Context {
+                management: None,
                 connection: authorization.connection.clone(),
                 manifest: package.manifest.clone(),
                 event: Value::Null,

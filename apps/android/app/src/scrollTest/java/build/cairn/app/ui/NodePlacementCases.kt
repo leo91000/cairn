@@ -724,6 +724,87 @@ abstract class NodePlacementCases {
     }
 
     @Test
+    fun backendMigrationRequiresConfirmationAndFollowsItsCompletion() {
+        MockWebServer().use { server ->
+            val submitted = CopyOnWriteArrayList<JsonObject>()
+            val completed = AtomicBoolean(false)
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val path = request.path!!.substringBefore('?')
+                        val body =
+                            when {
+                                path.endsWith("/backend-migration") && request.method == "POST" -> {
+                                    submitted +=
+                                        wireJson
+                                            .parseToJsonElement(request.body.readUtf8())
+                                            .jsonObject
+                                    "{}"
+                                }
+                                path.endsWith("/backend-migration") ->
+                                    """{"required":${!completed.get()},"toBackend":"native","pending":${submitted.isNotEmpty() && !completed.get()},"nodes":[{"id":"gpu","name":"Desktop GPU"}]}"""
+                                path == "/api/installations" -> beaconInstallationsFixture()
+                                path == "/api/account/session" -> beaconAccountFixture("fixture")
+                                path.endsWith("/overview") -> "{}"
+                                else -> "[]"
+                            }
+                        return MockResponse().setBody(body)
+                    }
+                }
+            server.start()
+            val vault =
+                object : SessionVault {
+                    private val values = mutableMapOf<String, String>()
+
+                    override fun read(origin: String) = values[origin]
+
+                    override fun write(origin: String, cookie: String?) {
+                        if (cookie == null) values.remove(origin) else values[origin] = cookie
+                    }
+                }
+            val vm =
+                CairnViewModel(
+                    ApplicationProvider.getApplicationContext<Application>(),
+                    vault,
+                    beaconOrigin = "",
+                )
+            compose.setContent {
+                val state by vm.state.collectAsStateWithLifecycle()
+                LaunchedEffect(Unit) {
+                    vm.state.first { it.ready }
+                    vm.connect(server.url("/").toString())
+                }
+                CairnTheme { if (state.session.authenticated) Page { BackendMigration(vm, "run") } }
+            }
+            compose.waitUntil(20000) {
+                compose
+                    .onAllNodesWithText("Migrer cette conversation…")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Migrer cette conversation…").performScrollTo().performClick()
+            compose
+                .onNodeWithText("Le prochain message ouvre une nouvelle session", substring = true)
+                .assertExists()
+            assertTrue(submitted.isEmpty())
+            capture("backend-migration-confirm")
+            compose.onNodeWithText("Confirmer").performClick()
+            compose.waitUntil(10000) { submitted.isNotEmpty() }
+            assertEquals("native", submitted[0]["backend"]?.jsonPrimitive?.content)
+            assertEquals("gpu", submitted[0]["nodeId"]?.jsonPrimitive?.content)
+            assertEquals(true, submitted[0]["confirm"]?.jsonPrimitive?.boolean)
+            completed.set(true)
+            elapse(2000)
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Migration terminée.", substring = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+        }
+    }
+
+    @Test
     fun ownerCanEnrollConfigureAndRevokeANode() {
         MockWebServer().use { server ->
             val writes = CopyOnWriteArrayList<Pair<String, JsonObject>>()

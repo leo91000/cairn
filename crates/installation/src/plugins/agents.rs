@@ -100,6 +100,29 @@ pub async fn command(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
     let package = registry::active(s, plugin)
         .await
         .map_err(|_| unavailable())?;
+    if let Some(file) = input.get("file").filter(|value| value.is_object()) {
+        let instances = granted(s, &agent_id, Some(plugin))
+            .await?
+            .into_iter()
+            .flat_map(|(_, instances, _)| instances)
+            .filter(|connection| connection.grants(&agent_id))
+            .collect::<Vec<_>>();
+        if !package.manifest.permits_capability("files") {
+            return Err(Error::forbidden(
+                "This plugin has no approved file capability.",
+            ));
+        }
+        let method = match text(file, "method") {
+            "create" => "files.create",
+            "append" => "files.append",
+            "read" => "files.read",
+            "delete" => "files.delete",
+            _ => return Err(Error::bad("Unknown file transfer operation.")),
+        };
+        let scope = Scope::for_agent(s, &run, instances, bearer).await?;
+        let result = scope::call(s, &package, &scope, method, file).await?;
+        return Ok(json!({ "output": "json", "value": result }));
+    }
     let name = text(input, "command");
     let Some(command) = package.manifest.command(name) else {
         let available = package

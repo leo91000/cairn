@@ -109,12 +109,6 @@ fn verify_host_mount(state: &Path, mounted: &HostMount) -> Result<()> {
 /// verified private attachments before the existing nonce-safe device cleanup.
 pub async fn recover_host_mounts(state: &Path) -> Result<()> {
     let mounts = host_mounts(state, &std::fs::read_to_string("/proc/self/mountinfo")?)?;
-    #[cfg(not(feature = "ublk"))]
-    if !mounts.is_empty() {
-        return Err(Error::unavailable(
-            "Native mount recovery requires ublk support.",
-        ));
-    }
     for mounted in mounts {
         let root = workspace::directory(state, &mounted.run)?;
         let _workspace = crate::file_lock::exclusive(
@@ -139,10 +133,8 @@ pub async fn recover_host_mounts(state: &Path) -> Result<()> {
         let ownership = tokio::task::spawn_blocking(move || -> Result<_> {
             // Keep both leases with kernel operations if startup is cancelled.
             let ownership = (_workspace, owner);
-            #[cfg(feature = "ublk")]
+
             storage::ublk::quiesce_stale_host_disk(&state, &run)?;
-            #[cfg(not(feature = "ublk"))]
-            let _ = (state, run);
             Ok(ownership)
         })
         .await
@@ -208,7 +200,7 @@ pub struct Mounted {
     mounted: bool,
     completed: bool,
     aborted: bool,
-    #[cfg(feature = "ublk")]
+
     device: Arc<std::sync::Mutex<storage::ublk::MountedDisk>>,
     _owner: Option<environment::OwnerLease>,
     _physical: Option<crate::file_lock::Guard>,
@@ -220,14 +212,6 @@ pub async fn mount(
     plan: &Value,
     stop: &CancellationToken,
 ) -> Result<Mounted> {
-    #[cfg(not(feature = "ublk"))]
-    {
-        let _ = (state, run, plan, stop);
-        Err(Error::unavailable(
-            "Native execution requires ublk support.",
-        ))
-    }
-    #[cfg(feature = "ublk")]
     {
         let owner = environment::ownership(state, run, "Native disk is active.").await?;
         let directory = &owner.directory;
@@ -379,7 +363,7 @@ impl Mounted {
         // then represents a crash prefix, like a forcibly stopped guest.
         self.aborted = true;
         self.volume.stop.cancel();
-        #[cfg(feature = "ublk")]
+
         {
             let device = self.device.clone();
             tokio::task::spawn_blocking(move || {
@@ -413,7 +397,7 @@ impl Mounted {
             self.volume.seal_completed().await?;
             self.completed = true;
         }
-        #[cfg(feature = "ublk")]
+
         {
             self.volume.stop.cancel();
             let device = self.device.clone();
@@ -524,7 +508,7 @@ impl Drop for Mounted {
             if let Some(physical) = self._physical.take() {
                 std::mem::forget(physical);
             }
-            #[cfg(feature = "ublk")]
+
             std::mem::forget(self.device.clone());
             std::mem::forget(self.volume.clone());
         }

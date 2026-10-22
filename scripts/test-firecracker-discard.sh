@@ -13,7 +13,6 @@ curl -fsSL "https://codeload.github.com/firecracker-microvm/firecracker/tar.gz/$
 printf '%s  %s\n' "$source_sha256" "$fixture/source.tar.gz" | sha256sum -c -
 tar -xzf "$fixture/source.tar.gz" --strip-components=1 -C "$fixture"
 rm "$fixture/source.tar.gz"
-git -C "$fixture" apply "$repository/deploy/microvm/firecracker-shared-memory.patch"
 git -C "$fixture" apply "$repository/deploy/microvm/firecracker-discard.patch"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repository/target/firecracker-discard}"
 export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0

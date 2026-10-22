@@ -305,16 +305,27 @@ async fn respond(s: &Arc<Service>, request: Request) -> Result<Response> {
     if id.is_null() {
         return Ok(StatusCode::ACCEPTED.into_response());
     }
-    let dispatched = dispatch(
-        s,
-        &endpoint,
-        &bearer,
-        scopes.as_deref(),
-        method,
-        &body["params"],
-        modern,
-    )
-    .await;
+    let migration_owner = input
+        .identity
+        .as_ref()
+        .filter(|identity| {
+            relayed_management && identity.role == crate::auth::InstallationRole::Owner
+        })
+        .map(|identity| identity.account_id.clone());
+    let dispatched = crate::backend_migration::OWNER
+        .scope(
+            migration_owner,
+            dispatch(
+                s,
+                &endpoint,
+                &bearer,
+                scopes.as_deref(),
+                method,
+                &body["params"],
+                modern,
+            ),
+        )
+        .await;
     if matches!(method, "initialize" | "tools/list") {
         let (endpoint, connection_id) = match &endpoint {
             Endpoint::Management => ("management", "unknown"),
@@ -675,6 +686,10 @@ pub(crate) async fn invoke(
         | "list_plugin_instance_access"
         | "list_plugin_agent_grant_counts"
         | "list_plugin_resource_choices" => plugin_reads::invoke(s, name, args, bearer).await,
+        "get_chat_backend_migration" => {
+            crate::backend_migration::preview(s, text(&args, "chatId"), authorize).await
+        }
+        "migrate_chat_backend" => s.migrate_chat_backend(args, authorize).await,
         "list_nodes"
         | "list_native_callers"
         | "create_node_enrollment"
@@ -727,6 +742,10 @@ pub(crate) async fn invoke(
         }
         "merge_agents" => s.merge_agents_authorized(args, authorize).await,
         "run_task" => s.enqueue(text(&args, "taskId"), "mcp", None).await,
+        "convert_run_to_chat" => {
+            s.chat_from_run_authorized(text(&args, "runId"), authorize)
+                .await
+        }
         "cancel_run" => {
             s.worker.cancel(s, text(&args, "runId")).await?;
             Ok(json!({ "cancelled": true }))
@@ -753,6 +772,9 @@ pub(crate) async fn invoke(
         "read_run_content" => s.store.read(move |db| read_run_content(db, &args)).await,
         "list_skills" | "read_skill" | "save_skill" | "edit_skill_files" => {
             skills_tool(s, name, &args, bearer).await
+        }
+        "list_plugins" | "manage_plugin" => {
+            Box::pin(crate::plugins::management::invoke(s, name, &args, bearer)).await
         }
         "list_mcps" | "create_mcp" | "update_mcp" | "test_mcp" | "disconnect_mcp"
         | "delete_mcp" => connection_tool(s, name, args, bearer).await,

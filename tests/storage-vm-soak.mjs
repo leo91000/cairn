@@ -13,6 +13,7 @@ import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
 import { memorySmoke } from './runner-memory-smoke.mjs'
 import { prepareStorageOrigin, storageSmoke } from './runner-storage-smoke.mjs'
+import { ublkDeviceArguments } from './ublk-devices.mjs'
 
 async function main() {
   const image = process.argv[2]
@@ -47,7 +48,7 @@ async function main() {
       await mkdir(path.join(root, directory), { recursive: true })
     await writeFile(path.join(root, 'data/runner-secret'), 'fixture-runner-token')
     const capabilities = ['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE']
-    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(capability => ['--cap-add', capability]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '6g', '--cpus', '3', '-e', 'CONCURRENCY=1', '--entrypoint', '/usr/local/bin/cairn', image, 'runner-broker')
+    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(capability => ['--cap-add', capability]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', ...ublkDeviceArguments(), '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '6g', '--cpus', '3', '-e', 'CONCURRENCY=1', '--entrypoint', '/usr/local/bin/cairn', image, 'runner-broker')
     started = true
     let address
     const api = async (endpoint, method = 'GET', body) => {

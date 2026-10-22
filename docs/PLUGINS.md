@@ -89,7 +89,7 @@ ordinary package. Uninstalling requires removing the package's instances first.
 
 A manifest declares `"apiVersion": 2` (the only version Cairn loads) and:
 
-- `capabilities`: `conversations.submit`, `conversations.control`, `storage`, `http`,
+- `capabilities`: `conversations.submit`, `conversations.control`, `storage`, `http`, `files`,
   `timers`, `exec`, `socket` and `inbound`;
 - `hosts`: the hostnames `http` (HTTPS) and `socket` (WSS) may reach. `*.example.com`
   covers every subdomain of `example.com`, not the domain itself;
@@ -640,8 +640,9 @@ are `read`, `contribute` and `manage`, in increasing order. Each request fixes
 maps a request field to an admitted input scope (for example `channel` to
 `channel`) or to a non-secret resource setting (`team_id` to `resource.externalId`).
 The host verifies it in query/JSON/form arguments, rejects duplicates and
-ambiguous raw/multipart bodies, and never relies on the script to enforce that
-request's method, endpoint or bound fields.
+ambiguous raw/multipart/file-backed bodies, and never relies on the script to
+enforce that request's method, endpoint or bound fields. File encoding cannot
+overwrite a checked JSON field in a bound resource operation.
 
 A command or tool declares `operation` and must require a `resource` plus every
 declared scope as text arguments. The host selects the resource and operation
@@ -752,8 +753,9 @@ Native execution also retains its precise package approval across remote owner
 checks and preparation, and verifies it with the local route, person and run
 before registration or starting the agent. Reapproving identical files does not
 release work whose retained approval changed during that verification.
-Commands and MCP tools retain their run's original requester, including when the
-target integration uses an instance-wide agent grant. That separate target grant
+Commands and MCP tools, including `manage_plugin` calls from an installation
+tool, retain their run's original requester, including when the target integration
+uses an instance-wide agent grant. That separate target grant
 does not bypass revocation of the source participant, route or owner access.
 Operation scopes with the same name as a route condition must match that condition;
 operations on the source integration cannot select a different instance or an
@@ -1182,6 +1184,118 @@ The host runs the OAuth 2.0 device authorization grant (RFC 8628) for the owner:
   and to the save, which consumes the sign-in. The browser and the script never see
   the token. Tokens are not refreshed: use an OAuth application whose tokens do not
   expire.
+
+### Authorization-code OAuth and refresh
+
+Packages can declare `credential.oauth` instead of `credential.deviceFlow`:
+
+```toml
+[credential.oauth]
+authorizationUrl = "https://service.example/authorize"
+tokenUrl = "https://service.example/token"
+revocationUrl = "https://service.example/revoke" # optional
+clientIdSetting = "clientId" # declared string setting
+clientSecretSetting = "clientSecret" # optional declared secret setting
+scopes = [ "mail.read" ]
+requireRefreshToken = true # optional; unattended services should require it
+
+[credential.oauth.scopeSettings]
+allowSend = [ "mail.send" ] # declared boolean setting
+
+[credential.oauth.authorizationParameters]
+access_type = "offline"
+```
+
+All endpoints must use HTTPS, exact declared hosts and no query or fragment. The
+host owns state, owner binding, PKCE S256, callback code exchange and refresh.
+Packages and browser/native clients never receive tokens. The owner registers
+`GET /api/plugins/{id}/oauth`'s `callbackUrl` with the provider. `POST` to the same
+path starts a ten-minute sign-in (`instance?`, `settings`, `secrets?`);
+`GET`/`DELETE /api/plugins/{id}/oauth/{flow}` inspect or cancel it. The owner opens
+`verificationUri` and returns through `/plugins/oauth/callback`, whose page removes
+the single-use query before posting to the authenticated installation callback.
+Web and Android poll the same owner-bound flow (`pending`, `exchanging`,
+`completed`, `failed`); `credentialFlow` validates the draft and saves the encrypted
+access/refresh record once. A changed client or increased permissions requires
+reconnecting. Sign-in is bound to its package digest, original instance revision,
+client settings and selected scopes. A `form` handler also receives trusted
+`previous` settings so it can reject a reconnect to a different remote identity.
+
+Before authenticated HTTP, refresh is serialized per instance and preserves a
+refresh token when the provider omits it. Publication rechecks the current instance
+revision. Legacy static and device-flow credentials keep their existing behavior.
+`POST /api/plugins/{id}/connections/{instance}/disconnect` disables the account,
+removes local credentials and attempts declared provider revocation. The response
+distinguishes local disconnection from unconfirmed remote revocation. A provider
+may revoke other tokens for the same remote account/client; deleting an instance
+only removes local credentials and data.
+
+Public MCP and the opted-in installation tool expose `list_plugins` and
+`manage_plugin` for setup, sign-in, forms, instance lifecycle and panels. Neither
+accepts `agentIds`; instance grants remain in the owner's agent editor (ADR 0051).
+An installation management agent also needs the separate enabled instance grant
+before using its saved credentials in a form, panel, test or reconnect. Management
+and account grants are checked again through asynchronous handlers and refreshes.
+
+### Private transfer files and MIME
+
+The `files` capability adds `cairn.files.create`, `append`, `read`, `delete` and
+`composeMime`. Handles belong to one instance/owner and never name host paths.
+Files expire after one hour and after installation restart. Limits: 64 KiB decoded
+chunks, 40 MiB/file, 200 MiB/instance, 1 GiB and 256 files/installation. File bytes
+are private temporary files; only metadata and requested chunks enter Luau.
+`append` requires the exact current `offset`; `read` returns base64url data and a
+nullable `nextOffset`. Both padded and unpadded base64url responses are accepted.
+
+`http.request` can upload `bodyFile: {id, format: "raw"|"json"|"base64url",
+jsonPointer?}`. Base64url fills an existing JSON object's field (for example
+`/message/raw`), keeping inline request metadata separate. `responseFile` saves a
+large response directly; optional `jsonPointer` and `encoding` extract a provider's
+base64/base64url field. File transfer requires both approved HTTP and files
+capabilities before a request is sent. Ordinary inline limits remain unchanged.
+
+`composeMime` accepts explicit `from`, recipient arrays (`to`, `cc`, `bcc`,
+`replyTo`), `subject`, `text`/`html`, optional Message-ID/references and attachments
+by private handle (`id`, `name`, `mediaType`, optional inline `contentId`). The host
+validates headers and builds RFC5322/MIME Unicode and multipart content. It returns
+a `message/rfc822` handle and its `messageId`. `messageKey` produces a deterministic
+Message-ID scoped to the instance, useful for reconciling uncertain sends.
+`contentDigest` hashes the stable composition input and the actual attachment
+bytes, excluding generated MIME boundaries and dates. A changed attachment cannot
+silently replay an earlier send receipt. Local byte/I/O/CPU measurements and their
+limits are recorded in [the transfer measurements](PLUGIN-TRANSFER-MEASUREMENTS.md).
+
+The run-local CLI transfers conversation files with any approved files-capable
+package: `cairn plugin PACKAGE --upload INSTANCE PATH`, `--download INSTANCE HANDLE
+PATH`, `--delete-file INSTANCE HANDLE`. Each chunk rechecks the run and current
+instance grant. Downloads create a new private destination and remove incomplete
+files; they do not overwrite existing paths. No native filesystem capability is
+given to package code.
+
+### HTTP mutation receipts
+
+`http.request` optionally accepts an `idempotencyKey` (200 characters maximum) and
+stable `idempotencyInput`. The fingerprint also binds the native instance revision
+and, when present, resource/grant generations, the resource operation's requester
+and its OAuth authorization. Plugin input cannot remove these checks. Reusing a key with changed
+authority returns a conflict, including after reconnecting an account. Receipts
+created before these checks also conflict rather than returning an unverified
+result or repeating a potentially successful write. The stored shape and key
+namespace are unchanged; the new fingerprint requires the unreleased epoch-10
+compatibility gate, and old readers must not be used after migration.
+
+The host atomically claims a key scoped to the instance
+before sending. Completed responses replay from the durable receipt; different
+intent with the same key is refused. An interrupted/pending request is never sent
+again automatically: reconcile with the provider, then explicitly choose a new
+key if appropriate. Receipts survive restarts; deletion of the instance removes
+them. They are limited to 10,000 per instance, with response bodies up to 64 KiB;
+larger completed bodies replay the status with `resultOmitted: true`. File responses
+and safe GET/HEAD requests cannot use mutation receipts. The host does not promise
+provider-side exactly-once delivery or automatically retry confirmed HTTP errors.
+
+See the bundled [Gmail package](../plugins/gmail/README.md) for full API coverage,
+setup, Google restrictions and examples using these generic capabilities.
 
 ### Run credentials
 

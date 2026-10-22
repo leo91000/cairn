@@ -867,6 +867,45 @@ async fn third_party_packages_contribute_forms_commands_tools_and_views() {
     server.abort();
 }
 
+#[tokio::test]
+async fn live_form_completion_preserves_cleared_defaulted_fields() {
+    let f = fixture().await;
+    registry_install_and_approve(
+        &f.s,
+        json!({
+            "manifest": {
+                "id": "draftdefaults", "name": "Draft defaults", "version": "1.0.0",
+                "apiVersion": 2, "capabilities": [], "instanceForm": true,
+                "settings": [
+                    { "key": "note", "title": "Note", "type": "string", "default": "Initial note" },
+                    { "key": "limit", "title": "Limit", "type": "number", "default": 10 },
+                ],
+            },
+            "source": "return { form = function(input) return { values = input.values } end }",
+        }),
+    )
+    .await;
+
+    for settings in [json!({}), json!({ "note": null, "limit": null })] {
+        let completed = cairn_installation::plugins::forms::form(
+            &f.s,
+            "draftdefaults",
+            &json!({ "settings": settings }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(completed["values"], json!({}));
+    }
+    let completed = cairn_installation::plugins::forms::form(
+        &f.s,
+        "draftdefaults",
+        &json!({ "settings": { "note": "Edited", "limit": 0 } }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(completed["values"], json!({ "note": "Edited", "limit": 0 }));
+}
+
 async fn registry_install_and_approve(s: &Service, package: Value) {
     use cairn_installation::plugins::registry;
     let installed = registry::install(s, &package).await.unwrap();

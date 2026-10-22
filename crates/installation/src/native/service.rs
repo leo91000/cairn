@@ -1462,7 +1462,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     for (attempt, _, _) in &interrupted {
         systemd::stop(attempt).await?;
     }
-    #[cfg(feature = "ublk")]
+
     {
         let state = state.clone();
         tokio::task::spawn_blocking(move || storage::ublk::cleanup_stale(&state))

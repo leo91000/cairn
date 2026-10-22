@@ -1,4 +1,5 @@
 //! Conversation disk storage. Callers hold the conversation lock while preparing or exporting.
+pub(crate) mod backend_conversion;
 pub mod layout;
 mod local;
 
@@ -23,11 +24,8 @@ pub use lazy::{BlockSource, LazyDisk};
 
 pub mod fuse;
 
-pub mod vhost;
-
 pub mod transport;
 
-#[cfg(feature = "ublk")]
 pub mod ublk;
 
 pub mod remote;

@@ -271,6 +271,30 @@ struct Negotiation {
     dependencies: Option<PeerDependencies>,
 }
 
+fn udp_bindings(addresses: impl IntoIterator<Item = IpAddr>) -> Vec<(&'static str, NetworkType)> {
+    let (mut ipv4, mut ipv6) = (false, false);
+    for address in addresses {
+        if !cairn_protocol::direct::usable_candidate_address(address) {
+            continue;
+        }
+        if address.is_ipv4() {
+            ipv4 = true;
+        } else {
+            ipv6 = true;
+        }
+    }
+    // A wildcard IPv6 socket can bind without any usable IPv6 interface.
+    // The WebRTC driver then attempts STUN and remote checks on that socket,
+    // even on an IPv4-only container. Keep sockets and ICE families in sync.
+    [
+        (ipv4, "0.0.0.0:0", NetworkType::Udp4),
+        (ipv6, "[::]:0", NetworkType::Udp6),
+    ]
+    .into_iter()
+    .filter_map(|(available, bind, family)| available.then_some((bind, family)))
+    .collect()
+}
+
 async fn serve_peer(
     router: Router,
     direct: DirectConnections,
@@ -320,8 +344,21 @@ async fn serve_peer(
     } else {
         builder
     };
+    let interfaces = rtc::shared::ifaces::ifaces().map_err(Error::internal)?;
+    let (udp_addrs, network_types): (Vec<_>, Vec<_>) = udp_bindings(
+        interfaces
+            .into_iter()
+            .filter_map(|interface| interface.addr.map(|address| address.ip())),
+    )
+    .into_iter()
+    .unzip();
+    if udp_addrs.is_empty() {
+        return Err(Error::unavailable(
+            "No usable network interface for a direct connection.",
+        ));
+    }
     let settings = SettingEngineBuilder::new()
-        .with_network_types(vec![NetworkType::Udp4, NetworkType::Udp6])
+        .with_network_types(network_types)
         .with_multicast_dns_mode(MulticastDnsMode::Disabled)
         .with_sctp_max_message_size(SctpMaxMessageSize::Bounded(16_384))
         .with_sctp_max_receive_buffer_size(65_536);
@@ -346,7 +383,7 @@ async fn serve_peer(
             )
             .with_setting_engine(settings.build())
             .with_handler(handler)
-            .with_udp_addrs(vec!["0.0.0.0:0", "[::]:0"])
+            .with_udp_addrs(udp_addrs)
             .with_data_channel_send_buffer_limit(65_536)
             .build()
             .await
@@ -568,5 +605,47 @@ impl Drop for ClosePeer {
             }
             let _ = peer.close().await;
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn direct_udp_uses_only_families_with_usable_local_interfaces() {
+        let bindings = |addresses: &[&str]| {
+            udp_bindings(
+                addresses
+                    .iter()
+                    .map(|address| address.parse::<IpAddr>().unwrap()),
+            )
+        };
+        assert_eq!(
+            bindings(&["127.0.0.1", "::1", "172.18.0.2"]),
+            vec![("0.0.0.0:0", NetworkType::Udp4)]
+        );
+        assert_eq!(
+            bindings(&["::", "fe80::1", "fd00::2"]),
+            vec![("[::]:0", NetworkType::Udp6)]
+        );
+        assert_eq!(
+            bindings(&["192.168.1.2", "2001:db8::2", "192.168.1.2"]),
+            vec![
+                ("0.0.0.0:0", NetworkType::Udp4),
+                ("[::]:0", NetworkType::Udp6)
+            ]
+        );
+        assert!(
+            bindings(&[
+                "127.0.0.1",
+                "::1",
+                "169.254.1.1",
+                "fe80::1",
+                "0.0.0.0",
+                "ff02::1"
+            ])
+            .is_empty()
+        );
     }
 }

@@ -7,11 +7,12 @@ transport errors are not included in public account views or error messages.
 Redirects are disabled, requests time out after 30 seconds and bodies are bounded
 to 64 KB.
 
-The adapter follows the [official endpoint](https://github.com/anomalyco/opencode/blob/2b8a5969e932c15083e599c82d34ce0268f81b9e/packages/console/app/src/routes/zen/go/v1/usage.ts)
-and its [window analysis](https://github.com/anomalyco/opencode/blob/2b8a5969e932c15083e599c82d34ce0268f81b9e/packages/console/core/src/subscription.ts).
-It maps `rollingUsage`, `weeklyUsage` and `monthlyUsage` to the existing usage
-windows. `usagePercent` is the used percentage; `resetInSec` becomes an absolute
-Unix timestamp in seconds. The 30-day duration on the monthly window is only an
+The adapter follows the [official endpoint response](https://github.com/anomalyco/opencode/blob/d4704347465c1ee63d0c213ed00e648e7f0231c5/packages/console/app/src/routes/zen/go/v1/usage.ts).
+It maps `usage.rolling`, `usage.weekly` and `usage.monthly` to the existing usage
+windows. `percent` is the used percentage; the RFC 3339 `resetsAt` becomes an
+absolute Unix timestamp in seconds. The original flat response with `rollingUsage`,
+`weeklyUsage`, `monthlyUsage`, `usagePercent` and `resetInSec` remains supported.
+The 30-day duration on the monthly window is only an
 ordering hint: the displayed reset always comes from the provider, including
 calendar months with different lengths. No token pricing or fixed dollar allowance
 is used to estimate consumption.
@@ -27,7 +28,10 @@ Current exhausted windows make Go wait and let Auto try the next connection in
 the user's order. A later reading showing restored capacity makes it eligible
 again. Explicitly pinned routes still wait for their own connection.
 
-The provider's `useBalance` setting is read, never changed. When enabled, reaching
+The provider's `useBalance` setting is read when reported, never changed. The
+current response omits it; Cairn does not infer permission to continue on paid
+credits from quota percentages. The original response still supports this field.
+When reported as enabled, reaching
 a Go quota does not prevent admission: the provider may continue on paid Zen
 credits. The quota percentages stay unchanged on screen and both clients explain
 the setting. A native rate-limit error still marks the account exhausted, because

@@ -144,7 +144,15 @@ const singular = computed(() => instanceNoun(manifest.value, 1))
 const plural = computed(() => instanceNoun(manifest.value, 2))
 // A completed device sign-in gives the draft its credential; the package's form handler then
 // says who it signed in as.
-const signIn = useDeviceSignIn(() => id.value, () => void complete('credential'))
+const oauthCallbackUrl = ref('')
+const signIn = useDeviceSignIn(() => id.value, () => void complete('credential'), 2000, {
+  kind: () => manifest.value?.credential?.oauth ? 'oauth' : 'device-flow',
+  input: () => ({
+    ...(editing.value ? { instance: editing.value.id } : {}),
+    settings: pluginSettings(storedFields.value, values.value),
+    secrets: pluginSecrets(secrets.value),
+  }),
+})
 const tones = {
   ok: 'bg-[light-dark(#dff3ee,#163a33)] text-success',
   muted: 'bg-hover text-muted',
@@ -233,6 +241,13 @@ async function edit(connection: PluginConnection | null) {
     maxPerPersonPerHour: connection?.maxPerPersonPerHour ?? 5,
     enabled: connection?.enabled ?? true,
   }
+  oauthCallbackUrl.value = ''
+  if (manifest.value?.credential?.oauth) {
+    void api<{ callbackUrl: string }>(`/plugins/${id.value}/oauth`)
+      .then(result => oauthCallbackUrl.value = result.callbackUrl)
+      .catch(e => error.value = (e as Error).message)
+  }
+
   void complete()
 }
 
@@ -368,6 +383,14 @@ async function test(connection: PluginConnection) {
   await action(async () => {
     const result = await pluginOperation<{ message?: string }>(`/plugins/${id.value}/connections/${connection.id}/test`)
     notify(`${connection.name}: ${result.message || 'it works'}`)
+  })
+}
+
+async function disconnect(connection: PluginConnection) {
+  await action(async () => {
+    const result = await api<{ message: string }>(`/plugins/${id.value}/connections/${connection.id}/disconnect`, { method: 'POST' })
+    await load()
+    notify(`${connection.name}: ${result.message}`)
   })
 }
 
@@ -683,6 +706,14 @@ onBeforeUnmount(() => {
               </label>
               <span class="flex flex-wrap gap-2">
                 <UiButton
+                  v-if="manifest.credential?.oauth"
+                  size="small"
+                  :disabled="busy"
+                  @click="disconnect(connection)"
+                >
+                  Disconnect
+                </UiButton>
+                <UiButton
                   v-if="manifest.instanceTest"
                   size="small"
                   :disabled="busy"
@@ -814,7 +845,7 @@ onBeforeUnmount(() => {
         <UiAlert v-for="(message, index) in unshownFormErrors(manifest, completion?.errors)" :key="index">
           {{ message }}
         </UiAlert>
-        <label v-if="manifest.credential">{{ editing ? `New ${manifest.credential.label.toLowerCase()} (optional)` : manifest.credential.label }}<input
+        <label v-if="manifest.credential && !manifest.credential.oauth">{{ editing ? `New ${manifest.credential.label.toLowerCase()} (optional)` : manifest.credential.label }}<input
           v-model="form.token"
           type="password"
           autocomplete="new-password"
@@ -824,7 +855,11 @@ onBeforeUnmount(() => {
           :aria-invalid="Boolean(completion?.errors.credential)"
           @input="typed()"
         ><small :class="completion?.errors.credential ? 'text-coral' : ''">{{ completion?.errors.credential || 'Stored encrypted. Cairn adds it to this plugin’s requests; the plugin never sees it.' }}</small></label>
-        <section v-if="manifest.credential?.deviceFlow" class="grid gap-3" :aria-label="`Sign in with ${manifest.name}`">
+        <UiAlert v-if="manifest.credential?.oauth && completion?.errors.credential">
+          {{ completion.errors.credential }}
+        </UiAlert>
+        <section v-if="manifest.credential?.deviceFlow || manifest.credential?.oauth" class="grid gap-3" :aria-label="`Sign in with ${manifest.name}`">
+          <label v-if="manifest.credential?.oauth && oauthCallbackUrl">Callback URL<input :value="oauthCallbackUrl" readonly><small>Register this address in your provider’s OAuth application before signing in.</small></label>
           <UiButton
             v-if="!signIn.flow.value || signIn.completed.value"
             class="justify-self-start"
@@ -841,9 +876,9 @@ onBeforeUnmount(() => {
           </p>
           <div v-else-if="signIn.pending.value && signIn.flow.value" class="grid gap-3 rounded-2xl bg-inset p-4" role="status">
             <p class="text-sm">
-              Open {{ manifest.name }} and enter this code. Your password stays with {{ manifest.name }}.
+              {{ manifest.credential?.oauth ? `Open ${manifest.name} and approve access, then return here to save. Your password stays with ${manifest.name}.` : `Open ${manifest.name} and enter this code. Your password stays with ${manifest.name}.` }}
             </p>
-            <div class="flex flex-wrap items-center gap-2">
+            <div v-if="signIn.flow.value.userCode" class="flex flex-wrap items-center gap-2">
               <code aria-label="Verification code" class="select-all font-mono text-2xl font-bold tracking-widest">{{ signIn.flow.value.userCode }}</code>
               <UiButton size="small" :aria-label="copied ? 'Code copied' : 'Copy verification code'" @click="copyCode">
                 <Icon :name="copied ? Check : Copy" :size="13" />{{ copied ? 'Copied' : 'Copy' }}
@@ -854,6 +889,7 @@ onBeforeUnmount(() => {
             </p>
             <div class="flex flex-wrap gap-2">
               <a
+                v-if="verificationLink(signIn.flow.value)"
                 :class="[buttonBase, buttonVariants.primary, buttonSizes.small]"
                 :href="verificationLink(signIn.flow.value)"
                 target="_blank"
@@ -1006,7 +1042,7 @@ onBeforeUnmount(() => {
           <UiButton :disabled="busy" @click="closeEditor">
             Cancel
           </UiButton>
-          <UiButton type="submit" variant="primary" :disabled="busy || completing || !delegationReady">
+          <UiButton type="submit" variant="primary" :disabled="busy || completing || !delegationReady || (Boolean(manifest.credential?.oauth) && !editing && !signIn.completed.value)">
             Save {{ singular.toLowerCase() }}
           </UiButton>
         </div>

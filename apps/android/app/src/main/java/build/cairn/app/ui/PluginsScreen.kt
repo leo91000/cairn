@@ -706,6 +706,22 @@ private fun InstanceCard(
                     }
             }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (manifest.credential?.oauth != null)
+                    TextButton(
+                        onClick = {
+                            vm.perform {
+                                val result = api.send<JsonObject>("POST", "$path/disconnect")
+                                notify(
+                                    result["message"]?.jsonPrimitive?.contentOrNull
+                                        ?: "Compte déconnecté"
+                                )
+                                changed()
+                            }
+                        },
+                        enabled = !state.busy,
+                    ) {
+                        Text("Déconnecter")
+                    }
                 if (manifest.instanceTest)
                     TextButton(
                         onClick = {
@@ -831,6 +847,17 @@ private fun InstanceEditor(
     var signIn by remember(initial.id) { mutableStateOf<PluginDeviceFlow?>(null) }
     var signInError by remember(initial.id) { mutableStateOf<String?>(null) }
     var signingIn by remember(initial.id) { mutableStateOf(false) }
+    val signInKind = if (manifest.credential?.oauth != null) "oauth" else "device-flow"
+    var oauthCallbackUrl by remember(initial.id) { mutableStateOf("") }
+    LaunchedEffect(pluginId) {
+        if (manifest.credential?.oauth != null) {
+            runCatching { vm.api.get<JsonObject>("/plugins/${segment(pluginId)}/oauth") }
+                .onSuccess {
+                    oauthCallbackUrl = it["callbackUrl"]?.jsonPrimitive?.content.orEmpty()
+                }
+                .onFailure { signInError = it.message }
+        }
+    }
     var completion by remember(initial.id) { mutableStateOf<PluginForm?>(null) }
     // While the package answers, its derived values aren't in the form yet: no saving.
     var completing by remember(initial.id) { mutableStateOf(manifest.instanceForm) }
@@ -867,7 +894,7 @@ private fun InstanceEditor(
                 runCatching {
                     vm.api.request(
                         "DELETE",
-                        "/plugins/${segment(current.pluginId)}/device-flow/${segment(current.id)}",
+                        "/plugins/${segment(current.pluginId)}/$signInKind/${segment(current.id)}",
                     )
                 }
             }
@@ -880,7 +907,12 @@ private fun InstanceEditor(
                 signIn =
                     vm.api.send<PluginDeviceFlow>(
                         "POST",
-                        "/plugins/${segment(pluginId)}/device-flow",
+                        "/plugins/${segment(pluginId)}/$signInKind",
+                        buildJsonObject {
+                            if (!creating) put("instance", initial.id)
+                            put("settings", pluginSettings(stored, values))
+                            put("secrets", pluginSecrets(secrets))
+                        },
                     )
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -900,7 +932,7 @@ private fun InstanceEditor(
             val next =
                 try {
                     vm.api.get<PluginDeviceFlow>(
-                        "/plugins/${segment(flow.pluginId)}/device-flow/${segment(flow.id)}"
+                        "/plugins/${segment(flow.pluginId)}/$signInKind/${segment(flow.id)}"
                     )
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
@@ -935,7 +967,7 @@ private fun InstanceEditor(
                         runCatching {
                             vm.api.request(
                                 "DELETE",
-                                "/plugins/${segment(current.pluginId)}/device-flow/${segment(current.id)}",
+                                "/plugins/${segment(current.pluginId)}/$signInKind/${segment(current.id)}",
                             )
                         }
                     }
@@ -1081,40 +1113,51 @@ private fun InstanceEditor(
         manifest.credential?.let { credential ->
             val problem = completion?.errors?.get("credential")
             val signedIn = signIn?.completed == true
-            OutlinedTextField(
-                token,
-                {
-                    token = it
-                    // A pasted token replaces a sign-in.
-                    if (signIn != null) cancelSignIn()
-                    if (manifest.instanceForm) refresh("credential")
-                },
-                Modifier.fillMaxWidth(),
-                label = {
-                    Text(
-                        if (creating) credential.label
-                        else "Nouveau ${credential.label.lowercase()} (facultatif)"
-                    )
-                },
-                singleLine = true,
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = InputKeyboards.Password,
-                enabled = !state.busy,
-                isError = problem != null,
-                placeholder =
-                    when {
-                        signedIn -> ({ Text("Connecté · ou collez un jeton à la place") })
-                        creating -> null
-                        else -> ({ Text("Enregistré · laissez vide pour le garder") })
+            if (credential.oauth == null) {
+                OutlinedTextField(
+                    token,
+                    {
+                        token = it
+                        // A pasted token replaces a sign-in.
+                        if (signIn != null) cancelSignIn()
+                        if (manifest.instanceForm) refresh("credential")
                     },
-                supportingText = {
-                    Text(
-                        problem
-                            ?: "Chiffré. Cairn l’ajoute aux requêtes de ce plugin ; le plugin ne le voit jamais."
-                    )
-                },
-            )
-            if (credential.deviceFlow != null)
+                    Modifier.fillMaxWidth(),
+                    label = {
+                        Text(
+                            if (creating) credential.label
+                            else "Nouveau ${credential.label.lowercase()} (facultatif)"
+                        )
+                    },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = InputKeyboards.Password,
+                    enabled = !state.busy,
+                    isError = problem != null,
+                    placeholder =
+                        when {
+                            signedIn -> ({ Text("Connecté · ou collez un jeton à la place") })
+                            creating -> null
+                            else -> ({ Text("Enregistré · laissez vide pour le garder") })
+                        },
+                    supportingText = {
+                        Text(
+                            problem
+                                ?: "Chiffré. Cairn l’ajoute aux requêtes de ce plugin ; le plugin ne le voit jamais."
+                        )
+                    },
+                )
+            } else if (problem != null) {
+                FormError(problem)
+            }
+            if (credential.oauth != null && oauthCallbackUrl.isNotBlank()) {
+                Text("Adresse de retour à enregistrer dans l’application OAuth")
+                androidx.compose.foundation.text.selection.SelectionContainer {
+                    Text(oauthCallbackUrl)
+                }
+                CopyButton("Copier l’adresse de retour", oauthCallbackUrl)
+            }
+            if (credential.deviceFlow != null || credential.oauth != null)
                 DeviceSignIn(
                     manifest,
                     signIn,
@@ -1343,24 +1386,30 @@ private fun DeviceSignIn(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Text(
-                        "Ouvrez ${manifest.name} et saisissez ce code. Votre mot de passe reste chez ${manifest.name}.",
+                        if (manifest.credential?.oauth != null)
+                            "Ouvrez ${manifest.name}, autorisez l’accès puis revenez ici pour enregistrer le compte. Votre mot de passe reste chez ${manifest.name}."
+                        else
+                            "Ouvrez ${manifest.name} et saisissez ce code. Votre mot de passe reste chez ${manifest.name}.",
                         style = MaterialTheme.typography.bodyMedium,
                     )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        androidx.compose.foundation.text.selection.SelectionContainer(
-                            Modifier.weight(1f, fill = false)
-                        ) {
-                            Text(
-                                flow.userCode,
-                                Modifier.semantics { contentDescription = "Code de vérification" },
-                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold,
-                                style = MaterialTheme.typography.headlineSmall,
-                            )
+                    if (flow.userCode.isNotBlank())
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            androidx.compose.foundation.text.selection.SelectionContainer(
+                                Modifier.weight(1f, fill = false)
+                            ) {
+                                Text(
+                                    flow.userCode,
+                                    Modifier.semantics {
+                                        contentDescription = "Code de vérification"
+                                    },
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.headlineSmall,
+                                )
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            CopyButton("Copier le code", flow.userCode)
                         }
-                        Spacer(Modifier.width(8.dp))
-                        CopyButton("Copier le code", flow.userCode)
-                    }
                     flow.message
                         ?.takeIf { it.isNotBlank() }
                         ?.let {
@@ -1371,7 +1420,8 @@ private fun DeviceSignIn(
                             )
                         }
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        ExternalButton("Ouvrir ${manifest.name}", flow.link)
+                        if (flow.link.isNotBlank())
+                            ExternalButton("Ouvrir ${manifest.name}", flow.link)
                         TextButton(onClick = cancel) { Text("Annuler la connexion") }
                     }
                 }

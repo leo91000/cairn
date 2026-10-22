@@ -251,6 +251,11 @@ the beacon Compose definition; Traefik routes HTTPS only.
   payload is logged.
 - The peer uses ephemeral UDP sockets for ICE; it requires no forwarded inbound
   port, public certificate, local password or anonymous listener.
+  Each negotiation selects IPv4 and/or IPv6 from the usable local interface
+  addresses and uses the same families for sockets and ICE. An IPv4-only container
+  does not bind an IPv6 wildcard merely because its kernel supports IPv6 sockets.
+  IPv6-only and dual-stack hosts keep IPv6; without a usable interface, direct
+  negotiation fails and the authenticated relay remains available.
 
 ### DataChannel framing contract
 

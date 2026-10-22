@@ -1467,6 +1467,26 @@
     }
   },
   {
+    "name": "convert_run_to_chat",
+    "description": "Move a successfully completed mission run into Chats, preserving its session, workspace and history. The original mission schedule remains unchanged. No execution starts until a message is sent. Retrying returns the same chat.",
+    "scope": "manage",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "runId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "runId"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "send_chat_message",
     "description": "Send a message to a conversation. Supply a fresh UUID message.id; reuse it with identical content for safe retries. Queue waits for the current turn; steer joins it. Starts agent work with its configured permissions.",
     "scope": "run",
@@ -2515,6 +2535,125 @@
       },
       "required": [
         "nodeId"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_chat_backend_migration",
+    "description": "Inspect a conversation whose agent execution backend changed. Returns its current and configured backend, authorized destination nodes, pending migration and errors. Migration preserves the same chat and files and starts a fresh engine session.",
+    "scope": "read",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "chatId": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "chatId"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "migrate_chat_backend",
+    "description": "Explicitly migrate an existing conversation to the backend currently configured on its agent. Stops execution, publishes its original environment, copies home/workspaces/output into a fresh runtime and restores it on an authorized node. Keeps the same chat and history. Operating-system packages may need reinstalling; the next message starts a fresh engine session with preserved context. Failure retains the original environment. Returns immediately; poll get_chat_backend_migration. Requires explicit confirmation and installation management access; never grants additional native node authority.",
+    "scope": "manage",
+    "destructive": true,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "chatId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "nodeId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "backend": {
+          "type": "string",
+          "enum": [
+            "native",
+            "firecracker"
+          ]
+        },
+        "confirm": {
+          "type": "boolean",
+          "const": true
+        }
+      },
+      "required": [
+        "chatId",
+        "nodeId",
+        "backend",
+        "confirm"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_plugins",
+    "description": "List installed plugins, their manifests and configured instances, without credentials.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "manage_plugin",
+    "description": "Configure plugin instances and start/poll OAuth or device sign-in without exposing tokens. setup returns the callback and owner management URL. save takes complete instance data (name, enabled, settings, secrets?, credentialFlow?); instanceId selects an existing account. OAuth consent is completed by the owner in their browser. Agent grants stay in the owner agent editor. File-backed plugin commands use the run-specific plugin tool.",
+    "scope": "manage",
+    "destructive": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "pluginId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "setup",
+            "signin",
+            "signin_status",
+            "signin_cancel",
+            "form",
+            "save",
+            "enabled",
+            "delete",
+            "test",
+            "view",
+            "action",
+            "disconnect"
+          ]
+        },
+        "instanceId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "flowId": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "pluginId",
+        "action"
       ],
       "additionalProperties": false
     }

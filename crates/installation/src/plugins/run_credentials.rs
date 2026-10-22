@@ -3,7 +3,7 @@
 //! live (ADR 0051): every preparation and resumption renders them again, so a
 //! withdrawn grant blanks the files it wrote.
 use super::{
-    connections::{self, Connection, credential_key, secret_values},
+    connections::{self, Connection, secret_values},
     registry::{self, Package},
 };
 use crate::{error::Result, service::Service, validation::text};
@@ -67,11 +67,8 @@ struct Rendered {
 }
 
 async fn values(s: &Service, connection: &Connection) -> Result<(Option<String>, Value)> {
-    let credential = s
-        .vault
-        .get(&credential_key(&connection.id))
+    let credential = connections::credential(s, connection)
         .await?
-        .map(|value| text(&value, "token").to_owned())
         .filter(|token| !token.is_empty());
     let secrets = secret_values(s, &connection.id).await?;
     Ok((credential, Value::Object(secrets)))

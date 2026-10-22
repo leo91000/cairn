@@ -122,6 +122,16 @@ export interface Manifest {
       clientId: string
       scopes?: string[]
     }
+    oauth?: {
+      authorizationUrl: string
+      tokenUrl: string
+      revocationUrl?: string
+      clientIdSetting: string
+      clientSecretSetting?: string
+      scopes?: string[]
+      scopeSettings?: Record<string, string[]>
+      authorizationParameters?: Record<string, string>
+    }
   }
   settings?: SettingField[]
   instances?: { singular: string, plural: string }

@@ -19,6 +19,41 @@ use std::{collections::HashSet, sync::Arc};
 const TRUSTED: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const OTHER: &str = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 
+#[tokio::test]
+async fn converting_a_mission_retains_native_authority_and_rejects_unauthorized_callers() {
+    let f = Fixture::new().await;
+    let mut run = f.run();
+    run["status"] = "succeeded".into();
+    run["sessionId"] = "saved-session".into();
+    run["projectId"] = Value::Null;
+    run["snapshot"]["task"] =
+        json!({ "name": "Native mission", "prompt": "Inspect the workspace" });
+    let run_id = run["id"].as_str().unwrap().to_owned();
+    let saved = run.clone();
+    f.service
+        .store
+        .transaction(move |db| {
+            db.add_run(&saved, None)?;
+            db.set(
+                &format!("run-checkpoint:{}", saved["id"].as_str().unwrap()),
+                &json!({ "prepared": {} }),
+                None,
+            )
+        })
+        .await
+        .unwrap();
+    let path = format!("/api/runs/{run_id}/chat");
+    let (status, _) = f.call(&f.other, "POST", &path, json!({})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(f.service.chat_list().await.unwrap().is_empty());
+    assert_eq!(f.service.store.run(&run_id).await.unwrap(), run);
+    let (status, chat) = f.call(&f.trusted, "POST", &path, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{chat}");
+    assert_eq!(chat["nativePrincipals"], json!([TRUSTED]));
+    assert_eq!(chat["nativeAuthorityNodes"], json!([f.node["id"]]));
+    assert_eq!(chat["nativeProvenanceUnknown"], false);
+}
+
 struct Fixture {
     _root: tempfile::TempDir,
     service: Arc<Service>,

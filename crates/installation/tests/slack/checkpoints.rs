@@ -35,6 +35,7 @@ async fn checkpoints_cannot_escape_the_current_reply_and_are_retired_with_the_de
         .await
         .unwrap();
     let mut context = capabilities::Context {
+        management: None,
         connection: connection.clone(),
         manifest: registry::builtin("slack").unwrap().manifest,
         event: json!({"name": "reply", "id": delivery["id"], "authorId": "UALICE"}),

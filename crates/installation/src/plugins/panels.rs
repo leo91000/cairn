@@ -35,11 +35,31 @@ pub async fn view(s: &Service, plugin_id: &str, connection_id: &str) -> Result<V
     view_owned(s, plugin_id, connection_id, owner).await
 }
 
+pub(crate) async fn view_managed(
+    s: &Service,
+    plugin_id: &str,
+    connection_id: &str,
+    management: Option<super::management::Authority>,
+) -> Result<Value> {
+    let owner = Arc::new(Owner::current(s).await?);
+    view_authorized(s, plugin_id, connection_id, owner, management).await
+}
+
 pub(crate) async fn view_owned(
     s: &Service,
     plugin_id: &str,
     connection_id: &str,
     owner: Arc<Owner>,
+) -> Result<Value> {
+    view_authorized(s, plugin_id, connection_id, owner, None).await
+}
+
+async fn view_authorized(
+    s: &Service,
+    plugin_id: &str,
+    connection_id: &str,
+    owner: Arc<Owner>,
+    management: Option<super::management::Authority>,
 ) -> Result<Value> {
     let connection = connections::get(s, plugin_id, connection_id).await?;
     let package = registry::active(s, plugin_id).await?;
@@ -47,6 +67,10 @@ pub(crate) async fn view_owned(
         return Ok(json!({ "view": null }));
     }
     let scope = Scope::Instance(Box::new(connection), owner);
+    let scope = match management {
+        Some(authority) => Scope::Managed(Box::new(scope), authority),
+        None => scope,
+    };
     let payload = json!({ "instance": scope.instances()[0] });
     let view = scope::invoke(s, &package, "view", payload, &scope).await?;
     validate_view(&view).map_err(Error::bad_gateway)?;
@@ -65,12 +89,34 @@ pub async fn action(
     action_owned(s, plugin_id, connection_id, input, owner).await
 }
 
+pub(crate) async fn action_managed(
+    s: &Service,
+    plugin_id: &str,
+    connection_id: &str,
+    input: &Value,
+    management: Option<super::management::Authority>,
+) -> Result<Value> {
+    let owner = Arc::new(Owner::current(s).await?);
+    action_authorized(s, plugin_id, connection_id, input, owner, management).await
+}
+
 pub(crate) async fn action_owned(
     s: &Service,
     plugin_id: &str,
     connection_id: &str,
     input: &Value,
     owner: Arc<Owner>,
+) -> Result<Value> {
+    action_authorized(s, plugin_id, connection_id, input, owner, None).await
+}
+
+async fn action_authorized(
+    s: &Service,
+    plugin_id: &str,
+    connection_id: &str,
+    input: &Value,
+    owner: Arc<Owner>,
+    management: Option<super::management::Authority>,
 ) -> Result<Value> {
     let connection = connections::get(s, plugin_id, connection_id).await?;
     let package = registry::active(s, plugin_id).await?;
@@ -84,6 +130,10 @@ pub(crate) async fn action_owned(
         return Err(Error::bad("The action input is too large or invalid."));
     }
     let scope = Scope::Instance(Box::new(connection), owner);
+    let scope = match management {
+        Some(authority) => Scope::Managed(Box::new(scope), authority),
+        None => scope,
+    };
     let event = json!({
         "action": name,
         "payload": payload,
@@ -101,11 +151,31 @@ pub async fn test(s: &Service, plugin_id: &str, connection_id: &str) -> Result<V
     test_owned(s, plugin_id, connection_id, owner).await
 }
 
+pub(crate) async fn test_managed(
+    s: &Service,
+    plugin_id: &str,
+    connection_id: &str,
+    management: Option<super::management::Authority>,
+) -> Result<Value> {
+    let owner = Arc::new(Owner::current(s).await?);
+    test_authorized(s, plugin_id, connection_id, owner, management).await
+}
+
 pub(crate) async fn test_owned(
     s: &Service,
     plugin_id: &str,
     connection_id: &str,
     owner: Arc<Owner>,
+) -> Result<Value> {
+    test_authorized(s, plugin_id, connection_id, owner, None).await
+}
+
+async fn test_authorized(
+    s: &Service,
+    plugin_id: &str,
+    connection_id: &str,
+    owner: Arc<Owner>,
+    management: Option<super::management::Authority>,
 ) -> Result<Value> {
     let connection = connections::get(s, plugin_id, connection_id).await?;
     let package = registry::active(s, plugin_id).await?;
@@ -113,6 +183,10 @@ pub(crate) async fn test_owned(
         return Err(Error::not_found("This plugin has no connection test."));
     }
     let scope = Scope::Instance(Box::new(connection), owner);
+    let scope = match management {
+        Some(authority) => Scope::Managed(Box::new(scope), authority),
+        None => scope,
+    };
     let payload = json!({ "instance": scope.instances()[0] });
     let result = scope::invoke(s, &package, "test", payload, &scope).await?;
     let message = result["message"]

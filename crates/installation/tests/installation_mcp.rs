@@ -1633,6 +1633,256 @@ async fn public_call(s: &Arc<Service>, scopes: &[&str], name: &str, args: Value)
 }
 
 #[tokio::test]
+async fn mission_conversion_matches_public_mcp_and_installation_tools() {
+    for internal in [false, true] {
+        let root = TempDir::new().unwrap();
+        let s = service(&root).await;
+        let main = enabled_main(&s).await;
+        let (caller, configuration) = active_run(&s, &main).await;
+        let (target, _) = active_run(&s, &main).await;
+        let run_id = target["id"].as_str().unwrap();
+        let original = s
+            .store
+            .patch_run(
+                run_id,
+                json!({
+                    "status": "succeeded",
+                    "sessionId": "mission-session",
+                    "workspace": "/saved/mission-workspace",
+                    "summary": "Mission result",
+                }),
+            )
+            .await
+            .unwrap();
+        s.store
+            .set(
+                &format!("run-checkpoint:{run_id}"),
+                json!({
+                    "prepared": {}, "completed": true,
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        let invoke = |name, args| {
+            let s = s.clone();
+            let configuration = configuration.clone();
+            async move {
+                if internal {
+                    call(&s, &configuration, name, args).await
+                } else {
+                    public_call(&s, &["manage", "run"], name, args).await
+                }
+            }
+        };
+
+        let discovery = invoke(
+            "search",
+            json!({
+                "names": ["convert_run_to_chat"], "detail": "schema",
+            }),
+        )
+        .await;
+        assert_eq!(
+            result(&discovery)["operations"][0]["name"],
+            "convert_run_to_chat"
+        );
+        let args = json!({ "runId": run_id });
+        for scopes in [&["read"][..], &["run"][..]] {
+            let denied = public_call(&s, scopes, "convert_run_to_chat", args.clone()).await;
+            assert_eq!(denied["result"]["isError"], true);
+            assert!(s.chat_list().await.unwrap().is_empty());
+            assert_eq!(s.store.run(run_id).await.unwrap(), original);
+        }
+
+        let converted = invoke("convert_run_to_chat", args.clone()).await;
+        let chat = result(&converted);
+        let retried = invoke("convert_run_to_chat", args.clone()).await;
+        assert_eq!(result(&retried)["id"], chat["id"]);
+        assert_eq!(chat["runId"], original["id"]);
+        let converted_run = s.store.run(run_id).await.unwrap();
+        for field in ["id", "sessionId", "workspace", "summary", "status"] {
+            assert_eq!(converted_run[field], original[field], "{field}");
+        }
+        assert_eq!(converted_run["sourceTaskId"], original["taskId"]);
+        assert_eq!(s.chat_list().await.unwrap().len(), 1);
+        let message = invoke(
+            "send_chat_message",
+            json!({
+                "chatId": chat["id"],
+                "message": { "id": uuid::Uuid::new_v4(), "text": "Explain the mission result" },
+            }),
+        )
+        .await;
+        assert_eq!(result(&message)["status"], "queued");
+
+        if internal {
+            s.mcps
+                .revoke_run(&s, caller["id"].as_str().unwrap())
+                .await
+                .unwrap();
+            let token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+                .as_str()
+                .unwrap();
+            let (status, _) = request(
+                &s,
+                token,
+                "tools/call",
+                common::mcp_arguments("convert_run_to_chat", &args),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+    }
+}
+
+#[tokio::test]
+async fn plugin_setup_is_available_on_both_endpoints_without_granting_private_accounts() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let saved = cairn_installation::plugins::connections::save(
+        &s,
+        "onepassword",
+        &json!({
+            "name": "Private", "enabled": true, "secrets": { "token": "ops_fixture_private" },
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    for internal in [false, true] {
+        let list = if internal {
+            call(&s, &configuration, "list_plugins", json!({})).await
+        } else {
+            public_call(&s, &["read"], "list_plugins", json!({})).await
+        };
+        assert!(
+            result(&list)["packages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["id"] == "gmail")
+        );
+        assert!(!list.to_string().contains("ops_fixture_private"));
+        let args = json!({ "pluginId": "gmail", "action": "setup" });
+        let setup = if internal {
+            call(&s, &configuration, "manage_plugin", args).await
+        } else {
+            public_call(&s, &["manage"], "manage_plugin", args).await
+        };
+        assert!(
+            result(&setup)["callbackUrl"]
+                .as_str()
+                .unwrap()
+                .ends_with("/plugins/oauth/callback")
+        );
+        let forbidden = json!({ "pluginId": "onepassword", "action": "save", "instanceId": saved["id"], "data": { "agentIds": [MAIN_AGENT_ID] } });
+        let denied = if internal {
+            call(&s, &configuration, "manage_plugin", forbidden).await
+        } else {
+            public_call(&s, &["manage"], "manage_plugin", forbidden).await
+        };
+        assert_eq!(denied["result"]["isError"], true, "{denied}");
+    }
+    let denied = call(
+        &s,
+        &configuration,
+        "manage_plugin",
+        json!({ "pluginId": "onepassword", "action": "view", "instanceId": saved["id"] }),
+    )
+    .await;
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    let bypass = call(
+        &s,
+        &configuration,
+        "manage_plugin",
+        json!({ "pluginId": "onepassword", "action": "form", "data": { "instance": saved["id"] } }),
+    )
+    .await;
+    assert_eq!(bypass["result"]["isError"], true, "{bypass}");
+    assert_eq!(
+        s.get("plugin-connections", saved["id"].as_str().unwrap())
+            .await
+            .unwrap()["agentIds"],
+        json!([])
+    );
+}
+
+#[tokio::test]
+async fn both_mcp_endpoints_can_pause_and_delete_instances_pending_package_reapproval() {
+    use cairn_installation::{
+        plugins::{connections, registry},
+        validation::text,
+    };
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    s.plugins
+        .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let installed = registry::install(
+        &s,
+        &json!({
+            "manifest": {
+                "id": "pausable", "name": "Pausable", "version": "1.0.0",
+                "apiVersion": 2, "capabilities": [],
+            },
+            "source": "return {}",
+        }),
+    )
+    .await
+    .unwrap();
+    registry::approve(&s, "pausable", "1.0.0", text(&installed, "digest"))
+        .await
+        .unwrap();
+    let saved = connections::save(
+        &s,
+        "pausable",
+        &json!({
+            "name": "Pause me", "enabled": true,
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    std::fs::write(
+        root.path().join("data/plugins/pausable/1.0.0/main.luau"),
+        "return {} -- changed after approval",
+    )
+    .unwrap();
+    assert!(registry::active(&s, "pausable").await.is_err());
+    for internal in [false, true] {
+        let args = json!({
+            "pluginId": "pausable", "action": "enabled", "instanceId": saved["id"],
+            "data": { "enabled": false },
+        });
+        let paused = if internal {
+            call(&s, &configuration, "manage_plugin", args).await
+        } else {
+            public_call(&s, &["manage"], "manage_plugin", args).await
+        };
+        assert_eq!(result(&paused)["enabled"], false, "{paused}");
+    }
+    let removed = call(
+        &s,
+        &configuration,
+        "manage_plugin",
+        json!({
+            "pluginId": "pausable", "action": "delete", "instanceId": saved["id"],
+        }),
+    )
+    .await;
+    assert_ne!(removed["result"]["isError"], true, "{removed}");
+    assert!(
+        connections::get(&s, "pausable", text(&saved, "id"))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn both_mcp_endpoints_manage_chat_queues_and_lifecycle() {
     for internal in [false, true] {
         let root = TempDir::new().unwrap();
@@ -2393,6 +2643,104 @@ async fn installation_access_cannot_grant_secrets_or_exclusive_reservations() {
         .unwrap()
         .unwrap();
     assert_eq!(instance["agentIds"], json!([manager["id"]]));
+}
+
+#[tokio::test]
+async fn backend_migration_tools_match_and_recheck_management_grants() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let agent_token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let owner_token = common::relay_fixture::grant(&s, &["read", "manage"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let chat = cairn_installation::config::id();
+    let run = cairn_installation::config::id();
+    let node = cairn_installation::config::id();
+    s.store.put("nodes", json!({ "id": node, "runtimeId": "fixture", "capabilities": { "backend": "native" }, "nativeEnabled": true, "nativeAccounts": [] })).await.unwrap();
+    s.store
+        .set(
+            "native-authority",
+            json!({ "observedAt": cairn_installation::config::now(), "accounts": {} }),
+            None,
+        )
+        .await
+        .unwrap();
+    // Neither caller has a traced native host grant. Management access alone
+    // must not allow the migration to manufacture that authority.
+    let profile = s.agent(json!({ "name": "Native destination", "access": { "backend": "native", "nodes": [node] } }), None).await.unwrap();
+    let mut previous = profile.clone();
+    previous["access"]["backend"] = "firecracker".into();
+    common::add_run(&s.store, &json!({ "id": run, "taskId": "fixture", "status": "succeeded", "createdAt": 0, "snapshot": { "agent": previous } })).await;
+    s.store
+        .put(
+            "chats",
+            json!({ "id": chat, "runId": run, "agentId": profile["id"] }),
+        )
+        .await
+        .unwrap();
+    common::set_checkpoint(
+        &s.store,
+        &run,
+        json!({ "prepared": { "projectRoot": "/data/work" } }),
+    )
+    .await;
+    for (endpoint, token) in [
+        ("/mcp", owner_token.as_str()),
+        ("/mcp-installation", agent_token),
+    ] {
+        let (_, preview) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "get_chat_backend_migration",
+            json!({ "chatId": chat }),
+        )
+        .await;
+        assert_eq!(result(&preview)["required"], true);
+        assert!(result(&preview)["nodes"].as_array().unwrap().is_empty());
+        let (_, denied) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "migrate_chat_backend",
+            json!({ "chatId": chat, "nodeId": node, "backend": "native", "confirm": true }),
+        )
+        .await;
+        assert_eq!(denied["result"]["isError"], true, "{denied}");
+        assert!(s.store.run(&run).await.unwrap()["backendMigration"].is_null());
+    }
+    let read = common::relay_fixture::grant(&s, &["read"]).await;
+    let (_, denied) = node_management_call(
+        &app,
+        "/mcp",
+        &read,
+        "migrate_chat_backend",
+        json!({ "chatId": chat, "nodeId": node, "backend": "native", "confirm": true }),
+    )
+    .await;
+    assert_eq!(denied["result"]["isError"], true);
+    assert!(denied["result"]["_meta"]["mcp/www_authenticate"].is_string());
+    s.agent(
+        json!({ "name": "Main agent", "access": { "installation": false } }),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
+    let (status, _) = node_management_call(
+        &app,
+        "/mcp-installation",
+        agent_token,
+        "get_chat_backend_migration",
+        json!({ "chatId": chat }),
+    )
+    .await;
+    assert!(matches!(
+        status,
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    ));
 }
 
 #[tokio::test]

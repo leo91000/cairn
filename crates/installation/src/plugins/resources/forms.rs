@@ -236,6 +236,7 @@ impl Form {
         let connection = self.target.connection();
         let app = super::super::scope::summary(&connection);
         let draft = super::super::forms::Draft {
+            management: None,
             credential: s
                 .vault
                 .get(&connections::credential_key(&connection.id))

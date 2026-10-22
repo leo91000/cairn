@@ -11,14 +11,13 @@ path = "src/main.rs"
 
 [[example]]
 name = "ublk_probe"
-required-features = [ "ublk-prototype" ]
 
 [[example]]
 name = "native_storage_qualifier"
-required-features = [ "ublk" ]
 
 [features]
-ublk = [ "dep:libublk" ]
+# Compatibility aliases for existing build commands; libublk is always required.
+ublk = []
 ublk-prototype = [ "ublk" ]
 
 [dependencies]
@@ -110,17 +109,8 @@ aws-sdk-s3 = "1.150.0"
 blake3 = "1.8.7"
 flate2 = "1"
 lru = "0.18.5"
-vhost = { version = "=0.17.0", features = [ "vhost-user-backend" ] }
-vhost-user-backend = "=0.23.0"
-virtio-bindings = "=0.2.7"
-virtio-queue = "=0.18.0"
-vm-memory = { version = "=0.18.0", features = [
-  "backend-mmap",
-  "backend-atomic",
-  "backend-bitmap"
-] }
 vmm-sys-util = "=0.15.0"
-libublk = { git = "https://github.com/ublk-org/libublk-rs", rev = "0d172817b3737079477337b39538ccdc91766e6e", optional = true }
+libublk = { git = "https://github.com/ublk-org/libublk-rs", rev = "0d172817b3737079477337b39538ccdc91766e6e" }
 tokio-tungstenite = { version = "0.29", features = [ "rustls-tls-webpki-roots" ] }
 tower = { version = "0.5", features = [ "util" ] }
 webrtc = { version = "=0.21.0", default-features = false, features = [
@@ -130,6 +120,9 @@ webrtc = { version = "=0.21.0", default-features = false, features = [
 rtc = { version = "=0.21.0", default-features = false, features = [ "crypto-aws-lc-rs" ] }
 zstd = { version = "0.14.0", default-features = false }
 zip = { version = "6", default-features = false, features = [ "deflate-flate2" ] }
+ext4-view = { version = "=1.0.0", features = [ "std" ] }
+mail-builder = { version = "=0.4.4", default-features = false }
+mime_guess = "=2.0.5"
 
 [dev-dependencies]
 tempfile = "3"

@@ -227,8 +227,16 @@ async function main() {
     const emit = value => process.stdout.write(`${JSON.stringify(value)}\n`)
     mkdirSync(process.env.CODEX_HOME, { recursive: true })
     const conversation = path.join(process.env.CODEX_HOME, 'fixture-conversation.json')
-    if (!args.includes('resume'))
-      writeFileSync(conversation, JSON.stringify({ id: 'fixture-session', cwd: process.cwd(), parentThreadId: null }))
+    if (!args.includes('resume')) {
+      writeFileSync(conversation, JSON.stringify({
+        id: 'fixture-session',
+        cwd: process.cwd(),
+        parentThreadId: null,
+        turns: [],
+        historyMode: 'paginated',
+      }))
+    }
+
     emit({ type: 'thread.started', thread_id: 'fixture-session' })
     const restartMarker = path.join(process.env.CODEX_HOME, 'fixture-restart.json')
     if (prompt.includes('fixture:restart') && !args.includes('resume')) {

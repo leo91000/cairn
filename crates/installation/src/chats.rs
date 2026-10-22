@@ -832,6 +832,88 @@ pub(crate) fn create_in(db: &Db<'_>, input: Value) -> Result<Value> {
     create_as(db, input, &crate::native::policy::Origin::default())
 }
 
+/// Transfers a completed mission's conversation to a chat without replaying it.
+fn from_run(db: &Db<'_>, run_id: &str, origin: &crate::native::policy::Origin) -> Result<Value> {
+    crate::conversation_lifecycle::require_active_run(db, run_id)?;
+    if let Some(chat) = chat_for_run(db, run_id)? {
+        return Ok(chat);
+    }
+
+    let run = required(db.run(run_id)?, "Run not found")?;
+    if run["trigger"] == "chat" || run["status"] != RunStatus::Succeeded {
+        return Err(Error::conflict(
+            "Wait for this mission to finish successfully before continuing in chat.",
+        ));
+    }
+    if run["recoveryPending"] == true || !run["workspaceCleanedAt"].is_null() {
+        return Err(Error::conflict(
+            "This mission's workspace is unavailable. Start a new chat.",
+        ));
+    }
+    let checkpoint = required(
+        db.kv(&format!("run-checkpoint:{run_id}"))?,
+        "Run checkpoint not found",
+    )?;
+    if !checkpoint["prepared"].is_object() || text(&run, "sessionId").is_empty() {
+        return Err(Error::conflict(
+            "This mission has no saved conversation available to continue.",
+        ));
+    }
+
+    crate::native::policy::authorize_run_in(db, run_id, origin)?;
+    let run = required(db.run(run_id)?, "Run not found")?;
+    let agent = required(
+        db.get("agents", text(&run["snapshot"]["agent"], "id"))?,
+        "Agent not found",
+    )?;
+    if !crate::service::covers(&agent, &run["snapshot"]["agent"]) {
+        return Err(Error::conflict(
+            "Agent access was reduced. Start a new chat with the updated permissions.",
+        ));
+    }
+
+    let mut chat = json!({
+        "id": id(),
+        "title": run["snapshot"]["task"]["name"],
+        "agentId": agent["id"],
+        "projectId": run["projectId"],
+        "runId": run_id,
+        "paused": false,
+        "createdAt": now(),
+        "updatedAt": now(),
+    });
+    crate::native::policy::apply(&mut chat, &run);
+    task_projects(&agent, &chat, &db.list("projects")?)?;
+
+    let chat = db.put("chats", &chat)?;
+    db.patch_run(
+        run_id,
+        &json!({
+            "sourceTaskId": run["taskId"],
+            "sourceTaskPrompt": run["snapshot"]["task"]["prompt"],
+            "taskId": chat["id"],
+            "trigger": "chat",
+        }),
+    )?;
+    db.0.execute(
+        "UPDATE runs SET task_id=? WHERE id=?",
+        rusqlite::params![text(&chat, "id"), run_id],
+    )?;
+    // Work launched by this execution still returns to the same requester,
+    // whose conversation now lives in Chats rather than the mission's history.
+    db.0.execute(
+        "UPDATE runs SET data=json_set(data, '$.requestedBy', json_object('runId', ?, 'chatId', ?))
+         WHERE json_extract(data, '$.requestedBy.runId')=?",
+        rusqlite::params![run_id, text(&chat, "id"), run_id],
+    )?;
+    db.restore_chat_summaries(Some(run_id))?;
+    db.audit(
+        "run.converted_to_chat",
+        &json!({ "runId": run_id, "chatId": chat["id"] }),
+    )?;
+    Ok(chat)
+}
+
 pub(crate) fn create_as(
     db: &Db<'_>,
     input: Value,
@@ -939,6 +1021,41 @@ fn preparation_failed(db: &Db<'_>, prepared: &Value, error: Error) -> Result<()>
 }
 
 impl Service {
+    pub async fn chat_from_run(&self, run_id: &str) -> Result<Value> {
+        self.chat_from_run_authorized(run_id, |_| Ok(())).await
+    }
+
+    /// Rechecks delegated access in the transaction that transfers the conversation.
+    pub(crate) async fn chat_from_run_authorized<F>(
+        &self,
+        run_id: &str,
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
+        let origin = crate::native::policy::origin();
+        if origin.known() {
+            let run = self.store.run(run_id).await?;
+            crate::native::policy::refresh_agent(self, text(&run["snapshot"]["agent"], "id"))
+                .await?;
+        }
+
+        let active = self.worker.active.lock().await;
+        if active.contains_key(run_id) {
+            return Err(Error::conflict(
+                "Wait for this run to finish stopping before continuing in chat.",
+            ));
+        }
+        let run_id = run_id.to_owned();
+        self.store
+            .transaction(move |db| {
+                authorize(db)?;
+                from_run(db, &run_id, &origin)
+            })
+            .await
+    }
+
     pub async fn chat_list(&self) -> Result<Vec<Value>> {
         self.store.read(|db| list(db)).await
     }

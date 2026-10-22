@@ -296,6 +296,7 @@ pub async fn deliver(
     let digest = super::registry::digest(session.manifest(), session.sources())?;
     super::registry::require_digest(s, &connection.plugin_id, &digest).await?;
     let context = Context {
+        management: None,
         connection: connection.clone(),
         manifest: session.manifest().clone(),
         event: json!({ "name": "socket", "revision": connection.revision }),

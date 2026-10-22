@@ -4,6 +4,30 @@
 //! Scripts only describe and answer; the host keeps every credential.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
+
+/// A provider-independent authorization-code flow. Client settings and secrets are
+/// declared form fields; credentials and PKCE material never enter package code.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OAuth {
+    #[serde(default)]
+    pub require_refresh_token: bool,
+    pub authorization_url: String,
+    pub token_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revocation_url: Option<String>,
+    pub client_id_setting: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret_setting: Option<String>,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// Additional scopes for enabled boolean settings, e.g. sending or deletion.
+    #[serde(default)]
+    pub scope_settings: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub authorization_parameters: BTreeMap<String, String>,
+}
 
 /// OAuth 2.0 device authorization grant (RFC 8628), run by the host for the owner.
 /// The token obtained becomes the instance's credential; scripts never see it.
@@ -238,6 +262,65 @@ impl super::Manifest {
     }
 
     pub(super) fn validate_integrations(&self) -> Result<(), &'static str> {
+        if let Some(oauth) = self.credential.as_ref().and_then(|c| c.oauth.as_ref()) {
+            let field = |key: &str, kind: &str| {
+                self.settings
+                    .iter()
+                    .any(|f| f["key"] == key && f["type"] == kind)
+            };
+            let valid_scopes = |scopes: &[String]| {
+                scopes.len() <= 30
+                    && scopes.iter().all(|s| {
+                        !s.is_empty() && s.len() <= 200 && s.bytes().all(|c| c.is_ascii_graphic())
+                    })
+            };
+            if self
+                .credential
+                .as_ref()
+                .is_some_and(|c| c.device_flow.is_some())
+                || !self.permits_capability("http")
+                || !https_on(self, &oauth.authorization_url)
+                || !https_on(self, &oauth.token_url)
+                || oauth
+                    .revocation_url
+                    .as_ref()
+                    .is_some_and(|u| !https_on(self, u))
+                || !field(&oauth.client_id_setting, "string")
+                || oauth
+                    .client_secret_setting
+                    .as_ref()
+                    .is_some_and(|k| !field(k, "secret"))
+                || !valid_scopes(&oauth.scopes)
+                || oauth.scope_settings.len() > 20
+                || oauth
+                    .scope_settings
+                    .iter()
+                    .any(|(k, v)| !field(k, "boolean") || !valid_scopes(v))
+                || oauth.authorization_parameters.len() > 10
+                || oauth.authorization_parameters.iter().any(|(k, v)| {
+                    k.is_empty()
+                        || k.len() > 60
+                        || !k.bytes().all(|c| {
+                            c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'_' | b'-')
+                        })
+                        || matches!(
+                            k.as_str(),
+                            "state"
+                                | "scope"
+                                | "client_id"
+                                | "client_secret"
+                                | "redirect_uri"
+                                | "response_type"
+                                | "code_challenge"
+                                | "code_challenge_method"
+                        )
+                        || v.len() > 200
+                        || v.chars().any(char::is_control)
+                })
+            {
+                return Err("Plugin manifest has an invalid OAuth sign-in.");
+            }
+        }
         let flow = self
             .credential
             .as_ref()
@@ -433,6 +516,52 @@ mod tests {
             let mut invalid = flow.clone();
             invalid[key] = value;
             assert!(manifest(json!({ "deviceFlow": invalid })).is_err(), "{key}");
+        }
+    }
+
+    #[test]
+    fn oauth_uses_declared_endpoints_settings_and_host_owned_security_parameters() {
+        let base = json!({
+            "id": "mail", "name": "Mail", "version": "1", "apiVersion": 2,
+            "capabilities": ["http", "files"], "hosts": ["mail.example"],
+            "settings": [
+                { "key": "clientId", "title": "Client", "type": "string" },
+                { "key": "clientSecret", "title": "Secret", "type": "secret" },
+                { "key": "write", "title": "Write", "type": "boolean" },
+            ],
+            "credential": { "label": "Mail authorization", "header": "authorization", "prefix": "Bearer ", "oauth": {
+                "authorizationUrl": "https://mail.example/authorize", "tokenUrl": "https://mail.example/token",
+                "clientIdSetting": "clientId", "clientSecretSetting": "clientSecret", "requireRefreshToken": true,
+                "scopes": ["mail.read"], "scopeSettings": { "write": ["mail.write"] },
+                "authorizationParameters": { "access_type": "offline" },
+            } },
+        });
+        let check = |value: Value| {
+            serde_json::from_value::<Manifest>(value)
+                .unwrap()
+                .validate()
+        };
+        assert!(check(base.clone()).is_ok());
+        for (key, value) in [
+            ("authorizationUrl", json!("http://mail.example/authorize")),
+            ("tokenUrl", json!("https://attacker.example/token")),
+            (
+                "revocationUrl",
+                json!("https://mail.example/revoke?token=leak"),
+            ),
+            ("clientIdSetting", json!("missing")),
+            ("clientSecretSetting", json!("clientId")),
+            ("scopeSettings", json!({ "clientId": ["mail.write"] })),
+            ("authorizationParameters", json!({ "state": "fixed" })),
+            (
+                "authorizationParameters",
+                json!({ "code_challenge": "fixed" }),
+            ),
+            ("scopes", json!(["mail read"])),
+        ] {
+            let mut invalid = base.clone();
+            invalid["credential"]["oauth"][key] = value;
+            assert!(check(invalid).is_err(), "{key}");
         }
     }
 

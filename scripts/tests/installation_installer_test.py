@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 import unittest
 
+from supervisor_fixture import write_supervisors
+
 REPO = Path(__file__).resolve().parents[2]
 
 
@@ -41,7 +43,7 @@ if 'up' in sys.argv:
                 'image': 'ghcr.io/leo91000/cairn@sha256:' + '1' * 64,
             }))
             result = subprocess.run(
-                ['python3', str(REPO / 'deploy/installations/host.py'),
+                ['python3', str(write_supervisors(Path(directory))[0]),
                  'https://cairn.example.test', '--claim-code', 'a' * 64],
                 env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
                      'CAIRN_INSTALLATION_ROOT': directory}, capture_output=True, text=True)
@@ -64,7 +66,7 @@ if 'up' in sys.argv:
                 'image': 'ghcr.io/leo91000/cairn@sha256:' + '1' * 64,
             }))
             result = subprocess.run(
-                ['python3', str(REPO / 'deploy/installations/host.py'),
+                ['python3', str(write_supervisors(Path(directory))[0]),
                  'https://cairn.example.test', '--claim-code', 'a' * 64],
                 env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
                      'CAIRN_INSTALLATION_ROOT': str(installation)}, capture_output=True, text=True)
@@ -79,7 +81,7 @@ if 'up' in sys.argv:
             identity.parent.mkdir(parents=True)
             identity.touch(mode=0o600)
             result = subprocess.run(
-                ['python3', str(REPO / 'deploy/installations/host.py'),
+                ['python3', str(write_supervisors(Path(directory))[0]),
                  'https://cairn.example.test', '--claim-code', 'a' * 64],
                 env={**os.environ, 'CAIRN_INSTALLATION_ROOT': directory},
                 capture_output=True, text=True)
@@ -92,7 +94,7 @@ if 'up' in sys.argv:
     def test_invalid_claim_code_has_an_actionable_message(self):
         with tempfile.TemporaryDirectory() as directory:
             result = subprocess.run(
-                ['python3', str(REPO / 'deploy/installations/host.py'),
+                ['python3', str(write_supervisors(Path(directory))[0]),
                  'https://cairn.example.test', '--claim-code', 'invalid'],
                 env={**os.environ, 'CAIRN_INSTALLATION_ROOT': directory},
                 capture_output=True, text=True)
@@ -152,7 +154,7 @@ if 'exec' in args:
                 env = {**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
                        'CAIRN_INSTALLATION_ROOT': str(root / 'installation'),
                        'FIXTURE_BEACON_ORIGIN': f'http://127.0.0.1:{server.server_port}'}
-                command = ['python3', str(REPO / 'deploy/installations/host.py'),
+                command = ['python3', str(write_supervisors(Path(directory))[0]),
                            f'http://127.0.0.1:{server.server_port}', '--claim-code', 'a' * 64]
                 result = subprocess.run(command, env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)

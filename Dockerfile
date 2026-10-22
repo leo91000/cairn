@@ -101,9 +101,7 @@ EXPOSE 4311
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --start-interval=1s CMD curl --fail --silent --output /dev/null http://127.0.0.1:4311/health
 CMD ["/usr/local/bin/cairn-beacon"]
 
-# The direct block backend shares guest RAM with Firecracker. Upstream 1.17.0
-# does not reclaim MAP_SHARED memfd pages on balloon/free-page reporting.
-# Keep the patch narrow, pinned and tested; retain the upstream seccomp policy.
+# Keep native block discard pinned and tested; retain upstream seccomp policy.
 FROM rust:1.97.0-bookworm AS firecracker
 RUN apt-get update && apt-get install -y --no-install-recommends \
     musl-tools clang libclang-dev libseccomp-dev cmake && rm -rf /var/lib/apt/lists/* \
@@ -115,8 +113,6 @@ RUN curl -fsSL https://codeload.github.com/firecracker-microvm/firecracker/tar.g
     && echo '27280787407229c412901dfcf74cd378f1336010e71050aba43ace51cd4a0f4f  /tmp/firecracker-source.tar.gz' | sha256sum -c - \
     && tar -xzf /tmp/firecracker-source.tar.gz --strip-components=1 \
     && rm /tmp/firecracker-source.tar.gz
-COPY deploy/microvm/firecracker-shared-memory.patch /tmp/firecracker.patch
-RUN git apply /tmp/firecracker.patch
 # Native CI runs the async engine tests; build sandboxes may deny io_uring.
 COPY deploy/microvm/firecracker-discard.patch /tmp/firecracker-discard.patch
 RUN git apply /tmp/firecracker-discard.patch
@@ -224,7 +220,7 @@ RUN mksquashfs /control /control.squashfs -comp xz -processors 2 -noappend -all-
 
 FROM runtime AS final
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends iptables e2fsprogs util-linux fuse3 \
+RUN apt-get update && apt-get install -y --no-install-recommends iptables e2fsprogs fakeroot util-linux fuse3 \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://github.com/firecracker-microvm/firecracker/releases/download/v1.17.0/firecracker-v1.17.0-x86_64.tgz -o /tmp/firecracker.tgz \
     && echo '06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558  /tmp/firecracker.tgz' | sha256sum -c - \

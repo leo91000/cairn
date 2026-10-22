@@ -16,10 +16,10 @@ mod webhooks;
 pub use arguments::{parse_arguments, usage};
 pub use form::{FormLookup, validate_form_fields, validate_form_result, validate_lookup_result};
 pub use integrations::{
-    Condition, DeviceFlow, GitCredential, GitIdentity, ProjectSource, RunCredentials, RunFile,
-    SkillSource, home_path, render,
+    Condition, DeviceFlow, GitCredential, GitIdentity, OAuth, ProjectSource, RunCredentials,
+    RunFile, SkillSource, home_path, render,
 };
-pub use oauth::{OAuth, OAuthPersonal, OAuthTokenResponse};
+pub use oauth::{OAuth as OAuthProvider, OAuthPersonal, OAuthTokenResponse};
 pub use operations::{Operation, Profile, RequestRule};
 pub use resources::ResourceCollection;
 pub use settings::validate_settings_schema;
@@ -45,6 +45,10 @@ pub const CAPABILITIES: &[(&str, &str)] = &[
         "Answer the agent's questions and stop its work, for people you allow",
     ),
     ("storage", "Keep small private notes for each connection"),
+    (
+        "files",
+        "Transfer private files through temporary instance-scoped handles",
+    ),
     (
         "http",
         "Call the web hosts listed by the package, with the connection's credential when asked",
@@ -83,6 +87,9 @@ pub fn capability(method: &str) -> Option<&'static str> {
             "storage"
         }
         "http.request" => "http",
+        "files.create" | "files.append" | "files.read" | "files.delete" | "files.composeMime" => {
+            "files"
+        }
         "timers.after" | "timers.cancel" => "timers",
         "conversations.submit" | "delivery.checkpoint" => "conversations.submit",
         "conversations.check"
@@ -114,6 +121,9 @@ pub struct Credential {
     /// The owner may sign in instead of pasting the credential.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_flow: Option<DeviceFlow>,
+    /// Authorization-code sign-in with PKCE and host-owned refresh tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<OAuth>,
 }
 
 /// A program on the installation the package may run through `exec`.
@@ -269,7 +279,7 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operations: Vec<Operation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub oauth: Vec<OAuth>,
+    pub oauth: Vec<OAuthProvider>,
     /// Files, Git credentials and identity rendered into granted agents' runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_credentials: Option<RunCredentials>,

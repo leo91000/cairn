@@ -142,6 +142,7 @@ where
     // Secret loading is I/O too. A changed instance must not launch with either
     // an obsolete credential or a replacement credential from its new revision.
     authorize().await?;
+    capabilities::authorize_management(s, context).await?;
     let mut child = command.spawn().map_err(|_| {
         Error::unavailable("The program could not start. Is it installed on this server?")
     })?;

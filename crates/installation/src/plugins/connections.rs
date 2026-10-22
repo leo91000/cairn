@@ -25,6 +25,7 @@ pub const OWNED: &[&str] = &[
     "plugin-requests",
     "plugin-activity",
     "plugin-storage",
+    "plugin-http-receipts",
     "plugin-timers",
     "plugin-resource-grants",
     "plugin-routes",
@@ -320,13 +321,7 @@ pub(crate) fn authorize(db: &Db<'_>, expected: &Connection) -> Result<Connection
 
 /// The connection's secret, for host-side injection only. Never sent to plugin code.
 pub(crate) async fn credential(s: &Service, connection: &Connection) -> Result<Option<String>> {
-    ensure_owner(s, connection).await?;
-    let expected = connection.clone();
-    s.store.read(move |db| authorize(db, &expected)).await?;
-    Ok(s.vault
-        .get(&credential_key(&connection.id))
-        .await?
-        .map(|value| text(&value, "token").to_owned()))
+    super::oauth::access_token(s, connection).await
 }
 
 pub(crate) async fn status(s: &Service, connection: &Connection, state: &str) {
@@ -678,15 +673,83 @@ pub(crate) async fn save_owned(
     existing: Option<&str>,
     owner: std::sync::Arc<super::operations::Owner>,
 ) -> Result<Value> {
+    save_with_owner(s, plugin_id, input, existing, owner, |_| Ok(()), None).await
+}
+
+pub(crate) async fn save_authorized<F>(
+    s: &Service,
+    plugin_id: &str,
+    input: &Value,
+    existing: Option<&str>,
+    authorize_management: F,
+    management: Option<super::management::Authority>,
+) -> Result<Value>
+where
+    F: Fn(&Db<'_>) -> Result<()> + Send + Sync + 'static,
+{
+    let owner = std::sync::Arc::new(super::operations::Owner::current(s).await?);
+    save_with_owner(
+        s,
+        plugin_id,
+        input,
+        existing,
+        owner,
+        authorize_management,
+        management,
+    )
+    .await
+}
+
+async fn save_with_owner<F>(
+    s: &Service,
+    plugin_id: &str,
+    input: &Value,
+    existing: Option<&str>,
+    owner: std::sync::Arc<super::operations::Owner>,
+    authorize_management: F,
+    management: Option<super::management::Authority>,
+) -> Result<Value>
+where
+    F: Fn(&Db<'_>) -> Result<()> + Send + Sync + 'static,
+{
+    let authorize_management = std::sync::Arc::new(authorize_management);
+    let initial = authorize_management.clone();
+    s.store.read(move |db| initial(db)).await?;
+    let flow = input["credentialFlow"]
+        .as_str()
+        .filter(|flow| !flow.is_empty());
+    let flow_lock = flow.map(|flow| s.plugins.oauth_flows.lock(&format!("flow:{flow}")));
+    let _flow_guard = match flow_lock {
+        Some(lock) => Some(lock.lock_owned().await),
+        None => None,
+    };
     owner.recheck(s).await?;
     let approved = registry::approved(s, plugin_id).await?;
     let source = existing.map_or(SaveSource::New, SaveSource::Existing);
-    let prepared = prepare(s, &approved.package, input, source, Some(owner.clone())).await?;
+    let prepared = prepare_managed(
+        s,
+        &approved.package,
+        input,
+        source,
+        Some(owner.clone()),
+        management.clone(),
+    )
+    .await?;
     owner.recheck(s).await?;
+    if let Some(authority) = &management {
+        authority.recheck(s).await?;
+    }
     approved.recheck(s).await?;
+    let oauth_flow = approved
+        .package
+        .manifest
+        .credential
+        .as_ref()
+        .is_some_and(|c| c.oauth.is_some());
     let result = s
         .store
         .transaction(move |db| {
+            authorize_management(db)?;
             approved.recheck_in(db)?;
             prepared.persist_in(db)
         })
@@ -695,7 +758,11 @@ pub(crate) async fn save_owned(
         .as_str()
         .filter(|flow| !flow.is_empty())
     {
-        let _ = s.plugins.device_flows.token(s, plugin_id, flow, true).await;
+        if oauth_flow {
+            s.plugins.oauth_flows.consume(plugin_id, flow);
+        } else {
+            let _ = s.plugins.device_flows.token(s, plugin_id, flow, true).await;
+        }
     }
     s.plugins.changed.notify_one();
     Ok(result)
@@ -707,6 +774,17 @@ pub(crate) async fn prepare(
     input: &Value,
     source: SaveSource<'_>,
     request_owner: Option<std::sync::Arc<super::operations::Owner>>,
+) -> Result<Prepared> {
+    prepare_managed(s, package, input, source, request_owner, None).await
+}
+
+async fn prepare_managed(
+    s: &Service,
+    package: &registry::Package,
+    input: &Value,
+    source: SaveSource<'_>,
+    request_owner: Option<std::sync::Arc<super::operations::Owner>>,
+    management: Option<super::management::Authority>,
 ) -> Result<Prepared> {
     let (existing, setup, updating) = match source {
         SaveSource::New => (None, None, false),
@@ -807,25 +885,23 @@ pub(crate) async fn prepare(
         .as_u64()
         .filter(|value| (1..=50).contains(value))
         .unwrap_or(5) as u32;
-    // A device sign-in the owner completed supplies the credential instead of a paste.
+    // Sign-in supplies an encrypted credential record instead of a pasted token.
     let flow = input["credentialFlow"]
         .as_str()
         .filter(|flow| !flow.is_empty());
-    let signed_in = match flow {
+    let signed_record = match flow {
         Some(flow) => Some(
-            s.plugins
-                .device_flows
-                .token(s, plugin_id, flow, false)
-                .await?,
+            super::oauth::flow_credential(s, plugin_id, flow, existing, &settings, false).await?,
         ),
         None => None,
     };
-    let token = signed_in
-        .as_deref()
+    let token = signed_record
+        .as_ref()
+        .and_then(|v| v["token"].as_str())
         .unwrap_or_else(|| text(input, "token"))
         .trim();
     if input.get("token").is_some_and(|value| !value.is_string())
-        || token.len() > 4096
+        || token.len() > 16_384
         || token.chars().any(|c| c.is_whitespace() || c.is_control())
         || (existing.is_none() && token.is_empty() && manifest.credential.is_some())
     {
@@ -834,6 +910,17 @@ pub(crate) async fn prepare(
             .as_ref()
             .map_or("credential", |c| c.label.as_str());
         return Err(Error::bad(format!("Enter the {label}.")));
+    }
+    if manifest
+        .credential
+        .as_ref()
+        .is_some_and(|c| c.oauth.is_some())
+        && signed_record.is_none()
+        && !token.is_empty()
+    {
+        return Err(Error::bad(
+            "Connect this account through OAuth; pasted access tokens are not accepted.",
+        ));
     }
     let connection_id = existing.map_or_else(id, str::to_owned);
     uuid(&connection_id)?;
@@ -856,18 +943,35 @@ pub(crate) async fn prepare(
         None => Map::new(),
     };
     let secret_fields = secrets(&manifest, &input["secrets"], &saved)?;
+    if let Some(record) = &signed_record
+        && let Some(key) = manifest
+            .credential
+            .as_ref()
+            .and_then(|c| c.oauth.as_ref())
+            .and_then(|o| o.client_secret_setting.as_ref())
+        && record["oauth"]["clientSecret"] != secret_fields.get(key).cloned().unwrap_or(Value::Null)
+    {
+        return Err(Error::bad(
+            "The client secret changed after sign-in. Sign in again.",
+        ));
+    }
     let secret_keys = secret_fields.keys().cloned().collect::<Vec<_>>();
     if manifest.instance_form {
         let credential = match (token.is_empty(), existing) {
             (false, _) => Some(token.to_owned()),
-            (true, Some(id)) => s
+            (true, Some(id)) if setup.is_some() => s
                 .vault
                 .get(&credential_key(id))
                 .await?
-                .map(|value| text(&value, "token").to_owned()),
+                .and_then(|record| record["token"].as_str().map(str::to_owned)),
+            (true, Some(id)) => {
+                super::oauth::draft_token(s, &get(s, plugin_id, id).await?, management.as_ref())
+                    .await?
+            }
             (true, None) => None,
         };
         let draft = forms::Draft {
+            management,
             credential,
             secrets: secret_fields.clone(),
             setup: setup.cloned().map(Box::new),
@@ -882,6 +986,34 @@ pub(crate) async fn prepare(
         };
         settings = forms::submit(s, package, &connection_id, settings, draft).await?;
     }
+    if signed_record.is_none()
+        && let Some(oauth) = manifest.credential.as_ref().and_then(|c| c.oauth.as_ref())
+    {
+        let previous = match existing {
+            Some(id) => Some(get(s, plugin_id, id).await?),
+            None => None,
+        };
+        if let Some(previous) = previous {
+            let client_changed =
+                previous.settings[&oauth.client_id_setting] != settings[&oauth.client_id_setting];
+            let added_scope = oauth
+                .scope_settings
+                .keys()
+                .any(|key| settings[key] == true && previous.settings[key] != true);
+            let secret_changed = oauth
+                .client_secret_setting
+                .as_ref()
+                .is_some_and(|key| secret_fields.get(key) != saved.get(key));
+            if client_changed || added_scope || secret_changed {
+                return Err(Error::bad(
+                    "The OAuth client or permissions changed. Sign in again before saving.",
+                ));
+            }
+        }
+    }
+    if let Some(flow) = flow {
+        super::oauth::flow_credential(s, plugin_id, flow, existing, &settings, false).await?;
+    }
     let encrypted_secrets = if manifest.secret_settings().next().is_some() {
         Some(s.vault.encrypt(
             &secrets_key(&connection_id),
@@ -894,8 +1026,12 @@ pub(crate) async fn prepare(
         None
     } else {
         Some(
-            s.vault
-                .encrypt(&credential_key(&connection_id), &json!({ "token": token }))?,
+            s.vault.encrypt(
+                &credential_key(&connection_id),
+                &signed_record
+                    .clone()
+                    .unwrap_or_else(|| json!({ "token": token })),
+            )?,
         )
     };
     let connection = Connection {
@@ -1070,6 +1206,7 @@ pub(crate) async fn refresh(s: &Service, connection: &Connection) -> Result<()> 
         .await?
         .map(|value| text(&value, "token").to_owned());
     let draft = forms::Draft {
+        management: None,
         credential,
         secrets: secret_values(s, &connection.id).await?,
         setup: None,
@@ -1213,10 +1350,24 @@ pub async fn get(s: &Service, plugin_id: &str, connection_id: &str) -> Result<Co
 }
 
 pub async fn remove(s: &Service, plugin_id: &str, connection_id: &str) -> Result<Value> {
+    remove_authorized(s, plugin_id, connection_id, |_| Ok(())).await
+}
+
+pub(crate) async fn remove_authorized<F>(
+    s: &Service,
+    plugin_id: &str,
+    connection_id: &str,
+    authorize_management: F,
+) -> Result<Value>
+where
+    F: Fn(&Db<'_>) -> Result<()> + Send + Sync + 'static,
+{
     get(s, plugin_id, connection_id).await?;
+    let forgotten_instance = connection_id.to_owned();
     let connection_id = connection_id.to_owned();
     s.store
         .transaction(move |db| {
+            authorize_management(db)?;
             db.remove(KIND, &connection_id)?;
             super::resources::remove_owned(db, &connection_id)?;
             crate::agent_grants::forget_resource(db, crate::agent_grants::PLUGINS, &connection_id)?;
@@ -1237,6 +1388,7 @@ pub async fn remove(s: &Service, plugin_id: &str, connection_id: &str) -> Result
             db.audit("plugin.connection.deleted", &json!({ "id": connection_id }))
         })
         .await?;
+    s.plugins.files.forget(&forgotten_instance);
     s.plugins.changed.notify_one();
     Ok(json!({ "deleted": true }))
 }
@@ -1283,14 +1435,46 @@ pub async fn overview(s: &Service) -> Result<Vec<Value>> {
 
 /// Pausing keeps the configuration and credential; the worker stops within seconds.
 pub async fn set_enabled(s: &Service, plugin_id: &str, id: &str, input: &Value) -> Result<Value> {
+    set_enabled_authorized(s, plugin_id, id, input, |_| Ok(())).await
+}
+
+pub(crate) async fn set_enabled_authorized<F>(
+    s: &Service,
+    plugin_id: &str,
+    id: &str,
+    input: &Value,
+    authorize_management: F,
+) -> Result<Value>
+where
+    F: Fn(&Db<'_>) -> Result<()> + Send + Sync + 'static,
+{
     get(s, plugin_id, id).await?;
     let enabled = input["enabled"]
         .as_bool()
         .ok_or_else(|| Error::bad("Choose whether the connection accepts work."))?;
+    let oauth = if enabled {
+        registry::active(s, plugin_id)
+            .await?
+            .manifest
+            .credential
+            .as_ref()
+            .is_some_and(|c| c.oauth.is_some())
+    } else {
+        false
+    };
     let id = id.to_owned();
     let value = s
         .store
         .transaction(move |db| {
+            authorize_management(db)?;
+            if enabled
+                && oauth
+                && db
+                    .kv(&format!("mcp-secret:{}", credential_key(&id)))?
+                    .is_none()
+            {
+                return Err(Error::bad("Reconnect this account before enabling it."));
+            }
             let mut value = db
                 .get(KIND, &id)?
                 .ok_or_else(|| Error::not_found("Plugin connection not found."))?;

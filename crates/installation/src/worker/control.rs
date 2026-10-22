@@ -228,6 +228,11 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
 /// Queues a stopped run to continue its saved conversation.
 fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
     let run = required(db.run(id)?, "Run not found")?;
+    if run["backendMigration"].is_object() {
+        return Err(Error::conflict(
+            "Wait for the backend migration to finish before resuming.",
+        ));
+    }
     crate::conversation_lifecycle::require_active_run(db, id)?;
     let replay_refused = db.list("chats")?.iter().any(|chat| {
         chat["runId"] == id

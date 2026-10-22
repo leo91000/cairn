@@ -286,6 +286,24 @@ fun RunScreen(
                                         openChat(current.taskId)
                                     },
                                 )
+                            if (
+                                current.trigger != "chat" &&
+                                    current.status == "succeeded" &&
+                                    current.sessionId != null &&
+                                    current.workspaceCleanedAt == null
+                            )
+                                DropdownMenuItem(
+                                    text = { Text("Continuer en chat") },
+                                    leadingIcon = { Icon(CairnIcons.Chat, null) },
+                                    enabled = !state.busy,
+                                    onClick = {
+                                        menu = false
+                                        vm.perform {
+                                            val chat = api.send<Chat>("POST", "/runs/$id/chat")
+                                            openChat(chat.id)
+                                        }
+                                    },
+                                )
                         }
                     }
                 }

@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 /// Unsaved values a draft's handler may use through `auth`. Never sent to scripts.
 pub struct Draft {
+    pub management: Option<super::management::Authority>,
     pub credential: Option<String>,
     pub secrets: Map<String, Value>,
     pub setup: Option<Box<super::setup::SetupDraft>>,
@@ -41,7 +42,7 @@ pub(crate) fn typed_credential(manifest: &Manifest, input: &Value) -> Result<Opt
         return Ok(None);
     }
     if manifest.credential.is_none()
-        || token.len() > 4096
+        || token.len() > 16384
         || token.chars().any(|c| c.is_whitespace() || c.is_control())
     {
         return Err(Error::bad(
@@ -161,7 +162,16 @@ async fn run(
     evaluation: &Evaluation,
 ) -> Result<Value> {
     let secret_keys = draft.secrets.keys().cloned().collect::<Vec<_>>();
+    let previous = match instance {
+        Some(id) => s
+            .store
+            .get(connections::KIND, id)
+            .await?
+            .map(|v| v["settings"].clone()),
+        None => None,
+    };
     let mut payload = json!({
+        "previous": previous,
         "values": settings,
         "credential": draft.credential.is_some(),
         "secrets": secret_keys,
@@ -182,7 +192,12 @@ async fn run(
         settings,
         secret_keys,
     );
+    let management = draft.management.clone();
     let scope = Scope::Draft(Box::new(connection), Arc::new(draft));
+    let scope = match management {
+        Some(authority) => Scope::Managed(Box::new(scope), authority),
+        None => scope,
+    };
     let result = scope::invoke(s, package, "form", payload, &scope).await?;
     evaluation.finish(&package.manifest.settings, &["credential", "form"], result)
 }
@@ -195,11 +210,31 @@ pub async fn form(s: &Service, plugin_id: &str, input: &Value) -> Result<Value> 
     form_owned(s, plugin_id, input, owner).await
 }
 
+pub(crate) async fn form_managed(
+    s: &Service,
+    plugin_id: &str,
+    input: &Value,
+    management: Option<super::management::Authority>,
+) -> Result<Value> {
+    let owner = Arc::new(super::operations::Owner::current(s).await?);
+    form_authorized(s, plugin_id, input, owner, management).await
+}
+
 pub(crate) async fn form_owned(
     s: &Service,
     plugin_id: &str,
     input: &Value,
     owner: Arc<super::operations::Owner>,
+) -> Result<Value> {
+    form_authorized(s, plugin_id, input, owner, None).await
+}
+
+async fn form_authorized(
+    s: &Service,
+    plugin_id: &str,
+    input: &Value,
+    owner: Arc<super::operations::Owner>,
+    management: Option<super::management::Authority>,
 ) -> Result<Value> {
     let package = registry::active(s, plugin_id).await?;
     let manifest = &package.manifest;
@@ -217,18 +252,24 @@ pub(crate) async fn form_owned(
         .filter(|flow| !flow.is_empty())
     {
         Some(flow) => Some(
-            s.plugins
-                .device_flows
-                .token(s, plugin_id, flow, false)
-                .await?,
+            super::oauth::flow_credential(
+                s,
+                plugin_id,
+                flow,
+                instance.as_deref(),
+                &partial_values(&manifest.settings, &input["settings"])?,
+                false,
+            )
+            .await?,
         ),
         None => None,
     };
     let token = signed_in
-        .as_deref()
+        .as_ref()
+        .and_then(|v| v["token"].as_str())
         .unwrap_or_else(|| text(input, "token"))
         .trim();
-    if token.len() > 4096 || token.chars().any(|c| c.is_whitespace() || c.is_control()) {
+    if token.len() > 16_384 || token.chars().any(|c| c.is_whitespace() || c.is_control()) {
         let label = manifest
             .credential
             .as_ref()
@@ -243,11 +284,14 @@ pub(crate) async fn form_owned(
     }
     let credential = match (&instance, token.is_empty()) {
         (_, false) => Some(token.to_owned()),
-        (Some(id), true) => s
-            .vault
-            .get(&credential_key(id))
+        (Some(id), true) => {
+            super::oauth::draft_token(
+                s,
+                &connections::get(s, plugin_id, id).await?,
+                management.as_ref(),
+            )
             .await?
-            .map(|value| text(&value, "token").to_owned()),
+        }
         (None, true) => None,
     };
     let saved = match &instance {
@@ -255,6 +299,7 @@ pub(crate) async fn form_owned(
         None => Map::new(),
     };
     let draft = Draft {
+        management,
         credential: credential.filter(|_| manifest.credential.is_some()),
         secrets: secrets(manifest, &input["secrets"], saved),
         setup: None,
@@ -304,6 +349,7 @@ pub(crate) async fn setup_form(
             .map(|value| text(&value, "token").to_owned()),
     };
     let draft = Draft {
+        management: None,
         credential,
         secrets: secrets(&package.manifest, &input["secrets"], saved),
         setup: Some(Box::new(setup)),

@@ -2,6 +2,54 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 
 #[tokio::test]
+async fn dual_stack_binding_reports_ipv4_sources_as_ipv4_and_ipv6_sources_as_ipv6() {
+    let server = std::net::UdpSocket::bind("[::]:0").unwrap();
+    server.set_nonblocking(true).unwrap();
+    let port = server.local_addr().unwrap().port();
+    let task = tokio::spawn(cairn_beacon::stun::serve(
+        UdpSocket::from_std(server).unwrap(),
+    ));
+    let request = [
+        0, 1, 0, 0, 0x21, 0x12, 0xa4, 0x42, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    ];
+
+    for (bind, destination) in [
+        ("127.0.0.1:0", format!("127.0.0.1:{port}")),
+        ("[::1]:0", format!("[::1]:{port}")),
+    ] {
+        let client = UdpSocket::bind(bind).await.unwrap();
+        let source = client.local_addr().unwrap();
+        client.send_to(&request, &destination).await.unwrap();
+        let mut reply = [0; 512];
+        let (length, _) =
+            tokio::time::timeout(Duration::from_secs(1), client.recv_from(&mut reply))
+                .await
+                .unwrap()
+                .unwrap();
+        let (family, address) = match source.ip() {
+            std::net::IpAddr::V4(ip) => (1, ip.octets().to_vec()),
+            std::net::IpAddr::V6(ip) => (2, ip.octets().to_vec()),
+        };
+        assert_eq!(reply[25], family);
+        assert_eq!(length, 28 + address.len());
+        assert_eq!(&reply[8..20], &request[8..20]);
+        assert_eq!(
+            u16::from_be_bytes(reply[26..28].try_into().unwrap()) ^ 0x2112,
+            source.port()
+        );
+        let decoded: Vec<_> = reply[28..length]
+            .iter()
+            .zip(&request[4..20])
+            .map(|(byte, mask)| byte ^ mask)
+            .collect();
+        assert_eq!(decoded, address);
+    }
+
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
 async fn binding_reports_the_actual_udp_source_and_never_relays_turn_or_invalid_packets() {
     let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let destination = server.local_addr().unwrap();
