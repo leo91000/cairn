@@ -39,7 +39,7 @@ pub async fn send(root: &Path, writer: &mut (impl tokio::io::AsyncWrite + Unpin)
 pub async fn send_filtered(
     root: &Path,
     writer: &mut (impl tokio::io::AsyncWrite + Unpin),
-    include: fn(&Path) -> bool,
+    include: impl Fn(&Path) -> bool + Send,
 ) -> Result<()> {
     let root = tokio::fs::canonicalize(root).await?;
     let mut directories = vec![root.clone()];
