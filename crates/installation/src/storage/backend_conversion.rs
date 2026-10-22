@@ -176,7 +176,9 @@ impl Copy {
                         }
                     }
                     output.set_len(metadata.len())?;
-                    output.sync_all()?;
+                    // Packing reads this closed temporary tree. It is discarded
+                    // after interruption; only the published converted point is
+                    // durable, so each extracted file needs no separate fsync.
                     output.set_permissions(std::fs::Permissions::from_mode(
                         u32::from(metadata.mode() & 0o777) | 0o600,
                     ))?;

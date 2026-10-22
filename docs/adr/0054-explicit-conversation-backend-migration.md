@@ -61,6 +61,10 @@ conversion starts, both storage locks exclude live converters while abandoned
 staging from a terminated manager is reclaimed, including on a retry.
 Cleanup preserves the staging root so it can be a separate mounted filesystem;
 it removes only that directory's abandoned contents without following symlinks.
+Extracted files are closed before packing, without a separate fsync for every
+temporary file. This tree is discarded after interruption; the durability
+boundary remains the verified converted recovery point, published before the
+original environment is replaced.
 
 This supersedes the blanket native/VM conversion prohibition in
 [native journal storage](0052-native-ublk-workspaces-and-idle-eviction.md).
