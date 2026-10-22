@@ -12,6 +12,9 @@ mailbox. Agents need an explicit grant for every instance and must specify
 2. In Cairn → Plugins → Gmail → Add account, copy the callback URL into the client's
    authorized redirect URIs. Enter its client ID and client secret in Cairn. The
    secret and Google tokens stay in the encrypted installation vault.
+   The callback is the central Beacon URL (`https://cairn.build/plugins/oauth/callback`
+   on the official service), shared by every installation and mailbox. Register it
+   once per OAuth client; adding an installation needs no Google configuration.
 3. Choose capabilities, sign in with Google, verify the displayed email, then save.
    Repeat for each mailbox. Grant the instances on each agent's page.
 4. Google external applications in **Testing** require test users and expire refresh

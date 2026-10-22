@@ -15,6 +15,7 @@ mod network;
 mod notifications;
 mod oauth;
 mod passkeys;
+mod plugin_oauth;
 mod relay;
 mod sharing;
 pub mod stun;
@@ -251,6 +252,7 @@ pub async fn router_with_installation_hosts(
             post(passkeys::reauth_finish),
         )
         .route("/api/account/options", get(oauth::options))
+        .route("/api/plugins/oauth/callback", post(plugin_oauth::callback))
         .route("/api/account/oauth/{provider}/start", post(oauth::start))
         .route(
             "/api/account/oauth/{provider}/callback",

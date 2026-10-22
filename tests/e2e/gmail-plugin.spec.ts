@@ -13,7 +13,7 @@ test('Gmail connects two explicit mailboxes with OAuth and saves no browser toke
   const connections: Record<string, unknown>[] = []
   const starts: Record<string, any>[] = []
   const saves: Record<string, any>[] = []
-  const callbackUrl = 'https://cairn.example/installations/example/plugins/oauth/callback'
+  const callbackUrl = 'https://cairn.example/plugins/oauth/callback'
   await page.route('**/api/plugins', route => route.fulfill({
     json: {
       packages: [{
@@ -130,4 +130,34 @@ test('OAuth callback removes the code from browser history before posting it', a
   await expect(page.getByRole('status').filter({ hasText: 'Signed in. Return to the account editor' })).toBeVisible()
   expect(new URL(page.url()).search).toBe('')
   expect(callbacks).toEqual([{ state: 'synthetic-state', code: 'synthetic-code' }])
+})
+
+test('central OAuth callback completes without restoring the remembered installation', async ({ page }) => {
+  await page.goto(workspacePath('/plugins'))
+  await signIn(page)
+  const callbacks: Record<string, unknown>[] = []
+  await page.route('**/api/plugins/oauth/callback', async (route) => {
+    expect(route.request().headers()['x-csrf-token']).toBeTruthy()
+    callbacks.push(route.request().postDataJSON())
+    await route.fulfill({ json: { pluginId: 'gmail', flowId: 'flow', state: 'completed' } })
+  })
+  await page.goto('/plugins/oauth/callback?state=destination-state&code=central-code')
+  await expect(page.getByRole('status').filter({ hasText: 'Signed in. Return to the account editor' })).toBeVisible()
+  expect(new URL(page.url()).pathname).toBe('/plugins/oauth/callback')
+  expect(new URL(page.url()).search).toBe('')
+  expect(callbacks).toEqual([{ state: 'destination-state', code: 'central-code' }])
+  await expect(page.getByRole('banner', { name: 'Current installation' })).toHaveCount(0)
+})
+
+test('central OAuth callback requires a Cairn session and removes a declined response from history', async ({ page }) => {
+  let callbacks = 0
+  await page.route('**/api/account/session', route => route.fulfill({ json: { authenticated: false, csrf: null } }))
+  await page.route('**/api/plugins/oauth/callback', async (route) => {
+    callbacks++
+    await route.fulfill({ status: 500 })
+  })
+  await page.goto('/plugins/oauth/callback?state=destination-state&error=access_denied')
+  await expect(page.getByRole('alert')).toContainText('Sign in to your Cairn account')
+  expect(new URL(page.url()).search).toBe('')
+  expect(callbacks).toBe(0)
 })
