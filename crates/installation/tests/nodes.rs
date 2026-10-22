@@ -1660,61 +1660,73 @@ async fn concurrent_admission_reserves_capacity_once_and_preserves_agent_grants(
 }
 
 #[tokio::test]
-async fn queued_automatic_conversations_reserve_another_node_without_discarding_the_source() {
-    let owner = Owner::new().await;
-    let (run, agent, source, destination) = (id(), id(), id(), id());
-    for (node, cpu) in [(&source, 1), (&destination, 12)] {
-        let mut record = schedulable_node(node, &limits(cpu, 32768, 131072));
-        record["runtimes"] = json!(["fixture"]);
-        if node == &source {
-            record["pressure"] = "memory".into();
+async fn queued_capacity_moves_preserve_the_source_and_unfinished_mission_waits() {
+    for saved_wait in [false, true] {
+        let owner = Owner::new().await;
+        let (run, agent, source, destination) = (id(), id(), id(), id());
+        for (node, cpu) in [(&source, 1), (&destination, 12)] {
+            let mut record = schedulable_node(node, &limits(cpu, 32768, 131072));
+            record["runtimes"] = json!(["fixture"]);
+            if node == &source {
+                record["pressure"] = "memory".into();
+            }
+            owner.put("nodes", record).await;
         }
-        owner.put("nodes", record).await;
+        owner
+            .grant_nodes(&agent, json!([source, destination]))
+            .await;
+        let mut record = run_record(&run, RunStatus::Queued);
+        record["snapshot"] = json!({ "agent": { "id": agent } });
+        record["resources"] = limits(4, 12288, 65536);
+        record["nodeId"] = source.clone().into();
+        if saved_wait {
+            record["trigger"] = "manual".into();
+            record["wakeup"] = json!({
+                "id": "wait", "seconds": 3600, "wakeAt": now() + 3_600_000,
+            });
+        }
+        owner.add_run(&record).await;
+        owner
+            .set_checkpoint(
+                &run,
+                json!({ "nodeId": source, "runtimeId": "fixture", "completed": false }),
+            )
+            .await;
+        assert!(placement::is_no_capacity(
+            &placement::check(&owner.service, &record).await.unwrap_err()
+        ));
+        assert!(
+            moves::queue_capacity_move(&owner.service, &record)
+                .await
+                .unwrap()
+        );
+        let pending = owner.run(&run).await;
+        assert_eq!(
+            pending["nodeId"], source,
+            "source stays authoritative until transfer completes"
+        );
+        assert_eq!(pending["moveRequest"]["nodeId"], destination);
+        assert_eq!(
+            pending["moveRequest"]["automatic"], false,
+            "capture the latest source disk, never use a stale backup"
+        );
+        assert!(pending["moveRequest"]["backupId"].is_null());
+        assert_eq!(pending["recoveryPending"], true);
+        assert_eq!(pending["wakeup"], record["wakeup"]);
+        let reservation = pending["moveRequest"]["reservation"].as_str().unwrap();
+        assert_eq!(
+            owner.stored("node-attempts", reservation).await.unwrap()["released"],
+            false
+        );
+        assert!(
+            !moves::queue_capacity_move(&owner.service, &pending)
+                .await
+                .unwrap()
+        );
+        let mut cancelled = pending;
+        cancelled["cancelRequestedAt"] = now().into();
+        assert!(moves::advance(&owner.service, &cancelled).await.unwrap());
     }
-    owner
-        .grant_nodes(&agent, json!([source, destination]))
-        .await;
-    let mut record = run_record(&run, RunStatus::Queued);
-    record["snapshot"] = json!({ "agent": { "id": agent } });
-    record["resources"] = limits(4, 12288, 65536);
-    record["nodeId"] = source.clone().into();
-    owner.add_run(&record).await;
-    owner
-        .set_checkpoint(&run, json!({ "nodeId": source, "runtimeId": "fixture" }))
-        .await;
-    assert!(placement::is_no_capacity(
-        &placement::check(&owner.service, &record).await.unwrap_err()
-    ));
-    assert!(
-        moves::queue_capacity_move(&owner.service, &record)
-            .await
-            .unwrap()
-    );
-    let pending = owner.run(&run).await;
-    assert_eq!(
-        pending["nodeId"], source,
-        "source stays authoritative until transfer completes"
-    );
-    assert_eq!(pending["moveRequest"]["nodeId"], destination);
-    assert_eq!(
-        pending["moveRequest"]["automatic"], false,
-        "capture the latest source disk, never use a stale backup"
-    );
-    assert!(pending["moveRequest"]["backupId"].is_null());
-    assert_eq!(pending["recoveryPending"], true);
-    let reservation = pending["moveRequest"]["reservation"].as_str().unwrap();
-    assert_eq!(
-        owner.stored("node-attempts", reservation).await.unwrap()["released"],
-        false
-    );
-    assert!(
-        !moves::queue_capacity_move(&owner.service, &pending)
-            .await
-            .unwrap()
-    );
-    let mut cancelled = pending;
-    cancelled["cancelRequestedAt"] = now().into();
-    assert!(moves::advance(&owner.service, &cancelled).await.unwrap());
 }
 
 #[tokio::test]

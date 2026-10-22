@@ -24,9 +24,11 @@ completed predecessor. Wakeup observations are data, never additional authority.
 The run APIs and both installation tool interfaces expose the stored `wakeup`
 and `waiting` state. Existing cancellation handles the wait. Web/Android show a
 live wait card and stop action. Mission schedule pause affects future runs only.
-Mission waits and pending node moves exclude each other transactionally. Finish
+Mission waits and explicit node moves exclude each other transactionally. Finish
 the current move before registering a wait, or finish the wait before requesting
-a move; a rejected move releases its provisional destination reservation.
+a move; a rejected move releases its provisional destination reservation. Recovery
+may still relocate an interrupted, unfinished turn that registered a wait before
+it stopped; this preserves that wait until the turn completes successfully.
 
 ## Local storage measurement
 

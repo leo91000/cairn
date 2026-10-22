@@ -315,9 +315,12 @@ async fn record_request(
             let current = db
                 .run(&owner)?
                 .ok_or_else(|| Error::not_found("Conversation removed."))?;
-            // A mission wait parks this completed turn; a move would instead
-            // queue another execution and retain destination capacity.
-            if current["trigger"] != "chat" && current["wakeup"].is_object() {
+            // Explicit movement would bypass a mission wait. Internal relocation
+            // of an unfinished queued turn must still be able to restore capacity.
+            if expected != RunStatus::Queued
+                && current["trigger"] != "chat"
+                && current["wakeup"].is_object()
+            {
                 return Err(Error::conflict(
                     "Finish the mission wait before requesting a node move.",
                 ));
