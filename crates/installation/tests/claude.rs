@@ -489,6 +489,28 @@ async fn invalid_and_exact_limit_empty_inboxes_do_not_interrupt_a_turn() {
 }
 
 #[tokio::test]
+async fn fresh_and_resumed_sessions_disable_native_background_tasks() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let mut p = plan(&root, "Inspect the workspace");
+    for index in 0..2 {
+        if index > 0 {
+            p["sessionId"] = RESUMED_SESSION.into();
+            p["execution"]["messageId"] = "continued".into();
+        }
+
+        let (result, events) = run_to_end(&c, p.clone()).await;
+        result.unwrap();
+        assert!(completes(&events));
+        let invocations =
+            std::fs::read_to_string(c.home.join(".claude/invocations.jsonl")).unwrap();
+        let invocation: Value =
+            serde_json::from_str(invocations.lines().nth(index).unwrap()).unwrap();
+        assert_eq!(invocation["backgroundTasksDisabled"], "1");
+    }
+}
+
+#[tokio::test]
 async fn large_system_instructions_reach_claude_unchanged() {
     let root = TempDir::new().unwrap();
     let c = setup(&root);

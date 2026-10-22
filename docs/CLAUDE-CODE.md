@@ -44,11 +44,21 @@ is omitted. The full visible history stays available in Léo. Previous attachmen
 remain in the retained input directory. Model and effort defaults are reset when
 changing providers; the agent's global configuration is unchanged.
 
+Cairn sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` for every Claude launch,
+including resumed sessions and both native and microVM execution. This disables
+Claude's background Bash commands, background subagents and automatic backgrounding.
+Commands that reach their timeout stop instead of continuing in the background;
+long builds need an appropriate foreground timeout. Use Cairn's durable
+[`wait_for`](WAIT-FOR.md) for CI and other supported waits, so the execution can
+release its resources while waiting. See the official
+[background command behavior](https://code.claude.com/docs/en/tools-reference#foreground-commands-that-move-to-the-background).
+
+The adapter retains background notification handling for existing session history.
 Claude's turn results can cover several user messages, or background notifications
 unrelated to the current prompt. Léo correlates completion with consumed message
 IDs and keeps the process alive while non-ambient background tasks and their
-follow-up responses are pending. A background build or CI wait therefore remains
-part of the running conversation. Ambient watchers do not keep a run open.
+follow-up responses are pending. Such legacy background work remains part of the
+running conversation. Ambient watchers do not keep a run open.
 When Claude finishes responding and only those tasks keep the run open, Léo emits
 `turn.waiting` with each task's description, and an empty list once they finish.
 The conversation then shows « Veille » instead of the working indicator, and the
