@@ -487,6 +487,30 @@ describe('expected command outcomes and connection recovery', () => {
     expect(result.raw).toBe('2026-10-22T12:08:49Z  WARN codex: disk full\n')
     expect(result.blocks).toEqual([{ label: 'Output', code: '2026-10-22T12:08:49Z  WARN codex: disk full\n', language: 'plaintext' }])
   })
+  it.each([
+    '{"type":"diagnostic","message":"disk full","code":"ENOSPC"}\n',
+    '{"item":{"type":"agent_message","text":"native diagnostic","id":"x"}}\n',
+    '{"item":{"type":"command_execution","command":"native diagnostic","exit_code":1}}\n',
+  ])('keeps event-shaped diagnostic JSON as process output: %s', (text) => {
+    const entries = activityEntries([{
+      id: 1,
+      runId: 'run',
+      createdAt: 1,
+      type: 'diagnostic',
+      text,
+    }])
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({
+      kind: 'group',
+      artifacts: [{
+        kind: 'notice',
+        title: 'Agent diagnostic',
+        verbatim: true,
+        raw: text,
+        blocks: [{ label: 'Output', code: text, language: 'plaintext' }],
+      }],
+    })
+  })
 })
 
 it.each([false, true])('caps activity groups at thirty tools after folding updates (chat=%s)', (chat) => {

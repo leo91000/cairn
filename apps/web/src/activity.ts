@@ -147,6 +147,9 @@ function pretty(value: unknown) {
 }
 
 export function activityPayload(event: RunEvent) {
+  // Stderr can itself look like a protocol event; it is always process output.
+  if (event.type === 'diagnostic')
+    return {}
   if (event.payload)
     return event.payload
   try {

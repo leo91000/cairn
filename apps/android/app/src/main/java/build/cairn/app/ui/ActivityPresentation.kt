@@ -49,14 +49,17 @@ internal fun JsonElement?.asArray() = this as? JsonArray
 internal fun JsonElement?.plain(): String = (this as? JsonPrimitive)?.contentOrNull.orEmpty()
 
 internal fun RunEvent.activityData(): JsonObject? =
-    payload?.let(::JsonObject)
-        ?: runCatching {
-            if (text.firstOrNull { !it.isWhitespace() } != '{') return@runCatching null
-            (wireJson.parseToJsonElement(text) as? JsonObject)?.takeIf {
-                type == "chat.wait_ready" || it.string("type") == type || it.containsKey("item")
+    // Stderr can itself look like a protocol event; it is always process output.
+    if (type == "diagnostic") null
+    else
+        payload?.let(::JsonObject)
+            ?: runCatching {
+                if (text.firstOrNull { !it.isWhitespace() } != '{') return@runCatching null
+                (wireJson.parseToJsonElement(text) as? JsonObject)?.takeIf {
+                    type == "chat.wait_ready" || it.string("type") == type || it.containsKey("item")
+                }
             }
-        }
-            .getOrNull()
+                .getOrNull()
 
 internal fun readableField(value: String): String =
     value
