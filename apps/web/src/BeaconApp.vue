@@ -47,6 +47,7 @@ import { installationKey } from './installation-context'
 import Authorize from './views/Authorize.vue'
 
 const PrivacyPolicy = defineAsyncComponent(() => import('./views/PrivacyPolicy.vue'))
+const PluginOAuthCallback = defineAsyncComponent(() => import('./views/PluginOAuthCallback.vue'))
 
 interface AccountSession {
   authenticated: boolean
@@ -122,6 +123,15 @@ const beaconReturnKey = 'cairn-installation-return'
 const authorizePage = window.location.pathname === '/authorize'
 const claimPage = window.location.pathname === '/claim'
 const privacyPage = window.location.pathname === '/privacy'
+const pluginCallbackPage = centralAccount && window.location.pathname === '/plugins/oauth/callback'
+const pluginCallbackLocation = `${window.location.pathname}${window.location.search}`
+const pluginCallbackParameters = pluginCallbackPage ? Object.fromEntries(new URLSearchParams(window.location.search)) : undefined
+
+// Keep the provider response in this page's memory while the owner signs in.
+// No callback query should remain in browser history or the login page's links.
+if (pluginCallbackPage)
+  window.history.replaceState(null, '', window.location.pathname)
+
 const accountPage = window.location.pathname.endsWith('/settings/account')
 const accountReturn = new URL(window.location.href).searchParams.get('return_to')
 
@@ -194,7 +204,7 @@ watch(session, (value) => {
     catch {}
   }
 
-  if (!requested && value.installations.length && !claimPage && !invitationsPage && !authorizePage) {
+  if (!requested && value.installations.length && !claimPage && !invitationsPage && !authorizePage && !pluginCallbackPage) {
     let remembered = ''
     try {
       remembered = sharedPreference(`cairn_installation_${value.account?.id}`) || localStorage.getItem(`cairn-current-installation:${value.account?.id}`) || ''
@@ -496,8 +506,8 @@ async function oauth(provider: 'google' | 'github') {
     const start = await accountRequest(`oauth/${provider}/start`, {})
     try {
       sessionStorage.removeItem(beaconReturnKey)
-      if (installationRoute || claimPage || authorizePage || (centralAccount && accountReturn)) {
-        const destination = claimPage ? '/claim' : `${window.location.pathname}${window.location.search}${window.location.hash}`
+      if (installationRoute || claimPage || authorizePage || pluginCallbackPage || (centralAccount && accountReturn)) {
+        const destination = pluginCallbackPage ? pluginCallbackLocation : claimPage ? '/claim' : `${window.location.pathname}${window.location.search}${window.location.hash}`
         sessionStorage.setItem(beaconReturnKey, destination)
       }
     }
@@ -713,7 +723,7 @@ onMounted(async () => {
       sessionStorage.removeItem(beaconReturnKey)
       const target = new URL(destination, beaconOrigin)
       const returningToLogin = installationSubdomains && centralAccount && target.pathname === '/' && target.searchParams.has('return_to')
-      const allowedPath = destination === '/claim' || /^\/authorize(?:\?|$)/.test(destination) || /^\/installations\/[\w-]+\//.test(destination) || returningToLogin
+      const allowedPath = destination === '/claim' || /^\/authorize(?:\?|$)/.test(destination) || /^\/plugins\/oauth\/callback(?:\?|$)/.test(destination) || /^\/installations\/[\w-]+\//.test(destination) || returningToLogin
       if (target.origin === beaconOrigin && !target.username && !target.password && allowedPath) {
         target.searchParams.delete('sign_in_error')
         const signInError = url.searchParams.get('sign_in_error')
@@ -748,6 +758,9 @@ onMounted(async () => {
 
 <template>
   <PrivacyPolicy v-if="privacyPage" />
+  <main v-else-if="session?.authenticated && pluginCallbackPage" class="min-h-dvh bg-canvas text-ink px-6 py-10">
+    <PluginOAuthCallback :parameters="pluginCallbackParameters" />
+  </main>
   <main v-else-if="session?.authenticated && authorizePage" class="min-h-dvh bg-canvas text-ink px-6 py-10">
     <Authorize />
   </main>

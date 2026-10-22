@@ -201,12 +201,10 @@ pub async fn flow_credential(
 }
 
 pub async fn callback_url(s: &Service) -> Result<String> {
-    let (origin, installation) = crate::relay::beacon_address(&s.config.data_dir)
+    let (origin, _) = crate::relay::beacon_address(&s.config.data_dir)
         .await?
         .ok_or_else(|| Error::unavailable("Claim this installation before connecting a plugin."))?;
-    Ok(format!(
-        "{origin}/installations/{installation}/plugins/oauth/callback"
-    ))
+    Ok(format!("{origin}/plugins/oauth/callback"))
 }
 
 fn setting(settings: &Value, key: &str) -> Result<String> {
@@ -269,7 +267,12 @@ pub async fn start(s: &Service, plugin: &str, input: &Value, binding: &str) -> R
     scopes.sort();
     scopes.dedup();
     let verifier = token();
-    let state = token();
+    let (_, installation) = crate::relay::beacon_address(&s.config.data_dir)
+        .await?
+        .ok_or_else(|| Error::unavailable("Claim this installation before connecting a plugin."))?;
+    // The installation is a routing hint, not authority. Beacon checks ownership;
+    // this installation checks the complete random state, owner binding and PKCE.
+    let state = format!("plugin.{installation}.{}", token());
     let redirect = callback_url(s).await?;
     // Validate without applying test routing: this URL is opened by the owner.
     target(s, &package.manifest, &oauth.authorization_url, "https")?;

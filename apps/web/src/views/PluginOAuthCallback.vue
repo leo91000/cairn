@@ -3,9 +3,10 @@ import { onMounted, ref } from 'vue'
 import { api } from '../api'
 import UiAlert from '../components/UiAlert.vue'
 
+const props = defineProps<{ parameters?: Record<string, string> }>()
 const error = ref('')
 const completed = ref(false)
-const parameters = Object.fromEntries(new URLSearchParams(location.search))
+const parameters = props.parameters ?? Object.fromEntries(new URLSearchParams(location.search))
 // Remove the single-use code before rendering links or loading other resources.
 history.replaceState(null, '', location.pathname)
 

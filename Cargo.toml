@@ -19,5 +19,25 @@ lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
 
+# Keep third-party crates on the existing release profile. The measured four-unit
+# profile applies only to Cairn's workspace packages.
+[profile.release.package.cairn-installation]
+codegen-units = 4
+
+[profile.release.package.cairn-beacon]
+codegen-units = 4
+
+[profile.release.package.cairn-protocol]
+codegen-units = 4
+
+[profile.release.package.cairn-plugin-api]
+codegen-units = 4
+
+[profile.release.package.cairn-plugin-host]
+codegen-units = 4
+
+[profile.release.package.cairn-plugin-runtime]
+codegen-units = 4
+
 [profile.bench]
 lto = "thin"

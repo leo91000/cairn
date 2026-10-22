@@ -60,4 +60,19 @@ external Google consent is an owner setup step. The opt-in transfer measurement
 records local bytes, cold/warm reads, writes and process CPU separately from
 production network latency.
 
+## Central callback (2026-10-22)
+
+The provider redirect URI belongs to Beacon: `/plugins/oauth/callback` is shared
+by every installation and mailbox. The initial implementation put the installation
+ID in this URI, which required registering another provider redirect for each
+installation and contradicted Beacon's role as the single hosted entry point.
+New flows put the installation routing hint in their random state instead.
+Beacon authenticates the browser, checks CSRF and current ownership, and forwards
+the response over its ordinary revocation-aware relay. The installation retains
+the complete pending state, owner binding, PKCE verifier, token exchange and
+encrypted credentials. The central page does not restore a remembered workspace.
+The old installation callback stays available for already-started flows. Saved
+credentials and refresh requests are unchanged.
+No persisted format changes or compatibility epoch increase are required.
+
 See [plugin APIs](../PLUGINS.md) and [Gmail setup and limits](../../plugins/gmail/README.md).

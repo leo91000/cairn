@@ -1259,7 +1259,13 @@ Packages and browser/native clients never receive tokens. The owner registers
 path starts a ten-minute sign-in (`instance?`, `settings`, `secrets?`);
 `GET`/`DELETE /api/plugins/{id}/oauth/{flow}` inspect or cancel it. The owner opens
 `verificationUri` and returns through `/plugins/oauth/callback`, whose page removes
-the single-use query before posting to the authenticated installation callback.
+the single-use query before posting to Beacon's authenticated callback. This URL
+belongs to Beacon, not an installation: every installation shares it, including
+when installation subdomains are enabled. The random state includes an
+installation routing hint. Beacon checks the current session, CSRF and ownership,
+then uses its ordinary relay to forward the complete state and provider response.
+The destination installation alone verifies its pending owner-bound state and
+PKCE and exchanges the code. Beacon stores no plugin flows or credentials.
 Web and Android poll the same owner-bound flow (`pending`, `exchanging`,
 `completed`, `failed`); `credentialFlow` validates the draft and saves the encrypted
 access/refresh record once. A changed client or increased permissions requires
