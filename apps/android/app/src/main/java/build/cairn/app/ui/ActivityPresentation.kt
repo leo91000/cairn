@@ -30,6 +30,8 @@ internal data class ActivityPresentation(
     /** The event's own text, the source shown when it carries no structured data. */
     val text: String = "",
     val exitCode: Int? = null,
+    /** Process output, shown as written rather than as prose. */
+    val verbatim: Boolean = false,
 ) {
     /**
      * The recorded source, formatted only when the reader opens it. Timelines present every event
@@ -47,14 +49,17 @@ internal fun JsonElement?.asArray() = this as? JsonArray
 internal fun JsonElement?.plain(): String = (this as? JsonPrimitive)?.contentOrNull.orEmpty()
 
 internal fun RunEvent.activityData(): JsonObject? =
-    payload?.let(::JsonObject)
-        ?: runCatching {
-            if (text.firstOrNull { !it.isWhitespace() } != '{') return@runCatching null
-            (wireJson.parseToJsonElement(text) as? JsonObject)?.takeIf {
-                type == "chat.wait_ready" || it.string("type") == type || it.containsKey("item")
+    // Stderr can itself look like a protocol event; it is always process output.
+    if (type == "diagnostic") null
+    else
+        payload?.let(::JsonObject)
+            ?: runCatching {
+                if (text.firstOrNull { !it.isWhitespace() } != '{') return@runCatching null
+                (wireJson.parseToJsonElement(text) as? JsonObject)?.takeIf {
+                    type == "chat.wait_ready" || it.string("type") == type || it.containsKey("item")
+                }
             }
-        }
-            .getOrNull()
+                .getOrNull()
 
 internal fun readableField(value: String): String =
     value
@@ -236,7 +241,20 @@ internal fun expectedOutcome(view: CommandView, code: Int?): String? {
     }
 }
 
-internal fun presentActivity(event: RunEvent): ActivityPresentation {
+// CSI sequences (colors, cursor moves), OSC sequences (titles, links) and two-byte escapes.
+private val terminalEscape =
+    Regex("\u001B(?:\\[[0-?]*[ -/]*[@-~]|\\][^\u0007\u001B]*(?:\u0007|\u001B\\\\)?|[@-Z\\\\-_])")
+
+/** Agent stderr recorded by older runners keeps its terminal styling. */
+internal fun withoutTerminalStyling(text: String) = text.replace(terminalEscape, "")
+
+internal fun presentActivity(event: RunEvent): ActivityPresentation =
+    if (event.type == "diagnostic")
+        presentEvent(event.copy(text = withoutTerminalStyling(event.text)))
+            .copy(title = "Diagnostic de l’agent", verbatim = true)
+    else presentEvent(event)
+
+private fun presentEvent(event: RunEvent): ActivityPresentation {
     val data = event.activityData()
     val item = data?.get("item").asObject()
     val type = item.string("type")
@@ -391,7 +409,6 @@ internal fun presentActivity(event: RunEvent): ActivityPresentation {
                                     .orEmpty()
                             else -> plain.take(120).ifBlank { "État de l’exécution" }
                         }
-                    "diagnostic" -> "Diagnostic de connexion"
                     "output",
                     "item.completed" -> "Résultat enregistré"
                     "item.started" -> "Étape enregistrée"

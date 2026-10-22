@@ -756,7 +756,7 @@ mod tests {
             super::super::output::record(
                 &service,
                 &super::super::output::Output {
-                    diagnostic: false,
+                    kind: super::super::output::OutputKind::Stdout,
                     raw: event.to_string(),
                     received: tokio::time::Instant::now(),
                 },

@@ -474,6 +474,43 @@ describe('expected command outcomes and connection recovery', () => {
     const result = artifacts([old, event(2, 'turn.completed', {})])[0]
     expect(result).toMatchObject({ status: 'info', statusLabel: 'Recovered', raw: old.text })
   })
+  it('shows historical diagnostics without terminal styling', () => {
+    const styled = {
+      id: 1,
+      runId: 'old',
+      createdAt: 1,
+      type: 'diagnostic',
+      text: '\x1B[2m2026-10-22T12:08:49Z\x1B[0m \x1B[33m WARN\x1B[0m \x1B[2mcodex\x1B[0m\x1B[2m:\x1B[0m disk full\n',
+    }
+    const [result] = artifacts([styled])
+    expect(result).toMatchObject({ title: 'Agent diagnostic', verbatim: true })
+    expect(result.raw).toBe('2026-10-22T12:08:49Z  WARN codex: disk full\n')
+    expect(result.blocks).toEqual([{ label: 'Output', code: '2026-10-22T12:08:49Z  WARN codex: disk full\n', language: 'plaintext' }])
+  })
+  it.each([
+    '{"type":"diagnostic","message":"disk full","code":"ENOSPC"}\n',
+    '{"item":{"type":"agent_message","text":"native diagnostic","id":"x"}}\n',
+    '{"item":{"type":"command_execution","command":"native diagnostic","exit_code":1}}\n',
+  ])('keeps event-shaped diagnostic JSON as process output: %s', (text) => {
+    const entries = activityEntries([{
+      id: 1,
+      runId: 'run',
+      createdAt: 1,
+      type: 'diagnostic',
+      text,
+    }])
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({
+      kind: 'group',
+      artifacts: [{
+        kind: 'notice',
+        title: 'Agent diagnostic',
+        verbatim: true,
+        raw: text,
+        blocks: [{ label: 'Output', code: text, language: 'plaintext' }],
+      }],
+    })
+  })
 })
 
 it.each([false, true])('caps activity groups at thirty tools after folding updates (chat=%s)', (chat) => {

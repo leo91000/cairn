@@ -857,7 +857,7 @@ impl Execution<'_> {
                         if queue_ms >= 100 {
                             tracing::info!(target: "cairn_performance", operation = "agent_output", run_id = self.id, attempt_id = self.attempt_id, phase = "queue", elapsed_ms = queue_ms);
                         }
-                        if !output.diagnostic {
+                        if output.kind == output::OutputKind::Stdout {
                             activity.output();
                         }
                         crate::performance::wait("refresh_redactions", self.refresh_redactions()).await?;

@@ -685,3 +685,167 @@ async fn releasing_a_session_preserves_answers_in_delivery() {
         "answered"
     );
 }
+
+#[tokio::test]
+async fn diagnostics_are_plain_text_without_agent_performance_records() {
+    let mut fixture = Fixture::new().await;
+    let performance = "\x1b[2m2026-10-22T12:08:49.998434Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[1magent_attempt\x1b[0m\x1b[1m{\x1b[0m\x1b[3mrun_id\x1b[0m\x1b[2m=\x1b[0m\"run\"\x1b[1m}\x1b[0m\x1b[2m:\x1b[0m \x1b[2mcairn_performance\x1b[0m\x1b[2m:\x1b[0m \x1b[3moperation\x1b[0m\x1b[2m=\x1b[0m\"agent_activity\"\n";
+    let (reader, mut writer) = tokio::io::duplex(64);
+    let (sender, mut receiver) = mpsc::channel(32);
+    let reading = tokio::spawn(read_output(reader, true, sender, Vec::new()));
+    let writing = tokio::spawn(async move {
+        writer.write_all(performance.as_bytes()).await.unwrap();
+        writer
+            .write_all(b"\x1b[33m WARN\x1b[0m Reconnecting... 2/5\n")
+            .await
+            .unwrap();
+        writer.write_all(performance.as_bytes()).await.unwrap();
+        writer.write_all(b"Agent exited").await.unwrap();
+    });
+    while let Some(output) = receiver.recv().await {
+        fixture.output(output).await;
+    }
+    writing.await.unwrap();
+    reading.await.unwrap();
+
+    let diagnostics: String = fixture
+        .events()
+        .await
+        .iter()
+        .filter(|event| event["type"] == "diagnostic")
+        .map(|event| event["text"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(diagnostics, " WARN Reconnecting... 2/5\nAgent exited");
+}
+
+#[tokio::test]
+async fn carriage_return_diagnostics_survive_adjacent_performance_records() {
+    let performance = "2026-10-22T12:08:49Z INFO cairn_performance: operation=agent_activity";
+    for (input, expected) in [
+        (format!("disk full\r{performance}\n"), "disk full\r"),
+        (format!("{performance}\rdisk full\r"), "disk full\r"),
+        (format!("{performance}\r\ndisk full\r"), "disk full\r"),
+        (format!("{performance}\r\n"), ""),
+    ] {
+        let mut fixture = Fixture::new().await;
+        let (reader, mut writer) = tokio::io::duplex(1);
+        let (sender, mut receiver) = mpsc::channel(32);
+        let reading = tokio::spawn(read_output(reader, true, sender, Vec::new()));
+        let streamed = input.clone();
+        let writing = tokio::spawn(async move {
+            writer.write_all(streamed.as_bytes()).await.unwrap();
+        });
+        while let Some(output) = receiver.recv().await {
+            fixture.output(output).await;
+        }
+        writing.await.unwrap();
+        reading.await.unwrap();
+
+        let diagnostics: String = fixture
+            .events()
+            .await
+            .iter()
+            .filter(|event| event["type"] == "diagnostic")
+            .map(|event| event["text"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(diagnostics, expected, "input: {input:?}");
+    }
+}
+
+#[tokio::test]
+async fn performance_names_inside_diagnostics_are_retained_and_manager_logs_are_redacted() {
+    use tracing::instrument::WithSubscriber;
+
+    // Keep scoped tracing capture independent of other tests' callsite registration.
+    let _callsite_registration =
+        tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let mut fixture = Fixture::new().await;
+    let log_path = fixture._root.path().join("manager.log");
+    let log_file = std::fs::File::create(&log_path).unwrap();
+    let subscriber = tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(Arc::new(log_file))
+            .finish(),
+    );
+    let input = concat!(
+        "WARN native: invalid record cairn_performance: sensitive-tool-credential\n",
+        "2026-10-22T12:08:49Z WARN native: invalid record cairn_performance: sensitive-tool-credential\n",
+        "2026-10-22T12:08:49Z INFO cairn_performance: operation=agent_activity id=sensitive-tool-credential\n",
+    );
+    let (sender, mut receiver) = mpsc::channel(32);
+    // Match production: the stderr reader has no secrets; the consumer supplies
+    // current configured/account redactions, including credentials renewed later.
+    read_output(input.as_bytes(), true, sender, Vec::new()).await;
+    while let Some(output) = receiver.recv().await {
+        let performance = output.kind == OutputKind::Performance;
+        let previous_budget = fixture.log_total;
+        if performance {
+            fixture.log_total = LOG_BUDGET;
+        }
+        fixture
+            .output(output)
+            .with_subscriber(subscriber.clone())
+            .await;
+        if performance {
+            assert_eq!(fixture.log_total, LOG_BUDGET);
+            fixture.log_total = previous_budget;
+        }
+    }
+
+    let events = fixture.events().await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0]["text"],
+        concat!(
+            "WARN native: invalid record cairn_performance: [redacted]\n",
+            "2026-10-22T12:08:49Z WARN native: invalid record cairn_performance: [redacted]\n",
+        )
+    );
+    let logs = std::fs::read_to_string(log_path).unwrap();
+    assert!(logs.contains("source=\"agent_process\""), "{logs}");
+    assert!(
+        logs.contains("operation=agent_activity id=[redacted]"),
+        "{logs}"
+    );
+    assert!(!logs.contains("sensitive-tool-credential"), "{logs}");
+    assert!(!logs.contains("invalid record"), "{logs}");
+}
+
+#[tokio::test]
+async fn terminal_styling_and_utf8_survive_long_diagnostic_fragments() {
+    let prefix = "x".repeat(8190);
+    let link = "https://example.com/".repeat(1000);
+    for (input, expected) in [
+        (
+            format!("{prefix}\x1b[33mWARN\x1b[0m disk full\n"),
+            format!("{prefix}WARN disk full\n"),
+        ),
+        (
+            format!("{prefix}\x1b]8;;{link}\x1b\\WARN\x1b]8;;\x1b\\ disk full\n"),
+            format!("{prefix}WARN disk full\n"),
+        ),
+        (
+            format!("{prefix}xéWARN disk full\n"),
+            format!("{prefix}xéWARN disk full\n"),
+        ),
+    ] {
+        let mut fixture = Fixture::new().await;
+        let (sender, mut receiver) = mpsc::channel(32);
+        // Slice reads fill the reader's 8192-byte buffer, splitting the CSI,
+        // a long OSC body, or a UTF-8 character at that exact boundary.
+        read_output(input.as_bytes(), true, sender, Vec::new()).await;
+        while let Some(output) = receiver.recv().await {
+            fixture.output(output).await;
+        }
+        let diagnostics: String = fixture
+            .events()
+            .await
+            .iter()
+            .filter(|event| event["type"] == "diagnostic")
+            .map(|event| event["text"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(diagnostics, expected);
+    }
+}
