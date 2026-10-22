@@ -25,6 +25,54 @@ def release(**changes):
 
 
 class NativeHostTests(unittest.TestCase):
+    def test_codex_companion_is_extracted_and_rechecked_before_reuse(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = root / 'tools.zip'
+            payload = b'approved executable'
+            digest = hashlib.sha256(payload).hexdigest()
+            files = []
+            with zipfile.ZipFile(archive, 'w') as bundle:
+                bundle.writestr('bin/', b'')
+                for name in ('codex', 'claude', 'opencode', 'node', 'gh', 'codex-code-mode-host'):
+                    files.append(dict(path='bin/' + name, size=len(payload), sha256=digest))
+                    bundle.writestr('bin/' + name, payload)
+                bundle.writestr('manifest.json', json.dumps(dict(version=1, os='linux', arch='x86_64', files=files)))
+            host.unpack_tools(archive, root)
+            companion = root / 'tools/bin/codex-code-mode-host'
+            self.assertEqual(payload, companion.read_bytes())
+            self.assertEqual(0o555, companion.stat().st_mode & 0o777)
+            (root / 'cairn').write_bytes(payload)
+            metadata = release(size=len(payload), sha256=digest)
+            host.verify_installed(root, metadata)
+            companion.chmod(0o755)
+            companion.write_bytes(b'corrupted companion')
+            with self.assertRaisesRegex(ValueError, 'Installed native'):
+                host.verify_installed(root, metadata)
+
+    def test_workload_probe_executes_the_companion_as_the_managed_user(self):
+        files = [{'path': 'bin/' + name} for name in
+                 ('codex', 'claude', 'opencode', 'node', 'gh', 'codex-code-mode-host')]
+        manifest = dict(version=1, os='linux', arch='x86_64', files=files)
+        workload = Mock(pw_uid=1234, pw_gid=5678)
+        with patch.object(host.pwd, 'getpwnam', return_value=workload), \
+                patch.object(host.os, 'chown'), \
+                patch.object(host.Path, 'read_text', return_value=json.dumps(manifest)), \
+                patch.object(host.subprocess, 'run') as run:
+            host.verify_workload_tools(Path('/synthetic'))
+        companion = run.call_args_list[-1]
+        self.assertEqual(['/synthetic/tools/bin/codex-code-mode-host', '--help'], companion.args[0])
+        self.assertEqual(1234, companion.kwargs['user'])
+        self.assertEqual(5678, companion.kwargs['group'])
+        self.assertEqual([], companion.kwargs['extra_groups'])
+
+    def test_inventory_rejects_unlisted_companions_and_duplicate_entries(self):
+        files = [{'path': 'bin/' + name} for name in ('codex', 'claude', 'opencode', 'node', 'gh')]
+        manifest = dict(version=1, os='linux', arch='x86_64', files=files)
+        for extra in ('bin/unapproved-host', 'bin/codex'):
+            with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, 'inventory'):
+                host.tool_inventory(dict(manifest, files=files + [{'path': extra}]))
+
     def test_unsupported_cgroups_are_rejected_before_enrollment_or_downloads(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -141,7 +189,7 @@ class NativeHostTests(unittest.TestCase):
             for name in ('codex', 'claude', 'opencode', 'node', 'gh'):
                 (root / 'tools/bin' / name).write_bytes(payload)
                 entries.append(dict(path='bin/' + name, size=len(payload), sha256=digest))
-            (root / 'tools/manifest.json').write_text(json.dumps(dict(files=entries)))
+            (root / 'tools/manifest.json').write_text(json.dumps(dict(version=1, os='linux', arch='x86_64', files=entries)))
             metadata = release(size=len(payload), sha256=digest)
             host.verify_installed(root, metadata)
             (root / 'tools/bin/codex').write_bytes(b'corrupted bytes')

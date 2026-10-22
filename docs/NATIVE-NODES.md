@@ -88,8 +88,35 @@ The managed filesystem contains system binaries/libraries read-only, a private
 HOME, project files, output, temporary files and GPU devices. The personal home,
 desktop sockets, Docker daemon and administrator privileges are unavailable.
 Graphics tests must use headless/offscreen APIs. Cairn bundles the coding engines,
-Node.js and `gh`; other toolchains use this node's installed binaries/libraries or
+including Codex's `codex-code-mode-host` companion beside its executable, Node.js
+and `gh`; other toolchains use this node's installed binaries/libraries or
 user-managed tools under the private home. Respect repository version pins.
+
+### Updating an existing native supervisor
+
+Native runtime updates verify the complete tool inventory before activation.
+Supervisors installed before the Codex companion was bundled recognize only the
+original five executables: they reject the expanded archive and keep the previous
+runtime active. Refresh their supervisor once after updating the manager. Wait for
+the node to be idle, then run the following on the native host, replacing the origin
+with the direct HTTPS origin of its installation:
+
+```sh
+sudo sh -eu <<'SH'
+candidate=$(mktemp /opt/cairn-native/host-update.XXXXXX)
+trap 'rm -f "$candidate"' EXIT
+curl --fail --silent --show-error --proto '=https' --max-time 30 \
+  https://MANAGER-ORIGIN/internal/nodes/native-host.py > "$candidate"
+python3 -m py_compile "$candidate"
+chmod 0755 "$candidate"
+mv "$candidate" /opt/cairn-native/host.py
+systemctl restart cairn-native-node.service
+SH
+```
+
+This preserves enrollment, grants and conversation storage. The refreshed
+supervisor accepts the original inventory for older pinned runtimes and verifies
+the companion's hash and unprivileged launch when it is present in a newer bundle.
 
 Skills are the run's frozen bundle, copied afresh for each attempt. Accounts and
 MCP access use the usual scoped brokers. Credentials provided to an engine are
