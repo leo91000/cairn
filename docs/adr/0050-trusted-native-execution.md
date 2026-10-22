@@ -24,8 +24,9 @@ manager requires fresh Beacon membership evidence before extending host leases.
 Update, 2026-10-22: the owner may grant an agent all nodes, including future ones.
 This replaces the original requirement for an explicit agent-side selection;
 node-side opt-in, trusted people, provenance, delegation ceilings and revocations
-remain mandatory. Existing VM environments keep their backend and may use VM
-nodes under an all-node grant. Native slots are configurable and share one
+remain mandatory. Existing environments keep their backend and require migration
+before resuming after an agent changes backend, including with an all-node grant.
+Native slots are configurable and share one
 systemd workload slice's CPU/RAM ceiling, alongside the existing shared disk
 accounting. The supervisor and lease guardians remain outside that slice so an
 exhausted workload budget cannot prevent fencing. Epoch 11 and SQLite version 10

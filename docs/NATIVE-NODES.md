@@ -77,9 +77,10 @@ neither install nor uninstall a runtime on the host.
 ## Daily use
 
 An agent can use all nodes, including future ones, or an explicit selection.
-New conversations use its selected execution backend. Existing VM environments
-keep using VM nodes until migrated; an all-node grant also permits that existing
-work to resume. Native execution still requires the node owner's opt-in, trust
+New conversations use its selected execution backend. Existing environments keep
+their saved backend; after an agent changes backend, migrate its existing
+conversations before resuming them. An all-node grant does not replace that
+migration. Native execution still requires the node owner's opt-in, trust
 in every originating person, and fresh membership and delegation evidence.
 
 The controller defaults to one slot and supports configurable concurrent executions.
