@@ -210,6 +210,8 @@ export function observedTarget(observation: Record<string, unknown> | null | und
     return ''
   if (observation.type === 'run_finished')
     return 'Another run'
+  if (observation.type === 'time')
+    return 'Scheduled time'
   const display = observation.display as { short?: unknown } | null | undefined
   if (typeof display?.short === 'string' && display.short)
     return display.short
@@ -219,7 +221,7 @@ export function observedTarget(observation: Record<string, unknown> | null | und
 const runOutcomes: Record<string, string> = { blocked: 'Blocked', needs_input: 'Needs your input' }
 const failures = ['failure', 'failed', 'error', 'startup_failure', 'timed_out']
 
-/** What Cairn observed when a wait ended; a plain timer observes nothing and reads as neutral. */
+/** What Cairn observed when a wait ended; time reached is distinct from an external timeout. */
 export function waitOutcome(observation: Record<string, unknown> | null | undefined): WaitOutcome {
   const state = observation?.state
   if (!observation || !state)
@@ -228,6 +230,8 @@ export function waitOutcome(observation: Record<string, unknown> | null | undefi
   const display = resultDisplay(observation)
   if (display)
     return display
+  if (state === 'completed' && observation.type === 'time')
+    return { tone: 'neutral', title: 'Scheduled time reached', detail: '' }
   if (state === 'timed_out')
     return { tone: 'warning', title: 'Deadline reached without a result', detail: '' }
   if (state === 'unavailable')

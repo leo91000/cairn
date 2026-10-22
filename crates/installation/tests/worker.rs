@@ -1009,13 +1009,14 @@ async fn sleeping_chat_survives_worker_restart_and_releases_capacity_before_waki
         )
         .await
         .unwrap();
-    let wake = cairn_installation::chats::sleep::schedule(
+    let wake = cairn_installation::chats::wait_for::schedule(
         &s,
         token,
-        &json!({ "seconds": 15, "reason": "Wait for CI" }),
+        &json!({ "condition": { "type": "delay", "seconds": 15 }, "reason": "Wait for CI" }),
     )
     .await
-    .unwrap();
+    .unwrap()["wakeup"]
+        .clone();
     let first = fixture.until_finished(&run).await;
     assert_eq!(first["status"], "succeeded");
     let conversation = fixture

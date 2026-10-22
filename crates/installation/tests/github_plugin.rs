@@ -346,6 +346,8 @@ async fn granted_agents_see_github_conditions_and_others_do_not() {
     assert_eq!(
         types(&listing),
         [
+            json!("delay"),
+            json!("at"),
             json!("run_finished"),
             json!("github_workflow"),
             json!("github_pr_checks")
@@ -357,7 +359,10 @@ async fn granted_agents_see_github_conditions_and_others_do_not() {
     let listing = project_workspaces::rpc(&f.s, &bearer, "tools/list", &json!({}))
         .await
         .unwrap();
-    assert_eq!(types(&listing), [json!("run_finished")]);
+    assert_eq!(
+        types(&listing),
+        [json!("delay"), json!("at"), json!("run_finished")]
+    );
 }
 
 fn git(directory: &Path, args: &[&str]) -> String {
