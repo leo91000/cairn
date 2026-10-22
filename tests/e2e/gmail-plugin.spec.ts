@@ -149,15 +149,90 @@ test('central OAuth callback completes without restoring the remembered installa
   await expect(page.getByRole('banner', { name: 'Current installation' })).toHaveCount(0)
 })
 
-test('central OAuth callback requires a Cairn session and removes a declined response from history', async ({ page }) => {
-  let callbacks = 0
-  await page.route('**/api/account/session', route => route.fulfill({ json: { authenticated: false, csrf: null } }))
+test('central OAuth callback keeps a declined response through email sign-in without a browser session', async ({ page }) => {
+  const callbacks: Record<string, unknown>[] = []
+  const session = {
+    authenticated: true,
+    csrf: 'synthetic-csrf',
+    account: { id: 'owner', email: 'owner@example.test' },
+    installations: [{
+      id: 'other',
+      slug: 'remembered',
+      name: 'Other installation',
+      role: 'owner',
+      online: true,
+      updateRequired: false,
+    }],
+  }
+  await page.route('**/api/account/session', route => route.fulfill({
+    json: {
+      authenticated: false,
+      csrf: null,
+      account: null,
+      installations: [],
+    },
+  }))
+  await page.route('**/api/account/email-code', route => route.fulfill({ json: { challenge: 'synthetic-challenge' } }))
+  await page.route('**/api/account/verify', route => route.fulfill({ json: session }))
   await page.route('**/api/plugins/oauth/callback', async (route) => {
-    callbacks++
-    await route.fulfill({ status: 500 })
+    expect(route.request().headers()['x-csrf-token']).toBe(session.csrf)
+    callbacks.push(route.request().postDataJSON())
+    await route.fulfill({ status: 400, json: { error: 'Sign-in was declined. Try again when ready.' } })
   })
   await page.goto('/plugins/oauth/callback?state=destination-state&error=access_denied')
-  await expect(page.getByRole('alert')).toContainText('Sign in to your Cairn account')
+  await expect(page.getByRole('heading', { name: 'Sign in to Cairn' })).toBeVisible()
   expect(new URL(page.url()).search).toBe('')
-  expect(callbacks).toBe(0)
+  expect(callbacks).toEqual([])
+  await page.getByLabel('Email address').fill('owner@example.test')
+  await page.getByRole('button', { name: 'Send code', exact: true }).click()
+  await page.getByLabel('Email code').fill('12345678')
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('Sign-in was declined')
+  expect(callbacks).toEqual([{ state: 'destination-state', error: 'access_denied' }])
+  expect(new URL(page.url()).pathname).toBe('/plugins/oauth/callback')
+})
+
+test('central OAuth callback resumes after Cairn provider sign-in instead of a remembered workspace', async ({ page }) => {
+  let authenticated = false
+  const session = {
+    authenticated: true,
+    csrf: 'synthetic-csrf',
+    account: { id: 'owner', email: 'owner@example.test' },
+    installations: [{
+      id: 'other',
+      slug: 'remembered',
+      name: 'Other installation',
+      role: 'owner',
+      online: true,
+      updateRequired: false,
+    }],
+  }
+  await page.route('**/api/account/session', route => route.fulfill({
+    json: authenticated
+      ? session
+      : {
+          authenticated: false,
+          csrf: null,
+          account: null,
+          installations: [],
+        },
+  }))
+  await page.route('**/api/account/options', route => route.fulfill({ json: { google: true, github: false, passkeys: false } }))
+  await page.route('**/api/account/oauth/google/start', async (route) => {
+    authenticated = true
+    await route.fulfill({ json: { url: `${new URL(route.request().url()).origin}/?signed-in=1` } })
+  })
+  const callbacks: Record<string, unknown>[] = []
+  await page.route('**/api/plugins/oauth/callback', async (route) => {
+    callbacks.push(route.request().postDataJSON())
+    await route.fulfill({ json: { pluginId: 'gmail', flowId: 'flow', state: 'completed' } })
+  })
+  await page.goto('/plugins/oauth/callback?state=destination-state&code=before-login')
+  await expect(page.getByRole('heading', { name: 'Sign in to Cairn' })).toBeVisible()
+  expect(new URL(page.url()).search).toBe('')
+  await page.getByRole('button', { name: 'Continue with Google', exact: true }).click()
+  await expect(page.getByRole('status').filter({ hasText: 'Signed in. Return to the account editor' })).toBeVisible()
+  expect(new URL(page.url()).pathname).toBe('/plugins/oauth/callback')
+  expect(new URL(page.url()).search).toBe('')
+  expect(callbacks).toEqual([{ state: 'destination-state', code: 'before-login' }])
 })

@@ -36,7 +36,7 @@ pub(super) async fn callback(
     let invalid = || ApiError::Http(StatusCode::BAD_REQUEST, "Invalid plugin sign-in state");
     let parameters: Value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
     let state = parameters["state"].as_str().ok_or_else(invalid)?;
-    let mut fields = state.split(':');
+    let mut fields = state.split('.');
     let (Some("plugin"), Some(installation), Some(nonce), None) =
         (fields.next(), fields.next(), fields.next(), fields.next())
     else {

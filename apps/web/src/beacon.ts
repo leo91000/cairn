@@ -20,14 +20,7 @@ if (!installationRoute) {
   router.addRoute({ path: '/privacy', component: { render: () => null } })
 }
 
-if (window.location.pathname === '/plugins/oauth/callback' && !installationHost) {
-  // Complete on the central origin before the workspace shell can restore a
-  // remembered installation (which may differ from the flow's destination).
-  void import('./views/PluginOAuthCallback.vue').then(({ default: Callback }) => {
-    createApp(Callback, { central: true }).mount('#app')
-  })
-}
-else if (window.location.pathname === '/browser/drafts' && installationHost) {
+if (window.location.pathname === '/browser/drafts' && installationHost) {
   createApp(DraftTransfer).mount('#app')
 }
 else {

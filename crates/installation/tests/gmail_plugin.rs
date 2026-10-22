@@ -303,7 +303,7 @@ async fn sign_in(f: &Fixture, account: &str, instance: Option<&str>) -> Value {
     assert_eq!(params["code_challenge_method"], "S256");
     assert_eq!(params["access_type"], "offline");
     assert_eq!(params["state"], started["id"]);
-    assert!(params["state"].starts_with("plugin:"));
+    assert!(params["state"].starts_with("plugin."));
     assert_eq!(
         url::Url::parse(&params["redirect_uri"]).unwrap().path(),
         "/plugins/oauth/callback"

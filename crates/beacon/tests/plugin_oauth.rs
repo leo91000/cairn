@@ -149,6 +149,28 @@ async fn one_beacon_callback_routes_two_installations_and_rejects_altered_state(
         let parameters: HashMap<_, _> = url.query_pairs().into_owned().collect();
         assert_eq!(parameters["redirect_uri"], expected);
         assert_eq!(parameters["state"], flow["id"]);
+        // Android URL-encodes path segments before polling and cancellation.
+        // Exercise the actual generated ID through the encoded HTTP relay path.
+        let encoded: String =
+            url::form_urlencoded::byte_serialize(flow["id"].as_str().unwrap().as_bytes()).collect();
+        assert_eq!(encoded, flow["id"].as_str().unwrap());
+        let (_, id) = cairn_installation::relay::beacon_address(&service.config.data_dir)
+            .await
+            .unwrap()
+            .unwrap();
+        let response = relay
+            .app
+            .authenticated(
+                &relay.cookie,
+                &relay.session,
+                Method::GET,
+                &format!("/api/installations/{id}/api/plugins/gmail/oauth/{encoded}"),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.json::<Value>().await.unwrap()["state"], "pending");
     }
 
     let first_id = relay.session["installations"][0]["id"].as_str().unwrap();
@@ -211,6 +233,24 @@ async fn one_beacon_callback_routes_two_installations_and_rejects_altered_state(
             .iter()
             .all(|call| call["redirect_uri"] == expected && call["code_verifier"].len() == 43)
     );
+
+    let cancelled = start(&second, &binding).await;
+    let encoded: String =
+        url::form_urlencoded::byte_serialize(cancelled["id"].as_str().unwrap().as_bytes())
+            .collect();
+    let response = relay
+        .app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::DELETE,
+            &format!("/api/installations/{second_id}/api/plugins/gmail/oauth/{encoded}"),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.json::<Value>().await.unwrap()["cancelled"], true);
 
     stop.cancel();
     connector.await.unwrap().unwrap();
