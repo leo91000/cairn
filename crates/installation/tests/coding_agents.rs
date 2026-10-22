@@ -125,6 +125,7 @@ fn engine_configuration_and_validation_do_not_depend_on_the_other_engine() {
         let mut environment = cairn_installation::process::Environment::from([
             ("OPENAI_API_KEY".into(), "synthetic-openai-key".into()),
             ("ANTHROPIC_API_KEY".into(), "synthetic-anthropic-key".into()),
+            ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS".into(), "0".into()),
         ]);
         provider.configure_run_environment(&mut environment, root.path(), true, &home);
         assert!(!environment.contains_key("OPENAI_API_KEY"));
@@ -144,6 +145,7 @@ fn engine_configuration_and_validation_do_not_depend_on_the_other_engine() {
                 assert_eq!(environment["CLAUDE_CONFIG_DIR"], home.to_string_lossy());
                 assert_eq!(environment["BROWSER"], "true");
                 assert_eq!(environment["DISABLE_AUTOUPDATER"], "1");
+                assert_eq!(environment["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1");
                 assert!(adapter.uses_chat(false, false));
                 assert!(
                     adapter

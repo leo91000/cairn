@@ -89,7 +89,13 @@ else {
   const instructionsMode = instructionsFile >= 0
     ? statSync(args[instructionsFile + 1]).mode & 0o777
     : undefined
-  appendFileSync(log, `${JSON.stringify({ args, instructions, instructionsMode })}\n`)
+  const backgroundTasksDisabled = process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS
+  appendFileSync(log, `${JSON.stringify({
+    args,
+    instructions,
+    instructionsMode,
+    backgroundTasksDisabled,
+  })}\n`)
   out({ type: 'system', subtype: 'init', session_id: session })
   let question
   let serial = 0
