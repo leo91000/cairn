@@ -8,8 +8,15 @@ use tokio::{
     time::Instant,
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum OutputKind {
+    Stdout,
+    Diagnostic,
+    Performance,
+}
+
 pub(super) struct Output {
-    pub diagnostic: bool,
+    pub kind: OutputKind,
     pub raw: String,
     pub received: Instant,
 }
@@ -17,7 +24,19 @@ pub(super) struct Output {
 impl Output {
     fn new(diagnostic: bool, raw: String) -> Self {
         Self {
-            diagnostic,
+            kind: if diagnostic {
+                OutputKind::Diagnostic
+            } else {
+                OutputKind::Stdout
+            },
+            raw,
+            received: Instant::now(),
+        }
+    }
+
+    fn performance(raw: String) -> Self {
+        Self {
+            kind: OutputKind::Performance,
             raw,
             received: Instant::now(),
         }
@@ -84,7 +103,7 @@ pub(super) async fn read_output(
     secrets: Vec<String>,
 ) {
     if diagnostic {
-        return read_diagnostics(reader, events, &secrets).await;
+        return read_diagnostics(reader, events).await;
     }
 
     let mut bytes = [0; 8192];
@@ -129,11 +148,7 @@ pub(super) async fn read_output(
 
 /// Forwards agent stderr by whole lines, so styling and performance records are
 /// recognized intact. A long fragment without a line end is still forwarded.
-async fn read_diagnostics(
-    mut reader: impl AsyncRead + Unpin,
-    events: mpsc::Sender<Output>,
-    secrets: &[String],
-) {
+async fn read_diagnostics(mut reader: impl AsyncRead + Unpin, events: mpsc::Sender<Output>) {
     let mut bytes = [0; 8192];
     let mut pending = Vec::new();
     loop {
@@ -152,23 +167,19 @@ async fn read_diagnostics(
             None => continue,
         };
         let lines: Vec<u8> = pending.drain(..complete).collect();
-        if !forward_diagnostics(&lines, &events, secrets).await {
+        if !forward_diagnostics(&lines, &events).await {
             return;
         }
     }
     if !pending.is_empty() {
         // The receiver only disappears once the run stopped listening.
-        forward_diagnostics(&pending, &events, secrets).await;
+        forward_diagnostics(&pending, &events).await;
     }
 }
 
 /// Sends readable diagnostics to the run. The agent process's own performance
 /// records belong to the manager log, like the worker's.
-async fn forward_diagnostics(
-    bytes: &[u8],
-    events: &mpsc::Sender<Output>,
-    secrets: &[String],
-) -> bool {
+async fn forward_diagnostics(bytes: &[u8], events: &mpsc::Sender<Output>) -> bool {
     let text = String::from_utf8_lossy(bytes);
     let text = run_output::strip_terminal_styling(&text);
     let mut diagnostics = String::new();
@@ -179,8 +190,13 @@ async fn forward_diagnostics(
             if line.ends_with('\r') && lines.peek() == Some(&"\n") {
                 lines.next();
             }
-            let record = run_output::redact(line.trim_end(), secrets);
-            tracing::info!(target: "cairn_performance", source = "agent_process", record = %record);
+            if events
+                .send(Output::performance(line.trim_end().to_owned()))
+                .await
+                .is_err()
+            {
+                return false;
+            }
         } else {
             diagnostics.push_str(line);
         }
@@ -201,7 +217,14 @@ pub(super) async fn record(
 ) -> Result<bool> {
     let id = checkpoint.id.as_str();
     let raw = output.raw.as_str();
-    if output.diagnostic {
+    if output.kind == OutputKind::Performance {
+        // The consumer refreshes configured/account redactions before every output.
+        // Performance records never consume the run's persisted log budget.
+        let record = run_output::redact(raw, secrets);
+        tracing::info!(target: "cairn_performance", source = "agent_process", record = %record);
+        return Ok(false);
+    }
+    if output.kind == OutputKind::Diagnostic {
         record_raw(s, id, "diagnostic", raw, secrets, log_total).await?;
         return Ok(false);
     }

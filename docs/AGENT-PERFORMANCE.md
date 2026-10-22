@@ -17,8 +17,10 @@ or `side=worker` (events received by the manager). The agent process writes its
 records to stderr; the manager logs each one as `source=agent_process` with the
 sanitized line in `record`, rather than adding it to the run's diagnostics. Only
 the runner's formatted tracing records with the `cairn_performance` target are
-redirected; another logger mentioning that name remains a diagnostic. Match run, attempt and the
-local turn counter when comparing these records. Existing VM boot, preparation,
+redirected; another logger mentioning that name remains a diagnostic. The
+consumer refreshes configured and account-secret redactions before logging these
+records, including after the run's diagnostic budget is exhausted. Match run,
+attempt and the local turn counter when comparing these records. Existing VM boot, preparation,
 shutdown and storage records retain their current run/VM identities.
 Archive transfers add a UUID linking host and guest phases; see
 [VM import timings](VM-IMPORT-TIMINGS.md) for reading, transport, extraction and

@@ -762,29 +762,36 @@ async fn performance_names_inside_diagnostics_are_retained_and_manager_logs_are_
     let mut fixture = Fixture::new().await;
     let log_path = fixture._root.path().join("manager.log");
     let log_file = std::fs::File::create(&log_path).unwrap();
-    let subscriber = tracing_subscriber::fmt()
-        .with_ansi(false)
-        .without_time()
-        .with_writer(Arc::new(log_file))
-        .finish();
+    let subscriber = tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(Arc::new(log_file))
+            .finish(),
+    );
     let input = concat!(
         "WARN native: invalid record cairn_performance: sensitive-tool-credential\n",
         "2026-10-22T12:08:49Z WARN native: invalid record cairn_performance: sensitive-tool-credential\n",
         "2026-10-22T12:08:49Z INFO cairn_performance: operation=agent_activity id=sensitive-tool-credential\n",
     );
     let (sender, mut receiver) = mpsc::channel(32);
-    assert!(
-        forward_diagnostics(
-            input.as_bytes(),
-            &sender,
-            &["sensitive-tool-credential".into()]
-        )
-        .with_subscriber(subscriber)
-        .await
-    );
-    drop(sender);
+    // Match production: the stderr reader has no secrets; the consumer supplies
+    // current configured/account redactions, including credentials renewed later.
+    read_output(input.as_bytes(), true, sender, Vec::new()).await;
     while let Some(output) = receiver.recv().await {
-        fixture.output(output).await;
+        let performance = output.kind == OutputKind::Performance;
+        let previous_budget = fixture.log_total;
+        if performance {
+            fixture.log_total = LOG_BUDGET;
+        }
+        fixture
+            .output(output)
+            .with_subscriber(subscriber.clone())
+            .await;
+        if performance {
+            assert_eq!(fixture.log_total, LOG_BUDGET);
+            fixture.log_total = previous_budget;
+        }
     }
 
     let events = fixture.events().await;
