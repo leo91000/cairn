@@ -160,9 +160,12 @@ fun RunScreen(
     val more = live.catchingUp
     val timelineKeys = remember(id) { TimelineKeys() }
     val timeline =
-        remember(events, live.state?.artifacts) {
+        remember(events, live.state?.artifacts, run?.wakeup) {
             deliveryTimeline(
-                timelineKeys.stabilize(live.history, timelineEntries(events)),
+                timelineKeys.stabilize(
+                    live.history,
+                    timelineEntries(events, pendingWakeup = run?.wakeup),
+                ),
                 live.state?.artifacts.orEmpty(),
             )
         }
@@ -257,7 +260,11 @@ fun RunScreen(
                                     details = true
                                 },
                             )
-                            if (current.resumeAvailable && current.trigger != "chat")
+                            if (
+                                !current.active &&
+                                    current.resumeAvailable &&
+                                    current.trigger != "chat"
+                            )
                                 DropdownMenuItem(
                                     text = { Text("Reprendre") },
                                     enabled = !state.busy,
@@ -347,6 +354,15 @@ fun RunScreen(
                         style = MaterialTheme.typography.labelMedium,
                     )
                 RunWaitingReason(current)
+                if (current.status == "waiting")
+                    current.wakeup?.let { wakeup ->
+                        Text(
+                            "${wakeup.reason} · Reprise ${date(wakeup.wakeAt)}",
+                            Modifier.padding(horizontal = 20.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = signal.warning,
+                        )
+                    }
                 if (current.recoveryPending)
                     Text(
                         "Récupération en cours…",
@@ -387,7 +403,10 @@ fun RunScreen(
                         Page {
                             if (current.summary.isBlank())
                                 Empty(
-                                    if (current.active && current.suspendedByExclusive != null)
+                                    if (
+                                        current.status == "running" &&
+                                            current.suspendedByExclusive != null
+                                    )
                                         "Exécution suspendue"
                                     else if (current.active) "Le travail est en cours"
                                     else "Aucun résumé",
@@ -422,15 +441,25 @@ fun RunScreen(
                                 verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.Bottom),
                             ) {
                                 items(timeline, key = { it.key }) { entry ->
-                                    TimelineRow(
-                                        vm,
-                                        entry,
-                                        current.snapshot.agent.name.ifBlank { "Cairn" },
-                                        rendering,
-                                        hideRunning = current.status == "running",
-                                        active = current.active,
-                                        livePlan = livePlan,
-                                    )
+                                    CompositionLocalProvider(
+                                        LocalLiveWait provides
+                                            LiveWait(
+                                                current.wakeup,
+                                                paused = false,
+                                                settled = current.status == "waiting",
+                                                canPause = false,
+                                            )
+                                    ) {
+                                        TimelineRow(
+                                            vm,
+                                            entry,
+                                            current.snapshot.agent.name.ifBlank { "Cairn" },
+                                            rendering,
+                                            hideRunning = current.status == "running",
+                                            active = current.active && current.status != "waiting",
+                                            livePlan = livePlan,
+                                        )
+                                    }
                                 }
                                 if (!current.active)
                                     current.outcome
@@ -444,11 +473,20 @@ fun RunScreen(
                                                 )
                                             }
                                         }
-                                if (current.active && current.suspendedByExclusive != null)
+                                if (
+                                    current.status == "running" &&
+                                        current.suspendedByExclusive != null
+                                )
                                     item(key = "exclusive-suspended") {
                                         Text(
                                             "Suspendue (exclusivité) · ${current.suspendedByExclusive.reason}",
                                             color = signal.warning,
+                                        )
+                                    }
+                                else if (current.status == "waiting")
+                                    item(key = "mission-waiting") {
+                                        Text(
+                                            "Attente programmée · ${current.wakeup?.reason.orEmpty()}"
                                         )
                                     }
                                 else if (current.active)

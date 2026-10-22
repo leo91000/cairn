@@ -34,7 +34,7 @@ pub fn authorize_in(db: &crate::store::Db<'_>, bearer: &str) -> Result<Value> {
     let grant = db.kv(&grant_key(bearer))?.ok_or_else(denied)?;
     let grant = RunGrant::deserialize(&grant)?;
     let run = db.run(&grant.run_id)?.ok_or_else(denied)?;
-    let revoked = grant.message_id != run["chatExecution"]["messageId"]
+    let revoked = grant.message_id != *crate::waits::execution_id(&run)
         || !grant.workspace
         || run["status"] != RunStatus::Running
         || !run["cancelRequestedAt"].is_null();
@@ -223,16 +223,15 @@ async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Resul
             crate::nodes::exclusive::renew(s, bearer, args).await,
             summary,
         ),
-        "wait_for" => ToolResult::from_result(
-            crate::chats::wait_for::schedule(s, bearer, args).await,
-            |result| {
+        "wait_for" => {
+            ToolResult::from_result(crate::waits::schedule(s, bearer, args).await, |result| {
                 if result["deferred"] == true {
                     "Wait saved. End this turn; Cairn will resume when the scheduled time arrives, the condition resolves or the timeout expires, subject to capacity.".into()
                 } else {
                     "Condition already completed. Inspect the observation and continue this turn; no wakeup was scheduled.".into()
                 }
-            },
-        ),
+            })
+        }
 
         "list_nodes" => {
             let run = authorize(s, bearer).await?;
@@ -323,7 +322,7 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         crate::outcome::tool(),
         crate::chats::questions::list_tool(),
         crate::chats::questions::cancel_tool(),
-        crate::chats::wait_for::tool(&conditions),
+        crate::waits::tool(&conditions),
         crate::nodes::exclusive::acquire_tool(),
         crate::nodes::exclusive::release_tool(),
         crate::nodes::exclusive::status_tool(),

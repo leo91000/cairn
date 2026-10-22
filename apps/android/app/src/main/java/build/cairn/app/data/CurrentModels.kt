@@ -53,7 +53,7 @@ data class ChatQuestion(
 @Serializable
 data class ChatWakeup(
     val id: String,
-    val messageId: String,
+    val messageId: String? = null,
     val reason: String,
     val seconds: Long,
     val createdAt: Long,

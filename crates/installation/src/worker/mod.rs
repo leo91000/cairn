@@ -177,13 +177,15 @@ async fn schedule_tasks(s: Arc<Service>) {
     }
 }
 
-/// Requeues runs that were executing when the previous worker process stopped.
+/// Recovers executions and unfinished cleanup from the previous worker process.
 fn restore_after_restart(db: &mut Db<'_>) -> Result<()> {
     db.restore_chat_summaries(None)?;
     for run in db.active()? {
         let id = text(&run, "id");
         if run["status"] != RunStatus::Running {
-            if !run["cancelRequestedAt"].is_null() {
+            // Waiting was committed before fencing and release. A restart must
+            // finish that cleanup even when the wakeup is still far away.
+            if run["status"] == RunStatus::Waiting || !run["cancelRequestedAt"].is_null() {
                 db.patch_run(id, &json!({ "recoveryPending": true }))?;
             }
             continue;

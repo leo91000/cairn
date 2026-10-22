@@ -132,9 +132,11 @@ async fn record_failure(
             .update(|c| c.settled = Some(Some(settled)))
             .await?;
     }
-    s.store
-        .patch_run(run_id, failure_patch(status, needs_fence, &summary))
-        .await?;
+    let mut patch = failure_patch(status, needs_fence, &summary);
+    if status != RunStatus::Queued {
+        patch["wakeup"] = Value::Null;
+    }
+    s.store.patch_run(run_id, patch).await?;
     let kind = if s.shutdown.is_cancelled() {
         "status"
     } else {
@@ -259,7 +261,11 @@ async fn release(
             .prepared()
             .is_some_and(|prepared| prepared["backend"] == "native");
         if crate::nodes::publication::protected(&run)
-            && (native || run["status"] == RunStatus::Succeeded)
+            && (native
+                || matches!(
+                    RunStatus::of(&run),
+                    Some(RunStatus::Succeeded | RunStatus::Waiting)
+                ))
         {
             // Native work can only be captured after fencing, including failed,
             // cancelled and paused turns. Durable demand survives upload errors.
@@ -349,6 +355,7 @@ mod tests {
                 ("native", "failed", true, true),
                 ("native", "cancelled", true, true),
                 ("native", "queued", true, true),
+                ("firecracker", "waiting", true, true),
                 ("native", "failed", false, false),
                 ("firecracker", "failed", true, false),
                 ("firecracker", "cancelled", true, false),
@@ -392,10 +399,10 @@ mod tests {
                     "{backend}/{status}/fenced={fenced}: {current}",
                 );
                 if expected {
-                    // No S3 is configured: the synchronous attempt must fail without
-                    // losing demand, so the background scheduler can retry after repair.
+                    // No S3 is configured. Native file publications attempt synchronously;
+                    // on-demand disks and VMs retain pending demand for the scheduler.
                     assert_eq!(current["backup"]["requestedRevision"], 1);
-                    if mode == Some("on-demand") {
+                    if mode == Some("on-demand") || backend != "native" {
                         assert_eq!(current["backup"]["status"], "pending");
                     } else {
                         assert_eq!(current["backup"]["status"], "error");

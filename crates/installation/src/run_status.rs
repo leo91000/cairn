@@ -7,6 +7,7 @@ use serde_json::Value;
 pub enum RunStatus {
     Queued,
     Running,
+    Waiting,
     Succeeded,
     Failed,
     Cancelled,
@@ -18,6 +19,7 @@ impl RunStatus {
         match self {
             Self::Queued => "queued",
             Self::Running => "running",
+            Self::Waiting => "waiting",
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
@@ -29,6 +31,7 @@ impl RunStatus {
         Some(match value {
             "queued" => Self::Queued,
             "running" => Self::Running,
+            "waiting" => Self::Waiting,
             "succeeded" => Self::Succeeded,
             "failed" => Self::Failed,
             "cancelled" => Self::Cancelled,
@@ -42,9 +45,9 @@ impl RunStatus {
         run["status"].as_str().and_then(Self::parse)
     }
 
-    /// Queued and running runs hold the task's active slot (`runs_active_task`).
+    /// Queued, running and waiting runs hold the task's active slot (`runs_active_task`).
     pub const fn is_active(self) -> bool {
-        matches!(self, Self::Queued | Self::Running)
+        matches!(self, Self::Queued | Self::Running | Self::Waiting)
     }
 
     /// Terminal states from which a stopped session may be resumed.
@@ -81,6 +84,7 @@ mod tests {
         for status in [
             RunStatus::Queued,
             RunStatus::Running,
+            RunStatus::Waiting,
             RunStatus::Succeeded,
             RunStatus::Failed,
             RunStatus::Cancelled,

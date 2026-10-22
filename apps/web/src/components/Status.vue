@@ -6,6 +6,7 @@ const tones: Record<string, string> = {
   succeeded: 'bg-soft text-accent',
   running: 'bg-warning-surface text-warning',
   queued: 'bg-warning-surface text-warning',
+  waiting: 'bg-warning-surface text-warning',
   suspended: 'bg-soft text-muted',
   failed: 'bg-danger-surface text-danger',
   interrupted: 'bg-danger-surface text-danger',

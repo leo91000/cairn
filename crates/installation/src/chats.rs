@@ -1,7 +1,8 @@
 pub(crate) mod continuation;
 mod handoff;
 pub(crate) mod questions;
-pub mod wait_for;
+
+pub use crate::waits as wait_for;
 
 pub use handoff::{execution_text, with_invoked_skills};
 pub use questions::{Question, QuestionField, QuestionStatus, question_prefix};

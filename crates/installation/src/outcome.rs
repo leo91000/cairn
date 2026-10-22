@@ -71,7 +71,7 @@ pub async fn report(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
             // Authorize and write in the same transaction; a report from an expired
             // attempt cannot overwrite the next user message's outcome.
             let run = crate::project_workspaces::authorize_in(db, &bearer)?;
-            outcome["messageId"] = run["chatExecution"]["messageId"].clone();
+            outcome["messageId"] = crate::waits::execution_id(&run).clone();
             db.patch_run(
                 text(&run, "id"),
                 &json!({

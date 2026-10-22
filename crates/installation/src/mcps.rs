@@ -615,7 +615,7 @@ impl Mcps {
             configuration.env.insert(RUN_TOKEN_ENV, token.clone());
             let grant = RunGrant {
                 run_id: text(run, "id").to_owned(),
-                message_id: run["chatExecution"]["messageId"].clone(),
+                message_id: crate::waits::execution_id(run).clone(),
                 servers,
                 workspace,
                 installation,
@@ -652,7 +652,8 @@ impl Mcps {
                 let Some(scope) = grant.servers.get(&id) else {
                     return Err(expired());
                 };
-                let revoked = !run["cancelRequestedAt"].is_null()
+                let revoked = grant.message_id != *crate::waits::execution_id(&run)
+                    || !run["cancelRequestedAt"].is_null()
                     || run["status"] != RunStatus::Running
                     || !server.enabled
                     || server.revision != scope.revision;

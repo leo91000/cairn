@@ -191,6 +191,16 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
     if (isExclusivelySuspended(run)) {
       live.push({ ...base, kind: 'suspended', subtitle: exclusiveSuspensionLabel })
     }
+    else if (run.status === 'waiting') {
+      live.push({
+        ...base,
+        kind: 'waiting',
+        subtitle: run.wakeup?.reason || 'Mission waiting for continuation',
+        wakeAt: run.wakeup?.wakeAt,
+        condition: !!run.wakeup?.condition,
+        resolved: !!run.wakeup?.observation,
+      })
+    }
     else if (run.status === 'running' || run.status === 'queued') {
       live.push({ ...base, kind: run.status === 'running' ? 'running' : 'queued', subtitle: run.status === 'running' ? 'Mission running' : 'Mission needs a free runner' })
     }
