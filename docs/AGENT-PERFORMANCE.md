@@ -22,6 +22,9 @@ consumer refreshes configured and account-secret redactions before logging these
 records, including after the run's diagnostic budget is exhausted. Match run,
 attempt and the local turn counter when comparing these records. Existing VM boot, preparation,
 shutdown and storage records retain their current run/VM identities.
+Terminal styling is removed before framing diagnostics, with parser state kept
+across reads and long fragments. Control-sequence bodies are discarded while
+streaming rather than buffered, and incomplete UTF-8 characters wait for the next read.
 Archive transfers add a UUID linking host and guest phases; see
 [VM import timings](VM-IMPORT-TIMINGS.md) for reading, transport, extraction and
 acknowledgement measurements. Guest measurements require the updated VM image;

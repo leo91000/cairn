@@ -812,3 +812,40 @@ async fn performance_names_inside_diagnostics_are_retained_and_manager_logs_are_
     assert!(!logs.contains("sensitive-tool-credential"), "{logs}");
     assert!(!logs.contains("invalid record"), "{logs}");
 }
+
+#[tokio::test]
+async fn terminal_styling_and_utf8_survive_long_diagnostic_fragments() {
+    let prefix = "x".repeat(8190);
+    let link = "https://example.com/".repeat(1000);
+    for (input, expected) in [
+        (
+            format!("{prefix}\x1b[33mWARN\x1b[0m disk full\n"),
+            format!("{prefix}WARN disk full\n"),
+        ),
+        (
+            format!("{prefix}\x1b]8;;{link}\x1b\\WARN\x1b]8;;\x1b\\ disk full\n"),
+            format!("{prefix}WARN disk full\n"),
+        ),
+        (
+            format!("{prefix}xéWARN disk full\n"),
+            format!("{prefix}xéWARN disk full\n"),
+        ),
+    ] {
+        let mut fixture = Fixture::new().await;
+        let (sender, mut receiver) = mpsc::channel(32);
+        // Slice reads fill the reader's 8192-byte buffer, splitting the CSI,
+        // a long OSC body, or a UTF-8 character at that exact boundary.
+        read_output(input.as_bytes(), true, sender, Vec::new()).await;
+        while let Some(output) = receiver.recv().await {
+            fixture.output(output).await;
+        }
+        let diagnostics: String = fixture
+            .events()
+            .await
+            .iter()
+            .filter(|event| event["type"] == "diagnostic")
+            .map(|event| event["text"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(diagnostics, expected);
+    }
+}

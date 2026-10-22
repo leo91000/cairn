@@ -151,19 +151,26 @@ pub(super) async fn read_output(
 async fn read_diagnostics(mut reader: impl AsyncRead + Unpin, events: mpsc::Sender<Output>) {
     let mut bytes = [0; 8192];
     let mut pending = Vec::new();
+    let mut styling = run_output::TerminalStyling::default();
     loop {
         let n = match reader.read(&mut bytes).await {
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
-        pending.extend_from_slice(&bytes[..n]);
+        styling.push(&bytes[..n], &mut pending);
 
         // Keep a trailing CR until the next byte, so a split CRLF stays together.
         let complete = match pending.iter().enumerate().rfind(|(index, byte)| {
             **byte == b'\n' || (**byte == b'\r' && index + 1 < pending.len())
         }) {
             Some((end, _)) => end + 1,
-            None if pending.len() >= DIAGNOSTIC_FRAGMENT_LIMIT => pending.len(),
+            None if pending.len() >= DIAGNOSTIC_FRAGMENT_LIMIT => {
+                // Keep an incomplete UTF-8 character for the next read as well.
+                match std::str::from_utf8(&pending) {
+                    Err(error) if error.error_len().is_none() => error.valid_up_to(),
+                    _ => pending.len(),
+                }
+            }
             None => continue,
         };
         let lines: Vec<u8> = pending.drain(..complete).collect();
@@ -181,7 +188,6 @@ async fn read_diagnostics(mut reader: impl AsyncRead + Unpin, events: mpsc::Send
 /// records belong to the manager log, like the worker's.
 async fn forward_diagnostics(bytes: &[u8], events: &mpsc::Sender<Output>) -> bool {
     let text = String::from_utf8_lossy(bytes);
-    let text = run_output::strip_terminal_styling(&text);
     let mut diagnostics = String::new();
     let mut lines = text.split_inclusive(['\r', '\n']).peekable();
     while let Some(line) = lines.next() {

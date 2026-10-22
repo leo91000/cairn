@@ -57,15 +57,72 @@ static EXHAUSTED: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"(?i)^(?:you['’]ve hit your (?:usage |session |weekly |(?:individual )?spend )?limit|you have hit your (?:usage )?limit|usage limit (?:has been )?(?:reached|exceeded)|claude ai usage limit reached|(?:5-hour|session|weekly|opus) limit reached)\b").unwrap()
 });
 
-// CSI sequences (colors, cursor moves), OSC sequences (titles, links) and two-byte escapes.
-static TERMINAL_ESCAPE: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])")
-        .unwrap()
-});
+#[derive(Default)]
+enum TerminalState {
+    #[default]
+    Text,
+    Escape,
+    Csi,
+    Osc,
+    OscEscape,
+}
+
+/// Removes CSI, OSC and two-byte escapes without buffering control-sequence bodies.
+#[derive(Default)]
+pub(crate) struct TerminalStyling {
+    state: TerminalState,
+}
+
+impl TerminalStyling {
+    pub(crate) fn push(&mut self, bytes: &[u8], plain: &mut Vec<u8>) {
+        use TerminalState::*;
+
+        for &byte in bytes {
+            match self.state {
+                Text if byte == 0x1b => self.state = Escape,
+                Text => plain.push(byte),
+                Escape => match byte {
+                    b'[' => self.state = Csi,
+                    b']' => self.state = Osc,
+                    0x1b => {}
+                    b'@'..=b'Z' | b'\\'..=b'_' => self.state = Text,
+                    _ => {
+                        plain.extend_from_slice(&[0x1b, byte]);
+                        self.state = Text;
+                    }
+                },
+                Csi => match byte {
+                    b'@'..=b'~' => self.state = Text,
+                    0x1b => self.state = Escape,
+                    b'\r' | b'\n' => {
+                        plain.push(byte);
+                        self.state = Text;
+                    }
+                    _ => {}
+                },
+                Osc => match byte {
+                    0x07 => self.state = Text,
+                    0x1b => self.state = OscEscape,
+                    _ => {}
+                },
+                OscEscape => match byte {
+                    b'\\' | 0x07 => self.state = Text,
+                    0x1b => {}
+                    _ => self.state = Osc,
+                },
+            }
+        }
+    }
+}
 
 /// Removes terminal styling that agent processes write to stderr.
 pub fn strip_terminal_styling(text: &str) -> std::borrow::Cow<'_, str> {
-    TERMINAL_ESCAPE.replace_all(text, "")
+    if !text.contains('\x1b') {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut plain = Vec::with_capacity(text.len());
+    TerminalStyling::default().push(text.as_bytes(), &mut plain);
+    std::borrow::Cow::Owned(String::from_utf8_lossy(&plain).into_owned())
 }
 
 pub fn redact(text: &str, secrets: &[String]) -> String {
