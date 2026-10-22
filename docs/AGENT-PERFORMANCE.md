@@ -13,7 +13,9 @@ Retained older adapters ignore the optional fields; plans without them log
 `unknown`. Invalid correlation values also become `unknown`.
 
 Activity records have `side=adapter` (normalized events inside the agent process)
-or `side=worker` (events received by the manager). Match run, attempt and the
+or `side=worker` (events received by the manager). The agent process writes its
+records to stderr; the manager logs each one as `source=agent_process` with the
+original line in `record`, rather than adding it to the run's diagnostics. Match run, attempt and the
 local turn counter when comparing these records. Existing VM boot, preparation,
 shutdown and storage records retain their current run/VM identities.
 Archive transfers add a UUID linking host and guest phases; see

@@ -7,6 +7,19 @@ import org.junit.Test
 
 class ActivityPresentationTest {
     @Test
+    fun `historical diagnostics are shown verbatim without terminal styling`() {
+        val styled =
+            "\u001B[2m2026-10-22T12:08:49Z\u001B[0m \u001B[33m WARN\u001B[0m " +
+                "\u001B[2mcodex\u001B[0m\u001B[2m:\u001B[0m disk full\n"
+        val presentation = presentActivity(RunEvent(1, 1, "diagnostic", styled))
+
+        assertEquals("Diagnostic de l’agent", presentation.title)
+        assertTrue(presentation.verbatim)
+        assertEquals("2026-10-22T12:08:49Z  WARN codex: disk full\n", presentation.output)
+        assertEquals(presentation.output, presentation.raw)
+    }
+
+    @Test
     fun `shared corpus preserves activity and distinguishes immediate results`() {
         val raw =
             java.io.File(requireNotNull(System.getProperty("cairn.activityCorpus"))).readText()

@@ -5,7 +5,7 @@ use cairn_installation::{
     validation::text,
 };
 use serde_json::{Value, json};
-use std::{path::Path, process::ExitCode, sync::Arc, time::Duration};
+use std::{io::IsTerminal, path::Path, process::ExitCode, sync::Arc, time::Duration};
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -76,6 +76,8 @@ where
                 .unwrap_or_else(|_| "warn,cairn_performance=info".into()),
         )
         .with_writer(std::io::stderr)
+        // Agent stderr becomes run diagnostics; styling only helps in a terminal.
+        .with_ansi(std::io::stderr().is_terminal())
         .init();
     let threads = std::env::var("CAIRN_HTTP_THREADS")
         .ok()

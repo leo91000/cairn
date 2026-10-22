@@ -47,6 +47,7 @@ impl Output {
 const LOG_BUDGET: usize = 500_000;
 const ITEM_DETAIL_LIMIT: usize = run_output::ACTIVITY_DETAIL_LIMIT;
 const LINE_LIMIT: usize = 2_000_000;
+const DIAGNOSTIC_FRAGMENT_LIMIT: usize = 8192;
 // Match the resident Codex transport: supported tool frames must reach the JSON
 // parser intact before shortening. Large buffers are released after each frame.
 const TOOL_FRAME_LIMIT: usize = 100_000_000;
@@ -71,6 +72,10 @@ pub(super) async fn read_output(
     events: mpsc::Sender<Output>,
     secrets: Vec<String>,
 ) {
+    if diagnostic {
+        return read_diagnostics(reader, events).await;
+    }
+
     let mut bytes = [0; 8192];
     let mut line = Vec::new();
     let mut object_frame = None;
@@ -79,13 +84,6 @@ pub(super) async fn read_output(
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
-        if diagnostic {
-            let chunk = String::from_utf8_lossy(&bytes[..n]).into_owned();
-            if events.send(Output::new(true, chunk)).await.is_err() {
-                return;
-            }
-            continue;
-        }
         for byte in &bytes[..n] {
             if *byte != b'\n' {
                 if object_frame.is_none() && !byte.is_ascii_whitespace() {
@@ -116,6 +114,51 @@ pub(super) async fn read_output(
         // The receiver only disappears once the run stopped listening.
         let _ = events.send(Output::line(&line, &secrets)).await;
     }
+}
+
+/// Forwards agent stderr by whole lines, so styling and performance records are
+/// recognized intact. A long fragment without a line end is still forwarded.
+async fn read_diagnostics(mut reader: impl AsyncRead + Unpin, events: mpsc::Sender<Output>) {
+    let mut bytes = [0; 8192];
+    let mut pending = Vec::new();
+    loop {
+        let n = match reader.read(&mut bytes).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        pending.extend_from_slice(&bytes[..n]);
+
+        let complete = match pending.iter().rposition(|b| matches!(b, b'\n' | b'\r')) {
+            Some(end) => end + 1,
+            None if pending.len() >= DIAGNOSTIC_FRAGMENT_LIMIT => pending.len(),
+            None => continue,
+        };
+        let lines: Vec<u8> = pending.drain(..complete).collect();
+        if !forward_diagnostics(&lines, &events).await {
+            return;
+        }
+    }
+    if !pending.is_empty() {
+        // The receiver only disappears once the run stopped listening.
+        forward_diagnostics(&pending, &events).await;
+    }
+}
+
+/// Sends readable diagnostics to the run. The agent process's own performance
+/// records belong to the manager log, like the worker's.
+async fn forward_diagnostics(bytes: &[u8], events: &mpsc::Sender<Output>) -> bool {
+    let text = String::from_utf8_lossy(bytes);
+    let text = run_output::strip_terminal_styling(&text);
+    let mut diagnostics = String::new();
+    for line in text.split_inclusive('\n') {
+        if line.contains(" cairn_performance: ") {
+            tracing::info!(target: "cairn_performance", source = "agent_process", record = %line.trim_end());
+        } else {
+            diagnostics.push_str(line);
+        }
+    }
+
+    diagnostics.is_empty() || events.send(Output::new(true, diagnostics)).await.is_ok()
 }
 
 /// Records one output line and returns whether it reports exhausted usage.

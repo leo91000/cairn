@@ -262,7 +262,9 @@ internal fun ActivityBody(p: ActivityPresentation) {
                     )
                 }
         ActivityKind.NOTICE -> {
-            if (p.output.isNotBlank()) Text(p.output, style = MaterialTheme.typography.bodySmall)
+            if (p.output.isNotBlank() && p.verbatim) CodeBlock("Sortie", p.output)
+            else if (p.output.isNotBlank())
+                Text(p.output, style = MaterialTheme.typography.bodySmall)
             else if (p.subtitle.isBlank())
                 Text(
                     if (p.failed) "Consultez les détails techniques pour diagnostiquer cette étape."

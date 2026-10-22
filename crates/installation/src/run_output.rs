@@ -57,6 +57,17 @@ static EXHAUSTED: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"(?i)^(?:you['’]ve hit your (?:usage |session |weekly |(?:individual )?spend )?limit|you have hit your (?:usage )?limit|usage limit (?:has been )?(?:reached|exceeded)|claude ai usage limit reached|(?:5-hour|session|weekly|opus) limit reached)\b").unwrap()
 });
 
+// CSI sequences (colors, cursor moves), OSC sequences (titles, links) and two-byte escapes.
+static TERMINAL_ESCAPE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])")
+        .unwrap()
+});
+
+/// Removes terminal styling that agent processes write to stderr.
+pub fn strip_terminal_styling(text: &str) -> std::borrow::Cow<'_, str> {
+    TERMINAL_ESCAPE.replace_all(text, "")
+}
+
 pub fn redact(text: &str, secrets: &[String]) -> String {
     let mut text = TOKEN.replace_all(text, "[redacted]").into_owned();
     for pattern in PLUGIN_TOKENS.read().unwrap().iter() {
@@ -503,6 +514,19 @@ mod tests {
             assert_eq!(line.last(), Some(&b'\n'));
             assert_eq!(serde_json::from_slice::<Value>(&line).unwrap(), event);
         }
+    }
+
+    #[test]
+    fn terminal_styling_is_removed_from_diagnostics() {
+        let styled = "\x1b[2m2026-10-22T12:08:49Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[1magent_attempt\x1b[0m\x1b[1m{\x1b[0m\x1b[3mrun_id\x1b[0m\x1b[2m=\x1b[0m\"run\"\x1b[1m}\x1b[0m: \x1b]8;;https://example.com\x07link\x1b]8;;\x07 done\x1bM";
+        assert_eq!(
+            strip_terminal_styling(styled),
+            "2026-10-22T12:08:49Z  INFO agent_attempt{run_id=\"run\"}: link done"
+        );
+        assert_eq!(
+            strip_terminal_styling("Reconnecting... 2/5 [é]"),
+            "Reconnecting... 2/5 [é]"
+        );
     }
 
     #[test]

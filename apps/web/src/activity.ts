@@ -175,6 +175,15 @@ const collaborationTitles: Record<string, string> = {
   closeAgent: 'Closed a subagent',
 }
 
+// CSI sequences (colors, cursor moves), OSC sequences (titles, links) and two-byte escapes.
+// eslint-disable-next-line no-control-regex
+const terminalEscape = /\x1B(?:\[[\x30-\x3F]*[\x20-\x2F]*[\x40-\x7E]|\][^\x07\x1B]*(?:\x07|\x1B\\)?|[\x40-\x5A\x5C-\x5F])/g
+
+/** Agent stderr recorded by older runners keeps its terminal styling. */
+function withoutTerminalStyling(value: string) {
+  return value.replace(terminalEscape, '')
+}
+
 /** Keep tool updates in their original position and fold actions between messages. */
 export function activityEntries(events: RunEvent[], chat = false, groups = new ActivityGroups(), pendingWakeup?: ChatWakeup | null): ActivityEntry[] {
   const entries: ActivityEntry[] = []
@@ -227,7 +236,8 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     scheduled = undefined
   }
 
-  for (const [eventIndex, event] of events.entries()) {
+  for (const [eventIndex, stored] of events.entries()) {
+    const event = stored.type === 'diagnostic' ? { ...stored, text: withoutTerminalStyling(stored.text) } : stored
     if (event.type === 'artifact')
       continue
     if (waitBoundaries.has(event.type) || (event.type === 'status' && terminalStatuses.has(event.text)))
@@ -639,7 +649,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
         'thread.started': 'Session connected',
         'turn.started': 'Started working',
         'turn.completed': 'Finished this turn',
-        'diagnostic': 'Worker diagnostic',
+        'diagnostic': 'Agent diagnostic',
         'output': 'Worker output',
         'error': 'Worker reported an error',
         'item.started': 'Tool activity',

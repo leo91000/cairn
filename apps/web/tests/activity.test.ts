@@ -474,6 +474,18 @@ describe('expected command outcomes and connection recovery', () => {
     const result = artifacts([old, event(2, 'turn.completed', {})])[0]
     expect(result).toMatchObject({ status: 'info', statusLabel: 'Recovered', raw: old.text })
   })
+  it('shows historical diagnostics without terminal styling', () => {
+    const styled = {
+      id: 1,
+      runId: 'old',
+      createdAt: 1,
+      type: 'diagnostic',
+      text: '\x1B[2m2026-10-22T12:08:49Z\x1B[0m \x1B[33m WARN\x1B[0m \x1B[2mcodex\x1B[0m\x1B[2m:\x1B[0m disk full\n',
+    }
+    const [result] = artifacts([styled])
+    expect(result.raw).toBe('2026-10-22T12:08:49Z  WARN codex: disk full\n')
+    expect(result.blocks).toEqual([{ label: 'Output', code: '2026-10-22T12:08:49Z  WARN codex: disk full\n', language: 'plaintext' }])
+  })
 })
 
 it.each([false, true])('caps activity groups at thirty tools after folding updates (chat=%s)', (chat) => {

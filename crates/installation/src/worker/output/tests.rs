@@ -685,3 +685,35 @@ async fn releasing_a_session_preserves_answers_in_delivery() {
         "answered"
     );
 }
+
+#[tokio::test]
+async fn diagnostics_are_plain_text_without_agent_performance_records() {
+    let mut fixture = Fixture::new().await;
+    let performance = "\x1b[2m2026-10-22T12:08:49.998434Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[1magent_attempt\x1b[0m\x1b[1m{\x1b[0m\x1b[3mrun_id\x1b[0m\x1b[2m=\x1b[0m\"run\"\x1b[1m}\x1b[0m\x1b[2m:\x1b[0m \x1b[2mcairn_performance\x1b[0m\x1b[2m:\x1b[0m \x1b[3moperation\x1b[0m\x1b[2m=\x1b[0m\"agent_activity\"\n";
+    let (reader, mut writer) = tokio::io::duplex(64);
+    let (sender, mut receiver) = mpsc::channel(32);
+    let reading = tokio::spawn(read_output(reader, true, sender, Vec::new()));
+    let writing = tokio::spawn(async move {
+        writer.write_all(performance.as_bytes()).await.unwrap();
+        writer
+            .write_all(b"\x1b[33m WARN\x1b[0m Reconnecting... 2/5\n")
+            .await
+            .unwrap();
+        writer.write_all(performance.as_bytes()).await.unwrap();
+        writer.write_all(b"Agent exited").await.unwrap();
+    });
+    while let Some(output) = receiver.recv().await {
+        fixture.output(output).await;
+    }
+    writing.await.unwrap();
+    reading.await.unwrap();
+
+    let diagnostics: String = fixture
+        .events()
+        .await
+        .iter()
+        .filter(|event| event["type"] == "diagnostic")
+        .map(|event| event["text"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(diagnostics, " WARN Reconnecting... 2/5\nAgent exited");
+}
