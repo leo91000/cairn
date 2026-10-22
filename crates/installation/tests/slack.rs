@@ -30,7 +30,7 @@ use cairn_installation::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::{
         Arc,
@@ -58,11 +58,14 @@ struct Slack {
     rate_limit_first: AtomicBool,
     post_attempts: AtomicUsize,
     rate_limit_second: AtomicBool,
+    post_rate_error: Mutex<Option<String>>,
     hold_second_reply: AtomicBool,
     uncertain_first: AtomicBool,
+    uncertain_json: AtomicBool,
     cooldown_race: AtomicBool,
     channel_attempts: AtomicUsize,
     metadata_attempts: AtomicUsize,
+    metadata_errors: Mutex<VecDeque<String>>,
     channel_entered: Notify,
     release_channel: Notify,
     hold_reply_check: AtomicBool,
@@ -137,14 +140,27 @@ async fn api(
                         .into_response();
                 }
             }
+            if let Some(error) = slack.metadata_errors.lock().await.pop_front() {
+                return (
+                    StatusCode::OK,
+                    [("retry-after", "1")],
+                    Json(json!({"ok": false, "error": error})),
+                )
+                    .into_response();
+            }
             json!({"ok": true, "channel": {"id": values["channel"], "name": "cairn", "is_private": slack.private.load(Ordering::SeqCst), "is_archived": false, "is_member": true, "is_shared": false}})
         }
         "/api/chat.postMessage" => {
             let attempt = slack.post_attempts.fetch_add(1, Ordering::SeqCst);
             slack.post_times.lock().await.push(Instant::now());
             if attempt == 1 && slack.rate_limit_second.swap(false, Ordering::SeqCst) {
+                let json_error = slack.post_rate_error.lock().await.clone();
                 return (
-                    StatusCode::TOO_MANY_REQUESTS,
+                    if json_error.is_some() {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::TOO_MANY_REQUESTS
+                    },
                     [(
                         "retry-after",
                         if slack.hold_second_reply.load(Ordering::SeqCst) {
@@ -153,7 +169,10 @@ async fn api(
                             "1"
                         },
                     )],
-                    Json(json!({"ok": false, "error": "ratelimited"})),
+                    Json(json!({
+                        "ok": false,
+                        "error": json_error.as_deref().unwrap_or("ratelimited"),
+                    })),
                 )
                     .into_response();
             }
@@ -169,7 +188,11 @@ async fn api(
             slack.posts.lock().await.push(values);
             if slack.uncertain_first.swap(false, Ordering::SeqCst) {
                 return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
+                    if slack.uncertain_json.load(Ordering::SeqCst) {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    },
                     Json(json!({"ok": false, "error": "internal_error"})),
                 )
                     .into_response();
@@ -362,6 +385,11 @@ async fn an_uncertain_committed_post_is_not_repeated_after_manager_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_transient_json_post_error_is_not_replayed_after_manager_restart() {
+    exchange(DeliveryScenario::UncertainJsonRestart).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_storage_preserves_definite_rate_limits_across_channels() {
     exchange(DeliveryScenario::FullStorageRateLimited).await;
 }
@@ -379,6 +407,16 @@ async fn long_unicode_answers_arrive_completely_in_order_in_the_same_slack_threa
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiting_a_later_chunk_does_not_repeat_earlier_parts_of_the_answer() {
     exchange(DeliveryScenario::LongReplyRateLimited).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_json_rate_limit_on_a_later_chunk_keeps_confirmed_parts() {
+    exchange(DeliveryScenario::LongReplyJsonRateLimited).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_underscored_json_rate_limit_retries_the_unsent_chunk() {
+    exchange(DeliveryScenario::LongReplyJsonRateUnderscoreLimited).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -405,9 +443,17 @@ enum DeliveryScenario {
     SocketOverdueMetadata,
     SocketOpenInterrupted,
     SocketStaleRoute,
+    SocketSilent,
+    SocketWrongPong,
+    SocketHealthy,
+    SocketPeerSilent,
+    SocketTransientMetadata,
+    ReplyTransientMetadata,
     CapacityAfterAdmission,
     LongReply,
     LongReplyRateLimited,
+    LongReplyJsonRateLimited,
+    LongReplyJsonRateUnderscoreLimited,
     LongReplyRestart,
     LongFailedReplyAdvanced,
     ResetThread,
@@ -417,6 +463,7 @@ enum DeliveryScenario {
     RateLimited,
     PrivateBeforeReply,
     UncertainRestart,
+    UncertainJsonRestart,
     ChannelCadence,
 }
 
@@ -526,9 +573,31 @@ async fn exchange(scenario: DeliveryScenario) {
             | DeliveryScenario::SocketOverdueMetadata
             | DeliveryScenario::SocketOpenInterrupted
             | DeliveryScenario::SocketStaleRoute
+            | DeliveryScenario::SocketSilent
+            | DeliveryScenario::SocketWrongPong
+            | DeliveryScenario::SocketHealthy
+            | DeliveryScenario::SocketPeerSilent
+            | DeliveryScenario::SocketTransientMetadata
+    );
+    let recovers_socket = matches!(
+        scenario,
+        DeliveryScenario::SocketSilent
+            | DeliveryScenario::SocketWrongPong
+            | DeliveryScenario::SocketPeerSilent
     );
     let mut socket_fixture = if socket_mode {
-        Some(socket::Fixture::start(matches!(scenario, DeliveryScenario::SocketTls)).await)
+        Some(
+            socket::Fixture::start(matches!(
+                scenario,
+                DeliveryScenario::SocketTls
+                    | DeliveryScenario::SocketSilent
+                    | DeliveryScenario::SocketWrongPong
+                    | DeliveryScenario::SocketHealthy
+                    | DeliveryScenario::SocketPeerSilent
+                    | DeliveryScenario::SocketTransientMetadata
+            ))
+            .await,
+        )
     } else {
         None
     };
@@ -544,6 +613,8 @@ async fn exchange(scenario: DeliveryScenario) {
         scenario,
         DeliveryScenario::LongReply
             | DeliveryScenario::LongReplyRateLimited
+            | DeliveryScenario::LongReplyJsonRateLimited
+            | DeliveryScenario::LongReplyJsonRateUnderscoreLimited
             | DeliveryScenario::LongReplyRestart
             | DeliveryScenario::LongFailedReplyAdvanced
     );
@@ -575,17 +646,32 @@ async fn exchange(scenario: DeliveryScenario) {
     slack.rate_limit_second.store(
         matches!(
             scenario,
-            DeliveryScenario::LongReplyRateLimited | DeliveryScenario::LongFailedReplyAdvanced
+            DeliveryScenario::LongReplyRateLimited
+                | DeliveryScenario::LongReplyJsonRateLimited
+                | DeliveryScenario::LongReplyJsonRateUnderscoreLimited
+                | DeliveryScenario::LongFailedReplyAdvanced
         ),
         Ordering::SeqCst,
     );
+    *slack.post_rate_error.lock().await = match scenario {
+        DeliveryScenario::LongReplyJsonRateLimited => Some("ratelimited".to_owned()),
+        DeliveryScenario::LongReplyJsonRateUnderscoreLimited => Some("rate_limited".to_owned()),
+        _ => None,
+    };
     slack.rate_limit_first.store(rate_limited, Ordering::SeqCst);
     slack.hold_second_reply.store(
         matches!(scenario, DeliveryScenario::LongFailedReplyAdvanced),
         Ordering::SeqCst,
     );
     slack.uncertain_first.store(
-        matches!(scenario, DeliveryScenario::UncertainRestart),
+        matches!(
+            scenario,
+            DeliveryScenario::UncertainRestart | DeliveryScenario::UncertainJsonRestart
+        ),
+        Ordering::SeqCst,
+    );
+    slack.uncertain_json.store(
+        matches!(scenario, DeliveryScenario::UncertainJsonRestart),
         Ordering::SeqCst,
     );
     let slack_app = Router::new()
@@ -780,6 +866,12 @@ async fn exchange(scenario: DeliveryScenario) {
     } else {
         Vec::new()
     };
+    let transient_reads_before = if matches!(scenario, DeliveryScenario::ReplyTransientMetadata) {
+        *slack.metadata_errors.lock().await = vec!["internal_error".to_owned(); 6].into();
+        Some(slack.metadata_attempts.load(Ordering::SeqCst))
+    } else {
+        None
+    };
     let mut manager = start_manager_socket(
         &file,
         &slack_origin,
@@ -792,6 +884,31 @@ async fn exchange(scenario: DeliveryScenario) {
         capacity::keep_accepted_work(&service, &mut manager, &occupied_slots).await;
     }
     if let Some(fixture) = &mut socket_fixture {
+        if matches!(scenario, DeliveryScenario::SocketTransientMetadata) {
+            for code in [
+                "internal_error",
+                "service_unavailable",
+                "fatal_error",
+                "org_login_required",
+                "team_added_to_org",
+                "ratelimited",
+            ] {
+                slack
+                    .metadata_errors
+                    .lock()
+                    .await
+                    .push_back(code.to_owned());
+                fixture.send(envelope.clone(), "transient-read").await;
+                assert!(
+                    !fixture.unexpected_ack().await,
+                    "A retryable metadata read ({code}) was permanently acknowledged"
+                );
+                assert!(service.store.list(work::EVENTS).await.unwrap().is_empty());
+                if code == "ratelimited" {
+                    tokio::time::sleep(Duration::from_millis(2100)).await;
+                }
+            }
+        }
         if matches!(scenario, DeliveryScenario::SocketOpenInterrupted) {
             let retried = tokio::time::timeout(Duration::from_secs(3), async {
                 while slack.socket_opens.load(Ordering::SeqCst) < 2 {
@@ -883,6 +1000,9 @@ async fn exchange(scenario: DeliveryScenario) {
                 1
             }
         );
+    }
+    if let Some(before) = transient_reads_before {
+        admission::retain_transient_reply(&service, &slack, before).await;
     }
     if matches!(scenario, DeliveryScenario::LongReplyRestart) {
         common::eventually(
@@ -1117,7 +1237,9 @@ async fn exchange(scenario: DeliveryScenario) {
     }
     if matches!(
         scenario,
-        DeliveryScenario::PrivateBeforeReply | DeliveryScenario::UncertainRestart
+        DeliveryScenario::PrivateBeforeReply
+            | DeliveryScenario::UncertainRestart
+            | DeliveryScenario::UncertainJsonRestart
     ) {
         let pending = common::eventually(
             Duration::from_secs(30),
@@ -1338,6 +1460,52 @@ async fn exchange(scenario: DeliveryScenario) {
         controller_server.abort();
         return;
     }
+    if recovers_socket {
+        let fixture = socket_fixture.as_mut().unwrap();
+        if matches!(scenario, DeliveryScenario::SocketPeerSilent) {
+            fixture.wait_for_peer_ping_timeout().await;
+        } else {
+            fixture
+                .fail_heartbeats_and_wait_for_replacement(matches!(
+                    scenario,
+                    DeliveryScenario::SocketWrongPong
+                ))
+                .await;
+        }
+        let mut next = envelope.clone();
+        next["event_id"] = json!("EvSocketRecovery");
+        next["event"]["ts"] = json!(format!("{}.000009", now() / 1000));
+        next["event"]["thread_ts"] = json!(ts);
+        next["event"]["text"] = json!("<@UBOT> Explain the Slack tracer after Socket recovery");
+        fixture.send(next.clone(), "after-replacement").await;
+        fixture.ack("after-replacement").await;
+        fixture.send(next, "after-replacement-replay").await;
+        fixture.ack("after-replacement-replay").await;
+        common::eventually(
+            Duration::from_secs(20),
+            Duration::from_millis(25),
+            async || {
+                let posts = slack.posts.lock().await;
+                let settled = service
+                    .store
+                    .list(work::DELIVERIES)
+                    .await
+                    .unwrap()
+                    .is_empty();
+                (posts.len() == 2 && settled).then_some(())
+            },
+        )
+        .await;
+        let posts = slack.posts.lock().await;
+        assert_eq!(posts[1]["channel"], "CTEST");
+        assert_eq!(posts[1]["thread_ts"], ts);
+        assert!(posts[1]["text"].contains("after Socket recovery"));
+        assert_eq!(slack.socket_opens.load(Ordering::SeqCst), 2);
+    }
+    if matches!(scenario, DeliveryScenario::SocketHealthy) {
+        socket_fixture.as_mut().unwrap().stay_healthy().await;
+        assert_eq!(slack.socket_opens.load(Ordering::SeqCst), 1);
+    }
     stop_manager(&mut manager).await;
     let post = result.expect("the actual manager/provider/worker never delivered Slack's answer");
     assert_eq!(post["channel"], "CTEST");
@@ -1388,11 +1556,24 @@ async fn exchange(scenario: DeliveryScenario) {
                 + usize::from(matches!(
                     scenario,
                     DeliveryScenario::LongReplyRateLimited
+                        | DeliveryScenario::LongReplyJsonRateLimited
+                        | DeliveryScenario::LongReplyJsonRateUnderscoreLimited
                         | DeliveryScenario::LongFailedReplyAdvanced
                 ))
         );
+        if matches!(
+            scenario,
+            DeliveryScenario::LongReplyJsonRateLimited
+                | DeliveryScenario::LongReplyJsonRateUnderscoreLimited
+        ) {
+            let times = slack.post_times.lock().await;
+            assert!(
+                times[2].duration_since(times[1]) >= Duration::from_secs(1),
+                "A definite JSON rate rejection bypassed Retry-After"
+            );
+        }
     } else {
-        assert_eq!(posts.len(), 1);
+        assert_eq!(posts.len(), if recovers_socket { 2 } else { 1 });
     }
     drop(posts);
     assert!(
@@ -1409,6 +1590,8 @@ async fn exchange(scenario: DeliveryScenario) {
         .read(|db| db.runs(None, None, 20, 0, true))
         .await
         .unwrap();
+    // A follow-up resumes the settled run within the same Cairn conversation;
+    // the controller plans below independently prove both actual turns.
     assert_eq!(runs.len(), 1, "a denied author or duplicate started work");
     assert_eq!(runs[0]["status"], "succeeded");
     assert_eq!(runs[0]["snapshot"]["agent"]["id"], agent["id"]);
@@ -1419,7 +1602,7 @@ async fn exchange(scenario: DeliveryScenario) {
     let plans = controller.plans.lock().await;
     assert_eq!(
         plans.len(),
-        if matches!(scenario, DeliveryScenario::LongFailedReplyAdvanced) {
+        if matches!(scenario, DeliveryScenario::LongFailedReplyAdvanced) || recovers_socket {
             2
         } else {
             1
@@ -1442,6 +1625,27 @@ async fn exchange(scenario: DeliveryScenario) {
     assert_eq!(principal["connectionId"], instance_id);
     assert_eq!(principal["binding"]["id"], route["id"]);
     assert_eq!(principal["binding"]["resource"], resource["id"]);
+    if recovers_socket {
+        assert_eq!(
+            service.store.list("chats").await.unwrap().len(),
+            1,
+            "Reconnection detached the Slack thread"
+        );
+        assert!(
+            plans[1]["chat"]["execution"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("after Socket recovery")
+        );
+        assert!(
+            principals
+                .iter()
+                .all(|(_, principal)| principal["subject"] == "UALICE"
+                    && principal["connectionId"] == instance_id
+                    && principal["binding"]["id"] == route["id"]
+                    && principal["binding"]["resource"] == resource["id"])
+        );
+    }
     if let Some(fixture) = socket_fixture {
         fixture.stop().await;
     }

@@ -249,7 +249,7 @@ export type Cairn = {
     },
     -- capability "socket", in the transport worker only. WSS to declared hosts;
     -- `{{secret}}` in sent text becomes the credential (auth = true) or a secret field.
-    -- Commands apply once the handler returns.
+    -- I/O and control frames continue while the handler awaits a capability call.
     socket: {
         -- `after`: seconds to wait first (one day at most). `oversized`: JSON fields such
         -- as "d.id" or "d.threads.*.id" kept from messages over 1 MB. * projects arrays.
@@ -261,6 +261,9 @@ export type Cairn = {
             -- Milliseconds from wire receipt, including queue time, 100..35000.
             -- Expiry closes/stops this worker; unacknowledged inputs may be retried.
             eventTimeout: number?,
+            -- RFC 6455 Ping/Pong monitoring, independent of the handler. Each
+            -- interval/deadline is 1000..300000 ms; peerTimeout requires peer Pings.
+            heartbeat: { interval: number, timeout: number, peerTimeout: number? }?,
         }) -> (),
         -- Queued outside the handler; paced actual writes share the credential's budget.
         -- `name` emits { type = "sent", name, sent = true } after writing, or sent=false

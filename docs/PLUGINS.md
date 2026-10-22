@@ -336,7 +336,7 @@ A package that keeps its own connection, such as a chat platform's gateway, decl
 | `tick` | a timer set with `every` or `after` fired | `name` |
 | `close` | the server closed or the connection failed | `code?`, `reason`, `error?` |
 
-- `cairn.socket.connect{ url, auth?, after?, oversized?, eventTimeout? }`: WSS to a declared host,
+- `cairn.socket.connect{ url, auth?, after?, oversized?, eventTimeout?, heartbeat? }`: WSS to a declared host,
   default port, no credentials in the URL. Reconnections slow down (1 s doubling to
   60 s) until the package reports `connected`; `after` waits longer (seconds, a day at
   most). `auth` adds the instance's credential or a secret to the handshake headers,
@@ -351,6 +351,16 @@ A package that keeps its own connection, such as a chat platform's gateway, decl
   worker and closes its socket; the manager may restart it. The plugin must leave
   unfinished inputs unacknowledged and support provider retries/deduplication.
   An already committed effect is not undone by cancellation.
+  `heartbeat = { interval, timeout, peerTimeout? }` optionally monitors RFC 6455
+  control frames in the I/O supervisor, independently of handler work. All values
+  are milliseconds, from 1,000 to 300,000. At `interval` it flushes a Ping with a
+  fresh nonce and expects the matching Pong within `timeout` of the actual send.
+  Unrelated or late Pongs do not renew it. `peerTimeout`, when supplied, separately
+  requires Pings from the peer; application messages do not renew this deadline.
+  Expiry closes the connection and emits `close` with `error = heartbeat_timeout`;
+  the package owns reconnection policy. Checks and pending nonces belong only to
+  the current connection and disappear when it closes. No heartbeat is enabled
+  unless requested by the package.
 - `cairn.socket.send(text, { auth = true | { secret }, pace?, budget?, name? }?)`: with
   `auth`, the host replaces `{{secret}}` with the JSON-escaped secret. `pace` (ms, a
   minute at most) queues sends outside the handler and spaces actual writes with the

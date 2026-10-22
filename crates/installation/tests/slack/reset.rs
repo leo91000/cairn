@@ -107,6 +107,30 @@ pub(super) async fn round_trip(
         control(app, instance, &denied, SIGNING_SECRET).await,
         (StatusCode::OK, "denied".into())
     );
+    for code in ["internal_error", "service_unavailable", "ratelimited"] {
+        slack
+            .metadata_errors
+            .lock()
+            .await
+            .push_back(code.to_owned());
+        assert_eq!(
+            control(app, instance, &payload, SIGNING_SECRET).await.0,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{code}"
+        );
+        assert!(service.store.list(work::EVENTS).await.unwrap().is_empty());
+        let key = owner_key.clone();
+        assert!(
+            service
+                .store
+                .read(move |db| Ok(db.kv(&key)?.unwrap()["retiredAt"].is_null()))
+                .await
+                .unwrap()
+        );
+        if code == "ratelimited" {
+            tokio::time::sleep(Duration::from_millis(2100)).await;
+        }
+    }
     let started = Instant::now();
     assert_eq!(
         control(app, instance, &payload, SIGNING_SECRET).await,

@@ -50,9 +50,17 @@ fn tls_acceptor() -> tokio_rustls::TlsAcceptor {
 
 pub(super) struct Fixture {
     pub origin: String,
-    outgoing: mpsc::Sender<Message>,
+    outgoing: mpsc::Sender<FixtureCommand>,
     incoming: mpsc::Receiver<Message>,
+    connections: Arc<AtomicUsize>,
+    pings: Arc<AtomicUsize>,
     server: JoinHandle<()>,
+}
+
+enum FixtureCommand {
+    Frame(Message),
+    Blackhole,
+    WrongPongs,
 }
 
 impl Fixture {
@@ -65,30 +73,69 @@ impl Fixture {
         );
         let (outgoing, mut send) = mpsc::channel(16);
         let (received, incoming) = mpsc::channel(16);
+        let connections = Arc::new(AtomicUsize::new(0));
+        let opened = connections.clone();
+        let pings = Arc::new(AtomicUsize::new(0));
+        let counted_pings = pings.clone();
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let stream: Box<dyn Io> = if tls {
-                Box::new(tls_acceptor().accept(stream).await.unwrap())
-            } else {
-                Box::new(stream)
-            };
-            let mut socket = accept_hdr_async(stream, SlackUpgrade).await.unwrap();
-            socket
-                .send(Message::text(
-                    json!({"type": "hello", "connection_info": {"app_id": "ATEST"}}).to_string(),
-                ))
-                .await
-                .unwrap();
-            loop {
-                tokio::select! {
-                    frame = send.recv() => {
-                        let Some(frame) = frame else { break };
-                        if socket.send(frame).await.is_err() { break; }
-                    }
-                    frame = socket.next() => {
-                        match frame {
-                            Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
-                            Some(Ok(frame)) => { if received.send(frame).await.is_err() { break; } }
+            let mut stranded = Vec::new();
+            'connections: loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let stream: Box<dyn Io> = if tls {
+                    Box::new(tls_acceptor().accept(stream).await.unwrap())
+                } else {
+                    Box::new(stream)
+                };
+                let mut socket = accept_hdr_async(stream, SlackUpgrade).await.unwrap();
+                let mut wrong_pongs = false;
+                opened.fetch_add(1, Ordering::SeqCst);
+                socket
+                    .send(Message::text(
+                        json!({"type": "hello", "connection_info": {"app_id": "ATEST"}})
+                            .to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                loop {
+                    tokio::select! {
+                        frame = send.recv() => {
+                            match frame {
+                                Some(FixtureCommand::Frame(frame)) => {
+                                    if socket.send(frame).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Some(FixtureCommand::Blackhole) => {
+                                    // Retain the TCP stream but stop reading or writing it:
+                                    // no close, auto-Pong, FIN or RST can reveal the outage.
+                                    stranded.push(socket);
+                                    continue 'connections;
+                                }
+                                Some(FixtureCommand::WrongPongs) => wrong_pongs = true,
+                                None => break 'connections,
+                            }
+                        }
+                        frame = socket.next() => {
+                            match frame {
+                                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => continue 'connections,
+                                Some(Ok(Message::Ping(_))) => {
+                                    counted_pings.fetch_add(1, Ordering::SeqCst);
+                                    if wrong_pongs {
+                                        // Replaces tungstenite's queued automatic Pong.
+                                        socket
+                                            .send(Message::Pong(b"unrelated-pong".to_vec().into()))
+                                            .await
+                                            .unwrap();
+                                    } else {
+                                        socket.flush().await.unwrap();
+                                    }
+                                }
+                                Some(Ok(frame)) => {
+                                    if received.send(frame).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -98,19 +145,21 @@ impl Fixture {
             origin,
             outgoing,
             incoming,
+            connections,
+            pings,
             server,
         }
     }
 
     pub async fn send(&self, payload: Value, id: &str) {
         self.outgoing
-            .send(Message::text(
+            .send(FixtureCommand::Frame(Message::text(
                 json!({
                     "envelope_id": id, "type": "events_api", "accepts_response_payload": false,
                     "payload": payload,
                 })
                 .to_string(),
-            ))
+            )))
             .await
             .unwrap();
     }
@@ -129,7 +178,9 @@ impl Fixture {
 
     pub async fn ping_while_metadata_is_held(&mut self) -> std::result::Result<(), String> {
         self.outgoing
-            .send(Message::Ping(b"fixture-ping".to_vec().into()))
+            .send(FixtureCommand::Frame(Message::Ping(
+                b"fixture-ping".to_vec().into(),
+            )))
             .await
             .unwrap();
         let frame = tokio::time::timeout(Duration::from_secs(1), self.incoming.recv())
@@ -150,7 +201,72 @@ impl Fixture {
 
     pub async fn stop(self) {
         drop(self.outgoing);
-        self.server.await.unwrap();
+        // A blackholed connection may be waiting for a replacement at cleanup.
+        self.server.abort();
+        match self.server.await {
+            Err(error) if error.is_cancelled() => (),
+            result => result.unwrap(),
+        }
+    }
+
+    pub async fn fail_heartbeats_and_wait_for_replacement(&self, wrong_pongs: bool) {
+        assert_eq!(self.connections.load(Ordering::SeqCst), 1);
+        self.outgoing
+            .send(if wrong_pongs {
+                FixtureCommand::WrongPongs
+            } else {
+                FixtureCommand::Blackhole
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(14), async {
+            while self.connections.load(Ordering::SeqCst) != 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Slack stayed connected to a silent half-open socket; no replacement was opened");
+    }
+
+    pub async fn wait_for_peer_ping_timeout(&self) {
+        assert_eq!(self.connections.load(Ordering::SeqCst), 1);
+        tokio::time::timeout(Duration::from_secs(35), async {
+            while self.connections.load(Ordering::SeqCst) != 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Client Pongs concealed the absence of required server Pings");
+        assert!(self.pings.load(Ordering::SeqCst) >= 5);
+    }
+
+    pub async fn stay_healthy(&mut self) {
+        // Cross the 30s peer-Ping deadline. Both directions must remain healthy;
+        // answering only client Pings would fail this witness.
+        for index in 0..4 {
+            tokio::time::sleep(Duration::from_secs(8)).await;
+            let payload = format!("healthy-peer-{index}");
+            self.outgoing
+                .send(FixtureCommand::Frame(Message::Ping(
+                    payload.clone().into_bytes().into(),
+                )))
+                .await
+                .unwrap();
+            let pong = tokio::time::timeout(Duration::from_secs(1), self.incoming.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(pong, Message::Pong(bytes) if bytes.as_ref() == payload.as_bytes()));
+        }
+        assert_eq!(
+            self.connections.load(Ordering::SeqCst),
+            1,
+            "A healthy Socket Mode connection was replaced"
+        );
+        assert!(
+            self.pings.load(Ordering::SeqCst) >= 6,
+            "The client never checked the quiet healthy connection"
+        );
     }
 }
 
@@ -240,4 +356,29 @@ async fn an_interrupted_first_connection_response_recovers_before_receiving_slac
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stale_route_does_not_stop_other_socket_channels() {
     exchange(DeliveryScenario::SocketStaleRoute).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_silent_socket_recovers_the_next_requester_bound_exchange() {
+    exchange(DeliveryScenario::SocketSilent).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unrelated_pongs_cannot_keep_a_broken_connection_alive() {
+    exchange(DeliveryScenario::SocketWrongPong).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_quiet_healthy_socket_keeps_its_connection_and_requester() {
+    exchange(DeliveryScenario::SocketHealthy).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_pongs_do_not_hide_missing_server_pings() {
+    exchange(DeliveryScenario::SocketPeerSilent).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transient_metadata_errors_are_not_permanently_acknowledged() {
+    exchange(DeliveryScenario::SocketTransientMetadata).await;
 }

@@ -71,6 +71,11 @@ return {
             if check.status == 429 then
                 return { retryAfter = math.min(tonumber(check.headers["retry-after"]) or 5, 300) }
             end
+            if check.status >= 500 then
+                -- No message write was attempted. Keep the accepted reply while
+                -- channel metadata is temporarily unavailable.
+                return { retryAfter = 5 }
+            end
             error("The Slack channel is no longer an available public, unshared channel.")
         end
         local finished = index == #chunks

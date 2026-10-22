@@ -49,7 +49,13 @@ local function connect()
         cairn.fail("Slack did not provide a Socket Mode connection URL.")
     end
     ready = false
-    cairn.socket.connect({ url = response.json.url, eventTimeout = 2500 })
+    cairn.socket.connect({
+        url = response.json.url,
+        eventTimeout = 2500,
+        -- RFC 6455 health checks continue while an envelope handler awaits HTTP.
+        -- Match the Slack SDK's client-Pong and server-Ping timeout defaults.
+        heartbeat = { interval = 5000, timeout = 5000, peerTimeout = 30000 },
+    })
 end
 
 local function message(event)

@@ -1,5 +1,28 @@
 local API = "https://slack.com/api/"
 
+local RETRYABLE_READ_ERRORS = {
+    fatal_error = true,
+    internal_error = true,
+    service_unavailable = true,
+    org_login_required = true,
+    team_added_to_org = true,
+}
+
+local function classifyResponse(method, response)
+    if response.status ~= 200 or type(response.json) ~= "table" or response.json.ok ~= false then
+        return response
+    end
+    local code = response.json.error
+    local throttled = code == "ratelimited" or code == "rate_limited"
+    local status = if throttled then 429 else if method == "GET" and RETRYABLE_READ_ERRORS[code] then 503 else nil
+    if not status then
+        return response
+    end
+    local classified = table.clone(response)
+    classified.status = status
+    return classified
+end
+
 local function reserve(workspace, method)
     local key = "cooldown:" .. workspace .. ":" .. method
     local deadline = cairn.storage.get(key)
@@ -44,6 +67,9 @@ local function request(method, name, values, auth, workspace)
         form = if method == "GET" then nil else values,
         auth = auth,
     })
+    -- A documented JSON rate rejection is definite, even for a write. Other
+    -- transient errors are retryable only for reads: a mutation may have committed.
+    response = classifyResponse(method, response)
     if key and response.status == 429 then
         local seconds = tonumber(response.headers["retry-after"])
         if not seconds or seconds < 0 or seconds == math.huge or seconds ~= seconds then

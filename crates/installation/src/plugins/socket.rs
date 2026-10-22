@@ -65,6 +65,7 @@ pub enum Command {
         oversized: Vec<String>,
         /// Deadline for each received message, including time waiting in the queue.
         event_timeout: Option<Duration>,
+        heartbeat: Option<Heartbeat>,
     },
     Send(Outgoing),
     Close(u16),
@@ -92,6 +93,91 @@ pub struct Outgoing {
     name: Option<String>,
     ticket: Option<pacing::Ticket>,
     _slot: OwnedSemaphorePermit,
+}
+
+/// Optional RFC 6455 control-frame health checks. The package chooses its
+/// protocol's deadlines; monitoring stays with I/O while its handler awaits HTTP.
+#[derive(Clone, Debug)]
+pub struct Heartbeat {
+    interval: Duration,
+    timeout: Duration,
+    peer_timeout: Option<Duration>,
+}
+
+impl Heartbeat {
+    fn parse(value: &Value) -> Result<Self> {
+        fn duration(value: &Value, name: &str) -> Result<Duration> {
+            value
+                .as_u64()
+                .filter(|ms| (1_000..=300_000).contains(ms))
+                .map(Duration::from_millis)
+                .ok_or_else(|| {
+                    Error::bad(format!(
+                        "Set heartbeat {name} from 1000 to 300000 milliseconds."
+                    ))
+                })
+        }
+        Ok(Self {
+            interval: duration(&value["interval"], "interval")?,
+            timeout: duration(&value["timeout"], "timeout")?,
+            peer_timeout: value
+                .get("peerTimeout")
+                .map(|value| duration(value, "peerTimeout"))
+                .transpose()?,
+        })
+    }
+}
+
+struct HeartbeatState {
+    config: Heartbeat,
+    next_ping: Instant,
+    pending: Option<(Vec<u8>, Instant)>,
+    peer_deadline: Option<Instant>,
+}
+
+impl HeartbeatState {
+    fn new(config: Heartbeat) -> Self {
+        let now = Instant::now();
+        Self {
+            next_ping: now + config.interval,
+            pending: None,
+            peer_deadline: config.peer_timeout.map(|timeout| now + timeout),
+            config,
+        }
+    }
+
+    fn next(&self) -> Instant {
+        let next = self
+            .pending
+            .as_ref()
+            .map_or(self.next_ping, |(_, deadline)| *deadline);
+        self.peer_deadline
+            .map_or(next, |deadline| deadline.min(next))
+    }
+
+    fn expired(&self, now: Instant) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|(_, deadline)| now >= *deadline)
+            || self.peer_deadline.is_some_and(|deadline| now >= deadline)
+    }
+
+    fn pong(&mut self, bytes: &[u8]) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|(expected, deadline)| expected == bytes && Instant::now() < *deadline)
+        {
+            self.pending = None;
+        }
+    }
+
+    fn peer_ping(&mut self) {
+        let now = Instant::now();
+        if self.peer_deadline.is_some_and(|deadline| now < deadline) {
+            self.peer_deadline = self.config.peer_timeout.map(|timeout| now + timeout);
+        }
+    }
 }
 
 impl Link {
@@ -185,10 +271,16 @@ pub(crate) async fn call(
                         })
                 })
                 .transpose()?;
+            let heartbeat = args
+                .get("heartbeat")
+                .filter(|value| !value.is_null())
+                .map(Heartbeat::parse)
+                .transpose()?;
             link.send(Command::Connect {
                 url,
                 header,
                 event_timeout,
+                heartbeat,
                 after: Duration::from_secs_f64(after),
                 oversized: oversized
                     .iter()
@@ -361,6 +453,7 @@ struct Pending {
     url: String,
     header: Header,
     oversized: Vec<String>,
+    heartbeat: Option<Heartbeat>,
 }
 
 struct State {
@@ -373,6 +466,7 @@ struct State {
     last_attempt: Option<Instant>,
     backoff: Duration,
     event_timeout: Option<Duration>,
+    heartbeat: Option<HeartbeatState>,
 }
 
 enum Wake {
@@ -382,6 +476,7 @@ enum Wake {
     Timer,
     Send,
     Connect,
+    Heartbeat,
 }
 
 /// Only the requested fields; `*` projects each array entry without keeping large
@@ -476,6 +571,7 @@ impl State {
                 after,
                 oversized,
                 event_timeout,
+                heartbeat,
             } => {
                 self.event_timeout = event_timeout;
                 // Reconnections slow down until the package reports a healthy connection.
@@ -487,6 +583,7 @@ impl State {
                     url,
                     header,
                     oversized,
+                    heartbeat,
                 });
             }
             Command::Send(message) => {
@@ -507,6 +604,7 @@ impl State {
                 }
                 self.timers.clear();
                 self.outgoing.clear();
+                self.heartbeat = None;
             }
             Command::Timer { name, at, every } => {
                 if self.timers.len() < MAX_TIMERS || self.timers.contains_key(&name) {
@@ -526,12 +624,40 @@ impl State {
         self.socket = None;
         self.timers.clear();
         self.outgoing.clear();
+        self.heartbeat = None;
     }
 
     async fn shutdown(&mut self) {
         if let Some(mut socket) = self.socket.take() {
             let _ = tokio::time::timeout(Duration::from_secs(2), socket.close(None)).await;
         }
+    }
+
+    async fn heartbeat(&mut self) -> Option<Value> {
+        let heartbeat = self.heartbeat.as_mut()?;
+        if heartbeat.expired(Instant::now()) {
+            self.drop_socket();
+            return Some(closed(None, "", Some("heartbeat_timeout")));
+        }
+        if heartbeat.pending.is_some() || Instant::now() < heartbeat.next_ping {
+            return None;
+        }
+        let bytes = uuid::Uuid::new_v4().as_bytes().to_vec();
+        let socket = self.socket.as_mut()?;
+        let sent = tokio::time::timeout(
+            Duration::from_secs(2),
+            socket.send(Message::Ping(bytes.clone().into())),
+        )
+        .await;
+        if !matches!(sent, Ok(Ok(()))) {
+            self.drop_socket();
+            return Some(closed(None, "", Some("interrupted")));
+        }
+        // Start the response deadline after the Ping has actually been flushed.
+        let now = Instant::now();
+        heartbeat.pending = Some((bytes, now + heartbeat.config.timeout));
+        heartbeat.next_ping = now + heartbeat.config.interval;
+        None
     }
 
     async fn send(&mut self, message: Outgoing) -> Option<Value> {
@@ -585,6 +711,7 @@ impl State {
             url,
             header,
             oversized,
+            heartbeat,
             ..
         }) = self.connect.take()
         else {
@@ -631,6 +758,7 @@ impl State {
         {
             Ok(Ok((socket, _))) => {
                 self.socket = Some(socket);
+                self.heartbeat = heartbeat.map(HeartbeatState::new);
                 json!({ "type": "open" })
             }
             Ok(Err(_)) => closed(None, "", Some("unavailable")),
@@ -745,6 +873,7 @@ async fn supervise(
         last_attempt: None,
         backoff: Duration::from_secs(1),
         event_timeout: None,
+        heartbeat: None,
     };
     let result = tokio::select! {
         () = stop.cancelled() => Ok(()),
@@ -769,6 +898,7 @@ async fn drive(
             .iter()
             .filter_map(|message| message.ticket.as_ref().map(pacing::Ticket::at))
             .min();
+        let heartbeat_at = state.heartbeat.as_ref().map(HeartbeatState::next);
         let wake = tokio::select! {
             () = stop.cancelled() => Wake::Stop,
             command = commands.recv() => Wake::Command(command),
@@ -776,6 +906,7 @@ async fn drive(
             () = tokio::time::sleep_until(timer_at.unwrap_or_else(Instant::now)), if timer_at.is_some() => Wake::Timer,
             () = tokio::time::sleep_until(send_at.unwrap_or_else(Instant::now)), if send_at.is_some() => Wake::Send,
             () = tokio::time::sleep_until(connect_at.unwrap_or_else(Instant::now)), if connect_at.is_some() => Wake::Connect,
+            () = tokio::time::sleep_until(heartbeat_at.unwrap_or_else(Instant::now)), if heartbeat_at.is_some() => Wake::Heartbeat,
         };
         let received_at = Instant::now();
         let event = match wake {
@@ -808,10 +939,14 @@ async fn drive(
             }
             Wake::Send => state.send_pending().await,
             Wake::Connect => Some(state.open(s).await),
+            Wake::Heartbeat => state.heartbeat().await,
             Wake::Frame(Some(Ok(Message::Text(message)))) => {
                 Some(message_event(message.as_str(), &state.oversized))
             }
             Wake::Frame(Some(Ok(Message::Ping(bytes)))) => {
+                if let Some(heartbeat) = state.heartbeat.as_mut() {
+                    heartbeat.peer_ping();
+                }
                 let socket = state.socket.as_mut().expect("socket");
                 if !matches!(
                     tokio::time::timeout(Duration::from_secs(2), socket.send(Message::Pong(bytes)))
@@ -823,6 +958,12 @@ async fn drive(
                 } else {
                     None
                 }
+            }
+            Wake::Frame(Some(Ok(Message::Pong(bytes)))) => {
+                if let Some(heartbeat) = state.heartbeat.as_mut() {
+                    heartbeat.pong(&bytes);
+                }
+                None
             }
             Wake::Frame(Some(Ok(Message::Close(frame)))) => {
                 state.drop_socket();

@@ -1493,13 +1493,13 @@ stops that worker/socket, leaves the envelope unacknowledged and preserves any
 already committed work's native deduplication. With metadata held beyond 3 seconds,
 no request is imported and no native turn starts.
 
-The five current Socket journeys pass, including real WSS with an explicit
+The initial five Socket journeys pass, including real WSS with an explicit
 synthetic CA and ordinary certificate/name validation; an untrusted CA fails
 before envelope handling. Earlier plain WS evidence was not TLS evidence. The
 provider/model/controller remain synthetic, without VM isolation or production
 storage evidence. Full Slack/Discord regressions, fresh checkpoint review and
 exact-head CI qualification remain required. Socket lifecycle/overlap/active
-liveness and app quota/restart handling, all other Q1–Q20 lots and the three R72
+liveness (addressed by the later health-check checkpoint below) and app quota/restart handling, all other Q1–Q20 lots and the three R72
 integration findings remain open before final delivery or merge.
 
 
@@ -1521,3 +1521,74 @@ busy admission leaves no duplicate marker, six saturated scheduler wakeups retai
 the request, releasing capacity produces the actual answer, submitted receipts
 remain usable while full, and Slack reset/Discord textual stop still work. These
 are checkpoint assertions, not completion of Socket lifecycle or Q1–Q20.
+
+
+### Established Socket health and resumed exchange
+
+A verified-WSS actual-worker fixture first reproduced a successful first answer
+followed by a silent application peer: its TCP socket stayed open, but it stopped
+reading or answering WebSocket control frames without Close or FIN/RST. No
+replacement appeared within 14 seconds. This is not full network packet-loss
+qualification; the kernel can still acknowledge TCP traffic.
+
+The package now requests generic RFC 6455 health monitoring from the independent
+I/O supervisor, with 5,000 ms client Ping/matching-Pong deadlines and a separate
+30,000 ms peer-Ping deadline. The host supplies a fresh nonce and starts the Pong
+deadline after flushing the Ping; unrelated and expired replies cannot renew it.
+The package chooses the policy and obtains a new temporary URL after failure.
+No timers/nonces are persisted; checks belong only to the current socket. Existing
+packages without this option retain their existing network behavior.
+
+Four WSS journeys cover blackholes, unrelated Pongs, absent peer Pings while
+client Pongs succeed, and a healthy connection across 30 seconds with both
+control-frame directions. The first three produce a second actual requester-bound
+turn/answer in the same Cairn conversation and Slack thread, with replay deduplication.
+A follow-up resumes its settled Cairn run; two controller plans prove the turns,
+rather than incorrectly requiring two database runs. The initial test's short-final
+marker deliberately produced a constant fixture answer and was removed before
+asserting the echoed next request. These fixture assertion corrections are not
+production regressions. All twelve Socket cases pass without retries on the
+corrected fixture; synthetic provider/model/controller and TLS trust limits remain
+those described in SLACK.md. No real Slack service has been used.
+
+This advances established-connection health, not full protocol or Q1–Q20 delivery.
+Reason-specific rotation/overlap, connection/source ACK identity, app quotas and
+restart behavior remain required, alongside all accepted Slack features and final
+OAuth/tool-parity/security/compatibility/client-review/CI gates. The three existing
+generic OAuth/tool-parity integration gaps remain unresolved; the PR stays draft.
+
+
+### Metadata read errors versus uncertain writes
+
+A fresh independent review found that conversations.info JSON `ok:false` with
+HTTP200 became a permanent403, causing a Socket ACK without admission. Actual
+package fixtures reproduced that ACK, the HTTP403 instead of503, a signed reset
+refusal, and consumption of a queued answer's error budget. An initial HTTP
+fixture had invalid route limits; that setup failure was corrected before using
+its403/503 result as regression evidence.
+
+The Lua HTTP helper classifies documented transient platform errors only for GET
+reads. Definite JSON ratelimited/rate_limited refusals follow existing429
+cooldown/Retry-After logic for reads and writes; other transient reads use503 and
+retain accepted replies through the existing retryAfter
+path. This introduces no persisted fields or storage API; the previously measured
+queue/checkpoint shapes and retry path are reused. Six forced scheduler wakeups
+retain the pending actual answer without fabricating completion, then permit its
+real adapter/provider-process output. Tests separately preserve definite access
+denials and uncertain POST handling: a recorded post followed by HTTP200
+internal_error remains unreplayed after a real manager restart. All four focused
+transient cases and the signed reset journey pass on the rebuilt package.
+
+A second independent review reproduced a distinct write case: HTTP200 JSON
+ratelimited/rate_limited on a later answer chunk left its durable state as sending,
+so no further chunk arrived. Both actual-worker fixtures failed before the
+correction. The classifier now recognizes only those explicit throttle rejections
+for mutations, reusing the existing cooldown and retryable chunk checkpoint.
+The fixtures require the entire ordered answer without repeated earlier parts
+and a provider attempt delayed by Retry-After. Internal-error write outcomes
+remain uncertain; their restart guard must continue to refuse a second post.
+
+Full Q1–Q20 remains incomplete, including questions/stop, broader conversation
+inputs, provider OAuth, tools/automations/RTS and the remaining Socket lifecycle.
+The management-parity and older root OAuth setup/refresh integration findings
+remain mandatory final gates. This checkpoint does not authorize merge/release.

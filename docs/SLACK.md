@@ -7,7 +7,7 @@ thread. It is not the complete accepted Q1–Q20 delivery or a release candidate
 Actual-worker HTTP journeys cover inert owner setup and activation, visibility
 changes, uncertain-write restart and long rate-limit deadlines. The first Socket
 Mode journeys cover the same requester-bound exchange over WS and verified WSS,
-independent peer-Ping handling and refusal of overdue admission. Full Socket
+independent peer-Ping handling, active Ping/Pong health checks and refusal of overdue admission. Full Socket
 lifecycle, client and protocol qualification remains open; no real Slack workspace
 has been connected.
 
@@ -87,9 +87,14 @@ An overdue handler stops its worker and socket without a late ACK; Slack may ret
 A request already committed at the boundary remains subject to native deduplication.
 This cutoff is a cancellation policy, not a guarantee of end-to-end network latency.
 
-Basic Hello timeout, reconnect/backoff and `Retry-After` handling exist. Complete
-refresh/overlap, active liveness, app-level quota/restart and protocol qualification
-remain open before this transport is ready for the complete delivery. See
+Hello timeout, reconnect/backoff and `Retry-After` handling exist. The package
+chooses 5,000 ms client Ping intervals and matching-Pong deadlines, plus a separate
+30,000 ms server-Ping deadline. These RFC 6455 checks run in native I/O while Luau
+can await HTTP; the plugin handles failure by obtaining a fresh connection URL.
+Unrelated and late Pongs do not renew the check. The client/server timeout values
+follow the pinned Slack SDK defaults; its internal probing cadence differs.
+Complete refresh/overlap, app-level quota/restart and protocol qualification remain
+open before this transport is ready for the complete delivery. See
 [Slack's Socket Mode protocol](https://docs.slack.dev/apis/events-api/using-socket-mode/).
 
 ## Start a fresh conversation from Slack
@@ -144,10 +149,15 @@ not an exchange with the Slack service or a real agent model.
 native adapter through a loopback HTTP/WS fixture and a WSS fixture with an explicit
 synthetic CA and normal certificate/server-name verification. A client without
 that CA is refused before any envelope arrives. These certificates are unrelated
-to Slack's public certificate or deployment trust. Five Socket cases cover the
+to Slack's public certificate or deployment trust. Twelve Socket cases cover the
 requester/route/thread answer, changed-envelope-ID deduplication, peer Ping while
 metadata is held, rejection of a late ACK/admission after a held provider response,
-and positive/negative TLS validation. The Ping and overdue-admission cases first
+and positive/negative TLS validation. Four further WSS journeys cover a silent
+half-open connection, unrelated Pongs, missing server Pings despite successful
+client Pongs, and a healthy connection lasting beyond the peer-Ping deadline.
+Recovery obtains a fresh URL and delivers a second actual answer in the same Slack
+thread and Cairn conversation, retaining its requester/route and deduplication.
+The Ping and overdue-admission cases first
 reproduced failures in the previous implementation. They do not constitute a real
 Slack workspace conversation or complete Socket Mode lifecycle qualification.
 
@@ -169,7 +179,7 @@ test logs or the PR. No such live resources have been accessed or created here.
 ## Remaining accepted features
 
 The complete contract remains [SLACK-PLUGIN-SPEC.md](SLACK-PLUGIN-SPEC.md). The first
-slice does not finish Socket Mode lifecycle/overlap/liveness qualification; Slack OAuth installation and personal OAuth;
+slice does not finish Socket Mode replacement/overlap and full liveness qualification; Slack OAuth installation and personal OAuth;
 private channels, Slack Connect, DMs/group DMs; automatic following of engaged
 threads or authorized initial thread history; slash commands, shortcuts, buttons,
 questions, stop, modals, App Home or streaming; authenticated files and
@@ -200,7 +210,7 @@ Socket startup also recovers when the first `apps.connections.open` HTTP respons
 is interrupted before a socket or timer exists. This is tested with a response
 body terminated mid-transfer, followed by a new request and the actual exchange.
 This does not qualify full app-wide connection quotas, overlapping replacement,
-client-initiated liveness detection, restart policy or a real Slack workspace.
+complete rotation/overlap, restart policy or a real Slack workspace.
 
 
 The age window is checked against current receipt processing time for both
@@ -209,5 +219,33 @@ cannot restart work whose source timestamp is outside that window. A Socket
 admission refusal scoped to one route/resource is contained to that envelope;
 the root owner/instance/package must still authorize its ACK, while other valid
 channels keep their transport. Explicit app configuration failures still stop it.
-Active silent-connection liveness and overlapping replacement remain the next
-Socket protocol work, together with app-wide connection quotas/restart policy.
+Active client-Pong and server-Ping monitoring now detects silent connections;
+replacement after timeout is proven with actual-worker WSS fixtures. Overlapping
+replacement, stable connection/source ACK identity and app-wide quotas/restart
+policy remain required Socket protocol work. This does not complete the full
+Slack contract or establish a real-workspace result.
+
+
+### Temporary Slack metadata errors
+
+Slack can report a platform error inside HTTP 200. The package classifies the
+[documented read errors](https://docs.slack.dev/reference/methods/conversations.info/#errors)
+separately from definite access denials. Temporary channel checks leave HTTP and
+Socket mentions/reset controls retryable, without an ACK or an admitted duplicate
+marker. JSON `ratelimited` uses the existing method/workspace cooldown and
+`Retry-After` policy. A completed answer waiting for channel metadata stays pending
+without consuming the finite handler-error budget; authority/visibility is still
+rechecked before posting. The actual-worker fixture retains it across six forced
+scheduler wakeups, then produces the original complete answer. Only scheduling
+was advanced, not run completion or provider output.
+
+The documented JSON `ratelimited` and `rate_limited` refusals also use cooldowns
+for POST, preserving the unsent chunk and every earlier confirmed part. The
+fixtures exercise both spellings on a later chunk and require `Retry-After`
+before the next provider attempt. Other temporary-error normalization applies
+only to GET reads. An HTTP 200 `internal_error` after a message POST can conceal a
+committed write: the reply remains uncertain and is not replayed after manager
+restart. Definite access/visibility denials continue
+to refuse import/export. Transport exceptions and all final lifecycle/qualification
+requirements remain subject to the complete contract; this is not an exactly-once
+provider-write guarantee or a real Slack workspace result.
