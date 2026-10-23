@@ -352,13 +352,13 @@ function chooseSource(source: string) {
 
 function filled(field: SettingField) {
   if (field.type === 'secret')
-    return Boolean(secrets.value[field.key]?.trim()) || Boolean(editing.value?.secretKeys?.includes(field.key))
-  const value = values.value[field.key]
+    return Boolean(pluginFieldAnswer(pluginSecrets(secrets.value), field.key)) || Boolean(editing.value?.secretKeys?.includes(field.key))
+  const value = pluginFieldAnswer(pluginSettings([field], values.value), field.key)
   if (field.type === 'boolean')
     return true
   if (field.type === 'multiselect')
     return Array.isArray(value) && value.length > 0
-  return value !== undefined && value !== null && String(value).trim() !== ''
+  return value !== undefined && value !== null && value !== ''
 }
 
 /** What a step still needs before the owner can go on, or '' when it is complete. */

@@ -105,6 +105,8 @@ test('Gmail connects two explicit mailboxes with OAuth and saves no browser toke
   await expect(editor.getByRole('link', { name: /Open API Library/ })).toHaveAttribute('href', 'https://console.cloud.google.com/apis/library/gmail.googleapis.com')
   await expect(editor.getByRole('textbox', { name: 'Callback URL' })).toHaveValue(callbackUrl)
   await expect(editor.getByRole('note')).toContainText('seven days')
+  await expect(editor.getByRole('note')).toContainText('External apps in Testing')
+  await expect(editor.getByRole('link', { name: /Open Audience/ })).toHaveAttribute('href', 'https://console.cloud.google.com/auth/audience')
   await expect(editor.getByRole('button', { name: 'Continue' })).toBeDisabled()
   await capture('step-app', editor)
   await editor.getByLabel('Google OAuth client ID').fill('public-client')

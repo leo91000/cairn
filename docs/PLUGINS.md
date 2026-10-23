@@ -367,7 +367,7 @@ settings = [
   "clientSecret"
 ]
 shared = true # a new instance can reuse it from a saved one
-warning = "With a personal @gmail.com address the app stays in Testing…"
+warning = "External apps in Testing lose access after seven days…"
 
 [[setup.steps.checklist]]
 title = "Create an OAuth client"

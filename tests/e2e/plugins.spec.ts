@@ -478,6 +478,70 @@ test('program releases can be checked, installed and restored independently of p
   expect(actions).toEqual(['check', 'install', 'rollback'])
 })
 
+test('required choices and Unicode text keep the shared form whitespace contract', async ({ page }) => {
+  await useRelayForHttpMocks(page)
+  await page.route('**/api/plugins', route => route.fulfill({
+    json: {
+      packages: [{
+        id: 'forms',
+        builtin: false,
+        status: 'active',
+        active: '1.0.0',
+        manifest: {
+          id: 'forms',
+          name: 'Form examples',
+          version: '1.0.0',
+          apiVersion: 2,
+          capabilities: [],
+          settings: [
+            {
+              key: 'region',
+              title: 'Region',
+              type: 'select',
+              required: true,
+              default: ' ',
+              options: [{ value: ' ', label: 'Space option' }],
+            },
+            {
+              key: 'team',
+              title: 'Team',
+              type: 'string',
+              required: true,
+            },
+            {
+              key: 'password',
+              title: 'Password',
+              type: 'secret',
+              required: true,
+            },
+          ],
+        },
+        versions: [],
+      }],
+      capabilities: [],
+      connections: [],
+    },
+  }))
+  const saves: Record<string, any>[] = []
+  await page.route('**/api/plugins/forms/connections', async (route) => {
+    saves.push(route.request().postDataJSON())
+    await route.fulfill({ json: {} })
+  })
+  await page.goto(workspacePath('/plugins/forms'))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Add instance', exact: true }).click()
+  const form = page.getByRole('dialog', { name: 'New Form examples instance' })
+  await expect(form.getByRole('combobox', { name: 'Region' })).toHaveValue(' ')
+  await form.getByLabel('Team', { exact: true }).fill('   ')
+  await form.getByLabel('Password', { exact: true }).fill('\uFEFF')
+  await expect(form.getByRole('button', { name: 'Save instance' })).toBeDisabled()
+  await form.getByLabel('Team', { exact: true }).fill('\uFEFF')
+  await expect(form.getByRole('button', { name: 'Save instance' })).toBeEnabled()
+  await form.getByRole('button', { name: 'Save instance' }).click()
+  await expect.poll(() => saves.length).toBe(1)
+  expect(saves[0]).toMatchObject({ settings: { region: ' ', team: '\uFEFF' }, secrets: { password: '\uFEFF' } })
+})
+
 test('instance and panel forms share defaults, clearing, hidden values and secret rules', async ({ page }) => {
   await useRelayForHttpMocks(page)
   const fields = [

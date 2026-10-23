@@ -30,6 +30,11 @@ setup assistant (Cairn → Plugins → Gmail → Add account) walks through it:
    Workspace-internal OAuth application for unattended missions. Google may require
    verification of sensitive/restricted scopes depending on distribution and usage;
    an owner must still perform consent and any Google reauthorization.
+   Google permits a [personal-use verification exception](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification#personal-use):
+   an External app can be published without verification for this use, with an
+   unverified-app warning and a user cap. See Google's
+   [publishing-status guide](https://support.google.com/cloud/answer/15549945?hl=en).
+   Internal apps avoid the Testing limit; tokens can still expire or be revoked.
 
 The owner can also prepare configuration with `manage_plugin` (`setup`, `signin`,
 `signin_status`, `form`, `save`). These operations are available through public MCP

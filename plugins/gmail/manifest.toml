@@ -150,7 +150,7 @@ settings = [
   "clientSecret"
 ]
 shared = true
-warning = "With a personal @gmail.com address the app stays in Testing: Google ends its access after seven days and you sign in again. Google Workspace accounts can use an Internal app, which does not expire."
+warning = "External apps in Testing lose access after seven days. For personal use, you can publish an unverified External app (Google warning and user cap apply). Workspace-only Internal apps avoid the Testing limit; other revocation rules still apply."
 
 [[setup.steps.checklist]]
 title = "Enable the Gmail API"
@@ -160,9 +160,15 @@ link = "Open API Library"
 
 [[setup.steps.checklist]]
 title = "Configure the consent screen"
-text = "Give the app a name and a support email. Audience: Internal for Google Workspace; External for @gmail.com, then add your address under Test users."
+text = "Give the app a name and a support email."
 url = "https://console.cloud.google.com/auth/branding"
 link = "Open Branding"
+
+[[setup.steps.checklist]]
+title = "Choose the audience and publishing status"
+text = "For your Workspace organization only, choose Internal. For personal Gmail, choose External: add yourself as a test user in Testing, or publish for personal use (an unverified-app warning and user cap apply)."
+url = "https://console.cloud.google.com/auth/audience"
+link = "Open Audience"
 
 [[setup.steps.checklist]]
 title = "Create an OAuth client"
