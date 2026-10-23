@@ -1055,13 +1055,17 @@ internal fun timelineEntries(
                 )
             } else {
                 val presentation = if (chat) presentActivity(event) else null
+                val shown = failures[event.runId]
                 // A connection error is a connection notice: recovery hides it and the turn's
-                // failure replaces it.
-                val connection = presentation != null && connectionNotice(event, presentation)
+                // failure replaces it. One repeating the attempt's failure, such as the final
+                // error after the last retry, folds into it.
+                val connection =
+                    presentation != null &&
+                        shown?.reasons?.contains(failure) != true &&
+                        connectionNotice(event, presentation)
                 val reason = if (chat && !connection) failure else null
                 // An adapter reports its own stop as a failed turn; the terminal status says so.
                 if (reason != null && stopEcho(event, reason)) continue
-                val shown = failures[event.runId]
                 if (reason != null && shown != null && shown.repeats(event, reason)) {
                     shown.reasons.add(reason)
                     shown.ended = shown.ended || event.type != "error"

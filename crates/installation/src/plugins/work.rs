@@ -744,6 +744,10 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> 
         .as_ref()
         .and_then(crate::run_status::RunStatus::of)
         .is_some_and(crate::run_status::RunStatus::is_active);
+    // Waiting for an account can last hours: the failure answers the person meanwhile.
+    let waiting_for_account = run
+        .as_ref()
+        .is_some_and(|run| !text(run, "accountWaitReason").is_empty());
     let turn_end = |kind: &str| matches!(kind, "turn.completed" | "turn.failed");
     let stopped = |kind: &str| match kind {
         "cancelled" => Some("cancelled"),
@@ -785,7 +789,9 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> 
             });
         }
         let later = history[index + 1..].iter().any(|(_, next)| turn_end(next));
-        let continued = failed && ((retried && stop.is_none()) || (current && (later || active)));
+        let continued = failed
+            && ((retried && stop.is_none())
+                || (current && (later || (active && !waiting_for_account))));
         if !continued {
             return Ok(Turn::Done {
                 delivered,

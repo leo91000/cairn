@@ -501,13 +501,14 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       reported.delete(event.runId)
     }
 
+    const shown = failures.get(event.runId)
     // A connection error is a connection notice: recovery hides it and the turn's failure replaces it.
-    const connection = event.type === 'error' && connectionText(Object.keys(data).length ? pretty(data) : event.text)
+    // One repeating the attempt's failure, such as the final error after the last retry, folds into it.
+    const connection = event.type === 'error' && !shown?.messages.has(reason ?? '') && connectionText(Object.keys(data).length ? pretty(data) : event.text)
     const failureMessage = chat && !connection ? reason : undefined
     const failure = failureMessage !== undefined
     if (failure && stopEcho(event, failureMessage))
       continue
-    const shown = failures.get(event.runId)
     // The generic adapter error only repeats a turn failure; after an error report, it says the turn ended.
     const repeated = !!shown && (shown.messages.has(failureMessage ?? '') || (event.type === 'status' && [...shown.messages].some(message => sameReason(message, failureMessage ?? ''))))
     if (failure && shown && (!failureMessage || repeated || (failureMessage === 'Conversation interrupted.' && shown.ended))) {

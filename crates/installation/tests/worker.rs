@@ -2528,17 +2528,34 @@ async fn unlimited_runs_can_be_cancelled_and_finite_checkpoints_still_expire() {
     fixture
         .until(id, |r| r["status"] == RunStatus::Cancelled)
         .await;
-    let events = {
-        let id = id.to_owned();
-        s.store
-            .read(move |db| db.events(&id, 0, 1000))
-            .await
-            .unwrap()
-    };
+    // The worker records the final status event right after settling the run.
+    let events = eventually(
+        Duration::from_secs(5),
+        Duration::from_millis(30),
+        async || {
+            let id = id.to_owned();
+            let events = s
+                .store
+                .read(move |db| db.events(&id, 0, 1000))
+                .await
+                .unwrap();
+            events
+                .iter()
+                .any(|event| event["type"] == "status" && event["text"] == "cancelled")
+                .then_some(events)
+        },
+    )
+    .await;
     assert!(
         events.iter().all(|event| event["type"] != "turn.failed"),
         "A stop Cairn requested does not fail the turn: {events:?}"
     );
+    // "Run cancelled" says it all: the status repeats no reason.
+    let cancelled = events
+        .iter()
+        .find(|event| event["type"] == "status" && event["text"] == "cancelled")
+        .unwrap();
+    assert!(cancelled["payload"].is_null(), "{cancelled}");
     eventually(
         Duration::from_secs(5),
         Duration::from_millis(30),

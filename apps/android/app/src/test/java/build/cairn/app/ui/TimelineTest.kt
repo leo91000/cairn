@@ -341,6 +341,15 @@ class TimelineTest {
         val websocketNotice = notices(websocketFailure).single().events.single()
         assertEquals(2L, websocketNotice.id)
         assertFalse(connectionNotice(websocketNotice))
+        // The worker's final error after the last retry repeats the failure, even when it reads
+        // like a connection error.
+        val exhausted =
+            websocketFailure.take(2) +
+                retry(3, 1) +
+                plain(4, "turn.started") +
+                failure(5, "turn.failed", websocket) +
+                plain(6, "error", websocket)
+        assertEquals(listOf(5L), notices(exhausted).map { it.events.single().id })
         // A retry that succeeds ends the chain: a later message failing for the same reason
         // gets its own notice.
         val answered =

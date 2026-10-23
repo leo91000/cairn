@@ -1503,6 +1503,20 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
         .await
         .unwrap();
     assert!(reply().await.is_none(), "The attempt has not settled yet");
+    // Waiting for an account can last hours: the failure answers meanwhile.
+    s.store
+        .patch_run(
+            run_id,
+            json!({ "accountWaitReason": "Usage exhausted. Waiting for an available account." }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reply().await.unwrap().status, "failed");
+    s.store
+        .patch_run(run_id, json!({ "accountWaitReason": null }))
+        .await
+        .unwrap();
+    assert!(reply().await.is_none());
 
     s.store
         .patch_run(run_id, json!({ "status": "failed" }))

@@ -240,6 +240,11 @@ describe('conversation activity', () => {
     const reconnect = (id: number, step: number) => event(id, 'error', `Reconnecting... ${step}/5`, { willRetry: true, error: { message: `Reconnecting... ${step}/5`, codexErrorInfo: 'other' } })
     const reconnecting = [event(1, 'turn.started', ''), reconnect(2, 1), reconnect(3, 2)]
     expect(notices(reconnecting)).toEqual([expect.objectContaining({ title: 'Connection interrupted', blocks: [expect.objectContaining({ code: 'Reconnecting... 2/5' })] })])
+    // The worker's final error after the last retry repeats the failure, even when it reads like a connection error.
+    const websocket = 'WebSocket connection failed: 503 Service Unavailable'
+    const websocketAttempt = (start: number) => [event(start, 'turn.started', ''), event(start + 1, 'turn.failed', websocket, { error: { message: websocket } })]
+    const exhausted = [...websocketAttempt(1), event(3, 'retry.scheduled', '', { retry: { attempt: 1, limit: 1 } }), ...websocketAttempt(4), event(6, 'error', websocket)]
+    expect(notices(exhausted).map(notice => notice.title)).toEqual(['The agent ran into an error after 1 automatic retry'])
     // The older event stream reports its reconnect attempts as plain errors.
     const plainReconnects = [event(1, 'turn.started', ''), event(2, 'error', 'Reconnecting... 1/5'), event(3, 'error', 'Reconnecting... 2/5')]
     expect(notices(plainReconnects)).toEqual([expect.objectContaining({ title: 'Connection interrupted', blocks: [expect.objectContaining({ code: 'Reconnecting... 2/5' })] })])
