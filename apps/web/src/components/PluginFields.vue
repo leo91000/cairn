@@ -2,6 +2,8 @@
 import type { FieldOption, SettingField } from '../plugins'
 import { computed, useId } from 'vue'
 import { pluginFieldAnswer, pluginFormSecrets } from '../plugin-form-values'
+import { riskLabels } from '../plugin-setup'
+import { riskTones } from '../plugins'
 
 // Renders a package's declarative fields. Secret values live in their own model and
 // are never prefilled: a saved secret shows as a placeholder and stays when left blank.
@@ -72,7 +74,7 @@ function toggle(key: string, value: string, checked: boolean) {
           type="checkbox"
           class="mt-0.5 w-auto!"
           @change="changed(field)"
-        >{{ field.title }}
+        ><span class="flex flex-wrap items-center gap-1.5">{{ field.title }}<span v-if="field.risk" class="rounded-full px-2 py-px text-3xs font-semibold" :class="riskTones[field.risk]">{{ riskLabels[field.risk] }}</span></span>
         <small v-if="field.description" class="col-start-2 font-normal">{{ field.description }}</small>
       </label>
       <fieldset v-else-if="field.type === 'multiselect'" class="grid gap-1.5" :aria-label="field.title">

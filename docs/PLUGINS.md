@@ -348,6 +348,103 @@ that omits `agentIds` keeps it. Instances of
 packages that need no worker (no socket, inbound messages, conversations or timers)
 start nothing and show as ready while enabled.
 
+### Setup assistant
+
+The owner adds and edits instances through an assistant, one step at a time. A
+package describes it with `[setup]` ([ADR 0057](adr/0057-guided-plugin-setup.md)):
+
+```toml
+[setup]
+effort = "app" # signin | token | app, shown in the catalogue
+summary = "Gmail connects through a Google Cloud app you own. Create it once…"
+nameFrom = "email" # a string setting naming a new instance once known
+
+[[setup.steps]]
+id = "app"
+title = "Google Cloud app"
+settings = [
+  "clientId",
+  "clientSecret"
+]
+shared = true # a new instance can reuse it from a saved one
+warning = "External apps in Testing lose access after seven days…"
+
+[[setup.steps.checklist]]
+title = "Create an OAuth client"
+text = "Application type: Web application…"
+url = "https://console.cloud.google.com/auth/clients/create"
+link = "Open Clients"
+copy = "callbackUrl" # shows the OAuth callback URL with a copy button
+
+[[setup.steps]]
+id = "permissions"
+title = "Permissions"
+settings = [
+  "allowSend",
+  "allowDrafts"
+]
+
+[[setup.steps.presets]]
+id = "send"
+title = "Read, draft and send"
+risk = "medium"
+values = { allowDrafts = true, allowSend = true } # the step's other switches turn off
+
+[[setup.steps]]
+id = "connect"
+kind = "credential" # settings (default) | credential | people | agents
+title = "Sign in with Google"
+
+[[setup.steps]]
+id = "agents"
+kind = "agents"
+title = "Agents"
+```
+
+Declared steps cover the instance: a `credential` step when the manifest has a
+credential, every visible setting exactly once, a `people` step for delegating
+packages and an `agents` step, last, with `agentAccess`. Only settings steps list
+settings, may be `shared` and may have presets, whose values name the step's
+boolean settings. Checklist links are HTTPS; `copy = "callbackUrl"` needs OAuth. At
+most 8 steps, 8 tasks and 6 presets per step. Boolean settings may declare
+`risk = "low" | "medium" | "high"`, shown beside the switch.
+Presets refresh each changed field marked `refresh`, just like its individual
+switch. Form errors apply only to the checked input; changing an ordinary field
+clears its stale error without requiring `refresh`. Save still runs the package's
+authoritative `submit = true` validation.
+
+Without steps, Cairn derives them: one `Settings` step with the visible settings,
+before the sign-in for OAuth and after the credential otherwise, then `Who can
+talk to it` and `Agents` when they apply. The effort defaults to `app` for OAuth,
+`signin` for a device sign-in and `token` for another credential or a required
+secret setting. `GET /api/plugins` returns the resolved `setup` beside each
+`manifest` (and each version), and `manage_plugin`'s `setup` action returns it too.
+Clients of an older installation resolve it from the manifest the same way; the
+shared corpus `tests/fixtures/plugin-setup.json` checks Rust, web and Android.
+
+The package's `form` view appears on the credential step, on steps with dynamic or
+`refresh` fields, and on the first step when there is no credential. A new instance
+is named after `nameFrom` once the form derives it, unless the owner typed a name.
+
+`sharedFrom: <instance id>` on `POST /api/plugins/{id}/form`, `POST
+/api/plugins/{id}/oauth` and the save reuses the settings of the shared steps from
+a saved instance of the same package. The host copies them, secrets included;
+clients never receive the secrets. Each instance keeps its own copy, and only a
+new instance can reuse: an edit naming `sharedFrom` is refused. An installation
+management agent may only reuse an instance it is granted.
+Required secrets must be present; an absent optional secret remains absent,
+replacing any typed draft value for that shared field. Sources with secret fields
+remain individually selectable: equal visible labels cannot prove equal secrets.
+
+Installed manifests with `[setup]` require epoch 12 / SQLite version 11, which
+fences previous readers before plugin loading. Existing package files, approvals,
+connections and vault entries are preserved. See the
+[forward migration and recovery plan](AUTOMATIC-MIGRATIONS.md#current-transition-epochs-311-to-12).
+
+The assistant's last step can grant agents to a new instance with the save's
+`agentIds`: creation only grants, never removes. A saved instance shows its agents
+read-only, and grants change on agent pages ([ADR 0051](adr/0051-agent-centric-permissions.md)).
+
 ## Integrations
 
 Packages can also take part in Cairn's own features. The host keeps every credential
@@ -436,6 +533,7 @@ only removes local credentials and data.
 Public MCP and the opted-in installation tool expose `list_plugins` and
 `manage_plugin` for setup, sign-in, forms, instance lifecycle and panels. Neither
 accepts `agentIds`; instance grants remain in the owner's agent editor (ADR 0051).
+Both accept `data.sharedFrom` to reuse a granted instance's shared setup.
 An installation management agent also needs the separate enabled instance grant
 before using its saved credentials in a form, panel, test or reconnect. Management
 and account grants are checked again through asynchronous handlers and refreshes.

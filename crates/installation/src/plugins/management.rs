@@ -9,22 +9,24 @@ use crate::{
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-/// Management access does not replace a saved instance's separate agent grant.
+/// Management access does not replace a saved instance's separate agent grant, for
+/// the instance it edits and for the one whose shared setup it reuses.
 #[derive(Clone)]
 pub struct Authority {
     bearer: String,
     instance: Option<Box<connections::Connection>>,
+    shared: Option<Box<connections::Connection>>,
 }
 
 impl Authority {
     pub(crate) fn authorize(&self, db: &crate::store::Db<'_>) -> Result<()> {
         let run = crate::installation_mcp::authorize_in(db, &self.bearer)?;
-        if let Some(expected) = &self.instance {
+        let agent = text(&run["snapshot"]["agent"], "id");
+        for expected in [&self.instance, &self.shared].into_iter().flatten() {
             let current = db
                 .get(connections::KIND, &expected.id)?
                 .ok_or_else(|| Error::forbidden("This plugin instance was removed."))?;
             let current: connections::Connection = serde_json::from_value(current)?;
-            let agent = text(&run["snapshot"]["agent"], "id");
             if current.revision != expected.revision || !current.grants(agent) {
                 return Err(Error::forbidden(
                     "Installation management does not grant access to this plugin account. Ask the owner to grant it on the agent's page.",
@@ -71,9 +73,17 @@ pub(crate) async fn invoke(
         Some(instance) => Some(Box::new(connections::get(s, plugin, instance).await?)),
         None => None,
     };
+    // Reusing another instance's shared setup uses its saved secrets.
+    let shared_instance = match connections::shared_source(data)?
+        .filter(|_| matches!(action, "signin" | "form" | "save") && bearer.is_some())
+    {
+        Some(source) => Some(Box::new(connections::get(s, plugin, source).await?)),
+        None => None,
+    };
     let authority = bearer.map(|bearer| Authority {
         bearer: bearer.to_owned(),
         instance: saved_instance,
+        shared: shared_instance,
     });
     let authorize = {
         let authority = authority.clone();
@@ -125,7 +135,10 @@ pub(crate) async fn invoke(
         };
     let result = match action {
         "setup" => {
-            let mut result = json!({ "manifest": package.manifest });
+            let mut result = json!({
+                "manifest": package.manifest,
+                "setup": package.manifest.setup(),
+            });
             if is_oauth {
                 result["callbackUrl"] = json!(oauth::callback_url(s).await?);
             }

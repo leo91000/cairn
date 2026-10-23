@@ -231,13 +231,21 @@ pub async fn start(s: &Service, plugin: &str, input: &Value, binding: &str) -> R
         Some(instance) => Some(connections::get(s, plugin, instance).await?),
         None => None,
     };
-    let settings = if input["settings"].is_object() {
+    let mut settings = if input["settings"].is_object() {
         input["settings"].clone()
     } else {
         existing
             .as_ref()
             .map_or_else(|| json!({}), |c| c.settings.clone())
     };
+    // A new instance can reuse the OAuth client another one already registered.
+    let shared =
+        connections::shared(s, &package.manifest, plugin, input, existing.is_some()).await?;
+    if let Some(shared) = &shared {
+        for (key, value) in &shared.settings {
+            settings[key] = value.clone();
+        }
+    }
     let settings = connections::settings(&package.manifest, &settings)?;
     let client_id = setting(&settings, &oauth.client_id_setting)?;
     let client_secret = match &oauth.client_secret_setting {
@@ -246,9 +254,15 @@ pub async fn start(s: &Service, plugin: &str, input: &Value, binding: &str) -> R
                 Some(id) => connections::secret_values(s, id).await?,
                 None => Map::default(),
             };
-            let value = input["secrets"][key]
-                .as_str()
-                .filter(|v| !v.trim().is_empty())
+            let value = shared
+                .as_ref()
+                .and_then(|shared| shared.secrets.get(key))
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    input["secrets"][key]
+                        .as_str()
+                        .filter(|v| !v.trim().is_empty())
+                })
                 .or_else(|| saved.get(key).and_then(Value::as_str))
                 .ok_or_else(|| Error::bad("Enter the OAuth client secret before signing in."))?;
             if value.len() > 16_384 || value.chars().any(char::is_control) {

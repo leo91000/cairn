@@ -1,5 +1,6 @@
 import type { Agent } from '../../../packages/contracts/contracts'
 import type { IconName } from './icons'
+import type { PluginSetup, SetupRisk } from './plugin-setup'
 import {
   BrandLinear,
   BrandSlack,
@@ -45,6 +46,8 @@ export interface SettingField {
   dynamic?: boolean
   /** Changing this field asks the package's form handler again. */
   refresh?: boolean
+  /** How much a switch lets agents do. */
+  risk?: SetupRisk
   default?: unknown
 }
 
@@ -126,6 +129,8 @@ export interface Manifest {
   /** What granted agents' runs receive from its instance, such as git credentials. */
   runCredentials?: Record<string, unknown>
   secretPatterns?: string[]
+  /** What connecting takes and the steps the owner follows, as the package declares them. */
+  setup?: Partial<PluginSetup>
 }
 
 /** A named source a package offers, such as GitHub repositories. */
@@ -164,6 +169,8 @@ export interface PackageVersion {
   /** The package's Luau files, `main.luau` first. */
   files?: { path: string, bytes: number }[]
   manifest?: Manifest
+  /** The steps the owner follows, resolved by the installation. */
+  setup?: PluginSetup
   approved?: boolean
   error?: string
 }
@@ -175,6 +182,8 @@ export interface PluginEntry {
   status: 'active' | 'update' | 'needs_approval' | 'invalid'
   active: string | null
   manifest: Manifest | null
+  /** The steps the owner follows; older installations send only the manifest. */
+  setup?: PluginSetup | null
   versions: PackageVersion[]
 }
 
@@ -241,6 +250,13 @@ export const capabilityLabels: Record<string, [IconName, string]> = {
   'storage': [HardDrive, 'Storage'],
   'timers': [Clock, 'Timers'],
   'exec': [Cpu, 'Runs programs'],
+}
+
+/** Risk pills: low reads as safe, high as a warning. */
+export const riskTones: Record<SetupRisk, string> = {
+  low: 'bg-[light-dark(#dff3ee,#163a33)] text-success',
+  medium: 'bg-warning-surface text-warning',
+  high: 'bg-danger-surface text-danger',
 }
 
 /** What a package gives agents, for catalogue chips. */

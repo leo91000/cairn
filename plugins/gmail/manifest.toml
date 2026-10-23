@@ -58,7 +58,8 @@ title = "Google OAuth client ID"
 type = "string"
 required = true
 maxLength = 2000
-description = "Create a Web application client in Google Cloud and register the callback URL shown above."
+placeholder = "123456789-abc.apps.googleusercontent.com"
+description = "Shown by Google once the client is created. It ends with .apps.googleusercontent.com."
 
 [[settings]]
 key = "clientSecret"
@@ -66,6 +67,7 @@ title = "Google OAuth client secret"
 type = "secret"
 required = true
 maxLength = 16384
+placeholder = "GOCSPX-…"
 
 [[settings]]
 key = "email"
@@ -79,36 +81,43 @@ key = "allowSend"
 title = "Send messages"
 type = "boolean"
 default = false
+risk = "medium"
 
 [[settings]]
 key = "allowDrafts"
 title = "Create and edit drafts"
 type = "boolean"
 default = false
+risk = "low"
 
 [[settings]]
 key = "allowModify"
 title = "Organize mail, labels and imports"
 type = "boolean"
 default = false
+risk = "medium"
 
 [[settings]]
 key = "allowDelete"
 title = "Permanently delete mail"
 type = "boolean"
 default = false
+risk = "high"
+description = "Bypasses the trash. Grants full access to the mailbox."
 
 [[settings]]
 key = "allowSettings"
 title = "Manage mailbox settings"
 type = "boolean"
 default = false
+risk = "medium"
 
 [[settings]]
 key = "allowSharing"
 title = "Manage forwarding and delegates"
 type = "boolean"
 default = false
+risk = "high"
 description = "Manage forwarding and delegates (Workspace restrictions apply)"
 
 [[settings]]
@@ -116,12 +125,114 @@ key = "allowWatch"
 title = "Configure Google Cloud Pub/Sub watches"
 type = "boolean"
 default = false
+risk = "medium"
+description = "Needs a Pub/Sub topic in the same Google Cloud project."
 
 [[settings]]
 key = "allowAdmin"
 title = "Workspace S/MIME and client-side encryption administration"
 type = "boolean"
 default = false
+risk = "high"
+description = "For Google Workspace administrators."
+
+[setup]
+effort = "app"
+summary = "Gmail connects through a Google Cloud app you own. Create it once, in about ten minutes; each mailbox then takes one Google sign-in."
+nameFrom = "email"
+
+[[setup.steps]]
+id = "app"
+title = "Google Cloud app"
+description = "Google lets Cairn read mail only through an OAuth app you own. Every mailbox you add later can reuse it."
+settings = [
+  "clientId",
+  "clientSecret"
+]
+shared = true
+warning = "External apps in Testing lose access after seven days. For personal use, you can publish an unverified External app (Google warning and user cap apply). Workspace-only Internal apps avoid the Testing limit; other revocation rules still apply."
+
+[[setup.steps.checklist]]
+title = "Enable the Gmail API"
+text = "Pick or create a project, then select Enable."
+url = "https://console.cloud.google.com/apis/library/gmail.googleapis.com"
+link = "Open API Library"
+
+[[setup.steps.checklist]]
+title = "Configure the consent screen"
+text = "Give the app a name and a support email."
+url = "https://console.cloud.google.com/auth/branding"
+link = "Open Branding"
+
+[[setup.steps.checklist]]
+title = "Choose the audience and publishing status"
+text = "For your Workspace organization only, choose Internal. For personal Gmail, choose External: add yourself as a test user in Testing, or publish for personal use (an unverified-app warning and user cap apply)."
+url = "https://console.cloud.google.com/auth/audience"
+link = "Open Audience"
+
+[[setup.steps.checklist]]
+title = "Create an OAuth client"
+text = "Application type: Web application. Under Authorized redirect URIs, add this address."
+url = "https://console.cloud.google.com/auth/clients/create"
+link = "Open Clients"
+copy = "callbackUrl"
+
+[[setup.steps.checklist]]
+title = "Paste the client ID and secret below"
+text = "Google shows them once the client is created."
+
+[[setup.steps]]
+id = "permissions"
+title = "Permissions"
+description = "What agents may do with this mailbox. Google asks you to approve exactly these permissions; widening them later means signing in again."
+settings = [
+  "allowSend",
+  "allowDrafts",
+  "allowModify",
+  "allowDelete",
+  "allowSettings",
+  "allowSharing",
+  "allowWatch",
+  "allowAdmin",
+]
+
+[[setup.steps.presets]]
+id = "read"
+title = "Read only"
+description = "Search and read mail and attachments."
+risk = "low"
+
+[[setup.steps.presets]]
+id = "drafts"
+title = "Read and prepare drafts"
+description = "Agents write drafts; you send them yourself from Gmail."
+risk = "low"
+values = { allowDrafts = true }
+
+[[setup.steps.presets]]
+id = "send"
+title = "Read, draft and send"
+description = "Agents send mail as this address, within what you ask them."
+risk = "medium"
+values = { allowDrafts = true, allowSend = true }
+
+[[setup.steps.presets]]
+id = "manage"
+title = "Manage the inbox"
+description = "Also labels, archiving, filters and mailbox settings."
+risk = "medium"
+values = { allowDrafts = true, allowSend = true, allowModify = true, allowSettings = true }
+
+[[setup.steps]]
+id = "connect"
+kind = "credential"
+title = "Sign in with Google"
+description = "Choose the mailbox to connect. Your password stays with Google; Cairn receives only the permissions you chose."
+
+[[setup.steps]]
+id = "agents"
+kind = "agents"
+title = "Agents"
 
 [agentAccess]
 description = "Off by default. Grant each mailbox explicitly; an agent can use several accounts. Permissions also follow the selected Google OAuth scopes."

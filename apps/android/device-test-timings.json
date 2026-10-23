@@ -53,7 +53,7 @@
   "build.cairn.app.ui.ParityDeviceTest#adaptiveTaskLayout": 4.4,
   "build.cairn.app.ui.ParityDeviceTest#compactChatEvidenceAndSwitcher": 18.5,
   "build.cairn.app.ui.ParityDeviceTest#taskConversationAndManagement": 7,
-  "build.cairn.app.ui.PluginsDeviceTest#serviceAccountsSendTheirTokenOnceAndLeaveGrantsToAgentPages": 3,
+  "build.cairn.app.ui.PluginsDeviceTest#serviceAccountsSendTheirTokenOnceAndAreGrantedToTheAgentsChosen": 3,
   "build.cairn.app.ui.QueueStripDeviceTest#queuedMessagesStayReadableAndOfferEveryActionFromTheSheet": 14.8,
   "build.cairn.app.ui.SkillMentionDeviceTest#dollarSuggestsSkillsAndInsertsTheChosenOneBeforeSending": 5,
   "build.cairn.app.ui.SkillMentionDeviceTest#emptySkillsExplainsTheMissingSuggestionsAndCanBeDismissed": 6.2,
