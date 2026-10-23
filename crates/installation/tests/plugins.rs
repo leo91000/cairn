@@ -1664,6 +1664,8 @@ async fn replies_to_a_stopped_turn_do_not_carry_the_next_answer() {
         )
         .await;
         event("turn.started", "", None).await;
+        let partial = json!({ "item": { "type": "agent_message", "text": "partial answer" } });
+        event("item.completed", "partial answer", Some(partial)).await;
         // Cairn stops the turn (Stop or the time limit), then the conversation answers another
         // message.
         event("status", status, None).await;
@@ -1689,8 +1691,11 @@ async fn replies_to_a_stopped_turn_do_not_carry_the_next_answer() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(reply.status, reply_status);
-        assert!(!reply.text.contains("the other answer"), "{}", reply.text);
+        // The reply keeps what the agent said before the stop, never the next answer.
+        assert_eq!(
+            (reply.text.as_str(), reply.status),
+            ("partial answer", reply_status)
+        );
     }
 }
 
