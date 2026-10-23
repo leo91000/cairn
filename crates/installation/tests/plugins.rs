@@ -1550,6 +1550,20 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
         .await
         .unwrap();
     assert!(reply().await.is_none());
+    // The retry then waits for an account: the failure answers meanwhile.
+    s.store
+        .patch_run(
+            run_id,
+            json!({ "accountWaitReason": "Waiting for a Codex account with available usage." }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reply().await.unwrap().status, "failed");
+    s.store
+        .patch_run(run_id, json!({ "accountWaitReason": null }))
+        .await
+        .unwrap();
+    assert!(reply().await.is_none());
     s.store
         .event(run_id, "turn.started", "", None)
         .await

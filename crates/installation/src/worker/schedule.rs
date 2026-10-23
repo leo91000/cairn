@@ -483,7 +483,7 @@ fn cancel_recovery(db: &Db<'_>, id: &str, run: &Value) -> Result<()> {
             "wakeup": null,
         }),
     )?;
-    if run["retry"].is_object() {
+    if run["retry"]["nextAttemptAt"].is_number() {
         db.event(id, "status", RunStatus::Cancelled.as_str(), None)?;
     }
     Ok(())

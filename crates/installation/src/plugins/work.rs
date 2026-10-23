@@ -744,11 +744,15 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> 
         .as_ref()
         .and_then(crate::run_status::RunStatus::of)
         .is_some_and(crate::run_status::RunStatus::is_active);
-    // Waiting for an account after the usage ran out can last hours: the failure answers the
-    // person meanwhile. Recovery and capacity waits continue the message.
-    let waiting_for_account = run
-        .as_ref()
-        .is_some_and(|run| text(run, "accountWaitReason").starts_with("Usage exhausted."));
+    // Waiting for an account can last hours: the failure answers the person meanwhile. These
+    // are the waits clients show as account waits; recovery and capacity waits continue it.
+    let waiting_for_account = run.as_ref().is_some_and(|run| {
+        let reason = text(run, "accountWaitReason");
+        reason.starts_with("Usage exhausted.")
+            || (reason.starts_with("Waiting for a ")
+                && reason.contains(" account with available usage."))
+            || !run["accountRequired"].is_null()
+    });
     let turn_end = |kind: &str| matches!(kind, "turn.completed" | "turn.failed");
     let stopped = |kind: &str| match kind {
         "cancelled" => Some("cancelled"),
@@ -790,9 +794,10 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> 
             });
         }
         let later = history[index + 1..].iter().any(|(_, next)| turn_end(next));
-        let continued = failed
-            && ((retried && stop.is_none())
-                || (current && (later || (active && !waiting_for_account))));
+        // While the run waits for an account on this message, its failure answers.
+        let waiting = waiting_for_account && current && !later;
+        let continued =
+            failed && !waiting && ((retried && stop.is_none()) || (current && (later || active)));
         if !continued {
             return Ok(Turn::Done {
                 delivered,
