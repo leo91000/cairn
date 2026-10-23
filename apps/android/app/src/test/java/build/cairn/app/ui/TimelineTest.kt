@@ -350,6 +350,19 @@ class TimelineTest {
                 failure(5, "turn.failed", websocket) +
                 plain(6, "error", websocket)
         assertEquals(listOf(5L), notices(exhausted).map { it.events.single().id })
+        // Without attempt markers (older Claude histories), a new request after a failed turn
+        // gets its own notice.
+        val unmarked =
+            listOf(
+                plain(1, "chat.user", "hi"),
+                failure(2, "turn.failed", capacity),
+                failure(3, "status", capacity, text = "failed"),
+                plain(4, "status", "Resume requested"),
+                plain(5, "chat.user", "again"),
+                failure(6, "turn.failed", capacity),
+                failure(7, "status", capacity, text = "failed"),
+            )
+        assertEquals(listOf(2L, 6L), notices(unmarked).map { it.events.single().id })
         // A retry that succeeds ends the chain: a later message failing for the same reason
         // gets its own notice.
         val answered =

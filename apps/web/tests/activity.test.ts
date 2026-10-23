@@ -213,6 +213,9 @@ describe('conversation activity', () => {
     expect(notices([...retried, ...attempt(9)]).map(notice => notice.title)).toEqual(['The agent ran into an error after 1 automatic retry', 'The agent ran into an error'])
     const cancelledWait = [...retried.slice(0, 4), event(5, 'status', 'cancelled'), ...attempt(6)]
     expect(notices(cancelledWait).map(notice => notice.title)).toEqual(['The agent ran into an error', 'Run cancelled', 'The agent ran into an error'])
+    // Without attempt markers (older Claude histories), a new request after a failed turn gets its own card.
+    const unmarked = [event(1, 'chat.user', 'hi'), event(2, 'turn.failed', capacity, { error: { message: capacity } }), event(3, 'status', 'failed', { error: { message: capacity } }), event(4, 'status', 'Resume requested'), event(5, 'chat.user', 'again'), event(6, 'turn.failed', capacity, { error: { message: capacity } }), event(7, 'status', 'failed', { error: { message: capacity } })]
+    expect(notices(unmarked)).toHaveLength(2)
     // A retry that succeeds ends the chain: a later message failing for the same reason gets its own card.
     const answered = [...retried.slice(0, 5), event(6, 'turn.completed', ''), event(7, 'chat.user', 'Next'), ...attempt(8)]
     expect(notices(answered).map(notice => notice.title)).toEqual(['Temporary error — automatic retry 1/3', 'The agent ran into an error'])

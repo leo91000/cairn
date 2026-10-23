@@ -406,6 +406,9 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     // A retry chain ends with an attempt that does not fail again, or with a new message.
     if (event.type === 'turn.completed' || event.type === 'chat.user')
       retried.delete(event.runId)
+    // A new request after a failed turn gets its own notice, even without an attempt marker.
+    if (event.type === 'chat.user' && failures.get(event.runId)?.ended && !failures.get(event.runId)?.pending)
+      failures.delete(event.runId)
 
     if (event.type === 'chat.user') {
       // A new request gets its own plan, even when the agent carries the previous list over.

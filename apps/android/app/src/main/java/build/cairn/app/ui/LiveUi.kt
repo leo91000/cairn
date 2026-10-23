@@ -799,6 +799,13 @@ internal fun timelineEntries(
             // A retry chain ends with an attempt that does not fail again, or with a new message.
             if (event.type == "turn.completed" || event.type == "chat.user")
                 retried.remove(event.runId)
+            // A new request after a failed turn gets its own notice, even without an attempt
+            // marker.
+            if (
+                event.type == "chat.user" &&
+                    failures[event.runId]?.let { it.ended && !it.pending } == true
+            )
+                failures.remove(event.runId)
             when (event.type) {
                 "chat.sleep",
                 "chat.wait",
