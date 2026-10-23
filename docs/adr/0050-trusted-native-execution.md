@@ -43,3 +43,15 @@ retained. Epoch-5 binaries cannot interpret the native records introduced here.
 Rollback to epoch 5 requires its matching prepared data backup and binary; automatic
 updates do not cross epochs or restore data. Windows/macOS and desktop-session
 access remain separate future work.
+
+Update, 2026-10-23: native conversations use distinct host accounts and disjoint
+subordinate UID/GID ranges. A RootlessKit enclave separates their network, PID and
+user namespaces; its immutable supervisor starts rootless Docker on demand.
+Only the outer identity-mapping bootstrap permits the mapping helpers' privilege
+transition. The enclave sets NoNewPrivileges before starting the engine/daemon;
+the engine has an empty capability bounding set. Existing managed mounts, device
+filters, shared budgets, leases, guardians and cgroup fencing remain. Docker's
+mandatory authorization plugin preserves restricted filesystem rights. The host
+Docker daemon and desktop sockets remain unavailable. See [native Docker](../NATIVE-DOCKER.md)
+for storage, conversion, networking and compatibility limits. Epoch 13, SQLite
+12 and the complete native runtime identity fence previous writers.

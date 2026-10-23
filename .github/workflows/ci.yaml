@@ -233,7 +233,10 @@ jobs:
     if: needs.resolve.outputs.reuse != 'true'
     runs-on: ubuntu-latest
     # Allow slow kernel-module installation and the complete native qualification.
-    timeout-minutes: 30
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/download-artifact@v8.0.1
@@ -243,7 +246,12 @@ jobs:
       - name: Prepare disposable host block storage and synthetic S3
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends e2fsprogs python3-venv
+          sudo apt-get install -y --no-install-recommends e2fsprogs python3-venv uidmap iproute2 iptables
+          sudo modprobe tun
+          sudo modprobe ip_tables
+          sudo modprobe iptable_nat
+          sudo modprobe ip6_tables
+          sudo modprobe ip6table_nat
           if ! sudo modprobe ublk_drv; then
             sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
             sudo modprobe ublk_drv
@@ -251,11 +259,31 @@ jobs:
           test -c /dev/ublk-control
           python3 -m venv .native-s3-test
           .native-s3-test/bin/pip install 'moto[server]==5.2.3' awscli
+      - name: Qualify the successful main reference on the same disposable host
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          runs = json.loads(subprocess.check_output(['gh', 'run', 'list', '--workflow', 'ci.yaml', '--branch', 'main', '--status', 'success', '--limit', '20', '--json', 'databaseId,headSha']))
+          for run in runs:
+              artifacts = json.loads(subprocess.check_output(['gh', 'api', 'repos/${{ github.repository }}/actions/runs/' + str(run['databaseId']) + '/artifacts']))
+              if any(artifact['name'] == 'browser-backend' and not artifact['expired'] for artifact in artifacts['artifacts']):
+                  subprocess.run(['gh', 'run', 'download', str(run['databaseId']), '--name', 'browser-backend', '--dir', 'reference-native'], check=True)
+                  Path('native-storage-evidence/reference').mkdir(parents=True)
+                  Path('native-storage-evidence/reference/revision.json').write_text(json.dumps(run, indent=2))
+                  break
+          else:
+              raise RuntimeError('No successful main reference artifact is available; build a reference before claiming comparative measurements.')
+          PY
+          chmod +x reference-native/cairn reference-native/examples/native_storage_qualifier
+          sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/reference" .native-s3-test/bin/python scripts/tests/node_s3_test.py --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier
       - name: Qualify real ublk, S3, eviction, systemd ownership and crash recovery
         run: |
           chmod +x target/debug/cairn target/debug/examples/native_storage_qualifier
           mkdir -p native-storage-evidence
-          sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" .native-s3-test/bin/python scripts/tests/node_s3_test.py --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier
+          sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" .native-s3-test/bin/python scripts/tests/node_s3_test.py --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:

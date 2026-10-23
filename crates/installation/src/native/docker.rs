@@ -1,0 +1,709 @@
+//! Lazy Docker inside the conversation's RootlessKit enclave. The host daemon
+//! is never involved. Docker's mandatory authorization plugin bounds its API
+//! to the same files and permissions as the engine.
+use crate::{
+    error::{Error, Result},
+    validation::text,
+};
+use axum::{Json, Router, extract::State, routing::post};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use serde_json::{Value, json};
+use std::{
+    os::unix::fs::PermissionsExt,
+    path::{Component, Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    process::Command,
+    sync::Mutex,
+};
+use tokio_util::sync::CancellationToken;
+
+const RUNTIME: &str = "/run/cairn-docker";
+const SOCKET: &str = "/run/cairn-docker/docker.sock";
+const DATA: &str = "/var/lib/cairn-docker";
+const DOCKER: &str = "/opt/cairn-docker/bin/docker";
+
+#[derive(Clone)]
+struct Policy {
+    plan: Arc<Value>,
+}
+
+fn present(value: &Value, name: &str) -> bool {
+    match &value[name] {
+        Value::Null => false,
+        Value::Array(values) => !values.is_empty(),
+        Value::Object(values) => !values.is_empty(),
+        Value::String(value) => !value.is_empty(),
+        Value::Bool(value) => *value,
+        _ => true,
+    }
+}
+
+impl Policy {
+    fn bind(&self, source: &str, read_only: bool) -> Result<()> {
+        let path = Path::new(source);
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+        {
+            return Err(Error::forbidden(
+                "Docker bind sources must be absolute conversation paths.",
+            ));
+        }
+        let workspace = Path::new(text(&self.plan, "projectRoot"));
+        let output = PathBuf::from(text(&self.plan, "guestDataRoot"))
+            .join("runs")
+            .join(text(&self.plan, "runId"))
+            .join("output");
+        if ![
+            workspace,
+            Path::new("/home/node"),
+            Path::new("/tmp"),
+            output.as_path(),
+        ]
+        .iter()
+        .any(|root| path.starts_with(root))
+        {
+            return Err(Error::forbidden(
+                "Docker bind source is outside this conversation.",
+            ));
+        }
+        if crate::execution::Sandbox::is_read_only(&self.plan["sandbox"])
+            && path.starts_with(workspace)
+            && !read_only
+        {
+            return Err(Error::forbidden(
+                "This conversation requires read-only workspace bind mounts.",
+            ));
+        }
+        // Do not let a symlink turn a permitted name into another root. Missing
+        // sources are rejected too: Docker must not create a path as namespace root.
+        if std::fs::canonicalize(path).ok().as_deref() != Some(path) {
+            return Err(Error::forbidden(
+                "Docker bind source is missing or redirected.",
+            ));
+        }
+        Ok(())
+    }
+
+    fn host_config(&self, host: &Value) -> Result<()> {
+        for field in [
+            "Privileged",
+            "CapAdd",
+            "Devices",
+            "DeviceRequests",
+            "DeviceCgroupRules",
+            "VolumesFrom",
+            "CgroupParent",
+            "UsernsMode",
+            "PidMode",
+            "UTSMode",
+            "MaskedPaths",
+            "ReadonlyPaths",
+            "ContainerIDFile",
+            "StorageOpt",
+        ] {
+            if present(host, field) {
+                return Err(Error::forbidden(format!(
+                    "Docker {field} is unavailable in native conversations."
+                )));
+            }
+        }
+        if host["IpcMode"]
+            .as_str()
+            .is_some_and(|mode| !matches!(mode, "" | "private" | "shareable"))
+        {
+            return Err(Error::forbidden("Docker requires a private IPC namespace."));
+        }
+        if host["NetworkMode"]
+            .as_str()
+            .is_some_and(|mode| mode == "host" || mode.starts_with("container:"))
+        {
+            return Err(Error::forbidden(
+                "Docker host/container network namespace overrides are unavailable.",
+            ));
+        }
+        if host["CgroupnsMode"]
+            .as_str()
+            .is_some_and(|mode| !mode.is_empty() && mode != "private")
+            || host["Runtime"]
+                .as_str()
+                .is_some_and(|runtime| !runtime.is_empty() && runtime != "runc")
+        {
+            return Err(Error::forbidden(
+                "Docker requires its private namespaces and standard runtime.",
+            ));
+        }
+        if let Some(options) = host["SecurityOpt"].as_array() {
+            for option in options {
+                if !matches!(
+                    option.as_str(),
+                    Some("no-new-privileges" | "no-new-privileges:true" | "no-new-privileges=true")
+                ) {
+                    return Err(Error::forbidden(
+                        "Docker security overrides are unavailable.",
+                    ));
+                }
+            }
+        }
+        // A daemon restart must not run containers created under a previous
+        // attempt's rights before the current policy has checked their mounts.
+        if host["RestartPolicy"]["Name"]
+            .as_str()
+            .is_some_and(|name| !name.is_empty() && name != "no")
+        {
+            return Err(Error::forbidden(
+                "Docker restart policies are unavailable; recreate services in each turn.",
+            ));
+        }
+        if let Some(binds) = host["Binds"].as_array() {
+            for bind in binds {
+                let parts: Vec<_> = bind.as_str().unwrap_or("").split(':').collect();
+                if parts.len() < 2 || parts.len() > 3 {
+                    return Err(Error::forbidden("Invalid Docker bind mount."));
+                }
+                let options: Vec<_> = parts.get(2).copied().unwrap_or("rw").split(',').collect();
+                if options
+                    .iter()
+                    .any(|option| !matches!(*option, "ro" | "rw" | "rprivate" | "private"))
+                {
+                    return Err(Error::forbidden(
+                        "Docker bind propagation and relabeling are unavailable.",
+                    ));
+                }
+                if parts[0].starts_with('/') {
+                    self.bind(parts[0], options.contains(&"ro"))?;
+                } else if parts[0].is_empty()
+                    || !parts[0]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+                {
+                    return Err(Error::forbidden("Invalid Docker volume name."));
+                }
+            }
+        }
+        if let Some(mounts) = host["Mounts"].as_array() {
+            for mount in mounts {
+                match mount["Type"].as_str() {
+                    Some("bind") => {
+                        if present(&mount["BindOptions"], "NonRecursive")
+                            || mount["BindOptions"]["Propagation"]
+                                .as_str()
+                                .is_some_and(|mode| {
+                                    !mode.is_empty() && mode != "rprivate" && mode != "private"
+                                })
+                        {
+                            return Err(Error::forbidden(
+                                "Docker must retain recursive conversation mount restrictions.",
+                            ));
+                        }
+                        self.bind(text(mount, "Source"), mount["ReadOnly"] == true)?;
+                    }
+                    Some("volume") => {
+                        self.volume_driver(&mount["VolumeOptions"]["DriverConfig"])?;
+                    }
+                    Some("tmpfs") => {}
+                    _ => return Err(Error::forbidden("Unsupported native Docker mount type.")),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn volume_driver(&self, driver: &Value) -> Result<()> {
+        if driver["Name"]
+            .as_str()
+            .is_some_and(|name| !name.is_empty() && name != "local")
+            || present(driver, "Options")
+        {
+            return Err(Error::forbidden(
+                "Docker supports ordinary local volumes without driver options.",
+            ));
+        }
+        Ok(())
+    }
+
+    fn authorize(&self, request: &Value) -> Result<()> {
+        let uri = text(request, "RequestUri");
+        let mut path = uri.split('?').next().unwrap_or("");
+        if let Some(versioned) = path.strip_prefix("/v") {
+            let (version, rest) = versioned
+                .split_once('/')
+                .ok_or_else(|| Error::forbidden("Invalid Docker API path."))?;
+            if !version
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'.')
+            {
+                return Err(Error::forbidden("Invalid Docker API version."));
+            }
+            path = &path[version.len() + 2..];
+            let _ = rest;
+        }
+        if path.contains('%') || path.contains("..") || path.contains("//") {
+            return Err(Error::forbidden("Invalid Docker API path."));
+        }
+        let segments: Vec<_> = path.trim_start_matches('/').split('/').collect();
+        let method = text(request, "RequestMethod");
+        let body = request["RequestBody"].as_str().unwrap_or("");
+        let decoded = STANDARD.decode(body).map_err(Error::internal)?;
+        let json_body = serde_json::from_slice::<Value>(&decoded).unwrap_or(Value::Null);
+        match segments.first().copied() {
+            Some("_ping" | "version" | "info" | "events" | "system" | "distribution")
+                if method == "GET" || method == "HEAD" => {}
+            Some("containers") => {
+                if segments.get(1) == Some(&"create") && method == "POST" {
+                    if !json_body.is_object() {
+                        return Err(Error::forbidden("Invalid Docker container configuration."));
+                    }
+                    self.host_config(&json_body["HostConfig"])?;
+                } else if !matches!(segments.get(1), Some(&"json" | &"prune")) {
+                    let name = segments.get(1).copied().unwrap_or("");
+                    if name.is_empty()
+                        || !name
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+                    {
+                        return Err(Error::forbidden("Invalid Docker container name."));
+                    }
+                    // Names and unambiguous short IDs are both part of Docker's
+                    // public API. Resolve only directories in this private store.
+                    let mut found = None;
+                    for entry in std::fs::read_dir(Path::new(DATA).join("containers"))? {
+                        let entry = entry?;
+                        let id = entry.file_name();
+                        let id = id.to_string_lossy();
+                        if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                            continue;
+                        }
+                        let config: Value = serde_json::from_slice(&std::fs::read(
+                            entry.path().join("config.v2.json"),
+                        )?)?;
+                        if (id.starts_with(name) || config["Name"] == format!("/{name}"))
+                            && found.replace(entry.path()).is_some()
+                        {
+                            return Err(Error::forbidden("Ambiguous Docker container ID."));
+                        }
+                    }
+                    let directory = found
+                        .ok_or_else(|| Error::forbidden("Docker container is unavailable."))?;
+                    if method != "DELETE" && !(method == "GET" && segments.get(2) == Some(&"json"))
+                    {
+                        let mut host: Value = serde_json::from_slice(&std::fs::read(
+                            directory.join("hostconfig.json"),
+                        )?)?;
+                        // Docker fills these with its default masks after the
+                        // create request. User overrides were refused at create.
+                        if let Some(object) = host.as_object_mut() {
+                            object.remove("MaskedPaths");
+                            object.remove("ReadonlyPaths");
+                        }
+                        self.host_config(&host)?;
+                    }
+                    if segments.get(2) == Some(&"update") {
+                        self.host_config(&json_body)?;
+                    }
+                    if segments.get(2) == Some(&"exec") && json_body["Privileged"] == true {
+                        return Err(Error::forbidden("Privileged Docker exec is unavailable."));
+                    }
+                }
+            }
+            Some("exec") => {
+                if json_body["Privileged"] == true {
+                    return Err(Error::forbidden("Privileged Docker exec is unavailable."));
+                }
+            }
+            Some("volumes") => {
+                if method == "POST" && segments.get(1) == Some(&"create") {
+                    self.volume_driver(
+                        &json!({ "Name": json_body["Driver"], "Options": json_body["DriverOpts"] }),
+                    )?;
+                }
+            }
+            Some("networks") => {
+                if method == "POST"
+                    && segments.get(1) == Some(&"create")
+                    && json_body["Driver"]
+                        .as_str()
+                        .is_some_and(|driver| !driver.is_empty() && driver != "bridge")
+                {
+                    return Err(Error::forbidden(
+                        "Native Docker supports private bridge networks.",
+                    ));
+                }
+            }
+            Some("images" | "build" | "grpc" | "session" | "auth" | "commit") => {}
+            _ => {
+                return Err(Error::forbidden(
+                    "This Docker API operation is unavailable in native conversations.",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+async fn authorization(State(policy): State<Policy>, Json(request): Json<Value>) -> Json<Value> {
+    match policy.authorize(&request) {
+        Ok(()) => Json(json!({ "Allow": true })),
+        Err(error) => Json(json!({ "Allow": false, "Msg": error.message })),
+    }
+}
+
+async fn relay(listener: tokio::net::TcpListener, stop: CancellationToken) {
+    let _ = crate::microvm::listener::serve(
+        || listener.accept(),
+        |(mut client, _)| async move {
+            if let Ok(mut server) = tokio::net::UnixStream::connect("/run/cairn-mcp.sock").await {
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+            }
+        },
+        32,
+        stop,
+    )
+    .await;
+}
+
+async fn clear_store(daemon: &mut Option<tokio::process::Child>) -> Result<()> {
+    if let Some(child) = daemon.as_mut() {
+        if let Some(pid) = child.id()
+            && unsafe { libc::kill(pid as i32, libc::SIGTERM) } != 0
+        {
+            return Err(Error::unavailable(
+                "Docker shutdown could not be requested; state retained.",
+            ));
+        }
+        let status = tokio::time::timeout(Duration::from_secs(20), child.wait())
+            .await
+            .map_err(|_| Error::timeout("Docker shutdown is unconfirmed; state retained."))??;
+        if !status.success() {
+            return Err(Error::unavailable(
+                "Docker exited unsuccessfully; resume in a new turn before resetting state.",
+            ));
+        }
+    }
+    *daemon = None;
+    let mut entries = tokio::fs::read_dir(DATA).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        if entry.file_type().await?.is_dir() {
+            tokio::fs::remove_dir_all(entry.path()).await?;
+        } else {
+            tokio::fs::remove_file(entry.path()).await?;
+        }
+    }
+    tokio::fs::File::open(DATA).await?.sync_all().await?;
+    Ok(())
+}
+
+fn unprivileged(command: &mut Command) {
+    // This is namespace root, with no capability over the initial host user
+    // namespace. Keep inherited render/video groups for native GPU access.
+    unsafe {
+        command.pre_exec(|| {
+            for capability in 0..=63 {
+                if libc::prctl(libc::PR_CAPBSET_DROP, capability, 0, 0, 0) != 0
+                    && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINVAL)
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            if libc::setgid(1000) != 0 || libc::setuid(1000) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+/// Runs only inside RootlessKit. All children, including slirp, dockerd,
+/// containerd, builds and containers remain in the original workload cgroup.
+pub async fn enclave(stop: CancellationToken) -> Result<i32> {
+    if unsafe { libc::geteuid() } != 0
+        || std::env::var_os("ROOTLESSKIT_STATE_DIR").is_none()
+        || std::fs::read_to_string("/proc/self/uid_map")?
+            .lines()
+            .count()
+            != 2
+    {
+        return Err(Error::forbidden(
+            "Native enclave requires its managed rootless namespace.",
+        ));
+    }
+    let plan: Value = serde_json::from_slice(&tokio::fs::read("/run/cairn-plan.json").await?)?;
+    let policy = Policy {
+        plan: Arc::new(plan),
+    };
+    // RootlessKit copied /etc into a namespace-local tmpfs. Replace its
+    // read-only backing symlinks, never the host account databases.
+    for (name, contents) in [
+        (
+            "passwd",
+            "root:x:0:0:namespace supervisor:/run/cairn-docker:/usr/sbin/nologin\nnode:x:1000:1000:conversation:/home/node:/bin/sh\n",
+        ),
+        ("group", "root:x:0:\nnode:x:1000:\n"),
+    ] {
+        let path = Path::new("/etc").join(name);
+        tokio::fs::remove_file(&path).await?;
+        tokio::fs::write(path, contents).await?;
+    }
+    let runtime = Path::new(RUNTIME);
+    tokio::fs::create_dir_all(runtime.join("plugins")).await?;
+    tokio::fs::set_permissions(runtime, std::fs::Permissions::from_mode(0o755)).await?;
+    tokio::fs::set_permissions(
+        runtime.join("plugins"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .await?;
+    // New runtime files never travel with a published environment.
+    let plugin = tokio::net::UnixListener::bind(runtime.join("plugins/cairn.sock"))?;
+    let router = Router::new()
+        .route(
+            "/Plugin.Activate",
+            post(|| async { Json(json!({ "Implements": ["authz"] })) }),
+        )
+        .route("/AuthZPlugin.AuthZReq", post(authorization))
+        .route(
+            "/AuthZPlugin.AuthZRes",
+            post(|| async { Json(json!({ "Allow": true })) }),
+        )
+        .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024))
+        .with_state(policy);
+    let plugin_stop = stop.clone();
+    tokio::spawn(async move {
+        axum::serve(plugin, router)
+            .with_graceful_shutdown(plugin_stop.cancelled_owned())
+            .await
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:5202").await?;
+    tokio::spawn(relay(listener, stop.clone()));
+    let starter = tokio::net::UnixListener::bind(runtime.join("start.sock"))?;
+    std::os::unix::fs::chown(runtime.join("start.sock"), None, Some(1000))?;
+    tokio::fs::set_permissions(
+        runtime.join("start.sock"),
+        std::fs::Permissions::from_mode(0o660),
+    )
+    .await?;
+    let daemon = Arc::new(Mutex::new(None::<tokio::process::Child>));
+    let daemon_task = daemon.clone();
+    let start_stop = stop.clone();
+    tokio::spawn(async move {
+        loop {
+            let accepted = tokio::select! {
+                () = start_stop.cancelled() => break,
+                result = starter.accept() => result,
+            };
+            let Ok((mut client, _)) = accepted else {
+                break;
+            };
+            let mut operation = [0u8; 5];
+            match tokio::time::timeout(Duration::from_secs(2), client.read_exact(&mut operation))
+                .await
+            {
+                Ok(Ok(_)) => {}
+                _ => continue,
+            };
+            let mut daemon = daemon_task.lock().await;
+            if &operation == b"reset" {
+                let reply = match clear_store(&mut daemon).await {
+                    Ok(()) => "OK".to_owned(),
+                    Err(error) => error.message,
+                };
+                let _ = client.write_all(reply.as_bytes()).await;
+                continue;
+            }
+            if &operation != b"start" {
+                continue;
+            }
+            let ready = match daemon.as_mut() {
+                Some(child) => matches!(child.try_wait(), Ok(None)),
+                None => false,
+            };
+            if !ready {
+                // The daemon's home is private namespace-root state, not the
+                // engine's configuration, and plugins cannot be user supplied.
+                let mut command = Command::new("/opt/cairn-docker/bin/dockerd");
+                command
+                    .args([
+                        "--rootless",
+                        "--host=unix:///run/cairn-docker/docker.sock",
+                        "--group=1000",
+                        "--data-root=/var/lib/cairn-docker",
+                        "--exec-root=/run/cairn-docker/exec",
+                        "--pidfile=/run/cairn-docker/dockerd.pid",
+                        "--config-file=/run/cairn-docker/daemon.json",
+                        "--authorization-plugin=cairn",
+                        "--storage-driver=overlay2",
+                        "--shutdown-timeout=5",
+                    ])
+                    .env("HOME", "/run/cairn-docker")
+                    .env("XDG_RUNTIME_DIR", RUNTIME)
+                    .stdin(std::process::Stdio::null())
+                    .kill_on_drop(true);
+                *daemon = command.spawn().ok();
+            }
+            let _ = client
+                .write_all(if daemon.is_some() {
+                    b"OK"
+                } else {
+                    b"Docker daemon launch failed"
+                })
+                .await;
+        }
+    });
+    // The plugin spec directory and config are root-private within the managed
+    // runtime bind. The engine cannot replace the policy or daemon configuration.
+    tokio::fs::create_dir_all("/run/docker/plugins").await?;
+    tokio::fs::write(
+        "/run/docker/plugins/cairn.spec",
+        b"unix:///run/cairn-docker/plugins/cairn.sock",
+    )
+    .await?;
+    tokio::fs::write(
+        runtime.join("daemon.json"),
+        b"{\"features\":{\"containerd-snapshotter\":false}}",
+    )
+    .await?;
+    let mut engine = Command::new("/run/cairn-entrypoint/cairn");
+    engine
+        .arg("runner-entry")
+        .env("HOME", "/home/node")
+        .env("DOCKER_HOST", format!("unix://{SOCKET}"))
+        .env(
+            "PATH",
+            "/opt/cairn-docker:/opt/cairn-native-tools/bin:/home/node/.local/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        )
+        .kill_on_drop(true);
+    unprivileged(&mut engine);
+    let mut engine = engine.spawn()?;
+    let status = tokio::select! {
+        result = engine.wait() => result?.code().unwrap_or(143),
+        () = stop.cancelled() => 143,
+    };
+    // systemd confirms all descendant termination before checkpoint/unmount.
+    // Best-effort graceful daemon shutdown improves crash consistency, but is
+    // never a substitute for cgroup fencing on cancellation or supervisor death.
+    if let Some(daemon) = daemon.lock().await.as_mut()
+        && let Some(pid) = daemon.id()
+    {
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(5), daemon.wait()).await;
+    }
+    Ok(status)
+}
+
+/// The immutable docker wrapper invokes this before commands needing a server.
+async fn request(operation: &[u8]) -> Result<()> {
+    let mut client = tokio::net::UnixStream::connect(Path::new(RUNTIME).join("start.sock")).await?;
+    client.write_all(operation).await?;
+    let mut reply = Vec::new();
+    tokio::time::timeout(Duration::from_secs(120), client.read_to_end(&mut reply))
+        .await
+        .map_err(|_| Error::timeout("Native Docker startup request timed out."))??;
+    if reply != b"OK" {
+        return Err(Error::unavailable(
+            String::from_utf8_lossy(&reply).into_owned(),
+        ));
+    }
+    Ok(())
+}
+
+pub async fn reset() -> Result<()> {
+    request(b"reset").await
+}
+
+pub async fn ensure() -> Result<()> {
+    request(b"start").await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let result = Command::new(DOCKER)
+            .args(["--host", &format!("unix://{SOCKET}"), "info"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .status()
+            .await?;
+        if result.success() {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(Error::timeout(
+                "This conversation's Docker daemon did not become ready; inspect the run's daemon diagnostics.",
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Set before Tokio starts: the only setuid helpers run in RootlessKit's outer
+/// bootstrap. This process, the engine and dockerd can never gain host privileges.
+pub fn harden_enclave() -> std::io::Result<()> {
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy() -> Policy {
+        Policy {
+            plan: Arc::new(
+                json!({ "sandbox": "workspace-write", "projectRoot": "/workspace", "guestDataRoot": "/data", "runId": "run" }),
+            ),
+        }
+    }
+
+    #[test]
+    fn docker_api_cannot_acquire_namespace_mount_device_or_restart_privileges() {
+        for host in [
+            json!({"Privileged":true}),
+            json!({"CapAdd":["SYS_ADMIN"]}),
+            json!({"PidMode":"host"}),
+            json!({"VolumesFrom":["other"]}),
+            json!({"Devices":[{}]}),
+            json!({"SecurityOpt":["seccomp=unconfined"]}),
+            json!({"RestartPolicy":{"Name":"always"}}),
+            json!({"CgroupParent":"/"}),
+            json!({"Runtime":"other"}),
+        ] {
+            assert!(policy().host_config(&host).is_err(), "{host}");
+        }
+        assert!(policy().host_config(&json!({"Binds":["database:/var/lib/postgresql/data"],"RestartPolicy":{"Name":"no"}})).is_ok());
+    }
+
+    #[test]
+    fn docker_driver_options_and_unrecognized_management_apis_fail_closed() {
+        assert!(
+            policy()
+                .volume_driver(
+                    &json!({"Name":"local","Options":{"device":"/host","type":"none","o":"bind"}})
+                )
+                .is_err()
+        );
+        for path in [
+            "/v1.55/plugins/create",
+            "/swarm/init",
+            "/v1.55/secrets/create",
+            "/v1.55/containers/%2fhost/start",
+        ] {
+            assert!(
+                policy()
+                    .authorize(&json!({"RequestUri":path,"RequestMethod":"POST"}))
+                    .is_err()
+            );
+        }
+        assert!(
+            policy()
+                .authorize(&json!({"RequestUri":"/v1.55/info","RequestMethod":"GET"}))
+                .is_ok()
+        );
+    }
+}

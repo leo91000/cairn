@@ -309,6 +309,9 @@ pub struct Launch<'a> {
     pub workspace: &'a Path,
     pub output: &'a Path,
     pub identity: &'a Identity,
+    pub conversation: Option<&'a super::identity::Identity>,
+    pub docker_data: Option<&'a Path>,
+    pub docker_runtime: Option<&'a Path>,
     pub temporary: &'a Path,
     pub auth: Option<&'a Path>,
 }
@@ -330,16 +333,20 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
         "--collect".into(),
         "--service-type=exec".into(),
         format!("--unit={}", unit(launch.id)?),
-        format!("--uid={}", launch.identity.user),
+        format!(
+            "--uid={}",
+            launch
+                .conversation
+                .map_or(launch.identity.user.as_str(), |identity| identity
+                    .user
+                    .as_str())
+        ),
     ];
     let mut property = |value: String| args.push(format!("--property={value}"));
     for value in [
         "KillMode=control-group",
         "TimeoutStopSec=10s",
         "SendSIGKILL=yes",
-        "NoNewPrivileges=yes",
-        "CapabilityBoundingSet=",
-        "RestrictSUIDSGID=yes",
         "ProtectKernelTunables=yes",
         "ProtectKernelModules=yes",
         "ProtectControlGroups=yes",
@@ -359,6 +366,25 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
     ] {
         property(value.into());
     }
+    if launch.conversation.is_some() {
+        // RootlessKit's newuidmap/newgidmap need their standard setuid transition
+        // under the unique host account. The immutable namespace entrypoint sets
+        // NNP before any daemon or engine is launched and empties the engine's
+        // bounding set. Retain every mount/device/cgroup restriction here.
+        property("NoNewPrivileges=no".into());
+        for group in ["render", "video"] {
+            if std::fs::read_to_string("/etc/group")?
+                .lines()
+                .any(|line| line.starts_with(&format!("{group}:")))
+            {
+                property(format!("SupplementaryGroups={group}"));
+            }
+        }
+    } else {
+        property("NoNewPrivileges=yes".into());
+        property("CapabilityBoundingSet=".into());
+        property("RestrictSUIDSGID=yes".into());
+    }
     property(format!(
         "BindsTo={} {}",
         supervisor_unit()?,
@@ -375,7 +401,11 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
     property(format!("RootDirectory={}", path_property(launch.root)?));
     property(format!(
         "WorkingDirectory={}",
-        path_property(Path::new(text(launch.plan, "cwd")))?
+        if launch.conversation.is_some() {
+            "/".into()
+        } else {
+            path_property(Path::new(text(launch.plan, "cwd")))?
+        }
     ));
     for source in [
         "/usr",
@@ -391,6 +421,8 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
         "/etc/nsswitch.conf",
         "/etc/passwd",
         "/etc/group",
+        "/etc/subuid",
+        "/etc/subgid",
         "/etc/hosts",
         "/etc/resolv.conf",
         "/etc/vulkan",
@@ -457,6 +489,37 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
         path_property(launch.temporary)?
     ));
     property("ReadWritePaths=+/tmp".into());
+    if let (Some(docker_data), Some(docker_runtime)) = (launch.docker_data, launch.docker_runtime) {
+        for (source, target) in [
+            (docker_data.to_owned(), "/var/lib/cairn-docker"),
+            (docker_runtime.join("runtime"), "/run/cairn-docker"),
+            (docker_runtime.join("rootlesskit"), "/run/cairn-rootlesskit"),
+            (docker_runtime.join("plugins"), "/run/docker/plugins"),
+        ] {
+            property(format!("BindPaths={}:{}", path_property(&source)?, target));
+            property(format!("ReadWritePaths=+{target}"));
+        }
+        let tools = std::env::var("CAIRN_NATIVE_DOCKER_TOOLS")
+            .unwrap_or_else(|_| "/opt/cairn-native/docker-tools/v1".into());
+        property(format!(
+            "BindReadOnlyPaths={}:/opt/cairn-docker",
+            path_property(Path::new(&tools))?
+        ));
+        let channel = launch
+            .data
+            .join("runs")
+            .join(text(launch.plan, "runId"))
+            .join("home")
+            .join(crate::microvm::mcp::SOCKET);
+        if channel.exists() {
+            property(format!(
+                "BindReadOnlyPaths={}:/run/cairn-mcp.sock",
+                path_property(&channel)?
+            ));
+        }
+        property("DeviceAllow=/dev/net/tun rw".into());
+        property("BindPaths=/dev/net/tun".into());
+    }
     let bindings: Vec<super::home::Binding> = serde_json::from_value(
         launch
             .plan
@@ -543,11 +606,33 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
     args.extend([
         "--setenv=HOME=/home/node",
         "--setenv=CAIRN_AUTH_SOCKET=/run/cairn-auth.sock",
-        "--setenv=PATH=/opt/cairn-native-tools/bin:/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin",
-        "--",
-        "/run/cairn-entrypoint/cairn",
-        "runner-entry",
+        "--setenv=PATH=/opt/cairn-docker/bin:/opt/cairn-native-tools/bin:/home/node/.local/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     ].map(String::from));
+    if launch.conversation.is_some() {
+        args.extend(
+            [
+                "--setenv=HOME=/run/cairn-docker",
+                "--setenv=XDG_RUNTIME_DIR=/run/cairn-docker",
+                "--",
+                "/opt/cairn-docker/bin/rootlesskit",
+                "--state-dir=/run/cairn-rootlesskit",
+                "--subid-source=static",
+                "--net=slirp4netns",
+                "--disable-host-loopback",
+                "--port-driver=none",
+                "--pidns",
+                "--ipcns",
+                "--utsns",
+                "--copy-up=/etc",
+                "--propagation=rslave",
+                "/run/cairn-entrypoint/cairn",
+                "native-enclave",
+            ]
+            .map(String::from),
+        );
+    } else {
+        args.extend(["--", "/run/cairn-entrypoint/cairn", "runner-entry"].map(String::from));
+    }
     Ok(args)
 }
 

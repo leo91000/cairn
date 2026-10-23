@@ -95,6 +95,12 @@ def main():
     with tempfile.TemporaryDirectory(prefix='cairn-native-smoke-', dir='/var/tmp') as temporary:
         root = Path(temporary)
         root.chmod(0o700)
+        host.require_docker_host()
+        previous_install = host.INSTALL
+        host.INSTALL = root / 'managed-tools'
+        docker_tools = host.prepare_docker_tools()
+        host.configure_docker_apparmor(docker_tools)
+        host.INSTALL = previous_install
         (root / 'disposable-fixture').touch()
         data, state = root / 'data', root / 'state'
         tools = root / 'versions/synthetic/tools'
@@ -210,6 +216,7 @@ def main():
         def start_controller():
             environment = dict(DATA_DIR=str(data), RUNNER_STATE_DIR=str(state), RUNNER_BIND='127.0.0.1:4311',
                 CAIRN_NATIVE_TOOLS=str(tools), CAIRN_NATIVE_USER=user, CAIRN_NODE_BACKEND='native',
+                CAIRN_NATIVE_DOCKER_TOOLS=str(docker_tools),
                 APP_RUNTIME_ID='synthetic', CAIRN_NATIVE_SUPERVISOR_UNIT=supervisor)
             command('systemd-run', '--quiet', '--collect', '--service-type=exec', '--unit=' + supervisor,
                 *['--setenv=' + key + '=' + value for key, value in environment.items()], str(binary), 'native-controller')
@@ -245,7 +252,7 @@ def main():
             cached.unlink()
             metrics['preparedBaseMetadataBytes'] = ready['metadataBytes']
 
-        def start(run, long=True, lease=90000, expected='changed', legacy=False, measure=None):
+        def start(run, long=True, lease=90000, expected='changed', legacy=False, measure=None, docker_script='', sandbox='workspace-write'):
             seed(run)
             attempt = str(uuid.uuid4())
             attempts.append(attempt)
@@ -270,8 +277,12 @@ def main():
                 script += 'test "$(cat /home/node/.claude/CLAUDE.md)" = "legacy user instructions"\n'
                 script += 'test "$(cat /home/node/.codex/sessions/keep)" = "session state"\n'
             script += 'if test -e persisted; then test "$(cat persisted)" = "' + expected + '"; fi\n'
-            script += 'printf changed > persisted\nprintf temporary-artifact > /tmp/native-artifact\n'
-            script += f'printf %s {attempt} > ready\n'
+            if sandbox != 'read-only':
+                script += 'printf changed > persisted\n'
+            script += 'printf temporary-artifact > /tmp/native-artifact\n'
+            script += docker_script
+            if sandbox != 'read-only':
+                script += f'printf %s {attempt} > ready\n'
             if measure:
                 script += "while ! test -e measure-go; do sleep 0.05; done\n/usr/bin/python3 - <<'MEASURE' > measure.json\n" + MEASURE + '\nMEASURE\n'
                 script += 'printf measured > measure-ready\n'
@@ -280,8 +291,8 @@ def main():
             (tools / 'bin/codex').write_text(script)
             (tools / 'bin/codex').chmod(0o555)
             plan = dict(id=attempt, runId=run, backend='native', runtimeId='synthetic', nodeLeaseRequired=True,
-                expires=None, cwd=str(workspace / base_projects[run] if run in base_projects else workspace), projectRoot=str(workspace), sandbox='workspace-write',
-                resources=dict(cpu=1, memoryMiB=512, diskMiB=256), args=[], prompt='synthetic input', storage=contexts[run],
+                expires=None, cwd=str(workspace / base_projects[run] if run in base_projects else workspace), projectRoot=str(workspace), sandbox=sandbox,
+                resources=dict(cpu=1, memoryMiB=1024 if docker_script else 512, diskMiB=2048 if docker_script else 256), args=[], prompt='synthetic input', storage=contexts[run],
                 imports=[dict(source=str(workspace), target=str(workspace)), dict(source=str(data / 'runs' / run / 'home'), target='/home/node')])
             if run in base_archives:
                 plan.update(nativeProjectArchives=base_archives[run], nativeProjectBase=base_keys[run])
@@ -293,6 +304,7 @@ def main():
             (data / 'runner-plans' / (attempt + '.json')).write_text(json.dumps(plan))
             manager('checkpoint', run=run, attempt=attempt)
             api('/runs/' + attempt + '/lease', {'remainingMs': lease})
+            startup = time.perf_counter()
             api('/runs/' + attempt)
             def execution_ready():
                 if (state / (attempt + '.exit')).exists():
@@ -301,6 +313,8 @@ def main():
                 return (managed(run) / 'ready').read_text() == attempt
 
             eventually(execution_ready)
+            metrics.setdefault('conversationStartupMs', []).append(dict(ms=(time.perf_counter() - startup) * 1000,
+                docker=bool(docker_script), resume=run in started_runs))
             if (state / (attempt + '.exit')).exists() and int((state / (attempt + '.exit')).read_text()) != 0:
                 for record in (state / (attempt + '.log')).read_text().splitlines():
                     event = json.loads(record)
@@ -498,6 +512,55 @@ def main():
             else:
                 raise AssertionError('Completed attempt restarted.')
             manager('publish', run=run)
+            if os.environ.get('CAIRN_NATIVE_DOCKER_QUALIFY') == '1':
+                import socket
+                api('/node-budget', dict(limits=dict(diskMiB=8192, cpu=2, memoryMiB=2048), slots=2))
+                docker_run = create()
+                docker_other = create()
+
+                def docker_script(phase):
+                    workload = Path(__file__).with_name('native_docker_workload.py').read_text()
+                    return '/usr/bin/python3 - ' + phase + " <<'NATIVE_DOCKER'\n" + workload + '\nNATIVE_DOCKER\n'
+
+                def docker_result(current):
+                    path = state / 'native' / current / 'data/home/.docker-test-result.json'
+                    return json.loads(path.read_text())
+
+                fresh = start(docker_run, lease=300000, docker_script=docker_script('fresh'))
+                metrics['dockerFresh'] = docker_result(docker_run)
+                namespace = command('systemctl', 'show', 'cairn-native-' + fresh + '.service', '--property=ControlGroup', '--value').stdout.strip()
+                group = Path('/sys/fs/cgroup') / namespace.lstrip('/')
+                metrics['dockerCgroup'] = dict(cpuMax=(group / 'cpu.max').read_text().strip(),
+                    memoryMax=(group / 'memory.max').read_text().strip(), cpuStat=(group / 'cpu.stat').read_text())
+                assert int((group / 'memory.max').read_text()) == 1024 * 1024 * 1024
+                assert (group / 'cpu.max').read_text().split()[0] != 'max'
+                with socket.socket() as probe:
+                    assert probe.connect_ex(('127.0.0.1', 57431)) != 0, 'Docker published on the host network.'
+                parallel = start(docker_other, lease=300000, docker_script=docker_script('other'))
+                owner_a = json.loads((state / 'native' / docker_run / 'data/.cairn-identity.json').read_text())
+                owner_b = json.loads((state / 'native' / docker_other / 'data/.cairn-identity.json').read_text())
+                assert owner_a['root_uid'] != owner_b['root_uid']
+                assert abs(owner_a['subuid'] - owner_b['subuid']) >= 65536
+                api('/runs/' + parallel, method='DELETE')
+                fenced(docker_other, parallel)
+                api('/runs/' + fresh, method='DELETE')
+                fenced(docker_run, fresh)
+                point = manager('publish', run=docker_run)
+                resumed_docker = start(docker_run, lease=300000, docker_script=docker_script('resume'))
+                metrics['dockerResume'] = docker_result(docker_run)
+                api('/runs/' + resumed_docker, method='DELETE')
+                fenced(docker_run, resumed_docker)
+                manager('restore', run=docker_run, backupId=point['backupId'])
+                restored_docker = start(docker_run, lease=300000, docker_script=docker_script('resume'))
+                metrics['dockerRestored'] = docker_result(docker_run)
+                command('systemctl', 'kill', '--signal=SIGKILL', '--kill-who=main', supervisor)
+                eventually(lambda: command('systemctl', 'show', supervisor, '--property=LoadState', '--value').stdout.strip() == 'not-found')
+                start_controller()
+                fenced(docker_run, restored_docker)
+                api('/node-budget', dict(limits=dict(diskMiB=8192, cpu=2, memoryMiB=2048), slots=2))
+                readonly_docker = start(docker_run, long=False, lease=300000, sandbox='read-only', docker_script=docker_script('readonly'))
+                fenced(docker_run, readonly_docker)
+                manager('publish', run=docker_run)
             # Publication checks every decoded S3 block for generated secrets.
             s3 = boto3.client('s3', endpoint_url=os.environ['CAIRN_NODE_TEST_S3_ENDPOINT'])
             objects = [obj for page in s3.get_paginator('list_objects_v2').paginate(Bucket='cairn-node-test') for obj in page.get('Contents', [])]

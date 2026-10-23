@@ -1,11 +1,22 @@
 {
   "schema": 2,
-  "epoch": 12,
-  "databaseVersion": 11,
+  "epoch": 13,
+  "databaseVersion": 12,
   "legacyTree": "a6aae371f1d76cceb2f510180531f0ef17ec3e60",
   "automaticMigration": {
-    "fromEpochs": [3, 4, 5, 6, 7, 8, 9, 10, 11],
-    "previousDatabaseVersion": 10,
+    "fromEpochs": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "previousDatabaseVersion": 11,
     "plan": "docs/AUTOMATIC-MIGRATIONS.md",
     "tests": [
       "settings::tests::length_limits_are_positive_integers_with_type_specific_caps",
@@ -25,7 +36,11 @@
       "native_nodes_admit_six_attempts_only_after_the_configured_budget_is_applied",
       "wildcard_node_access_still_requires_trusted_contributors",
       "native::service::tests::native_budget_supports_six_slots_and_rejects_invalid_capacities",
-      "native::service::tests::controller_enforces_all_configured_slots_before_preparing_an_attempt"
+      "native::service::tests::controller_enforces_all_configured_slots_before_preparing_an_attempt",
+      "native::identity::tests::ranges_never_overlap_host_users_or_other_subordinates",
+      "native::identity::tests::remapping_preserves_volume_users_and_is_idempotent_for_disjoint_ranges",
+      "native::docker::tests::docker_api_cannot_acquire_namespace_mount_device_or_restart_privileges",
+      "native::docker::tests::docker_driver_options_and_unrecognized_management_apis_fail_closed"
     ]
   }
 }

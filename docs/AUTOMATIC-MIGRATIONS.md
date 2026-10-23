@@ -138,7 +138,7 @@ state, diagnose and retry it or apply a reviewed forward fix. Never lower
 Manager/runner rollout uses the existing automatic migration gate. This release
 does not create or restore backups, convert conversations, or grant host trust.
 
-## Current transition: epochs 3–11 to 12
+## Retained transition: epochs 3–11 to 12
 
 Epoch 12 adds optional `[setup]` declarations to installed plugin manifests.
 Previous binaries reject this field, so SQLite advances from version 10 to 11
@@ -161,3 +161,35 @@ package files, vault and identity, then retry this candidate or deploy a reviewe
 forward fix. Never lower SQLite `user_version`, the epoch or the legacy tree, or
 start an older manager against the migrated installation. Merging does not
 release or deploy an installation.
+
+## Current transition: epochs 3–12 to 13
+
+Epoch 13 stores native conversation ownership mappings inside the encrypted ext4
+filesystem and allocates a distinct host account and subordinate UID/GID range to
+each conversation. Docker metadata retains container owners and modes. Old native
+controllers flatten file ownership and cannot safely write this state. SQLite
+advances from 11 to 12 before manager admission, fencing previous managers. The
+block object, encryption, manifest and legacy formats remain unchanged.
+
+Existing native files are assigned to namespace UID 1000 once, under exclusive
+physical ownership. Subsequent same-node resumes compare one mapping record;
+cross-node recovery translates only the previous account/range while retaining
+container users. The mapping is published with the data. Interrupted translation
+retains the old mapping for an idempotent retry; neither source work nor the local
+journal is discarded. Retain the identity registry with the environment, including
+after cache eviction. Do not recycle accounts into another conversation.
+
+Before activating this runtime on native hosts, refresh the reviewed supervisor,
+provision its managed Docker tools and mapping prerequisites, drain and stop the
+previous native runtime. The supervisor's existing epoch gate deliberately refuses
+a routine in-place upgrade from epoch 12. An operator must perform the reviewed
+native transition; this PR neither releases nor deploys it. Never start an old
+native controller against a disk written by this runtime. Rollback needs matching
+pre-transition data and binaries; prefer a forward fix. Keep the existing legacy
+Git tree and every earlier transition qualification.
+
+Qualification includes disjoint ID allocation, ownership translation, mandatory
+Docker API authorization, existing native storage recovery, and the disposable
+native-runtime job. Images, cache and volumes follow the same publication and
+clean eviction rules as other native disk bytes. Native-to-VM conversion refuses
+an initialized Docker store rather than silently losing it; see NATIVE-DOCKER.md.

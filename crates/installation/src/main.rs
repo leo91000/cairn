@@ -51,6 +51,13 @@ where
     }
     cairn_installation::tls::install_provider();
 
+    if std::env::args().nth(1).as_deref() == Some("native-enclave")
+        && let Err(error) = cairn_installation::native::docker::harden_enclave()
+    {
+        eprintln!("Could not harden the native enclave: {error}");
+        return ExitCode::FAILURE;
+    }
+
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     // Validate the inherited control socket before Tokio creates any FDs.
     if args.first().is_some_and(|a| a == "supervise") && !has_control_socket() {
@@ -178,6 +185,9 @@ where
         }
         "guest" => cairn_installation::microvm::guest::serve(stop).await?,
         "native-controller" => cairn_installation::native::serve(stop).await?,
+        "native-enclave" => return cairn_installation::native::docker::enclave(stop).await,
+        "native-docker" => cairn_installation::native::docker::ensure().await?,
+        "native-docker-reset" => cairn_installation::native::docker::reset().await?,
         "native-watchdog" => {
             cairn_installation::native::watchdog(
                 Path::new(arg(&args, 1, "Missing native lease file.")?),
