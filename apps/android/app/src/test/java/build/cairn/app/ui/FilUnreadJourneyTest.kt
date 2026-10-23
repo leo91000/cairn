@@ -51,6 +51,7 @@ class FilUnreadJourneyTest {
                 startedAt = now - 30 * 60_000,
                 finishedAt = now - 20 * 60_000,
                 snapshot = Snapshot(task = notes, agent = main),
+                provider = "codex",
                 unread = true,
                 preview =
                     "Trois nouveautés cette semaine : reprise à la demande, partage d’installations et notifications.",
@@ -63,6 +64,7 @@ class FilUnreadJourneyTest {
                 startedAt = now - 7_200_000,
                 finishedAt = now - 7_000_000,
                 snapshot = Snapshot(task = audit, agent = main),
+                provider = "opencode",
             ),
         )
     private val chats =
@@ -75,6 +77,7 @@ class FilUnreadJourneyTest {
                 runId = "done-run",
                 updatedAt = now - 4 * 60_000,
                 finishedAt = now - 3 * 60_000,
+                provider = "claude",
                 unread = true,
                 preview =
                     "Le changelog est prêt : 12 corrections, 3 nouveautés. J’ai ouvert la PR #184.",
@@ -85,6 +88,7 @@ class FilUnreadJourneyTest {
                 agentName = "Rédacteur",
                 pendingQuestions = 1,
                 updatedAt = now - 60_000,
+                provider = "claude",
             ),
             Chat(
                 "old",
@@ -93,6 +97,7 @@ class FilUnreadJourneyTest {
                 status = "succeeded",
                 updatedAt = now - 86_400_000,
                 finishedAt = now - 86_400_000,
+                provider = "codex",
             ),
         )
 

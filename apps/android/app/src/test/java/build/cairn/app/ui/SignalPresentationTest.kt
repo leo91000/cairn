@@ -144,6 +144,26 @@ class SignalPresentationTest {
     }
 
     @Test
+    fun `each row carries the coding agent of its latest turn`() {
+        val feed =
+            buildFeed(
+                listOf(
+                    Chat("switched", status = "running", provider = "claude"),
+                    Chat("new"),
+                ),
+                listOf(
+                    Run("audit-run", taskId = "audit", status = "running", provider = "opencode")
+                ),
+                listOf(Task("audit", "Audit")),
+            )
+        assertEquals(
+            listOf("chat:switched" to "claude", "run:audit-run" to "opencode"),
+            feed.running.map { it.key to it.harness },
+        )
+        assertNull(feed.recent.single().harness)
+    }
+
+    @Test
     fun `missions that need review and running missions are surfaced`() {
         val tasks = listOf(Task("a", "Audit"), Task("b", "Veille"))
         val activity =

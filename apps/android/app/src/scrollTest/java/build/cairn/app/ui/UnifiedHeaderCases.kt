@@ -51,6 +51,7 @@ abstract class UnifiedHeaderCases {
             runId = "run",
             run = Run("run", status = "succeeded", startedAt = now - 60_000),
             updatedAt = now,
+            provider = "claude",
         )
     private val installations =
         """[{"id":"fixture","name":"Maison","role":"owner","online":true},""" +

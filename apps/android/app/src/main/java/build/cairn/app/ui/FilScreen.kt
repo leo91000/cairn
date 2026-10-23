@@ -90,6 +90,8 @@ internal data class FeedItem(
     val outcome: String? = null,
     val setAside: SetAside? = null,
     val requester: FeedRequester? = null,
+    /** The coding agent of its latest turn. */
+    val harness: String? = null,
 ) {
     /** Only a blocked outcome can be dismissed; input the agent asked for can only be snoozed. */
     val dismissible
@@ -175,6 +177,7 @@ internal fun buildFeed(
                     chat.run?.startedAt,
                     chatId = chat.id,
                     runId = chat.runId,
+                    harness = chat.provider,
                 )
             val wait = chatWaitNotice(chat.run)
             when {
@@ -271,6 +274,7 @@ internal fun buildFeed(
                     run.startedAt,
                     runId = run.id,
                     taskId = run.taskId,
+                    harness = run.provider,
                 )
             when {
                 run.active ->
@@ -781,6 +785,16 @@ private fun FeedRow(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         if (item.working) WorkingLabel("En cours", Modifier.padding(end = 6.dp))
+                        item.harness?.let {
+                            // Beside a two-line preview, it stays on the first line.
+                            val line =
+                                if (item.preview != null)
+                                    Modifier.align(Alignment.Top).padding(top = 4.dp)
+                                else Modifier
+                            Box(line.padding(end = 5.dp).testTag("harness-$it")) {
+                                ProviderMark(it, 13.dp)
+                            }
+                        }
                         Text(
                             item.preview ?: item.subtitle,
                             style = MaterialTheme.typography.bodyMedium,

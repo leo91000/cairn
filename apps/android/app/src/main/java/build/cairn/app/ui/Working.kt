@@ -425,7 +425,7 @@ private fun WaitingTask(content: @Composable RowScope.() -> Unit) {
  * indicator.
  */
 @Composable
-internal fun WorkingAvatar(name: String, key: String, size: Dp) {
+internal fun WorkingAvatar(name: String, key: String, size: Dp, harness: String? = null) {
     val primary = MaterialTheme.colorScheme.primary
     val transition = rememberInfiniteTransition(label = "avatar-working")
     val travel by
@@ -501,7 +501,7 @@ internal fun WorkingAvatar(name: String, key: String, size: Dp) {
             )
             drawCircle(primary, stroke * 0.9f, position)
         }
-        AgentAvatar(name, key, size)
+        AgentAvatar(name, key, size, harness = harness)
     }
 }
 

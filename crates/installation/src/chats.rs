@@ -158,6 +158,11 @@ fn view(db: &Db<'_>, mut chat: Value) -> Result<Value> {
     chat["suspendedByExclusive"] = run
         .as_ref()
         .map_or(Value::Null, |run| run["suspendedByExclusive"].clone());
+    // The coding agent of the latest turn, which a message may switch from the agent's own.
+    chat["provider"] = run
+        .as_ref()
+        .and_then(|run| Provider::of_run(run).ok())
+        .map_or(Value::Null, |provider| provider.as_str().into());
     // When the agent's latest turn ended, for what the Fil shows as unread.
     chat["finishedAt"] = run.map_or(Value::Null, |run| run["finishedAt"].clone());
     Ok(chat)
@@ -1122,6 +1127,53 @@ mod tests {
             assert_eq!(db.kv("chat-error:chat")?.unwrap(), "Current preparation failed");
             Ok(())
         }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn chats_and_run_summaries_show_the_coding_agent_of_the_latest_turn() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                for (id, agent) in [
+                    ("switched", json!({ "provider": "claude" })),
+                    ("legacy", json!({})),
+                ] {
+                    let run = json!({
+                        "id": id,
+                        "taskId": id,
+                        "createdAt": 0,
+                        "status": "succeeded",
+                        "snapshot": { "agent": agent },
+                    });
+                    db.add_run(&run, None)?;
+                    db.put(
+                        "chats",
+                        &json!({ "id": id, "runId": id, "agentId": "agent" }),
+                    )?;
+                }
+                db.put(
+                    "chats",
+                    &json!({ "id": "new", "runId": null, "agentId": "agent" }),
+                )?;
+
+                let chats = list(db)?;
+                let provider = |id: &str| {
+                    chats.iter().find(|chat| chat["id"] == id).unwrap()["provider"].clone()
+                };
+                assert_eq!(provider("switched"), "claude");
+                assert_eq!(provider("legacy"), "codex");
+                assert!(provider("new").is_null());
+
+                let runs = db.runs(None, None, 10, 0, false)?;
+                let provider =
+                    |id: &str| runs.iter().find(|run| run["id"] == id).unwrap()["provider"].clone();
+                assert_eq!(provider("switched"), "claude");
+                assert_eq!(provider("legacy"), "codex");
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

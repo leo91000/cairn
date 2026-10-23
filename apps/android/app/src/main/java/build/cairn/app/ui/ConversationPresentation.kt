@@ -280,6 +280,8 @@ internal fun ConversationHeader(
     agentKey: String,
     status: String,
     live: String?,
+    /** The coding agent of the latest turn, marked on the avatar. */
+    harness: String? = null,
     liveSince: Long?,
     route: ConnectionRoute,
     back: () -> Unit,
@@ -310,8 +312,8 @@ internal fun ConversationHeader(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         // The comet ring turns while the agent is running this conversation.
-                        if (live != null) WorkingAvatar(agent, agentKey, 36.dp)
-                        else AgentAvatar(agent, agentKey, 36.dp)
+                        if (live != null) WorkingAvatar(agent, agentKey, 36.dp, harness)
+                        else AgentAvatar(agent, agentKey, 36.dp, harness = harness)
                         Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
