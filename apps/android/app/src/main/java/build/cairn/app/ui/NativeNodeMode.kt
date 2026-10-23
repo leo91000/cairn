@@ -72,6 +72,14 @@ internal fun NativeNodeMode(vm: CairnViewModel, node: ExecutionNode, changed: su
             else "Natif protégé",
             style = MaterialTheme.typography.titleSmall,
         )
+        if (
+            node.nativeModeObserved != null &&
+                (node.nativeModeStatus in listOf("pending", "failed") ||
+                    node.nativeModeObserved.status != "applied")
+        )
+            Text(
+                "Dernier mode confirmé ci-dessus ; privilèges actuels non confirmés, nouveaux placements bloqués."
+            )
         if (node.nativeModeStatus == "pending")
             Text(
                 "Basculement en cours. Les nouveaux placements attendent la confirmation de l’arrêt et du mode."

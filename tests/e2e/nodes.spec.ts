@@ -745,6 +745,8 @@ test('previews node administrator powers and keeps failed transitions visibly bl
   await review.getByRole('button', { name: 'Confirm access and restart managed executions' }).click()
   await expect(review).toHaveCount(0)
   await expect(card).toContainText('Change failed; new placements are blocked')
+  await expect(card).toContainText('Last confirmed: Native protected')
+  await expect(card).toContainText('Current privileges are unconfirmed')
   await expect(card).toContainText('Native protected')
   expect(requests[1]).toEqual({ mode: 'administrator', previewId: 'preview-one', confirm: true })
   await card.getByRole('button', { name: 'Switch to Native administrator', exact: true }).click()

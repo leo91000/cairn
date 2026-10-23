@@ -1059,9 +1059,10 @@ fn ensure_removable(db: &Db<'_>, kind: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Drops an agent's portrait, plugin grants and exclusive node grants.
+/// Drops an agent's portrait, plugin grants and node admission reviews.
 pub(crate) fn forget_agent(db: &Db<'_>, id: &str) -> Result<()> {
     db.delete(&format!("agent-avatar:{id}"))?;
+    crate::nodes::native_mode::forget_agent(db, id)?;
     crate::agent_grants::forget_agent(db, id)
 }
 

@@ -1832,3 +1832,46 @@ async fn native_mode_preview_includes_unplaced_automatic_work_and_rejects_concur
     assert_eq!(status, StatusCode::OK, "{pending}");
     assert_eq!(pending["nativeModeStatus"], "pending");
 }
+
+#[tokio::test]
+async fn deleting_an_agent_revokes_admin_review_before_reusing_its_creation_id() {
+    let f = Fixture::new().await;
+    let node_id = text(&f.node, "id");
+    let mut node = f.node.clone();
+    let generation = id();
+    node["nativeModeRequest"] = json!({ "mode": "administrator", "generation": generation });
+    node["nativeModeObserved"] =
+        json!({ "mode": "administrator", "generation": generation, "status": "applied" });
+    node["capabilities"]["nativeModeProtocol"] = 1.into();
+    node["nativeReviewedAgents"] = json!([f.agent["id"]]);
+    let original = f.run();
+    let before = node.clone();
+    assert!(
+        f.service
+            .store
+            .read(move |db| policy::allows(db, &original, &before))
+            .await
+            .unwrap()
+    );
+    f.service.store.put("nodes", node).await.unwrap();
+    let path = format!("/api/agents/{}", text(&f.agent, "id"));
+    let (status, result) = f.owner_call("DELETE", &path, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert!(
+        f.service.get("nodes", node_id).await.unwrap()["nativeReviewedAgents"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let (status, recreated) = f.owner_call("POST", "/api/agents", json!({
+        "creationId": f.agent["id"], "name": "Replayed creation", "access": { "backend": "native", "nodes": null }
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{recreated}");
+    assert_eq!(recreated["id"], f.agent["id"]);
+    let node = f.service.get("nodes", node_id).await.unwrap();
+    assert!(!cairn_installation::nodes::native_mode::reviewed(
+        &node, &recreated
+    ));
+    let (status, _) = f.owner_call("PUT", &path, json!({ "name": "Explicit replay", "access": { "backend": "native", "nodes": [node_id] } })).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}

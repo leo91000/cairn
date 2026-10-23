@@ -138,10 +138,10 @@ pub(crate) fn review_agent(
                 .is_some_and(|nodes| nodes.iter().any(|node| node == &id))
         });
         let confirmed = native_reviews.iter().any(|node| node == &id);
-        if allowed && explicit && !reviewed.contains(&agent["id"]) {
+        if allowed && !reviewed.contains(&agent["id"]) {
             if confirmed && owner_review {
                 reviewed.push(agent["id"].clone());
-            } else if !was_explicit {
+            } else if explicit && !was_explicit {
                 return Err(Error::forbidden(
                     "Review and explicitly confirm passwordless host sudo for each new administrative node access.",
                 ));
@@ -155,13 +155,28 @@ pub(crate) fn review_agent(
     Ok(())
 }
 
+/// Deleted and merged identities must never transfer a host review to a later
+/// creation retry that happens to reuse the same UUID.
+pub(crate) fn forget_agent(db: &Db<'_>, agent_id: &str) -> Result<()> {
+    for mut node in db.list("nodes")? {
+        if let Some(agents) = node["nativeReviewedAgents"].as_array_mut() {
+            let previous = agents.len();
+            agents.retain(|saved| saved != agent_id);
+            if agents.len() != previous {
+                db.put("nodes", &node)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn snapshot(db: &Db<'_>, node: &Value, mode: Mode) -> Result<Value> {
     let node_id = text(node, "id");
     let agents = db
         .list("agents")?
         .into_iter()
         .filter(|agent| crate::native::policy::native(agent) && super::agent_allows(agent, node_id))
-        .map(|agent| json!({ "id": agent["id"], "name": agent["name"], "access": policy(&agent) }))
+        .map(|agent| json!({ "id": agent["id"], "name": agent["name"], "revision": agent["revision"], "access": policy(&agent) }))
         .collect::<Vec<_>>();
     let authority = db.kv("native-authority")?.unwrap_or_default();
     let trusted_people = node["nativeAccounts"].as_array().into_iter().flatten().map(|account| json!({
@@ -355,5 +370,66 @@ mod tests {
             store.run(&run_id).await.unwrap()["nativeModeInterruption"],
             newer
         );
+    }
+
+    #[tokio::test]
+    async fn administrative_migration_reads_keep_revocation_without_workload_review() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        let node_id = id();
+        let agent_id = id();
+        let person = id();
+        let generation = id();
+        let node = json!({
+            "id": node_id, "nativeEnabled": true, "nativeAccounts": [person],
+            "capabilities": { "backend": "native", "nativeModeProtocol": 1 },
+            "nativeModeRequest": { "mode": "administrator", "generation": generation },
+            "nativeModeObserved": { "mode": "administrator", "generation": generation, "status": "applied" },
+            "nativeReviewedAgents": [],
+        });
+        let grant = json!({ "nativePrincipals": [person], "nativeAuthorityNodes": [node_id], "nativeProvenanceUnknown": false });
+        let mut run = grant.clone();
+        run["snapshot"] = json!({ "agent": { "id": agent_id, "access": { "backend": "native", "nodes": [node_id] } } });
+        run["backendMigration"] = json!({ "sourceReadReady": true, "grant": grant });
+        store
+            .put(
+                "agents",
+                json!({ "id": agent_id, "access": { "backend": "firecracker", "nodes": [] } }),
+            )
+            .await
+            .unwrap();
+        store
+            .set(
+                "native-authority",
+                json!({ "observedAt": now(), "accounts": { (person): {} } }),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .read(move |db| {
+                assert!(!crate::native::policy::allows(db, &run, &node)?);
+                assert!(crate::native::policy::allows_migration_source(
+                    db, &run, &node
+                )?);
+                let mut unfenced = run.clone();
+                unfenced["backendMigration"]["sourceReadReady"] = false.into();
+                assert!(!crate::native::policy::allows_migration_source(
+                    db, &unfenced, &node
+                )?);
+                let mut revoked = node.clone();
+                revoked["revoked"] = true.into();
+                assert!(!crate::native::policy::allows_migration_source(
+                    db, &run, &revoked
+                )?);
+                revoked = node;
+                revoked["nativeAccounts"] = json!([]);
+                assert!(!crate::native::policy::allows_migration_source(
+                    db, &run, &revoked
+                )?);
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 }

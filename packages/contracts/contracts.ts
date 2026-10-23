@@ -33,7 +33,7 @@ export const agentInput = z.object({
   exclusiveNodes: z.array(id).max(100).default([]),
   plugins: z.array(id).max(100).default([]),
   // An acknowledgement for this save, removed before persistence; never a profile mode.
-  nativeNodeReviews: z.array(id).max(100).optional().describe('Owner confirmation of the specifically reviewed administrator nodes selected in access.nodes. These grant unrestricted passwordless sudo on the real host, including access to locally present credentials and services. Never infer confirmation from an all-node grant or conversion. Not saved on the agent; delegated installation agents cannot approve it.'),
+  nativeNodeReviews: z.array(id).max(100).optional().describe('Owner confirmation of specifically reviewed administrator node IDs already covered by access.nodes, including wildcard access. Reviews only these nodes while preserving the placement selection. These grant unrestricted passwordless sudo on the real host, including access to locally present credentials and services. Never infer confirmation from an all-node grant or conversion. Not saved on the agent; delegated installation agents cannot approve it.'),
 })
 export const agentUpdate = z.object({
   provider: agentInput.shape.provider.removeDefault().optional(),

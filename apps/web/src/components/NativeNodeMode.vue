@@ -13,7 +13,19 @@ const preview = ref<NativeModePreview | null>(null)
 const busy = ref(false)
 const error = ref('')
 const target = computed(() => props.node.nativeModeProposal?.mode ?? (['pending', 'failed'].includes(props.node.nativeModeStatus ?? '') ? props.node.nativeModeRequest?.mode ?? 'protected' : props.node.nativeModeRequest?.mode === 'administrator' ? 'protected' : 'administrator'))
-const effective = computed(() => props.node.nativeModeObserved ? nativeModeLabel(props.node.nativeModeObserved.mode) : props.node.nativeModeRequest ? 'Effective mode unconfirmed' : 'Native protected')
+const confirmed = computed(() => {
+  const transitioning = ['pending', 'failed'].includes(props.node.nativeModeStatus ?? '')
+  const legacyProtected = !props.node.nativeModeObserved && !props.node.nativeModeRequest
+  return !transitioning && (props.node.nativeModeObserved?.status === 'applied' || legacyProtected)
+})
+const effective = computed(() => {
+  if (props.node.nativeModeObserved) {
+    const label = nativeModeLabel(props.node.nativeModeObserved.mode)
+    return confirmed.value ? label : `Last confirmed: ${label}`
+  }
+
+  return props.node.nativeModeRequest ? 'Effective mode unconfirmed' : 'Native protected'
+})
 
 async function open(mode = target.value) {
   busy.value = true
@@ -50,7 +62,10 @@ async function confirm() {
 
 <template>
   <section class="my-3 grid gap-2 rounded-xl border border-line p-4 text-sm" aria-label="Native host privileges">
-    <p><strong>{{ effective }}</strong> · effective on this node</p>
+    <p><strong>{{ effective }}</strong><span v-if="confirmed"> · effective on this node</span></p>
+    <p v-if="!confirmed">
+      Current privileges are unconfirmed; new placements are blocked.
+    </p>
     <p v-if="node.nativeModeStatus === 'pending'">
       Change in progress. New placements wait for stop and mode confirmation.
     </p>

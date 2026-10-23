@@ -42,7 +42,8 @@ the existing agent permission editor or node access step, which describes host
 sudo. Agent saves supply transient `nativeNodeReviews` node IDs from that informed
 review; node grants and trusted-person edits require transient
 `confirmNativeAdministration: true`. Neither is a persisted agent privilege
-mode. A wildcard alone does not approve administrator admission. Removing access
+mode. An owner tool call can review selected node IDs while preserving wildcard
+placement access; other administrative nodes remain unreviewed. A wildcard alone does not approve administrator admission. Removing access
 or changing backend removes that node's review; regranting a wildcard cannot
 revive it. Adding trusted people on an administrator node requires the existing
 node editor's informed owner confirmation. Native provenance, trusted people,
@@ -89,7 +90,12 @@ refuses new execution. Restart recovers owned work before serving requests. The
 same request is retried cooperatively by the connector; an applied generation is
 idempotent. Unconfirmed stop, unavailable sudo, disk cleanup failure or durable
 write failure cannot produce a protected success claim. Owners can retry from
-node details after diagnosing the supervisor.
+node details after diagnosing the supervisor. Durable-write errors remain failed
+and visible in health even when the disk cannot record the error. During an
+unconfirmed transition, clients name the last confirmed mode and explicitly
+mark current privileges unconfirmed. A first preparation interrupted before any
+engine session exists restarts with the preserved files and conversation history;
+an available engine session is still resumed.
 
 Returning to protected removes the Cairn sudo rule and restores the existing unit
 restrictions for new executions, after stopping old ones. It **does not** undo

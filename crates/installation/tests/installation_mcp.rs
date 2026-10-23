@@ -2843,3 +2843,70 @@ async fn waiting_missions_are_visible_and_cancellable_through_both_installation_
         assert!(final_run["wakeup"].is_null());
     }
 }
+
+#[tokio::test]
+async fn owner_mcp_can_review_one_wildcard_administrator_node_without_broadening_other_admission() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let agent_token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let owner_token = common::relay_fixture::grant(&s, &["read", "manage"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let agent = s
+        .agent(
+            json!({ "name": "Wildcard native", "access": { "backend": "native", "nodes": null } }),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut nodes = Vec::new();
+    for _ in 0..2 {
+        let node = cairn_installation::config::id();
+        s.store.put("nodes", json!({
+            "id": node, "capabilities": { "backend": "native", "nativeModeProtocol": 1 },
+            "nativeModeRequest": { "mode": "administrator", "generation": cairn_installation::config::id() },
+            "nativeReviewedAgents": [],
+        })).await.unwrap();
+        nodes.push(node);
+    }
+    let args = json!({ "id": agent["id"], "agent": { "nativeNodeReviews": [nodes[0]] } });
+    let (_, denied) = node_management_call(
+        &app,
+        "/mcp-installation",
+        agent_token,
+        "update_agent",
+        args.clone(),
+    )
+    .await;
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    assert!(
+        s.get("nodes", &nodes[0]).await.unwrap()["nativeReviewedAgents"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let (_, response) =
+        node_management_call(&app, "/mcp", &owner_token, "update_agent", args).await;
+    let saved = result(&response);
+    assert_eq!(saved["id"], agent["id"], "{response}");
+    assert!(
+        saved["access"]["nodes"].is_null(),
+        "Scoped review must preserve wildcard placement"
+    );
+    assert!(saved["nativeNodeReviews"].is_null());
+    assert!(
+        s.get("nodes", &nodes[0]).await.unwrap()["nativeReviewedAgents"]
+            .as_array()
+            .unwrap()
+            .contains(&agent["id"])
+    );
+    assert!(
+        s.get("nodes", &nodes[1]).await.unwrap()["nativeReviewedAgents"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}

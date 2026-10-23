@@ -98,6 +98,29 @@ async fn execute_inner(
     }
 }
 
+/// A controller may have accepted a first attempt before its engine created a
+/// session. Prefer any recoverable session; only that controlled native restart
+/// can start afresh when none was recorded. Ordinary and VM recovery stay strict.
+async fn saved_session(
+    s: &Service,
+    run: &Value,
+    home: &Path,
+    cwd: &Path,
+) -> Result<Option<String>> {
+    match recovery::session(s, run, home, cwd).await {
+        Ok(session) => Ok(Some(session)),
+        Err(error)
+            if error.status == 409
+                && crate::native::policy::native(&run["snapshot"]["agent"])
+                && run["nativeModeInterruption"].is_string()
+                && text(run, "sessionId").is_empty() =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 struct Execution<'a> {
     s: &'a Arc<Service>,
     id: String,
@@ -374,8 +397,17 @@ impl Execution<'_> {
         if !self.checkpoint.read(RunCheckpoint::launched).await {
             return Ok(None);
         }
-        let session =
-            recovery::session(s, self.run, &workspace.state_home, workspace.cwd()).await?;
+        let Some(session) =
+            saved_session(s, self.run, &workspace.state_home, workspace.cwd()).await?
+        else {
+            s.store.event(
+                &self.id,
+                "status",
+                "Restarting with preserved files after the node mode change; no resumable engine session was recorded.",
+                None,
+            ).await?;
+            return Ok(None);
+        };
         let patch = json!({
             "sessionId": session,
             "resumeCount": self.run["resumeCount"].as_u64().unwrap_or(0) + 1,
@@ -1114,4 +1146,76 @@ impl Execution<'_> {
 
 fn current_exe() -> Result<String> {
     Ok(std::env::current_exe()?.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn mode_restart_before_first_session_preserves_available_sessions_and_other_recovery_rules()
+     {
+        let root = tempfile::tempdir().unwrap();
+        let s = Service::new(crate::config::Config {
+            data_dir: root.path().join("data"),
+            home: root.path().join("home"),
+            workspace_roots: vec![root.path().into()],
+            public_url: "http://localhost:4310".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            codex_bin: "/bin/false".into(),
+            claude_bin: "/bin/false".into(),
+            opencode_bin: "/bin/false".into(),
+            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            concurrency: 1,
+            logger: false,
+            worker_enabled: false,
+            runner_url: String::new(),
+        })
+        .await
+        .unwrap();
+        for provider in ["codex", "claude", "opencode"] {
+            let mut run = json!({
+                "isolated": true, "nativeModeInterruption": crate::config::id(),
+                "snapshot": { "agent": { "provider": provider, "access": { "backend": "native" } } },
+            });
+            assert!(
+                saved_session(&s, &run, root.path(), root.path())
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{provider}"
+            );
+            run["sessionId"] = if provider == "opencode" {
+                "ses_saved"
+            } else {
+                "saved-session"
+            }
+            .into();
+            assert_eq!(
+                saved_session(&s, &run, root.path(), root.path())
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                run["sessionId"].as_str(),
+                "{provider}"
+            );
+            run["sessionId"] = Value::Null;
+            run["nativeModeInterruption"] = Value::Null;
+            assert!(
+                saved_session(&s, &run, root.path(), root.path())
+                    .await
+                    .is_err(),
+                "{provider}"
+            );
+            run["nativeModeInterruption"] = crate::config::id().into();
+            run["snapshot"]["agent"]["access"]["backend"] = "firecracker".into();
+            assert!(
+                saved_session(&s, &run, root.path(), root.path())
+                    .await
+                    .is_err(),
+                "{provider}"
+            );
+        }
+    }
 }

@@ -150,6 +150,19 @@ impl Controller {
             .is_some_and(|until| *until > crate::nodes::boot_ms())
     }
 
+    async fn persist_mode(&self, state: &Value) -> Result<()> {
+        let bytes = serde_json::to_vec(state)?;
+        if let Err(error) = atomic_write(&self.state.join(mode::FILE), &bytes).await {
+            // Keep the last confirmed mode and target, but report the actual
+            // failure through health even when the disk cannot record it.
+            let mut observed = self.mode.lock().await;
+            observed["status"] = "failed".into();
+            observed["error"] = error.message.clone().into();
+            return Err(error);
+        }
+        Ok(())
+    }
+
     async fn change_mode(&self, value: Value) -> Result<Value> {
         let request = mode::request(value)?;
         let expected = serde_json::to_value(&request)?;
@@ -162,8 +175,10 @@ impl Controller {
         pending["status"] = "pending".into();
         pending["target"] = expected.clone();
         pending["error"] = Value::Null;
-        atomic_write(&self.state.join(mode::FILE), &serde_json::to_vec(&pending)?).await?;
+        // Refuse old leased plans even if persisting intent fails. No sudo
+        // mutation or applied acknowledgement may precede durable intent.
         *self.mode.lock().await = pending.clone();
+        self.persist_mode(&pending).await?;
         let result = tokio::time::timeout(Duration::from_secs(270), async {
             // Signal every preparation/workload first; all process descendants
             // belong to the managed cgroup. Root can escape it: this is cooperative.
@@ -206,7 +221,7 @@ impl Controller {
                 pending
             }
         };
-        atomic_write(&self.state.join(mode::FILE), &serde_json::to_vec(&state)?).await?;
+        self.persist_mode(&state).await?;
         *self.mode.lock().await = state.clone();
         Ok(state)
     }
@@ -2454,6 +2469,89 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(response.status, 401);
+    }
+
+    #[tokio::test]
+    async fn native_mode_final_write_failure_reports_unconfirmed_privileges() {
+        let (_root, controller) = fixture().await;
+        let target = json!({ "mode": "administrator", "generation": crate::config::id() });
+        {
+            let mut pending = controller.mode.lock().await;
+            pending["status"] = "pending".into();
+            pending["target"] = target.clone();
+        }
+        private_dir(&controller.state.join(mode::FILE))
+            .await
+            .unwrap();
+        let applied = json!({ "mode": target["mode"], "generation": target["generation"], "status": "applied" });
+        // Exercise final acknowledgement persistence without invoking host sudo.
+        assert!(controller.persist_mode(&applied).await.is_err());
+        let observed = controller.mode.lock().await.clone();
+        assert_eq!(observed["status"], "failed");
+        assert_eq!(
+            observed["mode"], "protected",
+            "Never publish an undurable applied mode"
+        );
+        assert_eq!(observed["target"], target);
+        assert!(!text(&observed, "error").is_empty());
+        assert!(mode::check_plan(&observed, &json!({})).is_err());
+        assert!(mode::check_plan(&observed, &json!({ "nativeMode": target })).is_err());
+    }
+
+    #[tokio::test]
+    async fn native_mode_persistence_failure_blocks_previously_leased_plans() {
+        let (_root, controller) = fixture().await;
+        let run = crate::config::id();
+        let attempt = crate::config::id();
+        let stage = controller.data.join("runs").join(&run);
+        for directory in [
+            stage.join("workspace"),
+            stage.join("home"),
+            controller.data.join("runner-plans"),
+        ] {
+            private_dir(&directory).await.unwrap();
+        }
+        let plan = json!({
+            "id": attempt, "runId": run, "backend": "native", "nodeLeaseRequired": true, "expires": null,
+            "cwd": stage.join("workspace"), "projectRoot": stage.join("workspace"),
+            "sandbox": "workspace-write", "args": [], "prompt": "fixture",
+            "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
+            "imports": [
+                { "source": stage.join("workspace"), "target": stage.join("workspace") },
+                { "source": stage.join("home"), "target": "/home/node" }
+            ]
+        });
+        atomic_write(
+            &controller
+                .data
+                .join("runner-plans")
+                .join(format!("{attempt}.json")),
+            &serde_json::to_vec(&plan).unwrap(),
+        )
+        .await
+        .unwrap();
+        controller
+            .leases
+            .lock()
+            .await
+            .insert(attempt.clone(), crate::nodes::boot_ms() + 60000);
+        controller.plan(&attempt).await.unwrap();
+        mode::check_plan(&*controller.mode.lock().await, &plan).unwrap();
+        // A directory at the state-file destination guarantees an atomic rename
+        // failure on this disposable fixture, before any host sudo operation.
+        private_dir(&controller.state.join(mode::FILE))
+            .await
+            .unwrap();
+        let request = json!({ "mode": "administrator", "generation": crate::config::id() });
+        assert!(controller.change_mode(request.clone()).await.is_err());
+        let state = controller.mode.lock().await.clone();
+        assert_eq!(state["status"], "failed");
+        assert!(!text(&state, "error").is_empty());
+        assert_eq!(state["target"], request);
+        let error = controller.start(&attempt).await.unwrap_err();
+        assert_eq!(error.status, 409);
+        assert!(error.message.contains("privilege generation"), "{error:?}");
+        assert!(controller.active.lock().await.is_empty());
     }
 
     #[tokio::test]

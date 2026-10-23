@@ -201,7 +201,7 @@
         }
       },
       "nativeNodeReviews": {
-        "description": "Owner confirmation of the specifically reviewed administrator nodes selected in access.nodes. These grant unrestricted passwordless sudo on the real host, including access to locally present credentials and services. Never infer confirmation from an all-node grant or conversion. Not saved on the agent; delegated installation agents cannot approve it.",
+        "description": "Owner confirmation of specifically reviewed administrator node IDs already covered by access.nodes, including wildcard access. Reviews only these nodes while preserving the placement selection. These grant unrestricted passwordless sudo on the real host, including access to locally present credentials and services. Never infer confirmation from an all-node grant or conversion. Not saved on the agent; delegated installation agents cannot approve it.",
         "maxItems": 100,
         "type": "array",
         "items": {

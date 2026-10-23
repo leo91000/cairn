@@ -167,6 +167,10 @@ abstract class NodePlacementCases {
                     .isNotEmpty()
             }
             compose.onNodeWithText("Natif protégé").performScrollTo().assertExists()
+            compose
+                .onNodeWithText("privilèges actuels non confirmés", substring = true)
+                .performScrollTo()
+                .assertExists()
             compose.runOnIdle {
                 assertEquals("administrator", writes.last()["mode"]?.jsonPrimitive?.content)
                 assertEquals("review", writes.last()["previewId"]?.jsonPrimitive?.content)
