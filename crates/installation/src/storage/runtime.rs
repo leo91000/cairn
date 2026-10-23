@@ -334,6 +334,45 @@ pub(crate) async fn create_prepared(
     create_source(directory, manifest, context, 1, true).await
 }
 
+/// Prepare a private clone in a disposable environment before publishing it
+/// atomically into the conventional native disk. Startup removes abandoned
+/// temporary environments; no new authoritative pending format is introduced.
+pub(crate) async fn clone_native_base(source: &Path, target: &Path, context: &Value) -> Result<()> {
+    let physical = target
+        .parent()
+        .ok_or_else(|| Error::bad("Missing clone environment."))?;
+    if target.file_name().is_none_or(|name| name != "lazy")
+        || physical
+            .parent()
+            .and_then(Path::file_name)
+            .is_none_or(|name| name != "environments")
+        || physical.join("owner").exists()
+    {
+        return Err(Error::conflict(
+            "Native bases require a new unclaimed environment.",
+        ));
+    }
+    crate::validation::uuid(
+        physical
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(""),
+    )?;
+    let (source, target, context) = (source.to_owned(), target.to_owned(), context.clone());
+    blocking(move || {
+        // Validate current authority; immutable cached bases never carry it.
+        Source::new(
+            &context,
+            tokio::runtime::Handle::current(),
+            CancellationToken::new(),
+        )?;
+        LazyDisk::clone_sealed(&source, &target)?;
+        LazyDisk::bind_cloned_context(&target, &context)?;
+        Ok(())
+    })
+    .await
+}
+
 async fn create_source(
     directory: &Path,
     manifest: &Value,

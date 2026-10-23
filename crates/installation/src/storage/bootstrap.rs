@@ -13,7 +13,7 @@ pub async fn prepare(
     context: &Value,
     stop: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    prepare_source(directory, size, context, stop, false, None).await
+    prepare_source(directory, size, context, stop, false, None, None).await
 }
 
 /// Native host workspaces have one ext4 filesystem and no guest system view.
@@ -23,7 +23,16 @@ pub(crate) async fn prepare_native(
     context: &Value,
     stop: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    prepare_source(directory, size, context, stop, false, Some(Layout::Flat)).await
+    prepare_source(
+        directory,
+        size,
+        context,
+        stop,
+        false,
+        Some(Layout::Flat),
+        None,
+    )
+    .await
 }
 
 /// Build an anonymous, entirely local disk without minting or borrowing any
@@ -51,7 +60,29 @@ pub async fn prepare_unassigned(
             .unwrap_or(""),
     )?;
     let context = serde_json::json!({ "unassigned": true, "policy": policy });
-    prepare_source(directory, size, &context, stop, true, None).await
+    prepare_source(directory, size, &context, stop, true, None, None).await
+}
+
+/// Populate and seal an anonymous native base before it can be cloned.
+pub(crate) async fn prepare_native_base(
+    directory: &Path,
+    size: u64,
+    contents: &Path,
+    identity: (u32, u32),
+    policy: &super::policy::Policy,
+    stop: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    let context = serde_json::json!({ "unassigned": true, "policy": policy });
+    prepare_source(
+        directory,
+        size,
+        &context,
+        stop,
+        true,
+        Some(Layout::Flat),
+        Some((contents, identity)),
+    )
+    .await
 }
 
 fn selected_layout(size: u64) -> Result<Layout> {
@@ -87,6 +118,7 @@ async fn prepare_source(
     stop: &tokio_util::sync::CancellationToken,
     prepared: bool,
     requested_layout: Option<Layout>,
+    seed: Option<(&Path, (u32, u32))>,
 ) -> Result<()> {
     crate::skills::private_dir(directory).await?;
     let _lock = crate::file_lock::exclusive(&directory.join("lock"), "VM disk is active.")?;
@@ -96,6 +128,21 @@ async fn prepare_source(
     let mut generation = 1;
     let mut layout = Layout::Flat;
     let mut resizing = false;
+    if requested_layout == Some(Layout::Flat)
+        && !prepared
+        && seed.is_none()
+        && super::runtime::exists(directory)
+        && !marker.exists()
+        && !resize_source.exists()
+    {
+        let metadata = directory.join("lazy");
+        let geometry = tokio::task::spawn_blocking(move || super::LazyDisk::geometry(&metadata))
+            .await
+            .map_err(Error::internal)??;
+        if geometry == (size, Layout::Flat) {
+            return Ok(());
+        }
+    }
     if resize_source.exists() && !super::runtime::exists(directory) {
         // Never continue from a raw image that resize2fs may have only partly
         // changed. The original journal stays authoritative until installation.
@@ -180,8 +227,15 @@ async fn prepare_source(
             tokio::fs::remove_file(directory.join("data.ext4")).await?;
         }
     }
-    let (raw, layout) = super::local::prepare_layout(directory, size, layout).await?;
-    let mut manifest = crate::nodes::snapshots::index(&raw).await?;
+    let (raw, layout) = if let Some((contents, identity)) = seed {
+        (
+            super::local::prepare_seeded(directory, size, contents, identity, stop).await?,
+            Layout::Flat,
+        )
+    } else {
+        super::local::prepare_layout(directory, size, layout).await?
+    };
+    let mut manifest = crate::nodes::snapshots::index_with_stop(&raw, stop).await?;
     layout.store(&mut manifest)?;
     let staging = tempfile::Builder::new()
         .prefix("bootstrap-")
@@ -197,9 +251,17 @@ async fn prepare_source(
         super::runtime::create_at_generation(&root, &empty, &context, generation).await?
     };
     let writer = disk.clone();
-    tokio::task::spawn_blocking(move || copy_blocks(&raw, &manifest, &writer, &policy))
-        .await
-        .map_err(Error::internal)??;
+    let seal = seed.is_some();
+    let copy_stop = stop.clone();
+    tokio::task::spawn_blocking(move || {
+        copy_blocks(&raw, &manifest, &writer, &policy, &copy_stop)?;
+        if seal {
+            writer.seal()?;
+        }
+        Ok::<_, Error>(())
+    })
+    .await
+    .map_err(Error::internal)??;
     drop(disk);
     tokio::fs::rename(&root, directory.join("lazy")).await?;
     tokio::fs::File::open(directory).await?.sync_all().await?;
@@ -280,9 +342,13 @@ fn copy_blocks(
     manifest: &Value,
     writer: &super::LazyDisk,
     policy: &super::policy::Policy,
+    stop: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     let input = super::LocalDisk::open(raw, false)?;
     for block in manifest["blocks"].as_array().unwrap() {
+        if stop.is_cancelled() {
+            return Err(Error::unavailable("Disk initialization stopped."));
+        }
         if text(block, "hash").is_empty() {
             continue;
         }
@@ -322,7 +388,7 @@ mod tests {
         let context = json!({ "unassigned": true, "policy": policy });
         let stop = CancellationToken::new();
         let layout = Layout::paired(size).unwrap();
-        prepare_source(&original, size, &context, &stop, true, Some(layout))
+        prepare_source(&original, size, &context, &stop, true, Some(layout), None)
             .await
             .unwrap();
         let volume = super::super::runtime::load(&original).await.unwrap();
@@ -365,7 +431,7 @@ mod tests {
         let size = 256 * 1024 * 1024;
         let layout = Layout::paired(size).unwrap();
         let stop = CancellationToken::new();
-        prepare_source(&directory, size, &context, &stop, false, Some(layout))
+        prepare_source(&directory, size, &context, &stop, false, Some(layout), None)
             .await
             .unwrap();
         let volume = super::super::runtime::load(&directory).await.unwrap();
@@ -428,6 +494,7 @@ mod tests {
             &stop,
             false,
             Some(Layout::Flat),
+            None,
         )
         .await
         .unwrap();

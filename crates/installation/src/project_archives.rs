@@ -7,7 +7,7 @@ mod node;
 mod tests;
 
 pub(crate) use manager::{catalog, checkout, maintain, run_archives, serve_cached, serve_run};
-pub(crate) use node::{abandon_stage, prefetch, stage};
+pub(crate) use node::{abandon_stage, foreground_waiter, prefetch, stage};
 
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -34,7 +34,7 @@ pub(crate) struct Archive {
 }
 
 impl Archive {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         crate::validation::uuid(&self.project_id)?;
         for (value, length) in [(&self.key, 64), (&self.hash, 64), (&self.revision, 40)] {
             if value.len() != length || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -119,6 +119,64 @@ async fn extract_verified(
         return Err(Error::bad("Project archive checksum mismatch."));
     }
     extract(file, target, budget).await
+}
+
+/// A metadata-only preflight bounds expanded allocation before warming. The
+/// mutation lock keeps this cache entry stable; extraction independently checks
+/// the complete checksum before writing, so corrupt metadata cannot underreserve.
+pub(crate) async fn cached_allocation(
+    root: &Path,
+    descriptor: &Archive,
+    unit: u64,
+    stop: &tokio_util::sync::CancellationToken,
+) -> Result<u64> {
+    let file = cached(root, descriptor)
+        .await?
+        .ok_or_else(|| Error::not_found("Project archive is not cached."))?;
+    let (logical, stop) = (descriptor.logical_bytes, stop.clone());
+    tokio::task::spawn_blocking(move || archive::allocation_budget(file, logical, unit, &stop))
+        .await
+        .map_err(Error::internal)?
+}
+
+/// Native base preparation holds the shared storage lock throughout extraction.
+pub(crate) async fn extract_cached(
+    root: &Path,
+    descriptor: &Archive,
+    target: &Path,
+    stop: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    let file = cached(root, descriptor)
+        .await?
+        .ok_or_else(|| Error::not_found("Project archive is not cached."))?;
+    let (file, target, descriptor, stop) =
+        (file, target.to_owned(), descriptor.clone(), stop.clone());
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        use std::io::{Read, Seek};
+        let mut file = file;
+        let mut hash = blake3::Hasher::new();
+        let mut buffer = vec![0; 1024 * 1024];
+        let mut bytes = 0;
+        loop {
+            if stop.is_cancelled() {
+                return Err(Error::unavailable("Native base preparation stopped."));
+            }
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            hash.update(&buffer[..count]);
+            bytes += count as u64;
+        }
+        if bytes != descriptor.bytes || hash.finalize().to_hex().as_str() != descriptor.hash {
+            return Err(Error::bad("Project archive checksum mismatch."));
+        }
+        file.rewind()?;
+        archive::extract_with_stop(file, &target, descriptor.logical_bytes, &stop)?;
+        Ok(())
+    })
+    .await
+    .map_err(Error::internal)?
 }
 
 /// Called only with cache mutation serialized and before creating a new temp
@@ -218,7 +276,17 @@ pub(crate) async fn reclaim_for_foreground(
 ) -> Result<u64> {
     let _guard = lock().lock().await;
     let freed = clean_interrupted_downloads(root).await?;
-    Ok(freed.saturating_add(reclaim_except(root, needed.saturating_sub(freed), keep).await?))
+    let freed =
+        freed.saturating_add(reclaim_except(root, needed.saturating_sub(freed), keep).await?);
+    if crate::native::enabled() && freed < needed {
+        let bases = crate::native::bases::Bases {
+            data: root.to_owned(),
+            state: crate::native::state_dir(),
+            identity: (0, 0),
+        };
+        return Ok(freed.saturating_add(bases.trim(u64::MAX, needed - freed, None).await?));
+    }
+    Ok(freed)
 }
 
 pub(crate) async fn initialize(

@@ -6,6 +6,46 @@ use std::path::{Path, PathBuf};
 
 mod paired;
 
+pub(crate) async fn prepare_seeded(
+    directory: &Path,
+    size: u64,
+    contents: &Path,
+    identity: (u32, u32),
+    stop: &tokio_util::sync::CancellationToken,
+) -> Result<PathBuf> {
+    let image = directory.join("data.partial");
+    let file = tokio::fs::File::create(&image).await?;
+    file.set_len(size).await?;
+    drop(file);
+    let options = format!(
+        "root_owner={}:{},lazy_itable_init=0,lazy_journal_init=0",
+        identity.0, identity.1
+    );
+    let mut child = tokio::process::Command::new("mkfs.ext4")
+        .args(["-q", "-F", "-E", &options, "-d"])
+        .arg(contents)
+        .arg(&image)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let status = tokio::select! {
+        result = child.wait() => result?,
+        () = stop.cancelled() => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(Error::unavailable("Native base formatting stopped."));
+        }
+    };
+    if !status.success() {
+        return Err(Error::unavailable("Native base formatting failed."));
+    }
+    let disk = directory.join("data.ext4");
+    tokio::fs::rename(&image, &disk).await?;
+    Ok(disk)
+}
+
 pub(crate) async fn prepare_layout(
     directory: &Path,
     desired: u64,

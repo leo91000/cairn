@@ -114,6 +114,17 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
             Ok(json!({ "ok": true }))
         }
         "metrics" => Ok(json!({ "remoteRequests": requests.load(Ordering::SeqCst) })),
+        "archive-hash" => {
+            let path = PathBuf::from(
+                command["path"]
+                    .as_str()
+                    .ok_or_else(|| Error::bad("Missing fixture archive."))?,
+            );
+            if tokio::fs::metadata(&path).await?.len() > 64 * 1024 * 1024 {
+                return Err(Error::bad("Fixture archive is too large."));
+            }
+            Ok(json!({ "hash": blake3::hash(&tokio::fs::read(path).await?).to_hex().to_string() }))
+        }
         "revoke" => {
             let mut node = s.get("nodes", nodes::LOCAL_NODE_ID).await?;
             node["nativeEnabled"] = false.into();

@@ -282,13 +282,7 @@ pub async fn capture(
         ));
     }
     let needed = logical.saturating_mul(2).saturating_add(16 * 1024 * 1024);
-    let path = std::ffi::CString::new(snapshots_root.as_os_str().as_encoded_bytes())
-        .map_err(Error::internal)?;
-    let mut capacity = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    if unsafe { libc::statvfs(path.as_ptr(), capacity.as_mut_ptr()) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let capacity = unsafe { capacity.assume_init() };
+    let capacity = filesystem(&snapshots_root)?;
     let free = capacity.f_bavail.saturating_mul(capacity.f_frsize);
     if free < needed.saturating_add(256 * 1024 * 1024) {
         return Err(Error::unavailable(
@@ -592,8 +586,20 @@ async fn finish_restore(root: &Path, pending: &Value) -> Result<Value> {
 
 /// No symlink traversal, device reads or directory deletion through workload paths.
 pub async fn own_tree(root: &Path, uid: u32, gid: u32) -> Result<()> {
+    own_tree_with_stop(root, uid, gid, &tokio_util::sync::CancellationToken::new()).await
+}
+
+pub(crate) async fn own_tree_with_stop(
+    root: &Path,
+    uid: u32,
+    gid: u32,
+    stop: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
     let mut pending = vec![root.to_owned()];
     while let Some(path) = pending.pop() {
+        if stop.is_cancelled() {
+            return Err(Error::unavailable("Native base ownership stopped."));
+        }
         let metadata = tokio::fs::symlink_metadata(&path).await?;
         std::os::unix::fs::lchown(&path, Some(uid), Some(gid))?;
         if metadata.is_dir() && !metadata.file_type().is_symlink() {
@@ -700,6 +706,17 @@ fn measure_with_seen(
         }
     }
     Ok(total)
+}
+
+/// Host extraction and sparse images use this filesystem's allocation unit.
+pub(crate) fn filesystem(path: &Path) -> Result<libc::statvfs> {
+    let path =
+        std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).map_err(Error::internal)?;
+    let mut capacity = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(path.as_ptr(), capacity.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(unsafe { capacity.assume_init() })
 }
 
 #[cfg(test)]

@@ -117,8 +117,63 @@ pub(super) fn pack(source: &Path, file: File) -> Result<u64> {
     Ok(logical)
 }
 
+struct Stoppable<'a, R> {
+    input: R,
+    stop: &'a tokio_util::sync::CancellationToken,
+}
+
+impl<R: Read> Read for Stoppable<'_, R> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        if self.stop.is_cancelled() {
+            return Err(std::io::Error::other("Project extraction stopped."));
+        }
+        self.input.read(bytes)
+    }
+}
+
+impl<R: Seek> Seek for Stoppable<'_, R> {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        if self.stop.is_cancelled() {
+            return Err(std::io::Error::other("Project extraction stopped."));
+        }
+        self.input.seek(position)
+    }
+}
+
+/// Accepted archives include every parent directory explicitly. One allocation
+/// unit per entry covers rounded file tails and directory blocks; the extra
+/// KiB covers inode/directory-entry and journal frame metadata conservatively.
+/// No payload is decompressed or written by this preflight.
+pub(super) fn allocation_budget(
+    file: File,
+    logical: u64,
+    unit: u64,
+    stop: &tokio_util::sync::CancellationToken,
+) -> Result<u64> {
+    let archive = ZipArchive::new(Stoppable { input: file, stop }).map_err(archive_error)?;
+    if archive.len() > MAX_ENTRIES {
+        return Err(Error::too_large("Too many project archive entries."));
+    }
+    let entry_bytes = unit.max(4096).saturating_add(1024);
+    Ok(logical.saturating_add((archive.len() as u64 + 1).saturating_mul(entry_bytes)))
+}
+
 pub(crate) fn extract(file: File, target: &Path, budget: u64) -> Result<u64> {
-    let mut archive = ZipArchive::new(file).map_err(archive_error)?;
+    extract_with_stop(
+        file,
+        target,
+        budget,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+}
+
+pub(super) fn extract_with_stop(
+    file: File,
+    target: &Path,
+    budget: u64,
+    stop: &tokio_util::sync::CancellationToken,
+) -> Result<u64> {
+    let mut archive = ZipArchive::new(Stoppable { input: file, stop }).map_err(archive_error)?;
     if archive.len() > MAX_ENTRIES {
         return Err(Error::too_large("Too many project archive entries."));
     }
@@ -127,6 +182,9 @@ pub(crate) fn extract(file: File, target: &Path, budget: u64) -> Result<u64> {
     let mut seen = HashSet::new();
     let mut directories = Vec::new();
     for index in 0..archive.len() {
+        if stop.is_cancelled() {
+            return Err(Error::unavailable("Project extraction stopped."));
+        }
         let mut entry = archive.by_index(index).map_err(archive_error)?;
         let path = entry
             .enclosed_name()
@@ -174,7 +232,9 @@ pub(crate) fn extract(file: File, target: &Path, budget: u64) -> Result<u64> {
                 .mode(mode & 0o777)
                 .custom_flags(libc::O_NOFOLLOW)
                 .open(destination)?;
-            if std::io::copy(&mut entry.take(expected + 1), &mut file)? != expected {
+            let input = entry.take(expected + 1);
+            let mut input = Stoppable { input, stop };
+            if std::io::copy(&mut input, &mut file)? != expected {
                 return Err(Error::bad("Project archive size changed."));
             }
             file.flush()?;

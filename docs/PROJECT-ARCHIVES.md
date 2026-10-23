@@ -111,3 +111,6 @@ First/warm reads are page-cache eligible; a genuinely cold device read and the
 production network path are not measured by this harness. An earlier tmpfs run
 gave median 483 ms versus 305 ms installation, demonstrating why tmpfs results
 must not be presented as physical disk measurements.
+
+Native nodes can also prepare [local disk bases](NATIVE-BASES.md) from verified
+ZIPs to avoid expanding the same project for each new conversation.

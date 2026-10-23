@@ -70,11 +70,13 @@ pub(crate) async fn stage(
     session: &crate::nodes::executor::Session,
     root: &Path,
     descriptors: &[Archive],
-) -> Result<()> {
+    base_disk_mib: Option<u64>,
+) -> Result<Option<String>> {
     let run = root
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| Error::bad("Missing run identity."))?;
+    crate::native::bases::release_pin(root, &session.attempt).await?;
     let retained = crate::native::state_dir()
         .join("native")
         .join(run)
@@ -86,9 +88,40 @@ pub(crate) async fn stage(
             crate::skills::private_dir(&root.join("workspace").join(&descriptor.project_id))
                 .await?;
         }
-        return Ok(());
+        return Ok(None);
     }
     let _disk = crate::native::disk::lock(&crate::native::state_dir()).await?;
+    if let Some(disk_mib) = base_disk_mib {
+        let lookup = crate::native::bases::request(
+            "lookup",
+            &serde_json::json!({ "archives": descriptors, "diskMiB": disk_mib }),
+        )
+        .await;
+        if let Ok(value) = lookup
+            && let Some(key) = value["base"]["key"].as_str()
+            && key.len() == 64
+            && key.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            tokio::fs::hard_link(
+                crate::native::state_dir()
+                    .join("native-bases")
+                    .join(key)
+                    .join("pin"),
+                crate::native::bases::pin_path(root, &session.attempt)?,
+            )
+            .await?;
+            crate::native::bases::touch_pin(&crate::native::bases::pin_path(
+                root,
+                &session.attempt,
+            )?);
+            for descriptor in descriptors {
+                descriptor.validate()?;
+                crate::skills::private_dir(&root.join("workspace").join(&descriptor.project_id))
+                    .await?;
+            }
+            return Ok(Some(key.to_owned()));
+        }
+    }
     let _guard = lock().lock().await;
     let data = crate::nodes::node_data_dir();
     clean_interrupted_downloads(&data).await?;
@@ -154,10 +187,18 @@ pub(crate) async fn stage(
         }
         crate::skills::private_dir(&root.join("workspace").join(&descriptor.project_id)).await?;
     }
-    Ok(())
+    if let Some(disk_mib) = base_disk_mib {
+        let _ = crate::native::bases::request(
+            "warm",
+            &serde_json::json!({ "archives": descriptors, "diskMiB": disk_mib }),
+        )
+        .await;
+    }
+    Ok(None)
 }
 
-pub(crate) async fn abandon_stage(root: &Path, pressure: bool) -> Result<()> {
+pub(crate) async fn abandon_stage(root: &Path, pressure: bool, attempt: &str) -> Result<()> {
+    crate::native::bases::release_pin(root, attempt).await?;
     let _disk = if crate::native::enabled() {
         Some(crate::native::disk::lock(&crate::native::state_dir()).await?)
     } else {
@@ -258,7 +299,7 @@ async fn prefetch_into(
 /// OS locks make the foreground priority visible to the controller process as
 /// well as the connector. Cancellation releases both the partial file and the
 /// exclusive mutation lock; no partially downloaded archive becomes visible.
-async fn foreground_waiter(state: &Path) {
+pub(crate) async fn foreground_waiter(state: &Path) {
     loop {
         match crate::file_lock::exclusive(
             &state.join("storage-foreground.lock"),
