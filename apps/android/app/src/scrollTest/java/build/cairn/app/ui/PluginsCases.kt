@@ -199,6 +199,31 @@ abstract class PluginsCases {
                     instanceView = true,
                     instanceTest = true,
                 ),
+            // As the installation resolves it from the manifest's `[setup]`.
+            setup =
+                PluginSetup(
+                    effort = "token",
+                    summary = "1Password connects through a service account you create.",
+                    steps =
+                        listOf(
+                            SetupStep(
+                                "token",
+                                title = "Service account token",
+                                settings = listOf("token"),
+                                checklist =
+                                    listOf(
+                                        SetupTask(
+                                            "Create a service account",
+                                            "Copy its token, which starts with ops_.",
+                                            url =
+                                                "https://developer.1password.com/docs/service-accounts/get-started/",
+                                            link = "Open the guide",
+                                        )
+                                    ),
+                            ),
+                            SetupStep("agents", "agents", "Agents"),
+                        ),
+                ),
         )
     private val account =
         PluginConnection(
@@ -253,10 +278,17 @@ abstract class PluginsCases {
             ),
             onePassword.summary(listOf(account)),
         )
+        // Until the first instance exists, the card says what connecting takes.
         assertEquals(
-            PluginSummary(PluginBadge("À configurer", PluginTone.MUTED), "Version 1.0.0", 0),
+            PluginSummary(
+                PluginBadge("À configurer", PluginTone.MUTED),
+                "Version 1.0.0",
+                0,
+                effort = "token",
+            ),
             onePassword.summary(emptyList()),
         )
+        assertEquals("Coller un jeton", effortLabel(onePassword.summary(emptyList()).effort))
         assertEquals(
             PluginBadge("À approuver", PluginTone.WARNING),
             notes.copy(status = "needs_approval").summary(emptyList()).badge,
@@ -692,6 +724,13 @@ abstract class PluginsCases {
                     compose.onAllNodesWithText("Modifier").fetchSemanticsNodes().isNotEmpty()
                 }
                 compose.onNodeWithText("Modifier").performScrollTo().performClick()
+                compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                compose
+                    .onNode(
+                        hasContentDescription("Qui peut lui parler", substring = true) and
+                            hasClickAction()
+                    )
+                    .performClick()
                 compose.onNodeWithText("A des plugins").assertExists()
                 compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
                 assertFalse(paths.any { it.endsWith("/api/plugins") })
@@ -771,9 +810,16 @@ abstract class PluginsCases {
                     .isNotEmpty()
             }
             compose.onNodeWithText("Ajouter une instance").performClick()
-            compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+            // One step at a time: the settings, then who can talk to it.
+            compose.onNodeWithText("Étape 1 sur 2", ignoreCase = true).assertExists()
+            compose.onNodeWithText("Continuer").assertIsNotEnabled()
+            compose.onNodeWithText("Renseignez « Team ».").assertExists()
+            compose.onNodeWithContentDescription("Étape 2", substring = true).assertIsNotEnabled()
             compose.onNodeWithText("Team").performTextInput("core")
             compose.onNodeWithText("Limit").performTextInput("3")
+            compose.onNodeWithText("Continuer").performClick()
+            compose.onNode(isHeading() and hasText("Qui peut lui parler")).assertExists()
+            compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
             compose.onNodeWithText("Helper").performScrollTo().performClick()
             capture("plugin-instance-editor")
             for (person in listOf("300", "301")) {
@@ -802,6 +848,141 @@ abstract class PluginsCases {
                 payload["userIds"],
             )
             assertFalse(payload.containsKey("token"))
+        }
+    }
+
+    @Test
+    fun ordinaryFieldsClearStaleErrorsAndPresetsRefreshDependentChoices() {
+        val entry =
+            notes.copy(
+                manifest =
+                    notes.manifest!!.copy(
+                        capabilities = emptyList(),
+                        instanceForm = true,
+                        settings =
+                            listOf(
+                                PluginSetting(key = "team", title = "Team", required = true),
+                                PluginSetting(
+                                    key = "more",
+                                    title = "More destinations",
+                                    type = "boolean",
+                                    refresh = true,
+                                ),
+                                PluginSetting(
+                                    key = "extra",
+                                    title = "Extra destinations",
+                                    type = "boolean",
+                                    refresh = true,
+                                ),
+                                PluginSetting(
+                                    key = "destination",
+                                    title = "Destination",
+                                    type = "select",
+                                    dynamic = true,
+                                ),
+                            ),
+                        setup =
+                            PluginSetup(
+                                steps =
+                                    listOf(
+                                        SetupStep(
+                                            id = "settings",
+                                            title = "Settings",
+                                            settings =
+                                                listOf("team", "more", "extra", "destination"),
+                                            presets =
+                                                listOf(
+                                                    SetupPreset("basic", "Basic"),
+                                                    SetupPreset(
+                                                        "more",
+                                                        "More places",
+                                                        values =
+                                                            mapOf("more" to true, "extra" to true),
+                                                    ),
+                                                ),
+                                        )
+                                    )
+                            ),
+                    )
+            )
+        MockWebServer().use { server ->
+            val forms = CopyOnWriteArrayList<JsonObject>()
+            val saved = CopyOnWriteArrayList<String>()
+            server.dispatcher =
+                dispatcher(packages = listOf(entry), connections = emptyList()) { path, body ->
+                    when {
+                        path.endsWith("/plugins/notes/form") -> {
+                            val request = wireJson.parseToJsonElement(body).jsonObject
+                            forms += request
+                            val values = request.getValue("settings").jsonObject
+                            wireJson.encodeToString(
+                                PluginForm(
+                                    errors =
+                                        if (values["team"]?.jsonPrimitive?.content.isNullOrEmpty())
+                                            mapOf("team" to "Enter a team")
+                                        else emptyMap(),
+                                    options =
+                                        mapOf(
+                                            "destination" to
+                                                if (
+                                                    values["more"] == JsonPrimitive(true) &&
+                                                        values["extra"] == JsonPrimitive(true)
+                                                )
+                                                    listOf(PluginOption("room", "Room"))
+                                                else emptyList()
+                                        ),
+                                )
+                            )
+                        }
+                        path.endsWith("/plugins/notes/connections") -> {
+                            saved += body
+                            "{}"
+                        }
+                        else -> null
+                    }
+                }
+            server.start()
+            show(server) { vm, state -> PluginScreen(vm, state, "notes") {} }
+            compose.waitUntil(30000) {
+                compose
+                    .onAllNodesWithText("Ajouter une instance")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Ajouter une instance").performClick()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Enter a team").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Enter a team").assertExists()
+            compose.onNodeWithText("Team").performTextInput("core")
+            compose.onNodeWithText("Enregistrer").assertIsEnabled()
+            compose.onNodeWithText("Enter a team").assertDoesNotExist()
+            compose.onNodeWithText("More places").performScrollTo().performClick()
+            compose.waitUntil(10000) { forms.count { it["changed"] != null } == 2 }
+            assertEquals(
+                listOf("more", "extra"),
+                forms.mapNotNull { it["changed"]?.jsonPrimitive?.content },
+            )
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Room").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Room").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Enregistrer") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.waitUntil(10000) { saved.isNotEmpty() }
+            assertEquals(
+                JsonPrimitive("room"),
+                wireJson
+                    .parseToJsonElement(saved.single())
+                    .jsonObject["settings"]
+                    ?.jsonObject
+                    ?.get("destination"),
+            )
         }
     }
 
@@ -923,8 +1104,9 @@ abstract class PluginsCases {
             compose.waitUntil(10000) {
                 compose.onAllNodesWithText("Create the bot").fetchSemanticsNodes().isNotEmpty()
             }
-            compose.onNodeWithText("Nom").performTextInput("#support on Acme")
-            compose.onNodeWithText("Bot token").performTextInput("synthetic_android_token")
+            compose
+                .onNode(hasSetTextAction() and hasText("Bot token"))
+                .performTextInput("synthetic_android_token")
             // The bot's card behind the editor also says who it is: wait for the form's own words.
             compose.waitUntil(10000) {
                 compose
@@ -940,14 +1122,17 @@ abstract class PluginsCases {
                         it["token"]?.jsonPrimitive?.content == "synthetic_android_token"
                 },
             )
+            continueSetup()
             compose.onNodeWithText("Acme HQ").performScrollTo().performClick()
             compose.waitUntil(10000) {
                 compose.onAllNodesWithText("#help").fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithText("The bot can’t read this channel").assertExists()
             compose.onNodeWithText("#help").performScrollTo().performClick()
+            continueSetup()
             // The bot's card behind the editor names the same agent.
             compose.onNode(hasText("Helper") and hasClickAction()).performScrollTo().performClick()
+            compose.onNodeWithText("Nom").performScrollTo().performTextInput("#support on Acme")
             capture("plugin-discord-setup")
             compose.waitUntil(10000) {
                 compose
@@ -1128,7 +1313,6 @@ abstract class PluginsCases {
                 compose.onAllNodesWithText("OAuth client ID").fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithText("Google authorization").assertDoesNotExist()
-            compose.onNodeWithText("Nom").performTextInput("Personal mailbox")
             compose
                 .onNodeWithText("OAuth client ID")
                 .performScrollTo()
@@ -1137,8 +1321,10 @@ abstract class PluginsCases {
                 .onNodeWithText("OAuth client secret")
                 .performScrollTo()
                 .performTextInput("synthetic-secret")
+            continueSetup()
+            compose.onNodeWithText("Nom").performScrollTo().performTextInput("Personal mailbox")
             compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
-            compose.onNodeWithText("Se connecter avec Forge").performScrollTo().performClick()
+            signInButton("Se connecter avec Forge").performScrollTo().performClick()
             compose.waitUntil(10000) { starts.isNotEmpty() }
             compose.onNodeWithText("Copier le code").assertDoesNotExist()
             capture("plugin-oauth-sign-in")
@@ -1201,7 +1387,12 @@ abstract class PluginsCases {
             compose.waitUntil(30000) {
                 compose.onAllNodesWithText("Ajouter · Account").fetchSemanticsNodes().isNotEmpty()
             }
-            compose.onNodeWithText("Ajouter · Account").performClick()
+            // No account yet: the plugin page says what connecting takes and starts the assistant.
+            compose.onNodeWithTag("plugin-first-setup").assertExists()
+            compose.onNodeWithText("Se connecter").assertExists()
+            compose.onNodeWithContentDescription("1. Se connecter avec Forge").assertExists()
+            capture("plugin-first-setup")
+            compose.onNodeWithText("Commencer la configuration").performScrollTo().performClick()
             compose.waitUntil(10000) {
                 compose
                     .onAllNodesWithText("Se connecter avec Forge")
@@ -1213,7 +1404,7 @@ abstract class PluginsCases {
             compose.onNodeWithText("Forge token").assertExists()
             compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
 
-            compose.onNodeWithText("Se connecter avec Forge").performScrollTo().performClick()
+            signInButton("Se connecter avec Forge").performScrollTo().performClick()
             compose.waitUntil(10000) {
                 compose.onAllNodesWithText("WXYZ-1234").fetchSemanticsNodes().isNotEmpty()
             }
@@ -1226,7 +1417,7 @@ abstract class PluginsCases {
             }
             compose.onNodeWithText("WXYZ-1234").assertDoesNotExist()
 
-            compose.onNodeWithText("Se connecter avec Forge").performScrollTo().performClick()
+            signInButton("Se connecter avec Forge").performScrollTo().performClick()
             compose.waitUntil(20000) {
                 compose
                     .onAllNodesWithText("Connecté. Enregistrez pour garder ce account.")
@@ -1452,7 +1643,7 @@ abstract class PluginsCases {
     }
 
     @Test
-    fun serviceAccountsSendTheirTokenOnceAndLeaveGrantsToAgentPages() {
+    fun serviceAccountsSendTheirTokenOnceAndAreGrantedToTheAgentsChosen() {
         MockWebServer().use { server ->
             val saved = CopyOnWriteArrayList<String>()
             server.dispatcher = dispatcher { path, body ->
@@ -1470,21 +1661,23 @@ abstract class PluginsCases {
                     .isNotEmpty()
             }
             compose.onNodeWithText("Ajouter · Service account").performClick()
-            compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
-            compose.onNodeWithText("Nom").performTextInput("Staging")
-            compose.onNodeWithText("Service account token").performTextInput("ops_android_fixture")
+            compose.onNodeWithText("Continuer").assertIsNotEnabled()
+            // What to do on 1Password first, ticked off as the owner goes.
+            compose.onNodeWithText("1. Create a service account").assertExists()
+            compose.onNodeWithText("Open the guide").assertExists()
+            compose.onNodeWithContentDescription("Create a service account : fait").performClick()
+            compose
+                .onNode(hasSetTextAction() and hasText("Service account token"))
+                .performTextInput("ops_android_fixture")
             compose
                 .onNode(SemanticsMatcher.keyIsDefined(SemanticsProperties.Password))
                 .assertExists()
-            // Grants are read-only here: they are set on each agent's page.
-            compose.onNodeWithText("Aucun agent ne peut l’utiliser pour l’instant.").assertExists()
-            assertTrue(
-                compose
-                    .onAllNodesWithText("Gérer sur les fiches agents ›")
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            )
-            compose.onNode(hasText("Helper") and isToggleable()).assertDoesNotExist()
+            capture("plugin-setup-checklist")
+            continueSetup()
+            // A new account is granted to the agents ticked here; later on, on agent pages.
+            compose.onNode(hasText("Helper") and isToggleable()).assertIsEnabled().performClick()
+            compose.onNode(hasText("Helper") and isToggleable()).assertIsOn()
+            compose.onNodeWithText("Nom").performScrollTo().performTextInput("Staging")
             capture("plugin-instance-editor")
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(10000) { saved.isNotEmpty() }
@@ -1494,7 +1687,7 @@ abstract class PluginsCases {
                 buildJsonObject { put("token", "ops_android_fixture") },
                 payload["secrets"],
             )
-            assertFalse("agentIds" in payload)
+            assertEquals(JsonArray(listOf(JsonPrimitive("helper"))), payload["agentIds"])
             assertEquals(JsonObject(emptyMap()), payload["settings"])
         }
     }
@@ -6349,6 +6542,354 @@ abstract class PluginsCases {
         }
     }
 
+    @Test
+    fun anAgentAlreadyUsingAnotherGitHubAccountCannotBeGrantedASecond() {
+        // Runs receive the account's git credentials: one account per agent.
+        val github =
+            forge.copy(
+                manifest =
+                    requireNotNull(forge.manifest)
+                        .copy(
+                            agentAccess = PluginAgentAccess(),
+                            runCredentials = buildJsonObject { putJsonArray("git") {} },
+                        )
+            )
+        val work =
+            PluginConnection(
+                id = "work",
+                pluginId = "forge",
+                name = "Work",
+                agentIds = listOf("helper"),
+            )
+        MockWebServer().use { server ->
+            val saved = CopyOnWriteArrayList<JsonObject>()
+            server.dispatcher =
+                dispatcher(packages = listOf(github), connections = listOf(work)) { path, body ->
+                    when {
+                        path.endsWith("/plugins/forge/form") -> "{}"
+                        path.endsWith("/plugins/forge/connections") -> {
+                            saved += wireJson.parseToJsonElement(body).jsonObject
+                            "{}"
+                        }
+                        else -> null
+                    }
+                }
+            server.start()
+            show(server) { vm, state -> PluginScreen(vm, state, "forge") {} }
+            compose.waitUntil(30000) {
+                compose.onAllNodesWithText("Ajouter · Account").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Ajouter · Account").performClick()
+            compose
+                .onNode(hasSetTextAction() and hasText("Forge token"))
+                .performTextInput("pasted_android_token")
+            continueSetup()
+            compose.onNodeWithText("Utilise Work").assertExists()
+            compose.onNode(hasText("Helper") and isToggleable()).assertIsNotEnabled()
+            compose.onNode(hasText("Cairn") and isToggleable()).assertIsEnabled()
+            compose.onNodeWithText("Nom").performScrollTo().performTextInput("Personal")
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.waitUntil(10000) { saved.isNotEmpty() }
+            // Skipping the agents step grants nobody.
+            assertFalse("agentIds" in saved.single())
+            assertEquals("pasted_android_token", saved.single()["token"]?.jsonPrimitive?.content)
+        }
+    }
+
+    /** The Gmail package's setup, as the installation resolves it, trimmed to three switches. */
+    private val gmail =
+        PluginEntry(
+            id = "gmail",
+            builtin = true,
+            active = "1.0.0",
+            manifest =
+                PluginManifest(
+                    id = "gmail",
+                    name = "Gmail",
+                    version = "1.0.0",
+                    capabilities = listOf("http"),
+                    instances = PluginInstances("Account", "Accounts"),
+                    credential =
+                        PluginCredential(
+                            "Google authorization",
+                            "authorization",
+                            "Bearer ",
+                            oauth =
+                                buildJsonObject {
+                                    put("clientIdSetting", "clientId")
+                                    put("clientSecretSetting", "clientSecret")
+                                    putJsonObject("scopeSettings") {
+                                        putJsonArray("allowSend") {
+                                            add("https://www.googleapis.com/auth/gmail.send")
+                                        }
+                                        putJsonArray("allowDrafts") {
+                                            add("https://www.googleapis.com/auth/gmail.compose")
+                                        }
+                                        putJsonArray("allowDelete") {
+                                            add("https://mail.google.com/")
+                                        }
+                                    }
+                                },
+                        ),
+                    instanceForm = true,
+                    agentAccess = PluginAgentAccess("Off by default."),
+                    settings =
+                        listOf(
+                            PluginSetting("clientId", "Google OAuth client ID", required = true),
+                            PluginSetting(
+                                "clientSecret",
+                                "Google OAuth client secret",
+                                type = "secret",
+                                required = true,
+                            ),
+                            PluginSetting("email", "Connected email", hidden = true),
+                            PluginSetting(
+                                "allowSend",
+                                "Send messages",
+                                type = "boolean",
+                                risk = "medium",
+                            ),
+                            PluginSetting(
+                                "allowDrafts",
+                                "Create and edit drafts",
+                                type = "boolean",
+                                risk = "low",
+                            ),
+                            PluginSetting(
+                                "allowDelete",
+                                "Permanently delete mail",
+                                type = "boolean",
+                                risk = "high",
+                            ),
+                        ),
+                ),
+            setup =
+                PluginSetup(
+                    effort = "app",
+                    summary = "Gmail connects through a Google Cloud app you own.",
+                    nameFrom = "email",
+                    steps =
+                        listOf(
+                            SetupStep(
+                                "app",
+                                title = "Google Cloud app",
+                                settings = listOf("clientId", "clientSecret"),
+                                shared = true,
+                                checklist =
+                                    listOf(
+                                        SetupTask(
+                                            "Enable the Gmail API",
+                                            url =
+                                                "https://console.cloud.google.com/apis/library/gmail.googleapis.com",
+                                            link = "Open API Library",
+                                        ),
+                                        SetupTask(
+                                            "Create an OAuth client",
+                                            "Add this address.",
+                                            copy = "callbackUrl",
+                                        ),
+                                    ),
+                                warning = "A Testing app expires after seven days.",
+                            ),
+                            SetupStep(
+                                "permissions",
+                                title = "Permissions",
+                                settings = listOf("allowSend", "allowDrafts", "allowDelete"),
+                                presets =
+                                    listOf(
+                                        SetupPreset("read", "Read only", risk = "low"),
+                                        SetupPreset(
+                                            "send",
+                                            "Read, draft and send",
+                                            risk = "medium",
+                                            values =
+                                                mapOf("allowDrafts" to true, "allowSend" to true),
+                                        ),
+                                    ),
+                            ),
+                            SetupStep("connect", "credential", "Sign in with Google"),
+                            SetupStep("agents", "agents", "Agents"),
+                        ),
+                ),
+        )
+
+    @Test
+    fun aMailboxReusesTheGoogleCloudAppAndIsNamedAfterItsSignIn() {
+        val clientId = "481203947512-k2d9qv0bm3h1.apps.googleusercontent.com"
+        val alice =
+            PluginConnection(
+                id = "alice",
+                pluginId = "gmail",
+                name = "alice@example.test",
+                settings =
+                    buildJsonObject {
+                        put("clientId", clientId)
+                        put("email", "alice@example.test")
+                    },
+                secretKeys = listOf("clientSecret"),
+            )
+        MockWebServer().use { server ->
+            val forms = CopyOnWriteArrayList<JsonObject>()
+            val starts = CopyOnWriteArrayList<JsonObject>()
+            val saved = CopyOnWriteArrayList<JsonObject>()
+            val flow =
+                PluginDeviceFlow(
+                    "oauth-g",
+                    "gmail",
+                    "pending",
+                    "",
+                    "https://accounts.google.com/o",
+                    expiresAt = 1,
+                )
+            server.dispatcher =
+                dispatcher(
+                    includeGet = true,
+                    packages = listOf(gmail),
+                    connections = listOf(alice),
+                ) { path, body ->
+                    when (path.removePrefix("/api/installations/fixture/api")) {
+                        "/plugins/gmail/form" -> {
+                            val request = wireJson.parseToJsonElement(body).jsonObject
+                            forms += request
+                            // The package verifies the mailbox once signed in.
+                            if ("credentialFlow" in request)
+                                buildJsonObject {
+                                    putJsonObject("values") { put("email", "bob@example.test") }
+                                }
+                                    .toString()
+                            else "{}"
+                        }
+                        "/plugins/gmail/oauth" ->
+                            if (body.isEmpty())
+                                buildJsonObject {
+                                    put(
+                                        "callbackUrl",
+                                        "https://cairn.example/plugins/oauth/callback",
+                                    )
+                                }
+                                    .toString()
+                            else {
+                                starts += wireJson.parseToJsonElement(body).jsonObject
+                                wireJson.encodeToString(flow)
+                            }
+                        "/plugins/gmail/oauth/oauth-g" ->
+                            wireJson.encodeToString(flow.copy(state = "completed"))
+                        "/plugins/gmail/connections" -> {
+                            saved += wireJson.parseToJsonElement(body).jsonObject
+                            "{}"
+                        }
+                        else -> null
+                    }
+                }
+            server.start()
+            show(server) { vm, state -> PluginScreen(vm, state, "gmail") {} }
+            compose.waitUntil(30000) {
+                compose.onAllNodesWithText("Ajouter · Account").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Ajouter · Account").performClick()
+            // The app saved with Alice's mailbox is offered first; its secret stays on the server.
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Réutiliser la configuration de alice@example.test")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText(shortValue(clientId, 14)).assertExists()
+            compose.onNodeWithText("1. Enable the Gmail API").assertDoesNotExist()
+            capture("plugin-gmail-reuse")
+            // Another app: its checklist, the callback URL to copy and Google's warning.
+            compose.onNodeWithText("En configurer une nouvelle").performClick()
+            compose.onNodeWithText("1. Enable the Gmail API").assertExists()
+            compose.onNodeWithText("Open API Library").assertExists()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Copier l’adresse de retour")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("A Testing app expires after seven days.").assertExists()
+            compose.onNodeWithText("Continuer").assertIsNotEnabled()
+            capture("plugin-gmail-app")
+            compose
+                .onNodeWithText("Réutiliser la configuration de alice@example.test")
+                .performScrollTo()
+                .performClick()
+            continueSetup()
+            // Permissions as presets; the switches stay at hand.
+            compose.onNode(hasText("Read only") and isSelected()).assertExists()
+            // Alice's card behind the assistant lists the same settings: look at switches only.
+            compose.onNode(hasText("Send messages") and isToggleable()).assertDoesNotExist()
+            compose.onNodeWithText("Read, draft and send").performClick()
+            compose.onNode(hasText("Read, draft and send") and isSelected()).assertExists()
+            compose.onNodeWithText("Affiner").performClick()
+            compose.onNode(hasText("Send messages") and isToggleable()).assertIsOn()
+            compose.onNode(hasText("Permanently delete mail") and isToggleable()).assertIsOff()
+            compose.onNodeWithText("Risque élevé").assertExists()
+            capture("plugin-gmail-permissions")
+            continueSetup()
+            compose.onNodeWithText("Enregistrer").assertDoesNotExist()
+            signInButton("Sign in with Google").performScrollTo().performClick()
+            compose.waitUntil(20000) {
+                compose.onAllNodesWithText("Connecté.").fetchSemanticsNodes().isNotEmpty()
+            }
+            // Other permissions after signing in need a new sign-in, which the installation
+            // would require: even choosing the same ones again.
+            compose.onNodeWithText("Retour").performClick()
+            compose.onNodeWithText("Read only").performClick()
+            compose.onNodeWithText("Read, draft and send").performClick()
+            continueSetup()
+            compose.onNodeWithText("Connecté.").assertDoesNotExist()
+            compose.onNodeWithText("Continuer").assertIsNotEnabled()
+            signInButton("Sign in with Google").performScrollTo().performClick()
+            compose.waitUntil(20000) {
+                compose.onAllNodesWithText("Connecté.").fetchSemanticsNodes().isNotEmpty()
+            }
+            continueSetup()
+            compose.onNode(hasText("Helper") and isToggleable()).performClick()
+            // Named after the mailbox the package verified.
+            compose.onNode(hasSetTextAction() and hasText("bob@example.test")).assertExists()
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.waitUntil(10000) { saved.isNotEmpty() }
+            val payload = saved.single()
+            assertEquals("bob@example.test", payload["name"]?.jsonPrimitive?.content)
+            assertEquals("alice", payload["sharedFrom"]?.jsonPrimitive?.content)
+            assertEquals("oauth-g", payload["credentialFlow"]?.jsonPrimitive?.content)
+            assertEquals(JsonArray(listOf(JsonPrimitive("helper"))), payload["agentIds"])
+            assertEquals(
+                buildJsonObject {
+                    put("clientId", clientId)
+                    put("email", "bob@example.test")
+                    put("allowSend", true)
+                    put("allowDrafts", true)
+                    put("allowDelete", false)
+                },
+                payload["settings"],
+            )
+            assertEquals(JsonObject(emptyMap()), payload["secrets"])
+            assertEquals(2, starts.size)
+            assertTrue(starts.all { it["sharedFrom"]?.jsonPrimitive?.content == "alice" })
+            // The package hears about the reused app too, never its secret.
+            val signedIn = forms.filter { "credentialFlow" in it }
+            assertTrue(forms.toString(), signedIn.isNotEmpty())
+            assertTrue(signedIn.all { it["sharedFrom"]?.jsonPrimitive?.content == "alice" })
+            assertTrue(forms.none { it["secrets"]?.jsonObject?.isNotEmpty() == true })
+        }
+    }
+
+    /** Waits for the package's answer, then goes to the next step. */
+    private fun continueSetup() {
+        compose.waitUntil(10000) {
+            compose
+                .onAllNodes(hasText("Continuer") and isEnabled())
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithText("Continuer").performClick()
+    }
+
+    /** The sign-in button, not the step's title above it. */
+    private fun signInButton(label: String) = compose.onNode(hasText(label) and hasClickAction())
+
     @Test fun editingAnInstanceLeavesItsGrantsToTheAgentPages() = editExistingAccount(older = false)
 
     @Test
@@ -6492,6 +7033,7 @@ abstract class PluginsCases {
         read: (String) -> String? = { null },
         current: Boolean = true,
         packages: List<PluginEntry> = listOf(onePassword, discord, notes),
+        connections: List<PluginConnection> = listOf(bot, account),
         /** Every request as "METHOD path", when a journey checks methods. */
         requests: MutableList<String>? = null,
         handle: (String, String) -> String?,
@@ -6558,7 +7100,7 @@ abstract class PluginsCases {
                                 PluginCatalog(
                                     setupDrafts = current,
                                     packages = packages,
-                                    connections = listOf(bot, account),
+                                    connections = connections,
                                 )
                             )
                         "/api/installations/fixture/api/plugins/onepassword/programs" ->

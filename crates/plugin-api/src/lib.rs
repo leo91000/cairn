@@ -9,6 +9,7 @@ mod oauth;
 mod operations;
 mod resources;
 mod settings;
+mod setup;
 mod sources;
 mod view;
 mod webhooks;
@@ -23,6 +24,7 @@ pub use oauth::{OAuth as OAuthProvider, OAuthPersonal, OAuthTokenResponse};
 pub use operations::{Operation, Profile, RequestRule};
 pub use resources::ResourceCollection;
 pub use settings::validate_settings_schema;
+pub use setup::{CopyValue, Effort, Preset, Risk, Setup, Step, StepKind, Task};
 pub use sources::{MAX_MODULES, MAX_SOURCE_BYTES, Sources, module_path, resolve};
 pub use view::{validate_action_result, validate_view};
 pub use webhooks::{Webhook, WebhookSetup, WebhookSignature, WebhookTimestamp};
@@ -295,6 +297,9 @@ pub struct Manifest {
     /// Skill sources the owner imports from through the `skills` handler.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skill_sources: Vec<SkillSource>,
+    /// What connecting an instance takes and the steps the owner follows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<Setup>,
 }
 
 pub(crate) fn slug(value: &str, max: usize) -> bool {
@@ -457,7 +462,8 @@ impl Manifest {
         }
         self.validate_programs()?;
         self.validate_agent_interface()?;
-        self.validate_integrations()
+        self.validate_integrations()?;
+        self.validate_setup()
     }
 
     fn validate_programs(&self) -> Result<(), &'static str> {
@@ -540,6 +546,13 @@ impl Manifest {
 
     pub fn permits_capability(&self, capability: &str) -> bool {
         self.capabilities.iter().any(|item| item == capability)
+    }
+
+    /// People address one root agent only when resource routes do not own
+    /// participant admission and agent selection.
+    pub fn delegates(&self) -> bool {
+        self.permits_capability("conversations.submit")
+            && !self.resources.iter().any(|resource| resource.delegation)
     }
 
     /// A host method is allowed only through a capability the manifest requests.

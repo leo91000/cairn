@@ -1,0 +1,135 @@
+{
+  "availableParallelism": 12,
+  "cases": [
+    {
+      "digest": "52cc5c06a0c4181f43acabef58bd4b08572bdb5524060b7c70616e49d2ed56c2",
+      "manifestBytes": 263,
+      "offloaded": false,
+      "readBatchProcessCpuMs": 2.2372710000000007,
+      "reads": [
+        {
+          "loaderThreadCpuMs": 0.9199139999999999,
+          "processCpuMs": 0.9233599999999997,
+          "wallMs": 0.928709
+        },
+        {
+          "loaderThreadCpuMs": 0.28512700000000013,
+          "processCpuMs": 0.28711099999999945,
+          "wallMs": 0.286667
+        },
+        {
+          "loaderThreadCpuMs": 0.26975799999999994,
+          "processCpuMs": 0.2718930000000004,
+          "wallMs": 0.27525299999999997
+        },
+        {
+          "loaderThreadCpuMs": 0.2487510000000004,
+          "processCpuMs": 0.25049800000000033,
+          "wallMs": 0.24980199999999997
+        },
+        {
+          "loaderThreadCpuMs": 0.23391800000000007,
+          "processCpuMs": 0.23555800000000016,
+          "wallMs": 0.234878
+        },
+        {
+          "loaderThreadCpuMs": 0.23175100000000004,
+          "processCpuMs": 0.23330099999999998,
+          "wallMs": 0.232637
+        }
+      ],
+      "sourceBytes": 9,
+      "writes": [
+        {
+          "processCpuMs": 0.16440999999999928,
+          "wallMs": 4.457661
+        },
+        {
+          "processCpuMs": 0.12959299999999985,
+          "wallMs": 3.5964650000000002
+        },
+        {
+          "processCpuMs": 0.09190300000000029,
+          "wallMs": 3.144662
+        },
+        {
+          "processCpuMs": 0.12975100000000062,
+          "wallMs": 2.9700830000000003
+        },
+        {
+          "processCpuMs": 0.06663599999999992,
+          "wallMs": 2.745009
+        },
+        {
+          "processCpuMs": 0.1098789999999994,
+          "wallMs": 2.874469
+        }
+      ]
+    },
+    {
+      "digest": "52cc5c06a0c4181f43acabef58bd4b08572bdb5524060b7c70616e49d2ed56c2",
+      "manifestBytes": 263,
+      "offloaded": true,
+      "readBatchProcessCpuMs": 3.2821549999999995,
+      "reads": [
+        {
+          "loaderThreadCpuMs": 0.782727,
+          "processCpuMs": 1.0984649999999991,
+          "wallMs": 1.040697
+        },
+        {
+          "loaderThreadCpuMs": 0.42575799999999997,
+          "processCpuMs": 0.45492500000000113,
+          "wallMs": 0.45217599999999997
+        },
+        {
+          "loaderThreadCpuMs": 0.401705,
+          "processCpuMs": 0.4138149999999996,
+          "wallMs": 0.418218
+        },
+        {
+          "loaderThreadCpuMs": 0.4092370000000001,
+          "processCpuMs": 0.4203620000000008,
+          "wallMs": 0.431352
+        },
+        {
+          "loaderThreadCpuMs": 0.4072140000000002,
+          "processCpuMs": 0.41789200000000015,
+          "wallMs": 0.42273700000000003
+        },
+        {
+          "loaderThreadCpuMs": 0.410787,
+          "processCpuMs": 0.42768599999999957,
+          "wallMs": 0.434231
+        }
+      ],
+      "sourceBytes": 9,
+      "writes": [
+        {
+          "processCpuMs": 0.06233499999999914,
+          "wallMs": 2.871457
+        },
+        {
+          "processCpuMs": 0.049127999999999616,
+          "wallMs": 2.7931470000000003
+        },
+        {
+          "processCpuMs": 0.035679000000000016,
+          "wallMs": 3.207272
+        },
+        {
+          "processCpuMs": 0.056525999999999854,
+          "wallMs": 3.354403
+        },
+        {
+          "processCpuMs": 0.04991599999999963,
+          "wallMs": 2.803347
+        },
+        {
+          "processCpuMs": 0.044790000000000774,
+          "wallMs": 2.747262
+        }
+      ]
+    }
+  ]
+}

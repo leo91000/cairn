@@ -8,6 +8,7 @@ import type {
 } from './plugins'
 import { api, ApiError } from './api'
 import { pluginManagementItems } from './plugin-management'
+import { pluginSetup } from './plugin-setup'
 import { delegates, needsWorker } from './plugins'
 
 /** Card data is presentation, never a manifest used to configure or approve code. */
@@ -22,6 +23,7 @@ export interface PluginPresentation {
   delegates: boolean
   agentAccess: boolean
   agentAccessDescription?: string | null
+  setup?: ReturnType<typeof pluginSetup>
   contributions: {
     commands: number
     tools: number
@@ -89,6 +91,7 @@ function legacyCards(catalog: Catalog): PluginCards {
           needsWorker: needsWorker(manifest),
           delegates: delegates(manifest),
           agentAccess: Boolean(manifest.agentAccess),
+          setup: pluginSetup(entry),
           contributions: {
             commands: manifest.commands?.length ?? 0,
             tools: manifest.tools?.length ?? 0,

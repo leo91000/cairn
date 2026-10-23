@@ -42,3 +42,8 @@ deadline. The measurement itself does not demonstrate physical recovery.
 No new key, table, encrypted envelope or credential field is introduced by
 applying the existing expiry to OAuth writes. The complete unreleased epoch-12 /
 SQLite-11 transition and recovery qualification remain mandatory.
+
+This observation precedes integration of Main's guided setup transition. The
+current unqualified Slack boundary is epoch 13 / SQLite 12; the original samples
+remain historical evidence for the unchanged credential representation. See the
+[current compatibility inventory](../SLACK-PLUGIN-COMPATIBILITY.md).

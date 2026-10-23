@@ -19,6 +19,7 @@ data class PluginPresentation(
     val agentAccess: Boolean,
     val contributions: PluginContributionCounts,
     val agentAccessDescription: String? = null,
+    val setup: PluginSetup? = null,
 )
 
 @Serializable
@@ -96,6 +97,7 @@ data class PluginCardEntry(
             if (current.instances == 0) "Version ${active.orEmpty()}"
             else "${current.instances} ${noun.lowercase()}$granted",
             current.pendingRequests,
+            presentation?.setup?.effort.takeIf { current.instances == 0 },
         )
     }
 }
@@ -145,6 +147,7 @@ private fun PluginCatalog.cards() =
                                 it.instanceForm,
                                 it.resources.size,
                             ),
+                            setup = entry.resolvedSetup(),
                         )
                     },
                     entry.versions.size,
@@ -237,13 +240,14 @@ internal data class PluginConfigurationEntry(
     val accessReads: Boolean = false,
     val setupDrafts: Boolean = false,
     val capabilities: List<PluginCapability>? = null,
+    val setup: PluginSetup? = null,
 ) {
     val name
         get() = manifest?.name ?: id
 }
 
 internal fun PluginEntry.configuration() =
-    PluginConfigurationEntry(id, builtin, status, active, manifest)
+    PluginConfigurationEntry(id, builtin, status, active, manifest, setup = setup)
 
 /** Saved root and resource IDs remain distinct; neither asserts effective authorization. */
 @Serializable

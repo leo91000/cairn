@@ -254,6 +254,12 @@ async fn start_for(
         (None, Some(instance)) => Some(connections::get(s, plugin, instance).await?),
         (None, None) => None,
     };
+    // Reuse the same settings/secret override contract as form and save. Null
+    // optional secrets from the source also replace any locally typed value.
+    let shared_input = connections::shared(s, &package.manifest, plugin, input, existing.is_some())
+        .await?
+        .map(|shared| shared.apply(input));
+    let input = shared_input.as_ref().unwrap_or(input);
     let settings = if input["settings"].is_object() {
         input["settings"].clone()
     } else {

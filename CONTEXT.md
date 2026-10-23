@@ -145,7 +145,8 @@ du propriétaire et aux permissions d’agent qu’il a approuvées.
 Une configuration d’un plugin par le propriétaire, par exemple un bot Discord, un
 compte de service 1Password ou un compte GitHub : ses réglages, ses secrets chiffrés
 et, s’il répond à des personnes, sa délégation externe. Les agents autorisés à
-utiliser ce que le plugin leur apporte se choisissent sur la page de chaque agent.
+utiliser ce que le plugin leur apporte se choisissent sur la page de chaque agent,
+ou à la dernière étape de sa création, qui ne fait qu’ajouter des droits.
 Aucun agent n’est autorisé par défaut.
 _Avoid_ : connexion (réservé aux comptes des agents de code)
 
@@ -156,6 +157,15 @@ service externe, sans donner d’accès aux agents ni accepter du travail. Elle
 expire si le propriétaire ne termine pas la configuration. L’activation valide la
 configuration complète puis publie l’instance, ses ressources et les autorisations
 préparées dans une seule transaction, en conservant leurs identifiants.
+
+**Assistant de configuration d’un plugin** :
+Les étapes que le propriétaire suit pour ajouter ou modifier une instance, dans
+l’ordre où chacune devient possible : ce qu’il crée d’abord chez le service (par
+exemple une app Google Cloud), les réglages, la connexion, les personnes et les
+agents. Le catalogue annonce ce que la connexion demande : se connecter, coller un
+jeton ou créer sa propre app. Une étape partagée, comme le client OAuth d’une app,
+se configure une fois et se réutilise pour les instances suivantes du même plugin.
+_Avoid_ : wizard, onboarding
 
 **Contribution d’un plugin** :
 Ce qu’un package déclare dans son manifeste et que Cairn affiche et contrôle : le

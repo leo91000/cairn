@@ -3,8 +3,83 @@ use rusqlite::Connection;
 use serde_json::json;
 
 #[tokio::test]
+async fn upgrades_version_ten_preserving_plugin_packages_and_fences_older_binaries() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    let package = json!({ "id": "package:notes", "pluginId": "notes", "active": "1", "approvals": { "1": "reviewed-digest" } });
+    let connection = json!({ "id": "mailbox", "pluginId": "notes", "settings": { "team": "core" }, "secretKeys": ["token"] });
+    let encrypted = json!({ "ciphertext": "retained-vault-entry" });
+    store.put("plugin-packages", package.clone()).await.unwrap();
+    store
+        .put("plugin-connections", connection.clone())
+        .await
+        .unwrap();
+    store
+        .set("plugin-secrets:mailbox", encrypted.clone(), None)
+        .await
+        .unwrap();
+    let directory = root.path().join("plugins/notes/1");
+    std::fs::create_dir_all(&directory).unwrap();
+    let manifest =
+        br#"{"id":"notes","name":"Notes","version":"1","apiVersion":2,"capabilities":[]}"#;
+    std::fs::write(directory.join("manifest.json"), manifest).unwrap();
+    std::fs::write(directory.join("main.luau"), "return {}").unwrap();
+    store
+        .transaction(|db| {
+            db.0.execute_batch("PRAGMA user_version=10;")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    drop(store);
+
+    let upgraded = Store::open(root.path()).unwrap();
+    assert_eq!(
+        upgraded
+            .get("plugin-packages", "package:notes")
+            .await
+            .unwrap(),
+        Some(package)
+    );
+    assert_eq!(
+        upgraded.get("plugin-connections", "mailbox").await.unwrap(),
+        Some(connection)
+    );
+    assert_eq!(
+        upgraded.kv("plugin-secrets:mailbox").await.unwrap(),
+        Some(encrypted)
+    );
+    assert_eq!(
+        std::fs::read(directory.join("manifest.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(
+        std::fs::read_to_string(directory.join("main.luau")).unwrap(),
+        "return {}"
+    );
+    let db = Connection::open(root.path().join("manager.db")).unwrap();
+    let version: i64 = db
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 12);
+    // Epoch-11 managers reject anything above ten before reading installed manifests.
+    assert!(version > 10);
+    drop(upgraded);
+    db.pragma_update(None, "user_version", version + 1).unwrap();
+    assert_eq!(
+        Store::open(root.path()).err().unwrap().message,
+        "This database belongs to a newer application version."
+    );
+    assert_eq!(
+        db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        version + 1
+    );
+}
+
+#[tokio::test]
 async fn upgrades_version_five_without_changing_records_and_fences_older_binaries() {
-    for previous in [5, 8, 9, 10] {
+    for previous in [5, 8, 9, 10, 11] {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
         store
@@ -86,7 +161,7 @@ PRAGMA user_version=8;",
     let version: i64 = db
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
     assert!(
         version > 8,
         "Older managers must refuse mission wait records"
@@ -117,7 +192,7 @@ async fn upgrades_version_nine_preserving_native_nodes_and_fences_older_binaries
     let version: i64 = db
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
     // Epoch-10 managers enforce a maximum of nine before opening application records.
     assert!(version > 9);
     drop(upgraded);

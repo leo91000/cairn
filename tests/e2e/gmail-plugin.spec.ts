@@ -7,7 +7,9 @@ import {
   workspacePath,
 } from './fixtures'
 
-test('Gmail connects two explicit mailboxes with OAuth and saves no browser token', async ({ page, workspace }) => {
+test('Gmail connects two explicit mailboxes with OAuth and saves no browser token', async ({ page, workspace }, testInfo) => {
+  const capture = (name: string, target: { screenshot: (options: { path: string, animations: 'disabled' }) => Promise<unknown> } = page) =>
+    target.screenshot({ path: testInfo.outputPath(`gmail-${name}.png`), animations: 'disabled' })
   await useRelayForHttpMocks(page)
   const catalog = await workspace.api('/api/plugins')
   const gmail = catalog.packages.find((item: { id: string }) => item.id === 'gmail').manifest
@@ -90,27 +92,99 @@ test('Gmail connects two explicit mailboxes with OAuth and saves no browser toke
   await expect(logo.locator('path')).toHaveAttribute('d', gmail.brand.path)
   await expect(logo.locator('..')).toHaveCSS('background-color', 'rgb(234, 67, 53)')
 
-  for (const email of ['alice@example.test', 'bob@example.test']) {
-    await page.getByRole('button', { name: 'Add account', exact: true }).click()
-    const editor = page.getByRole('dialog', { name: 'New account' })
-    await expect(editor.getByLabel('Callback URL')).toHaveValue(callbackUrl)
-    await expect(editor.getByLabel('Google authorization', { exact: true })).toHaveCount(0)
-    await editor.getByLabel('Name', { exact: true }).fill(email)
-    await editor.getByLabel('Google OAuth client ID').fill('public-client')
-    await editor.getByLabel('Google OAuth client secret').fill('synthetic-client-secret')
-    await expect(editor.getByRole('button', { name: 'Save account', exact: true })).toBeDisabled()
-    await editor.getByRole('button', { name: 'Sign in with Gmail', exact: true }).click()
-    await expect(editor.getByLabel('Verification code', { exact: true })).toHaveCount(0)
-    await expect(editor.getByRole('link', { name: 'Open Gmail' })).toHaveAttribute('href', /accounts\.google\.com/)
-    await expect(editor.getByText(`Connected as ${email}`)).toBeVisible({ timeout: 10000 })
-    await editor.getByRole('button', { name: 'Save account', exact: true }).click()
-    await expect(editor).toHaveCount(0)
-  }
+  // The page says before anything else that Gmail needs a Google Cloud app.
+  const first = page.getByRole('region', { name: 'Set up your first account' })
+  await expect(first).toContainText('Google Cloud app you own')
+  await expect(first.getByText('Needs your own app')).toBeVisible()
+  await capture('first-setup')
+  await first.getByRole('button', { name: 'Start setup' }).click()
 
-  expect(starts).toHaveLength(2)
-  expect(starts[0]).toMatchObject({ settings: { clientId: 'public-client', allowSend: false }, secrets: { clientSecret: 'synthetic-client-secret' } })
+  // First mailbox: the Google Cloud app is created, then the permissions, then the sign-in.
+  let editor = page.getByRole('dialog', { name: 'New account' })
+  await expect(editor.getByRole('heading', { name: 'Google Cloud app' })).toBeVisible()
+  await expect(editor.getByRole('link', { name: /Open API Library/ })).toHaveAttribute('href', 'https://console.cloud.google.com/apis/library/gmail.googleapis.com')
+  await expect(editor.getByRole('textbox', { name: 'Callback URL' })).toHaveValue(callbackUrl)
+  await expect(editor.getByRole('note')).toContainText('seven days')
+  await expect(editor.getByRole('note')).toContainText('External apps in Testing')
+  await expect(editor.getByRole('link', { name: /Open Audience/ })).toHaveAttribute('href', 'https://console.cloud.google.com/auth/audience')
+  await expect(editor.getByRole('button', { name: 'Continue' })).toBeDisabled()
+  await capture('step-app', editor)
+  await editor.getByLabel('Google OAuth client ID').fill('public-client')
+  await editor.getByLabel('Google OAuth client secret').fill('synthetic-client-secret')
+  await editor.getByRole('button', { name: 'Continue' }).click()
+
+  await expect(editor.getByRole('heading', { name: 'Permissions' })).toBeVisible()
+  await expect(editor.getByRole('radio', { name: /Read only/ })).toBeChecked()
+  await editor.getByRole('radio', { name: /Read, draft and send/ }).check()
+  await editor.getByText('Fine-tune').click()
+  await expect(editor.getByRole('checkbox', { name: /Send messages/ })).toBeChecked()
+  await expect(editor.getByRole('checkbox', { name: /Permanently delete mail.*High risk/ })).not.toBeChecked()
+  await capture('step-permissions', editor)
+  await editor.getByRole('button', { name: 'Continue' }).click()
+
+  await expect(editor.getByLabel('Google authorization', { exact: true })).toHaveCount(0)
+  await expect(editor.getByRole('button', { name: 'Continue' })).toBeDisabled()
+  await editor.getByRole('button', { name: 'Sign in with Google', exact: true }).click()
+  await expect(editor.getByLabel('Verification code', { exact: true })).toHaveCount(0)
+  await expect(editor.getByRole('link', { name: 'Open sign-in' })).toHaveAttribute('href', /accounts\.google\.com/)
+  await expect(editor.getByText('Connected as alice@example.test')).toBeVisible({ timeout: 10000 })
+  await capture('step-sign-in', editor)
+  await editor.getByRole('button', { name: 'Continue' }).click()
+
+  // The last step grants agents and names the account after the verified mailbox.
+  await expect(editor.getByRole('heading', { name: 'Agents' })).toBeVisible()
+  await expect(editor.getByLabel('Name', { exact: true })).toHaveValue('alice@example.test')
+  await editor.getByRole('checkbox', { name: /Main agent/ }).check()
+  await capture('step-agents', editor)
+  await editor.getByRole('button', { name: 'Save account', exact: true }).click()
+  await expect(editor).toHaveCount(0)
+
+  // Second mailbox: the same Google Cloud app is offered, so only permissions and sign-in remain.
+  await page.getByRole('button', { name: 'Add account', exact: true }).click()
+  editor = page.getByRole('dialog', { name: 'New account' })
+  await expect(editor.getByRole('radio', { name: /Use the same one as alice@example\.test/ })).toBeChecked()
+  await expect(editor.getByLabel('Google OAuth client ID')).toHaveCount(0)
+  await capture('second-account-reuse', editor)
+  await editor.getByRole('button', { name: 'Continue' }).click()
+  await editor.getByRole('button', { name: 'Continue' }).click()
+  await editor.getByRole('button', { name: 'Sign in with Google', exact: true }).click()
+  await expect(editor.getByText('Connected as bob@example.test')).toBeVisible({ timeout: 10000 })
+  // Other permissions after signing in need a new sign-in, which the installation would require.
+  await editor.getByRole('button', { name: 'Back', exact: true }).click()
+  await editor.getByRole('radio', { name: /Read, draft and send/ }).check()
+  await editor.getByRole('button', { name: 'Continue' }).click()
+  await expect(editor.getByText('Connected as bob@example.test')).toHaveCount(0)
+  await expect(editor.getByRole('button', { name: 'Continue' })).toBeDisabled()
+  await editor.getByRole('button', { name: 'Sign in with Google', exact: true }).click()
+  await expect(editor.getByText('Connected as bob@example.test')).toBeVisible({ timeout: 10000 })
+  await editor.getByRole('button', { name: 'Continue' }).click()
+  await expect(editor.getByLabel('Name', { exact: true })).toHaveValue('bob@example.test')
+  await editor.getByRole('button', { name: 'Save account', exact: true }).click()
+  await expect(editor).toHaveCount(0)
+
+  expect(starts).toHaveLength(3)
+  expect(starts[0]).toMatchObject({
+    settings: {
+      clientId: 'public-client',
+      allowSend: true,
+      allowDrafts: true,
+      allowDelete: false,
+    },
+    secrets: { clientSecret: 'synthetic-client-secret' },
+  })
+  expect(starts[0]).not.toHaveProperty('sharedFrom')
+  // The second sign-in names the first account; its secret never travels through the browser.
+  expect(starts[1]).toMatchObject({ sharedFrom: connections[0]!.id, settings: { allowSend: false } })
+  expect(starts[1].secrets).toEqual({})
+  expect(starts[2]).toMatchObject({ sharedFrom: connections[0]!.id, settings: { allowSend: true } })
+  expect(saves.map(value => value.name)).toEqual(['alice@example.test', 'bob@example.test'])
   expect(saves.map(value => value.settings.email)).toEqual(['alice@example.test', 'bob@example.test'])
-  expect(saves.map(value => value.credentialFlow)).toEqual(['flow-1', 'flow-2'])
+  expect(saves.map(value => value.credentialFlow)).toEqual(['flow-1', 'flow-3'])
+  expect(saves[1].sharedFrom).toBe(connections[0]!.id)
+  // Creation grants the agents ticked on the last step, and only those.
+  const main = (await workspace.api('/api/agents')).find((agent: { name: string }) => agent.name === 'Main agent')
+  expect(saves[0].agentIds).toEqual([main.id])
+  expect(saves[1]).not.toHaveProperty('agentIds')
   expect(saves.every(value => !Object.hasOwn(value, 'token'))).toBe(true)
   await expect(page.getByRole('heading', { name: 'alice@example.test', exact: true })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'bob@example.test', exact: true })).toBeVisible()

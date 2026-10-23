@@ -3,6 +3,9 @@
 //! manifest and every Luau file; any later change on disk needs a new approval.
 pub mod owner;
 
+#[cfg(test)]
+mod measurement;
+
 use crate::{
     config::now,
     error::{Error, Result},
@@ -281,10 +284,14 @@ fn read_limited(path: &Path, limit: u64) -> Result<String> {
 
 /// Reads one installed version. Its directory names must match the manifest.
 fn read_version(s: &Service, id: &str, version: &str) -> Result<Package> {
+    read_version_at(&root(s), id, version)
+}
+
+fn read_version_at(root: &Path, id: &str, version: &str) -> Result<Package> {
     if !segment(id) || !segment(version) {
         return Err(Error::not_found("Plugin version not found."));
     }
-    let directory = root(s).join(id).join(version);
+    let directory = root.join(id).join(version);
     if !package_io(std::fs::symlink_metadata(&directory))?.is_dir() {
         return Err(Error::not_found("Plugin version not found."));
     }
@@ -399,22 +406,35 @@ pub(crate) async fn approved(s: &Service, id: &str) -> Result<ApprovedPackage> {
     let version = record["active"]
         .as_str()
         .ok_or_else(|| Error::forbidden("Approve this plugin before connecting it."))?;
-    let package = read_version(s, id, version).map_err(|error| {
-        if matches!(error.status, 400 | 413) {
-            Error::forbidden("This plugin package is invalid. Review it in Plugins.")
-        } else {
-            error
-        }
-    })?;
+    // File reads and bounded manifest/regex validation are synchronous. Run
+    // them outside nested form/credential futures, whose caller retains its
+    // original approval and rechecks it at effects and commit.
+    let directory = root(s);
+    let plugin = id.to_owned();
+    let selected = version.to_owned();
+    let package =
+        tokio::task::spawn_blocking(move || read_version_at(&directory, &plugin, &selected))
+            .await
+            .map_err(Error::internal)?
+            .map_err(|error| {
+                if matches!(error.status, 400 | 413) {
+                    Error::forbidden("This plugin package is invalid. Review it in Plugins.")
+                } else {
+                    error
+                }
+            })?;
     if record["approvals"][version] != package.digest {
         return Err(Error::forbidden(
             "This plugin changed since it was approved. Review it in Plugins.",
         ));
     }
-    Ok(ApprovedPackage {
+    let approved = ApprovedPackage {
         package,
         record: Some(record),
-    })
+    };
+    let approval = approved.snapshot();
+    s.store.read(move |db| approval.recheck_in(db)).await?;
+    Ok(approved)
 }
 
 /// Every package that can run now: bundled ones and approved active installed versions.
@@ -440,6 +460,7 @@ fn summary(package: &Package) -> Value {
         "version": package.manifest.version,
         "digest": package.digest,
         "manifest": package.manifest,
+        "setup": package.manifest.setup(),
         "files": files(&package.source),
     })
 }

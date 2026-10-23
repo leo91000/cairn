@@ -893,3 +893,148 @@ async fn installation_management_revocation_during_oauth_refresh_cannot_publish_
         credential["oauth"]["expiresAt"]
     );
 }
+
+/// An installation management run of Main agent, through the installation MCP endpoint.
+async fn manage(f: &Fixture, args: Value) -> Value {
+    f.s.agent(
+        json!({ "name": "Main agent", "access": { "installation": true } }),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
+    let task =
+        f.s.task(
+            json!({ "name": "Set up Gmail", "prompt": "Add a mailbox", "agentId": MAIN_AGENT_ID }),
+            None,
+        )
+        .await
+        .unwrap();
+    let run =
+        f.s.enqueue(text(&task, "id"), "manual", None)
+            .await
+            .unwrap();
+    let run =
+        f.s.store
+            .patch_run(
+                text(&run, "id"),
+                json!({ "status": "running", "isolated": true }),
+            )
+            .await
+            .unwrap();
+    let configuration = f.s.mcps.run_configuration(&f.s, &run).await.unwrap();
+    let bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+    let app = cairn_installation::http::router(f.s.clone()).await.unwrap();
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": common::mcp_arguments("manage_plugin", &args) });
+    let request = common::request("POST", "/mcp-installation")
+        .header("authorization", format!("Bearer {bearer}"))
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    common::read_json(common::send(&app, request).await).await
+}
+
+#[tokio::test]
+async fn a_new_mailbox_reuses_the_google_app_without_exposing_its_secret() {
+    let f = fixture().await;
+    let alice = connect(&f, "alice").await;
+    let owner = "cairn-account:fixture-owner";
+
+    // Only the permissions are typed: the client comes from Alice's account.
+    let reuse = json!({ "sharedFrom": alice.id, "settings": { "allowSend": true } });
+    let started = oauth::start(&f.s, "gmail", &reuse, owner).await.unwrap();
+    let url = url::Url::parse(text(&started, "verificationUri")).unwrap();
+    let params: HashMap<_, _> = url.query_pairs().into_owned().collect();
+    assert_eq!(params["client_id"], "fixture-client");
+    assert!(!started.to_string().contains("fixture-secret"));
+    oauth::callback(
+        &f.s,
+        &json!({ "state": started["id"], "code": "carol" }),
+        owner,
+    )
+    .await
+    .unwrap();
+
+    let mut draft = reuse.clone();
+    draft["credentialFlow"] = started["id"].clone();
+    let form = cairn_installation::plugins::forms::form(&f.s, "gmail", &draft)
+        .await
+        .unwrap();
+    assert_eq!(form["values"]["email"], "carol@example.test", "{form}");
+    assert!(!form.to_string().contains("fixture-secret"));
+
+    draft["name"] = json!("carol@example.test");
+    draft["enabled"] = json!(true);
+    let saved = connections::save(&f.s, "gmail", &draft, None)
+        .await
+        .unwrap();
+    assert!(!saved.to_string().contains("fixture-secret"));
+    let carol: Connection = serde_json::from_value(saved).unwrap();
+    assert_eq!(carol.settings["clientId"], "fixture-client");
+    assert_eq!(carol.settings["allowSend"], true);
+    assert_eq!(carol.settings["email"], "carol@example.test");
+    assert_eq!(carol.secret_keys, ["clientSecret"]);
+    let secrets =
+        f.s.vault
+            .get(&connections::secrets_key(&carol.id))
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(secrets["fields"]["clientSecret"], "fixture-secret");
+    let credential =
+        f.s.vault
+            .get(&connections::credential_key(&carol.id))
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(credential["oauth"]["clientId"], "fixture-client");
+    assert_eq!(credential["oauth"]["clientSecret"], "fixture-secret");
+
+    // An edit keeps its own setup: only a new instance reuses another one's.
+    let error = connections::save(&f.s, "gmail", &draft, Some(&carol.id))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Only a new instance"), "{error}");
+    let edit = json!({ "instance": carol.id, "sharedFrom": alice.id, "settings": {} });
+    let error = oauth::start(&f.s, "gmail", &edit, owner).await.unwrap_err();
+    assert!(error.to_string().contains("Only a new instance"), "{error}");
+
+    // Reuse names an instance of the same package, and only shared settings move.
+    let unknown = json!({ "sharedFrom": uuid::Uuid::new_v4().to_string(), "settings": {} });
+    assert!(oauth::start(&f.s, "gmail", &unknown, owner).await.is_err());
+    let invalid = json!({ "sharedFrom": 7, "settings": {} });
+    assert!(oauth::start(&f.s, "gmail", &invalid, owner).await.is_err());
+    let elsewhere = json!({ "name": "Vault", "enabled": true, "sharedFrom": alice.id, "secrets": { "token": "ops_fixture" } });
+    let error = connections::save(&f.s, "onepassword", &elsewhere, None)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("nothing to reuse"), "{error}");
+}
+
+#[tokio::test]
+async fn installation_management_reuses_only_a_granted_google_app() {
+    let f = fixture().await;
+    let granted = connect(&f, "alice").await;
+    let flow = sign_in(&f, "bob", None).await;
+    let ungranted = connections::save(&f.s, "gmail", &json!({ "name": "bob", "enabled": true, "settings": settings(), "secrets": { "clientSecret": "fixture-secret" }, "credentialFlow": flow["id"] }), None).await.unwrap();
+
+    let refused = manage(
+        &f,
+        json!({ "pluginId": "gmail", "action": "signin", "data": { "sharedFrom": ungranted["id"], "settings": {} } }),
+    )
+    .await;
+    assert_eq!(refused["result"]["isError"], true, "{refused}");
+    assert!(refused.to_string().contains("grant"), "{refused}");
+
+    let started = manage(
+        &f,
+        json!({ "pluginId": "gmail", "action": "signin", "data": { "sharedFrom": granted.id, "settings": {} } }),
+    )
+    .await;
+    assert_ne!(started["result"]["isError"], true, "{started}");
+    assert!(started.to_string().contains("fixture-client"), "{started}");
+    assert!(!started.to_string().contains("fixture-secret"));
+
+    let setup = manage(&f, json!({ "pluginId": "gmail", "action": "setup" })).await;
+    let steps = setup.to_string();
+    assert!(steps.contains("Google Cloud app"), "{setup}");
+    assert!(steps.contains("callbackUrl"), "{setup}");
+}

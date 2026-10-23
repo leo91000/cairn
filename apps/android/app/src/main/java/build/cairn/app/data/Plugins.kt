@@ -45,6 +45,8 @@ data class PluginSetting(
     val remote: Boolean = false,
     /** Changing this field asks the package's form handler again. */
     val refresh: Boolean = false,
+    /** How much a switch lets agents do: `low`, `medium` or `high`. */
+    val risk: String? = null,
     val default: JsonElement? = null,
 )
 
@@ -335,6 +337,10 @@ data class PluginManifest(
     val projectSources: List<PluginProjectSource> = emptyList(),
     /** Where its enabled instances import skills from. */
     val skillSources: List<PluginSkillSource> = emptyList(),
+    /** Credentials given to agents' runs (`files`, `git`, …); only the kinds matter here. */
+    val runCredentials: JsonObject? = null,
+    /** The package's own setup assistant, when the installation does not resolve it. */
+    val setup: PluginSetup? = null,
 ) {
     /** Instances answer external people through a dedicated agent. */
     val delegates
@@ -348,6 +354,10 @@ data class PluginManifest(
         get() =
             listOf("socket", "inbound", "conversations.submit", "conversations.control", "timers")
                 .any { it in capabilities }
+
+    /** Runs receive the instance's credentials: each agent gets one instance of the package. */
+    val onePerAgent
+        get() = runCredentials?.keys?.any { it == "files" || it == "git" } == true
 
     /** The package's own name for one or several instances, e.g. "Service account". */
     fun noun(count: Int = 1): String =
@@ -365,6 +375,8 @@ data class PluginVersion(
     /** The package's Luau files, `main.luau` first. */
     val files: List<PluginFile>? = null,
     val manifest: PluginManifest? = null,
+    /** The steps the owner follows, resolved by the installation. */
+    val setup: PluginSetup? = null,
     val approved: Boolean? = null,
     val error: String? = null,
 )
@@ -378,6 +390,8 @@ data class PluginEntry(
     val status: String = "active",
     val active: String? = null,
     val manifest: PluginManifest? = null,
+    /** The steps the owner follows; older installations send only the manifest. */
+    val setup: PluginSetup? = null,
     val versions: List<PluginVersion> = emptyList(),
 ) {
     val name
@@ -515,8 +529,16 @@ internal fun pluginConnectionState(enabled: Boolean, state: String): PluginBadge
         else -> PluginBadge("Hors ligne", PluginTone.ATTENTION)
     }
 
-/** One plugin card in the catalogue: its status, a short count and pending requests. */
-data class PluginSummary(val badge: PluginBadge, val meta: String, val requests: Int)
+/**
+ * One plugin card in the catalogue: its status, a short count, pending requests and, until the
+ * first instance exists, what connecting takes ([PluginSetup.effort]).
+ */
+data class PluginSummary(
+    val badge: PluginBadge,
+    val meta: String,
+    val requests: Int,
+    val effort: String? = null,
+)
 
 private fun plural(count: Int, noun: String) = "$count $noun${if (count > 1) "s" else ""}"
 
@@ -551,6 +573,7 @@ fun PluginEntry.summary(connections: List<PluginConnection>): PluginSummary {
         },
         if (mine.isEmpty()) "Version ${active.orEmpty()}" else "${mine.size} $noun$granted",
         mine.sumOf { it.requests.size },
+        resolvedSetup().effort.takeIf { mine.isEmpty() },
     )
 }
 

@@ -30,6 +30,7 @@ import {
   Wrench,
 } from '../icons'
 import { pluginCards } from '../plugin-catalogue'
+import { effortLabels } from '../plugin-setup'
 import {
   capabilityLabels,
   connectionState,
@@ -73,6 +74,8 @@ interface Card {
   meta: string
   requests: number
   action: 'Set up' | 'Manage' | 'Review'
+  /** What connecting takes, until the first instance exists. */
+  effort?: { label: string, tone: 'warn' | 'accent' }
 }
 
 const tones = {
@@ -102,6 +105,7 @@ function card(entry: PluginCardEntry): Card {
     }
   }
 
+  const effort = presentation?.setup?.effort
   const online = (summary.states.connected ?? 0) + (summary.states.ready ?? 0)
   const noun = instanceNoun(presentation, summary.instances).toLowerCase()
   const agents = summary.authorizedAgents
@@ -124,6 +128,7 @@ function card(entry: PluginCardEntry): Card {
     meta: summary.instances ? `${summary.instances} ${noun}${granted}` : `Version ${entry.active}`,
     requests: summary.pendingRequests,
     action: summary.instances ? 'Manage' : 'Set up',
+    effort: !summary.instances && effort ? { label: effortLabels[effort], tone: effort === 'app' ? 'warn' : 'accent' } : undefined,
   }
 }
 
@@ -250,6 +255,9 @@ async function install() {
             <span class="flex min-w-0 flex-wrap items-center gap-2.5">
               <span v-if="loaded" class="inline-flex h-5.5 items-center gap-1.5 rounded-full px-2.25 text-2xs font-semibold" :class="tones[item.status.tone]">
                 <span class="size-1.75 rounded-full bg-current" />{{ item.status.label }}
+              </span>
+              <span v-if="item.effort" class="inline-flex h-5.5 items-center rounded-full px-2.25 text-2xs font-semibold" :class="item.effort.tone === 'warn' ? 'bg-warning-surface text-warning' : 'bg-soft text-accent'">
+                {{ item.effort.label }}
               </span>
               <span v-if="item.requests" class="inline-flex h-5.5 items-center rounded-full bg-coral-soft px-2.25 text-2xs font-semibold text-coral">
                 {{ item.requests }} request{{ item.requests > 1 ? 's' : '' }}

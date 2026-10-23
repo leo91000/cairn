@@ -595,6 +595,93 @@ pub(crate) async fn secret_values(s: &Service, connection_id: &str) -> Result<Ma
         .unwrap_or_default())
 }
 
+/// Values of the package's shared setup steps, copied from another of its instances,
+/// e.g. one OAuth client for every mailbox. The client names that instance
+/// (`sharedFrom`); its secrets stay in the host.
+pub(crate) struct Shared {
+    pub settings: Map<String, Value>,
+    pub secrets: Map<String, Value>,
+}
+
+impl Shared {
+    /// The input with the shared values in place of any typed ones.
+    pub fn apply(&self, input: &Value) -> Value {
+        let mut output = input.clone();
+        for (field, values) in [("settings", &self.settings), ("secrets", &self.secrets)] {
+            if !output[field].is_object() {
+                output[field] = json!({});
+            }
+            for (key, value) in values {
+                output[field][key] = value.clone();
+            }
+        }
+        output
+    }
+}
+
+/// The instance an input reuses, if it names one with `sharedFrom`.
+pub(crate) fn shared_source(input: &Value) -> Result<Option<&str>> {
+    match input.get("sharedFrom") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(id)) if !id.is_empty() => Ok(Some(id)),
+        Some(_) => Err(Error::bad("Choose the instance to reuse.")),
+    }
+}
+
+/// Only a new instance reuses another one's setup: an edit keeps its own.
+pub(crate) async fn shared(
+    s: &Service,
+    manifest: &Manifest,
+    plugin_id: &str,
+    input: &Value,
+    editing: bool,
+) -> Result<Option<Shared>> {
+    let Some(source) = shared_source(input)? else {
+        return Ok(None);
+    };
+    if editing {
+        return Err(Error::bad(
+            "Only a new instance can reuse another instance's setup.",
+        ));
+    }
+    let keys = manifest.shared_settings();
+    if keys.is_empty() {
+        return Err(Error::bad(
+            "This plugin has nothing to reuse from another instance.",
+        ));
+    }
+    let source = get(s, plugin_id, source).await?;
+    let saved = secret_values(s, &source.id).await?;
+    let mut shared = Shared {
+        settings: Map::new(),
+        secrets: Map::new(),
+    };
+    for field in manifest
+        .settings
+        .iter()
+        .filter(|field| keys.contains(&text(field, "key")))
+    {
+        let key = text(field, "key").to_owned();
+        if field["type"] == "secret" {
+            let value = saved.get(&key).cloned();
+            if value.is_none() && field["required"] == true {
+                return Err(Error::bad(format!(
+                    "{} has no saved {}. Set it up again.",
+                    source.name,
+                    text(field, "title")
+                )));
+            }
+            // Reusing an absent optional secret must also replace any typed draft value.
+            shared.secrets.insert(key, value.unwrap_or(Value::Null));
+        } else {
+            shared
+                .settings
+                .insert(key.clone(), source.settings[&key].clone());
+        }
+    }
+    Ok(Some(shared))
+}
+
 /// Agents granted the package's commands and tools on this instance. Off by default.
 fn agent_grants(manifest: &Manifest, input: &Value) -> Result<Vec<String>> {
     let agents = match input {
@@ -725,6 +812,16 @@ where
     };
     owner.recheck(s).await?;
     let approved = registry::approved(s, plugin_id).await?;
+    let shared_input = shared(
+        s,
+        &approved.package.manifest,
+        plugin_id,
+        input,
+        existing.is_some(),
+    )
+    .await?
+    .map(|shared| shared.apply(input));
+    let input = shared_input.as_ref().unwrap_or(input);
     let source = existing.map_or(SaveSource::New, SaveSource::Existing);
     let prepared = prepare_managed(
         s,
@@ -818,7 +915,7 @@ async fn prepare_managed(
         .resources
         .iter()
         .any(|resource| resource.delegation);
-    let delegates = manifest.permits_capability("conversations.submit") && !resource_routes;
+    let delegates = manifest.delegates();
     if resource_routes && !text(input, "agentId").is_empty() {
         return Err(Error::bad(
             "Choose agents on resource routes, rather than on the app instance.",

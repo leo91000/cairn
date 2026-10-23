@@ -43,13 +43,13 @@ impl Entry {
             "status": self.status,
             "active": self.active,
             "manifest": self.manifest,
+            "setup": self.manifest.as_ref().map(Manifest::setup),
             "versionCount": self.version_count,
         })
     }
 
     fn card(&self) -> Value {
         let presentation = self.manifest.as_ref().map(|manifest| {
-            let resource_delegation = manifest.resources.iter().any(|resource| resource.delegation);
             json!({
                 "name": manifest.name,
                 "description": manifest.description,
@@ -58,9 +58,10 @@ impl Entry {
                 "instances": manifest.instances,
                 "capabilities": manifest.capabilities,
                 "needsWorker": manifest.needs_worker(),
-                "delegates": manifest.permits_capability("conversations.submit") && !resource_delegation,
+                "delegates": manifest.delegates(),
                 "agentAccess": manifest.agent_access.is_some(),
                 "agentAccessDescription": manifest.agent_access.as_ref().map(|access| &access.description),
+                "setup": manifest.setup(),
                 "contributions": {
                     "commands": manifest.commands.len(),
                     "tools": manifest.tools.len(),

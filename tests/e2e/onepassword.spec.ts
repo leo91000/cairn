@@ -34,16 +34,18 @@ test('1Password service accounts are plugin instances with private tokens, grant
     await page.screenshot({ path: testInfo.outputPath(`onepassword-plugin-${width}.png`), fullPage: true, animations: 'disabled' })
   }
 
+  await expect(page.getByRole('region', { name: 'Set up your first service account' })).toContainText('read access to the vaults agents may use')
   await page.getByRole('button', { name: 'Add service account' }).click()
   let dialog = page.getByRole('dialog', { name: 'New service account' })
-  await dialog.getByLabel('Name', { exact: true }).fill('Production secrets')
+  await expect(dialog.getByRole('link', { name: /Open the guide/ })).toHaveAttribute('href', /developer\.1password\.com/)
   const token = dialog.getByLabel('Service account token', { exact: true })
   await expect(token).toHaveAttribute('type', 'password')
   await token.fill('ops_browser_fixture')
-  // Agents are granted on their own page; the instance only lists them.
-  await expect(dialog.getByRole('checkbox', { name: 'Main agent', exact: true })).toHaveCount(0)
-  await expect(dialog.getByRole('region', { name: 'Agents' })).toContainText('No agent can use it yet.')
-  await expect(dialog.getByRole('link', { name: 'Manage on agent pages ›' })).toBeVisible()
+  await dialog.getByRole('button', { name: 'Continue' }).click()
+  // A new account may be granted on its last step; nothing is granted unless ticked.
+  await expect(dialog.getByRole('heading', { name: 'Agents' })).toBeVisible()
+  await expect(dialog.getByRole('checkbox', { name: 'Main agent', exact: true })).not.toBeChecked()
+  await dialog.getByLabel('Name', { exact: true }).fill('Production secrets')
   for (const width of [1440, 390, 320]) {
     await page.setViewportSize({ width, height: 844 })
     await expectSingleScroll(page)
@@ -95,7 +97,11 @@ test('1Password service accounts are plugin instances with private tokens, grant
   await account.getByRole('button', { name: 'Edit Production secrets', exact: true }).click()
   dialog = page.getByRole('dialog', { name: 'Edit Production secrets' })
   await expect(dialog.getByLabel('Service account token', { exact: true })).toHaveValue('')
+  // Once it exists, its agents are listed read-only: grants change on agent pages.
+  await dialog.getByRole('button', { name: 'Step 2: Agents', exact: true }).click()
   await expect(dialog.getByRole('region', { name: 'Agents' })).toContainText('Authorized agents: Main agent')
+  await expect(dialog.getByRole('link', { name: 'Manage on agent pages ›' })).toBeVisible()
+  await expect(dialog.getByRole('checkbox', { name: 'Main agent', exact: true })).toHaveCount(0)
   const editing = page.waitForRequest(request => request.method() === 'PUT' && request.url().includes('/plugins/onepassword/connections/'))
   await dialog.getByRole('checkbox', { name: 'Active', exact: true }).uncheck()
   await dialog.getByRole('button', { name: 'Save service account' }).click()
@@ -123,5 +129,5 @@ test('1Password service accounts are plugin instances with private tokens, grant
 
   await account.getByRole('button', { name: 'Delete Production secrets', exact: true }).click()
   await page.getByRole('dialog').getByRole('button', { name: 'Delete service account', exact: true }).click()
-  await expect(page.getByText('No service accounts yet. Add one to start using this plugin.')).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Set up your first service account' })).toBeVisible()
 })

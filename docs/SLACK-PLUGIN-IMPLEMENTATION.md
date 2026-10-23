@@ -161,7 +161,7 @@ retries acknowledge an existing answer without recapturing a later turn's author
 reusing that receipt ID for a new question is refused.
 
 New persisted plugin
-manifests require a separate compatibility boundary: epoch 12 / SQLite 11, above
+manifests require a separate compatibility boundary: epoch 13 / SQLite 12, above
 main `0a46294c` and its reserved epochs 5–11. The [persistent-format inventory and
 forward recovery plan](SLACK-PLUGIN-COMPATIBILITY.md) retain the unchanged legacy
 tree and require a separately reviewed production transition. The route-authority
@@ -1713,3 +1713,30 @@ existing vault envelope and key count are reused; the optional consumed metadata
 is inventoried inside the unreleased epoch-12 / SQLite-11 boundary. This repairs
 foundation gaps; it does not complete Slack OAuth,
 root setup OAuth, management-tool parity or the accepted Q1–Q20 contract.
+
+## Guided setup integration compatibility boundary
+
+Main `d81a3a87` uses epoch 12 / SQLite 11 for guided setup declarations. The
+unreleased Slack branch therefore raises its earlier 12/11 reservation to
+**epoch 13 / SQLite 12**. Earlier checkpoint evidence above describes the source
+then tested; it does not qualify this integrated tree or a production transition.
+The retained Main migration plan remains documentation only for this draft;
+there is no automatic migration declaration to epoch 13. Full qualification and
+forward recovery remain required before delivery.
+
+The merge uses the same root-delegation predicate for setup derivation/validation,
+package cards and connection saves. Resource-routed packages keep participants
+and agent selection on their routes; editing the root does not require an
+app-wide answering agent. The shared Rust/web/Android corpus covers this case,
+and a browser regression exercises the real owner save. Android's narrow
+configuration read retains the server-resolved setup instead of requiring the
+legacy full catalogue. These integrations do not provide the remaining inert
+root OAuth client or management-tool mutation journey.
+
+A default-stack native regression also reproduced overflow while a resource form
+renewed its parent OAuth. Synchronous installed-package validation was nested
+inside the HTTP/worker/credential call chain. Approval reads now run that same
+file loader in the blocking pool, retaining the original approval and later
+checks. The uncertain-refresh regression passes with unchanged stack/deadlines;
+[local measurements](performance/PACKAGE-APPROVAL-READ.md) record its I/O/CPU
+limits. Complete merged-tree validation and fresh review remain separate gates.

@@ -1,16 +1,19 @@
 <script setup lang="ts">
 import type { Agent } from '../../../../packages/contracts/contracts'
 import type { PluginConfiguration } from '../plugin-catalogue'
+import type { SetupStep } from '../plugin-setup'
 import type {
   FormResult,
   PluginConnection,
   PluginSetupDraft,
+  SettingField,
 } from '../plugins'
 import {
   computed,
   onBeforeUnmount,
   onMounted,
   ref,
+  watch,
 } from 'vue'
 import { useRoute } from 'vue-router'
 import { currentAgentIds } from '../agent-access'
@@ -23,9 +26,11 @@ import {
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
 import PersonAvatar from '../components/PersonAvatar.vue'
+import PluginChecklist from '../components/PluginChecklist.vue'
 import PluginFields from '../components/PluginFields.vue'
 import PluginInstancePanel from '../components/PluginInstancePanel.vue'
 import PluginMark from '../components/PluginMark.vue'
+import PluginPresets from '../components/PluginPresets.vue'
 import PluginPrograms from '../components/PluginPrograms.vue'
 import PluginResources from '../components/PluginResources.vue'
 import PluginReview from '../components/PluginReview.vue'
@@ -58,6 +63,7 @@ import {
 import { pluginConfiguration, pluginInstance } from '../plugin-catalogue'
 import { pluginFormLookup } from '../plugin-form-lookups'
 import {
+  pluginFieldAnswer,
   pluginFormSecrets,
   pluginFormValue,
   pluginFormValues,
@@ -66,6 +72,14 @@ import {
 } from '../plugin-form-values'
 import { pluginManagementItems } from '../plugin-management'
 import { pluginOperation } from '../plugin-operations'
+import {
+  effortLabels,
+  matchingPreset,
+  pluginSetup,
+  sharedSources,
+  shortValue,
+  stepFields,
+} from '../plugin-setup'
 import {
   capabilityLabels,
   commandUsage,
@@ -100,8 +114,15 @@ const secrets = ref<Record<string, string>>(pluginFormSecrets())
 const people = ref<{ id: string, name: string }[]>([])
 const person = ref('')
 const completion = ref<FormResult | null>(null)
+const completionInputs = ref<Record<string, string>>({})
 const completing = ref(false)
 const copied = ref(false)
+// The setup assistant: its current step, the saved instance whose shared setup (such as
+// an OAuth client) a new one reuses, and the agents granted when it is created.
+const step = ref(0)
+const reuse = ref('')
+const grants = ref<string[]>([])
+const named = ref(false)
 let timer: ReturnType<typeof setInterval> | undefined
 let typing: ReturnType<typeof setTimeout> | undefined
 let asked = 0
@@ -114,10 +135,33 @@ const delegates = computed(() => delegating(manifest.value))
 const fields = computed(() => (manifest.value?.settings ?? []).filter(field => !field.hidden))
 const plainFields = computed(() => fields.value.filter(field => field.type !== 'secret'))
 const secretFields = computed(() => fields.value.filter(field => field.type === 'secret'))
+
+// A package error describes the input it checked. Ordinary fields need not request a
+// refresh while typing; editing them removes stale errors and save still validates them.
+function fieldInput(field: SettingField) {
+  return JSON.stringify(field.type === 'secret' ? secrets.value[field.key] : values.value[field.key]) ?? ''
+}
+
+const formErrors = computed(() => Object.fromEntries(Object.entries(completion.value?.errors ?? {}).filter(([key]) => {
+  const field = fields.value.find(field => field.key === key)
+  return !field || pluginFieldAnswer(completionInputs.value, key) === fieldInput(field)
+})))
 // Packages with their own panel describe the instance there.
 const shownFields = computed(() => manifest.value?.instanceView ? [] : plainFields.value)
 // Hidden settings are the package's own (e.g. names it derives); editing keeps them.
 const storedFields = computed(() => (manifest.value?.settings ?? []).filter(field => field.type !== 'secret'))
+const setup = computed(() => entry.value ? pluginSetup(entry.value) : { steps: [] })
+// A package with nothing to enter still names its instance and turns it on.
+const steps = computed<SetupStep[]>(() => setup.value.steps.length ? setup.value.steps : [{ id: 'details', kind: 'settings', title: 'Details' }])
+const current = computed<SetupStep | undefined>(() => steps.value[Math.min(step.value, steps.value.length - 1)])
+const last = computed(() => step.value >= steps.value.length - 1)
+const sources = computed(() => sharedSources(steps.value, manifest.value?.settings ?? [], connections.value, editing.value?.id ?? undefined))
+// The installation copies the reused values, secrets included, without sending them here.
+const sharing = computed(() => reuse.value ? { sharedFrom: reuse.value } : {})
+const sharedKeys = computed(() => steps.value.filter(item => item.shared).flatMap(item => item.settings ?? []))
+// A package whose runs receive the instance's credentials gives each agent one instance.
+const onePerAgent = computed(() => Boolean(manifest.value?.runCredentials && Object.keys(manifest.value.runCredentials).some(key => key === 'files' || key === 'git')))
+const callbackShown = computed(() => steps.value.some(item => item.checklist?.some(task => task.copy === 'callbackUrl')))
 const activityTones = {
   working: ['bg-soft text-accent', 'Working'],
   replied: ['bg-[light-dark(#dff3ee,#163a33)] text-success', 'Replied'],
@@ -151,7 +195,24 @@ const signIn = useDeviceSignIn(() => id.value, () => void complete('credential')
     ...(editing.value ? { instance: editing.value.id } : {}),
     settings: pluginSettings(storedFields.value, values.value),
     secrets: pluginSecrets(secrets.value),
+    ...sharing.value,
   }),
+})
+// A sign-in holds the OAuth client and scopes it asked for: choosing another app or other
+// permissions afterwards needs a new sign-in rather than a save the installation refuses.
+const signInBasis = computed(() => {
+  const oauth = manifest.value?.credential?.oauth
+  if (!oauth)
+    return ''
+  const keys = [oauth.clientIdSetting, ...Object.keys(oauth.scopeSettings ?? {})]
+  const secret = oauth.clientSecretSetting ? secrets.value[oauth.clientSecretSetting] ?? '' : ''
+  return JSON.stringify([reuse.value, keys.map(key => values.value[key] ?? null), secret])
+})
+watch(signInBasis, () => {
+  if (!signIn.flow.value)
+    return
+  void signIn.cancel()
+  void complete('credential')
 })
 const tones = {
   ok: 'bg-[light-dark(#dff3ee,#163a33)] text-success',
@@ -232,6 +293,12 @@ async function edit(connection: PluginConnection | null) {
   people.value = (connection?.userIds ?? []).map(user => ({ id: user, name: connection?.people.find(item => item.id === user)?.name ?? '' }))
   person.value = ''
   completion.value = null
+  step.value = 0
+  grants.value = []
+  named.value = Boolean(connection)
+  reuse.value = connection ? '' : sharedSources(steps.value, manifest.value?.settings ?? [], connections.value)[0]?.id ?? ''
+  if (!connection)
+    reused(reuse.value)
   form.value = {
     name: connection?.name ?? (manifest.value?.instances ? '' : manifest.value?.name ?? ''),
     token: '',
@@ -266,6 +333,7 @@ async function discard(draft: PluginSetupDraft) {
 function formBody() {
   return {
     instance: editing.value?.id,
+    ...sharing.value,
     settings: pluginSettings(storedFields.value, values.value),
     secrets: pluginSecrets(secrets.value),
     ...credentialInput(form.value.token, signIn.flow.value),
@@ -278,6 +346,7 @@ async function complete(changed?: string) {
   if (!manifest.value?.instanceForm)
     return
   const ask = ++asked
+  const inputs = Object.fromEntries(fields.value.map(field => [field.key, fieldInput(field)]))
   completing.value = true
   try {
     const result = formResult(await pluginOperation<FormResult | null>(`/plugins/${id.value}/form`, {
@@ -287,10 +356,17 @@ async function complete(changed?: string) {
     if (ask !== asked)
       return
     for (const field of storedFields.value) {
-      if (Object.hasOwn(result.values, field.key))
+      if (Object.hasOwn(result.values, field.key)) {
         values.value[field.key] = pluginFormValue(field, result.values[field.key])
+        inputs[field.key] = fieldInput(field)
+      }
     }
 
+    // A new instance is named after what the package verified, e.g. the mailbox.
+    const nameFrom = setup.value.nameFrom
+    if (nameFrom && !named.value && values.value[nameFrom])
+      form.value.name = String(values.value[nameFrom])
+    completionInputs.value = inputs
     completion.value = result
   }
   catch (e) {
@@ -309,6 +385,11 @@ async function complete(changed?: string) {
   }
 }
 
+async function presetChanged(keys: string[]) {
+  for (const key of keys)
+    await complete(key)
+}
+
 function typed() {
   // A pasted token replaces a sign-in.
   if (signIn.flow.value)
@@ -319,6 +400,105 @@ function typed() {
   // Saving waits for the package's answer about the new credential.
   completing.value = true
   typing = setTimeout(() => void complete('credential'), 500)
+}
+
+/** Shows the reused instance's visible shared values; another app starts empty. */
+function reused(source: string) {
+  const from = connections.value.find(item => item.id === source)
+  for (const field of storedFields.value.filter(field => sharedKeys.value.includes(field.key)))
+    values.value[field.key] = pluginFormValue(field, from?.settings[field.key] ?? '')
+  for (const key of sharedKeys.value)
+    delete secrets.value[key]
+}
+
+function chooseSource(source: string) {
+  reuse.value = source
+  reused(source)
+  void complete()
+}
+
+function filled(field: SettingField) {
+  if (field.type === 'secret')
+    return Boolean(pluginFieldAnswer(pluginSecrets(secrets.value), field.key)) || Boolean(editing.value?.secretKeys?.includes(field.key))
+  const value = pluginFieldAnswer(pluginSettings([field], values.value), field.key)
+  if (field.type === 'boolean')
+    return true
+  if (field.type === 'multiselect')
+    return Array.isArray(value) && value.length > 0
+  return value !== undefined && value !== null && value !== ''
+}
+
+/** What a step still needs before the owner can go on, or '' when it is complete. */
+function stepProblem(item: SetupStep | undefined): string {
+  if (!item || !manifest.value)
+    return ''
+  if (item.kind === 'settings') {
+    if (item.shared && reuse.value)
+      return ''
+    const shown = stepFields(item, fields.value)
+    const missing = shown.find(field => field.required && !filled(field))
+    if (missing)
+      return `Enter ${missing.title}.`
+    return shown.map(field => pluginFieldAnswer(formErrors.value, field.key)).find(Boolean) ?? ''
+  }
+
+  if (item.kind === 'credential') {
+    const credential = manifest.value.credential
+    const refused = pluginFieldAnswer(formErrors.value, 'credential')
+    if (refused)
+      return refused
+    if (editing.value || signIn.completed.value)
+      return ''
+    if (credential?.oauth)
+      return 'Sign in to continue.'
+    return form.value.token ? '' : `Enter the ${credential?.label.toLowerCase() ?? 'credential'}.`
+  }
+
+  if (item.kind === 'people' && delegates.value) {
+    const agent = state.agents.find(item => item.id === form.value.agentId)
+    if (!agent || problem(agent))
+      return 'Choose the agent that answers.'
+    if (form.value.accessMode === 'allowlist' && !people.value.length)
+      return 'Add at least one person.'
+  }
+
+  return ''
+}
+
+/** Steps before the first incomplete one can be opened; an edit opens any. */
+function reachable(index: number) {
+  return Boolean(editing.value) || steps.value.slice(0, index).every(item => !stepProblem(item))
+}
+
+function next() {
+  if (editing.value || last.value)
+    void save()
+  else if (!stepProblem(current.value))
+    step.value++
+}
+
+/** Fields the current step shows besides its presets' switches. */
+function stepShown(item: SetupStep) {
+  const shown = stepFields(item, fields.value)
+  return item.presets?.length ? shown.filter(field => field.type !== 'boolean') : shown
+}
+
+function switches(item: SetupStep) {
+  return stepFields(item, fields.value).filter(field => field.type === 'boolean')
+}
+
+/** Package guidance belongs with the credential and with choices the package fills. */
+function guided(item: SetupStep) {
+  return item.kind === 'credential' || (!manifest.value?.credential && item === steps.value[0])
+    || stepFields(item, fields.value).some(field => field.dynamic || field.refresh)
+}
+
+function holder(agent: Agent) {
+  return onePerAgent.value ? connections.value.find(item => item.agentIds?.includes(agent.id))?.name ?? '' : ''
+}
+
+function toggleGrant(agent: string, checked: boolean) {
+  grants.value = checked ? [...grants.value, agent] : grants.value.filter(item => item !== agent)
 }
 
 function addPerson() {
@@ -346,7 +526,7 @@ async function save() {
       settings: pluginSettings(storedFields.value, values.value),
       // Blank secret fields keep what is saved.
       secrets: pluginSecrets(secrets.value),
-      // Agents are granted on their own page; omitting the list keeps it.
+      // Existing grants are reread before save; new instances use the final setup step.
       ...(delegates.value && {
         agentId: form.value.agentId,
         projectId: agent?.access.projects?.[0] ?? null,
@@ -357,12 +537,17 @@ async function save() {
         maxPerPersonPerHour: Number(form.value.maxPerPersonPerHour),
       }),
       enabled: form.value.enabled,
+      ...sharing.value,
+      ...(!connection && grants.value.length ? { agentIds: [...grants.value] } : {}),
     }
     // Capture the target and typed fields before the asynchronous grant read.
     // Closing the editor during that read cannot turn this update into a creation.
     const agentIds = await currentAgentIds(state.agents, currentEntry, connection, async () => [await pluginInstance(plugin, connection!.id, exact)])
     const path = `/plugins/${plugin}/connections${connection ? `/${connection.id}` : ''}`
-    await pluginOperation(path, { ...body, ...(agentIds ? { agentIds } : {}) }, connection ? 'PUT' : 'POST')
+    await pluginOperation(path, {
+      ...body,
+      ...(agentIds ? { agentIds } : {}),
+    }, connection ? 'PUT' : 'POST')
     signIn.consumed()
     form.value.token = ''
     secrets.value = pluginFormSecrets()
@@ -539,9 +724,31 @@ onBeforeUnmount(() => {
               </UiButton>
             </article>
           </section>
-          <p v-if="loaded && !connections.length && !drafts.length && entry.active" class="mt-5 rounded-2xl border border-dashed border-line p-6 text-center text-sm text-muted">
-            No {{ plural.toLowerCase() }} yet. Add one to start using this plugin.
-          </p>
+          <section v-if="loaded && !connections.length && !drafts.length && entry.active" class="mt-5 grid gap-4 rounded-2xl border border-line bg-surface p-5" aria-labelledby="plugin-first">
+            <header class="flex items-start justify-between gap-3 phone:flex-wrap">
+              <div class="min-w-0">
+                <h2 id="plugin-first" class="text-[15px]! font-bold">
+                  Set up your first {{ singular.toLowerCase() }}
+                </h2>
+                <p class="mt-1 max-w-130 text-xs leading-relaxed text-muted">
+                  {{ setup.summary || `No ${plural.toLowerCase()} yet. Add one to start using this plugin.` }}
+                </p>
+              </div>
+              <span v-if="setup.effort" class="inline-flex h-5.5 shrink-0 items-center rounded-full px-2.25 text-2xs font-semibold" :class="setup.effort === 'app' ? 'bg-warning-surface text-warning' : 'bg-soft text-accent'">{{ effortLabels[setup.effort] }}</span>
+            </header>
+            <ol class="grid" aria-label="Setup steps">
+              <li v-for="(item, index) in steps" :key="item.id" class="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-3 border-t border-line py-2.5 first:border-0">
+                <span class="grid size-6 place-items-center rounded-full border border-control text-2xs font-bold text-muted">{{ index + 1 }}</span>
+                <span class="min-w-0">
+                  <span class="flex flex-wrap items-center gap-1.5 text-xs font-semibold">{{ item.title }}<span v-if="item.shared" class="rounded-full bg-hover px-1.75 py-px text-3xs font-semibold text-muted">Once</span></span>
+                  <span v-if="item.description" class="mt-0.5 block text-2xs leading-relaxed text-muted">{{ item.description }}</span>
+                </span>
+              </li>
+            </ol>
+            <UiButton variant="primary" class="justify-self-start" @click="edit(null)">
+              Start setup<Icon :name="ChevronRight" :size="15" />
+            </UiButton>
+          </section>
           <article
             v-for="connection in connections"
             :key="connection.id"
@@ -830,221 +1037,378 @@ onBeforeUnmount(() => {
       @activated="setupDraft = undefined; load()"
     />
     <Modal
-      v-if="editing !== undefined && manifest"
+      v-if="editing !== undefined && manifest && current"
+      wide
       :title="editing ? `Edit ${editing.name}` : manifest.instances ? `New ${singular.toLowerCase()}` : `New ${manifest.name} instance`"
       @close="closeEditor"
     >
-      <form class="grid gap-5 px-6.5 py-6 phone:p-5" @submit.prevent="save">
-        <UiAlert v-if="error">
-          {{ error }}
-        </UiAlert>
-        <label>Name<input v-model="form.name" required maxlength="100"></label>
-        <UiAlert v-if="completion?.errors.form">
-          {{ completion.errors.form }}
-        </UiAlert>
-        <UiAlert v-for="(message, index) in unshownFormErrors(manifest, completion?.errors)" :key="index">
-          {{ message }}
-        </UiAlert>
-        <label v-if="manifest.credential && !manifest.credential.oauth">{{ editing ? `New ${manifest.credential.label.toLowerCase()} (optional)` : manifest.credential.label }}<input
-          v-model="form.token"
-          type="password"
-          autocomplete="new-password"
-          spellcheck="false"
-          :required="!editing && !signIn.completed.value"
-          :placeholder="signIn.completed.value ? 'Signed in · or paste a token instead' : editing ? 'Saved · leave blank to keep' : ''"
-          :aria-invalid="Boolean(completion?.errors.credential)"
-          @input="typed()"
-        ><small :class="completion?.errors.credential ? 'text-coral' : ''">{{ completion?.errors.credential || 'Stored encrypted. Cairn adds it to this plugin’s requests; the plugin never sees it.' }}</small></label>
-        <UiAlert v-if="manifest.credential?.oauth && completion?.errors.credential">
-          {{ completion.errors.credential }}
-        </UiAlert>
-        <section v-if="manifest.credential?.deviceFlow || manifest.credential?.oauth" class="grid gap-3" :aria-label="`Sign in with ${manifest.name}`">
-          <label v-if="manifest.credential?.oauth && oauthCallbackUrl">Callback URL<input :value="oauthCallbackUrl" readonly><small>Register this address in your provider’s OAuth application before signing in.</small></label>
-          <UiButton
-            v-if="!signIn.flow.value || signIn.completed.value"
-            class="justify-self-start"
-            :disabled="busy || signIn.starting.value"
-            @click="signIn.start()"
-          >
-            <Icon :name="KeyRound" :size="15" />{{ signIn.completed.value ? 'Sign in with another account' : `Sign in with ${manifest.name}` }}
-          </UiButton>
-          <UiAlert v-if="signIn.error.value || signInProblem(signIn.flow.value)">
-            {{ signIn.error.value || signInProblem(signIn.flow.value) }}
-          </UiAlert>
-          <p v-if="signIn.completed.value" class="flex items-center gap-1.5 text-xs font-semibold text-success" role="status">
-            <Icon :name="Check" :size="14" />Signed in. Save to keep this {{ singular.toLowerCase() }}.
-          </p>
-          <div v-else-if="signIn.pending.value && signIn.flow.value" class="grid gap-3 rounded-2xl bg-inset p-4" role="status">
-            <p class="text-sm">
-              {{ manifest.credential?.oauth ? `Open ${manifest.name} and approve access, then return here to save. Your password stays with ${manifest.name}.` : `Open ${manifest.name} and enter this code. Your password stays with ${manifest.name}.` }}
-            </p>
-            <div v-if="signIn.flow.value.userCode" class="flex flex-wrap items-center gap-2">
-              <code aria-label="Verification code" class="select-all font-mono text-2xl font-bold tracking-widest">{{ signIn.flow.value.userCode }}</code>
-              <UiButton size="small" :aria-label="copied ? 'Code copied' : 'Copy verification code'" @click="copyCode">
-                <Icon :name="copied ? Check : Copy" :size="13" />{{ copied ? 'Copied' : 'Copy' }}
-              </UiButton>
-            </div>
-            <p v-if="signIn.flow.value.message" class="text-xs text-muted">
-              {{ signIn.flow.value.message }}
-            </p>
-            <div class="flex flex-wrap gap-2">
-              <a
-                v-if="verificationLink(signIn.flow.value)"
-                :class="[buttonBase, buttonVariants.primary, buttonSizes.small]"
-                :href="verificationLink(signIn.flow.value)"
-                target="_blank"
-                rel="noopener noreferrer"
-              >Open {{ manifest.name }}<Icon :name="ArrowUpRight" :size="14" /></a>
-              <UiButton size="small" @click="signIn.cancel()">
-                Cancel sign-in
-              </UiButton>
-            </div>
-          </div>
-          <UiButton
-            v-else-if="signInProblem(signIn.flow.value)"
-            size="small"
-            class="justify-self-start"
-            :disabled="busy || signIn.starting.value"
-            @click="signIn.start()"
-          >
-            Try again
-          </UiButton>
-        </section>
-        <div
-          v-if="completion?.view.length || completing"
-          class="grid gap-2.5"
-          :aria-busy="completing"
-          aria-live="polite"
-        >
-          <p v-if="completing && !completion?.view.length" class="text-2xs text-muted" role="status">
-            Checking…
-          </p>
-          <PluginView :nodes="completion?.view ?? []" :busy="completing" />
-        </div>
-        <PluginFields
-          v-model:values="values"
-          v-model:secrets="secrets"
-          :fields="fields"
-          :lookup="lookup"
-          :saved="editing?.secretKeys ?? []"
-          :disabled="busy"
-          :options="completion?.options"
-          :errors="completion?.errors"
-          @refresh="complete"
-        />
-        <section v-if="manifest.agentAccess" class="grid gap-1.5 rounded-xl border border-line bg-inset px-4 py-3" aria-label="Agents">
-          <p class="text-xs">
-            <template v-if="editing && agentNames(editing).length">
-              Authorized agents: <b>{{ agentNames(editing).join(', ') }}</b>
-            </template>
-            <template v-else>
-              No agent can use it yet.
-            </template>
-          </p>
-          <p v-if="manifest.operations?.length" class="text-xs text-muted">
-            Resource operations have separate access rules on each resource.
-          </p>
-          <p v-if="manifest.agentAccess.description" class="text-2xs leading-relaxed text-muted">
-            {{ manifest.agentAccess.description }}
-          </p>
-          <p class="text-2xs text-muted">
-            Grant it from the Secrets &amp; plugins section of each agent. <RouterLink to="/agents" class="text-accent hover:underline">
-              Manage on agent pages ›
-            </RouterLink>
-          </p>
-        </section>
-        <template v-if="delegates">
-          <fieldset class="grid gap-2" :disabled="busy">
-            <legend class="mb-1 text-xs font-semibold">
-              Who can talk to it
-            </legend>
-            <label class="grid! grid-cols-[auto_1fr] items-start gap-x-2! gap-y-0.5!"><input
-              v-model="form.accessMode"
-              type="radio"
-              value="requests"
-              class="mt-0.5 w-auto!"
-            >Approve people as they ask<small class="col-start-2 font-normal">Unknown people get a request you approve here; their messages aren’t kept until then.</small></label>
-            <label class="grid! grid-cols-[auto_1fr] items-start gap-x-2! gap-y-0.5!"><input
-              v-model="form.accessMode"
-              type="radio"
-              value="allowlist"
-              class="mt-0.5 w-auto!"
-            >Only people I add<small class="col-start-2 font-normal">Everyone else is ignored without a trace.</small></label>
-            <label class="grid! grid-cols-[auto_1fr] items-start gap-x-2! gap-y-0.5!"><input
-              v-model="form.accessMode"
-              type="radio"
-              value="everyone"
-              class="mt-0.5 w-auto!"
-            >Anyone<small class="col-start-2 font-normal">Needs a read-only agent with at most one project and no MCP or plugin access.</small></label>
-          </fieldset>
-          <fieldset class="grid gap-2" :disabled="busy">
-            <legend class="mb-1 text-xs font-semibold">
-              {{ form.accessMode === 'everyone' ? 'Already allowed' : 'Allowed now' }}
-            </legend>
-            <ul v-if="people.length" class="grid gap-1.5">
-              <li v-for="item in people" :key="item.id" class="flex items-center gap-3 rounded-xl border border-line px-3 py-1.5">
-                <PersonAvatar :name="item.name || item.id" :identity="item.id" :size="24" />
-                <span class="min-w-0 flex-1 truncate text-xs">{{ item.name || 'Person' }} <span class="font-mono text-3xs text-muted">{{ item.id }}</span></span>
-                <UiButton size="small" :aria-label="`Remove ${item.name || item.id}`" @click="people = people.filter(other => other.id !== item.id)">
-                  <Icon :name="X" :size="13" />
-                </UiButton>
-              </li>
-            </ul>
-            <div class="flex gap-2">
-              <input
-                v-model="person"
-                aria-label="Person’s ID"
-                placeholder="Add a person’s ID"
-                class="min-w-0 flex-1"
-                @keydown.enter.prevent="addPerson"
+      <form class="grid grid-cols-[190px_minmax(0,1fr)] phone:grid-cols-1" @submit.prevent="next">
+        <nav class="border-r border-line bg-inset px-2.5 py-5 phone:border-r-0 phone:border-b phone:px-4 phone:py-3" aria-label="Setup steps">
+          <ol class="grid gap-1 phone:flex phone:gap-1.5 phone:overflow-x-auto">
+            <li v-for="(item, index) in steps" :key="item.id" class="phone:shrink-0">
+              <button
+                type="button"
+                class="grid w-full grid-cols-[auto_minmax(0,1fr)] items-center gap-2.5 rounded-xl px-2.5 py-2 text-left text-xs enabled:hover:bg-hover disabled:opacity-50"
+                :class="index === step ? 'bg-surface font-semibold shadow-arcade' : ''"
+                :aria-current="index === step ? 'step' : undefined"
+                :disabled="!reachable(index)"
+                @click="step = index"
               >
-              <UiButton :disabled="!person.trim()" @click="addPerson">
-                Add
-              </UiButton>
-            </div>
-          </fieldset>
-          <fieldset class="grid gap-1.5" :disabled="busy">
-            <legend class="mb-1 text-xs font-semibold">
-              Answers as
+                <span
+                  aria-hidden="true"
+                  class="grid size-6 place-items-center rounded-full border text-2xs font-bold"
+                  :class="index < step && !stepProblem(item) ? 'border-success bg-success text-white' : index === step ? 'border-accent text-accent' : 'border-control text-muted'"
+                ><Icon v-if="index < step && !stepProblem(item)" :name="Check" :size="12" /><template v-else>{{ index + 1 }}</template></span>
+                <span class="min-w-0 truncate"><span class="sr-only">Step {{ index + 1 }}: </span>{{ item.title }}</span>
+              </button>
+            </li>
+          </ol>
+        </nav>
+        <div class="grid min-w-0 content-start gap-5 px-6.5 py-6 phone:p-5">
+          <UiAlert v-if="error">
+            {{ error }}
+          </UiAlert>
+          <UiAlert v-if="completion?.errors.form">
+            {{ completion.errors.form }}
+          </UiAlert>
+          <UiAlert v-for="(message, index) in unshownFormErrors(manifest, completion?.errors)" :key="index">
+            {{ message }}
+          </UiAlert>
+          <header>
+            <p class="text-3xs font-semibold uppercase tracking-[.12em] text-subtle">
+              Step {{ step + 1 }} of {{ steps.length }}
+            </p>
+            <h3 class="mt-1 text-[17px]! font-bold">
+              {{ current.title }}
+            </h3>
+            <p v-if="current.description" class="mt-1 text-xs leading-relaxed text-muted">
+              {{ current.description }}
+            </p>
+          </header>
+
+          <fieldset v-if="current.shared && sources.length && !editing" class="grid gap-1.5" :disabled="busy">
+            <legend class="sr-only">
+              Which {{ current.title }}
             </legend>
             <label
-              v-for="agent in agents"
-              :key="agent.id"
-              class="grid! grid-cols-[auto_1fr_auto] items-center gap-x-2.5! rounded-xl border border-line px-3.5 py-2 font-normal!"
-              :class="problem(agent) ? 'opacity-60' : form.agentId === agent.id ? 'border-accent bg-soft' : ''"
+              v-for="source in sources"
+              :key="source.id"
+              class="grid! grid-cols-[auto_1fr] items-start gap-x-2.5! gap-y-0.5! rounded-xl border border-line px-3.5 py-2.5 font-normal!"
+              :class="reuse === source.id ? 'border-accent bg-soft' : 'hover:bg-hover/40'"
             >
               <input
-                v-model="form.agentId"
                 type="radio"
-                class="w-auto!"
-                :value="agent.id"
-                :disabled="Boolean(problem(agent))"
-              ><span class="truncate text-xs font-semibold">{{ agent.name }}</span>
-              <span v-if="problem(agent)" class="rounded-full bg-warning-surface px-2 py-px text-3xs font-semibold text-warning">{{ problem(agent) }}</span>
+                class="mt-0.5 w-auto!"
+                name="plugin-shared-source"
+                :checked="reuse === source.id"
+                @change="chooseSource(source.id)"
+              ><span class="text-xs font-semibold">Use the same one as {{ source.names.join(', ') }}</span>
+              <small v-if="source.label" class="col-start-2 font-mono">{{ shortValue(source.label, 14) }}</small>
             </label>
-            <small>People reach only this agent: one project at most and no installation access. <RouterLink to="/agents" class="text-accent">Create a dedicated agent</RouterLink></small>
+            <label
+              class="grid! grid-cols-[auto_1fr] items-start gap-x-2.5! gap-y-0.5! rounded-xl border border-line px-3.5 py-2.5 font-normal!"
+              :class="!reuse ? 'border-accent bg-soft' : 'hover:bg-hover/40'"
+            >
+              <input
+                type="radio"
+                class="mt-0.5 w-auto!"
+                name="plugin-shared-source"
+                :checked="!reuse"
+                @change="chooseSource('')"
+              ><span class="text-xs font-semibold">Set up another one</span>
+            </label>
           </fieldset>
-          <label>Messages per hour<input
-            v-model="form.maxMessagesPerHour"
-            type="number"
-            min="1"
-            max="100"
-          ></label>
-          <label v-if="form.accessMode === 'everyone'">Messages per person per hour<input
-            v-model="form.maxPerPersonPerHour"
-            type="number"
-            min="1"
-            max="50"
-          ></label>
-        </template>
-        <label class="flex flex-row! items-center gap-2!"><input v-model="form.enabled" type="checkbox" class="w-auto!">Active</label>
-        <div class="flex justify-end gap-2.5">
-          <UiButton :disabled="busy" @click="closeEditor">
-            Cancel
-          </UiButton>
-          <UiButton type="submit" variant="primary" :disabled="busy || completing || !delegationReady || (Boolean(manifest.credential?.oauth) && !editing && !signIn.completed.value)">
-            Save {{ singular.toLowerCase() }}
-          </UiButton>
+
+          <template v-if="!(current.shared && reuse)">
+            <PluginChecklist
+              v-if="current.checklist?.length"
+              :key="current.id"
+              :tasks="current.checklist"
+              :callback-url="oauthCallbackUrl"
+            />
+            <p v-if="current.warning" class="flex items-start gap-2.5 rounded-xl bg-warning-surface px-4 py-3 text-xs leading-relaxed text-warning" role="note">
+              <Icon :name="TriangleAlert" :size="15" class="mt-px shrink-0" />{{ current.warning }}
+            </p>
+          </template>
+
+          <template v-if="current.kind === 'settings' && !(current.shared && reuse)">
+            <PluginPresets
+              v-if="current.presets?.length"
+              v-model:values="values"
+              :step="current"
+              :fields="fields"
+              :disabled="busy"
+              @refresh="presetChanged"
+            />
+            <PluginFields
+              v-if="stepShown(current).length"
+              v-model:values="values"
+              v-model:secrets="secrets"
+              :fields="stepShown(current)"
+              :lookup="lookup"
+              :saved="editing?.secretKeys ?? []"
+              :disabled="busy"
+              :options="completion?.options"
+              :errors="formErrors"
+              @refresh="complete"
+            />
+            <details v-if="current.presets?.length && switches(current).length" class="rounded-xl border border-line px-4 py-3" :open="!matchingPreset(current, fields, values)">
+              <summary class="cursor-pointer text-xs font-semibold">
+                Fine-tune
+              </summary>
+              <PluginFields
+                v-model:values="values"
+                v-model:secrets="secrets"
+                class="mt-3"
+                :fields="switches(current)"
+                :lookup="lookup"
+                :disabled="busy"
+                :errors="formErrors"
+                @refresh="complete"
+              />
+            </details>
+          </template>
+
+          <template v-if="current.kind === 'credential'">
+            <label v-if="manifest.credential && !manifest.credential.oauth">{{ editing ? `New ${manifest.credential.label.toLowerCase()} (optional)` : manifest.credential.label }}<input
+              v-model="form.token"
+              type="password"
+              autocomplete="new-password"
+              spellcheck="false"
+              :required="!editing && !signIn.completed.value"
+              :placeholder="signIn.completed.value ? 'Signed in · or paste a token instead' : editing ? 'Saved · leave blank to keep' : ''"
+              :aria-invalid="Boolean(completion?.errors.credential)"
+              @input="typed()"
+            ><small :class="completion?.errors.credential ? 'text-coral' : ''">{{ completion?.errors.credential || 'Stored encrypted. Cairn adds it to this plugin’s requests; the plugin never sees it.' }}</small></label>
+            <UiAlert v-if="manifest.credential?.oauth && completion?.errors.credential">
+              {{ completion.errors.credential }}
+            </UiAlert>
+            <section v-if="manifest.credential?.deviceFlow || manifest.credential?.oauth" class="grid gap-3" :aria-label="current.title">
+              <label v-if="manifest.credential?.oauth && oauthCallbackUrl && !callbackShown">Callback URL<input :value="oauthCallbackUrl" readonly><small>Register this address in your provider’s OAuth application before signing in.</small></label>
+              <UiButton
+                v-if="!signIn.flow.value || signIn.completed.value"
+                class="justify-self-start"
+                :variant="signIn.completed.value ? 'default' : 'primary'"
+                :disabled="busy || signIn.starting.value"
+                @click="signIn.start()"
+              >
+                <Icon :name="KeyRound" :size="15" />{{ signIn.completed.value ? 'Sign in with another account' : editing ? 'Sign in again' : current.title }}
+              </UiButton>
+              <UiAlert v-if="signIn.error.value || signInProblem(signIn.flow.value)">
+                {{ signIn.error.value || signInProblem(signIn.flow.value) }}
+              </UiAlert>
+              <p v-if="signIn.completed.value" class="flex items-center gap-1.5 text-xs font-semibold text-success" role="status">
+                <Icon :name="Check" :size="14" />{{ last ? `Signed in. Save to keep this ${singular.toLowerCase()}.` : 'Signed in.' }}
+              </p>
+              <div v-else-if="signIn.pending.value && signIn.flow.value" class="grid gap-3 rounded-2xl bg-inset p-4" role="status">
+                <p class="text-sm">
+                  {{ manifest.credential?.oauth ? `Approve access in the page that opened, then come back here. Your password stays with the provider.` : `Open ${manifest.name} and enter this code. Your password stays with ${manifest.name}.` }}
+                </p>
+                <div v-if="signIn.flow.value.userCode" class="flex flex-wrap items-center gap-2">
+                  <code aria-label="Verification code" class="select-all font-mono text-2xl font-bold tracking-widest">{{ signIn.flow.value.userCode }}</code>
+                  <UiButton size="small" :aria-label="copied ? 'Code copied' : 'Copy verification code'" @click="copyCode">
+                    <Icon :name="copied ? Check : Copy" :size="13" />{{ copied ? 'Copied' : 'Copy' }}
+                  </UiButton>
+                </div>
+                <p v-if="signIn.flow.value.message" class="text-xs text-muted">
+                  {{ signIn.flow.value.message }}
+                </p>
+                <div class="flex flex-wrap gap-2">
+                  <a
+                    v-if="verificationLink(signIn.flow.value)"
+                    :class="[buttonBase, buttonVariants.primary, buttonSizes.small]"
+                    :href="verificationLink(signIn.flow.value)"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >Open {{ manifest.credential?.oauth ? 'sign-in' : manifest.name }}<Icon :name="ArrowUpRight" :size="14" /></a>
+                  <UiButton size="small" @click="signIn.cancel()">
+                    Cancel sign-in
+                  </UiButton>
+                </div>
+              </div>
+              <UiButton
+                v-else-if="signInProblem(signIn.flow.value)"
+                size="small"
+                class="justify-self-start"
+                :disabled="busy || signIn.starting.value"
+                @click="signIn.start()"
+              >
+                Try again
+              </UiButton>
+            </section>
+          </template>
+
+          <div
+            v-if="guided(current) && (completion?.view.length || completing)"
+            class="grid gap-2.5"
+            :aria-busy="completing"
+            aria-live="polite"
+          >
+            <p v-if="completing && !completion?.view.length" class="text-2xs text-muted" role="status">
+              Checking…
+            </p>
+            <PluginView :nodes="completion?.view ?? []" :busy="completing" />
+          </div>
+
+          <template v-if="current.kind === 'people' && delegates">
+            <fieldset class="grid gap-2" :disabled="busy">
+              <legend class="mb-1 text-xs font-semibold">
+                Who can talk to it
+              </legend>
+              <label class="grid! grid-cols-[auto_1fr] items-start gap-x-2! gap-y-0.5!"><input
+                v-model="form.accessMode"
+                type="radio"
+                value="requests"
+                class="mt-0.5 w-auto!"
+              >Approve people as they ask<small class="col-start-2 font-normal">Unknown people get a request you approve here; their messages aren’t kept until then.</small></label>
+              <label class="grid! grid-cols-[auto_1fr] items-start gap-x-2! gap-y-0.5!"><input
+                v-model="form.accessMode"
+                type="radio"
+                value="allowlist"
+                class="mt-0.5 w-auto!"
+              >Only people I add<small class="col-start-2 font-normal">Everyone else is ignored without a trace.</small></label>
+              <label class="grid! grid-cols-[auto_1fr] items-start gap-x-2! gap-y-0.5!"><input
+                v-model="form.accessMode"
+                type="radio"
+                value="everyone"
+                class="mt-0.5 w-auto!"
+              >Anyone<small class="col-start-2 font-normal">Needs a read-only agent with at most one project and no MCP or plugin access.</small></label>
+            </fieldset>
+            <fieldset class="grid gap-2" :disabled="busy">
+              <legend class="mb-1 text-xs font-semibold">
+                {{ form.accessMode === 'everyone' ? 'Already allowed' : 'Allowed now' }}
+              </legend>
+              <ul v-if="people.length" class="grid gap-1.5">
+                <li v-for="item in people" :key="item.id" class="flex items-center gap-3 rounded-xl border border-line px-3 py-1.5">
+                  <PersonAvatar :name="item.name || item.id" :identity="item.id" :size="24" />
+                  <span class="min-w-0 flex-1 truncate text-xs">{{ item.name || 'Person' }} <span class="font-mono text-3xs text-muted">{{ item.id }}</span></span>
+                  <UiButton size="small" :aria-label="`Remove ${item.name || item.id}`" @click="people = people.filter(other => other.id !== item.id)">
+                    <Icon :name="X" :size="13" />
+                  </UiButton>
+                </li>
+              </ul>
+              <div class="flex gap-2">
+                <input
+                  v-model="person"
+                  aria-label="Person’s ID"
+                  placeholder="Add a person’s ID"
+                  class="min-w-0 flex-1"
+                  @keydown.enter.prevent="addPerson"
+                >
+                <UiButton :disabled="!person.trim()" @click="addPerson">
+                  Add
+                </UiButton>
+              </div>
+            </fieldset>
+            <fieldset class="grid gap-1.5" :disabled="busy">
+              <legend class="mb-1 text-xs font-semibold">
+                Answers as
+              </legend>
+              <label
+                v-for="agent in agents"
+                :key="agent.id"
+                class="grid! grid-cols-[auto_1fr_auto] items-center gap-x-2.5! rounded-xl border border-line px-3.5 py-2 font-normal!"
+                :class="problem(agent) ? 'opacity-60' : form.agentId === agent.id ? 'border-accent bg-soft' : ''"
+              >
+                <input
+                  v-model="form.agentId"
+                  type="radio"
+                  class="w-auto!"
+                  :value="agent.id"
+                  :disabled="Boolean(problem(agent))"
+                ><span class="truncate text-xs font-semibold">{{ agent.name }}</span>
+                <span v-if="problem(agent)" class="rounded-full bg-warning-surface px-2 py-px text-3xs font-semibold text-warning">{{ problem(agent) }}</span>
+              </label>
+              <small>People reach only this agent: one project at most and no installation access. <RouterLink to="/agents" class="text-accent">Create a dedicated agent</RouterLink></small>
+            </fieldset>
+            <label>Messages per hour<input
+              v-model="form.maxMessagesPerHour"
+              type="number"
+              min="1"
+              max="100"
+            ></label>
+            <label v-if="form.accessMode === 'everyone'">Messages per person per hour<input
+              v-model="form.maxPerPersonPerHour"
+              type="number"
+              min="1"
+              max="50"
+            ></label>
+          </template>
+
+          <template v-if="current.kind === 'agents' && manifest.agentAccess">
+            <p v-if="manifest.agentAccess.description" class="text-xs leading-relaxed text-muted">
+              {{ manifest.agentAccess.description }}
+            </p>
+            <fieldset v-if="!editing" class="grid gap-1.5" :disabled="busy">
+              <legend class="mb-1 text-xs font-semibold">
+                Agents that can use it
+              </legend>
+              <label
+                v-for="agent in state.agents"
+                :key="agent.id"
+                class="grid! grid-cols-[auto_1fr_auto] items-center gap-x-2.5! rounded-xl border border-line px-3.5 py-2 font-normal!"
+                :class="holder(agent) ? 'opacity-60' : grants.includes(agent.id) ? 'border-accent bg-soft' : ''"
+              >
+                <input
+                  type="checkbox"
+                  class="w-auto!"
+                  :checked="grants.includes(agent.id)"
+                  :disabled="Boolean(holder(agent))"
+                  @change="toggleGrant(agent.id, ($event.target as HTMLInputElement).checked)"
+                ><span class="truncate text-xs font-semibold">{{ agent.name }}</span>
+                <span v-if="holder(agent)" class="rounded-full bg-hover px-2 py-px text-3xs font-semibold text-muted">Uses {{ holder(agent) }}</span>
+              </label>
+              <small>You can skip this: no agent can use it until you grant one here or on the agent’s page.</small>
+            </fieldset>
+            <section v-else class="grid gap-1.5 rounded-xl border border-line bg-inset px-4 py-3" aria-label="Agents">
+              <p class="text-xs">
+                <template v-if="agentNames(editing).length">
+                  Authorized agents: <b>{{ agentNames(editing).join(', ') }}</b>
+                </template>
+                <template v-else>
+                  No agent can use it yet.
+                </template>
+              </p>
+              <p class="text-2xs text-muted">
+                Change it from the Secrets &amp; plugins section of each agent. <RouterLink to="/agents" class="text-accent hover:underline">
+                  Manage on agent pages ›
+                </RouterLink>
+              </p>
+            </section>
+          </template>
+
+          <template v-if="last || editing">
+            <hr class="border-line">
+            <label>Name<input
+              v-model="form.name"
+              required
+              maxlength="100"
+              @input="named = true"
+            ></label>
+            <label class="flex flex-row! items-center gap-2!"><input v-model="form.enabled" type="checkbox" class="w-auto!">Active</label>
+          </template>
+
+          <footer class="flex flex-wrap items-center justify-between gap-2.5 border-t border-line pt-4">
+            <span class="min-w-0 flex-1 text-2xs text-muted" role="status">{{ !editing && !last ? stepProblem(current) : '' }}</span>
+            <span class="flex flex-wrap justify-end gap-2.5">
+              <UiButton v-if="step > 0" :disabled="busy" @click="step--">
+                Back
+              </UiButton>
+              <UiButton v-else :disabled="busy" @click="closeEditor">
+                Cancel
+              </UiButton>
+              <UiButton v-if="editing && !last" :disabled="busy" @click="step++">
+                Next
+              </UiButton>
+              <UiButton
+                type="submit"
+                variant="primary"
+                :disabled="busy || completing || (editing || last ? steps.some(item => stepProblem(item)) : Boolean(stepProblem(current)))"
+              >
+                {{ editing || last ? `Save ${singular.toLowerCase()}` : 'Continue' }}
+              </UiButton>
+            </span>
+          </footer>
         </div>
       </form>
     </Modal>

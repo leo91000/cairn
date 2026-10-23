@@ -50,3 +50,8 @@ paths are unavailable. Temporary stores use `/tmp`, whose filesystem reports
 unrelated host processes, filesystem caches and scheduling remain uncontrolled.
 The optional consumed metadata remains inside the unreleased epoch-12 draft;
 complete forward-transition/recovery qualification remains required.
+
+This observation precedes integration of Main's guided setup transition. The
+current unqualified Slack boundary is epoch 13 / SQLite 12; the original samples
+remain historical evidence for the unchanged credential representation. See the
+[current compatibility inventory](../SLACK-PLUGIN-COMPATIBILITY.md).
