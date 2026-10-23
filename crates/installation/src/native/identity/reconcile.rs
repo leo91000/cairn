@@ -139,6 +139,19 @@ fn capture(data: &Path, path: &Path, transition: &Transition) -> Result<Entry> {
             }
         }
     }
+    let uid = mapped(
+        metadata.uid(),
+        false,
+        transition.previous.as_ref(),
+        &transition.target,
+    );
+    let gid = mapped(
+        metadata.gid(),
+        true,
+        transition.previous.as_ref(),
+        &transition.target,
+    );
+    let needs_apply = changed || uid != metadata.uid() || gid != metadata.gid();
     Ok(Entry {
         relative: path
             .strip_prefix(data)
@@ -147,34 +160,12 @@ fn capture(data: &Path, path: &Path, transition: &Transition) -> Result<Entry> {
             .as_bytes()
             .to_vec(),
         inode: metadata.ino(),
-        uid: mapped(
-            metadata.uid(),
-            false,
-            transition.previous.as_ref(),
-            &transition.target,
-        ),
-        gid: mapped(
-            metadata.gid(),
-            true,
-            transition.previous.as_ref(),
-            &transition.target,
-        ),
+        uid,
+        gid,
         mode: metadata.mode(),
         symlink: metadata.file_type().is_symlink(),
         attributes,
-        needs_apply: changed
-            || mapped(
-                metadata.uid(),
-                false,
-                transition.previous.as_ref(),
-                &transition.target,
-            ) != metadata.uid()
-            || mapped(
-                metadata.gid(),
-                true,
-                transition.previous.as_ref(),
-                &transition.target,
-            ) != metadata.gid(),
+        needs_apply,
     })
 }
 

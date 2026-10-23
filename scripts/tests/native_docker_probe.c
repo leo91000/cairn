@@ -33,6 +33,12 @@ int main(int argc, char **argv) {
         ssize_t size = getxattr("capability", "security.capability", capability, sizeof(capability));
         require(size >= 20 && capability[1] == (1 << 10));
         puts("metadata-preserved");
+    } else if (!strcmp(argv[1], "oom")) {
+        sleep(10); /* Let the disposable harness record readiness first. */
+        size_t size = (size_t)2 * 1024 * 1024 * 1024;
+        volatile unsigned char *memory = malloc(size); require(memory != NULL);
+        for (size_t i = 0; i < size; i += 4096) memory[i] = 1;
+        puts("unexpectedly-survived-node-ceiling"); return 99;
     } else {
         unsigned char buffer[4096];
         for (unsigned i = 0; i < sizeof(buffer); i++) buffer[i] = (i * 37 + 11) & 255;

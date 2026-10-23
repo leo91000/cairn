@@ -65,15 +65,6 @@ for plugin in buildx compose; do
     ln -s "/opt/cairn-docker/plugins/docker-$plugin" "$client_config/cli-plugins/docker-$plugin"
   fi
 done
-case "${1:-}" in
-  --version|--help|help) ;;
-  compose|buildx)
-    case "${2:-}" in
-      version|--help|help|config) ;;
-      *) /run/cairn-entrypoint/cairn native-docker ;;
-    esac ;;
-  *) /run/cairn-entrypoint/cairn native-docker ;;
-esac
 export DOCKER_HOST=unix:///run/cairn-docker/docker.sock
 exec /opt/cairn-docker/bin/docker "$@"
 '''
@@ -83,6 +74,10 @@ def require_docker_host():
     version = subprocess.run(['systemctl', '--version'], check=True, capture_output=True, text=True, timeout=10).stdout.split()[1]
     if int(version) < 255:
         raise ValueError('Native rootless enclaves require systemd 255 or newer; older versions force NoNewPrivileges on mapping helpers.')
+    for name in ('/proc/sys/user/max_user_namespaces', '/proc/sys/kernel/unprivileged_userns_clone'):
+        path = Path(name)
+        if path.exists() and int(path.read_text().strip()) == 0:
+            raise ValueError('Native Docker requires enabled unprivileged user namespaces; global restrictions are not changed automatically.')
     for name in ('newuidmap', 'newgidmap'):
         path = shutil.which(name)
         if not path:

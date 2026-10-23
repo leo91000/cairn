@@ -104,6 +104,8 @@ def main():
     command('docker', '--version')
     command('docker', 'buildx', 'version')
     command('docker', 'compose', 'version')
+    command('docker', 'context', 'ls')
+    command('docker', 'run', '--help')
     assert not Path('/run/cairn-docker/daemon.started').exists(), 'Client-only command launched the daemon.'
     timed('firstDaemonMs', '/run/cairn-entrypoint/cairn', 'native-docker')
     info = json.loads(command('docker', 'info', '--format', '{{json .}}'))
@@ -134,7 +136,9 @@ def main():
                 metrics['pulls'].append(dict(image=image, ms=(time.perf_counter() - elapsed) * 1000,
                     digest=command('docker', 'image', 'inspect', '--format', '{{json .RepoDigests}}', image)))
         command(*forbidden, success=False)
-    if phase == 'readonly':
+    if phase == 'oom':
+        command('docker', 'run', '-d', '--name', 'node-ceiling', '-v', str(probe) + ':/probe:ro', '-v', 'persistent:/v', ALPINE, '/probe', 'oom', '/v')
+    elif phase == 'readonly':
         command('docker', 'run', '--rm', '-v', str(Path.cwd()) + ':/workspace', ALPINE, 'true', success=False)
         command('docker', 'run', '--rm', '-v', str(Path.cwd()) + ':/workspace:ro', ALPINE,
                 'sh', '-c', 'test -f /workspace/persisted; ! touch /workspace/forbidden')

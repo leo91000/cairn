@@ -538,6 +538,15 @@ def main():
                 group = Path('/sys/fs/cgroup') / namespace.lstrip('/')
                 metrics['dockerCgroup'] = dict(cpuMax=(group / 'cpu.max').read_text().strip(),
                     memoryMax=(group / 'memory.max').read_text().strip(), cpuStat=(group / 'cpu.stat').read_text())
+                process_names = []
+                for membership in [group / 'cgroup.procs'] + list(group.rglob('cgroup.procs')):
+                    for pid in membership.read_text().split():
+                        try:
+                            process_names.append(Path('/proc', pid, 'comm').read_text().strip())
+                        except FileNotFoundError:
+                            pass
+                assert 'dockerd' in process_names and 'containerd' in process_names, process_names
+                metrics['dockerCgroup']['descendantNames'] = sorted(set(process_names))
                 assert int((group / 'memory.max').read_text()) == 1024 * 1024 * 1024
                 assert (group / 'cpu.max').read_text().split()[0] != 'max'
                 with socket.socket() as probe:
@@ -581,6 +590,10 @@ def main():
                 lease_docker = start(docker_run, lease=300000, docker_script=docker_script('resume'))
                 api('/runs/' + lease_docker + '/lease', {'remainingMs': 1000})
                 fenced(docker_run, lease_docker)
+                oom_docker = start(docker_run, lease=300000, docker_script=docker_script('oom'))
+                fenced(docker_run, oom_docker)
+                assert int((state / (oom_docker + '.exit')).read_text()) != 0, 'Over-budget container survived or exited normally.'
+                metrics['dockerMemoryCeilingFenced'] = True
                 readonly_docker = start(docker_run, long=False, lease=300000, sandbox='read-only', docker_script=docker_script('readonly'))
                 fenced(docker_run, readonly_docker)
                 manager('publish', run=docker_run)
