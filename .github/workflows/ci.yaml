@@ -186,7 +186,8 @@ jobs:
     needs: resolve
     if: needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Hosted Ubuntu package downloads can consume over 20 minutes before fixtures run.
+    timeout-minutes: 45
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_INCREMENTAL: '0'
@@ -231,7 +232,8 @@ jobs:
     needs: [resolve, build]
     if: needs.resolve.outputs.reuse != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Allow slow kernel-module installation and the complete native qualification.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/download-artifact@v8.0.1
