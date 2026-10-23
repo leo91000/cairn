@@ -121,6 +121,24 @@ async fn extract_verified(
     extract(file, target, budget).await
 }
 
+/// A metadata-only preflight bounds expanded allocation before warming. The
+/// mutation lock keeps this cache entry stable; extraction independently checks
+/// the complete checksum before writing, so corrupt metadata cannot underreserve.
+pub(crate) async fn cached_allocation(
+    root: &Path,
+    descriptor: &Archive,
+    unit: u64,
+    stop: &tokio_util::sync::CancellationToken,
+) -> Result<u64> {
+    let file = cached(root, descriptor)
+        .await?
+        .ok_or_else(|| Error::not_found("Project archive is not cached."))?;
+    let (logical, stop) = (descriptor.logical_bytes, stop.clone());
+    tokio::task::spawn_blocking(move || archive::allocation_budget(file, logical, unit, &stop))
+        .await
+        .map_err(Error::internal)?
+}
+
 /// Native base preparation holds the shared storage lock throughout extraction.
 pub(crate) async fn extract_cached(
     root: &Path,

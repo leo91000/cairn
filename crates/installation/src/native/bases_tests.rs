@@ -1,4 +1,4 @@
-use super::bases::*;
+use super::{bases::*, disk};
 use crate::{
     project_archives::Archive,
     skills::private_dir,
@@ -218,6 +218,56 @@ async fn prepared_ext4_base_adopts_private_authority_and_preserves_existing_conv
     let mut magic = [0; 2];
     volume.disk.read_at(1080, &mut magic).unwrap();
     assert_eq!(magic, [0x53, 0xef]);
+}
+
+#[tokio::test]
+async fn tiny_file_archives_reserve_allocated_blocks_before_extraction() {
+    let (_root, bases, mut archive, policy) = fixture().await;
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for index in 0..8192 {
+        zip.start_file(
+            format!("tiny-{index}"),
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(b"x").unwrap();
+    }
+    let bytes = zip.finish().unwrap().into_inner();
+    tokio::fs::remove_file(
+        bases
+            .data
+            .join("project-archives")
+            .join(format!("{}.zip", archive.hash)),
+    )
+    .await
+    .unwrap();
+    archive.hash = blake3::hash(&bytes).to_hex().to_string();
+    archive.bytes = bytes.len() as u64;
+    archive.logical_bytes = 8192;
+    tokio::fs::write(
+        bases
+            .data
+            .join("project-archives")
+            .join(format!("{}.zip", archive.hash)),
+        bytes,
+    )
+    .await
+    .unwrap();
+    let limit = 4 * 1024 * disk::MIB;
+    // Logical bytes alone would admit a 520 MiB temporary reservation. Rounded
+    // entry allocation requires more than the remaining 600 MiB, before mkfs.
+    let occupied = tokio::fs::File::create(bases.data.join("other-retained-work"))
+        .await
+        .unwrap();
+    occupied.set_len(limit - 600 * disk::MIB).await.unwrap();
+    let stop = CancellationToken::new();
+    bases
+        .warm(&[archive.clone()], 128, limit, &policy, &stop)
+        .await
+        .unwrap();
+    assert!(bases.lookup(&[archive], 128).await.unwrap().is_none());
+    assert!(!bases.state.join("environments").exists());
+    assert!(disk::used(&bases.data, &bases.state).await.unwrap() < limit);
 }
 
 #[tokio::test]

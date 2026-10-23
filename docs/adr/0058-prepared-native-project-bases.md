@@ -49,7 +49,12 @@ their exact project combination and disk size for later conversations. Catalog
 warming prepares individual projects at the normal 32 GiB size.
 
 The cache uses at most one eighth of the configured pool, capped at 64 GiB, and
-reserves temporary extraction/image/journal space before building. Pool pressure
+reserves simultaneous temporary extraction/image/journal space before building.
+A metadata-only ZIP preflight includes one host allocation unit and inode/entry
+overhead per entry, including explicit directories, instead of assuming logical
+file lengths bound tiny-file allocation. Extraction still verifies the entire ZIP
+checksum before writing; changed or corrupt preflight metadata cannot admit an
+under-reserved extraction. Pool pressure
 reclaims unused bases as well as ZIPs. Pins and source-reader locks fence
 eviction; accounting counts shared inodes once. Pins belong to an attempt, so an
 old cancellation cannot unpin its replacement. Failed preparation drops its pin;

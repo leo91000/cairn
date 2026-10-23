@@ -131,6 +131,33 @@ impl<R: Read> Read for Stoppable<'_, R> {
     }
 }
 
+impl<R: Seek> Seek for Stoppable<'_, R> {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        if self.stop.is_cancelled() {
+            return Err(std::io::Error::other("Project extraction stopped."));
+        }
+        self.input.seek(position)
+    }
+}
+
+/// Accepted archives include every parent directory explicitly. One allocation
+/// unit per entry covers rounded file tails and directory blocks; the extra
+/// KiB covers inode/directory-entry and journal frame metadata conservatively.
+/// No payload is decompressed or written by this preflight.
+pub(super) fn allocation_budget(
+    file: File,
+    logical: u64,
+    unit: u64,
+    stop: &tokio_util::sync::CancellationToken,
+) -> Result<u64> {
+    let archive = ZipArchive::new(Stoppable { input: file, stop }).map_err(archive_error)?;
+    if archive.len() > MAX_ENTRIES {
+        return Err(Error::too_large("Too many project archive entries."));
+    }
+    let entry_bytes = unit.max(4096).saturating_add(1024);
+    Ok(logical.saturating_add((archive.len() as u64 + 1).saturating_mul(entry_bytes)))
+}
+
 pub(crate) fn extract(file: File, target: &Path, budget: u64) -> Result<u64> {
     extract_with_stop(
         file,
@@ -146,7 +173,7 @@ pub(super) fn extract_with_stop(
     budget: u64,
     stop: &tokio_util::sync::CancellationToken,
 ) -> Result<u64> {
-    let mut archive = ZipArchive::new(file).map_err(archive_error)?;
+    let mut archive = ZipArchive::new(Stoppable { input: file, stop }).map_err(archive_error)?;
     if archive.len() > MAX_ENTRIES {
         return Err(Error::too_large("Too many project archive entries."));
     }

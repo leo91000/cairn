@@ -231,16 +231,25 @@ impl Bases {
             return Ok(());
         }
 
-        let logical = archives.iter().try_fold(0u64, |sum, archive| {
-            sum.checked_add(archive.logical_bytes)
-                .ok_or_else(|| Error::too_large("Native base is too large."))
-        })?;
+        let filesystem = workspace::filesystem(&self.state)?;
+        let unit = filesystem.f_frsize.max(filesystem.f_bsize).max(4096);
+        let mut expanded = 0u64;
+        for archive in archives {
+            if stop.is_cancelled() {
+                return Ok(());
+            }
+            expanded = expanded.saturating_add(
+                crate::project_archives::cached_allocation(&self.data, archive, unit, stop).await?,
+            );
+        }
         let budget = cache_limit(limit);
         let metadata = disk_mib.saturating_mul(disk::MIB) / 32 + 256 * disk::MIB;
-        let required = logical
+        // Extraction, raw ext4 and imported journal coexist during building.
+        // Include rounded tiny-file blocks, not only sum(st_size).
+        let required = expanded
             .saturating_mul(3)
             .saturating_add(metadata.saturating_mul(2));
-        let estimated_base = logical.saturating_add(metadata);
+        let estimated_base = expanded.saturating_add(metadata);
         if estimated_base > budget || stop.is_cancelled() {
             return Ok(());
         }
@@ -251,7 +260,10 @@ impl Bases {
             None,
         )
         .await?;
+        let capacity = workspace::filesystem(&self.state)?;
+        let host_free = capacity.f_bavail.saturating_mul(capacity.f_frsize);
         if required > disk::available(limit, disk::used(&self.data, &self.state).await?)
+            || required.saturating_add(256 * disk::MIB) > host_free
             || workspace::measure(&self.root(), true)?.saturating_add(estimated_base) > budget
         {
             return Ok(());
