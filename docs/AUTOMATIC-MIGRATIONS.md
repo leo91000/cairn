@@ -106,7 +106,9 @@ reviewed forward fix. Preserve the installation data; never lower SQLite's
 change does not deploy an installation. Local storage measurements and the
 reproduction command are in [mission waits](MISSION-WAITS.md).
 
-## Current transition: epochs 3–10 to 11
+<a id="current-transition-epochs-310-to-11"></a>
+
+## Retained transition: epochs 3–10 to 11
 
 Epoch 11 permits configurable concurrent native slots and an owner-selected
 all-node agent grant. SQLite advances from version 9 to 10 before admission,
@@ -135,3 +137,27 @@ state, diagnose and retry it or apply a reviewed forward fix. Never lower
 
 Manager/runner rollout uses the existing automatic migration gate. This release
 does not create or restore backups, convert conversations, or grant host trust.
+
+## Current transition: epochs 3–11 to 12
+
+Epoch 12 adds optional `[setup]` declarations to installed plugin manifests.
+Previous binaries reject this field, so SQLite advances from version 10 to 11
+transactionally in `Store::open`, before plugin loading or admission. Existing
+package files, approvals, connections, vault entries and workspace formats are
+retained without conversion. Packages without `[setup]` derive their assistant
+steps; declaring it requires the new reader. Shared settings copy into each new
+connection's existing settings and vault format.
+
+`upgrades_version_ten_preserving_plugin_packages_and_fences_older_binaries`
+checks preservation of package files and plugin records, the version-11 fence,
+and refusal of a newer database without downgrading it. All earlier migration
+regressions remain required by the exact-tree release gate. The version advance
+changes only the compatibility marker; it adds no read/write storage format or
+workload change requiring new throughput measurements.
+
+The installed updater retains the candidate once this fence is crossed. If
+startup or a later plugin operation fails, preserve the installation directory,
+package files, vault and identity, then retry this candidate or deploy a reviewed
+forward fix. Never lower SQLite `user_version`, the epoch or the legacy tree, or
+start an older manager against the migrated installation. Merging does not
+release or deploy an installation.

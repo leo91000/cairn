@@ -172,8 +172,8 @@ data class SharedSource(
 )
 
 /**
- * Saved instances whose shared steps are complete, one per distinct set of values: reusing any of
- * them copies the same app.
+ * Saved instances whose required shared values are complete. Secret values never reach clients, so
+ * sources with secrets remain individually selectable even if their labels match.
  */
 fun sharedSources(
     steps: List<SetupStep>,
@@ -187,10 +187,11 @@ fun sharedSources(
     for (connection in connections) {
         if (connection.id == except) continue
         val complete = shared.all { field ->
-            if (field.type == "secret") field.key in connection.secretKeys
+            if (field.type == "secret") !field.required || field.key in connection.secretKeys
             else {
                 val value = connection.settings[field.key]
-                !field.required || (value != null && value != JsonPrimitive(""))
+                !field.required ||
+                    (value != null && value != JsonNull && value != JsonPrimitive(""))
             }
         }
         if (!complete) continue
@@ -207,10 +208,7 @@ fun sharedSources(
                 }
                 .filter { it.isNotEmpty() }
                 .joinToString(" · ")
-        val same = sources.indexOfFirst { it.label == label }
-        if (same >= 0)
-            sources[same] = sources[same].copy(names = sources[same].names + connection.name)
-        else sources += SharedSource(connection.id, listOf(connection.name), label)
+        sources += SharedSource(connection.id, listOf(connection.name), label)
     }
     return sources
 }

@@ -12,12 +12,17 @@ const props = defineProps<{
   fields: SettingField[]
   disabled?: boolean
 }>()
+const emit = defineEmits<{ refresh: [keys: string[]] }>()
 const values = defineModel<Record<string, any>>('values', { required: true })
 const uid = useId()
 const selected = computed(() => matchingPreset(props.step, props.fields, values.value))
 
 function choose(preset: SetupPreset) {
-  Object.assign(values.value, presetValues(props.step, props.fields, preset))
+  const next = presetValues(props.step, props.fields, preset)
+  const changed = props.fields.filter(field => field.refresh && Object.hasOwn(next, field.key) && values.value[field.key] !== next[field.key])
+  Object.assign(values.value, next)
+  if (changed.length)
+    emit('refresh', changed.map(field => field.key))
 }
 </script>
 

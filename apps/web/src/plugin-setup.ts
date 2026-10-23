@@ -135,8 +135,8 @@ export interface SharedSource {
 }
 
 /**
- * Saved instances whose shared steps are complete, one per distinct set of values: reusing
- * any of them copies the same app.
+ * Saved instances whose required shared values are complete. Secret values never reach
+ * clients, so sources with secrets remain individually selectable even if their labels match.
  */
 export function sharedSources(steps: SetupStep[], fields: SettingField[], connections: PluginConnection[], except?: string): SharedSource[] {
   const shared = steps.filter(step => step.shared).flatMap(step => stepFields(step, fields))
@@ -147,19 +147,15 @@ export function sharedSources(steps: SetupStep[], fields: SettingField[], connec
     if (connection.id === except)
       continue
     const complete = shared.every(field => field.type === 'secret'
-      ? connection.secretKeys?.includes(field.key)
-      : !field.required || (connection.settings[field.key] !== undefined && connection.settings[field.key] !== ''))
+      ? !field.required || connection.secretKeys?.includes(field.key)
+      : !field.required || (connection.settings[field.key] !== undefined && connection.settings[field.key] !== null && connection.settings[field.key] !== ''))
     if (!complete)
       continue
     const label = shared.filter(field => field.type !== 'secret')
       .map(field => String(connection.settings[field.key] ?? ''))
       .filter(Boolean)
       .join(' · ')
-    const same = sources.find(source => source.label === label)
-    if (same)
-      same.names.push(connection.name)
-    else
-      sources.push({ id: connection.id, names: [connection.name], label })
+    sources.push({ id: connection.id, names: [connection.name], label })
   }
 
   return sources

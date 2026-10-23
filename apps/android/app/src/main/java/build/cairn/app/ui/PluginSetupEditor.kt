@@ -146,16 +146,17 @@ internal fun InstanceEditor(
         }
     }
     var completion by remember(initial.id) { mutableStateOf<PluginForm?>(null) }
+    var completionInputs by remember(initial.id) { mutableStateOf(mapOf<String, String?>()) }
     // While the package answers, its derived values aren't in the form yet: no saving.
     var completing by remember(initial.id) { mutableStateOf(manifest.instanceForm) }
     // Each change asks the package again; a newer question cancels the older one.
-    var asking by remember(initial.id) { mutableStateOf(0 to (null as String?)) }
+    var asking by remember(initial.id) { mutableStateOf(0 to listOf<String?>(null)) }
     val others = connections.filter { it.id != initial.id }
     fun problem(agent: Agent): String? =
         if (accessMode == "everyone") agent.publicProblem(others)
         else if (agent.eligibleForPlugins()) null else "Trop large"
     fun refresh(key: String?) {
-        asking = (asking.first + 1) to key
+        asking = (asking.first + 1) to listOf(key)
     }
     /** The installation copies the reused values, secrets included, without sending them here. */
     fun JsonObjectBuilder.sharing() {
@@ -280,49 +281,68 @@ internal fun InstanceEditor(
     if (manifest.instanceForm)
         LaunchedEffect(initial.id, asking) {
             completing = true
-            if (asking.second != null) kotlinx.coroutines.delay(400)
-            runCatching {
-                val result =
-                    vm.api.pluginOperation(
-                        "/plugins/${segment(pluginId)}/form",
-                        buildJsonObject {
-                            if (!creating) put("instance", initial.id)
-                            put("settings", pluginSettings(stored, values))
-                            put("secrets", pluginSecrets(secrets))
-                            sharing()
-                            credentialInput(token, signIn)?.let { (key, value) -> put(key, value) }
-                            asking.second?.let { put("changed", it) }
-                        },
-                    )
-                wireJson.decodeFromJsonElement<PluginForm>(result)
-            }
-                .onSuccess { form ->
-                    values =
-                        values +
+            if (asking.second.any { it != null }) kotlinx.coroutines.delay(400)
+            for (changed in asking.second) {
+                val inputs = fields.associate { field ->
+                    field.key to
+                        if (field.type == "secret") secrets[field.key] else values[field.key]
+                }
+                runCatching {
+                    val result =
+                        vm.api.pluginOperation(
+                            "/plugins/${segment(pluginId)}/form",
+                            buildJsonObject {
+                                if (!creating) put("instance", initial.id)
+                                put("settings", pluginSettings(stored, values))
+                                put("secrets", pluginSecrets(secrets))
+                                sharing()
+                                credentialInput(token, signIn)?.let { (key, value) ->
+                                    put(key, value)
+                                }
+                                changed?.let { put("changed", it) }
+                            },
+                        )
+                    wireJson.decodeFromJsonElement<PluginForm>(result)
+                }
+                    .onSuccess { form ->
+                        val derived =
                             form.values.mapValues { (key, value) ->
                                 formValue(
                                     stored.find { it.key == key } ?: PluginSetting(key = key),
                                     value,
                                 )
                             }
-                    // A new instance is named after what the package verified, e.g. the mailbox.
-                    setup.nameFrom
-                        ?.let { values[it] }
-                        ?.takeIf { it.isNotEmpty() && !named }
-                        ?.let { name = it }
-                    completion = form
-                    completing = false
-                }
-                .onFailure { error ->
-                    if (error is kotlinx.coroutines.CancellationException) throw error
-                    completion =
-                        PluginForm(
-                            options = completion?.options.orEmpty(),
-                            errors =
-                                mapOf("form" to (error.message ?: "Le plugin n’a pas répondu.")),
-                        )
-                    completing = false
-                }
+                        values = values + derived
+                        completionInputs = inputs + derived
+                        // A new instance is named after what the package verified, e.g. the
+                        // mailbox.
+                        setup.nameFrom
+                            ?.let { values[it] }
+                            ?.takeIf { it.isNotEmpty() && !named }
+                            ?.let { name = it }
+                        completion = form
+                    }
+                    .onFailure { error ->
+                        if (error is kotlinx.coroutines.CancellationException) throw error
+                        completion =
+                            PluginForm(
+                                options = completion?.options.orEmpty(),
+                                errors =
+                                    mapOf(
+                                        "form" to (error.message ?: "Le plugin n’a pas répondu.")
+                                    ),
+                            )
+                    }
+            }
+            completing = false
+        }
+    // Ordinary fields need not refresh while typing. Errors apply to the input checked by
+    // the package; changing it removes a stale error, and save still validates authoritatively.
+    val formErrors =
+        completion?.errors.orEmpty().filter { (key, _) ->
+            val field = fields.find { it.key == key }
+            field == null ||
+                completionInputs[key] == if (field.type == "secret") secrets[key] else values[key]
         }
     val agent = state.agents.find { it.id == agentId }
     fun filled(field: PluginSetting): Boolean =
@@ -342,10 +362,10 @@ internal fun InstanceEditor(
                 else {
                     val shown = item.fields(fields)
                     shown.find { it.required && !filled(it) }?.let { "Renseignez « ${it.title} »." }
-                        ?: shown.firstNotNullOfOrNull { completion?.errors?.get(it.key) }
+                        ?: shown.firstNotNullOfOrNull { formErrors[it.key] }
                 }
             "credential" ->
-                completion?.errors?.get("credential")
+                formErrors["credential"]
                     ?: when {
                         !creating || signIn?.completed == true -> null
                         manifest.credential?.oauth != null -> "Connectez-vous pour continuer."
@@ -603,7 +623,16 @@ internal fun InstanceEditor(
                     val switches = shown.filter { it.type == "boolean" }
                     if (current.presets.isNotEmpty())
                         SetupPresets(current, fields, values, enabled = !state.busy) {
+                            val changed =
+                                fields
+                                    .filter { field ->
+                                        field.refresh &&
+                                            field.key in it &&
+                                            values[field.key] != it[field.key]
+                                    }
+                                    .map { field -> field.key }
                             values = values + it
+                            if (changed.isNotEmpty()) asking = (asking.first + 1) to changed
                         }
                     PluginFields(
                         if (current.presets.isNotEmpty()) shown.filter { it.type != "boolean" }
@@ -615,7 +644,7 @@ internal fun InstanceEditor(
                         saved = initial.secretKeys,
                         enabled = !state.busy,
                         options = completion?.options.orEmpty(),
-                        errors = completion?.errors.orEmpty(),
+                        errors = formErrors,
                         refresh = ::refresh,
                     )
                     if (current.presets.isNotEmpty() && switches.isNotEmpty())
@@ -627,7 +656,7 @@ internal fun InstanceEditor(
                                 secrets,
                                 { key, value -> secrets = secrets + (key to value) },
                                 enabled = !state.busy,
-                                errors = completion?.errors.orEmpty(),
+                                errors = formErrors,
                                 refresh = ::refresh,
                             )
                         }

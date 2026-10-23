@@ -103,6 +103,7 @@ const secrets = ref<Record<string, string>>(pluginFormSecrets())
 const people = ref<{ id: string, name: string }[]>([])
 const person = ref('')
 const completion = ref<FormResult | null>(null)
+const completionInputs = ref<Record<string, string>>({})
 const completing = ref(false)
 const copied = ref(false)
 // The setup assistant: its current step, the saved instance whose shared setup (such as
@@ -122,6 +123,17 @@ const delegates = computed(() => delegating(manifest.value))
 const fields = computed(() => (manifest.value?.settings ?? []).filter(field => !field.hidden))
 const plainFields = computed(() => fields.value.filter(field => field.type !== 'secret'))
 const secretFields = computed(() => fields.value.filter(field => field.type === 'secret'))
+
+// A package error describes the input it checked. Ordinary fields need not request a
+// refresh while typing; editing them removes stale errors and save still validates them.
+function fieldInput(field: SettingField) {
+  return JSON.stringify(field.type === 'secret' ? secrets.value[field.key] : values.value[field.key]) ?? ''
+}
+
+const formErrors = computed(() => Object.fromEntries(Object.entries(completion.value?.errors ?? {}).filter(([key]) => {
+  const field = fields.value.find(field => field.key === key)
+  return !field || pluginFieldAnswer(completionInputs.value, key) === fieldInput(field)
+})))
 // Packages with their own panel describe the instance there.
 const shownFields = computed(() => manifest.value?.instanceView ? [] : plainFields.value)
 // Hidden settings are the package's own (e.g. names it derives); editing keeps them.
@@ -263,6 +275,7 @@ async function complete(changed?: string) {
   if (!manifest.value?.instanceForm)
     return
   const ask = ++asked
+  const inputs = Object.fromEntries(fields.value.map(field => [field.key, fieldInput(field)]))
   completing.value = true
   try {
     const result = await pluginOperation<FormResult>(`/plugins/${id.value}/form`, {
@@ -276,14 +289,17 @@ async function complete(changed?: string) {
     if (ask !== asked)
       return
     for (const field of storedFields.value) {
-      if (Object.hasOwn(result.values, field.key))
+      if (Object.hasOwn(result.values, field.key)) {
         values.value[field.key] = pluginFormValue(field, result.values[field.key])
+        inputs[field.key] = fieldInput(field)
+      }
     }
 
     // A new instance is named after what the package verified, e.g. the mailbox.
     const nameFrom = setup.value.nameFrom
     if (nameFrom && !named.value && values.value[nameFrom])
       form.value.name = String(values.value[nameFrom])
+    completionInputs.value = inputs
     completion.value = result
   }
   catch (e) {
@@ -300,6 +316,11 @@ async function complete(changed?: string) {
     if (ask === asked)
       completing.value = false
   }
+}
+
+async function presetChanged(keys: string[]) {
+  for (const key of keys)
+    await complete(key)
 }
 
 function typed() {
@@ -351,12 +372,12 @@ function stepProblem(item: SetupStep | undefined): string {
     const missing = shown.find(field => field.required && !filled(field))
     if (missing)
       return `Enter ${missing.title}.`
-    return shown.map(field => pluginFieldAnswer(completion.value?.errors, field.key)).find(Boolean) ?? ''
+    return shown.map(field => pluginFieldAnswer(formErrors.value, field.key)).find(Boolean) ?? ''
   }
 
   if (item.kind === 'credential') {
     const credential = manifest.value.credential
-    const refused = pluginFieldAnswer(completion.value?.errors, 'credential')
+    const refused = pluginFieldAnswer(formErrors.value, 'credential')
     if (refused)
       return refused
     if (editing.value || signIn.completed.value)
@@ -961,6 +982,7 @@ onBeforeUnmount(() => {
               :step="current"
               :fields="fields"
               :disabled="busy"
+              @refresh="presetChanged"
             />
             <PluginFields
               v-if="stepShown(current).length"
@@ -970,7 +992,7 @@ onBeforeUnmount(() => {
               :saved="editing?.secretKeys ?? []"
               :disabled="busy"
               :options="completion?.options"
-              :errors="completion?.errors"
+              :errors="formErrors"
               @refresh="complete"
             />
             <details v-if="current.presets?.length && switches(current).length" class="rounded-xl border border-line px-4 py-3" :open="!matchingPreset(current, fields, values)">
@@ -983,7 +1005,7 @@ onBeforeUnmount(() => {
                 class="mt-3"
                 :fields="switches(current)"
                 :disabled="busy"
-                :errors="completion?.errors"
+                :errors="formErrors"
                 @refresh="complete"
               />
             </details>

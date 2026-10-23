@@ -408,6 +408,10 @@ settings, may be `shared` and may have presets, whose values name the step's
 boolean settings. Checklist links are HTTPS; `copy = "callbackUrl"` needs OAuth. At
 most 8 steps, 8 tasks and 6 presets per step. Boolean settings may declare
 `risk = "low" | "medium" | "high"`, shown beside the switch.
+Presets refresh each changed field marked `refresh`, just like its individual
+switch. Form errors apply only to the checked input; changing an ordinary field
+clears its stale error without requiring `refresh`. Save still runs the package's
+authoritative `submit = true` validation.
 
 Without steps, Cairn derives them: one `Settings` step with the visible settings,
 before the sign-in for OAuth and after the credential otherwise, then `Who can
@@ -428,6 +432,14 @@ a saved instance of the same package. The host copies them, secrets included;
 clients never receive the secrets. Each instance keeps its own copy, and only a
 new instance can reuse: an edit naming `sharedFrom` is refused. An installation
 management agent may only reuse an instance it is granted.
+Required secrets must be present; an absent optional secret remains absent,
+replacing any typed draft value for that shared field. Sources with secret fields
+remain individually selectable: equal visible labels cannot prove equal secrets.
+
+Installed manifests with `[setup]` require epoch 12 / SQLite version 11, which
+fences previous readers before plugin loading. Existing package files, approvals,
+connections and vault entries are preserved. See the
+[forward migration and recovery plan](AUTOMATIC-MIGRATIONS.md#current-transition-epochs-311-to-12).
 
 The assistant's last step can grant agents to a new instance with the save's
 `agentIds`: creation only grants, never removes. A saved instance shows its agents

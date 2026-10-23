@@ -155,7 +155,8 @@
       {
         "except": null,
         "expected": [
-          { "id": "a", "names": ["alice@example.test", "bob@example.test"], "label": "one" },
+          { "id": "a", "names": ["alice@example.test"], "label": "one" },
+          { "id": "b", "names": ["bob@example.test"], "label": "one" },
           { "id": "c", "names": ["carol@example.test"], "label": "two" }
         ]
       },
@@ -164,6 +165,43 @@
         "expected": [
           { "id": "b", "names": ["bob@example.test"], "label": "one" },
           { "id": "c", "names": ["carol@example.test"], "label": "two" }
+        ]
+      },
+      {
+        "except": null,
+        "fields": [
+          { "key": "clientId", "title": "Client ID", "type": "string", "required": true },
+          { "key": "clientSecret", "title": "Client secret", "type": "secret" }
+        ],
+        "expected": [
+          { "id": "a", "names": ["alice@example.test"], "label": "one" },
+          { "id": "b", "names": ["bob@example.test"], "label": "one" },
+          { "id": "c", "names": ["carol@example.test"], "label": "two" },
+          { "id": "d", "names": ["no secret"], "label": "three" }
+        ]
+      },
+      {
+        "except": null,
+        "steps": [
+          { "id": "app", "kind": "settings", "title": "App", "settings": ["clientId"], "shared": true }
+        ],
+        "expected": [
+          { "id": "a", "names": ["alice@example.test"], "label": "one" },
+          { "id": "b", "names": ["bob@example.test"], "label": "one" },
+          { "id": "c", "names": ["carol@example.test"], "label": "two" },
+          { "id": "d", "names": ["no secret"], "label": "three" }
+        ]
+      },
+      {
+        "except": null,
+        "steps": [
+          { "id": "app", "kind": "settings", "title": "App", "settings": ["clientSecret"], "shared": true }
+        ],
+        "expected": [
+          { "id": "a", "names": ["alice@example.test"], "label": "" },
+          { "id": "b", "names": ["bob@example.test"], "label": "" },
+          { "id": "c", "names": ["carol@example.test"], "label": "" },
+          { "id": "e", "names": ["no client"], "label": "" }
         ]
       }
     ]

@@ -540,14 +540,16 @@ pub(crate) async fn shared(
     {
         let key = text(field, "key").to_owned();
         if field["type"] == "secret" {
-            let value = saved.get(&key).cloned().ok_or_else(|| {
-                Error::bad(format!(
+            let value = saved.get(&key).cloned();
+            if value.is_none() && field["required"] == true {
+                return Err(Error::bad(format!(
                     "{} has no saved {}. Set it up again.",
                     source.name,
                     text(field, "title")
-                ))
-            })?;
-            shared.secrets.insert(key, value);
+                )));
+            }
+            // Reusing an absent optional secret must also replace any typed draft value.
+            shared.secrets.insert(key, value.unwrap_or(Value::Null));
         } else {
             shared
                 .settings

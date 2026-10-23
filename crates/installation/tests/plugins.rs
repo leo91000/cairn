@@ -35,6 +35,65 @@ fn worker() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_cairn"))
 }
 
+#[tokio::test]
+async fn shared_setup_keeps_an_absent_optional_secret_absent() {
+    let (_root, s, _agent) = service().await;
+    let installed = registry::install(
+        &s,
+        &json!({
+            "manifest": {
+                "id": "shared-app", "name": "Shared app", "version": "1", "apiVersion": 2,
+                "capabilities": [],
+                "settings": [
+                    { "key": "clientId", "title": "Client ID", "type": "string", "required": true },
+                    { "key": "clientSecret", "title": "Client secret", "type": "secret" }
+                ],
+                "setup": { "steps": [{
+                    "id": "app", "kind": "settings", "title": "App", "shared": true,
+                    "settings": ["clientId", "clientSecret"]
+                }] }
+            },
+            "source": "return {}"
+        }),
+    )
+    .await
+    .unwrap();
+    registry::approve(&s, "shared-app", "1", text(&installed, "digest"))
+        .await
+        .unwrap();
+    let original = connections::save(
+        &s,
+        "shared-app",
+        &json!({
+            "name": "Original", "settings": { "clientId": "public-client" }, "enabled": false
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    let copy = connections::save(
+        &s,
+        "shared-app",
+        &json!({
+            "name": "Copy", "sharedFrom": original["id"], "enabled": false,
+            "secrets": { "clientSecret": "synthetic-draft-secret" }
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(copy["settings"]["clientId"], "public-client");
+    assert_eq!(copy["secretKeys"], json!([]));
+    let saved = s
+        .vault
+        .get(&connections::secrets_key(text(&copy, "id")))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved["fields"], json!({}));
+    assert!(!copy.to_string().contains("synthetic-draft-secret"));
+}
+
 async fn service() -> (TempDir, Arc<Service>, Value) {
     let root = TempDir::new().unwrap();
     std::fs::create_dir_all(root.path().join("home")).unwrap();

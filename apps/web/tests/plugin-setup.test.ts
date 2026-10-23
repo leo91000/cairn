@@ -46,10 +46,10 @@ describe('plugin setup (shared Rust and Android corpus)', () => {
       expect(presetValues(step, fields, step.presets!.find(preset => preset.id === id)!)).toEqual(values)
   })
 
-  it('offers each complete shared setup once, named by the instances using it', () => {
+  it('keeps secret-bearing sources selectable and permits absent optional secrets', () => {
     const { steps, fields, connections } = corpus.sources
     for (const item of corpus.sources.cases) {
-      const sources = sharedSources(steps as SetupStep[], fields as SettingField[], connections as unknown as PluginConnection[], item.except ?? undefined)
+      const sources = sharedSources((item.steps ?? steps) as SetupStep[], (item.fields ?? fields) as SettingField[], connections as unknown as PluginConnection[], item.except ?? undefined)
       expect(sources, String(item.except)).toEqual(item.expected)
     }
 

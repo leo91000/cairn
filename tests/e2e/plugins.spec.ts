@@ -247,8 +247,20 @@ test('Discord bots are set up through the package’s own form and keep the toke
 test('TOML packages wait for review and connect through a generated form', async ({ page, workspace }) => {
   test.setTimeout(90000)
   // Split into a module, loaded with require.
-  const source = 'local notes = require("./notes")\nreturn { start = function(event) cairn.storage.set("started", notes.started) end }'
+  const source = `local notes = require("./notes")
+return {
+  start = function(event) cairn.storage.set("started", notes.started) end,
+  form = function(event)
+    local values = event.values or {}
+    local errors = {}
+    if not values.team or values.team == "" then errors.team = "Enter a team" end
+    local choices = {}
+    if values.more and values.extra then choices = {{ value = "room", label = "Room" }} end
+    return { errors = errors, options = { destination = cairn.array(choices) } }
+  end,
+}`
   const module = 'return { started = true }'
+  await useRelayForHttpMocks(page)
   await page.goto(workspacePath('/plugins'))
   await signIn(page)
   await page.getByRole('button', { name: 'Install package' }).click()
@@ -264,12 +276,39 @@ version = "1.0.0"
 description = "Keeps a note for each team."
 apiVersion = 2
 capabilities = ["storage", "timers"]
+instanceForm = true
 [[settings]]
 key = "team"
 title = "Team"
 type = "string"
 required = true
 maxLength = ${maxLength}
+[[settings]]
+key = "more"
+title = "More destinations"
+type = "boolean"
+refresh = true
+[[settings]]
+key = "extra"
+title = "Extra destinations"
+type = "boolean"
+refresh = true
+[[settings]]
+key = "destination"
+title = "Destination"
+type = "select"
+dynamic = true
+[[setup.steps]]
+id = "settings"
+title = "Settings"
+settings = ["team", "more", "extra", "destination"]
+[[setup.steps.presets]]
+id = "basic"
+title = "Basic"
+[[setup.steps.presets]]
+id = "more"
+title = "More places"
+values = { more = true, extra = true }
 `),
     },
     { name: 'main.luau', mimeType: 'text/plain', buffer: Buffer.from(source) },
@@ -292,7 +331,23 @@ maxLength = ${maxLength}
 
   await page.getByRole('button', { name: 'Add instance' }).click()
   const form = page.getByRole('dialog', { name: 'New Team notes instance' })
+  await expect(form.getByText('Enter a team', { exact: true })).toBeVisible()
   await form.getByLabel('Team').fill('core')
+  // Non-refresh fields must not remain blocked by errors for their previous values.
+  await expect(form.getByRole('button', { name: 'Save instance' })).toBeEnabled()
+  await expect(form.getByText('Enter a team', { exact: true })).toHaveCount(0)
+  const refreshed: string[] = []
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && request.url().endsWith('/plugins/notes/form')) {
+      const changed = request.postDataJSON().changed
+      if (changed)
+        refreshed.push(changed)
+    }
+  })
+  await form.getByRole('radio', { name: 'More places' }).check()
+  await expect.poll(() => refreshed).toEqual(['more', 'extra'])
+  await expect(form.getByRole('option', { name: 'Room' })).toHaveCount(1)
+  await form.getByRole('combobox', { name: /^Destination/ }).selectOption('room')
   await form.getByRole('button', { name: 'Save instance' }).click()
   const connection = page.getByRole('article', { name: 'Team notes' })
   await expect(connection.getByText('core', { exact: true })).toBeVisible()
@@ -300,7 +355,16 @@ maxLength = ${maxLength}
 
   const catalog = await workspace.api('/api/plugins')
   expect(catalog.packages.find((item: { id: string }) => item.id === 'notes')).toMatchObject({ status: 'active', active: '1.0.0' })
-  expect(catalog.connections[0]).toMatchObject({ pluginId: 'notes', settings: { team: 'core' }, agentId: '' })
+  expect(catalog.connections[0]).toMatchObject({
+    pluginId: 'notes',
+    settings: {
+      team: 'core',
+      more: true,
+      extra: true,
+      destination: 'room',
+    },
+    agentId: '',
+  })
 
   await connection.getByRole('button', { name: 'Delete Team notes' }).click()
   await page.getByRole('dialog').getByRole('button', { name: 'Delete instance' }).click()

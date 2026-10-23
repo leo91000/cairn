@@ -97,7 +97,7 @@ class PluginSetupTest {
     }
 
     @Test
-    fun `each complete shared setup is offered once, named by the instances using it`() {
+    fun `secret-bearing sources stay selectable and optional secrets may be absent`() {
         val sources = corpus.getValue("sources").jsonObject
         val steps = wireJson.decodeFromJsonElement<List<SetupStep>>(sources.getValue("steps"))
         val fields = wireJson.decodeFromJsonElement<List<PluginSetting>>(sources.getValue("fields"))
@@ -118,7 +118,14 @@ class PluginSetupTest {
             assertEquals(
                 except.toString(),
                 expected,
-                sharedSources(steps, fields, connections, except),
+                sharedSources(
+                    case["steps"]?.let { wireJson.decodeFromJsonElement<List<SetupStep>>(it) }
+                        ?: steps,
+                    case["fields"]?.let { wireJson.decodeFromJsonElement<List<PluginSetting>>(it) }
+                        ?: fields,
+                    connections,
+                    except,
+                ),
             )
         }
         assertEquals(

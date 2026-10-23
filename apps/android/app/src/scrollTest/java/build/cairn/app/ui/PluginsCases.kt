@@ -426,6 +426,141 @@ abstract class PluginsCases {
     }
 
     @Test
+    fun ordinaryFieldsClearStaleErrorsAndPresetsRefreshDependentChoices() {
+        val entry =
+            notes.copy(
+                manifest =
+                    notes.manifest!!.copy(
+                        capabilities = emptyList(),
+                        instanceForm = true,
+                        settings =
+                            listOf(
+                                PluginSetting(key = "team", title = "Team", required = true),
+                                PluginSetting(
+                                    key = "more",
+                                    title = "More destinations",
+                                    type = "boolean",
+                                    refresh = true,
+                                ),
+                                PluginSetting(
+                                    key = "extra",
+                                    title = "Extra destinations",
+                                    type = "boolean",
+                                    refresh = true,
+                                ),
+                                PluginSetting(
+                                    key = "destination",
+                                    title = "Destination",
+                                    type = "select",
+                                    dynamic = true,
+                                ),
+                            ),
+                        setup =
+                            PluginSetup(
+                                steps =
+                                    listOf(
+                                        SetupStep(
+                                            id = "settings",
+                                            title = "Settings",
+                                            settings =
+                                                listOf("team", "more", "extra", "destination"),
+                                            presets =
+                                                listOf(
+                                                    SetupPreset("basic", "Basic"),
+                                                    SetupPreset(
+                                                        "more",
+                                                        "More places",
+                                                        values =
+                                                            mapOf("more" to true, "extra" to true),
+                                                    ),
+                                                ),
+                                        )
+                                    )
+                            ),
+                    )
+            )
+        MockWebServer().use { server ->
+            val forms = CopyOnWriteArrayList<JsonObject>()
+            val saved = CopyOnWriteArrayList<String>()
+            server.dispatcher =
+                dispatcher(packages = listOf(entry), connections = emptyList()) { path, body ->
+                    when {
+                        path.endsWith("/plugins/notes/form") -> {
+                            val request = wireJson.parseToJsonElement(body).jsonObject
+                            forms += request
+                            val values = request.getValue("settings").jsonObject
+                            wireJson.encodeToString(
+                                PluginForm(
+                                    errors =
+                                        if (values["team"]?.jsonPrimitive?.content.isNullOrEmpty())
+                                            mapOf("team" to "Enter a team")
+                                        else emptyMap(),
+                                    options =
+                                        mapOf(
+                                            "destination" to
+                                                if (
+                                                    values["more"] == JsonPrimitive(true) &&
+                                                        values["extra"] == JsonPrimitive(true)
+                                                )
+                                                    listOf(PluginOption("room", "Room"))
+                                                else emptyList()
+                                        ),
+                                )
+                            )
+                        }
+                        path.endsWith("/plugins/notes/connections") -> {
+                            saved += body
+                            "{}"
+                        }
+                        else -> null
+                    }
+                }
+            server.start()
+            show(server) { vm, state -> PluginScreen(vm, state, "notes") {} }
+            compose.waitUntil(30000) {
+                compose
+                    .onAllNodesWithText("Ajouter une instance")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Ajouter une instance").performClick()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Enter a team").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Enter a team").assertExists()
+            compose.onNodeWithText("Team").performTextInput("core")
+            compose.onNodeWithText("Enregistrer").assertIsEnabled()
+            compose.onNodeWithText("Enter a team").assertDoesNotExist()
+            compose.onNodeWithText("More places").performScrollTo().performClick()
+            compose.waitUntil(10000) { forms.count { it["changed"] != null } == 2 }
+            assertEquals(
+                listOf("more", "extra"),
+                forms.mapNotNull { it["changed"]?.jsonPrimitive?.content },
+            )
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Room").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Room").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Enregistrer") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.waitUntil(10000) { saved.isNotEmpty() }
+            assertEquals(
+                JsonPrimitive("room"),
+                wireJson
+                    .parseToJsonElement(saved.single())
+                    .jsonObject["settings"]
+                    ?.jsonObject
+                    ?.get("destination"),
+            )
+        }
+    }
+
+    @Test
     fun requiredWhitespaceChoiceCanBeSavedWithNonblankUnicodeText() {
         val entry =
             notes.copy(

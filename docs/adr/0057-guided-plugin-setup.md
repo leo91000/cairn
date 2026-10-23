@@ -36,7 +36,7 @@ client and its secret. A new instance names a saved instance of the same package
 with `sharedFrom` on its form, sign-in and save; the installation copies those
 values, secrets included, without sending secrets to the client. Each instance
 keeps its own copy, as before: the OAuth credential record already stores the
-client used for refresh, so no persisted format changes. An installation
+client used for refresh, so connection and vault formats stay unchanged. An installation
 management agent may reuse only an instance it is granted, like any saved
 credential.
 
@@ -56,6 +56,10 @@ change on agent pages. Public MCP and the installation tool still refuse
   reconnected on its own, as before.
 - Built-in manifests gained `[setup]`; packages without it get the derived
   assistant. A manifest declaring `[setup]` needs an installation that knows it.
+- Installed package manifests persist `[setup]`, which previous binaries reject.
+  Epoch 12 and SQLite version 11 fence those older readers before plugin loading.
+  Existing packages, approvals, settings and secrets are retained without rewriting;
+  see the [forward migration and recovery plan](../AUTOMATIC-MIGRATIONS.md#current-transition-epochs-311-to-12).
 - A Cairn-managed Google app, which would remove the Google Cloud step, is not
   provided: Gmail scopes are restricted and would require Google verification and
   an annual security assessment.
