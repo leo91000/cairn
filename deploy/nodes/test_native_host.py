@@ -25,6 +25,11 @@ def release(**changes):
 
 
 class NativeHostTests(unittest.TestCase):
+    def test_rootless_mapping_fails_before_enrollment_on_implicit_nnp_systemd(self):
+        with patch.object(host.subprocess, 'run', return_value=Mock(stdout='systemd 252')), \
+                self.assertRaisesRegex(ValueError, 'systemd 255'):
+            host.require_docker_host()
+
     def test_codex_companion_is_extracted_and_rechecked_before_reuse(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -80,7 +85,7 @@ class NativeHostTests(unittest.TestCase):
                 if controllers is not None:
                     (root / 'cgroup.controllers').write_text(controllers)
                 with patch.object(host, 'ROOT', root / 'state'), patch.object(host, 'CGROUP_ROOT', root), \
-                        patch.object(host.subprocess, 'run', return_value=Mock(stdout='systemd 252')), \
+                        patch.object(host.subprocess, 'run', return_value=Mock(stdout='systemd 255')), \
                         patch.object(host.getpass, 'getpass') as enrollment, patch.object(host, 'prepare') as prepare:
                     with self.assertRaisesRegex(ValueError, 'cgroup v2'):
                         host.install('https://manager.example.test')

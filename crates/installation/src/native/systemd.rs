@@ -66,6 +66,17 @@ pub async fn identity() -> Result<Identity> {
         ));
     }
     require_controllers(Path::new("/sys/fs/cgroup")).await?;
+    let version = output("/usr/bin/systemctl", &["--version"]).await?;
+    let supported = String::from_utf8_lossy(&version.stdout)
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u32>().ok())
+        .is_some_and(|version| version >= 255);
+    if !version.status.success() || !supported {
+        return Err(Error::unavailable(
+            "Native rootless enclaves require systemd 255 or newer; older versions force NoNewPrivileges on the identity-mapping bootstrap.",
+        ));
+    }
     let user = std::env::var("CAIRN_NATIVE_USER").unwrap_or_else(|_| "cairn-workload".into());
     if !user
         .bytes()

@@ -40,7 +40,10 @@
       "native::identity::tests::ranges_never_overlap_host_users_or_other_subordinates",
       "native::identity::tests::remapping_preserves_volume_users_and_is_idempotent_for_disjoint_ranges",
       "native::docker::tests::docker_api_cannot_acquire_namespace_mount_device_or_restart_privileges",
-      "native::docker::tests::docker_driver_options_and_unrecognized_management_apis_fail_closed"
+      "native::docker::tests::docker_driver_options_and_unrecognized_management_apis_fail_closed",
+      "native::identity::reconcile::tests::capability_and_acl_ids_follow_the_namespace_mapping",
+      "native::identity::reconcile::tests::pending_metadata_replay_restores_mode_even_after_ownership_changed",
+      "native::docker::mounts::tests::replaced_source_names_cannot_redirect_a_pinned_descriptor"
     ]
   }
 }

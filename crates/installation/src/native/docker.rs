@@ -9,7 +9,7 @@ use axum::{Json, Router, extract::State, routing::post};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use std::{
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Component, Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -20,6 +20,9 @@ use tokio::{
     sync::Mutex,
 };
 use tokio_util::sync::CancellationToken;
+
+mod mounts;
+mod proxy;
 
 const RUNTIME: &str = "/run/cairn-docker";
 const SOCKET: &str = "/run/cairn-docker/docker.sock";
@@ -43,7 +46,26 @@ fn present(value: &Value, name: &str) -> bool {
 }
 
 impl Policy {
+    fn roots(&self) -> Vec<PathBuf> {
+        vec![
+            PathBuf::from(text(&self.plan, "projectRoot")),
+            "/home/node".into(),
+            "/tmp".into(),
+            PathBuf::from(text(&self.plan, "guestDataRoot"))
+                .join("runs")
+                .join(text(&self.plan, "runId"))
+                .join("output"),
+        ]
+    }
+
     fn bind(&self, source: &str, read_only: bool) -> Result<()> {
+        if Path::new(source).starts_with(Path::new(RUNTIME).join("mounts")) {
+            return mounts::validate(self, Path::new(source), read_only);
+        }
+        self.bind_original(source, read_only)
+    }
+
+    fn bind_original(&self, source: &str, read_only: bool) -> Result<()> {
         let path = Path::new(source);
         if !path.is_absolute()
             || path
@@ -55,19 +77,7 @@ impl Policy {
             ));
         }
         let workspace = Path::new(text(&self.plan, "projectRoot"));
-        let output = PathBuf::from(text(&self.plan, "guestDataRoot"))
-            .join("runs")
-            .join(text(&self.plan, "runId"))
-            .join("output");
-        if ![
-            workspace,
-            Path::new("/home/node"),
-            Path::new("/tmp"),
-            output.as_path(),
-        ]
-        .iter()
-        .any(|root| path.starts_with(root))
-        {
+        if !self.roots().iter().any(|root| path.starts_with(root)) {
             return Err(Error::forbidden(
                 "Docker bind source is outside this conversation.",
             ));
@@ -447,7 +457,19 @@ pub async fn enclave(stop: CancellationToken) -> Result<i32> {
     ] {
         let path = Path::new("/etc").join(name);
         tokio::fs::remove_file(&path).await?;
-        tokio::fs::write(path, contents).await?;
+        tokio::fs::write(&path, contents).await?;
+        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).await?;
+    }
+    // The tmpfs and network driver's files must be readable but immutable to
+    // UID1000. Never chmod the original host binds reached through symlinks.
+    tokio::fs::set_permissions("/etc", std::fs::Permissions::from_mode(0o755)).await?;
+    let mut entries = tokio::fs::read_dir("/etc").await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let metadata = tokio::fs::symlink_metadata(entry.path()).await?;
+        if metadata.is_file() && metadata.uid() == 0 {
+            tokio::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(0o644))
+                .await?;
+        }
     }
     let runtime = Path::new(RUNTIME);
     tokio::fs::create_dir_all(runtime.join("plugins")).await?;
@@ -470,7 +492,7 @@ pub async fn enclave(stop: CancellationToken) -> Result<i32> {
             post(|| async { Json(json!({ "Allow": true })) }),
         )
         .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024))
-        .with_state(policy);
+        .with_state(policy.clone());
     let plugin_stop = stop.clone();
     tokio::spawn(async move {
         axum::serve(plugin, router)
@@ -489,6 +511,7 @@ pub async fn enclave(stop: CancellationToken) -> Result<i32> {
     let daemon = Arc::new(Mutex::new(None::<tokio::process::Child>));
     let daemon_task = daemon.clone();
     let start_stop = stop.clone();
+    let launch_policy = policy.clone();
     tokio::spawn(async move {
         loop {
             let accepted = tokio::select! {
@@ -522,14 +545,18 @@ pub async fn enclave(stop: CancellationToken) -> Result<i32> {
                 None => false,
             };
             if !ready {
+                if let Err(error) = mounts::restore(&launch_policy).await {
+                    let _ = client.write_all(error.message.as_bytes()).await;
+                    continue;
+                }
                 // The daemon's home is private namespace-root state, not the
                 // engine's configuration, and plugins cannot be user supplied.
                 let mut command = Command::new("/opt/cairn-docker/bin/dockerd");
                 command
                     .args([
                         "--rootless",
-                        "--host=unix:///run/cairn-docker/docker.sock",
-                        "--group=1000",
+                        "--host=unix:///run/cairn-docker/private/docker.sock",
+                        "--group=0",
                         "--data-root=/var/lib/cairn-docker",
                         "--exec-root=/run/cairn-docker/exec",
                         "--pidfile=/run/cairn-docker/dockerd.pid",
@@ -543,6 +570,14 @@ pub async fn enclave(stop: CancellationToken) -> Result<i32> {
                     .stdin(std::process::Stdio::null())
                     .kill_on_drop(true);
                 *daemon = command.spawn().ok();
+                if daemon.is_some() {
+                    let _ = tokio::fs::write(Path::new(RUNTIME).join("daemon.started"), b"1").await;
+                    let _ = tokio::fs::set_permissions(
+                        Path::new(RUNTIME).join("daemon.started"),
+                        std::fs::Permissions::from_mode(0o444),
+                    )
+                    .await;
+                }
             }
             let _ = client
                 .write_all(if daemon.is_some() {
@@ -566,6 +601,8 @@ pub async fn enclave(stop: CancellationToken) -> Result<i32> {
         b"{\"features\":{\"containerd-snapshotter\":false}}",
     )
     .await?;
+    crate::skills::private_dir(&runtime.join("private")).await?;
+    proxy::serve(policy, stop.clone()).await?;
     let mut engine = Command::new("/run/cairn-entrypoint/cairn");
     engine
         .arg("runner-entry")

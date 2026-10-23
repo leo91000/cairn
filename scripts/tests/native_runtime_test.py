@@ -9,6 +9,7 @@ import boto3
 import http.client
 import http.server
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -81,7 +82,7 @@ def main():
     user = 'cairn-smoke-' + identifier[:8]
     supervisor = 'cairn-native-smoke-' + identifier + '.service'
     token = 'synthetic-controller-credential'
-    attempts, runs = [], []
+    attempts, runs, reserved_users = [], [], []
     metrics = dict(host=dict(kernel=platform.release(), machine=platform.machine(), cpuCount=os.cpu_count(),
                             cpu=Path('/proc/cpuinfo').read_text().split('model name')[1].splitlines()[0],
                             memory=Path('/proc/meminfo').read_text().splitlines()[0]),
@@ -108,6 +109,10 @@ def main():
             directory.mkdir(parents=True, mode=0o700)
         tools.chmod(0o755)
         (tools / 'bin').chmod(0o755)
+        probe = tools / 'bin/native-docker-probe'
+        probe_source = Path(__file__).with_name('native_docker_probe.c')
+        command('cc', '-static', '-O2', '-Wall', '-Wextra', '-Werror', str(probe_source), '-o', str(probe))
+        metrics['dockerProbe'] = dict(compiler=command('cc', '--version').stdout.splitlines()[0], flags='-static -O2 -Wall -Wextra -Werror', sourceSha256=hashlib.sha256(probe_source.read_bytes()).hexdigest())
         (data / 'runner-secret').write_text(token)
         (tools / 'manifest.json').write_text('{}')
         (tools.parent / 'release.json').write_text(json.dumps({'runtimeId': 'synthetic', 'os': 'linux', 'arch': 'x86_64'}))
@@ -118,6 +123,7 @@ def main():
         reference.mkdir()
         (reference / 'asset').write_bytes(asset)
         metrics['reference'] = json.loads(command(sys.executable, '-c', MEASURE, cwd=reference).stdout)
+        metrics['dockerVolumeHostReference'] = json.loads(command(str(probe), 'io', str(reference)).stdout)
         metrics['filesystem'] = command('stat', '-f', '-c', '%T', str(root)).stdout.strip()
 
         def api(path, body=None, method='POST', raw=False):
@@ -312,7 +318,7 @@ def main():
                 # A preceding short execution can retain its readiness file.
                 return (managed(run) / 'ready').read_text() == attempt
 
-            eventually(execution_ready)
+            eventually(execution_ready, timeout=600 if docker_script else 60)
             metrics.setdefault('conversationStartupMs', []).append(dict(ms=(time.perf_counter() - startup) * 1000,
                 docker=bool(docker_script), resume=run in started_runs))
             if (state / (attempt + '.exit')).exists() and int((state / (attempt + '.exit')).read_text()) != 0:
@@ -551,13 +557,30 @@ def main():
                 api('/runs/' + resumed_docker, method='DELETE')
                 fenced(docker_run, resumed_docker)
                 manager('restore', run=docker_run, backupId=point['backupId'])
+                # Emulate a destination with unavailable source IDs on this
+                # disposable host. No controller/workload is using this account.
+                command('userdel', owner_a['user'])
+                blocker = 'cairn-test-' + identifier[:8]
+                command('useradd', '--system', '--user-group', '--no-create-home', '--uid', str(owner_a['root_uid']), blocker)
+                reserved_users.append(blocker)
+                command('usermod', '--add-subuids', str(owner_a['subuid']) + '-' + str(owner_a['subuid'] + 65535), '--add-subgids', str(owner_a['subgid']) + '-' + str(owner_a['subgid'] + 65535), blocker)
                 restored_docker = start(docker_run, lease=300000, docker_script=docker_script('resume'))
                 metrics['dockerRestored'] = docker_result(docker_run)
+                destination = json.loads((state / 'native' / docker_run / 'data/.cairn-identity.json').read_text())
+                assert destination['root_uid'] != owner_a['root_uid']
+                assert destination['subuid'] != owner_a['subuid']
+                metrics['dockerIdentityMove'] = dict(source=owner_a, destination=destination, conditions='Different host IDs emulated on the same disposable host; same kernel/tools, loopback S3, not a physical two-node/WAN measurement.')
                 command('systemctl', 'kill', '--signal=SIGKILL', '--kill-who=main', supervisor)
                 eventually(lambda: command('systemctl', 'show', supervisor, '--property=LoadState', '--value').stdout.strip() == 'not-found')
                 start_controller()
                 fenced(docker_run, restored_docker)
                 api('/node-budget', dict(limits=dict(diskMiB=8192, cpu=2, memoryMiB=2048), slots=2))
+                guardian_docker = start(docker_run, lease=300000, docker_script=docker_script('resume'))
+                command('systemctl', 'kill', '--signal=SIGKILL', '--kill-who=main', 'cairn-native-guardian-' + guardian_docker + '.service')
+                fenced(docker_run, guardian_docker)
+                lease_docker = start(docker_run, lease=300000, docker_script=docker_script('resume'))
+                api('/runs/' + lease_docker + '/lease', {'remainingMs': 1000})
+                fenced(docker_run, lease_docker)
                 readonly_docker = start(docker_run, long=False, lease=300000, sandbox='read-only', docker_script=docker_script('readonly'))
                 fenced(docker_run, readonly_docker)
                 manager('publish', run=docker_run)
@@ -585,6 +608,10 @@ def main():
             bridge.shutdown()
             for unit in [supervisor] + ['cairn-native-' + attempt + '.service' for attempt in attempts] + ['cairn-native-guardian-' + attempt + '.service' for attempt in attempts]:
                 subprocess.run(['systemctl', 'stop', unit], capture_output=True, timeout=30)
+            for current in runs:
+                subprocess.run(['userdel', 'cairn-c-' + current.replace('-', '')[:24]], capture_output=True, timeout=30)
+            for reserved in reserved_users:
+                subprocess.run(['userdel', reserved], check=True, capture_output=True)
             subprocess.run(['userdel', user], check=True, capture_output=True)
 
 

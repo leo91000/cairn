@@ -57,7 +57,7 @@ jobs:
     needs: resolve
     if: needs.resolve.outputs.reuse != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_INCREMENTAL: '0'
@@ -233,7 +233,7 @@ jobs:
     if: needs.resolve.outputs.reuse != 'true'
     runs-on: ubuntu-latest
     # Allow slow kernel-module installation and the complete native qualification.
-    timeout-minutes: 45
+    timeout-minutes: 90
     permissions:
       contents: read
       actions: read
@@ -259,26 +259,24 @@ jobs:
           test -c /dev/ublk-control
           python3 -m venv .native-s3-test
           .native-s3-test/bin/pip install 'moto[server]==5.2.3' awscli
-      - name: Qualify the successful main reference on the same disposable host
+      - run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Build and qualify the exact base reference on the same disposable host
         env:
-          GH_TOKEN: ${{ github.token }}
+          REFERENCE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CARGO_PROFILE_DEV_DEBUG: '0'
+          CARGO_INCREMENTAL: '0'
         run: |
-          python3 - <<'PY'
-          import json, subprocess
+          sudo apt-get install -y --no-install-recommends libclang-dev
+          git fetch --no-tags origin "$REFERENCE_SHA"
+          git worktree add --detach /tmp/cairn-native-reference "$REFERENCE_SHA"
+          CARGO_TARGET_DIR="$PWD/reference-target" cargo +1.97.1 build --locked --manifest-path /tmp/cairn-native-reference/Cargo.toml --bin cairn --example native_storage_qualifier --features ublk
+          mkdir -p native-storage-evidence/reference
+          python3 - <<'PYREF'
+          import json, os
           from pathlib import Path
-          runs = json.loads(subprocess.check_output(['gh', 'run', 'list', '--workflow', 'ci.yaml', '--branch', 'main', '--status', 'success', '--limit', '20', '--json', 'databaseId,headSha']))
-          for run in runs:
-              artifacts = json.loads(subprocess.check_output(['gh', 'api', 'repos/${{ github.repository }}/actions/runs/' + str(run['databaseId']) + '/artifacts']))
-              if any(artifact['name'] == 'browser-backend' and not artifact['expired'] for artifact in artifacts['artifacts']):
-                  subprocess.run(['gh', 'run', 'download', str(run['databaseId']), '--name', 'browser-backend', '--dir', 'reference-native'], check=True)
-                  Path('native-storage-evidence/reference').mkdir(parents=True)
-                  Path('native-storage-evidence/reference/revision.json').write_text(json.dumps(run, indent=2))
-                  break
-          else:
-              raise RuntimeError('No successful main reference artifact is available; build a reference before claiming comparative measurements.')
-          PY
-          chmod +x reference-native/cairn reference-native/examples/native_storage_qualifier
-          sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/reference" .native-s3-test/bin/python scripts/tests/node_s3_test.py --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier
+          Path('native-storage-evidence/reference/revision.json').write_text(json.dumps(dict(headSha=os.environ['REFERENCE_SHA'], profile='development, debug=0, incremental=0', source='exact base, built on disposable runner'), indent=2))
+          PYREF
+          sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/reference" .native-s3-test/bin/python scripts/tests/node_s3_test.py --native-runtime reference-target/debug/cairn --qualifier reference-target/debug/examples/native_storage_qualifier
       - name: Qualify real ublk, S3, eviction, systemd ownership and crash recovery
         run: |
           chmod +x target/debug/cairn target/debug/examples/native_storage_qualifier

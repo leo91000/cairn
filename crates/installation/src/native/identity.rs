@@ -4,7 +4,11 @@
 use super::atomic_write;
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
-use std::{os::unix::fs::MetadataExt, path::Path};
+use std::path::Path;
+
+mod reconcile;
+
+pub(super) use reconcile::reconcile;
 use tokio::process::Command;
 
 const COUNT: u32 = 65536;
@@ -226,56 +230,6 @@ fn translate(id: u32, old_root: u32, old_start: u32, root: u32, start: u32) -> u
     } else {
         id
     }
-}
-
-/// The mapping travels inside the encrypted disk, rather than node-local
-/// metadata. Preserve container users and volume modes on cross-node recovery.
-pub(super) async fn reconcile(data: &Path, identity: &Identity) -> Result<()> {
-    let marker = data.join(".cairn-identity.json");
-    let previous = match tokio::fs::read(&marker).await {
-        Ok(bytes) => Some(serde_json::from_slice::<Identity>(&bytes)?),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.into()),
-    };
-    if previous.as_ref() == Some(identity) {
-        return Ok(());
-    }
-    if let Some(old) = previous {
-        let mut pending = vec![data.to_owned()];
-        while let Some(path) = pending.pop() {
-            let metadata = tokio::fs::symlink_metadata(&path).await?;
-            let uid = translate(
-                metadata.uid(),
-                old.root_uid,
-                old.subuid,
-                identity.root_uid,
-                identity.subuid,
-            );
-            let gid = translate(
-                metadata.gid(),
-                old.root_gid,
-                old.subgid,
-                identity.root_gid,
-                identity.subgid,
-            );
-            if uid != metadata.uid() || gid != metadata.gid() {
-                std::os::unix::fs::lchown(&path, Some(uid), Some(gid))?;
-                if !metadata.file_type().is_symlink() {
-                    tokio::fs::set_permissions(&path, metadata.permissions()).await?;
-                }
-            }
-            if metadata.is_dir() {
-                let mut entries = tokio::fs::read_dir(&path).await?;
-                while let Some(entry) = entries.next_entry().await? {
-                    pending.push(entry.path());
-                }
-            }
-        }
-    } else {
-        super::workspace::own_tree(data, identity.uid(), identity.gid()).await?;
-    }
-    super::block::sync(data).await?;
-    atomic_write(&marker, &serde_json::to_vec(identity)?).await
 }
 
 #[cfg(test)]

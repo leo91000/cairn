@@ -29,6 +29,12 @@ plugin refuses privileged containers/exec, added capabilities, host PID/IPC/UTS
 namespaces, devices, alternate runtimes, volume driver options and mounts outside
 the conversation's home, workspace, output and temporary directories. Recursive
 bind restrictions are retained; workspace binds require `:ro` in read-only mode.
+The public Docker socket is a streaming gateway; the daemon socket is root-private.
+Before forwarding a container create, the gateway resolves bind sources with
+`openat2` without symlinks, clones the pinned mount descriptors, and gives Docker
+immutable private mirror paths. Replacing a source name cannot redirect Docker
+to private runtime or store files. Mirrors are rebuilt from durable source records
+before daemon startup and rechecked against the current turn's rights.
 The read-only system/credential bindings remain read-only through Docker too.
 YOLO does not grant host administrator rights. The engine cannot read or replace
 raw daemon metadata, its authorization plugin or its configuration.
@@ -62,7 +68,9 @@ Same-node resume retains Docker state without a directory-wide ownership pass.
 Cold restore, acknowledged-cache eviction and movement to another native node use
 the same encrypted block publication and demand reads as the other disk bytes.
 The UID/GID mapping travels inside the disk; a destination reconciles owners while
-preserving container users and volume modes. A destination needs compatible
+preserving container users, volume modes, POSIX ACL identities and namespaced
+file capabilities. Durable transition and per-batch metadata journals allow an
+interrupted ownership change to finish before a subsequent destination remapping. A destination needs compatible
 managed Docker tools and Linux native prerequisites. It does not restore running
 containers, network connections or process memory. Disk usage counts against the
 existing conversation filesystem and shared node disk budget; image pulls and
@@ -91,7 +99,7 @@ does not release or deploy any runtime.
 The native installer provisions verified, versioned binaries under its managed
 directory: Docker 29.9.0, RootlessKit 3.3.0, slirp4netns 1.3.6, Buildx 0.38.1 and
 Compose 5.6.1. Exact archive/executable SHA-256 pins are in `native-host.py`.
-The host needs Linux 5.11+, systemd 252+, cgroup v2, distribution `uidmap`,
+The host needs Linux 5.12+, systemd 255+, cgroup v2, distribution `uidmap`,
 `iproute2`, `iptables`, `/dev/net/tun`, root-managed `/etc/subuid` and `/etc/subgid`,
 and the existing ublk/ext4 prerequisites. Mapping helpers must be root-owned,
 setuid and not writable by workloads. Unsupported prerequisites fail explicitly.
@@ -122,6 +130,10 @@ command runs against the owner's desktop node or its Docker daemon.
 startup samples, cold daemon startup before pulls, warm daemon commands, image
 pull time/digests separately, build/cache resume and restore, storage read/write
 wall and process CPU times, encoded S3 bytes and cgroup limits/accounting.
+A static C probe records identical direct-host and named-volume 8 MiB read / 128
+fsynced 4 KiB write workloads separately from the seeded native filesystem probe.
+The destination-ID test emulates unavailable source IDs on the same disposable
+host; it is not a physical two-node or network-transfer benchmark.
 Cold file reads use advisory `POSIX_FADV_DONTNEED`; eviction also clears userspace
 cache. This is local synthetic S3 evidence, not production WAN latency. Results
 must be attached from successful CI before the PR is considered qualified; no

@@ -80,6 +80,9 @@ exec /opt/cairn-docker/bin/docker "$@"
 
 
 def require_docker_host():
+    version = subprocess.run(['systemctl', '--version'], check=True, capture_output=True, text=True, timeout=10).stdout.split()[1]
+    if int(version) < 255:
+        raise ValueError('Native rootless enclaves require systemd 255 or newer; older versions force NoNewPrivileges on mapping helpers.')
     for name in ('newuidmap', 'newgidmap'):
         path = shutil.which(name)
         if not path:
@@ -96,8 +99,8 @@ def require_docker_host():
             raise ValueError('Native Docker requires root-managed subordinate UID/GID databases.')
     if not stat.S_ISCHR(Path('/dev/net/tun').stat().st_mode):
         raise ValueError('Native Docker requires the existing /dev/net/tun device.')
-    if tuple(int(part) for part in os.uname().release.split('.')[:2]) < (5, 11):
-        raise ValueError('Native Docker overlay2 requires Linux 5.11 or newer.')
+    if tuple(int(part) for part in os.uname().release.split('.')[:2]) < (5, 12):
+        raise ValueError('Native Docker bind isolation requires Linux 5.12 or newer.')
 
 
 def prepare_docker_tools():
@@ -447,8 +450,8 @@ def install(manager):
     if (ROOT / 'data/node/identity.json').exists():
         raise ValueError('Native node is already enrolled.')
     version = subprocess.run(['systemctl', '--version'], check=True, capture_output=True, text=True).stdout.split()[1]
-    if int(version) < 252:
-        raise ValueError('Native execution requires systemd 252 or newer.')
+    if int(version) < 255:
+        raise ValueError('Native rootless execution requires systemd 255 or newer.')
     try:
         controllers = set((CGROUP_ROOT / 'cgroup.controllers').read_text().split())
     except OSError as error:

@@ -175,8 +175,10 @@ Existing native files are assigned to namespace UID 1000 once, under exclusive
 physical ownership. Subsequent same-node resumes compare one mapping record;
 cross-node recovery translates only the previous account/range while retaining
 container users. The mapping is published with the data. Interrupted translation
-retains the old mapping for an idempotent retry; neither source work nor the local
-journal is discarded. Retain the identity registry with the environment, including
+records both mappings and journals original modes/ACLs/file capabilities before
+each ownership batch. Recovery replays pending metadata even when chown already
+completed, finishes that mapping, then applies a new destination mapping if needed;
+neither source work nor the local journal is discarded. Retain the identity registry with the environment, including
 after cache eviction. Do not recycle accounts into another conversation.
 
 Before activating this runtime on native hosts, refresh the reviewed supervisor,

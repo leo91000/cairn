@@ -1,11 +1,16 @@
 """Synthetic Docker workload executed inside the disposable native enclave."""
 import json
 import os
+import pwd
+import shutil
+import socket
 from pathlib import Path
 import subprocess
 import sys
 import time
+import threading
 import urllib.request
+import urllib.error
 
 ALPINE = 'alpine:3.22.2'
 POSTGRES = 'postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24'
@@ -20,6 +25,51 @@ def command(*args, success=True):
     if not success:
         assert result.returncode != 0, 'Restricted Docker operation succeeded: ' + ' '.join(args)
     return result.stdout.strip()
+
+
+def wait_http(expected):
+    deadline = time.monotonic() + 20
+    while True:
+        try:
+            assert urllib.request.urlopen('http://127.0.0.1:' + str(PORT), timeout=2).read().strip() == expected
+            return
+        except (OSError, urllib.error.URLError):
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.1)
+
+
+def bind_race(image):
+    root = Path.cwd() / '.docker-race'
+    root.mkdir(exist_ok=True)
+    allowed = root / 'allowed'
+    allowed.mkdir(exist_ok=True)
+    (allowed / 'daemon.json').write_text('allowed')
+    source = root / 'source'
+    if source.is_symlink():
+        source.unlink()
+    if not source.exists():
+        allowed.rename(source)
+    stop = threading.Event()
+
+    def swap():
+        while not stop.is_set():
+            source.rename(allowed)
+            source.symlink_to('/run/cairn-docker', target_is_directory=True)
+            time.sleep(0.001)
+            source.unlink()
+            allowed.rename(source)
+            time.sleep(0.001)
+
+    thread = threading.Thread(target=swap)
+    thread.start()
+    try:
+        for _ in range(12):
+            result = subprocess.run(['docker', 'run', '--rm', '-v', str(source) + ':/probe:ro', image, 'cat', '/probe/daemon.json'], capture_output=True, text=True, timeout=30)
+            assert result.returncode != 0 or result.stdout.strip() == 'allowed', 'Bind race exposed private runtime metadata.'
+    finally:
+        stop.set()
+        thread.join()
 
 
 def main():
@@ -44,16 +94,28 @@ def main():
         pass
     else:
         raise AssertionError('Engine could read raw daemon metadata.')
-    assert not Path('/run/cairn-docker/docker.sock').exists(), 'Daemon started before its first Docker command.'
+    assert not Path('/run/cairn-docker/daemon.started').exists(), 'Daemon started before its first Docker command.'
+    assert pwd.getpwuid(1000).pw_name == 'node'
+    socket.getaddrinfo('registry-1.docker.io', 443)
+    try:
+        urllib.request.urlopen('https://registry-1.docker.io/v2/', timeout=20)
+    except urllib.error.HTTPError as error:
+        assert error.code == 401
     command('docker', '--version')
     command('docker', 'buildx', 'version')
     command('docker', 'compose', 'version')
-    assert not Path('/run/cairn-docker/docker.sock').exists(), 'Client-only command launched the daemon.'
+    assert not Path('/run/cairn-docker/daemon.started').exists(), 'Client-only command launched the daemon.'
     timed('firstDaemonMs', '/run/cairn-entrypoint/cairn', 'native-docker')
     info = json.loads(command('docker', 'info', '--format', '{{json .}}'))
     assert 'name=rootless' in info['SecurityOptions'], info['SecurityOptions']
     metrics['cgroupDriver'] = info['CgroupDriver']
     timed('warmDaemonMs', 'docker', 'info')
+    probe = Path.home() / '.native-docker-probe'
+    shutil.copyfile('/opt/cairn-native-tools/bin/native-docker-probe', probe)
+    probe.chmod(0o755)
+
+    def volume_probe(mode):
+        return command('docker', 'run', '--rm', '-v', str(probe) + ':/probe:ro', '-v', 'persistent:/v', ALPINE, '/probe', mode, '/v')
     forbidden_commands = [
         ('docker', 'run', '--privileged', ALPINE, 'true'),
         ('docker', 'run', '--cap-add=SYS_ADMIN', ALPINE, 'true'),
@@ -82,7 +144,7 @@ def main():
         command('docker', 'pull', ALPINE)
         command('docker', 'run', '-d', '--name', 'other-http', '-p', str(PORT) + ':80', ALPINE,
                 'sh', '-c', 'mkdir /www; echo other >/www/index.html; exec httpd -f -p 80 -h /www')
-        assert urllib.request.urlopen('http://127.0.0.1:' + str(PORT), timeout=5).read().strip() == b'other'
+        wait_http(b'other')
     else:
         context = Path('.docker-fixture')
         context.mkdir(exist_ok=True)
@@ -97,6 +159,12 @@ def main():
                     'echo durable >/v/marker; chown 999:999 /v/marker; chmod 600 /v/marker')
         else:
             assert cached == (Path.home() / '.docker-cache-token').read_text(), 'Build cache was lost after resume.'
+        if phase == 'fresh':
+            volume_probe('metadata-create')
+        assert volume_probe('metadata-check') == 'metadata-preserved'
+        metrics['volumeIo'] = json.loads(volume_probe('io'))
+        if phase == 'fresh':
+            bind_race(ALPINE)
         assert command('docker', 'run', '--rm', '-v', 'persistent:/v', ALPINE, 'cat', '/v/marker') == 'durable'
         assert command('docker', 'run', '--rm', '-v', 'persistent:/v', ALPINE, 'stat', '-c', '%u:%g:%a', '/v/marker') == '999:999:600'
         compose = dict(services=dict(
@@ -116,7 +184,7 @@ def main():
         else:
             raise AssertionError('Compose Postgres did not become ready.')
         assert command('docker', 'compose', '-p', 'native', '-f', str(compose_path), 'exec', '-T', 'redis', 'redis-cli', 'ping') == 'PONG'
-        assert urllib.request.urlopen('http://127.0.0.1:' + str(PORT), timeout=5).read().strip() == b'conversation'
+        wait_http(b'conversation')
         # Same agent-visible bind paths reach the daemon; no host path rewriting.
         assert command('docker', 'run', '--rm', '-v', str(Path.cwd()) + ':/workspace', ALPINE, 'cat', '/workspace/persisted') == 'changed'
     (Path.home() / '.docker-test-result.json').write_text(json.dumps(metrics))

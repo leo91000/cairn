@@ -8,7 +8,7 @@ never crash a driver. Review code before testing on a personal workstation.
 
 ## Requirements and enrollment
 
-Use Linux x86-64 with systemd 252+, cgroup v2, Python 3, curl, useradd/usermod,
+Use Linux x86-64 with systemd 255+, cgroup v2, Python 3, curl, useradd/usermod,
 e2fsprogs, io_uring and a working `ublk_drv` kernel driver. Host libraries must be
 compatible with the published coding engines. The installed GPU
 driver, render/video device permissions and application libraries must already

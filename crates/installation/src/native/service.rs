@@ -453,10 +453,14 @@ impl Controller {
             "sys",
             "run",
             "tmp",
+            "var",
             "var/tmp",
+            "home",
             "home/node",
         ] {
-            tokio::fs::create_dir_all(container.join(dir)).await?;
+            let path = container.join(dir);
+            tokio::fs::create_dir_all(&path).await?;
+            tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).await?;
         }
         let mut plan = plan.clone();
         plan["guestDataRoot"] = guest_data(&plan, &self.data)
