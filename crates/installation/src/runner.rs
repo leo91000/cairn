@@ -503,6 +503,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_vm_disk_cleanup_preserves_native_workspace_scope() {
+        let root = tempfile::tempdir().unwrap();
+        let broker = fixture_broker(root.path()).await;
+        let run = crate::config::id();
+        let vm_attempt = crate::config::id();
+        let native_attempt = crate::config::id();
+        let plans = broker.data.join("runner-plans");
+        private_dir(&plans).await.unwrap();
+
+        for (attempt, backend) in [(&vm_attempt, "firecracker"), (&native_attempt, "native")] {
+            let plan = json!({
+                "id": attempt,
+                "runId": run,
+                "backend": backend,
+                "nodeLeaseRequired": true,
+            });
+            std::fs::write(
+                plans.join(format!("{attempt}.json")),
+                serde_json::to_vec(&plan).unwrap(),
+            )
+            .unwrap();
+        }
+        let native_path = plans.join(format!("{native_attempt}.json"));
+        let native_bytes = std::fs::read(&native_path).unwrap();
+        std::fs::write(broker.state_file(&vm_attempt, "run"), &run).unwrap();
+        let vm_stopped = broker.state_file(&vm_attempt, "stopped");
+        let native_stopped = broker.state_file(&native_attempt, "stopped");
+        let app = router(broker);
+
+        assert_eq!(
+            request(&app, &run, "delete", &crate::config::id(), SECRET).await,
+            200
+        );
+        assert!(!plans.join(format!("{vm_attempt}.json")).exists());
+        assert!(vm_stopped.exists(), "Deleted VM attempts must stay fenced");
+        assert!(
+            native_path.exists(),
+            "Retiring an old VM disk must retain the native plan used by workspace MCP authorization"
+        );
+        assert_eq!(std::fs::read(native_path).unwrap(), native_bytes);
+        assert!(!native_stopped.exists());
+    }
+
+    #[tokio::test]
     async fn workspace_disk_deletion_uses_authenticated_http_and_preserves_the_lock() {
         let root = tempfile::TempDir::new().unwrap();
         let data = root.path().join("data");
