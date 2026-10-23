@@ -102,6 +102,16 @@ internal fun conversationError(chat: Chat?): String? {
         ?: "La réponse s’est arrêtée avant la fin. Reprenez la conversation pour continuer."
 }
 
+/** The conversation already shows a failed run's reason as its failure notice. */
+internal fun failureShown(chat: Chat?, events: List<RunEvent>): Boolean {
+    if (!chat?.error.isNullOrBlank()) return false
+    val run = chat?.run?.takeIf { it.status == "failed" } ?: return false
+    val error = run.error?.takeIf { it.isNotBlank() } ?: return false
+    return events.any {
+        it.runId == run.id && sameReason(failureReason(it).orEmpty(), error) && !stopEcho(it)
+    }
+}
+
 @Composable
 internal fun ChatWaitingNotice(
     notice: ChatWaitNotice,

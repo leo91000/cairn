@@ -722,19 +722,38 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> 
             _ => Turn::Waiting,
         });
     };
-    let end: Option<(i64, String)> = db.0.query_row(
-        "SELECT id, type FROM events WHERE run_id=?1 AND type IN ('turn.completed','turn.failed') AND id>?2 ORDER BY id LIMIT 1",
-        rusqlite::params![run_id, delivered], |row| Ok((row.get(0)?, row.get(1)?)),
-    ).optional()?;
-    if let Some((end, kind)) = end {
-        return Ok(Turn::Done {
-            delivered,
-            end,
-            run: run_id,
-            failed: kind == "turn.failed",
-        });
-    }
+    let mut statement = db.0.prepare(
+        "SELECT id, type FROM events WHERE run_id=?1 AND type IN ('turn.completed','turn.failed') AND id>?2 ORDER BY id",
+    )?;
+    let ends = statement
+        .query_map(rusqlite::params![run_id, delivered], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     let run = db.run(&run_id)?;
+
+    // A failed turn is final only once Cairn stops working on its message: an automatic
+    // retry, another account or a recovered controller continues it, and a later turn answers.
+    let current = run
+        .as_ref()
+        .is_some_and(|run| run["chatExecution"]["messageId"] == delivery["id"]);
+    let active = run
+        .as_ref()
+        .and_then(crate::run_status::RunStatus::of)
+        .is_some_and(crate::run_status::RunStatus::is_active);
+    for (index, (end, kind)) in ends.iter().enumerate() {
+        let failed = kind == "turn.failed";
+        let continued = failed && current && (index + 1 < ends.len() || active);
+        if !continued {
+            return Ok(Turn::Done {
+                delivered,
+                end: *end,
+                run: run_id,
+                failed,
+            });
+        }
+    }
+
     match run.as_ref().and_then(|run| run["status"].as_str()) {
         Some("failed" | "interrupted") => Ok(Turn::Stopped { failed: true }),
         Some("cancelled") => Ok(Turn::Stopped { failed: false }),

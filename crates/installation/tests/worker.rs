@@ -280,6 +280,36 @@ async fn transient_agent_failure_resumes_same_session_and_workspace_after_restar
 }
 
 #[tokio::test]
+async fn agent_failure_without_a_message_keeps_its_code_for_the_retry() {
+    let mut fixture = Fixture::new().await;
+    let prompt = "fixture:agent-failures:[{\"codexErrorInfo\":\"serverOverloaded\"}]";
+    let chat_id = fixture.start_chat(message(prompt)).await;
+    let run_id = fixture.chat_run(&chat_id).await;
+    let waiting = fixture
+        .until(&run_id, |run| run["retry"].is_object() || finished(run))
+        .await;
+    assert_eq!(waiting["status"], RunStatus::Queued, "{waiting}");
+    assert_eq!(waiting["retry"]["cause"]["kind"], "server");
+    let id = run_id.clone();
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.events(&id, 0, 1000))
+        .await
+        .unwrap();
+    let failures = events
+        .iter()
+        .filter(|event| event["type"] == "turn.failed")
+        .map(|event| event["payload"]["error"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        failures,
+        [json!({ "codexErrorInfo": "serverOverloaded", "message": "Conversation interrupted." })]
+    );
+    fixture.stop(false).await;
+}
+
+#[tokio::test]
 async fn agent_retries_stop_after_three_attempts_or_when_the_error_becomes_terminal() {
     for terminal in [false, true] {
         let mut fixture = Fixture::new().await;
@@ -2483,6 +2513,17 @@ async fn unlimited_runs_can_be_cancelled_and_finite_checkpoints_still_expire() {
     fixture
         .until(id, |r| r["status"] == RunStatus::Cancelled)
         .await;
+    let events = {
+        let id = id.to_owned();
+        s.store
+            .read(move |db| db.events(&id, 0, 1000))
+            .await
+            .unwrap()
+    };
+    assert!(
+        events.iter().all(|event| event["type"] != "turn.failed"),
+        "A stop Cairn requested does not fail the turn: {events:?}"
+    );
     eventually(
         Duration::from_secs(5),
         Duration::from_millis(30),

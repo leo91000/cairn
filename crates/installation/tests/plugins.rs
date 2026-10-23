@@ -1462,6 +1462,82 @@ async fn replies_export_only_the_correlated_completed_turn_and_revoke_immediatel
 }
 
 #[tokio::test]
+async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
+    let (_root, s, connection) = fixture().await;
+    let event = json!({
+        "name": "message",
+        "revision": connection.revision,
+        "authorId": "300",
+        "payload": { "id": "500", "author": { "id": "300", "name": "Sarah" } },
+    });
+    let receipt = work::submit(
+        &s,
+        &context(&connection, &event),
+        &json!({ "text": "hello" }),
+    )
+    .await
+    .unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+    let run_id = text(&chat, "runId");
+    let run = s.store.run(run_id).await.unwrap();
+    assert_eq!(run["chatExecution"]["messageId"], receipt["messageId"]);
+    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let reply = async || work::reply(&s, &connection, &delivery).await.unwrap();
+
+    s.store
+        .event(
+            run_id,
+            "chat.user",
+            "hello",
+            Some(json!({ "messageId": receipt["messageId"] })),
+        )
+        .await
+        .unwrap();
+    let capacity = "Selected model is at capacity. Please try a different model.";
+    let failure = json!({ "error": { "message": capacity, "codexErrorInfo": "serverOverloaded" } });
+    s.store
+        .event(run_id, "turn.failed", capacity, Some(failure))
+        .await
+        .unwrap();
+    assert!(reply().await.is_none(), "The attempt has not settled yet");
+
+    s.store
+        .patch_run(run_id, json!({ "status": "failed" }))
+        .await
+        .unwrap();
+    let failed = reply().await.unwrap();
+    assert_eq!(failed.status, "failed");
+
+    // Cairn retries the same message: the failure was not the final answer.
+    s.store
+        .patch_run(run_id, json!({ "status": "queued" }))
+        .await
+        .unwrap();
+    assert!(reply().await.is_none());
+    s.store
+        .event(run_id, "turn.started", "", None)
+        .await
+        .unwrap();
+    let answer = json!({ "item": { "type": "agent_message", "text": "hello back" } });
+    s.store
+        .event(run_id, "item.completed", "hello back", Some(answer))
+        .await
+        .unwrap();
+    s.store
+        .event(run_id, "turn.completed", "", None)
+        .await
+        .unwrap();
+    let completed = reply().await.unwrap();
+    assert_eq!(
+        (completed.text.as_str(), completed.status),
+        ("hello back", "completed")
+    );
+}
+
+#[tokio::test]
 async fn revoked_and_deleted_deliveries_do_not_stop_other_people() {
     let (_root, s, connection) = fixture().await;
     let (mock, server) = mock(&s).await;

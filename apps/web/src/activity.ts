@@ -167,6 +167,44 @@ export function activityPayload(event: RunEvent) {
   }
 }
 
+/** A failed attempt's reasons, its card and how many times Cairn retried its chain. */
+interface FailedAttempt {
+  messages: Set<string>
+  notice?: ActivityArtifact
+  retries?: number
+  /** Its turn or run failed, beyond a reported error. */
+  ended?: boolean
+  /** Cairn scheduled a retry that has not started yet. */
+  pending?: boolean
+}
+
+/** Whether a notice reports a connection the provider is restoring. */
+function connectionText(raw: string) {
+  return /websocket|reconnecting\.\.\.|reconnecting\s+\d+\//i.test(raw) && /503|reconnect|falling back|connection.*(?:closed|failed)/i.test(raw)
+}
+
+// Adapters report a stop that Cairn requested as a failed turn.
+const stopEchoes = new Set(['Conversation stopped.', 'Claude execution stopped.', 'OpenCode execution stopped.'])
+
+/** The reason a failure event gives, or undefined when the event does not report a failure. */
+export function failureReason(event: RunEvent) {
+  const data = activityPayload(event)
+  const failure = ['turn.failed', 'runner.failed'].includes(event.type) || (event.type === 'error' && data.willRetry !== true) || (event.type === 'status' && event.text === 'failed')
+  if (!failure)
+    return undefined
+  return text(record(data.error).message) || text(data.message) || (event.type === 'status' ? '' : event.text)
+}
+
+/** Whether a reason repeats one already given; a run's recorded error may be truncated. */
+export function sameReason(given: string, reason: string) {
+  return given === reason || (!!reason && given.startsWith(reason))
+}
+
+/** Whether an adapter reports a stop Cairn requested; the terminal status that follows says so. */
+export function stopEcho(event: RunEvent, reason = failureReason(event)) {
+  return event.type !== 'status' && reason !== undefined && stopEchoes.has(reason)
+}
+
 function readable(value: string) {
   return value.replaceAll(/[._]/g, ' ').replace(/^./, letter => letter.toUpperCase())
 }
@@ -211,9 +249,13 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
 
   const agentKey = (event: RunEvent, id: string) => `${event.runId}:${aliases.get(`${event.runId}:${id}`) ?? id}`
   let connectionNotices: ActivityArtifact[] = []
-  // A conversation shows one card per failed attempt. The adapter, the worker and the final
-  // status may each repeat the provider's error; only a new reason adds a card.
-  const failures = new Map<string, { messages: Set<string>, notice?: ActivityArtifact }>()
+  // A conversation shows one card per failure. The adapter, the worker and the final status
+  // may each repeat the provider's error; only a new reason adds a card. When Cairn retries,
+  // the next attempt's card with the same reason replaces the previous one.
+  const failures = new Map<string, FailedAttempt>()
+  const retried = new Map<string, FailedAttempt>()
+  // Diagnostics keep every lifecycle event, but a final status does not repeat a reason.
+  const reported = new Map<string, Set<string>>()
 
   function recovered() {
     for (const notice of connectionNotices) {
@@ -359,6 +401,10 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       continue
     }
 
+    // A retry chain ends with an attempt that does not fail again, or with a new message.
+    if (event.type === 'turn.completed' || event.type === 'chat.user')
+      retried.delete(event.runId)
+
     if (event.type === 'chat.user') {
       // A new request gets its own plan, even when the agent carries the previous list over.
       plan = undefined
@@ -428,24 +474,56 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       turn++
     }
 
-    if (event.type === 'turn.failed')
+    const reason = failureReason(event)
+    if (event.type === 'turn.failed') {
+      // The failure's card says why the turn ended; its reconnect attempts add nothing.
+      if (chat && reason && reason !== 'Conversation interrupted.') {
+        for (const notice of connectionNotices)
+          notice.attention = false
+      }
+
       connectionNotices = []
-    if (event.type === 'turn.started' || (event.type === 'status' && data.attempt === true))
+    }
+
+    // A run that ends, or is stopped while it waits, ends its retry chain: a resume starts afresh.
+    if (event.type === 'status' && ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(event.text)) {
+      retried.delete(event.runId)
+      const attempt = failures.get(event.runId)
+      if (attempt)
+        attempt.pending = false
+    }
+
+    if (event.type === 'turn.started' || (event.type === 'status' && data.attempt === true)) {
+      const previous = failures.get(event.runId)
+      if (previous?.pending)
+        retried.set(event.runId, previous)
       failures.delete(event.runId)
-    const failure = chat && (['turn.failed', 'runner.failed'].includes(event.type) || (event.type === 'error' && data.willRetry !== true) || (event.type === 'status' && event.text === 'failed'))
-    const failureMessage = failure ? text(record(data.error).message) || text(data.message) || (event.type === 'status' ? '' : event.text) : ''
+      reported.delete(event.runId)
+    }
+
+    // A connection error is a connection notice: recovery hides it and the turn's failure replaces it.
+    const connection = event.type === 'error' && connectionText(Object.keys(data).length ? pretty(data) : event.text)
+    const failureMessage = chat && !connection ? reason : undefined
+    const failure = failureMessage !== undefined
+    if (failure && stopEcho(event, failureMessage))
+      continue
     const shown = failures.get(event.runId)
-    if (failure && shown && (event.type === 'status' || !failureMessage || failureMessage === 'Conversation interrupted.' || shown.messages.has(failureMessage))) {
+    // The generic adapter error only repeats a turn failure; after an error report, it says the turn ended.
+    const repeated = !!shown && (shown.messages.has(failureMessage ?? '') || (event.type === 'status' && [...shown.messages].some(message => sameReason(message, failureMessage ?? ''))))
+    if (failure && shown && (!failureMessage || repeated || (failureMessage === 'Conversation interrupted.' && shown.ended))) {
       shown.messages.add(failureMessage)
+      shown.ended ||= event.type !== 'error'
       continue
     }
 
     // Cairn retries a temporary failure itself: its card says so instead of reporting a dead end.
     if (chat && event.type === 'retry.scheduled' && shown?.notice) {
       const retry = record(data.retry)
+      shown.retries = typeof retry.attempt === 'number' ? retry.attempt : (shown.retries ?? 0) + 1
+      shown.pending = true
       shown.notice.status = 'info'
-      shown.notice.title = typeof retry.attempt === 'number' && typeof retry.limit === 'number'
-        ? `Temporary error — automatic retry ${retry.attempt}/${retry.limit}`
+      shown.notice.title = typeof retry.limit === 'number'
+        ? `Temporary error — automatic retry ${shown.retries}/${retry.limit}`
         : 'Temporary error — retrying automatically'
       continue
     }
@@ -714,17 +792,36 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       }
     }
 
-    if (artifact.kind === 'notice' && ['error', 'diagnostic', 'item.completed'].includes(event.type) && /websocket|reconnecting\.\.\.|reconnecting\s+\d+\//i.test(artifact.raw) && /503|reconnect|falling back|connection.*(?:closed|failed)/i.test(artifact.raw)) {
+    if (artifact.kind === 'notice' && ['error', 'diagnostic', 'item.completed'].includes(event.type) && connectionText(artifact.raw)) {
       artifact.title = 'Connection interrupted'
       artifact.attention = true
+      // The turn's reconnect attempts share one card, showing the latest.
+      for (const notice of connectionNotices)
+        notice.attention = false
       connectionNotices.push(artifact)
+    }
+
+    if (reason) {
+      const reasons = reported.get(event.runId) ?? new Set<string>()
+      if (!chat && event.type === 'status' && reasons.has(reason))
+        artifact.blocks = []
+      reasons.add(reason)
+      reported.set(event.runId, reasons)
     }
 
     if (failure) {
       const attempt = failures.get(event.runId) ?? { messages: new Set<string>() }
       attempt.messages.add(failureMessage)
       attempt.notice = artifact
+      attempt.ended ||= event.type !== 'error'
       failures.set(event.runId, attempt)
+      const previous = retried.get(event.runId)
+      retried.delete(event.runId)
+      if (previous?.notice && previous.messages.has(failureMessage)) {
+        previous.notice.attention = false
+        attempt.retries = previous.retries
+        artifact.title = `The agent ran into an error after ${previous.retries} automatic ${previous.retries === 1 ? 'retry' : 'retries'}`
+      }
     }
 
     // A scheduled wait shows as its own card; only a call that failed stays among the tools.

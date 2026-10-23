@@ -508,6 +508,7 @@ internal fun ChatPage(
     val error = conversationError?.takeUnless {
         quota != null && (isQuotaMessage(it) || it == quota.message)
     }
+    val errorShown = remember(chat, live.events) { failureShown(chat, live.events) }
     var errorDismissed by
         remember(error, chat?.id, chat?.run?.id, chat?.run?.finishedAt) { mutableStateOf(false) }
     val selectedAgent = state.agents.find { it.id == (chat?.agentId ?: agent) }
@@ -1043,7 +1044,7 @@ internal fun ChatPage(
                         create = create,
                         dismiss = { errorDismissed = true },
                     )
-                else if (error != null && !errorDismissed)
+                else if (error != null && !errorDismissed && !errorShown)
                     Row(
                         Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,

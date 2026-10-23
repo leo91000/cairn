@@ -615,8 +615,10 @@ internal data class TimelineEntry(
     val plan: AgentPlan? = null,
     /** Where an update changed the plan. */
     val planUpdate: PlanUpdate? = null,
-    /** Cairn retries this failure itself: the notice says so instead of reporting a dead end. */
-    val retried: String = "",
+    /** A failure notice's own title, such as Cairn's automatic retry. */
+    val noticeTitle: String = "",
+    /** Cairn retries this failure itself: the notice is a warning, not a dead end. */
+    val retrying: Boolean = false,
 )
 
 /** Fold updates in place within a turn; keep messages and errors in chronological order. */
@@ -733,9 +735,17 @@ internal fun timelineEntries(
         // the history does.
         var scheduled: Int? = null
         val moves = mutableMapOf<Int, Int>()
-        // A conversation shows one notice per failed attempt. The adapter, the worker and the
-        // final status may each repeat the provider's error; only a new reason adds a notice.
+        // A conversation shows one notice per failure. The adapter, the worker and the final
+        // status may each repeat the provider's error; only a new reason adds a notice. When
+        // Cairn retries, the next attempt's notice with the same reason replaces the previous one.
         val failures = mutableMapOf<String, FailedAttempt>()
+        val retried = mutableMapOf<String, FailedAttempt>()
+        val replaced = mutableSetOf<String>()
+        // The turn's reconnect attempts share one notice; the failure that ends it replaces them.
+        val connections = mutableListOf<Int>()
+        fun hideConnections() = connections.forEach { replaced.add(result[it].key) }
+        // Diagnostics keep every lifecycle event, but a final status does not repeat a reason.
+        val reported = mutableMapOf<String, MutableSet<String>>()
         fun placeScheduled() {
             val index = scheduled ?: return
             flushActivity()
@@ -748,13 +758,37 @@ internal fun timelineEntries(
                     (event.type == "status" && event.text in TERMINAL_STATUSES)
             )
                 placeScheduled()
-            if (event.type == "turn.started") waitReason = ""
+            if (event.type == "turn.started") {
+                waitReason = ""
+                connections.clear()
+            }
+            val failure = failureReason(event)
+            if (event.type == "turn.failed") {
+                if (chat && !failure.isNullOrBlank() && failure != "Conversation interrupted.")
+                    hideConnections()
+                connections.clear()
+            }
+            // A run that ends, or is stopped while it waits, ends its retry chain: a resume
+            // starts afresh.
+            if (event.type == "status" && event.text in TERMINAL_STATUSES) {
+                retried.remove(event.runId)
+                failures[event.runId]?.pending = false
+            }
             if (
                 event.type == "turn.started" ||
                     (event.type == "status" &&
                         event.activityData()?.get("attempt") == JsonPrimitive(true))
-            )
-                failures.remove(event.runId)
+            ) {
+                failures.remove(event.runId)?.let { if (it.pending) retried[event.runId] = it }
+                reported.remove(event.runId)
+            }
+            val repeated =
+                failure
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { reported.getOrPut(event.runId) { mutableSetOf() }.add(it) } == false
+            // A retry chain ends with an attempt that does not fail again, or with a new message.
+            if (event.type == "turn.completed" || event.type == "chat.user")
+                retried.remove(event.runId)
             when (event.type) {
                 "chat.sleep",
                 "chat.wait",
@@ -1020,38 +1054,66 @@ internal fun timelineEntries(
                     )
                 )
             } else {
-                val reason = if (chat) failureReason(event) else null
+                val presentation = if (chat) presentActivity(event) else null
+                // A connection error is a connection notice: recovery hides it and the turn's
+                // failure replaces it.
+                val connection = presentation != null && connectionNotice(event, presentation)
+                val reason = if (chat && !connection) failure else null
+                // An adapter reports its own stop as a failed turn; the terminal status says so.
+                if (reason != null && stopEcho(event, reason)) continue
                 val shown = failures[event.runId]
                 if (reason != null && shown != null && shown.repeats(event, reason)) {
                     shown.reasons.add(reason)
+                    shown.ended = shown.ended || event.type != "error"
                     continue
                 }
+                // Cairn retries a temporary failure itself: its notice says so.
                 if (chat && event.type == "retry.scheduled" && shown?.notice != null) {
                     val index = shown.notice!!
-                    result[index] = result[index].copy(retried = retryTitle(event))
+                    val (attempt, limit) = retryProgress(event, shown.retries)
+                    shown.retries = attempt
+                    shown.pending = true
+                    result[index] =
+                        result[index].copy(
+                            noticeTitle = retryTitle(attempt, limit),
+                            retrying = true,
+                        )
                     continue
                 }
-                val presentation = if (chat) presentActivity(event) else null
                 if (presentation?.kind == ActivityKind.NOTICE) {
                     val interrupted =
                         event.type == "status" &&
                             event.text.lowercase() in listOf("cancelled", "interrupted")
                     if (
-                        event.id !in recovered &&
-                            (presentation.failed ||
-                                interrupted ||
-                                presentation.connectionInterrupted())
+                        event.id !in recovered && (presentation.failed || interrupted || connection)
                     ) {
                         flushActivity()
-                        if (reason != null)
-                            failures
-                                .getOrPut(event.runId) { FailedAttempt() }
-                                .apply {
-                                    reasons.add(reason)
-                                    notice = result.size
-                                }
+                        if (connection) {
+                            hideConnections()
+                            connections.add(result.size)
+                        }
+                        var title = ""
+                        if (reason != null) {
+                            val attempt = failures.getOrPut(event.runId) { FailedAttempt() }
+                            attempt.reasons.add(reason)
+                            attempt.notice = result.size
+                            attempt.ended = attempt.ended || event.type != "error"
+                            val previous = retried.remove(event.runId)
+                            val chained = previous?.notice
+                            if (chained != null && reason in previous.reasons) {
+                                replaced.add(result[chained].key)
+                                attempt.retries = previous.retries
+                                title = retriedFailureTitle(previous.retries ?: 1)
+                            }
+                        }
                         result.add(
-                            TimelineEntry("notice:${event.id}", listOf(event), false, notice = true)
+                            TimelineEntry(
+                                "notice:${event.id}",
+                                listOf(event),
+                                false,
+                                notice = true,
+                                noticeTitle = title,
+                            )
                         )
                     }
                 } else {
@@ -1059,7 +1121,11 @@ internal fun timelineEntries(
                         flushActivity()
                     }
                     team = null
-                    activity.add(event)
+                    activity.add(
+                        if (!chat && repeated && event.type == "status")
+                            event.copy(payload = event.payload?.minus("error"))
+                        else event
+                    )
                 }
             }
         }
@@ -1087,17 +1153,19 @@ internal fun timelineEntries(
                 )
             )
         }
-        if (moves.isEmpty()) result
-        else {
-            // Each moved card goes before the entry at its target, in one pass.
-            val arriving = moves.entries.groupBy({ it.value }, { it.key })
-            buildList(result.size) {
-                for (index in 0..result.size) {
-                    arriving[index]?.sorted()?.forEach { add(result[it]) }
-                    if (index < result.size && index !in moves) add(result[index])
+        val placed =
+            if (moves.isEmpty()) result
+            else {
+                // Each moved card goes before the entry at its target, in one pass.
+                val arriving = moves.entries.groupBy({ it.value }, { it.key })
+                buildList(result.size) {
+                    for (index in 0..result.size) {
+                        arriving[index]?.sorted()?.forEach { add(result[it]) }
+                        if (index < result.size && index !in moves) add(result[index])
+                    }
                 }
             }
-        }
+        if (replaced.isEmpty()) placed else placed.filter { it.key !in replaced }
     }
 
 // Where a scheduled wait's card is placed: its turn ended, or a message or another wait event came.
@@ -1192,7 +1260,16 @@ internal fun TimelineRow(
     else if (entry.wait != null) WaitCard(entry.wait)
     else if (entry.plan != null) PlanCard(entry.plan, live = active && livePlan == entry.key)
     else if (entry.planUpdate != null) PlanUpdateRow(entry.planUpdate)
-    else if (entry.notice) ChatNotice(presentActivity(entry.events.single()), entry.retried)
+    else if (entry.notice)
+        entry.events.single().let { event ->
+            val presentation = presentActivity(event)
+            ChatNotice(
+                presentation,
+                entry.noticeTitle,
+                entry.retrying,
+                connectionNotice(event, presentation),
+            )
+        }
     else {
         val presentations = remember(entry.events) { entry.events.map(::presentActivity) }
         AgentActions(entry.key, presentations, hideRunning)

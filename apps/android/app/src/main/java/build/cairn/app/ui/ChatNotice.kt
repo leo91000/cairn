@@ -19,6 +19,14 @@ internal fun ActivityPresentation.connectionInterrupted(): Boolean =
         connectionSource.containsMatchIn(raw) &&
         connectionFailure.containsMatchIn(raw)
 
+/** A reported error, diagnostic or output about a connection the provider is restoring. */
+internal fun connectionNotice(
+    event: RunEvent,
+    presentation: ActivityPresentation = presentActivity(event),
+): Boolean =
+    event.type in listOf("error", "diagnostic", "item.completed") &&
+        presentation.connectionInterrupted()
+
 /** Only clear retry notices when work actually continues in the same turn. */
 internal fun recoveredChatConnections(events: List<RunEvent>, messages: Set<Long>): Set<Long> {
     val pending = mutableSetOf<Long>()
@@ -45,23 +53,44 @@ internal fun recoveredChatConnections(events: List<RunEvent>, messages: Set<Long
             recovered.addAll(pending)
             pending.clear()
         }
-        if (presentActivity(event).connectionInterrupted()) pending.add(event.id)
+        if (connectionNotice(event)) pending.add(event.id)
     }
     return recovered
 }
 
-/** The failures a conversation shows for one attempt, and the index of its notice. */
+/** A failed attempt's reasons, the index of its notice and how often Cairn retried its chain. */
 internal class FailedAttempt(
     val reasons: MutableSet<String> = mutableSetOf(),
     var notice: Int? = null,
+    var retries: Int? = null,
+    /** Its turn or run failed, beyond a reported error. */
+    var ended: Boolean = false,
+    /** Cairn scheduled a retry that has not started yet. */
+    var pending: Boolean = false,
 ) {
-    /** The final status and the generic adapter error only repeat the reason already shown. */
+    /**
+     * A blank reason only repeats the reason already shown, and the generic adapter error a turn
+     * failure; after an error report, it says the turn ended. A final status may give the reason
+     * truncated.
+     */
     fun repeats(event: RunEvent, reason: String) =
-        event.type == "status" ||
-            reason.isBlank() ||
-            reason == "Conversation interrupted." ||
-            reason in reasons
+        reason.isBlank() ||
+            reason in reasons ||
+            (event.type == "status" && reasons.any { sameReason(it, reason) }) ||
+            (reason == "Conversation interrupted." && ended)
 }
+
+/** Whether a reason repeats one already given; a run's recorded error may be truncated. */
+internal fun sameReason(given: String, reason: String) =
+    given == reason || (reason.isNotEmpty() && given.startsWith(reason))
+
+// Adapters report a stop that Cairn requested as a failed turn.
+private val STOP_ECHOES =
+    setOf("Conversation stopped.", "Claude execution stopped.", "OpenCode execution stopped.")
+
+/** An adapter's report of a stop Cairn requested; the terminal status that follows says so. */
+internal fun stopEcho(event: RunEvent, reason: String? = failureReason(event)) =
+    event.type != "status" && reason in STOP_ECHOES
 
 /** The reason a failure event gives, or null when the event does not report a failure. */
 internal fun failureReason(event: RunEvent): String? {
@@ -76,19 +105,31 @@ internal fun failureReason(event: RunEvent): String? {
     }
 }
 
-internal fun retryTitle(event: RunEvent): String {
+/** Cairn's retry number for this failure, counted across the chain, and its limit. */
+internal fun retryProgress(event: RunEvent, previous: Int?): Pair<Int, Int?> {
     val retry = event.activityData()?.get("retry").asObject()
-    val attempt = (retry?.get("attempt") as? JsonPrimitive)?.intOrNull
-    val limit = (retry?.get("limit") as? JsonPrimitive)?.intOrNull
-    return if (attempt != null && limit != null)
-        "Erreur temporaire — nouvelle tentative automatique $attempt/$limit"
-    else "Erreur temporaire — nouvelle tentative automatique"
+    val attempt = (retry?.get("attempt") as? JsonPrimitive)?.intOrNull ?: ((previous ?: 0) + 1)
+    return attempt to (retry?.get("limit") as? JsonPrimitive)?.intOrNull
 }
 
+internal fun retryTitle(attempt: Int, limit: Int?): String =
+    if (limit != null) "Erreur temporaire — nouvelle tentative automatique $attempt/$limit"
+    else "Erreur temporaire — nouvelle tentative automatique"
+
+internal fun retriedFailureTitle(retries: Int): String =
+    if (retries == 1) "L’agent a rencontré une erreur après 1 nouvelle tentative automatique"
+    else "L’agent a rencontré une erreur après $retries nouvelles tentatives automatiques"
+
 @Composable
-internal fun ChatNotice(presentation: ActivityPresentation, retried: String = "") {
-    val connection = presentation.connectionInterrupted()
-    val failed = presentation.failed && !connection && retried.isBlank()
+internal fun ChatNotice(
+    presentation: ActivityPresentation,
+    title: String = "",
+    retrying: Boolean = false,
+    connection: Boolean = presentation.connectionInterrupted(),
+) {
+    // A retry title says more than the connection pattern of its reason.
+    val connection = connection && title.isBlank()
+    val failed = presentation.failed && !connection && !retrying
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color =
@@ -101,7 +142,7 @@ internal fun ChatNotice(presentation: ActivityPresentation, retried: String = ""
     ) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
-                if (connection) "Connexion interrompue" else retried.ifBlank { presentation.title },
+                if (connection) "Connexion interrompue" else title.ifBlank { presentation.title },
                 style = MaterialTheme.typography.labelLarge,
             )
             val detail = presentation.output.ifBlank { presentation.subtitle }

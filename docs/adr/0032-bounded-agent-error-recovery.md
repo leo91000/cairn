@@ -13,11 +13,13 @@ stop the conversation are separate concerns.
 
 `run_retry` classifies confirmed agent failures and plans recovery independently of
 the provider adapter. Known connection, timeout, temporary server and request-rate
-errors qualify. Structured error codes and HTTP statuses take precedence; the exact
-routing timeout is a fallback for older adapters that supply only a message and
-for native Codex errors classified as `other`. This exception matches only the
-complete timeout message and cannot override a specific error code or terminal
-HTTP status.
+errors qualify. Structured error codes and HTTP statuses take precedence; two exact
+messages are a fallback for older adapters that supply only a message and for
+native Codex errors classified as `other`: the routing timeout, and the model at
+capacity (“Selected model is at capacity. Please try a different model.”, which
+native Codex reports as `serverOverloaded`) as a temporary server error. These
+exceptions match only the complete message and cannot override a specific error
+code or terminal HTTP status.
 Unknown errors, cancellation, invalid requests, authentication, permissions, context
 limits, storage/sandbox failures and subscription exhaustion are not retried here.
 Existing account-switching and VM-controller recovery retain their own policies.

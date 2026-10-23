@@ -136,6 +136,42 @@ class ConversationPresentationTest {
         assertNull(chatQuota(run.copy(status = "succeeded", accountWaitReason = null), emptyList()))
     }
 
+    @Test
+    fun `a failed run's banner is hidden once its reason shows as a failure notice`() {
+        val capacity = "Selected model is at capacity. Please try a different model."
+        val failure =
+            RunEvent(
+                1,
+                1,
+                "turn.failed",
+                capacity,
+                buildJsonObject {
+                    put("error", buildJsonObject { put("message", capacity) })
+                },
+                runId = "run",
+            )
+        val chat = Chat("chat", run = Run("run", status = "failed", error = capacity))
+        assertTrue(failureShown(chat, listOf(failure)))
+        assertFalse(failureShown(chat, emptyList()))
+        assertFalse(failureShown(chat, listOf(failure.copy(runId = "other"))))
+        assertFalse(failureShown(chat.copy(error = "Preparation failed"), listOf(failure)))
+        assertFalse(
+            failureShown(chat.copy(run = chat.run!!.copy(status = "queued")), listOf(failure))
+        )
+        // The timeline drops an adapter's report of a stop: it cannot stand for the reason.
+        val stop = "Claude execution stopped."
+        val echo =
+            failure.copy(
+                text = stop,
+                payload =
+                    buildJsonObject { put("error", buildJsonObject { put("message", stop) }) },
+            )
+        assertFalse(failureShown(chat.copy(run = chat.run!!.copy(error = stop)), listOf(echo)))
+        // A run records at most 10,000 characters of its error.
+        val truncated = chat.copy(run = chat.run!!.copy(error = capacity.take(20)))
+        assertTrue(failureShown(truncated, listOf(failure)))
+    }
+
     private val first = ChatMessage("one", text = "Bonjour")
     private val second = ChatMessage("two", text = "Ensuite")
 

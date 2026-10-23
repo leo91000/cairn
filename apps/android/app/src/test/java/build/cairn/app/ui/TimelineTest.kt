@@ -279,21 +279,103 @@ class TimelineTest {
         assertEquals(capacity, presentActivity(notice.events.single()).output)
         assertEquals(1, notices(attempt(1) + plain(4, "error", capacity)).size)
 
-        val retry = buildJsonObject {
-            put(
-                "retry",
+        fun retry(id: Long, attempt: Int) =
+            plain(
+                id,
+                "retry.scheduled",
+                "Temporary agent error.",
                 buildJsonObject {
-                    put("attempt", 1)
-                    put("limit", 3)
+                    put(
+                        "retry",
+                        buildJsonObject {
+                            put("attempt", attempt)
+                            put("limit", 3)
+                        },
+                    )
                 },
             )
-        }
-        val retried =
-            attempt(1) + plain(4, "retry.scheduled", "Temporary agent error.", retry) + attempt(5)
+        val waiting = notices(attempt(1) + retry(4, 1)).single()
+        assertEquals("Erreur temporaire — nouvelle tentative automatique 1/3", waiting.noticeTitle)
+        assertTrue(waiting.retrying)
+        // The next attempt's notice replaces the retried one: the chain shows a single notice.
+        val retried = attempt(1) + retry(4, 1) + attempt(5)
+        val final = notices(retried).single()
+        assertEquals(6L, final.events.single().id)
+        assertEquals(
+            "L’agent a rencontré une erreur après 1 nouvelle tentative automatique",
+            final.noticeTitle,
+        )
+        assertFalse(final.retrying)
+        assertEquals(
+            "L’agent a rencontré une erreur après 2 nouvelles tentatives automatiques",
+            notices(retried + retry(9, 2) + attempt(10)).single().noticeTitle,
+        )
+        val other =
+            attempt(1) +
+                retry(4, 1) +
+                plain(5, "turn.started") +
+                failure(6, "turn.failed", "Reconnect account")
+        assertEquals(2, notices(other).size)
+        // A run that ends, or is stopped during the wait, ends the chain: a resume is not a retry.
+        assertEquals(
+            listOf("L’agent a rencontré une erreur après 1 nouvelle tentative automatique", ""),
+            notices(retried + attempt(8)).map { it.noticeTitle },
+        )
+        val cancelledWait = attempt(1) + retry(4, 1) + plain(5, "status", "cancelled") + attempt(6)
+        assertEquals(
+            listOf(2L, 5L, 7L),
+            notices(cancelledWait).map { it.events.single().id },
+        )
+        assertEquals(
+            "Erreur temporaire — nouvelle tentative automatique 1/3",
+            notices(cancelledWait).first().noticeTitle,
+        )
+        // Like web, a turn failure is a failure notice even when it reads like a connection error.
+        val websocket = "WebSocket connection failed: 503 Service Unavailable"
+        val websocketFailure =
+            listOf(
+                plain(1, "turn.started"),
+                failure(2, "turn.failed", websocket),
+                failure(3, "status", websocket, text = "failed"),
+            )
+        val websocketNotice = notices(websocketFailure).single().events.single()
+        assertEquals(2L, websocketNotice.id)
+        assertFalse(connectionNotice(websocketNotice))
+        // A retry that succeeds ends the chain: a later message failing for the same reason
+        // gets its own notice.
+        val answered =
+            attempt(1) +
+                retry(4, 1) +
+                plain(5, "turn.started") +
+                plain(6, "turn.completed") +
+                plain(7, "chat.user", "Next") +
+                attempt(8)
         assertEquals(
             listOf("Erreur temporaire — nouvelle tentative automatique 1/3", ""),
-            notices(retried).map { it.retried },
+            notices(answered).map { it.noticeTitle },
         )
+
+        for (stop in
+            listOf(
+                "Conversation stopped.",
+                "Claude execution stopped.",
+                "OpenCode execution stopped.",
+            )) {
+            val cancelled =
+                listOf(
+                    plain(1, "turn.started"),
+                    failure(2, "turn.failed", stop),
+                    plain(3, "status", "cancelled"),
+                )
+            assertEquals(listOf(3L), notices(cancelled).map { it.events.single().id })
+        }
+        // Only an adapter's report is an echo; a run that failed with that reason still says so.
+        val stopFailed =
+            listOf(
+                plain(1, "turn.started"),
+                failure(2, "status", "Conversation stopped.", text = "failed"),
+            )
+        assertEquals(listOf(2L), notices(stopFailed).map { it.events.single().id })
 
         val timedOut =
             listOf(
@@ -303,6 +385,76 @@ class TimelineTest {
         val stopped = presentActivity(notices(timedOut).single().events.single())
         assertEquals("Exécution en échec", stopped.title)
         assertEquals("Run exceeded its time limit.", stopped.output)
+        // A turn's reconnect attempts share one notice; the failure that ends the turn replaces it.
+        fun reconnect(id: Long, step: Int) =
+            plain(
+                id,
+                "error",
+                "Reconnecting... $step/5",
+                buildJsonObject {
+                    put("willRetry", true)
+                    put(
+                        "error",
+                        buildJsonObject {
+                            put("message", "Reconnecting... $step/5")
+                            put("codexErrorInfo", "other")
+                        },
+                    )
+                },
+            )
+        val reconnecting = listOf(plain(1, "turn.started"), reconnect(2, 1), reconnect(3, 2))
+        assertEquals(listOf(3L), notices(reconnecting).map { it.events.single().id })
+        val disconnected =
+            reconnecting + failure(4, "turn.failed", "stream disconnected before completion")
+        assertEquals(listOf(4L), notices(disconnected).map { it.events.single().id })
+        // The older event stream reports its reconnect attempts as plain errors.
+        val plainReconnects =
+            listOf(
+                plain(1, "turn.started"),
+                plain(2, "error", "Reconnecting... 1/5"),
+                plain(3, "error", "Reconnecting... 2/5"),
+            )
+        assertEquals(listOf(3L), notices(plainReconnects).map { it.events.single().id })
+        assertEquals(
+            listOf(4L),
+            notices(plainReconnects + disconnected.last()).map { it.events.single().id },
+        )
+        // After an error report, the generic adapter error says the turn ended.
+        val reportedThenInterrupted =
+            listOf(
+                plain(1, "turn.started"),
+                plain(2, "error", "Validation needs attention."),
+                failure(3, "turn.failed", "Conversation interrupted."),
+                failure(4, "status", "Conversation interrupted.", text = "failed"),
+            )
+        assertEquals(
+            listOf(2L, 3L),
+            notices(reportedThenInterrupted).map { it.events.single().id },
+        )
+
+        // Run diagnostics keep the final status without repeating the reason already reported.
+        val diagnostics = timelineEntries(failed).flatMap { it.events }
+        assertEquals(capacity, presentActivity(diagnostics.first { it.id == 2L }).output)
+        assertEquals("", presentActivity(diagnostics.first { it.type == "status" }).output)
+        assertEquals(
+            "Run exceeded its time limit.",
+            presentActivity(timelineEntries(timedOut).flatMap { it.events }.last()).output,
+        )
+
+        // A run records at most 10,000 characters of its error; the truncated reason still
+        // repeats it.
+        val long = "Upstream error: " + "x".repeat(10_050)
+        val truncated =
+            listOf(
+                plain(1, "turn.started"),
+                failure(2, "turn.failed", long),
+                failure(3, "status", long.take(10_000), text = "failed"),
+            )
+        assertEquals(listOf(2L), notices(truncated).map { it.events.single().id })
+        // A final status with a reason not shown yet tells why the run ended.
+        val deniedThenTimedOut =
+            listOf(timedOut[0], plain(3, "error", "Access denied")) + timedOut[1]
+        assertEquals(listOf(3L, 2L), notices(deniedThenTimedOut).map { it.events.single().id })
     }
 
     private fun event(

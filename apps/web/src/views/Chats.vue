@@ -21,6 +21,7 @@ import {
 import { useRoute, useRouter } from 'vue-router'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
+import { failureReason, sameReason, stopEcho } from '../activity'
 import { api, apiUpload, state } from '../api'
 import { reuseAttachmentKey } from '../attachment-media'
 import {
@@ -224,6 +225,13 @@ const visibleError = computed(() => {
   return chatError || (failedRun ? failedRun.error || 'The response stopped before finishing. Resume the conversation to continue.' : '')
 })
 const openCodeRegionBlocked = computed(() => visibleError.value.startsWith('OpenCode Go requires Global regions for this model.'))
+// The conversation already shows a failed run's reason as its failure card.
+const errorShown = computed(() => {
+  const run = detail.value?.run
+  const reason = run?.status === 'failed' ? run.error : undefined
+  return !error.value && !detail.value?.error && !!reason
+    && events.value.some(event => event.runId === run?.id && sameReason(failureReason(event) ?? '', reason) && !stopEcho(event))
+})
 watch(() => [visibleError.value, detail.value?.id, detail.value?.run?.finishedAt], () => {
   dismissedError.value = false
 })
@@ -1069,7 +1077,7 @@ function key(event: KeyboardEvent) {
                 </RouterLink>. This conversation and its files stay saved.
               </p>
             </section>
-            <UiAlert v-else-if="visibleError && !dismissedError" class="mb-3 flex items-start gap-2">
+            <UiAlert v-else-if="visibleError && !dismissedError && !errorShown" class="mb-3 flex items-start gap-2">
               <span class="min-w-0 flex-1">{{ visibleError }}</span><button
                 :class="iconButton"
                 class="shrink-0"

@@ -97,12 +97,20 @@ impl Cause {
             })
             .or_else(|| {
                 let message = error["message"].as_str().unwrap_or("").trim();
-                // Codex exposes routing discovery I/O failures as `other`. Only
-                // this exact known timeout may recover without a specific code.
-                (code.is_empty()
-                    && matches!(info_code, "" | "other")
-                    && message.eq_ignore_ascii_case("workspace routing discovery timed out"))
-                .then_some(FailureKind::Timeout)
+                // Codex exposes routing discovery I/O failures as `other`, and its
+                // older event stream reports a model at capacity without a code.
+                // Only these exact known messages may recover without a specific code.
+                if !code.is_empty() || !matches!(info_code, "" | "other") {
+                    None
+                } else if message.eq_ignore_ascii_case("workspace routing discovery timed out") {
+                    Some(FailureKind::Timeout)
+                } else if message.eq_ignore_ascii_case(
+                    "Selected model is at capacity. Please try a different model.",
+                ) {
+                    Some(FailureKind::Server)
+                } else {
+                    None
+                }
             })?;
         let message = error["message"]
             .as_str()
@@ -191,6 +199,9 @@ mod tests {
         let cause = Cause::classify(&error).expect("A model at capacity must recover");
         assert_eq!(cause.kind, FailureKind::Server);
         assert_eq!(cause.message, error["message"]);
+        // The older event stream gives the message alone.
+        let legacy = json!({ "message": error["message"] });
+        assert_eq!(Cause::classify(&legacy).unwrap().kind, FailureKind::Server);
     }
 
     #[test]
