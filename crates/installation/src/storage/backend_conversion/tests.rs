@@ -491,3 +491,193 @@ async fn sparse_work_remains_sparse_and_manager_reserve_is_enforced() {
     assert_eq!(error.status, 507);
     assert!(!refused.join("converted.ext4").exists());
 }
+
+#[tokio::test]
+async fn conversion_recovers_wrapped_and_revoked_journals_without_changing_the_source() {
+    for (name, revoke_committed, rewrite, wrap, expected) in [
+        (
+            "committed-revoke",
+            true,
+            false,
+            false,
+            b"expected".as_slice(),
+        ),
+        (
+            "uncommitted-revoke",
+            false,
+            false,
+            false,
+            b"stale!!!".as_slice(),
+        ),
+        ("full-revoke", true, false, false, b"expected".as_slice()),
+        ("later-rewrite", true, true, false, b"latest!!".as_slice()),
+        ("wrapped-write", true, true, true, b"latest!!".as_slice()),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let tree = root.path().join("vm");
+        write(&tree, "upper/home/node/keep", b"expected");
+        write(
+            &tree,
+            "upper/data/runs/test/workspace/dirty",
+            b"unsaved work",
+        );
+        write(
+            &tree,
+            "upper/data/runs/test/output/result.md",
+            b"prior output",
+        );
+        let source = image(root.path(), &tree, "source.ext4").await;
+        let blocks = std::process::Command::new("debugfs")
+            .args(["-R", "blocks /upper/home/node/keep"])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(blocks.status.success());
+        let block = String::from_utf8(blocks.stdout)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        let mut stale = vec![0; 4096];
+        stale[..8].copy_from_slice(b"stale!!!");
+        let stale_path = root.path().join("stale-block");
+        std::fs::write(&stale_path, &stale).unwrap();
+        stale[..8].copy_from_slice(b"latest!!");
+        let latest_path = root.path().join("latest-block");
+        std::fs::write(&latest_path, &stale).unwrap();
+        let revoked = if name == "full-revoke" {
+            let mut value = [0; 4];
+            File::open(&source)
+                .unwrap()
+                .read_exact_at(&mut value, 1024 + 24)
+                .unwrap();
+            let block_size = 1024u64 << u32::from_le_bytes(value);
+            let entries = (block_size - 16 - 4) / 8;
+            (block..block + entries)
+                .map(|index| index.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        } else {
+            block.to_string()
+        };
+        let uncommitted = if revoke_committed { "" } else { "-c " };
+        let mut commands = format!(
+            "journal_open -c\njournal_write -b {block} {}\njournal_write {uncommitted}-r {revoked} /dev/null\n",
+            stale_path.display(),
+        );
+        if rewrite {
+            commands.push_str(&format!(
+                "journal_write -b {block} {}\n",
+                latest_path.display()
+            ));
+        }
+        if wrap {
+            commands = format!(
+                "journal_open -c\njournal_write -b {block} {}\n",
+                latest_path.display()
+            );
+        }
+        commands.push_str("journal_close\n");
+        let commands_path = root.path().join("journal-commands");
+        std::fs::write(&commands_path, commands).unwrap();
+        let journal = std::process::Command::new("debugfs")
+            .arg("-w")
+            .arg("-f")
+            .arg(&commands_path)
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            journal.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&journal.stderr)
+        );
+        if wrap {
+            wrap_journal_transaction(&source);
+        }
+        let original_hash = crate::storage::digest::block(&std::fs::read(&source).unwrap());
+        let staging = root.path().join("conversion");
+        std::fs::create_dir(&staging).unwrap();
+        let converted = convert(
+            &source,
+            &json!({ "size": SIZE }),
+            &prepared(),
+            "native",
+            &staging,
+        )
+        .await
+        .unwrap();
+        let destination = filesystem(&converted, 0, SIZE).unwrap();
+        assert_eq!(destination.read("/home/keep").unwrap(), expected, "{name}");
+        assert_eq!(
+            destination.read("/workspaces/dirty").unwrap(),
+            b"unsaved work"
+        );
+        assert_eq!(
+            destination.read("/output/result.md").unwrap(),
+            b"prior output"
+        );
+        assert_eq!(
+            crate::storage::digest::block(&std::fs::read(&source).unwrap()),
+            original_hash,
+            "{name}: source changed"
+        );
+    }
+}
+
+/// Place a valid descriptor/data/commit across the end of a synthetic journal.
+fn wrap_journal_transaction(image: &Path) {
+    let output = std::process::Command::new("debugfs")
+        .args(["-R", "blocks <8>"])
+        .arg(image)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let blocks: Vec<u64> = String::from_utf8(output.stdout)
+        .unwrap()
+        .split_whitespace()
+        .map(|n| n.parse().unwrap())
+        .collect();
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(image)
+        .unwrap();
+    let mut value = [0; 4];
+    file.read_exact_at(&mut value, 1024 + 24).unwrap();
+    let block_size = 1024u64 << u32::from_le_bytes(value);
+    let mut superblock = vec![0; 1024];
+    file.read_exact_at(&mut superblock, blocks[0] * block_size)
+        .unwrap();
+    let field =
+        |offset| u32::from_be_bytes(superblock[offset..offset + 4].try_into().unwrap()) as usize;
+    let (max_len, first, start) = (field(16), field(20), field(28));
+    assert!(first > 0 && max_len <= blocks.len() && start + 3 < max_len);
+    let mut transaction = Vec::new();
+    for block in blocks.iter().skip(start).take(3) {
+        let mut bytes = vec![0; block_size as usize];
+        file.read_exact_at(&mut bytes, *block * block_size).unwrap();
+        transaction.push(bytes);
+        file.write_all_at(&vec![0; block_size as usize], *block * block_size)
+            .unwrap();
+    }
+    for (index, bytes) in [max_len - 1, first, first + 1].into_iter().zip(transaction) {
+        file.write_all_at(&bytes, blocks[index] * block_size)
+            .unwrap();
+    }
+    superblock[28..32].copy_from_slice(&((max_len - 1) as u32).to_be_bytes());
+    superblock[252..256].fill(0);
+    let mut crc = u32::MAX;
+    for byte in &superblock {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ if crc & 1 == 1 { 0x82f63b78 } else { 0 };
+        }
+    }
+    superblock[252..256].copy_from_slice(&crc.to_be_bytes());
+    file.write_all_at(&superblock, blocks[0] * block_size)
+        .unwrap();
+    file.sync_all().unwrap();
+}

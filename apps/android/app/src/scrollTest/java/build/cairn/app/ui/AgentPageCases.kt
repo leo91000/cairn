@@ -750,8 +750,16 @@ abstract class AgentPageCases {
     fun nativeAgentCanUseAllCurrentAndFutureNodes() {
         journey("agent") { fixture ->
             open(AgentSection.Nodes)
-            waitForDescription("Exécution native sur l’hôte")
+            compose.waitUntil(15000) {
+                compose
+                    .onAllNodes(
+                        hasContentDescription("Exécution native sur l’hôte") and isEnabled()
+                    )
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
             compose.onNodeWithContentDescription("Exécution native sur l’hôte").performClick()
+            waitForDescription("Toutes les nodes natives, y compris futures")
             compose
                 .onNodeWithContentDescription("Toutes les nodes natives, y compris futures")
                 .assertIsOff()
