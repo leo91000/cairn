@@ -67,6 +67,8 @@ internal class FailedAttempt(
     var ended: Boolean = false,
     /** Cairn scheduled a retry that has not started yet. */
     var pending: Boolean = false,
+    /** The notice's title before it announced the retry. */
+    var failedTitle: String? = null,
 ) {
     /**
      * A blank reason only repeats the reason already shown, and the generic adapter error a turn

@@ -772,7 +772,17 @@ internal fun timelineEntries(
             // starts afresh.
             if (event.type == "status" && event.text in TERMINAL_STATUSES) {
                 retried.remove(event.runId)
-                failures[event.runId]?.pending = false
+                failures[event.runId]?.let { attempt ->
+                    // The announced retry will not run: the notice reports the failure again.
+                    val index = attempt.notice
+                    if (attempt.pending && index != null)
+                        result[index] =
+                            result[index].copy(
+                                noticeTitle = attempt.failedTitle.orEmpty(),
+                                retrying = false,
+                            )
+                    attempt.pending = false
+                }
             }
             if (
                 event.type == "turn.started" ||
@@ -1077,6 +1087,7 @@ internal fun timelineEntries(
                     val (attempt, limit) = retryProgress(event, shown.retries)
                     shown.retries = attempt
                     shown.pending = true
+                    if (shown.failedTitle == null) shown.failedTitle = result[index].noticeTitle
                     result[index] =
                         result[index].copy(
                             noticeTitle = retryTitle(attempt, limit),

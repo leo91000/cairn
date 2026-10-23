@@ -108,6 +108,41 @@ class ConversationPresentationTest {
     }
 
     @Test
+    fun `a reply that only repeats the turn failure folds into its notice`() {
+        val overloaded = "API Error: 529 Overloaded"
+        fun event(id: Long, type: String, payload: JsonObject? = null, raw: String = "") =
+            RunEvent(id, id, type, raw, payload, runId = "run")
+        fun reply(id: Long, text: String) =
+            event(
+                id,
+                "item.completed",
+                buildJsonObject {
+                    put(
+                        "item",
+                        buildJsonObject {
+                            put("id", "m$id")
+                            put("type", "agent_message")
+                            put("text", text)
+                        },
+                    )
+                },
+            )
+        val error = buildJsonObject {
+            put("error", buildJsonObject { put("message", overloaded) })
+        }
+        val history =
+            listOf(
+                event(1, "chat.user", raw = "Hello"),
+                event(2, "turn.started"),
+                reply(3, "Work is preserved."),
+                reply(4, overloaded),
+                event(5, "turn.failed", error),
+                event(6, "status", error, raw = "failed"),
+            )
+        assertEquals(setOf(4L), quotaHiddenEvents(history))
+    }
+
+    @Test
     fun `quota waits stop the working label and saved failures require manual resume`() {
         val message = "You've hit your individual spend limit · your weekly limit resets 3pm (UTC)"
         val run =

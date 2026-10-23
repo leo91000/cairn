@@ -744,10 +744,11 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> 
         .as_ref()
         .and_then(crate::run_status::RunStatus::of)
         .is_some_and(crate::run_status::RunStatus::is_active);
-    // Waiting for an account can last hours: the failure answers the person meanwhile.
+    // Waiting for an account after the usage ran out can last hours: the failure answers the
+    // person meanwhile. Recovery and capacity waits continue the message.
     let waiting_for_account = run
         .as_ref()
-        .is_some_and(|run| !text(run, "accountWaitReason").is_empty());
+        .is_some_and(|run| text(run, "accountWaitReason").starts_with("Usage exhausted."));
     let turn_end = |kind: &str| matches!(kind, "turn.completed" | "turn.failed");
     let stopped = |kind: &str| match kind {
         "cancelled" => Some("cancelled"),

@@ -326,10 +326,10 @@ class TimelineTest {
             listOf(2L, 5L, 7L),
             notices(cancelledWait).map { it.events.single().id },
         )
-        assertEquals(
-            "Erreur temporaire — nouvelle tentative automatique 1/3",
-            notices(cancelledWait).first().noticeTitle,
-        )
+        // The announced retry will not run: the notice reports the failure again.
+        val stoppedRetry = notices(cancelledWait).first()
+        assertEquals("", stoppedRetry.noticeTitle)
+        assertFalse(stoppedRetry.retrying)
         // Like web, a turn failure is a failure notice even when it reads like a connection error.
         val websocket = "WebSocket connection failed: 503 Service Unavailable"
         val websocketFailure =

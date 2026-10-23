@@ -212,7 +212,7 @@ describe('conversation activity', () => {
     // A run that ends, or is stopped during the wait, ends the chain: a resume is not a retry.
     expect(notices([...retried, ...attempt(9)]).map(notice => notice.title)).toEqual(['The agent ran into an error after 1 automatic retry', 'The agent ran into an error'])
     const cancelledWait = [...retried.slice(0, 4), event(5, 'status', 'cancelled'), ...attempt(6)]
-    expect(notices(cancelledWait).map(notice => notice.title)).toEqual(['Temporary error — automatic retry 1/3', 'Run cancelled', 'The agent ran into an error'])
+    expect(notices(cancelledWait).map(notice => notice.title)).toEqual(['The agent ran into an error', 'Run cancelled', 'The agent ran into an error'])
     // A retry that succeeds ends the chain: a later message failing for the same reason gets its own card.
     const answered = [...retried.slice(0, 5), event(6, 'turn.completed', ''), event(7, 'chat.user', 'Next'), ...attempt(8)]
     expect(notices(answered).map(notice => notice.title)).toEqual(['Temporary error — automatic retry 1/3', 'The agent ran into an error'])

@@ -176,6 +176,8 @@ interface FailedAttempt {
   ended?: boolean
   /** Cairn scheduled a retry that has not started yet. */
   pending?: boolean
+  /** The card's title before it announced the retry. */
+  failedTitle?: string
 }
 
 /** Whether a notice reports a connection the provider is restoring. */
@@ -486,9 +488,15 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     }
 
     // A run that ends, or is stopped while it waits, ends its retry chain: a resume starts afresh.
-    if (event.type === 'status' && ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(event.text)) {
+    if (event.type === 'status' && terminalStatuses.has(event.text)) {
       retried.delete(event.runId)
       const attempt = failures.get(event.runId)
+      // The announced retry will not run: the card reports the failure again.
+      if (attempt?.pending && attempt.notice) {
+        attempt.notice.status = 'error'
+        attempt.notice.title = attempt.failedTitle ?? attempt.notice.title
+      }
+
       if (attempt)
         attempt.pending = false
     }
@@ -522,6 +530,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       const retry = record(data.retry)
       shown.retries = typeof retry.attempt === 'number' ? retry.attempt : (shown.retries ?? 0) + 1
       shown.pending = true
+      shown.failedTitle ??= shown.notice.title
       shown.notice.status = 'info'
       shown.notice.title = typeof retry.limit === 'number'
         ? `Temporary error — automatic retry ${shown.retries}/${retry.limit}`

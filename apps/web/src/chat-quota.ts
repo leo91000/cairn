@@ -1,7 +1,7 @@
 import type { Run, RunEvent } from '../../../packages/contracts/contracts'
 import type { ActivityEntry } from './activity'
 import { providers } from '../../../packages/contracts/accounts'
-import { activityPayload } from './activity'
+import { activityPayload, failureReason } from './activity'
 
 const quotaMessage = /^(?:you['’]ve hit your (?:(?:usage|session|weekly|spend|individual spend) )?limit|you have hit your (?:usage )?limit|usage limit (?:has been )?(?:reached|exceeded)|claude ai usage limit reached|(?:5-hour|session|weekly|opus) limit reached)\b/i
 
@@ -65,13 +65,14 @@ export function chatQuota(run: Run | null | undefined, events: RunEvent[]): Chat
   }
 }
 
-/** Confirmed quota interruptions are transient chat bookkeeping; run diagnostics retain them. */
+/** Confirmed quota interruptions and replies echoing a failure are transient chat bookkeeping; run diagnostics retain them. */
 export function quotaHiddenEvents(events: RunEvent[]) {
   const hidden = new Set<string>()
   const turns = new Map<string, {
     exhausted: boolean
     legacyTool: boolean
     causes: Set<string>
+    failures: Set<string>
     messages: Map<string, { text: string, ids: string[] }>
   }>()
   for (const event of events) {
@@ -80,6 +81,7 @@ export function quotaHiddenEvents(events: RunEvent[]) {
         exhausted: false,
         legacyTool: false,
         causes: new Set(),
+        failures: new Set(),
         messages: new Map(),
       })
     }
@@ -100,8 +102,19 @@ export function quotaHiddenEvents(events: RunEvent[]) {
       message.text = typeof item?.text === 'string' ? item.text : event.text
       message.ids.push(id)
       turn.messages.set(key, message)
-      if (turn.exhausted && (isQuotaMessage(message.text) || turn.causes.has(message.text)))
+      if ((turn.exhausted && (isQuotaMessage(message.text) || turn.causes.has(message.text))) || turn.failures.has(message.text.trim()))
         message.ids.forEach(id => hidden.add(id))
+    }
+
+    // An agent may also say its failure as a reply, as Claude Code does for API errors: the
+    // failure card already shows it.
+    const reason = failureReason(event)?.trim()
+    if (reason && reason !== 'Conversation interrupted.') {
+      turn.failures.add(reason)
+      for (const message of turn.messages.values()) {
+        if (message.text.trim() === reason)
+          message.ids.forEach(id => hidden.add(id))
+      }
     }
 
     const cause = quotaFailure(event)
