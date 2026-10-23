@@ -617,7 +617,7 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
     args.extend([
         "--setenv=HOME=/home/node",
         "--setenv=CAIRN_AUTH_SOCKET=/run/cairn-auth.sock",
-        "--setenv=PATH=/opt/cairn-docker/bin:/opt/cairn-native-tools/bin:/home/node/.local/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "--setenv=PATH=/opt/cairn-docker/bin:/opt/cairn-native-tools/bin:/run/cairn-entrypoint:/home/node/.local/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     ].map(String::from));
     if launch.conversation.is_some() {
         args.extend(

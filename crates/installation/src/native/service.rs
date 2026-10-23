@@ -471,6 +471,8 @@ impl Controller {
         if plan["chat"]["provider"] == "claude" {
             plan["chat"]["claudeCredentialsDirectory"] = super::home::CLAUDE_AUTH_DIRECTORY.into();
         }
+        // The plugin CLI uses the same conversation-local relay as MCP servers.
+        plan["mcpEnv"][crate::plugins::cli::ORIGIN_ENV] = crate::microvm::mcp::ORIGIN.into();
         let auth = stage
             .join("home")
             .join(crate::nodes::workspace::provider_home(&plan))

@@ -87,6 +87,11 @@ fn remap_attribute(
     previous: Option<&Identity>,
     target: &Identity,
 ) -> Result<()> {
+    // A legacy disk has no namespace mapping. Its ACL qualifiers are opaque
+    // host IDs, not all aliases of the file owner; retain their exact values.
+    if previous.is_none() {
+        return Ok(());
+    }
     if name == "security.capability" {
         if bytes.len() < 4 {
             return Err(Error::conflict("Invalid persisted file capability."));
@@ -337,6 +342,26 @@ mod tests {
         acl[8..].copy_from_slice(&200999u32.to_le_bytes());
         remap_attribute("system.posix_acl_access", &mut acl, Some(&old), &target).unwrap();
         assert_eq!(&acl[8..], &400999u32.to_le_bytes());
+    }
+
+    #[test]
+    fn legacy_acl_qualifiers_are_preserved_without_collapsing_distinct_users() {
+        let target = Identity {
+            user: "new".into(),
+            root_uid: 902,
+            root_gid: 903,
+            subuid: 300000,
+            subgid: 400000,
+        };
+        let mut acl = vec![0; 20];
+        acl[..4].copy_from_slice(&2u32.to_le_bytes());
+        for (entry, id) in acl[4..].chunks_exact_mut(8).zip([800u32, 801]) {
+            entry[..2].copy_from_slice(&2u16.to_le_bytes());
+            entry[4..].copy_from_slice(&id.to_le_bytes());
+        }
+        let original = acl.clone();
+        remap_attribute("system.posix_acl_access", &mut acl, None, &target).unwrap();
+        assert_eq!(acl, original);
     }
 
     #[tokio::test]

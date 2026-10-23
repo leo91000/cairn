@@ -616,7 +616,7 @@ pub async fn enclave(stop: CancellationToken) -> Result<i32> {
         .env("DOCKER_HOST", format!("unix://{SOCKET}"))
         .env(
             "PATH",
-            "/opt/cairn-docker:/opt/cairn-native-tools/bin:/home/node/.local/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "/opt/cairn-docker:/opt/cairn-native-tools/bin:/run/cairn-entrypoint:/home/node/.local/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         )
         .kill_on_drop(true);
     unprivileged(&mut engine);
