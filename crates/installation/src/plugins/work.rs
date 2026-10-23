@@ -769,7 +769,7 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> 
     let waiting_for_account = run
         .as_ref()
         .is_some_and(|run| !run["accountRequired"].is_null())
-        || (account_wait && since.is_none_or(|since| now() - since >= ACCOUNT_WAIT_REPLY_MS));
+        || (account_wait && since.is_some_and(|since| now() - since >= ACCOUNT_WAIT_REPLY_MS));
     let turn_end = |kind: &str| matches!(kind, "turn.completed" | "turn.failed");
     let stopped = |kind: &str| match kind {
         "cancelled" => Some("cancelled"),
@@ -855,9 +855,14 @@ pub async fn reply(s: &Service, expected: &Connection, delivery: &Value) -> Resu
             Turn::Stopped { failed: false } => Ok(Some(Reply { text: "Stopped. Write again to continue.".into(), status: "cancelled", files: Vec::new() })),
             Turn::Stopped { failed: true } => Ok(Some(Reply { text: "The agent could not finish this request. Review the conversation in Cairn.".into(), status: "failed", files: Vec::new() })),
             Turn::Done { delivered, end, run, status } => {
+                // A retried turn answers with its last attempt, not with what a failed one said.
+                let answered: i64 = db.0.query_row(
+                    "SELECT COALESCE(MAX(id), ?2) FROM events WHERE run_id=?1 AND type='retry.scheduled' AND id>?2 AND id<?3",
+                    rusqlite::params![run, delivered, end], |row| row.get(0),
+                )?;
                 let final_text: Option<String> = db.0.query_row(
                     "SELECT json_extract(payload,'$.item.text') FROM events WHERE run_id=?1 AND id>?2 AND id<?3 AND json_extract(payload,'$.item.type')='agent_message' ORDER BY id DESC LIMIT 1",
-                    rusqlite::params![run, delivered, end], |row| row.get(0),
+                    rusqlite::params![run, answered, end], |row| row.get(0),
                 ).optional()?.flatten();
                 let mut statement = db.0.prepare(
                     "SELECT payload FROM events WHERE run_id=?1 AND type='artifact' AND id>?2 AND id<?3 ORDER BY id LIMIT 10",

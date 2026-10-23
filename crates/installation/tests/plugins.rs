@@ -1461,6 +1461,74 @@ async fn replies_export_only_the_correlated_completed_turn_and_revoke_immediatel
     assert!(s.get("chats", text(&receipt, "chatId")).await.is_ok());
 }
 
+/// Dates the run's last event back, as if it was recorded `ms` ago.
+async fn age_last_event(s: &Service, run_id: &str, ms: i64) {
+    let statement = format!(
+        "UPDATE events SET created_at=created_at-{ms} WHERE id=(SELECT MAX(id) FROM events WHERE run_id='{run_id}')"
+    );
+    s.store
+        .transaction(move |db| Ok(db.0.execute_batch(&statement)?))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn replies_answer_a_retried_turn_with_its_last_attempt() {
+    let (_root, s, connection) = fixture().await;
+    let event = json!({
+        "name": "message",
+        "revision": connection.revision,
+        "authorId": "300",
+        "payload": { "id": "500", "author": { "id": "300", "name": "Sarah" } },
+    });
+    let receipt = work::submit(
+        &s,
+        &context(&connection, &event),
+        &json!({ "text": "hello" }),
+    )
+    .await
+    .unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+    let run_id = text(&chat, "runId");
+    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
+        let store = s.store.clone();
+        let run_id = run_id.to_owned();
+        async move { store.event(&run_id, kind, text, payload).await.unwrap() }
+    };
+
+    event(
+        "chat.user",
+        "hello",
+        Some(json!({ "messageId": receipt["messageId"] })),
+    )
+    .await;
+    // Claude Code says an API error as a reply before the turn fails.
+    let overloaded = "API Error: 529 Overloaded";
+    let echo = json!({ "item": { "type": "agent_message", "text": overloaded } });
+    event("item.completed", overloaded, Some(echo)).await;
+    event(
+        "turn.failed",
+        overloaded,
+        Some(json!({ "error": { "message": overloaded } })),
+    )
+    .await;
+    let retry = json!({ "retry": { "attempt": 1, "limit": 3 } });
+    event("retry.scheduled", "Temporary agent error.", Some(retry)).await;
+    event("turn.started", "", None).await;
+    event("turn.completed", "", None).await;
+
+    let reply = work::reply(&s, &connection, &delivery)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.status, "completed");
+    assert!(!reply.text.contains(overloaded), "{}", reply.text);
+}
+
 #[tokio::test]
 async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
     let (_root, s, connection) = fixture().await;
@@ -1503,7 +1571,7 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
         .await
         .unwrap();
     assert!(reply().await.is_none(), "The attempt has not settled yet");
-    // Waiting for an account can last hours: the failure answers meanwhile.
+    // An account wait that just started continues the message.
     s.store
         .patch_run(
             run_id,
@@ -1511,6 +1579,18 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
         )
         .await
         .unwrap();
+    assert!(reply().await.is_none());
+    // Waiting for an account can last hours: once it lasts, the failure answers meanwhile.
+    s.store
+        .event(
+            run_id,
+            "status",
+            "Usage exhausted. Saving this session and restoring capacity or switching accounts.",
+            None,
+        )
+        .await
+        .unwrap();
+    age_last_event(&s, run_id, 3 * 60_000).await;
     assert_eq!(reply().await.unwrap().status, "failed");
     // A switch to another account that just started continues the message.
     s.store
@@ -1561,14 +1641,15 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
         .await
         .unwrap();
     assert!(reply().await.is_none());
-    // The retry then waits for an account: the failure answers meanwhile.
+    // The retry then waits for an account: once it lasts, the failure answers meanwhile.
+    let wait = "Waiting for a Codex account with available usage.";
     s.store
-        .patch_run(
-            run_id,
-            json!({ "accountWaitReason": "Waiting for a Codex account with available usage." }),
-        )
+        .patch_run(run_id, json!({ "accountWaitReason": wait }))
         .await
         .unwrap();
+    s.store.event(run_id, "status", wait, None).await.unwrap();
+    assert!(reply().await.is_none());
+    age_last_event(&s, run_id, 3 * 60_000).await;
     assert_eq!(reply().await.unwrap().status, "failed");
     s.store
         .patch_run(run_id, json!({ "accountWaitReason": null }))
