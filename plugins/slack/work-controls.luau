@@ -8,7 +8,8 @@ end
 
 local function reference(value)
     return type(value) == "string" and #value <= 200
-        and string.match(value, "^question:[%x%-]+:[%x%-]+$") ~= nil
+        and (string.match(value, "^question:[%x%-]+:[%x%-]+$") ~= nil
+            or string.match(value, "^progress:[%x%-]+$") ~= nil)
 end
 
 local function retry(response)
@@ -60,7 +61,7 @@ local function source(action, resource, payload)
     if action.action_id == "cairn_stop" and action.block_id == state.key .. ":stop" then
         return { action = "stop", reference = state.key }
     end
-    if type(action.action_id) ~= "string" then
+    if not state.question or type(action.action_id) ~= "string" then
         return nil
     end
     local field, option = string.match(action.action_id, "^cairn_answer_(%d+)_(%d+)$")
@@ -75,6 +76,105 @@ end
 
 return {
     source = source,
+    progress = function(event)
+        if #cairn.storage.list("question:" .. event.deliveryId .. ":") > 0 then
+            return nil
+        end
+        local key = "progress:" .. event.deliveryId
+        assert(reference(key), "Invalid native progress reference")
+        local state = cairn.storage.get(key)
+        if not state then
+            state = {
+                key = key,
+                status = "preparing",
+                delivery = event.deliveryId,
+                conversation = event.conversation,
+                userId = event.userId,
+                resource = event.reply.resource,
+                team = event.reply.workspace,
+                channel = event.reply.channel,
+                thread = event.reply.thread_ts,
+                readyAt = os.time() + 8,
+            }
+            -- Leave short work to its final answer. This deadline also survives
+            -- a replacement worker, unlike a stored process-local clock.
+            cairn.storage.set(key, state, { delivery = state.delivery })
+            return nil
+        end
+        if event.state ~= "working" or os.time() < state.readyAt then
+            return nil
+        end
+        local label = "Working — " .. (if type(event.step) == "string" then event.step else "Thinking")
+        local updating = state.status == "sent"
+        if updating then
+            if state.label == label or state.updateStatus == "sending" then
+                return nil
+            end
+        elseif state.status ~= "preparing" then
+            return nil
+        end
+        if messages.ready(event.reply) then
+            return nil
+        end
+        local safe = api.channel(state.resource, state.channel, state.team)
+        if not safe then
+            return nil
+        end
+        local blocks = {
+            { type = "section", text = plain(label) },
+            { type = "actions", block_id = key .. ":stop", elements = cairn.array({
+                { type = "button", action_id = "cairn_stop", value = key, text = plain("Stop"), style = "danger" },
+            }) },
+        }
+        if updating then
+            -- Keep the confirmed Stop binding usable while an edit is in flight.
+            -- An unconfirmed edit is not automatically repeated after restart.
+            state.updateStatus = "sending"
+        else
+            state.status = "posting"
+        end
+        cairn.storage.set(key, state, { delivery = state.delivery })
+        local values = {
+            channel = state.channel,
+            text = text.literal(label, 3000),
+            blocks = cairn.json.encode(cairn.array(blocks)),
+            parse = "none",
+        }
+        if updating then
+            values.ts = state.message
+            values.as_user = "true"
+        else
+            values.thread_ts = state.thread
+            values.mrkdwn = "false"
+            values.unfurl_links = "false"
+            values.unfurl_media = "false"
+        end
+        messages.before(event.reply)
+        local result = api.request("POST", if updating then "chat.update" else "chat.postMessage", values,
+            { resource = state.resource, secret = "botToken", prefix = "Bearer " }, state.team)
+        messages.after(event.reply)
+        if result.status == 429 then
+            if updating then
+                state.updateStatus = nil
+            else
+                state.status = "preparing"
+            end
+            cairn.storage.set(key, state, { delivery = state.delivery })
+            return nil
+        end
+        if result.status ~= 200 or type(result.json) ~= "table" or result.json.ok ~= true
+            or result.json.channel ~= state.channel or type(result.json.ts) ~= "string"
+            or (updating and result.json.ts ~= state.message) then
+            -- A committed but unconfirmed post must not become a second message.
+            error("Slack did not confirm the progress message. Check the thread and use Cairn to stop the work.")
+        end
+        state.status = "sent"
+        state.message = result.json.ts
+        state.label = label
+        state.updateStatus = nil
+        cairn.storage.set(key, state, { delivery = state.delivery })
+        return nil
+    end,
     question = function(event)
         local key = "question:" .. event.deliveryId .. ":" .. event.question.id
         assert(reference(key), "Invalid native question reference")
@@ -193,10 +293,12 @@ return {
         end
         if event.action == "stop" then
             local result = cairn.conversations.cancel(target)
-            cairn.storage.delete(state.key)
+            if state.question then
+                cairn.storage.delete(state.key)
+            end
             return result
         end
-        assert(event.action == "answer", "Unknown question control")
+        assert(event.action == "answer" and state.question, "Unknown question control")
         local id, value = selected(state, event.field, event.option)
         assert(id and value, "Unknown issued answer")
         state.answers[id] = value
@@ -219,5 +321,40 @@ return {
         for _, key in cairn.storage.list("question:" .. event.deliveryId .. ":") do
             cairn.storage.delete(key)
         end
+        local key = "progress:" .. event.deliveryId
+        local state = cairn.storage.get(key)
+        if not state then
+            return nil
+        end
+        if state.status == "sent" then
+            local remaining = messages.ready(event.reply)
+            if remaining then
+                return { retryAfter = remaining }
+            end
+        end
+        -- Retire the control before optional provider cleanup. A failed or
+        -- uncertain edit must neither retain controls nor block the final reply.
+        cairn.storage.delete(key)
+        if state.status == "sent" then
+            pcall(function()
+                local safe = api.channel(state.resource, state.channel, state.team)
+                if not safe then
+                    return
+                end
+                local label = if event.status == "completed" then "Work finished."
+                    else if event.status == "cancelled" then "Work stopped." else "Work failed."
+                messages.before(event.reply)
+                api.request("POST", "chat.update", {
+                    channel = state.channel,
+                    ts = state.message,
+                    text = label,
+                    blocks = cairn.json.encode(cairn.array({ { type = "section", text = plain(label) } })),
+                    as_user = "true",
+                    parse = "none",
+                }, { resource = state.resource, secret = "botToken", prefix = "Bearer " }, state.team)
+                messages.after(event.reply)
+            end)
+        end
+        return nil
     end,
 }

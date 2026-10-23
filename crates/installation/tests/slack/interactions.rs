@@ -22,6 +22,366 @@ async fn only_the_requester_can_stop_the_native_question_over_verified_wss() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_the_requester_can_stop_ordinary_work_over_signed_http() {
+    ordinary_progress_stop(false, ProgressBoundary::Confirmed).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_the_requester_can_stop_ordinary_work_over_verified_wss() {
+    ordinary_progress_stop(true, ProgressBoundary::Confirmed).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_work_still_replies_and_retires_its_control_when_cleanup_is_interrupted() {
+    ordinary_progress_stop(false, ProgressBoundary::InterruptedCleanup).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_uncertain_progress_edit_is_not_repeated_and_its_confirmed_stop_stays_usable() {
+    ordinary_progress_stop(false, ProgressBoundary::InterruptedEdit).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn signed_progress_stop_acks_before_metadata_and_rechecks_current_visibility() {
+    ordinary_progress_stop(false, ProgressBoundary::PrivateAfterAck).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn socket_progress_stop_acks_before_metadata_and_rechecks_current_visibility() {
+    ordinary_progress_stop(true, ProgressBoundary::PrivateAfterAck).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoking_the_requester_after_progress_stop_admission_prevents_cancellation() {
+    ordinary_progress_stop(false, ProgressBoundary::RevokedAfterAck).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_progress_retries_a_definitely_rejected_creation() {
+    let mut live = Live::start(false).await;
+    live.source["event"]["text"] = json!("<@UBOT> fixture:chat-hang");
+    live.slack.first_post_retry_after.store(2, Ordering::SeqCst);
+    live.slack.rate_limit_first.store(true, Ordering::SeqCst);
+    live.source().await;
+    common::eventually(
+        Duration::from_secs(35),
+        Duration::from_millis(20),
+        async || {
+            live.slack
+                .posts
+                .lock()
+                .await
+                .iter()
+                .any(|post| {
+                    post["channel"] == "CTEST"
+                        && post["thread_ts"] == live.source["event"]["ts"]
+                        && post["text"].contains("Working")
+                })
+                .then_some(())
+        },
+    )
+    .await;
+    assert_eq!(live.slack.post_attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(live.slack.posts.lock().await.len(), 1);
+    let times = live.slack.post_times.lock().await;
+    assert!(times[1].duration_since(times[0]) >= Duration::from_secs(2));
+    drop(times);
+    live.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn uncertain_progress_creation_is_not_repeated_before_or_after_restart() {
+    let mut live = Live::start(false).await;
+    live.source["event"]["text"] = json!("<@UBOT> fixture:chat-hang");
+    live.slack.uncertain_first.store(true, Ordering::SeqCst);
+    live.source().await;
+    common::eventually(
+        Duration::from_secs(25),
+        Duration::from_millis(20),
+        async || {
+            live.slack
+                .posts
+                .lock()
+                .await
+                .iter()
+                .any(|post| post["text"].contains("Working"))
+                .then_some(())
+        },
+    )
+    .await;
+    // Exercise another actual eight-second progress poll before reopening.
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert_eq!(live.slack.post_attempts.load(Ordering::SeqCst), 1);
+    let chats = live.service.chat_list().await.unwrap();
+    assert_eq!(chats.len(), 1);
+    let chat = text(&chats[0], "id").to_owned();
+    stop_manager(&mut live.manager).await;
+    live.manager =
+        start_manager_socket(&live._root.path().join("config.json"), &live.origin, None).await;
+    common::eventually(
+        Duration::from_secs(25),
+        Duration::from_millis(20),
+        async || {
+            let detail = live.service.chat_detail(&chat).await.ok()?;
+            (detail["run"]["status"] == "succeeded").then_some(())
+        },
+    )
+    .await;
+    common::eventually(
+        Duration::from_secs(10),
+        Duration::from_millis(20),
+        async || {
+            live.slack
+                .posts
+                .lock()
+                .await
+                .iter()
+                .any(|post| post["text"].contains("I reviewed the workspace"))
+                .then_some(())
+        },
+    )
+    .await;
+    let posts = live.slack.posts.lock().await;
+    assert_eq!(
+        posts
+            .iter()
+            .filter(|post| post["text"].starts_with("Working"))
+            .count(),
+        1
+    );
+    drop(posts);
+    live.finish().await;
+}
+
+enum ProgressBoundary {
+    Confirmed,
+    InterruptedEdit,
+    InterruptedCleanup,
+    PrivateAfterAck,
+    RevokedAfterAck,
+}
+
+async fn ordinary_progress_stop(socket_mode: bool, boundary: ProgressBoundary) {
+    let mut live = Live::start(socket_mode).await;
+    live.slack.interrupt_update_body.store(
+        matches!(boundary, ProgressBoundary::InterruptedEdit),
+        Ordering::SeqCst,
+    );
+    live.source["event"]["text"] = json!(
+        "<@UBOT> fixture:chat-hang fixture:progress-step PRIVATE_NATIVE_REQUEST_DO_NOT_EXPORT"
+    );
+    live.source().await;
+    let post = common::eventually(
+        Duration::from_secs(25),
+        Duration::from_millis(20),
+        async || {
+            live.slack
+                .posts
+                .lock()
+                .await
+                .iter()
+                .find(|post| {
+                    post["text"].contains("Working")
+                        && post
+                            .get("blocks")
+                            .is_some_and(|blocks| blocks.contains("cairn_stop"))
+                })
+                .cloned()
+        },
+    )
+    .await;
+    assert_eq!(post["channel"], "CTEST");
+    assert_eq!(post["thread_ts"], live.source["event"]["ts"]);
+    assert!(!post["text"].contains("PRIVATE_NATIVE_REQUEST_DO_NOT_EXPORT"));
+    let blocks: Value = serde_json::from_str(&post["blocks"]).unwrap();
+    let block = blocks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|block| {
+            block["elements"].as_array().is_some_and(|elements| {
+                elements
+                    .iter()
+                    .any(|element| element["action_id"] == "cairn_stop")
+            })
+        })
+        .unwrap();
+    let button = block["elements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|element| element["action_id"] == "cairn_stop")
+        .unwrap();
+    let ts = live.slack.post_ids.lock().await[text(block, "block_id")].clone();
+    common::eventually(
+        Duration::from_secs(20),
+        Duration::from_millis(20),
+        async || {
+            live.slack
+                .updates
+                .lock()
+                .await
+                .iter()
+                .any(|update| {
+                    update["ts"] == ts
+                        && update["text"].contains("Writing the answer")
+                        && update["blocks"].contains("cairn_stop")
+                        && !update["blocks"].contains("PRIVATE_PROVIDER_PROGRESS_DO_NOT_EXPORT")
+                })
+                .then_some(())
+        },
+    )
+    .await;
+    if matches!(boundary, ProgressBoundary::InterruptedEdit) {
+        // The provider accepted this edit but interrupted its HTTP response.
+        // Exercise another native progress poll with no confirmed edit result.
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        assert_eq!(live.slack.updates.lock().await.len(), 1);
+    }
+    let payload = json!({
+        "type": "block_actions",
+        "api_app_id": "ATEST",
+        "team": { "id": "TTEST" },
+        "user": { "id": "UALICE" },
+        "channel": { "id": "CTEST" },
+        "container": { "type": "message", "channel_id": "CTEST", "message_ts": ts },
+        "message": {
+            "user": "UBOT", "app_id": "ATEST", "ts": ts,
+            "thread_ts": live.source["event"]["ts"],
+        },
+        "actions": [{
+            "type": "button",
+            "action_id": button["action_id"],
+            "block_id": block["block_id"],
+            "value": button["value"],
+            "action_ts": format!("{}.000100", now() / 1000),
+        }],
+    });
+    let mut bob = payload.clone();
+    bob["user"]["id"] = json!("UBOB");
+    live.control(&bob, "bob-cannot-stop-ordinary-work", false)
+        .await;
+    let mut forged = payload.clone();
+    forged["message"]["ts"] = json!("1700000002.000001");
+    forged["container"]["message_ts"] = forged["message"]["ts"].clone();
+    live.control(&forged, "wrong-progress-message", false).await;
+    let mut answer = payload.clone();
+    answer["actions"][0]["action_id"] = json!("cairn_answer_1_1");
+    answer["actions"][0]["block_id"] = json!(format!("{}:1", text(button, "value")));
+    live.control(&answer, "progress-is-not-an-issued-question", false)
+        .await;
+    assert!(!live.controller.stopped().await);
+    if matches!(
+        boundary,
+        ProgressBoundary::PrivateAfterAck | ProgressBoundary::RevokedAfterAck
+    ) {
+        live.slack.hold_reply_check.store(true, Ordering::SeqCst);
+        live.control(&payload, "stop-ack-before-current-metadata", true)
+            .await;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            live.slack.channel_entered.notified(),
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(3100)).await;
+        assert!(!live.controller.stopped().await);
+        if matches!(boundary, ProgressBoundary::PrivateAfterAck) {
+            live.slack.private.store(true, Ordering::SeqCst);
+        } else {
+            let response = common::send(
+                &live.app,
+                owner(
+                    "POST",
+                    &format!("{}/people/UALICE", live.route_path),
+                    &json!({ "action": "remove", "revision": live.route_revision }),
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        live.slack.release_channel.notify_one();
+        common::eventually(
+            Duration::from_secs(5),
+            Duration::from_millis(20),
+            async || {
+                live.service
+                    .store
+                    .list(work::EVENTS)
+                    .await
+                    .ok()?
+                    .iter()
+                    .any(|event| event["attempts"].as_u64().is_some_and(|n| n >= 1))
+                    .then_some(())
+            },
+        )
+        .await;
+        assert!(!live.controller.stopped().await);
+        let chats = live.service.chat_list().await.unwrap();
+        let detail = live
+            .service
+            .chat_detail(text(&chats[0], "id"))
+            .await
+            .unwrap();
+        assert_eq!(detail["run"]["status"], "running");
+        live.finish().await;
+        return;
+    }
+    live.slack.interrupt_update_body.store(
+        matches!(boundary, ProgressBoundary::InterruptedCleanup),
+        Ordering::SeqCst,
+    );
+    live.control(&payload, "alice-stops-ordinary-work", true)
+        .await;
+    common::eventually(
+        Duration::from_secs(20),
+        Duration::from_millis(20),
+        async || live.controller.stopped().await.then_some(()),
+    )
+    .await;
+    common::eventually(
+        Duration::from_secs(10),
+        Duration::from_millis(20),
+        async || {
+            live.slack
+                .posts
+                .lock()
+                .await
+                .iter()
+                .any(|post| {
+                    post["channel"] == "CTEST"
+                        && post["thread_ts"] == live.source["event"]["ts"]
+                        && post["text"].contains("Stopped.")
+                })
+                .then_some(())
+        },
+    )
+    .await;
+    common::eventually(
+        Duration::from_secs(5),
+        Duration::from_millis(20),
+        async || {
+            live.slack
+                .updates
+                .lock()
+                .await
+                .iter()
+                .any(|update| {
+                    update["channel"] == "CTEST"
+                        && update["ts"] == ts
+                        && update["text"] == "Work stopped."
+                        && !update["blocks"].contains("cairn_stop")
+                })
+                .then_some(())
+        },
+    )
+    .await;
+    live.control(&payload, "retired-progress-control", false)
+        .await;
+    live.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_question_with_multiple_fields_waits_for_all_canonical_choices() {
     let mut live = Live::start(false).await;
     live.source["event"]["text"] =

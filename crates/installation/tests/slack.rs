@@ -58,6 +58,8 @@ const APP_TOKEN: &str = "xapp-synthetic-slack-test";
 #[derive(Default)]
 struct Slack {
     posts: Mutex<Vec<HashMap<String, String>>>,
+    updates: Mutex<Vec<HashMap<String, String>>>,
+    interrupt_update_body: AtomicBool,
     post_ids: Mutex<HashMap<String, String>>,
     socket_opens: AtomicUsize,
     interrupt_socket_open: AtomicBool,
@@ -240,6 +242,30 @@ async fn api(
                     .into_response();
             }
             json!({"ok": true, "channel": channel, "ts": ts})
+        }
+        "/api/chat.update" => {
+            assert_eq!(values["as_user"], "true");
+            assert_eq!(values["parse"], "none");
+            assert!(
+                slack
+                    .post_ids
+                    .lock()
+                    .await
+                    .values()
+                    .any(|ts| ts == &values["ts"])
+            );
+            let channel = values["channel"].clone();
+            let ts = values["ts"].clone();
+            let _: Value = serde_json::from_str(&values["blocks"]).unwrap();
+            slack.updates.lock().await.push(values);
+            if slack.interrupt_update_body.swap(false, Ordering::SeqCst) {
+                return Body::from_stream(futures_util::stream::iter([
+                    Ok(b"{\"ok\":".to_vec()),
+                    Err(std::io::Error::other("Synthetic update body interrupted")),
+                ]))
+                .into_response();
+            }
+            json!({ "ok": true, "channel": channel, "ts": ts })
         }
         _ => panic!("unexpected Slack method {path}"),
     };

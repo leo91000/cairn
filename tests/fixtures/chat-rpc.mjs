@@ -155,6 +155,25 @@ export function chatFixture() {
       }
 
       const text = params.input[0].text
+      if (method === 'turn/start' && text.includes('fixture:progress-step')) {
+        const progressTurn = active
+        const progressThread = thread
+        setTimeout(() => {
+          if (active !== progressTurn || thread !== progressThread)
+            return
+          const item = { id: `progress-${active.id}`, type: 'agentMessage', text: '' }
+          active.items.push(item)
+          save()
+          notify('item/started', { threadId: thread.id, turnId: active.id, item })
+          notify('item/agentMessage/delta', {
+            threadId: thread.id,
+            turnId: active.id,
+            itemId: item.id,
+            delta: 'PRIVATE_PROVIDER_PROGRESS_DO_NOT_EXPORT',
+          })
+        }, 10000).unref()
+      }
+
       if (text.includes('fixture:codex-reconnect')) {
         for (const scope of [
           { threadId: 'another-thread', turnId: active.id, willRetry: true },

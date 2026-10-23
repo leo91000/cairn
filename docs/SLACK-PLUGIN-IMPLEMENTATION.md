@@ -1592,3 +1592,39 @@ Full Q1–Q20 remains incomplete, including questions/stop, broader conversation
 inputs, provider OAuth, tools/automations/RTS and the remaining Socket lifecycle.
 The management-parity and older root OAuth setup/refresh integration findings
 remain mandatory final gates. This checkpoint does not authorize merge/release.
+
+### Ordinary progress and requester-bound Stop
+
+The next slice reuses the existing generic native `progress` callback and
+delivery-owned storage. Luau waits at least eight seconds from its first callback
+before posting ordinary working status in the exact source thread. Queued work
+does not publish a working status; an issued question suppresses duplicate
+progress. Only the native short step labels leave Cairn, never tool arguments,
+model output or reasoning. A changed step edits the confirmed bot message through
+[`chat.update`](https://docs.slack.dev/reference/methods/chat.update/), explicitly
+providing text and blocks. This is periodic progress, not agent-session streaming.
+
+The issued Stop carries a delivery reference. Its binding includes original
+author, resource, workspace, channel, thread and confirmed message timestamp;
+question actions cannot use a progress reference. Native execution checks are
+repeated after consumer-side provider visibility checks, retaining revocation and
+current-turn fences after fast HTTP/WSS acknowledgement. Cancellation reaches the
+actual provider process and its final answer returns to the source thread.
+
+Write intent precedes provider I/O. Definite quota refusals reuse the existing
+method cooldown and channel pacing; uncertain creation is not repeated across
+restart. An uncertain edit keeps the confirmed Stop usable and suppresses further
+active edits. Final handling deletes the reference before one optional terminal
+edit without controls, then delivers the final answer even if cleanup fails.
+Uncertain cleanup can leave a visibly stale but inert control. Native terminal,
+revocation and purge removal remain the authoritative lifetime boundary.
+
+Actual-worker HTTP/WSS fixtures exercise the hanging provider, step transition,
+real cancellation, Bob/forged-message/forged-answer refusal, post-ACK visibility
+and revocation, uncertain edits/cleanup, definite creation quotas and uncertain
+creation through manager restart. These use simulated Slack/model/controller
+boundaries, not a real workspace. The [storage observation](performance/SLACK-PROGRESS-STATE.md)
+records the representative progress value and its lifetime cost. No native API,
+web/Android UI capability or new persisted envelope is added; the inventory stays
+within the unqualified epoch-12 / SQLite-11 boundary. Full final review/validation,
+live Slack qualification and all remaining Q1–Q20 gates still apply.

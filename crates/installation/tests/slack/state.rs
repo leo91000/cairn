@@ -62,7 +62,23 @@ impl Native {
     }
 
     async fn set(&self, key: &str, scoped: bool) -> cairn_installation::error::Result<Value> {
-        let mut input = json!({"key": key, "value": {"status": "sent", "fields": ["synthetic nonsecret question"], "answers": {}}});
+        self.set_value(
+            key,
+            scoped,
+            json!({
+                "status": "sent", "fields": ["synthetic nonsecret question"], "answers": {},
+            }),
+        )
+        .await
+    }
+
+    async fn set_value(
+        &self,
+        key: &str,
+        scoped: bool,
+        value: Value,
+    ) -> cairn_installation::error::Result<Value> {
+        let mut input = json!({ "key": key, "value": value });
         if scoped {
             input["delivery"] = self.delivery["id"].clone();
         }
@@ -179,12 +195,45 @@ async fn purging_a_conversation_retires_its_pending_plugin_state_atomically() {
 #[tokio::test]
 #[ignore = "local native question-state storage comparison; run alone"]
 async fn measure_question_state_storage() {
+    measure_state_storage(false).await;
+}
+
+#[tokio::test]
+#[ignore = "local native progress-state storage comparison; run alone"]
+async fn measure_progress_state_storage() {
+    measure_state_storage(true).await;
+}
+
+async fn measure_state_storage(progress: bool) {
     use cairn_installation::store::Store;
     let mut cases = Vec::new();
     for scoped in [false, true] {
-        let native = Native::new().await;
+        let mut native = Native::new().await;
+        let value = if progress {
+            native.context.event["name"] = json!("progress");
+            json!({
+                "key": format!("progress:{}", text(&native.delivery, "id")),
+                "status": "sent",
+                "delivery": native.delivery["id"],
+                "conversation": native.chat["id"],
+                "userId": "UALICE",
+                "resource": "11111111-1111-4111-8111-111111111111",
+                "team": "TTEST",
+                "channel": "CTEST",
+                "thread": "1700000000.000001",
+                "readyAt": 1792753600,
+                "message": "1700000001.000001",
+                "label": "Working — Writing the answer",
+            })
+        } else {
+            json!({
+                "status": "sent",
+                "fields": ["synthetic nonsecret question"],
+                "answers": {},
+            })
+        };
         let connection = native.context.connection.id.clone();
-        // Same near-capacity instance in each case. The one observed question
+        // Same near-capacity instance in each case. The one observed value
         // differs only by native ownership, not payload or unrelated occupancy.
         native
             .service
@@ -204,7 +253,10 @@ async fn measure_question_state_storage() {
             })
             .await
             .unwrap();
-        native.set("measured", scoped).await.unwrap();
+        native
+            .set_value("measured", scoped, value.clone())
+            .await
+            .unwrap();
         let rows = native.service.store.list("plugin-storage").await.unwrap();
         let row = rows.iter().find(|row| row["key"] == "measured").unwrap();
         let encoded = serde_json::to_vec(row).unwrap().len();
@@ -232,7 +284,10 @@ async fn measure_question_state_storage() {
                 .unwrap();
             let cpu = checkpoints::cpu_ms();
             let at = Instant::now();
-            native.set("measured", scoped).await.unwrap();
+            native
+                .set_value("measured", scoped, value.clone())
+                .await
+                .unwrap();
             writes.push(
                 json!({"sample":sample,"wallMs":at.elapsed().as_secs_f64()*1000.0,
                 "processCpuMs":checkpoints::cpu_ms()-cpu}),
@@ -252,9 +307,15 @@ async fn measure_question_state_storage() {
             "remainingRows":retained.len(),"reads":reads,"writes":writes,"retirements":retirements}));
     }
     eprintln!(
-        "QUESTION_STATE_STORAGE {}",
+        "{} {}",
+        if progress {
+            "PROGRESS_STATE_STORAGE"
+        } else {
+            "QUESTION_STATE_STORAGE"
+        },
         json!({"cases":cases,
-        "workload":"same synthetic question in 1000-key instance; 6 reads on one reopened reader, 6 actual native writes/retirements; reference ordinary state versus delivery-owned candidate",
+        "valueKind": if progress {"synthetic confirmed progress"} else {"synthetic question"},
+        "workload":"same synthetic value in 1000-key instance; 6 reads on one reopened reader, 6 actual native writes/retirements; reference ordinary state versus delivery-owned candidate",
         "cache":"connection-cold first read, five warm reads; OS cache retained; prepared schema/auth and fixture setup excluded",
         "limits":"serialized JSON bytes exclude database/WAL/index pages; reads bypass capability authorization, writes include host checks and actor scheduling; no live Slack/model/VM/network latency claim",
         "host":{"parallelism":std::thread::available_parallelism().ok().map(std::num::NonZero::get),

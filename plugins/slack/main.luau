@@ -18,5 +18,6 @@ return {
     message = conversation.message,
     interaction = conversation.interaction,
     question = workControls.question,
+    progress = workControls.progress,
     reply = conversation.reply,
 }

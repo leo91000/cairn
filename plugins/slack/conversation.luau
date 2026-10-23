@@ -42,7 +42,10 @@ return {
         })
     end,
     reply = function(event)
-        workControls.cleanup(event)
+        local cleanup = workControls.cleanup(event)
+        if cleanup then
+            return cleanup
+        end
         local state = event.checkpoint
         if state and state.status == "sent" then
             return { done = true }

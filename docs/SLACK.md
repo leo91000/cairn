@@ -140,8 +140,43 @@ blocking RPC waits for its registration instead of becoming ordinary steering.
 Fixtures exercise actual adapter RPC answers and cancellation over signed HTTP
 and verified WSS, plus manager restart, wrong authors/origins and post-admission
 visibility/revocation. These are local protocol fixtures, not live Slack evidence.
-General progress/Stop surfaces, optional/free-text questions and native Slack
-modals remain required.
+Optional/free-text questions and native Slack modals remain required.
+
+## Progress and author-controlled Stop
+
+For ordinary work without a question, the package waits at least eight seconds
+after its first native progress callback before posting a short status and Stop
+button in the source thread. Native polling can postpone that first post further;
+queued requests do not post a working status. Short work uses its final answer.
+The status uses only the native step labels, such as running a command or writing
+the answer; commands, arguments, model output and reasoning are not copied.
+Changed steps edit the confirmed bot message, with explicit literal text and
+blocks as required by [`chat.update`](https://docs.slack.dev/reference/methods/chat.update/).
+This is periodic status, not streamed model output or Slack's agent-session UI.
+
+The Stop reference binds the original requester, native delivery, resource,
+workspace, source thread and confirmed bot-message timestamp. Signed HTTP and
+Socket Mode admit and acknowledge the issued action before its consumer reads
+current channel metadata. Native author/execution checks apply again before
+cancellation. Another allowed participant, a forged source message or an answer
+action on a progress reference cannot stop or answer the execution. Visibility
+changes and requester revocation after acknowledgement still prevent cancellation.
+
+One delivery-owned record retains the initial delay and write intent across a
+worker restart. A definite rate-limit rejection permits another attempt after
+cooldown. An uncertain creation is not posted again; use Cairn if no confirmed
+Stop is available. An uncertain edit is not repeated and leaves the previously
+confirmed Stop usable. On final delivery, the package retires that reference
+before trying one terminal edit without a Stop button. Failed or uncertain
+cleanup may leave an inert button visible, but cannot prevent the final answer;
+native delivery removal also deletes owned state on revocation and purge.
+All writers share channel pacing and workspace/method cooldowns.
+
+The local actual-worker fixtures cover signed HTTP and verified WSS, step edits,
+actual provider cancellation, wrong authors/sources/actions, post-ACK authority
+changes, definite quota rejection, uncertain creation through restart, uncertain
+editing and interrupted cleanup. The [storage observation](performance/SLACK-PROGRESS-STATE.md)
+measures this record separately. No real Slack workspace has been used.
 
 ## First Socket Mode exchange
 
@@ -256,7 +291,7 @@ The complete contract remains [SLACK-PLUGIN-SPEC.md](SLACK-PLUGIN-SPEC.md). The 
 slice does not finish Socket Mode replacement/overlap and full liveness qualification; Slack OAuth installation and personal OAuth;
 private channels, Slack Connect, DMs/group DMs; automatic following of engaged
 threads or authorized initial thread history; slash commands, shortcuts, general
-progress/Stop and complete question/modal surfaces, App Home or streaming; authenticated files and
+complete question/modal surfaces, App Home or agent-session streaming; authenticated files and
 livrable links; collaboration/productivity tools and scoped agent profiles;
 workflows and bounded owner automations; or private ephemeral RTS search with
 verified engines. Expired mentions currently do not execute, but a private
