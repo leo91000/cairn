@@ -1,4 +1,6 @@
 mod common;
+#[path = "plugin_setup_activation/oauth.rs"]
+mod oauth;
 
 use axum::{http::StatusCode, response::IntoResponse};
 use cairn_installation::{

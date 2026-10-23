@@ -52,7 +52,9 @@ pub(crate) async fn activate(
         target.approved(),
         &values,
         connections::SaveSource::Setup(&draft),
-        None,
+        Some(std::sync::Arc::new(
+            super::super::operations::Owner::for_account(s, account).await?,
+        )),
     )
     .await?;
     // The final form may make network requests. It must not finish a former
@@ -71,6 +73,14 @@ pub(crate) async fn activate(
         .store
         .transaction(move |db| {
             target.current(db)?;
+            // Another form can start renewal after preparation. Its committed
+            // intent must remain inert until the confirmed credential arrives.
+            let root_credential = vault.get_in(db, &connections::credential_key(&draft.id))?;
+            if root_credential.is_some_and(|credential| credential["oauth"]["refreshing"] == true) {
+                return Err(Error::conflict(
+                    "The account is renewing or needs reconnection. Finish sign-in before activating.",
+                ));
+            }
             let connection = prepared.connection.clone();
             let result = prepared.persist_in(db)?;
             super::super::resources::activate_setup_in(

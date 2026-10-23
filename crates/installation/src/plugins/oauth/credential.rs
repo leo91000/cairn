@@ -1,6 +1,7 @@
 //! Host-owned authorization-code sign-in and refresh for any plugin. Package code
 //! sees only the account's API responses; neither it nor a client receives tokens.
 use super::super::{capabilities::target, connections, registry};
+use super::super::{resources::target::Target, setup::SetupDraft};
 use crate::{
     auth::{digest, hex_digest, token},
     config::{id, now},
@@ -18,6 +19,10 @@ use std::{
 
 const TTL: i64 = 10 * 60 * 1000;
 
+mod root_setup;
+
+pub(crate) use root_setup::{setup_credential, setup_token, start_setup};
+
 #[derive(Clone)]
 struct Flow {
     id: String,
@@ -26,6 +31,7 @@ struct Flow {
     binding: String,
     instance: Option<String>,
     revision: Option<String>,
+    setup: Option<Arc<Target>>,
     settings: Value,
     url: String,
     redirect: String,
@@ -118,7 +124,10 @@ impl Flows {
         let current = flows
             .get(flow)
             .filter(|f| {
-                f.plugin == plugin && f.state == "completed" && f.instance.as_deref() == instance
+                f.plugin == plugin
+                    && f.state == "completed"
+                    && f.instance.as_deref() == instance
+                    && f.setup.is_none()
             })
             .ok_or_else(expired)?;
         if current.settings[&oauth.client_id_setting] != settings[&oauth.client_id_setting]
@@ -219,7 +228,20 @@ fn setting(settings: &Value, key: &str) -> Result<String> {
 
 /// Owner starts a fresh flow. PKCE, client secrets and tokens remain in the host.
 pub async fn start(s: &Service, plugin: &str, input: &Value, binding: &str) -> Result<Value> {
-    let package = registry::active(s, plugin).await?;
+    start_for(s, plugin, input, binding, None).await
+}
+
+async fn start_for(
+    s: &Service,
+    plugin: &str,
+    input: &Value,
+    binding: &str,
+    setup: Option<Arc<Target>>,
+) -> Result<Value> {
+    let package = match &setup {
+        Some(target) => target.package().clone(),
+        None => registry::active(s, plugin).await?,
+    };
     let oauth = package
         .manifest
         .credential
@@ -227,9 +249,10 @@ pub async fn start(s: &Service, plugin: &str, input: &Value, binding: &str) -> R
         .and_then(|c| c.oauth.as_ref())
         .ok_or_else(|| Error::not_found("This plugin has no OAuth sign-in."))?;
     let instance = input["instance"].as_str();
-    let existing = match instance {
-        Some(instance) => Some(connections::get(s, plugin, instance).await?),
-        None => None,
+    let existing = match (&setup, instance) {
+        (Some(target), _) => Some(target.connection()),
+        (None, Some(instance)) => Some(connections::get(s, plugin, instance).await?),
+        (None, None) => None,
     };
     let settings = if input["settings"].is_object() {
         input["settings"].clone()
@@ -238,11 +261,17 @@ pub async fn start(s: &Service, plugin: &str, input: &Value, binding: &str) -> R
             .as_ref()
             .map_or_else(|| json!({}), |c| c.settings.clone())
     };
-    let settings = connections::settings(&package.manifest, &settings)?;
+    let mut schema = package.manifest.clone();
+    if setup.is_some() {
+        for field in &mut schema.settings {
+            field["required"] = json!(false);
+        }
+    }
+    let settings = connections::settings(&schema, &settings)?;
     let client_id = setting(&settings, &oauth.client_id_setting)?;
     let client_secret = match &oauth.client_secret_setting {
         Some(key) => {
-            let saved = match instance {
+            let saved = match existing.as_ref().map(|connection| connection.id.as_str()) {
                 Some(id) => connections::secret_values(s, id).await?,
                 None => Map::default(),
             };
@@ -289,13 +318,17 @@ pub async fn start(s: &Service, plugin: &str, input: &Value, binding: &str) -> R
     ]);
     url.query_pairs_mut()
         .extend_pairs(oauth.authorization_parameters.iter());
+    if let Some(target) = &setup {
+        root_setup::recheck(s, target).await?;
+    }
     let flow = Flow {
         id: state.clone(),
         plugin: plugin.to_owned(),
         package_digest: package.digest,
         binding: hex_digest(binding),
-        instance: instance.map(str::to_owned),
+        instance: existing.as_ref().map(|c| c.id.clone()),
         revision: existing.map(|c| c.revision),
+        setup,
         settings,
         url: url.into(),
         redirect,
@@ -429,7 +462,9 @@ pub async fn callback(s: &Service, parameters: &Value, binding: &str) -> Result<
         if package.digest != flow.package_digest {
             return Err(expired());
         }
-        if let Some(instance) = &flow.instance {
+        if let Some(target) = &flow.setup {
+            root_setup::recheck(s, target).await?;
+        } else if let Some(instance) = &flow.instance {
             let current = connections::get(s, &flow.plugin, instance).await?;
             if Some(&current.revision) != flow.revision.as_ref() {
                 return Err(expired());
@@ -459,6 +494,9 @@ pub async fn callback(s: &Service, parameters: &Value, binding: &str) -> Result<
             fields.push(("client_secret".into(), secret.clone()));
         }
         let response = post(s, &package.manifest, &oauth.token_url, &fields).await?;
+        if let Some(target) = &flow.setup {
+            root_setup::recheck(s, target).await?;
+        }
         credentials(&response, &flow, oauth, None)
     }
     .await;
@@ -484,7 +522,11 @@ fn authorize_token(
     db: &crate::store::Db<'_>,
     expected: &connections::Connection,
     editing: bool,
+    setup: Option<&SetupDraft>,
 ) -> Result<()> {
+    if let Some(setup) = setup {
+        return setup.recheck_in(db);
+    }
     if expected.enabled && !editing {
         connections::authorize(db, expected)?;
         return Ok(());
@@ -519,12 +561,14 @@ pub(crate) async fn access_token_managed(
 struct ConfigurationRefresh<'a> {
     owner: &'a super::super::operations::Owner,
     approved: &'a registry::ApprovedPackage,
+    setup: Option<&'a SetupDraft>,
 }
 
 struct RefreshSnapshot {
     connection: connections::Connection,
     management: Option<super::super::management::Authority>,
     editing: bool,
+    setup: Option<Box<SetupDraft>>,
     approval: registry::Approval,
     credential: Value,
 }
@@ -533,14 +577,16 @@ impl RefreshSnapshot {
     fn new(
         connection: &connections::Connection,
         management: Option<&super::super::management::Authority>,
-        editing: bool,
+        configuration: Option<&ConfigurationRefresh<'_>>,
         approval: registry::Approval,
         credential: Value,
     ) -> Self {
         Self {
             connection: connection.clone(),
             management: management.cloned(),
-            editing,
+            editing: configuration.is_some(),
+            setup: configuration
+                .and_then(|configuration| configuration.setup.cloned().map(Box::new)),
             approval,
             credential,
         }
@@ -551,7 +597,7 @@ impl RefreshSnapshot {
         if let Some(authority) = &self.management {
             authority.authorize(db)?;
         }
-        authorize_token(db, &self.connection, self.editing)?;
+        authorize_token(db, &self.connection, self.editing, self.setup.as_deref())?;
         let key = connections::credential_key(&self.connection.id);
         if vault.get_in(db, &key)?.as_ref() != Some(&self.credential) {
             return Err(Error::conflict(
@@ -570,6 +616,9 @@ async fn recheck_refresh(
 ) -> Result<()> {
     if let Some(configuration) = configuration {
         configuration.owner.recheck(s).await?;
+        if let Some(setup) = configuration.setup {
+            root_setup::recheck_snapshot(s, setup, approved).await?;
+        }
     }
     if let Some(authority) = management {
         authority.recheck(s).await?;
@@ -583,7 +632,7 @@ async fn persist_refresh_state(
     s: &Service,
     connection: &connections::Connection,
     management: Option<&super::super::management::Authority>,
-    editing: bool,
+    configuration: Option<&ConfigurationRefresh<'_>>,
     approval: registry::Approval,
     previous: Value,
     replacement: &Value,
@@ -591,11 +640,15 @@ async fn persist_refresh_state(
     let key = connections::credential_key(&connection.id);
     let vault = s.vault.clone();
     let encrypted = vault.encrypt(&key, replacement)?;
-    let snapshot = RefreshSnapshot::new(connection, management, editing, approval, previous);
+    let snapshot = RefreshSnapshot::new(connection, management, configuration, approval, previous);
     s.store
         .transaction(move |db| {
             snapshot.authorize(db, &vault)?;
-            db.set(&format!("mcp-secret:{key}"), &encrypted, None)
+            db.set(
+                &format!("mcp-secret:{key}"),
+                &encrypted,
+                snapshot.setup.as_ref().map(|setup| setup.expires_at),
+            )
         })
         .await
 }
@@ -611,7 +664,11 @@ pub(crate) async fn draft_token(
         s,
         connection,
         management,
-        Some(ConfigurationRefresh { owner, approved }),
+        Some(ConfigurationRefresh {
+            owner,
+            approved,
+            setup: None,
+        }),
     )
     .await
 }
@@ -630,25 +687,46 @@ async fn access_token_with(
     }
     if let Some(configuration) = &configuration {
         configuration.owner.recheck(s).await?;
+        if let Some(setup) = configuration.setup {
+            root_setup::recheck_snapshot(s, setup, configuration.approved).await?;
+        }
         configuration.approved.recheck(s).await?;
     }
     if !editing {
         connections::ensure_owner(s, connection).await?;
     }
     let expected = connection.clone();
+    let initial_setup = configuration
+        .as_ref()
+        .and_then(|configuration| configuration.setup.cloned());
     let initial_authority = management.cloned();
     s.store
         .read(move |db| {
             if let Some(authority) = initial_authority {
                 authority.authorize(db)?;
             }
-            authorize_token(db, &expected, editing)
+            authorize_token(db, &expected, editing, initial_setup.as_ref())
         })
         .await?;
     let key = connections::credential_key(&connection.id);
     let Some(saved) = s.vault.get(&key).await? else {
         return Ok(None);
     };
+    let setup_requires_consent = configuration.as_ref().is_some_and(|configuration| {
+        configuration.setup.is_some()
+            && configuration
+                .approved
+                .package
+                .manifest
+                .credential
+                .as_ref()
+                .is_some_and(|credential| credential.oauth.is_some())
+    });
+    if setup_requires_consent && !saved["oauth"].is_object() {
+        return Err(Error::unauthorized(
+            "This setup needs OAuth consent. Save the settings and sign in again.",
+        ));
+    }
     if saved["oauth"]["refreshing"] == true {
         return Err(Error::unauthorized(
             "The last authorization renewal was interrupted. Reconnect this account.",
@@ -703,7 +781,7 @@ async fn access_token_with(
         s,
         connection,
         management,
-        editing,
+        configuration.as_ref(),
         approval.clone(),
         saved.clone(),
         &consuming,
@@ -715,7 +793,7 @@ async fn access_token_with(
     let snapshot = RefreshSnapshot::new(
         connection,
         management,
-        editing,
+        configuration.as_ref(),
         approval.clone(),
         consuming.clone(),
     );
@@ -731,6 +809,7 @@ async fn access_token_with(
         binding: String::new(),
         instance: Some(connection.id.clone()),
         revision: Some(connection.revision.clone()),
+        setup: None,
         settings: connection.settings.clone(),
         url: String::new(),
         redirect: String::new(),
@@ -749,7 +828,13 @@ async fn access_token_with(
     let refreshed = credentials(&response, &flow, oauth, Some(&saved))?;
     recheck_refresh(s, management, configuration.as_ref(), approved).await?;
     persist_refresh_state(
-        s, connection, management, editing, approval, consuming, &refreshed,
+        s,
+        connection,
+        management,
+        configuration.as_ref(),
+        approval,
+        consuming,
+        &refreshed,
     )
     .await?;
     Ok(refreshed["token"].as_str().map(str::to_owned))

@@ -960,14 +960,20 @@ async fn prepare_managed(
         ));
     }
     let secret_keys = secret_fields.keys().cloned().collect::<Vec<_>>();
+    let saved_setup_token = match setup {
+        Some(setup) => {
+            let owner = request_owner
+                .as_ref()
+                .ok_or_else(|| Error::forbidden("Setup has no current owner authority."))?;
+            super::oauth::credential::setup_token(s, setup, approved, owner, management.as_ref())
+                .await?
+        }
+        None => None,
+    };
     if manifest.instance_form {
         let credential = match (token.is_empty(), existing) {
             (false, _) => Some(token.to_owned()),
-            (true, Some(id)) if setup.is_some() => s
-                .vault
-                .get(&credential_key(id))
-                .await?
-                .and_then(|record| record["token"].as_str().map(str::to_owned)),
+            (true, Some(_)) if setup.is_some() => saved_setup_token,
             (true, Some(_)) => {
                 let form_owner = request_owner.as_deref().ok_or_else(|| {
                     Error::forbidden("This configuration has no current owner authority.")
@@ -1005,9 +1011,10 @@ async fn prepare_managed(
     if signed_record.is_none()
         && let Some(oauth) = manifest.credential.as_ref().and_then(|c| c.oauth.as_ref())
     {
-        let previous = match existing {
-            Some(id) => Some(get(s, plugin_id, id).await?),
-            None => None,
+        let previous = match (setup, existing) {
+            (Some(draft), _) => Some(draft.connection()),
+            (None, Some(id)) => Some(get(s, plugin_id, id).await?),
+            (None, None) => None,
         };
         if let Some(previous) = previous {
             let client_changed =

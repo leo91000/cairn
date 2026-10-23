@@ -3,7 +3,7 @@
 //! adds guidance; on save it checks the instance once more. It runs in a one-shot
 //! worker with the draft's own credential and secrets, before anything is saved.
 use super::{
-    connections::{self, Connection, credential_key, secret_values},
+    connections::{self, Connection, secret_values},
     registry::{self, Package},
     scope::{self, Scope},
 };
@@ -40,6 +40,15 @@ pub(crate) fn typed_credential(manifest: &Manifest, input: &Value) -> Result<Opt
         .trim();
     if token.is_empty() {
         return Ok(None);
+    }
+    if manifest
+        .credential
+        .as_ref()
+        .is_some_and(|credential| credential.oauth.is_some())
+    {
+        return Err(Error::bad(
+            "Connect this account through OAuth; pasted access tokens are not accepted.",
+        ));
     }
     if manifest.credential.is_none()
         || token.len() > 16384
@@ -330,10 +339,11 @@ async fn form_authorized(
 /// temporary; saving them requires the draft's separate revision-checked PATCH.
 pub(crate) async fn setup_form(
     s: &Service,
-    package: &Package,
+    approved: &registry::ApprovedPackage,
     setup: super::setup::SetupDraft,
     input: &Value,
 ) -> Result<Value> {
+    let package = &approved.package;
     if !package.manifest.instance_form {
         return Err(Error::not_found("This plugin has no instance form."));
     }
@@ -345,23 +355,24 @@ pub(crate) async fn setup_form(
     let evaluation = Evaluation::preview(&package.manifest.settings, &["credential"], input)?;
     let instance = setup.id.clone();
     let urls = setup_urls(s, &package.manifest, &instance, input).await?;
+    let owner = Arc::new(super::operations::Owner::for_account(s, &setup.owner_account).await?);
     let credential = match typed_credential(&package.manifest, &input["token"])? {
         Some(token) => Some(token),
-        None => s
-            .vault
-            .get(&credential_key(&instance))
-            .await?
-            .map(|value| text(&value, "token").to_owned()),
+        None => super::oauth::credential::setup_token(s, &setup, approved, &owner, None).await?,
     };
+    let root = Arc::new(super::resources::target::Target::Setup {
+        draft: Box::new(setup.clone()),
+        approved: approved.clone(),
+    });
     let draft = Draft {
         management: None,
         credential,
         secrets: secrets(&package.manifest, &input["secrets"], saved),
         setup: Some(Box::new(setup)),
         urls: Some(urls),
-        owner: None,
+        owner: Some(owner),
         resource: None,
-        root: None,
+        root: Some(root),
     };
     run(s, package, Some(&instance), settings, draft, &evaluation).await
 }

@@ -591,6 +591,21 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 .map_or("", |identity| identity.account_id.as_str());
             setup::save(s, id, account, body, None).await
         }
+        ("POST", ["plugins", id, "setup-drafts", draft, "oauth"]) => {
+            let identity = input
+                .identity
+                .as_ref()
+                .ok_or_else(|| Error::unauthorized("Please sign in."))?;
+            oauth::credential::start_setup(
+                s,
+                id,
+                draft,
+                &identity.account_id,
+                body,
+                identity.oauth_binding(),
+            )
+            .await
+        }
         (
             _,
             [

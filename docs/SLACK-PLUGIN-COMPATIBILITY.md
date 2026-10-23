@@ -196,3 +196,27 @@ automatic migration or legacy-tree change is introduced. Pre-Slack downgrade and
 production deployment remain fenced. This is a checkpoint inventory, not final
 whole-contract compatibility qualification. Local overhead is recorded in
 [continuation measurements](performance/SLACK-CONTINUATION-DELIVERY.md).
+
+## Root OAuth on inert setup drafts
+
+Root consent reuses the in-memory credential flow, existing setup metadata and
+encrypted credential key/envelope. It introduces no persisted field, key family
+or table. A completed root code-grant record has the existing OAuth shape; refresh
+uses the existing consumed-intent metadata inventoried above. Both intent and
+completion apply the original setup TTL through the existing KV expiry column.
+Activation removes that TTL in its existing promotion transaction. Client/scope/
+secret edits retire the saved credential without changing the setup metadata
+shape or extending the draft deadline. No token is returned to a client.
+Earlier draft OAuth credentials containing only `{token}` remain stored, but
+forms and activation require new consent instead of promoting a pasted token.
+Activation also refuses a concurrent consumed intent in the promotion transaction.
+
+Older normal OAuth records remain unchanged. Earlier development readers lack
+the setup sign-in endpoint and have incomplete root OAuth activation/renewal;
+they are not a supported way to operate this draft feature. The already
+unreleased epoch-12 / SQLite-11 boundary and legacy tree stay unchanged, and this
+inventory does not qualify production transition, physical recovery, downgrade,
+deployment or release. [Local measurements](performance/SETUP-OAUTH-EXPIRATION.md)
+separate encoded-value sizes from KV expiry and production latency. Web/Android
+sign-in and equivalent public-MCP/agent-tool mutations remain required before
+complete delivery.

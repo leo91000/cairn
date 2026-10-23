@@ -215,7 +215,7 @@ pub async fn form(
         return Err(Error::conflict("Setup changed. Reload its form."));
     }
     let approved = approved_package(s, &draft).await?;
-    super::forms::setup_form(s, &approved.package, draft, input).await
+    super::forms::setup_form(s, &approved, draft, input).await
 }
 
 #[derive(Deserialize)]
@@ -228,6 +228,7 @@ struct Input {
     secrets: Value,
     #[serde(default)]
     token: Value,
+    credential_flow: Option<String>,
     revision: Option<String>,
 }
 
@@ -240,6 +241,14 @@ pub async fn save(
 ) -> Result<Value> {
     let input: Input =
         serde_json::from_value(input.clone()).map_err(|_| Error::bad("Invalid setup draft."))?;
+    let flow_lock = input
+        .credential_flow
+        .as_ref()
+        .map(|flow| s.plugins.oauth_flows.lock(&format!("flow:{flow}")));
+    let _flow_guard = match flow_lock {
+        Some(lock) => Some(lock.lock_owned().await),
+        None => None,
+    };
     let approved = registry::approved(s, plugin).await?;
     let package = &approved.package;
     // Snapshot before fetching owner authority. Cleanup must not remove drafts
@@ -277,15 +286,60 @@ pub async fn save(
     }
     let settings = connections::settings(&partial, &input.settings)?;
     let draft_id = old.as_ref().map_or_else(id, |d| d.id.clone());
+    if input.credential_flow.is_some() && !input.token.is_null() {
+        return Err(Error::bad(
+            "Choose either a sign-in or a pasted credential.",
+        ));
+    }
     let token = super::forms::typed_credential(&package.manifest, &input.token)?;
     let credential_key = connections::credential_key(&draft_id);
     let saved_credential = s.vault.get(&credential_key).await?;
-    let credential = token.is_some() || saved_credential.is_some();
-    let encrypted_credential = token
-        .map(|token| s.vault.encrypt(&credential_key, &json!({"token": token})))
-        .transpose()?;
     let saved = connections::secret_values(s, &draft_id).await?;
     let fields = connections::secrets(&partial, &input.secrets, &saved)?;
+    let signed = match &input.credential_flow {
+        Some(flow) => Some(
+            super::oauth::credential::setup_credential(
+                s,
+                plugin,
+                flow,
+                old.as_ref().ok_or_else(missing)?,
+                &settings,
+                &fields,
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    // Consent belongs to the saved application and permission settings. Editing
+    // those fields retires the old credential; a new consent starts after save.
+    let changed_oauth = package
+        .manifest
+        .credential
+        .as_ref()
+        .and_then(|credential| credential.oauth.as_ref())
+        .is_some_and(|oauth| {
+            saved_credential
+                .as_ref()
+                .is_some_and(|record| record.get("oauth").is_none())
+                || old.as_ref().is_some_and(|old| {
+                    old.settings[&oauth.client_id_setting] != settings[&oauth.client_id_setting]
+                        || oauth
+                            .scope_settings
+                            .keys()
+                            .any(|key| old.settings[key] != settings[key])
+                        || oauth
+                            .client_secret_setting
+                            .as_ref()
+                            .is_some_and(|key| fields.get(key) != saved.get(key))
+                })
+        });
+    let credential =
+        signed.is_some() || token.is_some() || (saved_credential.is_some() && !changed_oauth);
+    let record = signed.or_else(|| token.map(|token| json!({"token": token})));
+    let encrypted_credential = record
+        .as_ref()
+        .map(|record| s.vault.encrypt(&credential_key, record))
+        .transpose()?;
     let expires_at = old
         .as_ref()
         .map_or_else(|| now() + LIFETIME, |d| d.expires_at);
@@ -345,6 +399,8 @@ pub async fn save(
                     &encrypted,
                     Some(expires_at),
                 )?;
+            } else if changed_oauth {
+                db.delete(&format!("mcp-secret:{credential_key}"))?;
             }
             db.set(
                 &format!("mcp-secret:{secret_key}"),
@@ -357,6 +413,9 @@ pub async fn save(
             )
         })
         .await?;
+    if let Some(flow) = &input.credential_flow {
+        s.plugins.oauth_flows.consume(plugin, flow);
+    }
     Ok(result)
 }
 

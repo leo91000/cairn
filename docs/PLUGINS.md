@@ -523,6 +523,24 @@ and responses expose only their names. An optional declared credential is stored
 with the same encrypted TTL; responses expose only `credential: boolean`. Blank or
 omitted tokens keep the saved credential. PATCH keeps the draft ID and original expiry.
 
+For a root `credential.oauth`, save the application settings and secrets first,
+then POST `/<draft>/oauth` with `{revision}`. The returned flow uses the ordinary
+owner-bound credential callback, status and cancellation endpoints. PATCH the
+same draft with `credentialFlow` to retain the completed consent. A setup flow
+cannot create an ordinary connection or authorize another draft. Changing its
+saved revision, owner access or package approval invalidates consent in flight.
+Pending flows remain in memory for at most ten minutes; restarting requires new
+consent. Pasted OAuth access tokens are refused; earlier drafts containing only
+a pasted token also require new consent before forms or activation. Saving a different OAuth client,
+scope setting or client secret retires the previous credential before reconnecting.
+Forms and activation renew expired credentials under the captured draft and
+approval, retaining the original secret expiry. Uncertain renewal requires new
+consent and cannot be activated or retried with the consumed refresh token.
+Activation rechecks the stored consumed flag in its transaction, so a renewal
+started by another form after preparation cannot be promoted until it finishes.
+This native API does not complete draft sign-in in the web/Android editors or
+equivalent public-MCP/installation-tool mutations; those remain delivery gates.
+
 Draft lists use `?cursor=…` and return `{ items, nextCursor }`, with a bounded
 encoded response size. Both clients load all pages before displaying the saved
 list, and cancel unfinished reads when leaving the screen.
@@ -706,8 +724,10 @@ Only a confirmed response under the same authority replaces this consumed state.
 Uncertainty requires new consent, including after reopening the store; it cannot
 replay a potentially rotated refresh token. A successful new sign-in replaces the
 consumed state through ordinary revision-checked saving.
-Tokens remain in the host. This does not complete root OAuth sign-in/activation
-for inert setup drafts, which remains a separate draft-PR delivery requirement.
+Tokens remain in the host. The same renewal fences apply to inert setup roots,
+including both intent and completion retaining the original setup expiry. Native
+root consent and activation are described above; their client/tool integration
+remains a separate draft-PR delivery requirement.
 The [local encrypted-record observation](performance/ROOT-FORM-CREDENTIAL-RENEWAL.md)
 records the reused storage shape and its limits.
 

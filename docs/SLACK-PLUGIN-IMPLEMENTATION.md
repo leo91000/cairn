@@ -1458,12 +1458,12 @@ alongside the resource and personal OAuth model. The demonstrated Slack HTTP
 journey uses a root signing secret and a workspace bot secret; it does not prove
 root `credential.oauth` combined with inert setup.
 
-That generic combination remains unfinished: web and Android choose inert setup
-for packages declaring resources or webhooks, but those setup editors and
-activation do not yet carry an owner-bound root OAuth flow. The activation path
-must also distinguish a setup ID from a saved connection ID. For an already saved
-instance, resource configuration forms must use the root credential engine's
-serialized refresh rather than inject a potentially expired vault token.
+That generic combination remains unfinished in web, Android and both tool
+interfaces. The native setup API now carries owner-bound root OAuth consent,
+retains it through revision-checked saving, and distinguishes the setup ID from
+the active connection namespace during activation. Configuration forms use
+serialized renewal for saved and inert roots. Client/tool integration is still
+required; this does not establish a complete user-facing OAuth setup journey.
 
 These are unresolved integration gates, together with the documented equivalent
 public-MCP/installation-tool configuration operations. They must be completed
@@ -1471,6 +1471,42 @@ before final delivery and merge; a green Slack fixture or CI checkpoint does not
 waive them. Current Slack work continues with concrete protocol and conversation
 features under the accepted Q1–Q20 scope. The PR remains a draft, and no live Slack
 workspace or production OAuth exchange has qualified these combinations.
+
+### Native root consent before activation
+
+The owner setup API can start root authorization-code OAuth after saving the
+draft's client settings. The common callback keeps its account binding and PKCE,
+and additionally retains the exact setup snapshot and package approval before
+and after token I/O. A completed flow can be saved only to that draft and
+revision; active-account flows and other setup roots cannot consume it. Successful
+saving consumes the in-memory flow and writes the existing encrypted credential
+key with the original setup expiry. Changing client, scope settings or secret
+retires the previous consent. Pasted OAuth tokens are refused.
+
+Draft forms and activation share serialized root renewal, including committed
+refresh consumption before provider I/O and exact credential/approval/setup
+fences afterward. Intent and completion retain the draft's original expiration;
+uncertain refresh requires new consent and prevents activation. Required fields
+which the form derives after authentication do not block starting consent; final
+activation still requires them. Preparation uses the explicit setup namespace
+rather than looking for a live connection under the same ID.
+
+Independent review found concurrent activation could promote a consumed refresh
+started by another form after preparation. The actual provider-gated regression
+reproduced HTTP 200 instead of conflict; activation now checks the root's consumed
+flag inside its transaction. The draft remains available and activation succeeds
+after the held renewal confirms. A separately prepared earlier-draft `{token}`
+record also reproduced activation without OAuth consent; such root OAuth drafts
+now require reconnection, preserving their metadata and other configuration.
+
+Native regressions use actual owner HTTP, the real Luau worker and synthetic
+provider responses. They cover consent/save/form/activation, cross-target refusal,
+late edit/delete/owner/package changes, expired renewal, uncertain response and
+secret expiration. Prepared expiry uses the real credential obtained by code
+exchange. [Storage observations](performance/SETUP-OAUTH-EXPIRATION.md) compare
+the same encrypted value with and without a KV deadline. Client sign-in surfaces,
+both tool mutation interfaces and the complete Slack OAuth lifecycle remain open;
+this API evidence is not a complete product or live Slack qualification.
 
 
 ## First Socket Mode exchange and measured protocol blockers
@@ -1635,8 +1671,8 @@ The actual owner HTTP/Luau regression reproduced a resource form using an expire
 root token without invoking renewal. Saved roots now use the existing serialized
 configuration refresh helper, preserving paused-instance editing. Concurrent
 previews share one refresh and receive only provider data, never credentials.
-Inert setup roots keep their current typed-secret path; root OAuth draft sign-in
-and activation remain unimplemented and mandatory.
+Inert roots now use the same renewal fences. Their native root OAuth consent and
+activation API is described below; client/tool integration remains mandatory.
 
 The next fixture reproduced late writes after owner revocation and package
 approval replacement: the form response failed but its rotated token had already
