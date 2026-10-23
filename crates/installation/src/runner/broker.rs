@@ -509,9 +509,17 @@ async fn enforce_limits(
     }
 }
 
-async fn plan_run_id(path: &Path) -> Result<String> {
+async fn vm_plan_run_id(path: &Path) -> Result<Option<String>> {
     let plan: Value = serde_json::from_slice(&tokio::fs::read(path).await?)?;
-    Ok(text(&plan, "runId").to_owned())
+
+    // The manager and its VM controller share this directory. A migrated run's
+    // native plan still authorizes remote workspace tools while the old VM
+    // disk is retired, so that plan belongs to the native execution lifecycle.
+    if plan["backend"] == "native" {
+        return Ok(None);
+    }
+
+    Ok(Some(text(&plan, "runId").to_owned()))
 }
 
 #[cfg(test)]
@@ -784,7 +792,7 @@ pub(super) async fn erase_attempt_content(broker: &Broker, run: &str) -> Result<
             let Some(attempt) = name.strip_suffix(".json").filter(|v| uuid(v).is_ok()) else {
                 continue;
             };
-            if plan_run_id(&entry.path()).await? != run {
+            if vm_plan_run_id(&entry.path()).await?.as_deref() != Some(run) {
                 continue;
             }
             // Fence a delayed start before removing its short-lived credentials.
