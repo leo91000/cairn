@@ -32,7 +32,7 @@ import {
 } from '../attachments'
 import { chatDelivery, chatWaitNotice, scheduledWakeup } from '../chat-delivery'
 import { chatListCarried, chatList as chats, publishChats } from '../chat-list'
-import { chatQuota, isQuotaMessage } from '../chat-quota'
+import { chatQuota, isQuotaMessage, quotaHiddenEvents } from '../chat-quota'
 import { liveWakeup, waitStatus } from '../chat-wait'
 import ActivityFeed from '../components/ActivityFeed.vue'
 import AgentAvatar from '../components/AgentAvatar.vue'
@@ -229,8 +229,11 @@ const openCodeRegionBlocked = computed(() => visibleError.value.startsWith('Open
 const errorShown = computed(() => {
   const run = detail.value?.run
   const reason = run?.status === 'failed' ? run.error : undefined
-  return !error.value && !detail.value?.error && !!reason
-    && events.value.some(event => event.runId === run?.id && sameReason(failureReason(event) ?? '', reason) && !stopEcho(event))
+  if (error.value || detail.value?.error || !reason)
+    return false
+  // Quota bookkeeping hides some failures from the conversation: they show nothing.
+  const hidden = quotaHiddenEvents(events.value)
+  return events.value.some(event => event.runId === run?.id && !hidden.has(`${event.runId}:${event.id}`) && sameReason(failureReason(event) ?? '', reason) && !stopEcho(event))
 })
 watch(() => [visibleError.value, detail.value?.id, detail.value?.run?.finishedAt], () => {
   dismissedError.value = false

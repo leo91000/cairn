@@ -802,19 +802,20 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> 
             .then(|| rest.find(|(_, next)| stopped(next).is_some() || turn_end(next)))
             .flatten()
             .and_then(|(stop, next)| stopped(next).map(|status| (*stop, status)));
-        if failed && let Some((stop, "cancelled")) = stop {
+        // The run stopped during the retried attempt: the message ends there, with what that
+        // attempt said.
+        if failed && let Some((stop, status)) = stop {
             return Ok(Turn::Done {
                 delivered,
                 end: stop,
                 run: run_id,
-                status: "cancelled",
+                status,
             });
         }
         let later = history[index + 1..].iter().any(|(_, next)| turn_end(next));
         // While the run waits for an account on this message, its failure answers.
         let waiting = waiting_for_account && current && !later;
-        let continued =
-            failed && !waiting && ((retried && stop.is_none()) || (current && (later || active)));
+        let continued = failed && !waiting && (retried || (current && (later || active)));
         if !continued {
             return Ok(Turn::Done {
                 delivered,

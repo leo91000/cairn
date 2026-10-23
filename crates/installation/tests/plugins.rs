@@ -1530,6 +1530,72 @@ async fn replies_answer_a_retried_turn_with_its_last_attempt() {
 }
 
 #[tokio::test]
+async fn replies_answer_a_retried_turn_stopped_by_cairn_with_its_last_attempt() {
+    let (_root, s, connection) = fixture().await;
+    let event = json!({
+        "name": "message",
+        "revision": connection.revision,
+        "authorId": "300",
+        "payload": { "id": "500", "author": { "id": "300", "name": "Sarah" } },
+    });
+    let receipt = work::submit(
+        &s,
+        &context(&connection, &event),
+        &json!({ "text": "hello" }),
+    )
+    .await
+    .unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+    let run_id = text(&chat, "runId");
+    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
+        let store = s.store.clone();
+        let run_id = run_id.to_owned();
+        async move { store.event(&run_id, kind, text, payload).await.unwrap() }
+    };
+
+    event(
+        "chat.user",
+        "hello",
+        Some(json!({ "messageId": receipt["messageId"] })),
+    )
+    .await;
+    // Claude Code says an API error as a reply before the turn fails.
+    let overloaded = "API Error: 529 Overloaded";
+    let echo = json!({ "item": { "type": "agent_message", "text": overloaded } });
+    event("item.completed", overloaded, Some(echo)).await;
+    event(
+        "turn.failed",
+        overloaded,
+        Some(json!({ "error": { "message": overloaded } })),
+    )
+    .await;
+    let retry = json!({ "retry": { "attempt": 1, "limit": 3 } });
+    event("retry.scheduled", "Temporary agent error.", Some(retry)).await;
+    event("turn.started", "", None).await;
+    let partial = json!({ "item": { "type": "agent_message", "text": "partial retry" } });
+    event("item.completed", "partial retry", Some(partial)).await;
+    // Cairn stops the retried attempt at its time limit: no turn end, only the status.
+    event("status", "failed", None).await;
+    s.store
+        .patch_run(run_id, json!({ "status": "failed" }))
+        .await
+        .unwrap();
+
+    let reply = work::reply(&s, &connection, &delivery)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (reply.text.as_str(), reply.status),
+        ("partial retry", "failed")
+    );
+}
+
+#[tokio::test]
 async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
     let (_root, s, connection) = fixture().await;
     let event = json!({

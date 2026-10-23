@@ -205,6 +205,31 @@ class ConversationPresentationTest {
         // A run records at most 10,000 characters of its error.
         val truncated = chat.copy(run = chat.run!!.copy(error = capacity.take(20)))
         assertTrue(failureShown(truncated, listOf(failure)))
+        // Quota bookkeeping hides the failed status of an exhausted turn: the banner keeps its
+        // reason.
+        val limit = "You've hit your usage limit"
+        val timeLimit = "Run exceeded its time limit."
+        val exhausted =
+            listOf(
+                RunEvent(1, 1, "turn.started", "", runId = "run"),
+                RunEvent(
+                    2,
+                    2,
+                    "turn.failed",
+                    limit,
+                    buildJsonObject { put("error", buildJsonObject { put("message", limit) }) },
+                    runId = "run",
+                ),
+                RunEvent(
+                    3,
+                    3,
+                    "status",
+                    "failed",
+                    buildJsonObject { put("error", buildJsonObject { put("message", timeLimit) }) },
+                    runId = "run",
+                ),
+            )
+        assertFalse(failureShown(chat.copy(run = chat.run!!.copy(error = timeLimit)), exhausted))
     }
 
     private val first = ChatMessage("one", text = "Bonjour")
