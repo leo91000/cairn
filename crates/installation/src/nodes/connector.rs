@@ -394,6 +394,23 @@ fn controller_ready(health: &Value) -> bool {
         && health["dataRoot"] == super::node_data_dir().to_string_lossy().as_ref()
 }
 
+/// Older native controllers do not participate in foreground-preemption locks.
+/// They remain executable, but cannot safely share storage with this warmer.
+fn archive_catalog(
+    health: &Value,
+    reply: &Value,
+) -> Result<Option<Vec<crate::project_archives::Archive>>> {
+    if health["projectArchives"] != 1 {
+        return Ok(None);
+    }
+    reply
+        .get("projectArchives")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(Error::from)
+}
+
 async fn heartbeat(
     client: &reqwest::Client,
     origin: &url::Url,
@@ -453,9 +470,8 @@ async fn heartbeat(
                     .map_err(|_| Error::bad("Invalid master heartbeat."))?;
                 if ready {
                     if let Ok(guard) = archive_warmer.clone().try_lock_owned()
-                        && let Some(descriptors) = value.get("projectArchives")
+                        && let Some(descriptors) = archive_catalog(&health, &value)?
                     {
-                        let descriptors = serde_json::from_value(descriptors.clone())?;
                         let (client, origin, token, stop) = (
                             client.clone(),
                             origin.clone(),
@@ -571,6 +587,21 @@ mod capacity_tests {
 #[cfg(test)]
 mod origin_tests {
     use super::*;
+
+    #[test]
+    fn legacy_controllers_never_start_archive_warming() {
+        let legacy = serde_json::json!({ "status": "ok", "backend": "native", "nodeProtocol": 2 });
+        let incompatible_catalog =
+            serde_json::json!({ "projectArchives": ["unsupported archive descriptor"] });
+        assert!(
+            super::archive_catalog(&legacy, &incompatible_catalog)
+                .unwrap()
+                .is_none()
+        );
+        let current = serde_json::json!({ "projectArchives": 1 });
+        let reply = serde_json::json!({ "projectArchives": [] });
+        assert!(super::archive_catalog(&current, &reply).unwrap().is_some());
+    }
 
     #[test]
     fn only_the_recorded_manager_origin_relaxes_the_https_rule() {
