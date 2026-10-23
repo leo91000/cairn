@@ -45,6 +45,20 @@ describe('conversation quota presentation', () => {
     expect(activityEntries(events, false).length).toBeGreaterThan(entries.length)
   })
 
+  it('folds a reply that only repeats the turn failure, as Claude Code does for API errors', () => {
+    const overloaded = 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'
+    const history = [
+      event(1, 'chat.user', { text: 'Hello' }),
+      event(2, 'turn.started'),
+      event(3, 'item.completed', { item: { id: 'work', type: 'agent_message', text: 'Work is preserved.' } }),
+      event(4, 'item.completed', { item: { id: 'api', type: 'agent_message', text: overloaded } }),
+      event(5, 'turn.failed', { error: { message: overloaded } }),
+      event(6, 'status', { error: { message: overloaded } }, 'failed'),
+    ]
+    const entries = quotaEntries(activityEntries(history, true), history)
+    expect(entries.map(entry => entry.kind === 'message' ? entry.text : entry.kind === 'notice' ? entry.artifact.title : entry.kind)).toEqual(['Hello', 'Work is preserved.', 'The agent ran into an error'])
+  })
+
   it('requires manual resume for saved failures', () => {
     expect(chatQuota({ ...run, status: 'failed', error: message }, events)?.automatic).toBe(false)
     expect(chatQuota({ ...run, status: 'succeeded', accountWaitReason: null }, events)).toBeNull()

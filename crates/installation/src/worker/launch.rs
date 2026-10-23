@@ -1013,6 +1013,10 @@ impl Execution<'_> {
             || self.run["chatExecution"].is_object())
             && has_session;
         let error = (!error.is_empty()).then(|| run_output::redact(&error, self.sensitive));
+        // A failed run's final status says why it ended when no earlier event did.
+        let details = error
+            .as_ref()
+            .map(|message| json!({ "error": { "message": message } }));
         let mut patch = json!({
             "status": status,
             "finishedAt": now(),
@@ -1045,8 +1049,9 @@ impl Execution<'_> {
             db.patch_run(&id, &patch)?;
             Ok(status)
         }).await?;
+        let details = details.filter(|_| status == RunStatus::Failed);
         s.store
-            .event(&self.id, "status", status.as_str(), None)
+            .event(&self.id, "status", status.as_str(), details)
             .await
     }
 
