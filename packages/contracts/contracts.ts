@@ -14,6 +14,8 @@ export const accessPolicy = z.object({
   mcps: z.array(id).max(100).nullable().default(null),
   mcpTools: z.record(id, z.array(z.string().min(1).max(200)).max(500)).default({}),
   installation: z.boolean().default(false),
+  // Hands tasks to conversations of agents it covers, on any coding agent and model.
+  delegation: z.boolean().default(false),
   sandbox: z.enum(['yolo', 'workspace-write', 'read-only']).default('yolo'),
 })
 export const agentInput = z.object({
@@ -46,6 +48,7 @@ export const agentUpdate = z.object({
     nodes: accessPolicy.shape.nodes.removeDefault().optional(),
     backend: accessPolicy.shape.backend.removeDefault().optional(),
     installation: accessPolicy.shape.installation.removeDefault().optional(),
+    delegation: accessPolicy.shape.delegation.removeDefault().optional(),
   }).optional(),
   exclusiveNodes: agentInput.shape.exclusiveNodes.removeDefault().optional(),
   plugins: agentInput.shape.plugins.removeDefault().optional(),

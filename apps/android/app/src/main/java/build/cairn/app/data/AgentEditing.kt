@@ -185,6 +185,7 @@ fun agentChanges(original: Agent, draft: AgentDraft): List<AgentSection> {
             add(AgentSection.Nodes)
         if (after.sandbox != before.sandbox) add(AgentSection.Sandbox)
         if (after.installation != before.installation) add(AgentSection.Powers)
+        if ((after.delegation == true) != (before.delegation == true)) add(AgentSection.Powers)
     }
 }
 
@@ -481,6 +482,7 @@ fun agentAccessSummary(
             )
                 add("Exclusivité")
             if (access.installation) add("Gestion de l’installation")
+            if (access.delegation == true) add("Délégation de tâches")
         }
         .joinToString(" · ")
 }
@@ -701,6 +703,7 @@ fun agentReductions(
         .filter { it !in edited.plugins }
         .forEach { id -> add(pluginGrantLabel(id, resources.catalog)) }
     if (before.installation && !after.installation) add("gestion de l’installation")
+    if (before.delegation == true && after.delegation != true) add("délégation de tâches")
     if (before.backend == NATIVE_BACKEND && after.backend != NATIVE_BACKEND) add("exécution native")
     if ((sandboxStrictness[after.sandbox] ?: 0) > (sandboxStrictness[before.sandbox] ?: 0))
         add("mode d’exécution « ${sandboxLabel(after.sandbox)} »")
@@ -760,6 +763,13 @@ fun agentReview(
             ReviewLine(
                 ReviewKind.Power,
                 "Ajout : gestion de l’installation. Cet agent pourra créer et modifier les agents (y compris leurs permissions), projets, skills, connexions MCP, missions et exécutions de toute l’installation.",
+            )
+        )
+    if (after.delegation == true && before.delegation != true)
+        add(
+            ReviewLine(
+                ReviewKind.Power,
+                "Ajout : délégation de tâches. Cet agent pourra lancer des conversations qui lui rendent compte, sur tout agent de code et modèle, en tant que lui-même ou qu’un agent dont il couvre les accès.",
             )
         )
     edited.plugins
@@ -866,6 +876,7 @@ fun rebaseAgent(
                 mcps = mergeList(a.mcps, m.mcps, t.mcps),
                 mcpTools = tools,
                 installation = pick(a.installation, m.installation, t.installation),
+                delegation = pick(a.delegation, m.delegation, t.delegation),
                 sandbox = pick(a.sandbox, m.sandbox, t.sandbox),
                 backend = pick(a.backend, m.backend, t.backend),
             ),

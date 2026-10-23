@@ -242,6 +242,22 @@ class AgentEditingTest {
     }
 
     @Test
+    fun delegationIsAReviewedPowerSentOnlyOnceSet() {
+        val granted = agent.copy(access = agent.access.copy(delegation = true))
+        val added = agentReview(agent, granted, resources, AgentPreview())
+        assertEquals(ReviewKind.Power, added.single().kind)
+        assertTrue(added.single().text.startsWith("Ajout : délégation de tâches."))
+        assertEquals(listOf("délégation de tâches"), agentReductions(granted, agent, resources))
+        // Unknown to an older installation, the setting is left out until it is set.
+        assertFalse("delegation" in agentSaveBody(agent)["access"]!!.jsonObject)
+        val revoked = granted.copy(access = granted.access.copy(delegation = false))
+        assertEquals(
+            "false",
+            agentSaveBody(revoked)["access"]!!.jsonObject["delegation"]!!.jsonPrimitive.content,
+        )
+    }
+
+    @Test
     fun reviewListsEveryRemovedGrantAndPower() {
         val granted =
             agent.copy(

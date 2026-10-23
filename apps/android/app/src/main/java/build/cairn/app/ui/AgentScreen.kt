@@ -897,15 +897,16 @@ private fun AgentOverview(
             AgentSection.Powers,
             when {
                 !resources.nodesLoaded -> NOT_LOADED
-                exclusive.isEmpty() && !access.installation -> "Aucun"
+                exclusive.isEmpty() && !access.installation && access.delegation != true -> "Aucun"
                 exclusive.isEmpty() -> ""
-                access.installation -> ""
+                access.installation || access.delegation == true -> ""
                 else -> "· gestion désactivée"
             },
             changed = AgentSection.Powers in changed,
             chips = {
                 if (exclusive.isNotEmpty()) PowerChip("Exclusivité")
                 if (access.installation) PowerChip("Gestion de l’installation")
+                if (access.delegation == true) PowerChip("Délégation de tâches")
             },
         ) {
             open(AgentSection.Powers)
@@ -1917,6 +1918,14 @@ private fun PowersSection(
             power = true,
         ) { on ->
             change { it.copy(installation = on) }
+        }
+        SwitchRow(
+            "Déléguer des tâches",
+            "Confier des tâches d’une conversation à de nouvelles conversations qui lui rendent compte, sur tout agent de code et modèle. Chacune s’exécute en tant que cet agent, ou qu’un agent dont il couvre les accès, dans son propre espace de travail. Une conversation déléguée ne délègue pas à son tour, et 5 au plus travaillent en même temps.",
+            access.delegation == true,
+            power = true,
+        ) { on ->
+            change { it.copy(delegation = on) }
         }
     }
     val exclusive = agent.effectiveExclusive(nodes)

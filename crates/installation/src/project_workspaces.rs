@@ -274,6 +274,23 @@ async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Resul
                 format!("Published {}: {url}", text(result, "title"))
             })
         }
+        "delegate_task" => ToolResult::from_result(
+            crate::delegation::delegate(s, bearer, args).await,
+            |result| {
+                format!(
+                    "Delegated “{}” to {} as conversation {}. Wait with wait_for and the task_finished condition.",
+                    text(result, "title"),
+                    text(result, "agentName"),
+                    text(result, "chatId")
+                )
+            },
+        ),
+        "task_status" => {
+            ToolResult::from_result(crate::delegation::status(s, bearer, args).await, summary)
+        }
+        "task_cancel" => {
+            ToolResult::from_result(crate::delegation::cancel(s, bearer, args).await, summary)
+        }
         "open_project" => ToolResult::from_result(
             s.projects.open(s, bearer, text(args, "projectId")).await,
             |result| {
@@ -313,6 +330,12 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         }
         Err(_) => Vec::new(),
     };
+    let token = bearer.to_owned();
+    let delegates = s
+        .store
+        .read(move |db| Ok(crate::delegation::offered(db, &token)))
+        .await
+        .unwrap_or(false);
     let mut tools = vec![
         open_project_tool(),
         crate::artifacts::tool(),
@@ -328,6 +351,9 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         crate::nodes::exclusive::status_tool(),
         crate::nodes::exclusive::renew_tool(),
     ];
+    if delegates {
+        tools.extend(crate::delegation::tools());
+    }
     // Package tools never shadow Cairn's own.
     // Listing stays available without a live run; calls authorize on their own.
     let granted = crate::plugins::agents::tools(s, bearer)

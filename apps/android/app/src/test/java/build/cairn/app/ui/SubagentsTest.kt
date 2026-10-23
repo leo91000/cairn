@@ -1,5 +1,6 @@
 package build.cairn.app.ui
 
+import build.cairn.app.data.Chat
 import build.cairn.app.data.RunEvent
 import kotlinx.serialization.json.*
 import org.junit.Assert.assertEquals
@@ -519,5 +520,69 @@ class SubagentsTest {
                 .single()
                 .single()
         assertEquals("claude-sonnet-5 · 1 utilisation d’outil · 12 jetons", agent.details())
+    }
+
+    private fun delegated(chatId: String) =
+        event(
+            "chat.delegated",
+            buildJsonObject {
+                put("chatId", chatId)
+                put("title", "Task $chatId")
+                put("agentName", "Reviewer")
+                put("provider", "codex")
+                put("model", "gpt-5.5")
+                put("task", "Review for $chatId")
+            },
+        )
+
+    @Test
+    fun `tasks delegated together form one team followed through their conversations`() {
+        val events = listOf(user("Review it"), delegated("a"), delegated("b"), delegated("a"))
+        val team = teams(events).single()
+        assertEquals(listOf("a", "b"), team.map { it.delegation?.chatId })
+        assertEquals("Task a", team.first().name)
+        assertEquals("Review for a", team.first().prompt)
+        assertEquals("gpt-5.5", team.first().model)
+        // A delegated task keeps working after the requester's turn ends.
+        assertEquals(SubagentState.RUNNING, team.first().state(active = false))
+
+        fun follow(chat: Chat?) = team.first().followed(chat).let { it.state to it.summary(false) }
+        val chat = Chat("a", status = "running", runId = "child")
+        assertEquals(SubagentState.RUNNING to "En cours", follow(chat))
+        assertEquals(
+            SubagentState.RUNNING to "En attente d’un runner",
+            follow(chat.copy(status = "idle", runId = null)),
+        )
+        assertEquals(
+            SubagentState.RUNNING to "Pose une question",
+            follow(chat.copy(status = "succeeded", pendingQuestions = 1)),
+        )
+        assertEquals(
+            SubagentState.DONE to "2 findings",
+            follow(chat.copy(status = "succeeded", preview = "2 findings")),
+        )
+        assertEquals(
+            SubagentState.DONE to "A rendu compte",
+            follow(chat.copy(status = "succeeded")),
+        )
+        assertEquals(
+            SubagentState.STOPPED to "Arrêtée",
+            follow(chat.copy(status = "cancelled", paused = true)),
+        )
+        assertEquals(SubagentState.FAILED to "Échec", follow(chat.copy(status = "failed")))
+        assertEquals(SubagentState.STOPPED to "Conversation supprimée", follow(null))
+        assertEquals("", team.first().elapsed(active = true, now = 10_000))
+    }
+
+    @Test
+    fun `earlier delegated tasks stay with the request that started them`() {
+        val timeline =
+            timelineEntries(listOf(user("First"), delegated("a"), user("Second")), chat = true)
+        assertTrue(currentSubagents(timeline).isEmpty())
+        val followed = timeline.followingDelegations(listOf(Chat("a", status = "succeeded")))
+        assertEquals(
+            SubagentState.DONE,
+            followed.single { it.agents.isNotEmpty() }.agents.single().state,
+        )
     }
 }

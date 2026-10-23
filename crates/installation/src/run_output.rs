@@ -427,7 +427,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             unopened repositories are not on disk):\n{}\n\n{tooling}\n\nSelected skills (read a skill's SKILL.md before using it; its \
             scripts and references sit beside it):\n{skills}\n\n{plugins}\n\nRun this task to completion within \
             its stated scope. Preserve unrelated files. Do not expose credentials. \
-            {interaction}\n{deliverables}{requested}\n{waiting} All task-authorized effects such as creating \
+            {interaction}\n{deliverables}{requested}\n{waiting}{delegation} All task-authorized effects such as creating \
             PRs or releasing must follow their checks. Use .agents/skills for skills. \
             Summarize actual changes, validation, external links and remaining blockers \
             at the end.",
@@ -449,6 +449,14 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             crate::waits::INSTRUCTIONS
         } else {
             ""
+        },
+        delegation = match (
+            run["isolated"] == true,
+            text(&run["snapshot"], "delegation")
+        ) {
+            (true, "requester") => format!(" {}", crate::delegation::INSTRUCTIONS),
+            (true, "delegated") => format!(" {}", crate::delegation::DELEGATED_INSTRUCTIONS),
+            _ => String::new(),
         },
     )
 }

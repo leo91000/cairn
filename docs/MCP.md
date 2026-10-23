@@ -151,6 +151,14 @@ access is restricted. It requires no external OAuth connection or personal token
 Disabling the option, ending or cancelling the execution, or changing its chat
 turn invalidates the access. See [the installation-access decision](adr/0036-opt-in-installation-tools-for-agents.md).
 
+An agent with **Task delegation** also finds `delegate_task`, `task_status` and
+`task_cancel` on `cairn_workspace` in conversations it did not receive as a
+delegated task. `delegate_task` takes the task text and optionally a title, an
+agent the caller covers, a project, a coding agent (`codex`, `claude`,
+`opencode`), a model, a reasoning effort and a retry `requestId`. It returns the
+delegated conversation; `task_status` with its `chatId` returns its state, outcome,
+pending questions and final report. See [delegated tasks](adr/0059-delegated-tasks.md).
+
 ## Managing conversations
 
 Public MCP clients and agents with installation access share the same chat operations,

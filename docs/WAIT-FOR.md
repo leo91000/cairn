@@ -7,7 +7,8 @@ travail autorisé avec un résultat précis.
 
 ## Ce que cette PR permet déjà
 
-Cairn fournit les conditions temporelles `delay` et `at`, ainsi que `run_finished` ;
+Cairn fournit les conditions temporelles `delay` et `at`, ainsi que `run_finished`
+et `task_finished` ;
 les plugins accordés à l’agent ajoutent les leurs,
 de type `<plugin>_<nom>` (voir les [conditions de plugins](PLUGINS.md#conditions)).
 Le plugin GitHub livré en ajoute deux :
@@ -23,6 +24,12 @@ Le plugin GitHub livré en ajoute deux :
   à l’installation et peut viser les exécutions d’autres agents de cette
   installation, selon la délégation du propriétaire décrite dans
   [l’accès agent](AGENT-ACCESS.md).
+- `task_finished` : une tâche que cette conversation a déléguée avec
+  `delegate_task` ne travaille plus : son tour est fini sans réveil ni message à
+  traiter, ou elle est en pause, arrêtée ou supprimée. Cette source exige la
+  délégation de tâches et ne vise que les tâches de la conversation qui attend.
+  Le rapport se lit ensuite avec `task_status` (voir les
+  [tâches déléguées](adr/0059-delegated-tasks.md)).
 - `github_workflow` : un workflow GitHub Actions identifié par un projet autorisé,
   un identifiant d’exécution et le SHA complet du commit termine. Le résultat
   inclut sa conclusion et son numéro de tentative. Le compte GitHub accordé à

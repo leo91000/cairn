@@ -151,6 +151,7 @@ it('starts new agents restricted until the owner widens their access', () => {
     mcps: [],
     mcpTools: {},
     installation: false,
+    delegation: false,
     sandbox: 'yolo',
   })
   expect(newAgentDraft()).toMatchObject({ exclusiveNodes: [], plugins: [] })
@@ -329,6 +330,20 @@ it('lists every addition and removal of powers and grants', () => {
   expect(reviewLines(granted, revoked, context).map(line => line.text)).toEqual([
     'Removed: node gpu-box, exclusive reservation on gpu-box, 1Password “Production”, installation management.',
   ])
+})
+
+it('reviews task delegation as a power and lists its removal', () => {
+  const saved = newAgentDraft()
+  const granted = structuredClone(saved)
+  granted.access.delegation = true
+  expect(changes(saved, granted)).toEqual(['powers'])
+  const added = reviewLines(saved, granted, context)
+  expect(added).toEqual([expect.objectContaining({ kind: 'power', section: 'powers' })])
+  expect(added[0]!.text).toMatch(/^Added: task delegation\./)
+  expect(needsReview(added, null)).toBe(true)
+  const revoked = structuredClone(granted)
+  revoked.access.delegation = false
+  expect(reviewLines(granted, revoked, context).map(line => line.text)).toEqual(['Removed: task delegation.'])
 })
 
 it('treats an exclusive reservation on a runtime without support as inactive', () => {
