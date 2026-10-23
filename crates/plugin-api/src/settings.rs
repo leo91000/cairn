@@ -126,6 +126,17 @@ fn validate_limits(field: &Value, kind: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// How much a switch lets agents do, shown beside it: `low`, `medium` or `high`.
+fn valid_risk(field: &Value, kind: &str) -> bool {
+    match field.get("risk") {
+        None | Some(Value::Null) => true,
+        Some(Value::String(risk)) => {
+            kind == "boolean" && matches!(risk.as_str(), "low" | "medium" | "high")
+        }
+        Some(_) => false,
+    }
+}
+
 /// Checks the manifest's `settings` list. Values are checked again on every save.
 pub fn validate_settings_schema(settings: &[Value]) -> Result<(), &'static str> {
     if settings.len() > 30 {
@@ -171,6 +182,7 @@ pub fn validate_settings_schema(settings: &[Value]) -> Result<(), &'static str> 
             || !optional_text(field, "description", 300)
             || !optional_text(field, "placeholder", 100)
             || !optional_text(field, "section", 60)
+            || !valid_risk(field, kind)
             || (kind == "secret" && field.get("default").is_some())
             || !valid_default(field, kind, choices.as_deref())
         {

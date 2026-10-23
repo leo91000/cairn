@@ -275,6 +275,7 @@ fn summary(package: &Package) -> Value {
         "version": package.manifest.version,
         "digest": package.digest,
         "manifest": package.manifest,
+        "setup": package.manifest.setup(),
         "files": files(&package.source),
     })
 }
@@ -290,6 +291,7 @@ pub async fn catalog(s: &Service) -> Result<Value> {
             "status": "active",
             "active": package.manifest.version,
             "manifest": package.manifest,
+            "setup": package.manifest.setup(),
             "versions": [summary(&package)],
         }));
     }
@@ -315,9 +317,14 @@ pub async fn catalog(s: &Service) -> Result<Value> {
         let current = versions
             .iter()
             .find(|item| item["version"] == active && item["approved"] == true);
-        let manifest = current
-            .map(|item| item["manifest"].clone())
-            .or_else(|| latest.map(|package| json!(package.manifest)));
+        let (manifest, setup) = match (current, latest) {
+            (Some(item), _) => (Some(item["manifest"].clone()), item["setup"].clone()),
+            (None, Some(package)) => (
+                Some(json!(package.manifest)),
+                json!(package.manifest.setup()),
+            ),
+            (None, None) => (None, Value::Null),
+        };
         let pending = versions
             .iter()
             .any(|item| item["approved"] == false && item["error"].is_null());
@@ -332,6 +339,7 @@ pub async fn catalog(s: &Service) -> Result<Value> {
             },
             "active": current.map(|item| item["version"].clone()),
             "manifest": manifest,
+            "setup": setup,
             "versions": versions,
         }));
     }

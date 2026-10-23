@@ -96,22 +96,35 @@ test('Discord bots are set up through the package’s own form and keep the toke
   await signIn(page)
 
   await expect(page.getByRole('link', { name: '1Password · Set up' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Discord · Set up' }).getByText('Paste a token')).toBeVisible()
   await page.getByRole('link', { name: 'Discord · Set up' }).click()
-  await expect(page.getByText('No bots yet. Add one to start using this plugin.')).toBeVisible()
-  await page.getByRole('button', { name: 'Add bot' }).click()
+  // Before the first bot, the page says what it takes and lists the steps.
+  const first = page.getByRole('region', { name: 'Set up your first bot' })
+  await expect(first).toContainText('Discord Developer Portal')
+  await expect(first.getByRole('list', { name: 'Setup steps' }).getByRole('listitem')).toHaveText([/Bot token/, /Where it answers/, /Who can talk to it/])
+  await first.getByRole('button', { name: 'Start setup' }).click()
   const dialog = page.getByRole('dialog', { name: 'New bot' })
+  await expect(dialog.getByText('Step 1 of 3')).toBeVisible()
   await expect(dialog.getByText('Create the bot')).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'Continue' })).toBeDisabled()
+  await expect(dialog.getByRole('button', { name: 'Where it answers' })).toBeDisabled()
 
   await expect(dialog.getByLabel('Bot token')).toHaveAttribute('type', 'password')
   await dialog.getByLabel('Bot token').fill(token)
   await expect(dialog.getByRole('status').filter({ hasText: 'Signed in as Cairn Bot' })).toBeVisible()
   await expect(dialog.getByRole('link', { name: 'Invite the bot to a server' })).toHaveAttribute('href', /permissions=309237746752/)
+  await dialog.getByRole('button', { name: 'Continue' }).click()
+  await expect(dialog.getByRole('heading', { name: 'Where it answers' })).toBeVisible()
+  // Server and channel are required before the next step.
+  await expect(dialog.getByRole('button', { name: 'Continue' })).toBeDisabled()
   await dialog.getByRole('combobox', { name: 'Server' }).selectOption('100')
   await expect(dialog.getByRole('radio', { name: /#leadership/ })).toBeDisabled()
   await expect(dialog.getByText('The bot can’t read this channel')).toBeVisible()
   await dialog.getByRole('radio', { name: /#support/ }).check()
   await expect(dialog.getByRole('checkbox', { name: /Read replies without a mention/ })).not.toBeChecked()
+  await dialog.getByRole('button', { name: 'Continue' }).click()
 
+  await expect(dialog.getByRole('heading', { name: 'Who can talk to it' })).toBeVisible()
   await expect(dialog.getByRole('radio', { name: /Approve people as they ask/ })).toBeChecked()
   // Anyone may only reach a read-only agent; this one isn't.
   await dialog.getByRole('radio', { name: /^Anyone/ }).check()
@@ -160,7 +173,10 @@ test('Discord bots are set up through the package’s own form and keep the toke
   const editor = page.getByRole('dialog', { name: 'Edit #support on Acme' })
   await expect(editor.getByLabel('New bot token (optional)')).toHaveValue('')
   await expect(editor.getByRole('status').filter({ hasText: 'Signed in as Cairn Bot' })).toBeVisible()
+  // An edit opens every step.
+  await editor.getByRole('button', { name: 'Next' }).click()
   await expect(editor.getByRole('radio', { name: /#support/ })).toBeChecked()
+  await editor.getByRole('button', { name: 'Who can talk to it' }).click()
   await editor.getByRole('radio', { name: /Only people I add/ }).check()
   await editor.getByLabel('Person’s ID').fill('300')
   await editor.getByRole('button', { name: 'Add', exact: true }).click()
@@ -225,14 +241,26 @@ test('Discord bots are set up through the package’s own form and keep the toke
 
   await bot.getByRole('button', { name: 'Delete #support on Acme' }).click()
   await page.getByRole('dialog').getByRole('button', { name: 'Delete bot' }).click()
-  await expect(page.getByText('No bots yet. Add one to start using this plugin.')).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Set up your first bot' })).toBeVisible()
 })
 
 test('TOML packages wait for review and connect through a generated form', async ({ page, workspace }) => {
   test.setTimeout(90000)
   // Split into a module, loaded with require.
-  const source = 'local notes = require("./notes")\nreturn { start = function(event) cairn.storage.set("started", notes.started) end }'
+  const source = `local notes = require("./notes")
+return {
+  start = function(event) cairn.storage.set("started", notes.started) end,
+  form = function(event)
+    local values = event.values or {}
+    local errors = {}
+    if not values.team or values.team == "" then errors.team = "Enter a team" end
+    local choices = {}
+    if values.more and values.extra then choices = {{ value = "room", label = "Room" }} end
+    return { errors = errors, options = { destination = cairn.array(choices) } }
+  end,
+}`
   const module = 'return { started = true }'
+  await useRelayForHttpMocks(page)
   await page.goto(workspacePath('/plugins'))
   await signIn(page)
   await page.getByRole('button', { name: 'Install package' }).click()
@@ -248,12 +276,39 @@ version = "1.0.0"
 description = "Keeps a note for each team."
 apiVersion = 2
 capabilities = ["storage", "timers"]
+instanceForm = true
 [[settings]]
 key = "team"
 title = "Team"
 type = "string"
 required = true
 maxLength = ${maxLength}
+[[settings]]
+key = "more"
+title = "More destinations"
+type = "boolean"
+refresh = true
+[[settings]]
+key = "extra"
+title = "Extra destinations"
+type = "boolean"
+refresh = true
+[[settings]]
+key = "destination"
+title = "Destination"
+type = "select"
+dynamic = true
+[[setup.steps]]
+id = "settings"
+title = "Settings"
+settings = ["team", "more", "extra", "destination"]
+[[setup.steps.presets]]
+id = "basic"
+title = "Basic"
+[[setup.steps.presets]]
+id = "more"
+title = "More places"
+values = { more = true, extra = true }
 `),
     },
     { name: 'main.luau', mimeType: 'text/plain', buffer: Buffer.from(source) },
@@ -276,7 +331,23 @@ maxLength = ${maxLength}
 
   await page.getByRole('button', { name: 'Add instance' }).click()
   const form = page.getByRole('dialog', { name: 'New Team notes instance' })
+  await expect(form.getByText('Enter a team', { exact: true })).toBeVisible()
   await form.getByLabel('Team').fill('core')
+  // Non-refresh fields must not remain blocked by errors for their previous values.
+  await expect(form.getByRole('button', { name: 'Save instance' })).toBeEnabled()
+  await expect(form.getByText('Enter a team', { exact: true })).toHaveCount(0)
+  const refreshed: string[] = []
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && request.url().endsWith('/plugins/notes/form')) {
+      const changed = request.postDataJSON().changed
+      if (changed)
+        refreshed.push(changed)
+    }
+  })
+  await form.getByRole('radio', { name: 'More places' }).check()
+  await expect.poll(() => refreshed).toEqual(['more', 'extra'])
+  await expect(form.getByRole('option', { name: 'Room' })).toHaveCount(1)
+  await form.getByRole('combobox', { name: /^Destination/ }).selectOption('room')
   await form.getByRole('button', { name: 'Save instance' }).click()
   const connection = page.getByRole('article', { name: 'Team notes' })
   await expect(connection.getByText('core', { exact: true })).toBeVisible()
@@ -284,7 +355,16 @@ maxLength = ${maxLength}
 
   const catalog = await workspace.api('/api/plugins')
   expect(catalog.packages.find((item: { id: string }) => item.id === 'notes')).toMatchObject({ status: 'active', active: '1.0.0' })
-  expect(catalog.connections[0]).toMatchObject({ pluginId: 'notes', settings: { team: 'core' }, agentId: '' })
+  expect(catalog.connections[0]).toMatchObject({
+    pluginId: 'notes',
+    settings: {
+      team: 'core',
+      more: true,
+      extra: true,
+      destination: 'room',
+    },
+    agentId: '',
+  })
 
   await connection.getByRole('button', { name: 'Delete Team notes' }).click()
   await page.getByRole('dialog').getByRole('button', { name: 'Delete instance' }).click()
@@ -396,6 +476,70 @@ test('program releases can be checked, installed and restored independently of p
   program.installed = installed('2.42.0')
   await expect(programs.getByText('op · Version 2.42.0')).toBeVisible({ timeout: 12000 })
   expect(actions).toEqual(['check', 'install', 'rollback'])
+})
+
+test('required choices and Unicode text keep the shared form whitespace contract', async ({ page }) => {
+  await useRelayForHttpMocks(page)
+  await page.route('**/api/plugins', route => route.fulfill({
+    json: {
+      packages: [{
+        id: 'forms',
+        builtin: false,
+        status: 'active',
+        active: '1.0.0',
+        manifest: {
+          id: 'forms',
+          name: 'Form examples',
+          version: '1.0.0',
+          apiVersion: 2,
+          capabilities: [],
+          settings: [
+            {
+              key: 'region',
+              title: 'Region',
+              type: 'select',
+              required: true,
+              default: ' ',
+              options: [{ value: ' ', label: 'Space option' }],
+            },
+            {
+              key: 'team',
+              title: 'Team',
+              type: 'string',
+              required: true,
+            },
+            {
+              key: 'password',
+              title: 'Password',
+              type: 'secret',
+              required: true,
+            },
+          ],
+        },
+        versions: [],
+      }],
+      capabilities: [],
+      connections: [],
+    },
+  }))
+  const saves: Record<string, any>[] = []
+  await page.route('**/api/plugins/forms/connections', async (route) => {
+    saves.push(route.request().postDataJSON())
+    await route.fulfill({ json: {} })
+  })
+  await page.goto(workspacePath('/plugins/forms'))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Add instance', exact: true }).click()
+  const form = page.getByRole('dialog', { name: 'New Form examples instance' })
+  await expect(form.getByRole('combobox', { name: 'Region' })).toHaveValue(' ')
+  await form.getByLabel('Team', { exact: true }).fill('   ')
+  await form.getByLabel('Password', { exact: true }).fill('\uFEFF')
+  await expect(form.getByRole('button', { name: 'Save instance' })).toBeDisabled()
+  await form.getByLabel('Team', { exact: true }).fill('\uFEFF')
+  await expect(form.getByRole('button', { name: 'Save instance' })).toBeEnabled()
+  await form.getByRole('button', { name: 'Save instance' }).click()
+  await expect.poll(() => saves.length).toBe(1)
+  expect(saves[0]).toMatchObject({ settings: { region: ' ', team: '\uFEFF' }, secrets: { password: '\uFEFF' } })
 })
 
 test('instance and panel forms share defaults, clearing, hidden values and secret rules', async ({ page }) => {

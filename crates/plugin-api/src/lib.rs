@@ -6,6 +6,7 @@ mod arguments;
 mod form;
 mod integrations;
 mod settings;
+mod setup;
 mod sources;
 mod view;
 
@@ -16,6 +17,7 @@ pub use integrations::{
     RunFile, SkillSource, home_path, render,
 };
 pub use settings::validate_settings_schema;
+pub use setup::{CopyValue, Effort, Preset, Risk, Setup, Step, StepKind, Task};
 pub use sources::{MAX_MODULES, MAX_SOURCE_BYTES, Sources, module_path, resolve};
 pub use view::{validate_action_result, validate_view};
 
@@ -254,6 +256,9 @@ pub struct Manifest {
     /// Skill sources the owner imports from through the `skills` handler.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skill_sources: Vec<SkillSource>,
+    /// What connecting an instance takes and the steps the owner follows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<Setup>,
 }
 
 pub(crate) fn slug(value: &str, max: usize) -> bool {
@@ -407,7 +412,8 @@ impl Manifest {
         }
         self.validate_programs()?;
         self.validate_agent_interface()?;
-        self.validate_integrations()
+        self.validate_integrations()?;
+        self.validate_setup()
     }
 
     fn validate_programs(&self) -> Result<(), &'static str> {

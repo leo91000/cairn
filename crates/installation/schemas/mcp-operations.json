@@ -2497,7 +2497,7 @@
   },
   {
     "name": "manage_plugin",
-    "description": "Configure plugin instances and start/poll OAuth or device sign-in without exposing tokens. setup returns the callback and owner management URL. save takes complete instance data (name, enabled, settings, secrets?, credentialFlow?); instanceId selects an existing account. OAuth consent is completed by the owner in their browser. Agent grants stay in the owner agent editor. File-backed plugin commands use the run-specific plugin tool.",
+    "description": "Configure plugin instances and start/poll OAuth or device sign-in without exposing tokens. setup returns the callback URL, owner management URL and the ordered setup steps the owner follows. save takes complete instance data (name, enabled, settings, secrets?, credentialFlow?); instanceId selects an existing account. For signin, form and save, data.sharedFrom names an instance of the same plugin whose shared setup (such as its OAuth client and secret) is reused inside the installation; it requires your grant on that instance. OAuth consent is completed by the owner in their browser. Agent grants stay in the owner agent editor. File-backed plugin commands use the run-specific plugin tool.",
     "scope": "manage",
     "destructive": true,
     "inputSchema": {

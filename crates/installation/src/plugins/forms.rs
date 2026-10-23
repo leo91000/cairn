@@ -117,6 +117,11 @@ pub(crate) async fn form_managed(
     if !manifest.instance_form {
         return Err(Error::not_found("This plugin has no instance form."));
     }
+    let shared_input =
+        connections::shared(s, manifest, plugin_id, input, input["instance"].is_string())
+            .await?
+            .map(|shared| shared.apply(input));
+    let input = shared_input.as_ref().unwrap_or(input);
     let instance = match input["instance"].as_str() {
         Some(id) => Some(connections::get(s, plugin_id, id).await?.id),
         None => None,

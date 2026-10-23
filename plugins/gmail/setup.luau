@@ -8,11 +8,10 @@ end
 
 return {
     form = function(input)
+        -- The setup steps of the manifest guide the Google Cloud app and the sign-in.
         if not input.credential then
             return {
                 errors = if input.submit then { credential = "Connect a Google account before saving." } else {},
-                view = { { type = "alert", tone = "info", title = "Connect a Google account",
-                    text = "Enable the Gmail API in Google Cloud, create a Web application OAuth client and register this installation's callback URL. Enter its client ID and secret, choose permissions, then sign in. Each mailbox is a separate instance. External apps in Testing require test users and Google expires their refresh token after seven days." } },
             }
         end
         local value, problem = profile()
