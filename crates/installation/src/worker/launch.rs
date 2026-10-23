@@ -169,6 +169,7 @@ struct RunnerPlan<'a> {
     mcp_env: &'a Value,
     resources: &'a Value,
     node_lease_required: bool,
+    native_mode: Value,
     backend: &'a Value,
     runtime_id: &'a Value,
     storage: RunnerStorage<'a>,
@@ -465,6 +466,14 @@ impl Execution<'_> {
             workspace.prepared["backend"].as_str(),
             Some("firecracker" | "native")
         );
+        if managed
+            && stopped_by_controller
+            && s.store.run(&self.id).await?["nativeModeInterruption"].is_string()
+        {
+            return Err(Error::unavailable(
+                "Native node mode changed. Managed executions stopped; saved files and conversation history are retained for restart.",
+            ));
+        }
         let interrupted = exit.code == Some(crate::runner::CONTROLLER_INTERRUPTED);
         if managed && stopped_by_controller && interrupted {
             if saved.start_rejected == Some(true) {
@@ -652,7 +661,7 @@ impl Execution<'_> {
         runner: &str,
         placement: &Value,
         resume: Option<&str>,
-        chat: Option<Value>,
+        mut chat: Option<Value>,
         launch: &Launch,
     ) -> Result<()> {
         let s = self.s;
@@ -667,20 +676,42 @@ impl Execution<'_> {
                 "readOnly": true,
             }));
         }
+        let mut context = crate::plugins::agents::with_instructions(s, self.run).await;
+        context["snapshot"]["skills"] = prepared["skills"].clone();
+        context["nativeMode"] = placement["nativeMode"].clone();
+        if prepared["backend"] == "native"
+            && let Some(chat) = &mut chat
+        {
+            run_output::native_chat_privileges(chat, &context, &placement["nativeMode"]);
+        }
         let prompt = if resume.is_some() {
             launch.prompt.clone()
         } else {
-            let mut context = crate::plugins::agents::with_instructions(s, self.run).await;
-            context["snapshot"]["skills"] = prepared["skills"].clone();
             run_output::prompt(&context, false)
         };
+        let prompt = if prepared["backend"] == "native" {
+            format!(
+                "{}\n\n{prompt}",
+                run_output::native_privileges(&placement["nativeMode"])
+            )
+        } else {
+            prompt
+        };
         let storage_node = text(placement, "nodeId");
-        let node_storage = s
-            .store
-            .get("nodes", storage_node)
-            .await?
-            .unwrap_or_default()["storage"]
-            .clone();
+        let node_storage = if prepared["backend"] == "native" {
+            let (run, attempt, placement) = (self.id.clone(), runner.to_owned(), placement.clone());
+            s.store
+                .transaction(move |db| {
+                    nodes::native_mode::acknowledge_plan(db, &run, &attempt, &placement)
+                })
+                .await?
+        } else {
+            s.store
+                .get("nodes", storage_node)
+                .await?
+                .unwrap_or_default()["storage"]
+                .clone()
+        };
         let storage_policy = Policy::for_node(&node_storage)?;
         let grant = nodes::disk_grants::new_disk(s, self.run, storage_node).await?;
         s.store
@@ -706,6 +737,7 @@ impl Execution<'_> {
             mcp_env: &workspace.mcp["env"],
             resources: &placement["resources"],
             node_lease_required: true,
+            native_mode: placement["nativeMode"].clone(),
             backend: &prepared["backend"],
             runtime_id: &placement["runtimeId"],
             storage: RunnerStorage {

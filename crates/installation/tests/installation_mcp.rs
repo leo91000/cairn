@@ -198,6 +198,48 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
         .await;
         assert_eq!(result(&updated)["nativeEnabled"], true);
         assert_eq!(result(&updated)["capabilities"]["backend"], "native");
+        let mut capable = s.get("nodes", next).await.unwrap();
+        capable["capabilities"]["nativeModeProtocol"] = 1.into();
+        s.store.put("nodes", capable).await.unwrap();
+        let (_, preview) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "change_native_node_mode",
+            json!({
+                "nodeId": next, "change": { "mode": "administrator" },
+            }),
+        )
+        .await;
+        let preview = result(&preview);
+        assert!(
+            preview["preview"]["warning"]
+                .as_str()
+                .unwrap()
+                .contains("real host")
+        );
+        let (_, requested) = node_management_call(&app, endpoint, token, "change_native_node_mode", json!({
+            "nodeId": next, "change": { "mode": "administrator", "previewId": preview["previewId"], "confirm": true },
+        })).await;
+        if endpoint == "/mcp-installation" {
+            assert_eq!(
+                result(&requested)["status"],
+                "awaiting-owner",
+                "{requested}"
+            );
+            assert!(s.get("nodes", next).await.unwrap()["nativeModeRequest"].is_null());
+        } else {
+            assert_eq!(
+                result(&requested)["nativeModeStatus"],
+                "pending",
+                "{requested}"
+            );
+            assert_eq!(
+                result(&requested)["nativeModeRequest"]["mode"],
+                "administrator"
+            );
+        }
+
         let (_, listed) =
             node_management_call(&app, endpoint, token, "list_nodes", json!({})).await;
         let node = result(&listed)

@@ -12,6 +12,7 @@ import {
 import {
   formatBytes,
   LOCAL_NODE_ID,
+  nativeModeLabel,
   relativeAge,
 } from '../../../../packages/contracts/nodes'
 import { api } from '../api'
@@ -315,7 +316,7 @@ onUnmounted(() => {
             </h2>
             <p class="m-0! mt-0.5!">
               <template v-if="run.executionBackend === 'native'">
-                Native process · shared host GPU · {{ run.storage?.mode === 'native' ? 'checkpoints between turns' : 'files load on demand' }}
+                {{ nativeModeLabel(run.nativeMode?.mode ?? 'protected') }} · shared host GPU · {{ run.storage?.mode === 'native' ? 'checkpoints between turns' : 'files load on demand' }}
               </template>
               <template v-else-if="run.storage?.mode === 'on-demand'">
                 Files load on demand

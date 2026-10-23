@@ -329,12 +329,25 @@ fun Agent.withNodeRun(node: String, run: Boolean, readOnlyGrants: Boolean = fals
  * removed except future machines. Without the machine list (it failed to load), nothing changes:
  * restricting then would keep the current runner only.
  */
-fun AccessPolicy.withAllNodes(all: Boolean, nodes: List<ExecutionNode>): AccessPolicy =
+fun AccessPolicy.withAllNodes(
+    all: Boolean,
+    nodes: List<ExecutionNode>,
+    agentId: String = "",
+): AccessPolicy =
     when {
         all -> copy(nodes = null)
         this.nodes != null -> this
         nodes.isEmpty() -> this
-        else -> copy(nodes = agentNodeChoices(nodes, backend).map { it.id })
+        else ->
+            copy(
+                nodes =
+                    agentNodeChoices(nodes, backend)
+                        .filter {
+                            it.nativeModeRequest?.mode != "administrator" ||
+                                agentId in it.nativeReviewedAgents
+                        }
+                        .map { it.id }
+            )
     }
 
 fun Agent.withExclusive(node: String, granted: Boolean): Agent =
@@ -728,6 +741,17 @@ private fun runsSentence(runs: AgentPreviewRuns): String {
 }
 
 /** The review shown before saving: powers and secrets added, and work a reduction stops. */
+fun Agent.nativeReviewNodes(resources: AgentResources): List<String> =
+    if (access.backend != NATIVE_BACKEND || access.nodes == null) emptyList()
+    else
+        resources.nodes
+            .filter {
+                it.nativeModeRequest?.mode == "administrator" &&
+                    it.id in access.nodes &&
+                    id !in it.nativeReviewedAgents
+            }
+            .map { it.id }
+
 fun agentReview(
     original: Agent,
     edited: Agent,
@@ -737,6 +761,15 @@ fun agentReview(
     val before = original.access
     val after = edited.access
     val nodes = agentNodeChoices(resources.nodes)
+    edited.nativeReviewNodes(resources).forEach { id ->
+        val name = resources.nodes.find { it.id == id }?.name ?: id
+        add(
+            ReviewLine(
+                ReviewKind.Power,
+                "Ajout : accès administrateur à $name. Toutes ses conversations admises auront sudo sans mot de passe sur l’hôte réel. Root peut lire les fichiers et identifiants locaux, modifier les services et contourner les limites coopératives. Le retour en protégé ne nettoie ni ne restaure la machine.",
+            )
+        )
+    }
     if (after.backend == NATIVE_BACKEND && before.backend != NATIVE_BACKEND)
         add(
             ReviewLine(
@@ -923,6 +956,7 @@ fun agentSaveBody(
      * so an installation upgraded between load and save never reads them as "none".
      */
     liveGrants: Boolean = true,
+    nativeNodeReviews: List<String> = emptyList(),
 ): JsonObject {
     val fields =
         wireJson
@@ -947,5 +981,6 @@ fun agentSaveBody(
     access["mcps"] = list(agent.access.mcps)
     fields["access"] = JsonObject(access)
     if (reapprove.isNotEmpty()) fields["reapproveDelegations"] = list(reapprove)
+    if (nativeNodeReviews.isNotEmpty()) fields["nativeNodeReviews"] = list(nativeNodeReviews)
     return JsonObject(fields)
 }

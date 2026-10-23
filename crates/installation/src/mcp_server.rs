@@ -688,6 +688,7 @@ pub(crate) async fn invoke(
         | "list_native_callers"
         | "create_node_enrollment"
         | "update_node"
+        | "change_native_node_mode"
         | "update_node_storage"
         | "revoke_node" => node_tools::invoke(s, name, args, bearer).await,
         "list_chat_artifacts"

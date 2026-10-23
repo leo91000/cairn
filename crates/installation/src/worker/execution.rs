@@ -154,14 +154,16 @@ async fn recovers_controller(
     cancel: &CancellationToken,
     error: &Error,
 ) -> Result<bool> {
-    if !error.is_unavailable() || !saved.managed() {
+    let run = s.store.run(&checkpoint.id).await?;
+    let mode_change = run["nativeModeInterruption"].is_string();
+    if (!error.is_unavailable() && !mode_change) || !saved.managed() {
         return Ok(false);
     }
-    let run = s.store.run(&checkpoint.id).await?;
-    let may_retry =
-        saved.controller_recoveries() < MAX_CONTROLLER_RECOVERIES || run["moveRequest"].is_object();
+    let may_retry = mode_change
+        || saved.controller_recoveries() < MAX_CONTROLLER_RECOVERIES
+        || run["moveRequest"].is_object();
     Ok(may_retry
-        && run["sessionId"].is_string()
+        && (mode_change || run["sessionId"].is_string())
         && !checkpoint.expired()
         && !cancel.is_cancelled()
         && !s.shutdown.is_cancelled())

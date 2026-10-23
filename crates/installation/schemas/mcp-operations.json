@@ -196,6 +196,16 @@
             "sandbox"
           ],
           "additionalProperties": false
+        },
+        "nativeNodeReviews": {
+          "description": "Owner confirmation of the specifically reviewed administrator nodes selected in access.nodes. These grant unrestricted passwordless sudo on the real host, including access to locally present credentials and services. Never infer confirmation from an all-node grant or conversion. Not saved on the agent; delegated installation agents cannot approve it.",
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
         }
       },
       "required": [
@@ -213,7 +223,7 @@
   },
   {
     "name": "update_agent",
-    "description": "Update an existing agent, including MCP connection and tool access. Omitted fields retain their current values; access, when supplied, replaces the entire access policy. Changes apply to new runs.",
+    "description": "Update an existing agent, including MCP connection and tool access. Omitted fields retain their current values; access, when supplied, replaces the entire access policy. Changes apply to new runs. Explicit access to a native administrator node grants host administration only after owner review; all-node and future-node grants never silently grant root. Review unapproved administrator access from node details.",
     "scope": "manage",
     "destructive": false,
     "inputSchema": {
@@ -378,6 +388,16 @@
                 "sandbox"
               ],
               "additionalProperties": false
+            },
+            "nativeNodeReviews": {
+              "description": "Owner confirmation of the specifically reviewed administrator nodes selected in access.nodes. These grant unrestricted passwordless sudo on the real host, including access to locally present credentials and services. Never infer confirmation from an all-node grant or conversion. Not saved on the agent; delegated installation agents cannot approve it.",
+              "maxItems": 100,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              }
             }
           },
           "additionalProperties": false
@@ -2319,6 +2339,11 @@
                 "format": "uuid"
               },
               "maxItems": 100
+            },
+            "confirmNativeAdministration": {
+              "type": "boolean",
+              "default": false,
+              "description": "Informed owner confirmation that newly trusted people may administer this host when its native mode is administrator."
             }
           },
           "required": [
@@ -2335,6 +2360,50 @@
         "node"
       ],
       "additionalProperties": false
+    }
+  },
+  {
+    "name": "change_native_node_mode",
+    "description": "Preview or confirm a native node privilege change. Call with change.mode first; inspect all affected agents, trusted people, conversations, tasks and root limitations, then confirm with the returned previewId. Stops managed workloads before applying and restarting; inspect list_nodes nativeModeRequest/nativeModeObserved/nativeModeStatus. Native administrator gives real unrestricted passwordless host sudo. Existing remote Cairn permissions do not expand; returning to protected does not clean or restore the host. A built-in agent can request elevation but the owner must confirm it in node details; its result is awaiting-owner. Requires installation management. No unknown or older supervisor can accept administrator work.",
+    "scope": "manage",
+    "destructive": true,
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "nodeId",
+        "change"
+      ],
+      "properties": {
+        "nodeId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "change": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "protected",
+                "administrator"
+              ]
+            },
+            "previewId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "confirm": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        }
+      }
     }
   },
   {

@@ -1,5 +1,5 @@
 //! Native implementation of the existing authenticated node controller protocol.
-use super::{atomic_write, block, disk, systemd, workspace};
+use super::{atomic_write, block, disk, mode, systemd, workspace};
 use crate::{
     error::{Error, Result},
     microvm::{plan::Plan, protocol::Event, wire},
@@ -35,12 +35,26 @@ const MAX_PLAN: u64 = 8_000_000;
 const MAX_LOG: u64 = 64 * 1024 * 1024;
 
 fn native_budget(value: &Value) -> Result<crate::microvm::budget::Budget> {
-    let budget: crate::microvm::budget::Budget = serde_json::from_value(value.clone())?;
+    let mut value = value.clone();
+    if let Some(protocol) = value
+        .as_object_mut()
+        .and_then(|value| value.remove("nativeModeProtocol"))
+        && protocol != 1
+    {
+        return Err(Error::bad("Unknown native mode storage protocol."));
+    }
+    let budget: crate::microvm::budget::Budget = serde_json::from_value(value)?;
     budget.limits.validate()?;
     if !(1..=4096).contains(&budget.slots) {
         return Err(Error::bad("Use between 1 and 4096 execution slots."));
     }
     Ok(budget)
+}
+
+fn budget_record(budget: &Value) -> Value {
+    let mut record = budget.clone();
+    record["nativeModeProtocol"] = 1.into();
+    record
 }
 
 struct Attempt {
@@ -60,6 +74,7 @@ struct Controller {
     admission: Arc<Mutex<()>>,
     base_warmer: Arc<super::bases_warmer::Warmer>,
     budget: Arc<Mutex<Value>>,
+    mode: Arc<Mutex<Value>>,
     changed: Arc<Notify>,
     log_lock: Arc<Mutex<()>>,
     stop: CancellationToken,
@@ -135,6 +150,67 @@ impl Controller {
             .is_some_and(|until| *until > crate::nodes::boot_ms())
     }
 
+    async fn change_mode(&self, value: Value) -> Result<Value> {
+        let request = mode::request(value)?;
+        let expected = serde_json::to_value(&request)?;
+        let _admission = self.admission.lock().await;
+        let previous = self.mode.lock().await.clone();
+        if mode::matches(&previous, &expected) {
+            return Ok(previous);
+        }
+        let mut pending = previous.clone();
+        pending["status"] = "pending".into();
+        pending["target"] = expected.clone();
+        pending["error"] = Value::Null;
+        atomic_write(&self.state.join(mode::FILE), &serde_json::to_vec(&pending)?).await?;
+        *self.mode.lock().await = pending.clone();
+        let result = tokio::time::timeout(Duration::from_secs(270), async {
+            // Signal every preparation/workload first; all process descendants
+            // belong to the managed cgroup. Root can escape it: this is cooperative.
+            let active: Vec<_> = self
+                .active
+                .lock()
+                .await
+                .iter()
+                .map(|(id, attempt)| {
+                    attempt.stop.cancel();
+                    id.clone()
+                })
+                .collect();
+            for id in active {
+                self.stop_admitted(&id).await?;
+            }
+            if !self.active.lock().await.is_empty() {
+                return Err(Error::conflict(
+                    "Native executions have not finished stopping.",
+                ));
+            }
+            mode::sudo(
+                &self.identity,
+                request.mode == crate::nodes::native_mode::Mode::Administrator,
+            )
+            .await
+        })
+        .await;
+        let state = match result {
+            Ok(Ok(())) => {
+                json!({ "mode": request.mode, "generation": request.generation, "status": "applied" })
+            }
+            result => {
+                pending["status"] = "failed".into();
+                pending["error"] = match result {
+                    Ok(Err(error)) => error.message,
+                    _ => "Native privilege transition stop confirmation timed out.".into(),
+                }
+                .into();
+                pending
+            }
+        };
+        atomic_write(&self.state.join(mode::FILE), &serde_json::to_vec(&state)?).await?;
+        *self.mode.lock().await = state.clone();
+        Ok(state)
+    }
+
     async fn start(&self, id: &str) -> Result<()> {
         let _admission = self.admission.lock().await;
         if self.active.lock().await.contains_key(id) {
@@ -154,6 +230,7 @@ impl Controller {
             return Err(Error::unavailable("The native execution slot is occupied."));
         }
         let plan = self.plan(id).await?;
+        mode::check_plan(&*self.mode.lock().await, &plan)?;
         let resources: crate::nodes::Resources = serde_json::from_value(plan["resources"].clone())?;
         resources.validate()?;
         let budget: crate::nodes::Resources =
@@ -781,6 +858,10 @@ impl Controller {
     async fn stop_attempt(&self, id: &str) -> Result<()> {
         uuid(id)?;
         let _admission = self.admission.lock().await;
+        self.stop_admitted(id).await
+    }
+
+    async fn stop_admitted(&self, id: &str) -> Result<()> {
         atomic_write(&self.file(id, "stopped"), b"1").await?;
         if let Some(attempt) = self.active.lock().await.get(id) {
             attempt.stop.cancel();
@@ -977,6 +1058,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             "status": "ok", "backend": "native", "nodeProtocol": 2, "projectArchives": 1, "nativeProjectBases": 1,
             "runtimeId": std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into()),
             "dataRoot": controller.data, "capabilities": capabilities,
+            "nativeMode": controller.mode.lock().await.clone(),
             "runtimes": systemd::runtimes()?,
             "pool": { "capacity": budget["slots"] }, "activeRuns": controller.active.lock().await.len(),
             "sharedResources": true, "exclusiveReservations": false, "budget": budget,
@@ -1012,6 +1094,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 .await?;
             json!({ "queued": true })
         }
+        ("POST", ["native-mode"]) => controller.change_mode(input(request, 16384).await?).await?,
         ("POST", ["node-budget"]) => {
             let value = input(request, 16384).await?;
             let budget = native_budget(&value)?;
@@ -1042,7 +1125,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 }
                 atomic_write(
                     &controller.state.join(crate::microvm::budget::FILE),
-                    &serde_json::to_vec(&value)?,
+                    &serde_json::to_vec(&budget_record(&value))?,
                 )
                 .await?;
                 *controller.budget.lock().await = value;
@@ -1642,8 +1725,17 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         Err(error) => return Err(error.into()),
     };
     let checked = native_budget(&budget)?;
+    let budget = serde_json::to_value(&checked)?;
     systemd::apply_budget(&checked).await?;
-    atomic_write(&budget_path, &serde_json::to_vec(&budget)?).await?;
+    atomic_write(&budget_path, &serde_json::to_vec(&budget_record(&budget))?).await?;
+    let mut mode = mode::load(&state).await?;
+    if mode["status"] == "applied"
+        && let Err(error) = mode::sudo(&identity, mode["mode"] == "administrator").await
+    {
+        mode["status"] = "failed".into();
+        mode["error"] = error.message.into();
+        atomic_write(&state.join(mode::FILE), &serde_json::to_vec(&mode)?).await?;
+    }
     let controller = Controller {
         data,
         state,
@@ -1653,6 +1745,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         admission: Arc::default(),
         base_warmer: Arc::default(),
         budget: Arc::new(Mutex::new(budget)),
+        mode: Arc::new(Mutex::new(mode)),
         changed: Arc::default(),
         log_lock: Arc::default(),
         stop: stop.clone(),
@@ -1825,6 +1918,9 @@ mod tests {
             leases: Arc::default(),
             admission: Arc::default(),
             base_warmer: Arc::default(),
+            mode: Arc::new(Mutex::new(
+                json!({ "mode": "protected", "generation": null, "status": "applied" }),
+            )),
             budget: Arc::new(Mutex::new(
                 json!({ "slots": 1, "limits": { "cpu": 1, "memoryMiB": 1024, "diskMiB": 1024 } }),
             )),

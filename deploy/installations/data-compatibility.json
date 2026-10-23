@@ -1,11 +1,22 @@
 {
   "schema": 2,
-  "epoch": 12,
-  "databaseVersion": 11,
+  "epoch": 13,
+  "databaseVersion": 12,
   "legacyTree": "a6aae371f1d76cceb2f510180531f0ef17ec3e60",
   "automaticMigration": {
-    "fromEpochs": [3, 4, 5, 6, 7, 8, 9, 10, 11],
-    "previousDatabaseVersion": 10,
+    "fromEpochs": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "previousDatabaseVersion": 11,
     "plan": "docs/AUTOMATIC-MIGRATIONS.md",
     "tests": [
       "settings::tests::length_limits_are_positive_integers_with_type_specific_caps",
@@ -25,7 +36,11 @@
       "native_nodes_admit_six_attempts_only_after_the_configured_budget_is_applied",
       "wildcard_node_access_still_requires_trusted_contributors",
       "native::service::tests::native_budget_supports_six_slots_and_rejects_invalid_capacities",
-      "native::service::tests::controller_enforces_all_configured_slots_before_preparing_an_attempt"
+      "native::service::tests::controller_enforces_all_configured_slots_before_preparing_an_attempt",
+      "upgrades_version_eleven_preserving_protected_native_defaults",
+      "native_administrator_requires_owner_review_verified_generation_and_explicit_admission",
+      "native_mode_preview_detects_concurrent_access_changes_and_agent_requests_need_owner",
+      "native::mode::tests::unknown_modes_and_stale_or_unconfirmed_plans_fail_closed"
     ]
   }
 }

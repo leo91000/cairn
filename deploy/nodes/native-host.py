@@ -366,7 +366,7 @@ WantedBy=multi-user.target
 ''')
     subprocess.run(['systemctl', 'daemon-reload'], check=True)
     subprocess.run(['systemctl', 'enable', '--now', SERVICE], check=True)
-    print('Native node enrolled. Enable it in Cairn and explicitly select trusted callers and native agents.')
+    print('Native node enrolled in protected mode. Enable it in Cairn and select trusted people and native agents. Administrator mode additionally requires sudo with the standard /etc/sudoers.d include; it is confirmed from the node details and gives control of the real host.')
 
 
 def health(directory, timeout=30):

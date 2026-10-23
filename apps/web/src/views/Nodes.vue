@@ -17,6 +17,7 @@ import {
 } from '../api'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
+import NativeNodeMode from '../components/NativeNodeMode.vue'
 import NodeStorage from '../components/NodeStorage.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
@@ -219,7 +220,7 @@ function save() {
         slots: node.slots,
         // Exclusive reservations are granted on each agent's page; omitting them keeps them.
         accepting: node.accepting,
-        ...(node.capabilities.backend === 'native' ? { nativeEnabled: node.nativeEnabled, nativeAccounts: node.nativeAccounts } : {}),
+        ...(node.capabilities.backend === 'native' ? { nativeEnabled: node.nativeEnabled, nativeAccounts: node.nativeAccounts, confirmNativeAdministration: node.nativeModeRequest?.mode === 'administrator' } : {}),
       }),
     })
     editing.value = null
@@ -272,7 +273,7 @@ function saveGrants() {
   return action(async () => {
     if (agentIds.length) {
       try {
-        await api(`/nodes/${node.id}/agents`, { method: 'PUT', body: JSON.stringify({ agentIds, add: true }) })
+        await api(`/nodes/${node.id}/agents`, { method: 'PUT', body: JSON.stringify({ agentIds, add: true, ...(node.nativeModeRequest?.mode === 'administrator' ? { confirmNativeAdministration: true } : {}) }) })
       }
       catch (e) {
         // An older installation only replaces the list: send the agents already allowed with the new ones.
@@ -311,12 +312,16 @@ function mismatch(agentId: string) {
 }
 
 function allNodes(agentId: string) {
+  if (granting.value?.nativeModeRequest?.mode === 'administrator' && !granting.value.nativeReviewedAgents?.includes(agentId))
+    return false
   return (!mismatch(agentId) && state.agents.some(agent => agent.id === agentId && agent.access?.nodes === null))
     || (granting.value?.agents?.some(agent => agent.id === agentId && agent.allNodes) ?? false)
 }
 
 /** Already allowed on the node being granted, from its latest data, or on every node. */
 function allowed(agentId: string) {
+  if (granting.value?.nativeModeRequest?.mode === 'administrator' && !granting.value.nativeReviewedAgents?.includes(agentId))
+    return false
   return allNodes(agentId) || (granting.value?.agents?.some(agent => agent.id === agentId) ?? false)
 }
 
@@ -457,6 +462,10 @@ function statusLabel(node: ExecutionNode) {
         <p class="mt-2 text-sm text-muted">
           {{ node.capabilities.backend === 'native' ? 'Native process · shared host GPU · trusted people only' : 'Firecracker VM' }}
         </p>
+        <NativeNodeMode v-if="node.capabilities.backend === 'native'" :node="node" @changed="load" />
+        <UiButton v-if="!node.revoked && node.nativeModeRequest?.mode === 'administrator'" @click="grant(node)">
+          Review agent access to this host
+        </UiButton>
         <template v-if="!node.revoked">
           <div class="capacity-grid" aria-label="Shared capacity">
             <div><span>Slots available</span><strong>{{ node.availableSlots ?? node.slots }} <small>of {{ node.slots }}</small></strong><span>{{ node.occupiedSlots ?? 0 }} active or reserved</span></div>
@@ -654,6 +663,9 @@ function statusLabel(node: ExecutionNode) {
         <p class="text-sm text-muted">
           Chosen agents may run their conversations on this machine. A tag or capability never grants access by itself.
         </p>
+        <p v-if="granting.nativeModeRequest?.mode === 'administrator'" class="text-power">
+          Granting access here gives these agents unrestricted passwordless sudo on the real host. Every trusted person may direct them to administer this machine. Root can read local credentials and defeat cooperative limits. Saving confirms this access.
+        </p>
         <label v-for="agent in state.agents" :key="agent.id" class="access-row">
           <input
             v-if="mismatch(agent.id)"
@@ -731,6 +743,9 @@ function statusLabel(node: ExecutionNode) {
         <fieldset v-if="editing.capabilities.backend === 'native'" class="form-section">
           <legend>Native execution</legend>
           <p>Only selected native agents and trusted people may run here. Disabling native execution or removing a person stops affected work after its lease expires.</p>
+          <p v-if="editing.nativeModeRequest?.mode === 'administrator'" class="text-power">
+            Every trusted person selected here may direct unrestricted host administration through admitted agents. Saving confirms this access.
+          </p>
           <label class="access-row"><input v-model="editing.nativeEnabled" type="checkbox">Enable native execution</label>
           <template v-if="nativeCallers.length">
             <p id="native-trusted-people" class="mt-4 mb-2!">

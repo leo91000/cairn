@@ -151,7 +151,16 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
         DetailSheet("Node d’exécution", { expanded = false }) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(current, style = MaterialTheme.typography.titleMedium)
-                if (run.executionBackend == "native") Text("Processus natif · GPU partagé")
+                if (run.executionBackend == "native")
+                    Text("${nativeModeLabel(run.nativeMode?.mode ?: "protected")} · GPU partagé")
+                if (
+                    run.executionBackend == "native" &&
+                        placement.nodes.find { it.id == run.nodeId }?.nativeModeStatus in
+                            listOf("pending", "failed")
+                )
+                    Text(
+                        "Le basculement de la node attend sa confirmation ; les nouveaux placements sont bloqués."
+                    )
                 if (run.executionBackend == "native" && run.storage?.mode == "native")
                     Text(
                         "Sauvegarde entre les tours",
