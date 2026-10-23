@@ -89,6 +89,7 @@ impl Executor {
             return Ok(());
         }
         timing.next("seed");
+        let mut pin = crate::native::bases::PendingPin::new(&data.join("runs").join(run), attempt)?;
         let plan = stage_plan(&session, &data, descriptor).await?;
         let root = data.join("runs").join(text(&plan, "runId"));
         timing.next("lease");
@@ -118,6 +119,7 @@ impl Executor {
         );
         tokio::spawn(mcp);
         tokio::spawn(refresh_inbox(session, root, stop));
+        pin.keep();
         timing.finish();
         Ok(())
     }
@@ -126,6 +128,15 @@ impl Executor {
         if let Some(stop) = self.attempts.lock().await.remove(attempt) {
             stop.cancel();
         }
+        let (data, attempt) = (super::node_data_dir(), attempt.to_owned());
+        tokio::spawn(async move {
+            if let Err(error) = crate::native::bases::release_attempt(&data, &attempt).await {
+                tracing::debug!(
+                    status = error.status,
+                    "Cancelled native preparation pin cleanup deferred"
+                );
+            }
+        });
     }
 
     pub async fn close(&self) -> Vec<String> {
@@ -235,24 +246,23 @@ async fn stage_plan(session: &Session, data: &Path, descriptor: Value) -> Result
         }
     }
     let root = data.join("runs").join(text(&plan, "runId"));
-    let archive_controller =
-        if crate::native::enabled() && descriptor.get("projectArchives").is_some() {
-            let health = super::local_client()?
-                .get("http://localhost/health")
-                .timeout(Duration::from_secs(5))
-                .send()
-                .await;
-            match health {
-                Ok(response) if response.status().is_success() => response
-                    .json::<Value>()
-                    .await
-                    .ok()
-                    .is_some_and(|health| health["projectArchives"] == 1),
-                _ => false,
+    let archive_health = if crate::native::enabled() && descriptor.get("projectArchives").is_some()
+    {
+        let health = super::local_client()?
+            .get("http://localhost/health")
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await;
+        match health {
+            Ok(response) if response.status().is_success() => {
+                response.json::<Value>().await.unwrap_or_default()
             }
-        } else {
-            false
-        };
+            _ => Value::Null,
+        }
+    } else {
+        Value::Null
+    };
+    let archive_controller = archive_health["projectArchives"] == 1;
     let archives: Option<Vec<crate::project_archives::Archive>> = if archive_controller {
         descriptor
             .get("projectArchives")
@@ -273,8 +283,16 @@ async fn stage_plan(session: &Session, data: &Path, descriptor: Value) -> Result
         .await?;
     plan["workspaceSeeded"] = seed_workspace.into();
     if let Some(archives) = archives {
-        match crate::project_archives::stage(session, &root, &archives).await {
-            Ok(()) => plan["nativeProjectArchives"] = serde_json::to_value(archives)?,
+        let base_size = (archive_health["nativeProjectBases"] == 1)
+            .then(|| plan["resources"]["diskMiB"].as_u64())
+            .flatten();
+        match crate::project_archives::stage(session, &root, &archives, base_size).await {
+            Ok(base) => {
+                if let Some(key) = base {
+                    plan["nativeProjectBase"] = key.into();
+                }
+                plan["nativeProjectArchives"] = serde_json::to_value(archives)?;
+            }
             Err(error) => {
                 fallback_seed(session, &root, error).await?;
                 seed_workspace = true;
@@ -311,7 +329,7 @@ async fn fallback_seed(session: &Session, root: &Path, error: Error) -> Result<(
         status = error.status,
         "Archive staging unavailable; requesting the complete legacy seed"
     );
-    crate::project_archives::abandon_stage(root, error.status == 507).await?;
+    crate::project_archives::abandon_stage(root, error.status == 507, &session.attempt).await?;
     session
         .seed(json!({ "kind": "initial", "workspace": true }), root)
         .await

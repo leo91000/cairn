@@ -82,9 +82,10 @@ pub(crate) fn usage_sync(data: &Path, state: &Path) -> Result<u64> {
                 }
             }
         } else {
-            let physical = super::super::storage::environment::ROOTS
-                .iter()
-                .any(|root| name == *root);
+            let physical = name == "native-bases"
+                || super::super::storage::environment::ROOTS
+                    .iter()
+                    .any(|root| name == *root);
             used = used.saturating_add(size(&entry.path(), physical, &mut seen)?);
         }
     }

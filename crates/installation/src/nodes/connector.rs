@@ -478,8 +478,10 @@ async fn heartbeat(
                             identity.token.clone(),
                             stop.clone(),
                         );
+                        let warm_bases = health["nativeProjectBases"] == 1;
                         tokio::spawn(async move {
                             let _guard = guard;
+                            let warming = descriptors.clone();
                             if let Err(error) = crate::project_archives::prefetch(
                                 client,
                                 origin,
@@ -493,6 +495,9 @@ async fn heartbeat(
                                     status = error.status,
                                     "Project archive preload deferred"
                                 );
+                            }
+                            if warm_bases {
+                                let _ = crate::native::bases::request("warm", &json!({ "archives": warming, "diskMiB": 32768, "individual": true })).await;
                             }
                         });
                     }

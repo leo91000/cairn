@@ -592,8 +592,20 @@ async fn finish_restore(root: &Path, pending: &Value) -> Result<Value> {
 
 /// No symlink traversal, device reads or directory deletion through workload paths.
 pub async fn own_tree(root: &Path, uid: u32, gid: u32) -> Result<()> {
+    own_tree_with_stop(root, uid, gid, &tokio_util::sync::CancellationToken::new()).await
+}
+
+pub(crate) async fn own_tree_with_stop(
+    root: &Path,
+    uid: u32,
+    gid: u32,
+    stop: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
     let mut pending = vec![root.to_owned()];
     while let Some(path) = pending.pop() {
+        if stop.is_cancelled() {
+            return Err(Error::unavailable("Native base ownership stopped."));
+        }
         let metadata = tokio::fs::symlink_metadata(&path).await?;
         std::os::unix::fs::lchown(&path, Some(uid), Some(gid))?;
         if metadata.is_dir() && !metadata.file_type().is_symlink() {

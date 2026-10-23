@@ -1,4 +1,8 @@
 //! Host execution. Permissions and lifecycle are separate from coding-engine adapters.
+pub(crate) mod bases;
+#[cfg(test)]
+mod bases_tests;
+mod bases_warmer;
 pub(crate) mod block;
 pub(crate) mod disk;
 mod home;

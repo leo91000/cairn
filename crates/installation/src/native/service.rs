@@ -58,6 +58,7 @@ struct Controller {
     mounted: Arc<Mutex<HashMap<String, Arc<block::Handle>>>>,
     leases: Arc<Mutex<HashMap<String, u64>>>,
     admission: Arc<Mutex<()>>,
+    base_warmer: Arc<super::bases_warmer::Warmer>,
     budget: Arc<Mutex<Value>>,
     changed: Arc<Notify>,
     log_lock: Arc<Mutex<()>>,
@@ -66,6 +67,14 @@ struct Controller {
 }
 
 impl Controller {
+    fn bases(&self) -> super::bases::Bases {
+        super::bases::Bases {
+            data: self.data.clone(),
+            state: self.state.clone(),
+            identity: (self.identity.uid, self.identity.gid),
+        }
+    }
+
     fn file(&self, id: &str, extension: &str) -> PathBuf {
         self.state.join(format!("{id}.{extension}"))
     }
@@ -360,6 +369,7 @@ impl Controller {
             .as_str()
             .ok_or_else(|| Error::bad("Missing pinned native runtime."))?;
         super::systemd::tools(runtime)?;
+        let from_base = self.bases().initialize(plan, &stop).await?;
         let mounted = block::mount(&self.state, text(plan, "runId"), plan, &stop).await?;
         self.mounted.lock().await.insert(
             text(plan, "runId").to_owned(),
@@ -375,6 +385,16 @@ impl Controller {
             self.disk_budget(plan).min(self.disk_growth().await?),
         )
         .await?;
+        super::bases::release_pin(
+            &self.data.join("runs").join(text(plan, "runId")),
+            text(plan, "id"),
+        )
+        .await?;
+        if from_base || plan.get("nativeProjectBase").is_some() {
+            self.bases()
+                .trim(super::bases::cache_limit(self.disk_limit().await?), 0, None)
+                .await?;
+        }
         let temporary = root.join("tmp");
         if temporary.exists() {
             tokio::fs::remove_dir_all(&temporary).await?;
@@ -625,7 +645,11 @@ impl Controller {
         } else {
             disk::bytes_if_present(&root.join("data")).await?
         };
-        let seed = if !root.join("initialized").exists()
+        let assigned_base =
+            block::exists(&self.state, run)? && root.join("file-owner.json").exists();
+        let seed = if assigned_base {
+            0
+        } else if !root.join("initialized").exists()
             && !root.join("data/.cairn-seed-complete").exists()
         {
             let source = Plan::new(plan.clone())
@@ -634,15 +658,27 @@ impl Controller {
                 .map(|import| import.source.to_owned())
                 .ok_or_else(|| Error::bad("Missing native workspace seed."))?;
             if let Some(archives) = plan["nativeProjectArchives"].as_array() {
-                archives.iter().try_fold(0u64, |bytes, archive| {
-                    bytes
-                        .checked_add(
-                            archive["logicalBytes"]
-                                .as_u64()
-                                .ok_or_else(|| Error::bad("Invalid project archive size."))?,
-                        )
-                        .ok_or_else(|| Error::too_large("Project archives exceed disk budget."))
-                })?
+                let descriptors: Vec<crate::project_archives::Archive> = archives
+                    .iter()
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .collect::<std::result::Result<_, _>>()?;
+                let size = plan["resources"]["diskMiB"]
+                    .as_u64()
+                    .ok_or_else(|| Error::bad("Missing native disk size."))?;
+                if let Some(base) = self.bases().lookup(&descriptors, size).await? {
+                    base.metadata_bytes
+                } else {
+                    archives.iter().try_fold(0u64, |bytes, archive| {
+                        bytes
+                            .checked_add(
+                                archive["logicalBytes"]
+                                    .as_u64()
+                                    .ok_or_else(|| Error::bad("Invalid project archive size."))?,
+                            )
+                            .ok_or_else(|| Error::too_large("Project archives exceed disk budget."))
+                    })?
+                }
             } else {
                 workspace::bytes(&source).await?
             }
@@ -772,6 +808,12 @@ impl Controller {
             return Err(error);
         }
         self.wait_stopped(id).await?;
+        if let Err(error) = super::bases::release_attempt(&self.data, id).await {
+            tracing::debug!(
+                status = error.status,
+                "Stopped native preparation pin cleanup deferred"
+            );
+        }
         Ok(())
     }
 
@@ -941,7 +983,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         let usage = controller.usage().await?;
         let budget = controller.budget.lock().await.clone();
         return Ok(Json(json!({
-            "status": "ok", "backend": "native", "nodeProtocol": 2, "projectArchives": 1,
+            "status": "ok", "backend": "native", "nodeProtocol": 2, "projectArchives": 1, "nativeProjectBases": 1,
             "runtimeId": std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into()),
             "dataRoot": controller.data, "capabilities": capabilities,
             "runtimes": systemd::runtimes()?,
@@ -957,31 +999,76 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
     }
     let parts = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
     let value = match (method.as_str(), parts.as_slice()) {
+        ("POST", ["native-bases", "lookup"]) => {
+            let value = input(request, 8_000_000).await?;
+            let archives: Vec<crate::project_archives::Archive> =
+                serde_json::from_value(value["archives"].clone())?;
+            let size = value["diskMiB"]
+                .as_u64()
+                .ok_or_else(|| Error::bad("Missing native base size."))?;
+            json!({ "base": controller.bases().lookup(&archives, size).await? })
+        }
+        ("POST", ["native-bases", "warm"]) => {
+            let value = input(request, 8_000_000).await?;
+            controller
+                .base_warmer
+                .enqueue(
+                    controller.bases(),
+                    value,
+                    controller.budget.clone(),
+                    controller.stop.clone(),
+                )
+                .await?;
+            json!({ "queued": true })
+        }
         ("POST", ["node-budget"]) => {
             let value = input(request, 16384).await?;
             let budget = native_budget(&value)?;
             let _admission = controller.admission.lock().await;
-            if value["limits"] != controller.budget.lock().await["limits"] {
-                systemd::apply_budget(&budget).await?;
+            let previous = controller.budget.lock().await.clone();
+            if value != previous {
+                // Do not hold the budget mutex while waiting for storage:
+                // foreground transfers query health with their disk lease held.
+                let _disk = disk::lock(&controller.state).await?;
+                let limit = budget.limits.disk_mi_b.saturating_mul(disk::MIB);
+                let used = disk::used(&controller.data, &controller.state).await?;
+                if let Err(error) = controller
+                    .bases()
+                    .trim(
+                        super::bases::cache_limit(limit),
+                        used.saturating_sub(limit),
+                        None,
+                    )
+                    .await
+                {
+                    tracing::debug!(
+                        status = error.status,
+                        "Native cache reclamation deferred during budget update"
+                    );
+                }
+                if value["limits"] != previous["limits"] {
+                    systemd::apply_budget(&budget).await?;
+                }
+                atomic_write(
+                    &controller.state.join(crate::microvm::budget::FILE),
+                    &serde_json::to_vec(&value)?,
+                )
+                .await?;
+                *controller.budget.lock().await = value;
             }
-            atomic_write(
-                &controller.state.join(crate::microvm::budget::FILE),
-                &serde_json::to_vec(&value)?,
-            )
-            .await?;
-            *controller.budget.lock().await = value;
             json!({ "ready": true })
         }
         ("POST", ["storage-policy"]) => {
             let policy: crate::storage::policy::Policy =
                 serde_json::from_value(input(request, 16384).await?)?;
             policy.validate()?;
-            atomic_write(
-                &controller.state.join("storage-policy.json"),
-                &serde_json::to_vec(&policy)?,
-            )
-            .await?;
-            crate::storage::runtime::configure(&controller.state, &policy)?;
+            let path = controller.state.join("storage-policy.json");
+            let encoded = serde_json::to_vec(&policy)?;
+            if tokio::fs::read(&path).await.ok().as_ref() != Some(&encoded) {
+                let _disk = disk::lock(&controller.state).await?;
+                atomic_write(&path, &encoded).await?;
+                crate::storage::runtime::configure(&controller.state, &policy)?;
+            }
             json!({ "ready": true })
         }
         ("POST", ["runs", id, "lease"]) => {
@@ -1547,6 +1634,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         .await?;
         tokio::fs::remove_file(marker).await?;
     }
+    super::bases::recover_pins(&data).await?;
     let budget_path = state.join(crate::microvm::budget::FILE);
     let budget: Value = match tokio::fs::read(&budget_path).await {
         Ok(bytes) => serde_json::from_slice(&bytes)?,
@@ -1565,6 +1653,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         mounted: Arc::default(),
         leases: Arc::default(),
         admission: Arc::default(),
+        base_warmer: Arc::default(),
         budget: Arc::new(Mutex::new(budget)),
         changed: Arc::default(),
         log_lock: Arc::default(),
@@ -1593,6 +1682,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     while !controller.active.lock().await.is_empty() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    controller.base_warmer.wait_idle().await;
     match result {
         Some(result) => result.map_err(Error::internal)??,
         None => server.await.map_err(Error::internal)??,
@@ -1604,6 +1694,42 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn budget_update_does_not_block_budget_reads_while_waiting_for_storage() {
+        let (_fixture, controller) = fixture().await;
+        let owner =
+            crate::file_lock::exclusive(&controller.state.join("storage.lock"), "fixture owner")
+                .unwrap();
+        let mut value = controller.budget.lock().await.clone();
+        value["slots"] = 2.into();
+        let updating = controller.clone();
+        let pending =
+            tokio::spawn(async move { route(updating, request("/node-budget", &value)).await });
+        let waiting = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if crate::file_lock::exclusive(
+                    &controller.state.join("storage-foreground.lock"),
+                    "priority probe",
+                )
+                .is_err()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .is_ok();
+        let readable = controller.budget.try_lock().is_ok();
+        // Abort this direct route before releasing the fixture disk; no real
+        // systemd budget operation is admitted by this concurrency test.
+        pending.abort();
+        let _ = pending.await;
+        drop(owner);
+        assert!(waiting);
+        assert!(readable);
+    }
 
     async fn fixture() -> (tempfile::TempDir, Controller) {
         let root = tempfile::tempdir().unwrap();
@@ -1624,6 +1750,7 @@ mod tests {
             mounted: Arc::default(),
             leases: Arc::default(),
             admission: Arc::default(),
+            base_warmer: Arc::default(),
             budget: Arc::new(Mutex::new(
                 json!({ "slots": 1, "limits": { "cpu": 1, "memoryMiB": 1024, "diskMiB": 1024 } }),
             )),

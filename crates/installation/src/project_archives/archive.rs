@@ -117,7 +117,35 @@ pub(super) fn pack(source: &Path, file: File) -> Result<u64> {
     Ok(logical)
 }
 
+struct Stoppable<'a, R> {
+    input: R,
+    stop: &'a tokio_util::sync::CancellationToken,
+}
+
+impl<R: Read> Read for Stoppable<'_, R> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        if self.stop.is_cancelled() {
+            return Err(std::io::Error::other("Project extraction stopped."));
+        }
+        self.input.read(bytes)
+    }
+}
+
 pub(crate) fn extract(file: File, target: &Path, budget: u64) -> Result<u64> {
+    extract_with_stop(
+        file,
+        target,
+        budget,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+}
+
+pub(super) fn extract_with_stop(
+    file: File,
+    target: &Path,
+    budget: u64,
+    stop: &tokio_util::sync::CancellationToken,
+) -> Result<u64> {
     let mut archive = ZipArchive::new(file).map_err(archive_error)?;
     if archive.len() > MAX_ENTRIES {
         return Err(Error::too_large("Too many project archive entries."));
@@ -127,6 +155,9 @@ pub(crate) fn extract(file: File, target: &Path, budget: u64) -> Result<u64> {
     let mut seen = HashSet::new();
     let mut directories = Vec::new();
     for index in 0..archive.len() {
+        if stop.is_cancelled() {
+            return Err(Error::unavailable("Project extraction stopped."));
+        }
         let mut entry = archive.by_index(index).map_err(archive_error)?;
         let path = entry
             .enclosed_name()
@@ -174,7 +205,9 @@ pub(crate) fn extract(file: File, target: &Path, budget: u64) -> Result<u64> {
                 .mode(mode & 0o777)
                 .custom_flags(libc::O_NOFOLLOW)
                 .open(destination)?;
-            if std::io::copy(&mut entry.take(expected + 1), &mut file)? != expected {
+            let input = entry.take(expected + 1);
+            let mut input = Stoppable { input, stop };
+            if std::io::copy(&mut input, &mut file)? != expected {
                 return Err(Error::bad("Project archive size changed."));
             }
             file.flush()?;
