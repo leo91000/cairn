@@ -723,9 +723,9 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> 
         });
     };
     let mut statement = db.0.prepare(
-        "SELECT id, type FROM events WHERE run_id=?1 AND type IN ('turn.completed','turn.failed') AND id>?2 ORDER BY id",
+        "SELECT id, CASE WHEN type<>'status' THEN type WHEN text='cancelled' THEN 'cancelled' ELSE 'stopped' END FROM events WHERE run_id=?1 AND id>?2 AND (type IN ('turn.started','turn.completed','turn.failed','retry.scheduled') OR (type='status' AND text IN ('failed','cancelled','interrupted'))) ORDER BY id",
     )?;
-    let ends = statement
+    let history = statement
         .query_map(rusqlite::params![run_id, delivered], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
         })?
@@ -734,6 +734,8 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> 
 
     // A failed turn is final only once Cairn stops working on its message: an automatic
     // retry, another account or a recovered controller continues it, and a later turn answers.
+    // A scheduled retry says so until the run stops; otherwise the run still works on this
+    // message.
     let current = run
         .as_ref()
         .is_some_and(|run| run["chatExecution"]["messageId"] == delivery["id"]);
@@ -741,9 +743,32 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> 
         .as_ref()
         .and_then(crate::run_status::RunStatus::of)
         .is_some_and(crate::run_status::RunStatus::is_active);
-    for (index, (end, kind)) in ends.iter().enumerate() {
+    let turn_end = |kind: &str| matches!(kind, "turn.completed" | "turn.failed");
+    for (index, (end, kind)) in history.iter().enumerate() {
+        // A turn Cairn stops reports no failure: the run's status ends this message.
+        match kind.as_str() {
+            "cancelled" => return Ok(Turn::Stopped { failed: false }),
+            "stopped" => return Ok(Turn::Stopped { failed: true }),
+            kind if !turn_end(kind) => continue,
+            _ => {}
+        }
         let failed = kind == "turn.failed";
-        let continued = failed && current && (index + 1 < ends.len() || active);
+        // An older adapter repeats the failure of the same turn before Cairn schedules its
+        // retry. The retry continues this message until the run stops before another turn ends.
+        let mut rest = history[index + 1..]
+            .iter()
+            .map(|(_, next)| next.as_str())
+            .skip_while(|next| *next == "turn.failed");
+        let retried = rest.next() == Some("retry.scheduled");
+        let stop = retried
+            .then(|| rest.find(|next| matches!(*next, "stopped" | "cancelled") || turn_end(next)))
+            .flatten();
+        if failed && stop == Some("cancelled") {
+            return Ok(Turn::Stopped { failed: false });
+        }
+        let later = history[index + 1..].iter().any(|(_, next)| turn_end(next));
+        let continued =
+            failed && ((retried && stop != Some("stopped")) || (current && (later || active)));
         if !continued {
             return Ok(Turn::Done {
                 delivered,

@@ -1516,6 +1516,16 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
         .patch_run(run_id, json!({ "status": "queued" }))
         .await
         .unwrap();
+    let retry = json!({ "retry": { "attempt": 1, "limit": 3 } });
+    s.store
+        .event(
+            run_id,
+            "retry.scheduled",
+            "Temporary agent error.",
+            Some(retry),
+        )
+        .await
+        .unwrap();
     assert!(reply().await.is_none());
     s.store
         .event(run_id, "turn.started", "", None)
@@ -1535,6 +1545,153 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
         (completed.text.as_str(), completed.status),
         ("hello back", "completed")
     );
+
+    // The run moves on to the next message before the reply is sent: the retry still answered.
+    s.store
+        .patch_run(
+            run_id,
+            json!({ "status": "running", "chatExecution": { "messageId": "next" } }),
+        )
+        .await
+        .unwrap();
+    let completed = reply().await.unwrap();
+    assert_eq!(
+        (completed.text.as_str(), completed.status),
+        ("hello back", "completed")
+    );
+}
+
+#[tokio::test]
+async fn replies_do_not_follow_a_retry_stopped_before_it_ran() {
+    let (_root, s, connection) = fixture().await;
+    let event = json!({
+        "name": "message",
+        "revision": connection.revision,
+        "authorId": "300",
+        "payload": { "id": "500", "author": { "id": "300", "name": "Sarah" } },
+    });
+    let receipt = work::submit(
+        &s,
+        &context(&connection, &event),
+        &json!({ "text": "hello" }),
+    )
+    .await
+    .unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+    let run_id = text(&chat, "runId");
+    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
+        let store = s.store.clone();
+        let run_id = run_id.to_owned();
+        async move { store.event(&run_id, kind, text, payload).await.unwrap() }
+    };
+
+    event(
+        "chat.user",
+        "hello",
+        Some(json!({ "messageId": receipt["messageId"] })),
+    )
+    .await;
+    let capacity = "Selected model is at capacity. Please try a different model.";
+    let failure = json!({ "error": { "message": capacity, "codexErrorInfo": "serverOverloaded" } });
+    event("turn.failed", capacity, Some(failure)).await;
+    let retry = json!({ "retry": { "attempt": 1, "limit": 3 } });
+    event("retry.scheduled", "Temporary agent error.", Some(retry)).await;
+    // The owner stops the run during the wait, then the conversation answers another message.
+    event("status", "cancelled", None).await;
+    event(
+        "chat.user",
+        "something else",
+        Some(json!({ "messageId": "next" })),
+    )
+    .await;
+    event("turn.started", "", None).await;
+    let answer = json!({ "item": { "type": "agent_message", "text": "the other answer" } });
+    event("item.completed", "the other answer", Some(answer)).await;
+    event("turn.completed", "", None).await;
+    s.store
+        .patch_run(
+            run_id,
+            json!({ "status": "succeeded", "chatExecution": { "messageId": "next" } }),
+        )
+        .await
+        .unwrap();
+
+    let reply = work::reply(&s, &connection, &delivery)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.status, "cancelled");
+    assert!(!reply.text.contains("the other answer"), "{}", reply.text);
+}
+
+#[tokio::test]
+async fn replies_to_a_stopped_turn_do_not_carry_the_next_answer() {
+    for (status, reply_status) in [("cancelled", "cancelled"), ("failed", "failed")] {
+        let (_root, s, connection) = fixture().await;
+        let event = json!({
+            "name": "message",
+            "revision": connection.revision,
+            "authorId": "300",
+            "payload": { "id": "500", "author": { "id": "300", "name": "Sarah" } },
+        });
+        let receipt = work::submit(
+            &s,
+            &context(&connection, &event),
+            &json!({ "text": "hello" }),
+        )
+        .await
+        .unwrap();
+        s.chat_tick(&std::collections::HashSet::new())
+            .await
+            .unwrap();
+        let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+        let run_id = text(&chat, "runId");
+        let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+        let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
+            let store = s.store.clone();
+            let run_id = run_id.to_owned();
+            async move { store.event(&run_id, kind, text, payload).await.unwrap() }
+        };
+
+        event(
+            "chat.user",
+            "hello",
+            Some(json!({ "messageId": receipt["messageId"] })),
+        )
+        .await;
+        event("turn.started", "", None).await;
+        // Cairn stops the turn (Stop or the time limit), then the conversation answers another
+        // message.
+        event("status", status, None).await;
+        event(
+            "chat.user",
+            "something else",
+            Some(json!({ "messageId": "next" })),
+        )
+        .await;
+        event("turn.started", "", None).await;
+        let answer = json!({ "item": { "type": "agent_message", "text": "the other answer" } });
+        event("item.completed", "the other answer", Some(answer)).await;
+        event("turn.completed", "", None).await;
+        s.store
+            .patch_run(
+                run_id,
+                json!({ "status": "succeeded", "chatExecution": { "messageId": "next" } }),
+            )
+            .await
+            .unwrap();
+
+        let reply = work::reply(&s, &connection, &delivery)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply.status, reply_status);
+        assert!(!reply.text.contains("the other answer"), "{}", reply.text);
+    }
 }
 
 #[tokio::test]

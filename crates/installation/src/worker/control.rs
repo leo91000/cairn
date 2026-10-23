@@ -182,6 +182,11 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
             "retry": null,
         });
         db.patch_run(id, &patch)?;
+        // A run that already worked, such as one waiting for an automatic retry, shows the
+        // stop in its conversation.
+        if run["sessionId"].is_string() {
+            db.event(id, "status", RunStatus::Cancelled.as_str(), None)?;
+        }
     }
     db.audit("run.cancelled", &json!({ "id": id }))
 }

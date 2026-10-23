@@ -418,7 +418,7 @@ fn finish_recovery(db: &Db<'_>, id: &str, checkpoint: Option<&RunCheckpoint>) ->
         .run(id)?
         .ok_or_else(|| Error::not_found("Run not found"))?;
     if !current["cancelRequestedAt"].is_null() {
-        db.patch_run(id, &cancelled_recovery())?;
+        cancel_recovery(db, id)?;
         return Ok(false);
     }
     if let Some(checkpoint) = checkpoint {
@@ -469,16 +469,21 @@ fn finish_recovery(db: &Db<'_>, id: &str, checkpoint: Option<&RunCheckpoint>) ->
     Ok(true)
 }
 
-/// Settles a recovering run whose cancellation was requested.
-fn cancelled_recovery() -> Value {
-    json!({
-        "status": RunStatus::Cancelled,
-        "finishedAt": now(),
-        "accountWaitReason": null,
-        "recoveryPending": false,
-        "retry": null,
-        "wakeup": null,
-    })
+/// Settles a recovering run whose cancellation was requested, such as one waiting for an
+/// automatic retry. Its conversation shows the stop, as when a running agent is stopped.
+fn cancel_recovery(db: &Db<'_>, id: &str) -> Result<()> {
+    db.patch_run(
+        id,
+        &json!({
+            "status": RunStatus::Cancelled,
+            "finishedAt": now(),
+            "accountWaitReason": null,
+            "recoveryPending": false,
+            "retry": null,
+            "wakeup": null,
+        }),
+    )?;
+    db.event(id, "status", RunStatus::Cancelled.as_str(), None)
 }
 
 /// Hands a run whose execution failed unexpectedly back to recovery.

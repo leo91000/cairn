@@ -402,6 +402,21 @@ async fn cancellation_during_retry_wait_does_not_launch_another_agent() {
     fixture
         .until(&run_id, |run| run["status"] == RunStatus::Cancelled)
         .await;
+    // The conversation shows the stop: it ends the retry Cairn had scheduled.
+    let id = run_id.clone();
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.events(&id, 0, 1000))
+        .await
+        .unwrap();
+    let after_retry = events
+        .iter()
+        .skip_while(|event| event["type"] != "retry.scheduled")
+        .filter(|event| event["type"] == "status")
+        .map(|event| text(event, "text"))
+        .collect::<Vec<_>>();
+    assert_eq!(after_retry, ["cancelled"], "{events:?}");
     let marker: Value = serde_json::from_slice(
         &tokio::fs::read(Path::new(text(&waiting, "workspace")).join("fixture-retry-work.json"))
             .await
