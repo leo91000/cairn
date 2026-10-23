@@ -696,6 +696,9 @@ enum Turn {
     },
 }
 
+/// How long an account wait lasts before a failed turn answers the person.
+const ACCOUNT_WAIT_REPLY_MS: i64 = 2 * 60_000;
+
 fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> {
     if delivery["revision"] != connection.revision || !connection.allows(text(delivery, "userId")) {
         return Err(Error::forbidden("Reply authorization was revoked."));
@@ -744,15 +747,29 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> 
         .as_ref()
         .and_then(crate::run_status::RunStatus::of)
         .is_some_and(crate::run_status::RunStatus::is_active);
-    // Waiting for an account can last hours: the failure answers the person meanwhile. These
-    // are the waits clients show as account waits; recovery and capacity waits continue it.
-    let waiting_for_account = run.as_ref().is_some_and(|run| {
-        let reason = text(run, "accountWaitReason");
-        reason.starts_with("Usage exhausted.")
-            || (reason.starts_with("Waiting for a ")
-                && reason.contains(" account with available usage."))
-            || !run["accountRequired"].is_null()
-    });
+    // Waiting for an account can last hours: once it lasts, the failure answers the person
+    // meanwhile. A quick switch to another account, recovery and capacity waits continue the
+    // message; a wait for the person to reconnect an account answers at once. These are the
+    // waits clients show as account waits.
+    let reason = run
+        .as_ref()
+        .map(|run| text(run, "accountWaitReason"))
+        .unwrap_or_default();
+    let account_wait = reason.starts_with("Usage exhausted.")
+        || (reason.starts_with("Waiting for a ")
+            && reason.contains(" account with available usage."));
+    let since: Option<i64> = if account_wait {
+        db.0.query_row(
+            "SELECT created_at FROM events WHERE run_id=?1 AND id>?2 AND type='status' AND (text=?3 OR (?4 AND text LIKE 'Usage exhausted.%')) ORDER BY id DESC LIMIT 1",
+            rusqlite::params![run_id, delivered, reason, reason.starts_with("Usage exhausted.")], |row| row.get(0),
+        ).optional()?
+    } else {
+        None
+    };
+    let waiting_for_account = run
+        .as_ref()
+        .is_some_and(|run| !run["accountRequired"].is_null())
+        || (account_wait && since.is_none_or(|since| now() - since >= ACCOUNT_WAIT_REPLY_MS));
     let turn_end = |kind: &str| matches!(kind, "turn.completed" | "turn.failed");
     let stopped = |kind: &str| match kind {
         "cancelled" => Some("cancelled"),

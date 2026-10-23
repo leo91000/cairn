@@ -1512,6 +1512,17 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
         .await
         .unwrap();
     assert_eq!(reply().await.unwrap().status, "failed");
+    // A switch to another account that just started continues the message.
+    s.store
+        .event(
+            run_id,
+            "status",
+            "Usage exhausted. Saving this session and restoring capacity or switching accounts.",
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(reply().await.is_none());
     // Recovering the controller continues the message.
     s.store
         .patch_run(
