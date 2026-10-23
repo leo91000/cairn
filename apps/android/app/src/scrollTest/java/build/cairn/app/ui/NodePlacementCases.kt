@@ -685,7 +685,7 @@ abstract class NodePlacementCases {
                 compose.onAllNodesWithText("Node : Bureau GPU").fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithText("Node : Bureau GPU").performClick()
-            compose.onNodeWithText("Processus natif · GPU partagé").assertExists()
+            compose.onNodeWithText("Natif protégé · GPU partagé").assertExists()
             compose.onNodeWithText("Fichiers chargés à la demande").assertExists()
             compose.onNodeWithText("Sauvegarde entre les tours").assertDoesNotExist()
             capture("native-run-synchronized")

@@ -1778,3 +1778,57 @@ async fn converting_wildcard_access_never_reviews_host_root_without_explicit_own
         "The acknowledgement is not a new profile permission"
     );
 }
+
+#[tokio::test]
+async fn native_mode_preview_includes_unplaced_automatic_work_and_rejects_concurrent_arrivals() {
+    let f = Fixture::new().await;
+    let node_id = text(&f.node, "id");
+    let mut node = f.node.clone();
+    node["capabilities"]["nativeModeProtocol"] = 1.into();
+    f.service.store.put("nodes", node).await.unwrap();
+    let first = f.run();
+    common::add_run(&f.service.store, &first).await;
+    let path = format!("/api/nodes/{node_id}/native-mode");
+    let (status, preview) = f
+        .owner_call("POST", &path, json!({ "mode": "administrator" }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert!(
+        preview["preview"]["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|run| run["id"] == first["id"])
+    );
+
+    let second = f.run();
+    common::add_run(&f.service.store, &second).await;
+    let (status, _) = f
+        .owner_call(
+            "POST",
+            &path,
+            json!({ "mode": "administrator", "previewId": preview["previewId"], "confirm": true }),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "An undisclosed automatic arrival requires a fresh preview"
+    );
+    assert!(f.service.get("nodes", node_id).await.unwrap()["nativeModeRequest"].is_null());
+    let (_, fresh) = f
+        .owner_call("POST", &path, json!({ "mode": "administrator" }))
+        .await;
+    let listed = fresh["preview"]["conversations"].as_array().unwrap();
+    assert_eq!(listed.len(), 2);
+    assert!(listed.iter().any(|run| run["id"] == second["id"]));
+    let (status, pending) = f
+        .owner_call(
+            "POST",
+            &path,
+            json!({ "mode": "administrator", "previewId": fresh["previewId"], "confirm": true }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{pending}");
+    assert_eq!(pending["nativeModeStatus"], "pending");
+}

@@ -170,11 +170,26 @@ fn snapshot(db: &Db<'_>, node: &Value, mode: Mode) -> Result<Value> {
     let mut conversations = Vec::new();
     for run in db.runs(None, None, i64::MAX, 0, true)? {
         let checkpoint = super::db_checkpoint(db, text(&run, "id"))?;
+        let already_associated = run["nodeId"] == node_id
+            || checkpoint["nodeId"] == node_id
+            || run["pinnedNodeId"] == node_id
+            || run["preferredNodeId"] == node_id
+            || run["targetNodeId"] == node_id;
+        // Automatic queued work has no node yet. Include every potential first
+        // placement covered by the displayed agent grants, even at capacity or
+        // while offline; a concurrent arrival must invalidate this preview.
+        let unplaced_candidate = run["nodeId"].as_str().is_none()
+            && checkpoint["nodeId"].as_str().is_none()
+            && ["pinnedNodeId", "targetNodeId"].iter().all(|field| {
+                run[*field]
+                    .as_str()
+                    .is_none_or(|selected| selected == node_id)
+            })
+            && agents
+                .iter()
+                .any(|agent| agent["id"] == super::run_agent(&run));
         if crate::native::policy::native(&run["snapshot"]["agent"])
-            && (run["nodeId"] == node_id
-                || checkpoint["nodeId"] == node_id
-                || run["pinnedNodeId"] == node_id
-                || run["preferredNodeId"] == node_id)
+            && (already_associated || unplaced_candidate)
         {
             conversations.push(json!({
                 "id": run["id"], "agentId": super::run_agent(&run),
@@ -292,7 +307,7 @@ mod tests {
         let agent =
             json!({ "id": agent_id, "access": { "backend": "native", "nodes": [node_id] } });
         let run = json!({
-            "id": run_id, "createdAt": now(), "status": "running", "snapshot": { "agent": agent },
+            "id": run_id, "taskId": id(), "createdAt": now(), "status": "running", "snapshot": { "agent": agent },
             "nativePrincipals": [person], "nativeAuthorityNodes": [node_id], "nativeProvenanceUnknown": false,
         });
         store.put("nodes", node.clone()).await.unwrap();

@@ -30,7 +30,8 @@ root on its own host. No claim here extends the native boundary to Firecracker.
 
 The owner changes the mode from node details on the web or Android. Preview
 lists trusted account IDs, admitted agents (including all-node grants), existing
-conversations and scheduled tasks, interruptions and host powers. Confirmation
+conversations (including potential first placements still in the automatic queue)
+and scheduled tasks, interruptions and host powers. Confirmation
 is bound to that snapshot for five minutes and consumed once. Concurrent changes
 to those inputs require another preview. The mode choice stays on the node.
 
