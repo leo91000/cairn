@@ -77,14 +77,17 @@ pub(super) fn pack(source: &Path, file: File) -> Result<u64> {
                     continue;
                 }
                 let target = std::fs::read_link(&path)?;
+                let target = target
+                    .to_str()
+                    .ok_or_else(|| Error::bad("Invalid project symlink."))?;
+                logical = logical
+                    .checked_add(target.len() as u64)
+                    .filter(|size| *size <= super::LOGICAL_BYTES)
+                    .ok_or_else(|| {
+                        Error::too_large("Project archive exceeds logical size limit.")
+                    })?;
                 archive
-                    .add_symlink(
-                        name,
-                        target
-                            .to_str()
-                            .ok_or_else(|| Error::bad("Invalid project symlink."))?,
-                        options,
-                    )
+                    .add_symlink(name, target, options)
                     .map_err(archive_error)?;
             } else if metadata.is_dir() {
                 archive
@@ -204,9 +207,10 @@ mod tests {
         .unwrap();
         symlink("script", source.join("link")).unwrap();
         let output = tempfile::tempfile().unwrap();
-        pack(&source, output.try_clone().unwrap()).unwrap();
+        let logical = pack(&source, output.try_clone().unwrap()).unwrap();
         let target = root.path().join("target");
-        extract(output, &target, 100).unwrap();
+        assert_eq!(logical, 16); // Script bytes plus the symlink target.
+        assert_eq!(extract(output, &target, logical).unwrap(), logical);
         assert_eq!(
             std::fs::read_link(target.join("link")).unwrap(),
             Path::new("script")

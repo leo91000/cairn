@@ -18,6 +18,7 @@ fn descriptor(bytes: &[u8]) -> Archive {
     Archive {
         project_id: crate::config::id(),
         revision: "a".repeat(40),
+        origin_hash: None,
         key: "b".repeat(64),
         hash: blake3::hash(bytes).to_hex().to_string(),
         bytes: bytes.len() as u64,

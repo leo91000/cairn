@@ -25,6 +25,8 @@ const LOGICAL_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 pub(crate) struct Archive {
     pub project_id: String,
     pub revision: String,
+    #[serde(default)]
+    pub origin_hash: Option<String>,
     pub key: String,
     pub hash: String,
     pub bytes: u64,

@@ -588,6 +588,34 @@ async fn new_git_work_is_fresh_and_local_snapshots_preserve_the_registered_check
         std::fs::read_to_string(fresh.join("file")).unwrap(),
         "conversation edit"
     );
+    // Changing a live remote to a fork at the same commit must invalidate the
+    // archive's Git configuration, including the archive later sent to nodes.
+    let fork = root.path().join("fork");
+    git(
+        root.path(),
+        &[
+            "clone",
+            "--bare",
+            origin.to_str().unwrap(),
+            fork.to_str().unwrap(),
+        ],
+    );
+    git(
+        &source,
+        &["remote", "set-url", "origin", fork.to_str().unwrap()],
+    );
+    for name in ["fork-seed", "fork-warm"] {
+        let fork_seed = archive_seed(&s, &project, &root.path().join(name)).await;
+        assert_eq!(
+            git(&fork_seed, &["config", "--get", "remote.origin.url"]),
+            fork.to_str().unwrap()
+        );
+        assert_eq!(git(&fork_seed, &["rev-parse", "HEAD"]), current);
+    }
+    git(
+        &source,
+        &["remote", "set-url", "origin", origin.to_str().unwrap()],
+    );
     std::fs::write(origin.join("file"), "next version").unwrap();
     git(&origin, &["commit", "-am", "next version"]);
     let next = archive_seed(&s, &project, &root.path().join("next")).await;

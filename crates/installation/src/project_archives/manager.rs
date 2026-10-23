@@ -33,9 +33,13 @@ async fn build(
     source: &Path,
     revision: &str,
 ) -> Result<(Archive, std::fs::File)> {
+    let origin_hash = crate::project_git::origin(source, config)
+        .await
+        .map(|origin| blake3::hash(origin.as_bytes()).to_hex().to_string());
     let _guard = lock().lock().await;
     if let Some(descriptor) = latest(config, project).await?
         && descriptor.revision == revision
+        && descriptor.origin_hash == origin_hash
         && let Some(file) = cached(&config.data_dir, &descriptor).await?
     {
         return Ok((descriptor, file));
@@ -53,6 +57,7 @@ async fn build(
     let descriptor = Archive {
         project_id: text(project, "id").into(),
         revision: revision.into(),
+        origin_hash,
         key: key(project),
         hash,
         bytes,
@@ -84,15 +89,19 @@ pub(crate) async fn checkout(
     if project["sourceMode"] == "local" {
         return Ok(false);
     }
-    let Some(revision) =
+    let Some((revision, origin)) =
         crate::project_git::remote_revision(source, project, config, credentials).await?
     else {
         return Ok(false);
     };
+    let origin_hash = blake3::hash(origin.as_bytes()).to_hex().to_string();
     let hit = async {
         let _guard = lock().lock().await;
         match latest(config, project).await? {
-            Some(descriptor) if descriptor.revision == revision => {
+            Some(descriptor)
+                if descriptor.revision == revision
+                    && descriptor.origin_hash.as_ref() == Some(&origin_hash) =>
+            {
                 Ok(cached(&config.data_dir, &descriptor)
                     .await?
                     .map(|file| (descriptor, file)))
@@ -314,15 +323,18 @@ async fn refresh(s: &Service, project: &Value) -> Result<()> {
     };
     let credentials =
         crate::plugins::run_credentials::fetch(s, Some(text(agent, "id")), project).await?;
-    let revision = crate::project_git::remote_revision(
+    let remote = crate::project_git::remote_revision(
         Path::new(text(project, "path")),
         project,
         &s.config,
         &credentials,
     )
     .await?;
-    if let Some(descriptor) = latest(&s.config, project).await?
-        && Some(&descriptor.revision) == revision.as_ref()
+    if let Some((revision, origin)) = remote
+        && let Some(descriptor) = latest(&s.config, project).await?
+        && descriptor.revision == revision
+        && descriptor.origin_hash.as_deref()
+            == Some(blake3::hash(origin.as_bytes()).to_hex().as_str())
         && cached(&s.config.data_dir, &descriptor).await?.is_some()
     {
         return Ok(());
@@ -411,6 +423,7 @@ mod tests {
                 project_id: text(&project, "id").into(),
                 key: key(&project),
                 revision: "c".repeat(40),
+                origin_hash: None,
                 hash: hash.repeat(64),
                 bytes: CACHE_BYTES * 3 / 5,
                 logical_bytes: 0,
