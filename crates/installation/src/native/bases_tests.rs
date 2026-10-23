@@ -146,6 +146,9 @@ async fn prepared_ext4_base_adopts_private_authority_and_preserves_existing_conv
     assert_eq!(bases.trim(0, u64::MAX, None).await.unwrap(), 0);
     assert!(bases.initialize(&plan, &stop).await.unwrap());
     let directory = storage::environment::directory(&bases.state, &run).unwrap();
+    assert_eq!(directory, bases.state.join("disks").join(&run));
+    assert!(!directory.join("environment").exists());
+    assert!(!directory.join("owner").exists());
     assert!(!directory.join("restore.pending").exists());
     assert!(
         !bases
@@ -188,11 +191,8 @@ async fn prepared_ext4_base_adopts_private_authority_and_preserves_existing_conv
             .ino()
     );
     assert!(!bases.initialize(&plan, &stop).await.unwrap());
-    // Existing environment recovery completes a pointer-only claim. No new
-    // recovery intent or cache descriptor is needed by an older controller.
-    tokio::fs::remove_file(directory.join("owner"))
-        .await
-        .unwrap();
+    // A conventional committed disk is readable without running environment
+    // claim recovery, including when interrupted before the ownership hint.
     tokio::fs::remove_file(
         bases
             .state
@@ -202,7 +202,6 @@ async fn prepared_ext4_base_adopts_private_authority_and_preserves_existing_conv
     )
     .await
     .unwrap();
-    storage::environment::recover(&bases.state).await.unwrap();
     bases.trim(0, u64::MAX, None).await.unwrap();
     let mut legacy_plan = plan.clone();
     legacy_plan
@@ -446,9 +445,17 @@ async fn measure_prepared_native_bases() {
         });
         let run = crate::config::id();
         let plan = json!({
-            "id": crate::config::id(), "runId": run, "runtimeId": "a".repeat(40), "resources": { "diskMiB": 256 },
-            "nativeProjectArchives": archives, "nativeProjectBase": ready.key,
-            "storage": { "master": "http://127.0.0.1:1/", "grant": format!("probe-{index}"), "policy": policy },
+            "id": crate::config::id(),
+            "runId": run,
+            "runtimeId": "a".repeat(40),
+            "resources": { "diskMiB": 256 },
+            "nativeProjectArchives": archives,
+            "nativeProjectBase": ready.key,
+            "storage": {
+                "master": "http://127.0.0.1:1/",
+                "grant": format!("probe-{index}"),
+                "policy": policy
+            }
         });
         let begin = Instant::now();
         let cpu = cpu_ms();
@@ -515,7 +522,7 @@ async fn measure_prepared_native_bases() {
             "baseAllocatedBytes": super::workspace::measure(&cache, true).unwrap(),
             "basePreparation": warm, "samples": samples,
             "hostLoad": std::fs::read_to_string("/proc/loadavg").unwrap(),
-            "conditions": "4096x4KiB text + seeded random42 8MiB; local host filesystem; cached ZIP/base; no ublk mount or WAN. ZIP final syncfs can include unrelated host writes. Clone includes durable metadata, assignment, geometry and full journal open. Reads use advisory DONTNEED; writes probe a disposable raw journal block.",
+            "conditions": "4096x4KiB text + seeded random42 8MiB; local host filesystem; cached ZIP/base; no ublk mount or WAN. ZIP final syncfs can include unrelated host writes. Clone includes durable metadata, atomic journal publication, geometry and full journal open. Reads use advisory DONTNEED; writes probe a disposable raw journal block.",
         })
     );
 }

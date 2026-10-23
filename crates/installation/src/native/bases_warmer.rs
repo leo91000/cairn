@@ -63,6 +63,9 @@ impl Warmer {
         };
         let mut queue = self.queue.lock().await;
         for archives in groups {
+            if !Bases::eligible(&archives, disk_mib) {
+                continue;
+            }
             let key = bases.key(&archives, disk_mib)?;
             if value["individual"] != true {
                 queue.failures.remove(&key);

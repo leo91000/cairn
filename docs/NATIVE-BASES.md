@@ -26,7 +26,7 @@ TMPDIR="$HOME/.cache/cairn-bases-benchmark" pnpm test:backend \
 The workload contains 4,096 text files of 4 KiB and 8 MiB seeded random bytes
 (StdRng seed 42), 24 MiB total, in a 256 MiB virtual ext4 filesystem. Three
 alternating samples compare cached ZIP extraction/ownership/final synchronization
-with durable private metadata cloning, assignment, geometry checking and full
+with durable private metadata cloning, atomic journal publication, geometry checking and full
 journal open. Base construction is measured separately. Output records encoded
 ZIP bytes, allocated base bytes, new private bytes, wall and process CPU time,
 advisory cold/warm 4 MiB journal reads and a synchronized 4 KiB raw journal delta.
@@ -41,22 +41,22 @@ disposable native-runtime CI fixture.
 
 On 2026-10-23, local ext4/NVMe on an i9-14900K, Linux 7.2.9, 94 GiB RAM,
 with other builds and native workloads running, produced the following
-development-profile samples. Host load at completion was 11.49 / 8.30 / 8.02.
+development-profile samples. Host load at completion was 8.56 / 8.71 / 9.05.
 
 | Metric | Cached ZIP | Prepared base |
 | --- | ---: | ---: |
-| Sample 1 preparation | 2,952 ms | 138 ms |
-| Sample 2 preparation | 413 ms | 159 ms |
-| Sample 3 preparation | 397 ms | 150 ms |
-| Median preparation | 413 ms | 150 ms |
-| Median process CPU | 353 ms | 82 ms |
-| Project bytes expanded / new private allocated bytes | 24 MiB | 80 KiB |
+| Sample 1 preparation | 5,530 ms | 102 ms |
+| Sample 2 preparation | 458 ms | 115 ms |
+| Sample 3 preparation | 449 ms | 118 ms |
+| Median preparation | 458 ms | 115 ms |
+| Median process CPU | 347 ms | 84 ms |
+| Project bytes expanded / new private allocated bytes | 24 MiB | 76 KiB |
 
 The ZIP contains 9,102,989 bytes. The reusable journal base allocates 67,194,880
-bytes (64.08 MiB) and takes 1,164 ms wall / 476 ms CPU to prepare once. This
+bytes (64.08 MiB) and takes 1,187 ms wall / 473 ms CPU to prepare once. This
 trades more bounded per-version cache space for less per-conversation writing.
-The median of three advisory cold/warm 4 MiB reads was 3.38 / 0.20 ms; the
-synchronized 4 KiB journal delta took 17.84 ms wall / 0.44 ms CPU. The first ZIP
+The median of three advisory cold/warm 4 MiB reads was 4.01 / 0.21 ms; the
+synchronized 4 KiB journal delta took 6.61 ms wall / 0.44 ms CPU. The first ZIP
 sample shows the variability of host-wide writeback; the three samples and
 measurement boundaries are retained instead of treating that sample as a steady
 production comparison.

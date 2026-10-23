@@ -334,9 +334,9 @@ pub(crate) async fn create_prepared(
     create_source(directory, manifest, context, 1, true).await
 }
 
-/// Prepare a new private native clone before its existing ownership claim.
-/// A crash before assignment leaves an ordinary unclaimed environment, which
-/// startup recovery removes. No new pending format is needed by older binaries.
+/// Prepare a private clone in a disposable environment before publishing it
+/// atomically into the conventional native disk. Startup removes abandoned
+/// temporary environments; no new authoritative pending format is introduced.
 pub(crate) async fn clone_native_base(source: &Path, target: &Path, context: &Value) -> Result<()> {
     let physical = target
         .parent()

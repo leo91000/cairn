@@ -1555,6 +1555,13 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
     Ok(Json(value).into_response())
 }
 
+// Called only after old workloads and block devices are fenced. Temporary
+// anonymous bases/clones have no authority; conventional committed disks remain.
+async fn recover_preparations(data: &Path, state: &Path) -> Result<()> {
+    storage::environment::recover(state).await?;
+    super::bases::recover_pins(data).await
+}
+
 async fn bind_controller(path: &Path) -> Result<tokio::net::UnixListener> {
     if let Ok(metadata) = tokio::fs::symlink_metadata(path).await {
         if !metadata.file_type().is_socket() {
@@ -1634,7 +1641,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         .await?;
         tokio::fs::remove_file(marker).await?;
     }
-    super::bases::recover_pins(&data).await?;
+    recover_preparations(&data, &state).await?;
     let budget_path = state.join(crate::microvm::budget::FILE);
     let budget: Value = match tokio::fs::read(&budget_path).await {
         Ok(bytes) => serde_json::from_slice(&bytes)?,
@@ -1694,6 +1701,82 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_startup_reclaims_interrupted_preparations_and_preserves_committed_disks() {
+        let (_fixture, controller) = fixture().await;
+        let run = crate::config::id();
+        let attempt = crate::config::id();
+        let disk = controller.state.join("disks").join(&run);
+        let abandoned = controller
+            .state
+            .join("environments")
+            .join(crate::config::id());
+        private_dir(&disk.join("lazy")).await.unwrap();
+        atomic_write(&disk.join("lazy/preserved"), b"committed payload")
+            .await
+            .unwrap();
+        private_dir(&abandoned.join("lazy")).await.unwrap();
+        atomic_write(&abandoned.join("lazy/partial"), b"unclaimed")
+            .await
+            .unwrap();
+        let stage = controller.data.join("runs").join(&run);
+        private_dir(&stage).await.unwrap();
+        let pin = super::super::bases::pin_path(&stage, &attempt).unwrap();
+        atomic_write(&pin, b"").await.unwrap();
+        recover_preparations(&controller.data, &controller.state)
+            .await
+            .unwrap();
+        assert!(!abandoned.exists());
+        assert!(!pin.exists());
+        assert_eq!(
+            storage::environment::directory(&controller.state, &run).unwrap(),
+            disk
+        );
+        assert_eq!(
+            tokio::fs::read(disk.join("lazy/preserved")).await.unwrap(),
+            b"committed payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn optional_base_limits_do_not_reject_valid_zip_preparation() {
+        let (_fixture, controller) = fixture().await;
+        let run = crate::config::id();
+        let project_root = controller.data.join("runs").join(&run).join("workspace");
+        let archive = json!({
+            "projectId": crate::config::id(),
+            "revision": "a".repeat(40),
+            "key": "b".repeat(64),
+            "hash": "c".repeat(64),
+            "bytes": 100,
+            "logicalBytes": 15
+        });
+        for (size, count) in [(2_097_152, 1), (128, 65)] {
+            let mut archives = Vec::new();
+            for _ in 0..count {
+                let mut value = archive.clone();
+                value["projectId"] = crate::config::id().into();
+                archives.push(value);
+            }
+            let plan = json!({
+                "id": crate::config::id(),
+                "runId": run,
+                "projectRoot": project_root,
+                "resources": { "cpu": 1, "memoryMiB": 512, "diskMiB": size },
+                "imports": [{ "source": project_root, "target": project_root }],
+                "nativeProjectArchives": archives
+            });
+            controller.check_preparation_space(&plan).await.unwrap();
+            assert!(
+                !controller
+                    .bases()
+                    .initialize(&plan, &CancellationToken::new())
+                    .await
+                    .unwrap()
+            );
+        }
+    }
 
     #[tokio::test]
     async fn budget_update_does_not_block_budget_reads_while_waiting_for_storage() {

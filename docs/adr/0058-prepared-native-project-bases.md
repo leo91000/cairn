@@ -22,14 +22,17 @@ Complete disk/accounting/publication formats stay unchanged.
 ## Ownership and interrupted preparation
 
 The cached base is anonymous and has no remote authority. Prepare each clone in
-a new unclaimed environment, bind only that private metadata to the current
-plan's validated storage context and synchronize it before assignment. The
-existing environment pointer/owner protocol is the commit point. Before this
-claim, ordinary startup recovery removes an abandoned unclaimed directory. After
-it, both old and new native controllers can load the conventional authorized
-journal and finish initialization from its existing `.cairn-seed-complete` marker.
-No new authoritative recovery intent or data epoch is introduced. A missing
+a disposable unclaimed environment and bind only its private metadata to the
+current plan's validated storage context. Under the existing logical ownership
+and physical disk locks, synchronize its runtime identity, atomically rename the
+finished journal into the conventional `disks/<run>/lazy` directory, then sync its
+parent. That rename is the commit point. Before it, an older controller sees an
+ordinary empty disk; after it, both old and new controllers can open the normal
+authorized journal and initialize from its existing `.cairn-seed-complete` marker.
+No new pointer/owner claim, recovery intent or data epoch is introduced. A missing
 ownership hint only causes the existing one-time reconciliation of file owners.
+Native startup reclaims abandoned temporary environments after fencing old
+workloads, before admitting new preparation.
 
 Existing conversations always retain their own journals. A cache refresh, changed
 remote, different UID, another disk size or cache eviction never replaces their
@@ -40,7 +43,8 @@ files. Keep the installation epoch 12/database version 11 contract unchanged.
 The connector negotiates `nativeProjectBases: 1`. Under the shared storage lock it
 pins a complete matching base before omitting the ZIP download and full expanded
 seed reservation. The controller independently derives the same key. A miss or
-an older controller uses the established ZIP path; foreground misses enqueue
+an older controller uses the established ZIP path. Combinations outside optional
+base-cache limits also remain ordinary ZIP misses; foreground misses enqueue
 their exact project combination and disk size for later conversations. Catalog
 warming prepares individual projects at the normal 32 GiB size.
 

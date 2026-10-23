@@ -80,18 +80,19 @@ pub(crate) struct Ready {
 
 struct Unclaimed {
     path: PathBuf,
-    armed: bool,
 }
 
 impl Drop for Unclaimed {
     fn drop(&mut self) {
-        if self.armed {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+        let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 
 impl Bases {
+    pub fn eligible(archives: &[Archive], disk_mib: u64) -> bool {
+        !archives.is_empty() && archives.len() <= 64 && (128..=1_048_576).contains(&disk_mib)
+    }
+
     pub fn key(&self, archives: &[Archive], disk_mib: u64) -> Result<String> {
         Inputs::new(archives, disk_mib, self.identity)?.key()
     }
@@ -105,6 +106,9 @@ impl Bases {
         archives: &[Archive],
         disk_mib: u64,
     ) -> Result<Option<(PathBuf, Ready)>> {
+        if !Self::eligible(archives, disk_mib) {
+            return Ok(None);
+        }
         let inputs = Inputs::new(archives, disk_mib, self.identity)?;
         let key = inputs.key()?;
         let root = self.root().join(&key);
@@ -369,6 +373,18 @@ impl Bases {
         if stop.is_cancelled() {
             return Err(Error::unavailable("Native base clone stopped."));
         }
+        let lease = environment::lock(&self.state, run, "Native disk is active.").await?;
+        for name in [
+            "lazy",
+            "data.ext4",
+            "bootstrap.pending",
+            "resize-source",
+            "restore.pending",
+        ] {
+            if lease.directory.join(name).exists() {
+                return Ok(false);
+            }
+        }
         let physical = self.state.join("environments").join(crate::config::id());
         touch_pin(&self.root().join(&ready.key).join("pin"));
         let (source, target, context) = (
@@ -383,32 +399,52 @@ impl Bases {
             "arch": "x86_64",
             "runtimeId": plan["runtimeId"]
         });
-        let encoded_runtime = serde_json::to_vec(&runtime)?;
         let handle = tokio::runtime::Handle::current();
-        let mut unclaimed = tokio::task::spawn_blocking(move || -> Result<Unclaimed> {
+        let unclaimed = tokio::task::spawn_blocking(move || -> Result<Unclaimed> {
             use std::os::unix::fs::DirBuilderExt;
             std::fs::DirBuilder::new().mode(0o700).create(&target)?;
             let guard = Unclaimed {
                 path: target.clone(),
-                armed: true,
             };
             handle.block_on(storage::runtime::clone_native_base(
                 &source,
                 &target.join("lazy"),
                 &context,
             ))?;
-            handle.block_on(atomic_write(&target.join("runtime.json"), &encoded_runtime))?;
             std::fs::File::open(&target)?.sync_all()?;
             std::fs::File::open(target.parent().unwrap())?.sync_all()?;
             Ok(guard)
         })
         .await
         .map_err(Error::internal)??;
-        // Assignment can persist its pointer before returning an error. Retain
-        // that directory for environment recovery once claiming begins.
-        unclaimed.armed = false;
-        let environment = physical.file_name().unwrap().to_str().unwrap();
-        let owner = environment::assign(&self.state, environment, run).await?;
+        // Publish directly into the conventional native disk. Older native
+        // controllers do not recover environment claims, so no pointer/owner
+        // pair may become authoritative here. Runtime identity is durable before
+        // the journal rename commits; before then this is an ordinary empty disk.
+        let runtime_path = lease.directory.join("runtime.json");
+        match tokio::fs::read(&runtime_path).await {
+            Ok(bytes) if serde_json::from_slice::<Value>(&bytes)? != runtime => {
+                return Err(Error::conflict("Native disk runtime changed."));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        atomic_write(&runtime_path, &serde_json::to_vec(&runtime)?).await?;
+        tokio::fs::File::open(&lease.directory)
+            .await?
+            .sync_all()
+            .await?;
+        tokio::fs::File::open(lease.directory.parent().unwrap())
+            .await?
+            .sync_all()
+            .await?;
+        tokio::fs::rename(physical.join("lazy"), lease.directory.join("lazy")).await?;
+        tokio::fs::File::open(&lease.directory)
+            .await?
+            .sync_all()
+            .await?;
+        drop(unclaimed);
         // Existing block initialization recognizes the populated filesystem's
         // .cairn-seed-complete marker even if interrupted before these hints.
         private_dir(&root).await?;
@@ -418,7 +454,7 @@ impl Bases {
         )
         .await?;
         release_pin(&self.data.join("runs").join(run), text(plan, "id")).await?;
-        drop(owner);
+        drop(lease);
         Ok(true)
     }
 }
