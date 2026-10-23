@@ -100,9 +100,13 @@ fn date_millis(condition: &Value) -> Result<i64> {
     Ok(date.timestamp_millis() + extra_millisecond)
 }
 
-/// The single wait tool: native time/run conditions and conditions of granted plugins.
-pub fn tool(plugin_conditions: &[Value]) -> Value {
-    let mut conditions = vec![delay(), at(), run_finished(), task_finished()];
+/// The single wait tool: native time/run conditions and conditions of granted plugins. Only a
+/// conversation that may delegate is offered the delegated-task condition.
+pub fn tool(plugin_conditions: &[Value], delegates: bool) -> Value {
+    let mut conditions = vec![delay(), at(), run_finished()];
+    if delegates {
+        conditions.push(task_finished());
+    }
     conditions.extend(plugin_conditions.iter().cloned());
     json!({
         "name": "wait_for",

@@ -345,7 +345,7 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         crate::outcome::tool(),
         crate::chats::questions::list_tool(),
         crate::chats::questions::cancel_tool(),
-        crate::waits::tool(&conditions),
+        crate::waits::tool(&conditions, delegates),
         crate::nodes::exclusive::acquire_tool(),
         crate::nodes::exclusive::release_tool(),
         crate::nodes::exclusive::status_tool(),

@@ -8,7 +8,7 @@ travail autorisé avec un résultat précis.
 ## Ce que cette PR permet déjà
 
 Cairn fournit les conditions temporelles `delay` et `at`, ainsi que `run_finished`
-et `task_finished` ;
+et `task_finished` pour les conversations qui peuvent déléguer ;
 les plugins accordés à l’agent ajoutent les leurs,
 de type `<plugin>_<nom>` (voir les [conditions de plugins](PLUGINS.md#conditions)).
 Le plugin GitHub livré en ajoute deux :

@@ -102,6 +102,26 @@ impl Fixture {
             .collect()
     }
 
+    /// The condition types `wait_for` offers this turn.
+    async fn wait_conditions(&self, turn: &Turn) -> Vec<String> {
+        let listing = project_workspaces::rpc(&self.s, &turn.token, "tools/list", &json!({}))
+            .await
+            .unwrap();
+        let wait = listing["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "wait_for")
+            .unwrap()
+            .clone();
+        wait["inputSchema"]["properties"]["condition"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|condition| text(&condition["properties"]["type"], "const").to_owned())
+            .collect()
+    }
+
     async fn delegate(
         &self,
         turn: &Turn,
@@ -128,6 +148,11 @@ async fn delegation_is_an_opt_in_agent_power() {
     let f = Fixture::new(false).await;
     let turn = f.conversation(MAIN_AGENT_ID).await;
     assert!(!f.tools(&turn).await.contains(&"delegate_task".to_owned()));
+    assert!(
+        !f.wait_conditions(&turn)
+            .await
+            .contains(&"task_finished".to_owned())
+    );
     let denied = f
         .delegate(&turn, json!({ "task": "Review the branch" }))
         .await
@@ -140,6 +165,10 @@ async fn delegation_is_an_opt_in_agent_power() {
     for tool in ["delegate_task", "task_status", "task_cancel"] {
         assert!(tools.contains(&tool.to_owned()), "{tool} is offered");
     }
+    assert_eq!(
+        f.wait_conditions(&turn).await.last().unwrap(),
+        "task_finished"
+    );
     let run = f.s.store.run(&turn.run).await.unwrap();
     assert_eq!(run["snapshot"]["delegation"], "requester");
 }
