@@ -90,6 +90,15 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
     if input.method != "POST" {
         return Err(Error::method_not_allowed("Method not allowed."));
     }
+    if *attempt == "cache" {
+        return crate::project_archives::serve_cached(
+            s,
+            &node,
+            operation,
+            text(&input.body, "hash"),
+        )
+        .await;
+    }
     let (run, plan) = authorize(s, &node, attempt).await?;
     let root = s.config.data_dir.join("runs").join(text(&run, "id"));
     match *operation {
@@ -98,7 +107,13 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
             Ok(Json(json!({ "remainingMs": lease_ms })).into_response())
         }
         "plan" => {
-            let descriptor = json!({ "plan": plan, "dataRoot": s.config.data_dir });
+            let mut descriptor = json!({ "plan": plan, "dataRoot": s.config.data_dir });
+            if plan["backend"] == "native"
+                && let Some(archives) =
+                    crate::project_archives::run_archives(s, &run, &root).await?
+            {
+                descriptor["projectArchives"] = serde_json::to_value(archives)?;
+            }
             Ok(Json(descriptor).into_response())
         }
         "inbox" => {
@@ -120,7 +135,15 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
             let messages: Value = serde_json::from_slice(&bytes)?;
             Ok(Json(json!({ "messages": messages })).into_response())
         }
-        "seed" => seed_source(&run, &plan, &root, &input.body).await,
+        "seed" => {
+            let archives = plan["backend"] == "native"
+                && input.body["projectArchives"] == true
+                && crate::project_archives::run_archives(s, &run, &root)
+                    .await?
+                    .is_some();
+            seed_source(&run, &plan, &root, &input.body, archives).await
+        }
+        "archive" => crate::project_archives::serve_run(s, &run, &root, &input.body).await,
         "auth" => {
             let socket = root
                 .join("home")
@@ -174,6 +197,7 @@ async fn seed_source(
     plan: &Value,
     root: &Path,
     selection: &Value,
+    archives: bool,
 ) -> Result<Response> {
     let source = match text(selection, "kind") {
         "initial" => root.to_path_buf(),
@@ -197,8 +221,9 @@ async fn seed_source(
     // Older nodes omit `workspace` and keep receiving a complete seed. Never
     // let a node omit bootstrap files for a fresh VM or a native environment.
     let resumed_vm = plan["backend"] == "firecracker" && plan["resumeWorkspace"] == true;
-    let skip_projects =
-        text(selection, "kind") == "initial" && selection["workspace"] == false && resumed_vm;
+    let skip_projects = text(selection, "kind") == "initial"
+        && selection["workspace"] == false
+        && (resumed_vm || archives);
     let project_root = if skip_projects {
         plan["projectRoot"]
             .as_str()
@@ -251,6 +276,7 @@ pub async fn fetch(
                 .map_err(Error::internal)?,
         )
         .bearer_auth(token)
+        .timeout(Duration::from_secs(300))
         .json(body)
         .send()
         .await
@@ -301,7 +327,38 @@ pub async fn seed(
         .bytes_stream()
         .map(|r| r.map_err(std::io::Error::other));
     let mut reader = BufReader::new(tokio_util::io::StreamReader::new(stream));
-    super::files::receive(&mut reader, temp.path(), budget).await?;
+    if crate::native::enabled() {
+        let keep = selection["keepArchives"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let data = super::node_data_dir();
+        let multiplier = if selection["kind"] == "inbox" { 2 } else { 1 };
+        super::files::receive_with_reclaim(
+            &mut reader,
+            temp.path(),
+            budget,
+            SEED_BUDGET_BYTES,
+            |needed| {
+                let (data, keep) = (data.clone(), keep.clone());
+                async move {
+                    Ok(crate::project_archives::reclaim_for_foreground(
+                        &data,
+                        needed.saturating_mul(multiplier),
+                        &keep,
+                    )
+                    .await?
+                        / multiplier)
+                }
+            },
+        )
+        .await?;
+    } else {
+        super::files::receive(&mut reader, temp.path(), budget).await?;
+    }
     // Preserve the directory inode mounted into a native workload. Replacing a
     // bind-mounted directory would leave it reading the previous inbox forever.
     if crate::native::enabled() && selection["kind"] == "inbox" {

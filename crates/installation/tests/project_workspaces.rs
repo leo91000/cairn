@@ -502,6 +502,15 @@ fn git(directory: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().into()
 }
 
+async fn archive_seed(s: &Service, project: &Value, root: &Path) -> PathBuf {
+    std::fs::create_dir(root).unwrap();
+    let run = json!({ "id": id(), "snapshot": { "agent": { "access": { "backend": "native" } }, "task": { "worktree": true } } });
+    let entry = execution::project_seed(&run, project, &s.config, root, &RunCredentials::default())
+        .await
+        .unwrap();
+    PathBuf::from(text(&entry, "path"))
+}
+
 #[tokio::test]
 async fn new_git_work_is_fresh_and_local_snapshots_preserve_the_registered_checkout() {
     let (root, s, _) = fixture().await;
@@ -534,6 +543,89 @@ async fn new_git_work_is_fresh_and_local_snapshots_preserve_the_registered_check
     assert_eq!(
         std::fs::read_to_string(source.join("file")).unwrap(),
         "uncommitted"
+    );
+    // Exercise the actual isolated seed seam; ordinary clones keep their contract.
+    let seed = archive_seed(&s, &project, &root.path().join("seed")).await;
+    assert_eq!(
+        std::fs::read_to_string(seed.join("file")).unwrap(),
+        "current"
+    );
+    // The same commit reuses a complete archive, while mutable checkouts remain private.
+    let cache = s.config.data_dir.join("project-archives");
+    let archives_before = std::fs::read_dir(&cache)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "zip")
+        })
+        .count();
+    assert_eq!(archives_before, 1);
+    let archive = std::fs::read_dir(&cache)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "zip")
+        })
+        .unwrap()
+        .path();
+    let mut damaged = std::fs::read(&archive).unwrap();
+    damaged[0] ^= 0xff;
+    std::fs::write(&archive, damaged).unwrap();
+    // Same-length corruption must rebuild from the authorized remote, not poison later starts.
+    std::fs::write(fresh.join("file"), "conversation edit").unwrap();
+    let warm = archive_seed(&s, &project, &root.path().join("warm")).await;
+    assert_eq!(
+        std::fs::read_to_string(warm.join("file")).unwrap(),
+        "current"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fresh.join("file")).unwrap(),
+        "conversation edit"
+    );
+    // Changing a live remote to a fork at the same commit must invalidate the
+    // archive's Git configuration, including the archive later sent to nodes.
+    let fork = root.path().join("fork");
+    git(
+        root.path(),
+        &[
+            "clone",
+            "--bare",
+            origin.to_str().unwrap(),
+            fork.to_str().unwrap(),
+        ],
+    );
+    git(
+        &source,
+        &["remote", "set-url", "origin", fork.to_str().unwrap()],
+    );
+    for name in ["fork-seed", "fork-warm"] {
+        let fork_seed = archive_seed(&s, &project, &root.path().join(name)).await;
+        assert_eq!(
+            git(&fork_seed, &["config", "--get", "remote.origin.url"]),
+            fork.to_str().unwrap()
+        );
+        assert_eq!(git(&fork_seed, &["rev-parse", "HEAD"]), current);
+    }
+    git(
+        &source,
+        &["remote", "set-url", "origin", origin.to_str().unwrap()],
+    );
+    std::fs::write(origin.join("file"), "next version").unwrap();
+    git(&origin, &["commit", "-am", "next version"]);
+    let next = archive_seed(&s, &project, &root.path().join("next")).await;
+    assert_eq!(
+        std::fs::read_to_string(next.join("file")).unwrap(),
+        "next version"
+    );
+    assert_eq!(
+        std::fs::read_to_string(warm.join("file")).unwrap(),
+        "current"
     );
     project["sourceMode"] = "local".into();
     let local = root.path().join("local");

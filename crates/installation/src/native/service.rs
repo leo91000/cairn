@@ -633,12 +633,29 @@ impl Controller {
                 .find(|import| import.target == text(plan, "projectRoot"))
                 .map(|import| import.source.to_owned())
                 .ok_or_else(|| Error::bad("Missing native workspace seed."))?;
-            workspace::bytes(&source).await?
+            if let Some(archives) = plan["nativeProjectArchives"].as_array() {
+                archives.iter().try_fold(0u64, |bytes, archive| {
+                    bytes
+                        .checked_add(
+                            archive["logicalBytes"]
+                                .as_u64()
+                                .ok_or_else(|| Error::bad("Invalid project archive size."))?,
+                        )
+                        .ok_or_else(|| Error::too_large("Project archives exceed disk budget."))
+                })?
+            } else {
+                workspace::bytes(&source).await?
+            }
         } else {
             0
         };
         let home = disk::bytes_if_present(&self.data.join("runs").join(run).join("home")).await?;
         let incoming = seed.saturating_add(home);
+        let growth = self.disk_growth().await?;
+        if incoming > growth {
+            crate::project_archives::reclaim_for_foreground(&self.data, incoming - growth, &[])
+                .await?;
+        }
         if current.saturating_add(incoming) > self.disk_budget(plan)
             || incoming > self.disk_growth().await?
             || disk::used(&self.data, &self.state).await? > self.disk_limit().await?
@@ -924,7 +941,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         let usage = controller.usage().await?;
         let budget = controller.budget.lock().await.clone();
         return Ok(Json(json!({
-            "status": "ok", "backend": "native", "nodeProtocol": 2,
+            "status": "ok", "backend": "native", "nodeProtocol": 2, "projectArchives": 1,
             "runtimeId": std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into()),
             "dataRoot": controller.data, "capabilities": capabilities,
             "runtimes": systemd::runtimes()?,

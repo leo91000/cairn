@@ -27,21 +27,30 @@ pub(crate) async fn used(data: &Path, state: &Path) -> Result<u64> {
 /// Count file-backed legacy work conservatively, but charge journal/cache blocks
 /// by allocated bytes. Mounted views refer to those same blocks and add no charge.
 pub(crate) fn usage_sync(data: &Path, state: &Path) -> Result<u64> {
-    fn size(path: &Path, physical: bool) -> Result<u64> {
+    fn size(
+        path: &Path,
+        physical: bool,
+        seen: &mut std::collections::HashSet<(u64, u64)>,
+    ) -> Result<u64> {
         use std::os::unix::fs::MetadataExt;
         match std::fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.is_dir() => super::workspace::measure(path, physical),
-            Ok(metadata) if metadata.is_file() => Ok(if physical {
-                metadata.blocks().saturating_mul(512)
-            } else {
-                metadata.len()
-            }),
+            Ok(metadata) if metadata.is_dir() => {
+                super::workspace::measure_unique(path, physical, seen)
+            }
+            Ok(metadata) if metadata.is_file() && seen.insert((metadata.dev(), metadata.ino())) => {
+                Ok(if physical {
+                    metadata.blocks().saturating_mul(512)
+                } else {
+                    metadata.len()
+                })
+            }
             Ok(_) => Ok(0),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
             Err(error) => Err(error.into()),
         }
     }
-    let mut used = size(data, false)?;
+    let mut seen = std::collections::HashSet::new();
+    let mut used = size(data, false, &mut seen)?;
     for entry in std::fs::read_dir(state)? {
         let entry = entry?;
         let name = entry.file_name();
@@ -49,7 +58,7 @@ pub(crate) fn usage_sync(data: &Path, state: &Path) -> Result<u64> {
             for plan in std::fs::read_dir(entry.path())? {
                 let plan = plan?;
                 if plan.file_type()?.is_file() {
-                    used = used.saturating_add(size(&plan.path(), false)?);
+                    used = used.saturating_add(size(&plan.path(), false, &mut seen)?);
                 }
             }
         } else if name == "native" {
@@ -65,18 +74,18 @@ pub(crate) fn usage_sync(data: &Path, state: &Path) -> Result<u64> {
                     for file in std::fs::read_dir(&root)? {
                         let file = file?;
                         if file.file_name() != "data" {
-                            used = used.saturating_add(size(&file.path(), false)?);
+                            used = used.saturating_add(size(&file.path(), false, &mut seen)?);
                         }
                     }
                 } else {
-                    used = used.saturating_add(size(&root, false)?);
+                    used = used.saturating_add(size(&root, false, &mut seen)?);
                 }
             }
         } else {
             let physical = super::super::storage::environment::ROOTS
                 .iter()
                 .any(|root| name == *root);
-            used = used.saturating_add(size(&entry.path(), physical)?);
+            used = used.saturating_add(size(&entry.path(), physical, &mut seen)?);
         }
     }
     Ok(used)
@@ -101,14 +110,38 @@ pub(crate) async fn recover_exports(state: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn lock(state: &Path) -> Result<crate::file_lock::Guard> {
+pub(crate) struct StorageGuard {
+    _storage: crate::file_lock::Guard,
+    _priority: crate::file_lock::Guard,
+}
+
+pub(crate) async fn lock(state: &Path) -> Result<StorageGuard> {
     tokio::time::timeout(Duration::from_secs(300), async {
+        // Every foreground waiter holds shared intent, across processes. The
+        // warmer probes this lock and cancels its network transfer promptly.
+        let priority = loop {
+            match crate::file_lock::shared(
+                &state.join("storage-foreground.lock"),
+                "Storage priority probe in progress.",
+            ) {
+                Ok(guard) => break guard,
+                Err(error) if error.status == 409 => {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        };
         loop {
             match crate::file_lock::exclusive(
                 &state.join("storage.lock"),
                 "Another native storage operation is in progress.",
             ) {
-                Ok(owner) => return Ok(owner),
+                Ok(owner) => {
+                    return Ok(StorageGuard {
+                        _storage: owner,
+                        _priority: priority,
+                    });
+                }
                 Err(error) if error.status == 409 => {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
@@ -148,6 +181,28 @@ pub(crate) async fn staging_budget() -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_cache_and_conversation_pins_are_charged_once_per_inode() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let state = root.path().join("state");
+        std::fs::create_dir_all(data.join("project-archives")).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let archive = data.join("project-archives/seed.zip");
+        std::fs::write(&archive, vec![1; 4096]).unwrap();
+        for index in 0..4 {
+            let run = data
+                .join("runs")
+                .join(index.to_string())
+                .join("project-archives");
+            std::fs::create_dir_all(&run).unwrap();
+            std::fs::hard_link(&archive, run.join("seed.zip")).unwrap();
+        }
+        assert_eq!(usage_sync(&data, &state).unwrap(), 4096);
+        std::fs::remove_file(archive).unwrap();
+        assert_eq!(usage_sync(&data, &state).unwrap(), 4096);
+    }
 
     #[tokio::test]
     async fn native_block_pool_counts_retained_journals_and_staging_without_scanning_the_mounted_view()
