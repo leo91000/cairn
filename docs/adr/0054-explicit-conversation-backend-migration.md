@@ -70,6 +70,10 @@ Extracted files are closed before packing, without a separate fsync for every
 temporary file. This tree is discarded after interruption; the durability
 boundary remains the verified converted recovery point, published before the
 original environment is replaced.
+Populating the new ext4 image is a bulk operation with a two-hour command budget.
+A valid retained environment with many files can exceed the ordinary three-minute
+host-command deadline on remote staging. Other host commands retain their
+existing limits; a failed or timed-out conversion still cannot replace the source.
 
 This supersedes the blanket native/VM conversion prohibition in
 [native journal storage](0052-native-ublk-workspaces-and-idle-eviction.md).
