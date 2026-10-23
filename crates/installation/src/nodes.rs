@@ -1201,8 +1201,13 @@ async fn heartbeat(s: &Service, input: &Input) -> Result<Value> {
     }
     let mut value = serde_json::to_value(&reply)?;
     // Older connectors ignore this optional, credential-free cache catalogue.
-    value["projectArchives"] =
-        serde_json::to_value(crate::project_archives::catalog(s, &reply.node_id).await?)?;
+    match crate::project_archives::catalog(s, &reply.node_id).await {
+        Ok(archives) => value["projectArchives"] = serde_json::to_value(archives)?,
+        Err(error) => tracing::warn!(
+            status = error.status,
+            "Archive catalogue unavailable; node leases remain valid"
+        ),
+    }
     Ok(value)
 }
 

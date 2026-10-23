@@ -651,6 +651,11 @@ impl Controller {
         };
         let home = disk::bytes_if_present(&self.data.join("runs").join(run).join("home")).await?;
         let incoming = seed.saturating_add(home);
+        let growth = self.disk_growth().await?;
+        if incoming > growth {
+            crate::project_archives::reclaim_for_foreground(&self.data, incoming - growth, &[])
+                .await?;
+        }
         if current.saturating_add(incoming) > self.disk_budget(plan)
             || incoming > self.disk_growth().await?
             || disk::used(&self.data, &self.state).await? > self.disk_limit().await?

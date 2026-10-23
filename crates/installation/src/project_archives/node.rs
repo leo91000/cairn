@@ -13,7 +13,10 @@ async fn download(
     if !response.status().is_success() {
         return Err(Error::unavailable("Project archive download rejected."));
     }
-    if descriptor.bytes > budget {
+    let freed = clean_interrupted_downloads(root).await?;
+    let budget = budget.saturating_add(freed);
+    let reclaimed = reclaim(root, descriptor.bytes.saturating_sub(budget)).await?;
+    if descriptor.bytes > budget.saturating_add(reclaimed) {
         return Err(Error::new(
             507,
             "Project archive exceeds free node disk budget.",
@@ -88,7 +91,10 @@ pub(crate) async fn stage(
     let _disk = crate::native::disk::lock(&crate::native::state_dir()).await?;
     let _guard = lock().lock().await;
     let data = crate::nodes::node_data_dir();
-    crate::skills::private_dir(&root.join("project-archives")).await?;
+    clean_interrupted_downloads(&data).await?;
+    let pins = root.join("project-archives");
+    crate::skills::private_dir(&pins).await?;
+    let mut required = 0u64;
     for descriptor in descriptors {
         descriptor.validate()?;
         let cached_file = cached(&data, descriptor).await?;
@@ -98,7 +104,40 @@ pub(crate) async fn stage(
         } else {
             false
         };
-        if !verified {
+        if verified {
+            tokio::fs::hard_link(
+                descriptor.path(&data),
+                pins.join(format!("{}.zip", descriptor.project_id)),
+            )
+            .await?;
+        } else {
+            // A corrupt cache entry cannot reserve space while its replacement downloads.
+            match tokio::fs::remove_file(descriptor.path(&data)).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            required = required
+                .checked_add(descriptor.bytes)
+                .ok_or_else(|| Error::too_large("Project archives exceed disk budget."))?;
+        }
+        required = required
+            .checked_add(descriptor.logical_bytes)
+            .ok_or_else(|| Error::too_large("Project archives exceed disk budget."))?;
+    }
+    // Current inputs are pinned before reclamation. Reserve the final filesystem
+    // plus missing encoded objects; warm objects are already charged to the pool.
+    let available = budget().await?;
+    let reclaimed = reclaim(&data, required.saturating_sub(available)).await?;
+    if required > available.saturating_add(reclaimed) {
+        return Err(Error::new(
+            507,
+            "Project archive preparation exceeds free node disk budget.",
+        ));
+    }
+    for descriptor in descriptors {
+        let target = pins.join(format!("{}.zip", descriptor.project_id));
+        if !target.exists() {
             let selection =
                 serde_json::json!({ "projectId": descriptor.project_id, "hash": descriptor.hash });
             let response = crate::nodes::workspace::fetch(
@@ -111,12 +150,27 @@ pub(crate) async fn stage(
             )
             .await?;
             download(&data, descriptor, response, budget().await?).await?;
+            tokio::fs::hard_link(descriptor.path(&data), target).await?;
         }
-        let target = root
-            .join("project-archives")
-            .join(format!("{}.zip", descriptor.project_id));
-        tokio::fs::hard_link(descriptor.path(&data), target).await?;
         crate::skills::private_dir(&root.join("workspace").join(&descriptor.project_id)).await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn abandon_stage(root: &Path, pressure: bool) -> Result<()> {
+    let _disk = if crate::native::enabled() {
+        Some(crate::native::disk::lock(&crate::native::state_dir()).await?)
+    } else {
+        None
+    };
+    let _guard = lock().lock().await;
+    match tokio::fs::remove_dir_all(root.join("project-archives")).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    if pressure {
+        reclaim(&crate::nodes::node_data_dir(), u64::MAX).await?;
     }
     Ok(())
 }
@@ -144,6 +198,7 @@ pub(crate) async fn prefetch(
         let Some(_guard) = lock().try_lock().ok() else {
             return Ok(());
         };
+        clean_interrupted_downloads(&root).await?;
         if cached(&root, &descriptor).await?.is_some() {
             continue;
         }

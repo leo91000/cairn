@@ -7,7 +7,7 @@ mod node;
 mod tests;
 
 pub(crate) use manager::{catalog, checkout, maintain, run_archives, serve_cached, serve_run};
-pub(crate) use node::{prefetch, stage};
+pub(crate) use node::{abandon_stage, prefetch, stage};
 
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -106,6 +106,38 @@ async fn extract(file: std::fs::File, target: &Path, budget: u64) -> Result<u64>
         .map_err(Error::internal)?
 }
 
+async fn extract_verified(
+    file: std::fs::File,
+    descriptor: &Archive,
+    target: &Path,
+    budget: u64,
+) -> Result<u64> {
+    let (hash, bytes) = fingerprint(file.try_clone()?).await?;
+    if hash != descriptor.hash || bytes != descriptor.bytes {
+        return Err(Error::bad("Project archive checksum mismatch."));
+    }
+    extract(file, target, budget).await
+}
+
+/// Called only with cache mutation serialized and before creating a new temp
+/// file. Killed downloads/builds must not leave immortal budget charges.
+async fn clean_interrupted_downloads(root: &Path) -> Result<u64> {
+    let directory = root.join("project-archives");
+    crate::skills::private_dir(&directory).await?;
+    let mut entries = tokio::fs::read_dir(directory).await?;
+    let mut freed = 0u64;
+    while let Some(entry) = entries.next_entry().await? {
+        if entry.file_name().to_string_lossy().starts_with(".tmp")
+            && entry.file_type().await?.is_file()
+        {
+            let bytes = entry.metadata().await?.len();
+            tokio::fs::remove_file(entry.path()).await?;
+            freed = freed.saturating_add(bytes);
+        }
+    }
+    Ok(freed)
+}
+
 /// Cache objects are disposable and pinned by an open descriptor or a run's hard
 /// link. Eviction never traverses conversation files or follows symlinks.
 async fn prune(root: &Path, reserve: u64) -> Result<()> {
@@ -132,6 +164,59 @@ async fn prune(root: &Path, reserve: u64) -> Result<()> {
         bytes = bytes.saturating_sub(length);
     }
     Ok(())
+}
+
+/// Free unpinned disposable objects against actual shared-pool pressure, not
+/// merely the separate cache cap. Run pins and conversation files are untouched.
+async fn reclaim(root: &Path, needed: u64) -> Result<u64> {
+    reclaim_except(root, needed, &[]).await
+}
+
+async fn reclaim_except(root: &Path, needed: u64, keep: &[String]) -> Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+    let directory = root.join("project-archives");
+    crate::skills::private_dir(&directory).await?;
+    let mut entries = tokio::fs::read_dir(directory).await?;
+    let mut files = Vec::new();
+    while let Some(entry) = entries.next_entry().await? {
+        if entry
+            .path()
+            .extension()
+            .is_none_or(|extension| extension != "zip")
+            || !entry.file_type().await?.is_file()
+        {
+            continue;
+        }
+        let metadata = entry.metadata().await?;
+        let protected = entry
+            .path()
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .is_some_and(|hash| keep.iter().any(|keep| keep == hash));
+        if metadata.nlink() == 1 && !protected {
+            files.push((metadata.modified()?, entry.path(), metadata.len()));
+        }
+    }
+    files.sort_by_key(|(modified, _, _)| *modified);
+    let mut reclaimed = 0u64;
+    for (_, path, bytes) in files {
+        if reclaimed >= needed {
+            break;
+        }
+        tokio::fs::remove_file(path).await?;
+        reclaimed = reclaimed.saturating_add(bytes);
+    }
+    Ok(reclaimed)
+}
+
+pub(crate) async fn reclaim_for_foreground(
+    root: &Path,
+    needed: u64,
+    keep: &[String],
+) -> Result<u64> {
+    let _guard = lock().lock().await;
+    let freed = clean_interrupted_downloads(root).await?;
+    Ok(freed.saturating_add(reclaim_except(root, needed.saturating_sub(freed), keep).await?))
 }
 
 pub(crate) async fn initialize(

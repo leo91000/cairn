@@ -327,7 +327,38 @@ pub async fn seed(
         .bytes_stream()
         .map(|r| r.map_err(std::io::Error::other));
     let mut reader = BufReader::new(tokio_util::io::StreamReader::new(stream));
-    super::files::receive(&mut reader, temp.path(), budget).await?;
+    if crate::native::enabled() {
+        let keep = selection["keepArchives"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let data = super::node_data_dir();
+        let multiplier = if selection["kind"] == "inbox" { 2 } else { 1 };
+        super::files::receive_with_reclaim(
+            &mut reader,
+            temp.path(),
+            budget,
+            SEED_BUDGET_BYTES,
+            |needed| {
+                let (data, keep) = (data.clone(), keep.clone());
+                async move {
+                    Ok(crate::project_archives::reclaim_for_foreground(
+                        &data,
+                        needed.saturating_mul(multiplier),
+                        &keep,
+                    )
+                    .await?
+                        / multiplier)
+                }
+            },
+        )
+        .await?;
+    } else {
+        super::files::receive(&mut reader, temp.path(), budget).await?;
+    }
     // Preserve the directory inode mounted into a native workload. Replacing a
     // bind-mounted directory would leave it reading the previous inbox forever.
     if crate::native::enabled() && selection["kind"] == "inbox" {

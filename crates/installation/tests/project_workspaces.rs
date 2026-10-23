@@ -563,6 +563,21 @@ async fn new_git_work_is_fresh_and_local_snapshots_preserve_the_registered_check
         })
         .count();
     assert_eq!(archives_before, 1);
+    let archive = std::fs::read_dir(&cache)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "zip")
+        })
+        .unwrap()
+        .path();
+    let mut damaged = std::fs::read(&archive).unwrap();
+    damaged[0] ^= 0xff;
+    std::fs::write(&archive, damaged).unwrap();
+    // Same-length corruption must rebuild from the authorized remote, not poison later starts.
     std::fs::write(fresh.join("file"), "conversation edit").unwrap();
     let warm = archive_seed(&s, &project, &root.path().join("warm")).await;
     assert_eq!(

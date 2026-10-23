@@ -84,6 +84,121 @@ async fn cache_eviction_preserves_open_archives_and_pinned_conversation_seeds() 
 }
 
 #[tokio::test]
+async fn pool_pressure_reclaims_only_unused_archives_even_below_the_cache_cap() {
+    let root = tempfile::tempdir().unwrap();
+    let cache = root.path().join("project-archives");
+    std::fs::create_dir(&cache).unwrap();
+    let old = cache.join("old.zip");
+    let pinned = cache.join("pinned.zip");
+    std::fs::write(&old, vec![1; 600]).unwrap();
+    std::fs::write(&pinned, vec![2; 500]).unwrap();
+    std::fs::hard_link(&pinned, root.path().join("run-pin.zip")).unwrap();
+    // Scale the reviewed 150/600/200 MiB scenario down to bytes. Reclamation
+    // is driven by the actual preparation deficit, despite a non-full cache.
+    assert_eq!(reclaim(root.path(), 400 - 150).await.unwrap(), 600);
+    assert!(!old.exists());
+    assert!(pinned.exists());
+    assert_eq!(reclaim(root.path(), 1).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn initial_configuration_and_legacy_transfers_reclaim_cache_only_when_needed() {
+    let root = tempfile::tempdir().unwrap();
+    let cache = root.path().join("project-archives");
+    std::fs::create_dir(&cache).unwrap();
+    std::fs::write(cache.join("unused.zip"), vec![1; 600]).unwrap();
+    std::fs::write(cache.join("needed.zip"), vec![2; 100]).unwrap();
+    let source = root.path().join("source");
+    std::fs::create_dir_all(source.join("home")).unwrap();
+    std::fs::write(source.join("home/config"), vec![3; 128]).unwrap();
+    let mut frames = Vec::new();
+    crate::nodes::files::send(&source, &mut frames)
+        .await
+        .unwrap();
+    let keep = vec!["needed".to_owned()];
+    let destination = root.path().join("received");
+    crate::nodes::files::receive_with_reclaim(
+        &mut frames.as_slice(),
+        &destination,
+        0,
+        1024,
+        |needed| {
+            let (data, keep) = (root.path().to_owned(), keep.clone());
+            async move { reclaim_for_foreground(&data, needed, &keep).await }
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read(destination.join("home/config")).unwrap(),
+        vec![3; 128]
+    );
+    assert!(!cache.join("unused.zip").exists());
+    assert!(cache.join("needed.zip").exists());
+}
+
+#[tokio::test]
+async fn interrupted_downloads_release_their_budget_without_evicting_valid_objects() {
+    let root = tempfile::tempdir().unwrap();
+    let cache = root.path().join("project-archives");
+    std::fs::create_dir(&cache).unwrap();
+    std::fs::write(cache.join(".tmp-killed-download"), vec![1; 600]).unwrap();
+    std::fs::write(cache.join("valid.zip"), vec![2; 100]).unwrap();
+    assert_eq!(
+        reclaim_for_foreground(root.path(), 128, &[]).await.unwrap(),
+        600
+    );
+    assert!(!cache.join(".tmp-killed-download").exists());
+    assert!(cache.join("valid.zip").exists());
+}
+
+#[tokio::test]
+async fn checksum_verification_covers_zip_permissions_outside_the_payload_crc() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("script"), "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(
+        source.join("script"),
+        std::fs::Permissions::from_mode(0o751),
+    )
+    .unwrap();
+    let original = tempfile::NamedTempFile::new().unwrap();
+    archive::pack(&source, original.reopen().unwrap()).unwrap();
+    let mut bytes = std::fs::read(original.path()).unwrap();
+    let descriptor = descriptor(&bytes);
+    let central = bytes
+        .windows(4)
+        .position(|bytes| bytes == b"PK\x01\x02")
+        .unwrap();
+    bytes[central + 40] ^= 0o100; // Unix owner execute bit in external attributes.
+    let damaged = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(damaged.path(), &bytes).unwrap();
+    let unverified = root.path().join("unverified");
+    archive::extract(damaged.reopen().unwrap(), &unverified, 4096).unwrap();
+    assert_ne!(
+        std::fs::metadata(unverified.join("script"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o751
+    );
+    assert!(
+        extract_verified(
+            damaged.reopen().unwrap(),
+            &descriptor,
+            &root.path().join("verified"),
+            4096
+        )
+        .await
+        .is_err()
+    );
+    assert!(!root.path().join("verified").exists());
+}
+
+#[tokio::test]
 #[ignore = "reproducible local archive versus file-frame benchmark"]
 async fn measure_project_archive_transfer() {
     let root = tempfile::tempdir().unwrap();

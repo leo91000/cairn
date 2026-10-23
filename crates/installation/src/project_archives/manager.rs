@@ -14,8 +14,16 @@ async fn latest(config: &Config, project: &Value) -> Result<Option<Archive>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let descriptor: Archive = serde_json::from_slice(&bytes)?;
-    descriptor.validate()?;
+    // A damaged disposable index is a cache miss, not a lease/preparation failure.
+    let Ok(descriptor) = serde_json::from_slice::<Archive>(&bytes) else {
+        return Ok(None);
+    };
+    if descriptor.validate().is_err()
+        || descriptor.key != key(project)
+        || descriptor.project_id != text(project, "id")
+    {
+        return Ok(None);
+    }
     Ok(Some(descriptor))
 }
 
@@ -32,6 +40,7 @@ async fn build(
     {
         return Ok((descriptor, file));
     }
+    clean_interrupted_downloads(&config.data_dir).await?;
     prune(&config.data_dir, 0).await?;
     let root = config.data_dir.join("project-archives");
     let temp = tempfile::NamedTempFile::new_in(&root)?;
@@ -80,18 +89,39 @@ pub(crate) async fn checkout(
     else {
         return Ok(false);
     };
-    let hit = {
+    let hit = async {
         let _guard = lock().lock().await;
         match latest(config, project).await? {
             Some(descriptor) if descriptor.revision == revision => {
-                cached(&config.data_dir, &descriptor).await?
+                Ok(cached(&config.data_dir, &descriptor)
+                    .await?
+                    .map(|file| (descriptor, file)))
             }
-            _ => None,
+            _ => Ok::<_, Error>(None),
         }
-    };
-    if let Some(file) = hit {
-        extract(file, target, LOGICAL_BYTES).await?;
-        return Ok(true);
+    }
+    .await;
+    if let Ok(Some((descriptor, file))) = hit {
+        match extract_verified(file, &descriptor, target, LOGICAL_BYTES).await {
+            Ok(_) => return Ok(true),
+            Err(error) => {
+                tracing::warn!(
+                    status = error.status,
+                    "Invalid project archive discarded; cloning the authorized remote"
+                );
+                if target.exists() {
+                    tokio::fs::remove_dir_all(target).await?;
+                }
+                let _guard = lock().lock().await;
+                match tokio::fs::remove_file(descriptor.path(&config.data_dir)).await {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        tracing::warn!(kind = ?error.kind(), "Invalid archive could not be removed");
+                    }
+                }
+            }
+        }
     }
     crate::project_git::clone(source, target, project, config, credentials).await?;
     let actual = crate::project_git::revision(target, config).await?;
@@ -297,7 +327,7 @@ async fn refresh(s: &Service, project: &Value) -> Result<()> {
     {
         return Ok(());
     }
-    let root = s.config.data_dir.join("project-archives");
+    let root = s.config.data_dir.join("project-archive-staging");
     crate::skills::private_dir(&root).await?;
     let temporary = tempfile::tempdir_in(root)?;
     checkout(
@@ -312,6 +342,25 @@ async fn refresh(s: &Service, project: &Value) -> Result<()> {
 }
 
 pub(crate) async fn maintain(s: Arc<Service>) {
+    {
+        let _guard = lock().lock().await;
+        if let Err(error) = clean_interrupted_downloads(&s.config.data_dir).await {
+            tracing::warn!(
+                status = error.status,
+                "Interrupted archive cache cleanup deferred"
+            );
+        }
+    }
+    // Only this worker creates remote-clone staging directories. A new worker
+    // starts after the old installation process has stopped.
+    let staging = s.config.data_dir.join("project-archive-staging");
+    if let Ok(mut entries) = tokio::fs::read_dir(&staging).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if entry.file_name().to_string_lossy().starts_with(".tmp") {
+                let _ = tokio::fs::remove_dir_all(entry.path()).await;
+            }
+        }
+    }
     loop {
         let refresh_all = async {
             for project in s.store.list("projects").await? {

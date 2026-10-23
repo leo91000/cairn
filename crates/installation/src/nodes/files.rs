@@ -146,6 +146,20 @@ pub async fn receive(
     root: &Path,
     budget: u64,
 ) -> Result<()> {
+    receive_with_reclaim(reader, root, budget, budget, |_| std::future::ready(Ok(0))).await
+}
+
+pub(crate) async fn receive_with_reclaim<F, Fut>(
+    reader: &mut (impl AsyncBufRead + Unpin),
+    root: &Path,
+    mut budget: u64,
+    maximum: u64,
+    mut reclaim: F,
+) -> Result<()>
+where
+    F: FnMut(u64) -> Fut + Send,
+    Fut: std::future::Future<Output = Result<u64>> + Send,
+{
     crate::skills::private_dir(root).await?;
     let mut used = 0u64;
     let mut entries = 0u64;
@@ -180,8 +194,19 @@ pub async fn receive(
                     .ok_or_else(|| Error::bad("Missing workspace size."))?;
                 used = used
                     .checked_add(size)
-                    .filter(|v| *v <= budget)
                     .ok_or_else(|| Error::bad("Workspace exceeds node disk budget."))?;
+                if used > maximum {
+                    return Err(Error::bad("Workspace exceeds node disk budget."));
+                }
+                if used > budget {
+                    let reclaimed = reclaim(used - budget)
+                        .await?
+                        .min(maximum.saturating_sub(budget));
+                    budget = budget.saturating_add(reclaimed);
+                    if used > budget {
+                        return Err(Error::bad("Workspace exceeds node disk budget."));
+                    }
+                }
                 receive_file(reader, &target, size, mode).await?;
             }
             _ => return Err(Error::bad("Invalid workspace entry.")),

@@ -19,10 +19,17 @@ and files edited in a conversation are excluded. The seed retains Git history,
 file modes and symlinks. Extraction rejects traversal, duplicate paths, symlink
 ancestors, unsupported entries and entries exceeding the remaining disk budget.
 Downloads verify both encoded length and BLAKE3 before atomic publication. A
-foreground cache hit is rehashed before it becomes a conversation seed.
+foreground cache hit on either the master or node is rehashed before it becomes
+a conversation seed, including ZIP names and Unix permissions outside payload CRCs.
 
 The master and each node keep at most 2 GiB of encoded cache objects. A project
-set that exceeds this capacity keeps the established file-transfer path. Native
+set that exceeds this capacity keeps the established file-transfer path. The node
+also reclaims unpinned old objects against actual pool pressure, reserving room
+for missing downloads and the final extracted filesystem before admission. Initial
+home/configuration, legacy project and inbox transfers can reclaim unused archives
+as file headers exceed their initial space budget; protected current project
+archives remain available. Native admission also reclaims cache for legacy disk
+initialization. Native
 pool accounting counts shared archive inodes once, including temporary run pins.
 Pins protect extraction against concurrent eviction and are removed after the
 private filesystem is durably initialized. Cache files are private to Cairn;
@@ -56,8 +63,11 @@ workload has been admitted at this point. After initialization, the existing dis
 is authoritative and its completion marker bypasses extraction. Neither a new
 commit nor a cache eviction overwrites an existing conversation's work.
 
-Cache failure or an oversized archive falls back to legacy preparation. Invalid
-or interrupted downloads never become cache hits. Archive distribution checks
+Cache failure or an oversized archive falls back to legacy preparation. A damaged
+master cache is discarded and rebuilt from the currently authorized remote. Node
+archive staging errors remove partial pins and request a complete legacy seed;
+authorization failures remain failures. An unavailable archive catalogue never
+invalidates node leases. Invalid or interrupted downloads never become cache hits. Archive distribution checks
 current agent project/node grants, backend, node admission and trusted native
 people; run-scoped downloads also retain the existing attempt/provenance checks.
 
