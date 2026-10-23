@@ -8,6 +8,7 @@ package build.cairn.app.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -27,6 +28,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.addPathNodes
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -37,9 +39,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.lifecycle.viewModelScope
 import build.cairn.app.data.*
-import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
 
 /** The installation's web page for steps that stay on the web: package uploads. */
@@ -142,6 +142,11 @@ private fun PluginCard(entry: PluginEntry, summary: PluginSummary, open: () -> U
         Spacer(Modifier.height(12.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             ToneChip(summary.badge)
+            // What connecting takes, until the first instance exists.
+            if (summary.effort != null) {
+                Spacer(Modifier.width(6.dp))
+                EffortPill(summary.effort)
+            }
             if (summary.requests > 0) {
                 Spacer(Modifier.width(6.dp))
                 Pill(
@@ -288,11 +293,14 @@ private fun PluginInstances(
                 }
         }
         if (instances.isEmpty() && entry.active != null)
-            Empty(
-                if (manifest.instances != null) "${manifest.noun(2)} : aucun"
-                else "Aucune instance",
-                "Ajoutez-en un pour commencer à utiliser ce plugin.",
-            )
+            FirstSetup(manifest, entry.resolvedSetup()) {
+                vm.clearMessage()
+                editing =
+                    PluginConnection(
+                        name = if (manifest.instances == null) manifest.name else "",
+                        accessMode = "requests",
+                    )
+            }
         instances.forEach { connection ->
             InstanceCard(
                 vm,
@@ -333,6 +341,7 @@ private fun PluginInstances(
                 vm,
                 state,
                 id,
+                requireNotNull(entry),
                 it,
                 initial,
                 catalog?.connections.orEmpty(),
@@ -673,522 +682,8 @@ private fun ActivityRow(connection: PluginConnection, item: PluginActivity, open
     }
 }
 
-/**
- * Generic instance settings: the manifest's fields (secrets never prefilled), completed by the
- * package's own form handler when it has one, the agents granted the package's commands and tools
- * (read-only: grants are set on each agent's page), then the delegation for conversation plugins.
- */
 @Composable
-private fun InstanceEditor(
-    vm: CairnViewModel,
-    state: Workspace,
-    pluginId: String,
-    manifest: PluginManifest,
-    initial: PluginConnection,
-    connections: List<PluginConnection>,
-    close: () -> Unit,
-    openAgents: () -> Unit,
-    saved: suspend () -> Unit,
-) {
-    val creating = initial.id.isBlank()
-    val fields = manifest.settings.filter { !it.hidden }
-    // Hidden settings are the package's own (e.g. names it derives); editing keeps them.
-    val stored = manifest.settings.filter { it.type != "secret" }
-    var name by remember(initial.id) { mutableStateOf(initial.name) }
-    // Deliberately not saveable: never persist a credential in saved instance state.
-    var token by remember(initial.id) { mutableStateOf("") }
-    var values by
-        remember(initial.id) {
-            mutableStateOf(
-                stored.associate { field ->
-                    field.key to formValue(field, initial.settings[field.key])
-                }
-            )
-        }
-    // Same rule for secret fields: typed in, sent once, never kept.
-    var secrets by remember(initial.id) { mutableStateOf(mapOf<String, String>()) }
-    var agentId by remember(initial.id) { mutableStateOf(initial.agentId) }
-    var accessMode by remember(initial.id) { mutableStateOf(initial.accessMode) }
-    var people by
-        remember(initial.id) {
-            mutableStateOf(
-                initial.userIds.map { id ->
-                    PluginLabel(id, initial.people.find { it.id == id }?.name.orEmpty())
-                }
-            )
-        }
-    var person by remember(initial.id) { mutableStateOf("") }
-    var perHour by remember(initial.id) { mutableStateOf(initial.maxMessagesPerHour.toString()) }
-    var perPerson by
-        remember(initial.id) { mutableStateOf((initial.maxPerPersonPerHour ?: 5).toString()) }
-    var enabled by remember(initial.id) { mutableStateOf(initial.enabled) }
-    // A device sign-in gives the draft its credential once completed; the token stays on the
-    // installation. Not saveable either: a flow outlives neither the editor nor the process.
-    var signIn by remember(initial.id) { mutableStateOf<PluginDeviceFlow?>(null) }
-    var signInError by remember(initial.id) { mutableStateOf<String?>(null) }
-    var signingIn by remember(initial.id) { mutableStateOf(false) }
-    val signInKind = if (manifest.credential?.oauth != null) "oauth" else "device-flow"
-    var oauthCallbackUrl by remember(initial.id) { mutableStateOf("") }
-    LaunchedEffect(pluginId) {
-        if (manifest.credential?.oauth != null) {
-            runCatching { vm.api.get<JsonObject>("/plugins/${segment(pluginId)}/oauth") }
-                .onSuccess {
-                    oauthCallbackUrl = it["callbackUrl"]?.jsonPrimitive?.content.orEmpty()
-                }
-                .onFailure { signInError = it.message }
-        }
-    }
-    var completion by remember(initial.id) { mutableStateOf<PluginForm?>(null) }
-    // While the package answers, its derived values aren't in the form yet: no saving.
-    var completing by remember(initial.id) { mutableStateOf(manifest.instanceForm) }
-    // Each change asks the package again; a newer question cancels the older one.
-    var asking by remember(initial.id) { mutableStateOf(0 to (null as String?)) }
-    val others = connections.filter { it.id != initial.id }
-    fun problem(agent: Agent): String? =
-        if (accessMode == "everyone") agent.publicProblem(others)
-        else if (agent.eligibleForPlugins()) null else "Trop large"
-    fun refresh(key: String?) {
-        asking = (asking.first + 1) to key
-    }
-    val scope = rememberCoroutineScope()
-    /** Forgets the sign-in, on the installation too unless a save consumed it. */
-    fun cancelSignIn() {
-        val current = signIn ?: return
-        signIn = null
-        signInError = null
-        if (current.state != "expired")
-            vm.viewModelScope.launch {
-                runCatching {
-                    vm.api.request(
-                        "DELETE",
-                        "/plugins/${segment(current.pluginId)}/$signInKind/${segment(current.id)}",
-                    )
-                }
-            }
-    }
-    fun startSignIn() {
-        cancelSignIn()
-        signingIn = true
-        scope.launch {
-            try {
-                signIn =
-                    vm.api.send<PluginDeviceFlow>(
-                        "POST",
-                        "/plugins/${segment(pluginId)}/$signInKind",
-                        buildJsonObject {
-                            if (!creating) put("instance", initial.id)
-                            put("settings", pluginSettings(stored, values))
-                            put("secrets", pluginSecrets(secrets))
-                        },
-                    )
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                signInError = e.message ?: "La connexion n’a pas pu démarrer."
-            } finally {
-                signingIn = false
-            }
-        }
-    }
-    // Polls every 2 s until the sign-in settles; a newer or cancelled flow stops this one.
-    val polling = signIn?.takeIf { it.pending }
-    LaunchedEffect(polling?.id) {
-        val flow = polling ?: return@LaunchedEffect
-        while (true) {
-            kotlinx.coroutines.delay(2000)
-            val next =
-                try {
-                    vm.api.get<PluginDeviceFlow>(
-                        "/plugins/${segment(flow.pluginId)}/$signInKind/${segment(flow.id)}"
-                    )
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    if (signIn?.id != flow.id) return@LaunchedEffect
-                    // A forgotten sign-in expired on the installation.
-                    if (e is ApiException && e.status == 404) {
-                        signIn = flow.copy(state = "expired", message = e.message)
-                        return@LaunchedEffect
-                    }
-                    signInError = e.message
-                    continue
-                }
-            if (signIn?.id != flow.id) return@LaunchedEffect
-            signInError = null
-            signIn = next
-            if (!next.pending) {
-                // The package's form handler then says who it signed in as.
-                if (next.completed && manifest.instanceForm) refresh("credential")
-                return@LaunchedEffect
-            }
-        }
-    }
-    // Read the draft state directly: saving can consume the sign-in and close the
-    // editor before another composition updates a remembered copy.
-    DisposableEffect(initial.id) {
-        onDispose {
-            signIn
-                ?.takeIf { it.state != "expired" }
-                ?.let { current ->
-                    vm.viewModelScope.launch {
-                        runCatching {
-                            vm.api.request(
-                                "DELETE",
-                                "/plugins/${segment(current.pluginId)}/$signInKind/${segment(current.id)}",
-                            )
-                        }
-                    }
-                }
-        }
-    }
-    if (manifest.instanceForm)
-        LaunchedEffect(initial.id, asking) {
-            completing = true
-            if (asking.second != null) kotlinx.coroutines.delay(400)
-            runCatching {
-                val result =
-                    vm.api.pluginOperation(
-                        "/plugins/${segment(pluginId)}/form",
-                        buildJsonObject {
-                            if (!creating) put("instance", initial.id)
-                            put("settings", pluginSettings(stored, values))
-                            put(
-                                "secrets",
-                                pluginSecrets(secrets),
-                            )
-                            credentialInput(token, signIn)?.let { (key, value) -> put(key, value) }
-                            asking.second?.let { put("changed", it) }
-                        },
-                    )
-                wireJson.decodeFromJsonElement<PluginForm>(result)
-            }
-                .onSuccess { form ->
-                    values =
-                        values +
-                            form.values.mapValues { (key, value) ->
-                                formValue(
-                                    stored.find { it.key == key } ?: PluginSetting(key = key),
-                                    value,
-                                )
-                            }
-                    completion = form
-                    completing = false
-                }
-                .onFailure { error ->
-                    if (error is kotlinx.coroutines.CancellationException) throw error
-                    completion =
-                        PluginForm(
-                            options = completion?.options.orEmpty(),
-                            errors =
-                                mapOf("form" to (error.message ?: "Le plugin n’a pas répondu.")),
-                        )
-                    completing = false
-                }
-        }
-    val missingSecret = fields.any {
-        it.type == "secret" &&
-            it.required &&
-            it.key !in initial.secretKeys &&
-            secrets[it.key].isNullOrBlank()
-    }
-    val agent = state.agents.find { it.id == agentId }
-    Editor(
-        if (creating) "Nouveau · ${manifest.noun()}" else "Modifier ${initial.name}",
-        state.busy,
-        state.error,
-        close = close,
-        valid =
-            name.isNotBlank() &&
-                (!creating ||
-                    manifest.credential == null ||
-                    token.isNotBlank() ||
-                    signIn?.completed == true) &&
-                !missingSecret &&
-                fields.none {
-                    it.required &&
-                        it.type !in setOf("boolean", "secret", "multiselect") &&
-                        // A choice is an exact identifier; only text uses blankness.
-                        (if (it.type == "select") values[it.key].isNullOrEmpty()
-                        else values[it.key].isNullOrBlank())
-                } &&
-                (!manifest.delegates || (agent != null && problem(agent) == null)) &&
-                !completing,
-        save = {
-            vm.perform {
-                // Grants to send back (older or unknown installation), as saved right now.
-                val keptGrants =
-                    if (creating) null
-                    else
-                        initial.agentIdsToSend(state.agents, manifest) {
-                            wireJson
-                                .decodeFromString<PluginCatalog>(api.request("GET", "/plugins"))
-                                .connections
-                                .find { it.id == initial.id }
-                                ?.agentIds
-                        }
-                api.pluginOperation(
-                    "/plugins/${segment(pluginId)}/connections" +
-                        if (creating) "" else "/${segment(initial.id)}",
-                    buildJsonObject {
-                        put("name", name.trim())
-                        // The save consumes a completed sign-in.
-                        credentialInput(token, signIn)?.let { (key, value) -> put(key, value) }
-                        put("settings", pluginSettings(stored, values))
-                        // Blank secret fields keep what is saved.
-                        put(
-                            "secrets",
-                            pluginSecrets(secrets),
-                        )
-                        // Agents are granted from their own page; the server keeps the list.
-                        if (manifest.delegates) {
-                            put("agentId", agentId)
-                            put(
-                                "projectId",
-                                agent?.access?.projects?.firstOrNull()?.let(::JsonPrimitive)
-                                    ?: JsonNull,
-                            )
-                            put("accessMode", accessMode)
-                            put("userIds", JsonArray(people.map { JsonPrimitive(it.id) }))
-                            put(
-                                "people",
-                                JsonArray(
-                                    people.map { label ->
-                                        buildJsonObject {
-                                            put("id", label.id)
-                                            put("name", label.name)
-                                        }
-                                    }
-                                ),
-                            )
-                            put("maxMessagesPerHour", perHour.toIntOrNull() ?: 20)
-                            put("maxPerPersonPerHour", perPerson.toIntOrNull() ?: 5)
-                        }
-                        put("enabled", enabled)
-                        keptGrants?.let { ids ->
-                            put("agentIds", JsonArray(ids.map(::JsonPrimitive)))
-                        }
-                    },
-                    method = if (creating) "POST" else "PUT",
-                )
-                token = ""
-                // Consumed by the save: nothing is left to cancel.
-                signIn = null
-                secrets = emptyMap()
-                notify("${manifest.noun()} enregistré")
-                saved()
-            }
-        },
-    ) {
-        completion?.errors?.get("form")?.let { FormError(it) }
-        Field("Nom", name, { name = it }, enabled = !state.busy)
-        manifest.credential?.let { credential ->
-            val problem = completion?.errors?.get("credential")
-            val signedIn = signIn?.completed == true
-            if (credential.oauth == null) {
-                OutlinedTextField(
-                    token,
-                    {
-                        token = it
-                        // A pasted token replaces a sign-in.
-                        if (signIn != null) cancelSignIn()
-                        if (manifest.instanceForm) refresh("credential")
-                    },
-                    Modifier.fillMaxWidth(),
-                    label = {
-                        Text(
-                            if (creating) credential.label
-                            else "Nouveau ${credential.label.lowercase()} (facultatif)"
-                        )
-                    },
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = InputKeyboards.Password,
-                    enabled = !state.busy,
-                    isError = problem != null,
-                    placeholder =
-                        when {
-                            signedIn -> ({ Text("Connecté · ou collez un jeton à la place") })
-                            creating -> null
-                            else -> ({ Text("Enregistré · laissez vide pour le garder") })
-                        },
-                    supportingText = {
-                        Text(
-                            problem
-                                ?: "Chiffré. Cairn l’ajoute aux requêtes de ce plugin ; le plugin ne le voit jamais."
-                        )
-                    },
-                )
-            } else if (problem != null) {
-                FormError(problem)
-            }
-            if (credential.oauth != null && oauthCallbackUrl.isNotBlank()) {
-                Text("Adresse de retour à enregistrer dans l’application OAuth")
-                androidx.compose.foundation.text.selection.SelectionContainer {
-                    Text(oauthCallbackUrl)
-                }
-                CopyButton("Copier l’adresse de retour", oauthCallbackUrl)
-            }
-            if (credential.deviceFlow != null || credential.oauth != null)
-                DeviceSignIn(
-                    manifest,
-                    signIn,
-                    signInError,
-                    enabled = !state.busy && !signingIn,
-                    start = ::startSignIn,
-                    cancel = ::cancelSignIn,
-                )
-        }
-        completion
-            ?.view
-            ?.takeIf { it.isNotEmpty() }
-            ?.let { view ->
-                Column(
-                    Modifier.testTag("plugin-form-view"),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    PluginViewNodes(view, state.busy, press = {}, act = { _, _, _ -> })
-                }
-            }
-        PluginFields(
-            fields,
-            values,
-            { key, value -> values = values + (key to value) },
-            secrets,
-            { key, value -> secrets = secrets + (key to value) },
-            saved = initial.secretKeys,
-            enabled = !state.busy,
-            options = completion?.options.orEmpty(),
-            errors = completion?.errors.orEmpty(),
-            refresh = ::refresh,
-        )
-        manifest.agentAccess?.let { access ->
-            Text("Agents autorisés", style = MaterialTheme.typography.titleMedium)
-            if (access.description.isNotBlank())
-                Text(
-                    access.description,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            val names =
-                initial.agentIds.map { id ->
-                    state.agents.find { it.id == id }?.name ?: "Agent supprimé"
-                }
-            Text(
-                if (names.isEmpty()) "Aucun agent ne peut l’utiliser pour l’instant."
-                else names.joinToString(", "),
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            Text(
-                "Les accès se règlent sur la fiche de chaque agent (Secrets & plugins).",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            TextButton(onClick = openAgents) { Text("Gérer sur les fiches agents ›") }
-        }
-        if (manifest.delegates) {
-            Choice(
-                "Qui peut lui parler",
-                accessMode,
-                listOf(
-                    "requests" to "Valider les personnes à leur demande",
-                    "allowlist" to "Seulement les personnes que j’ajoute",
-                    "everyone" to "Tout le monde",
-                ),
-            ) {
-                accessMode = it
-            }
-            if (accessMode == "everyone")
-                Text(
-                    "Il faut un agent en lecture seule, limité à un projet, sans MCP ni plugin.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            Text("Personnes autorisées", style = MaterialTheme.typography.labelLarge)
-            people.forEach { label ->
-                val shown = label.name.ifBlank { "Personne" }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    AgentAvatar(label.name.ifBlank { label.id }, label.id, 28.dp)
-                    Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(shown, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
-                        Text(
-                            label.id,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    ActionIcon("Retirer $shown", CairnIcons.Close, enabled = !state.busy) {
-                        people = people.filter { it.id != label.id }
-                    }
-                }
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.weight(1f)) {
-                    Field(
-                        "Identifiant d’une personne",
-                        person,
-                        { person = it.trim() },
-                        enabled = !state.busy,
-                    )
-                }
-                Spacer(Modifier.width(8.dp))
-                TextButton(
-                    onClick = {
-                        if (people.none { it.id == person }) {
-                            val known =
-                                connections
-                                    .flatMap { it.requests }
-                                    .find { it.userId == person }
-                                    ?.name
-                                    .orEmpty()
-                            people = people + PluginLabel(person, known)
-                        }
-                        person = ""
-                    },
-                    enabled = person.isNotBlank() && !state.busy,
-                ) {
-                    Text("Ajouter")
-                }
-            }
-            ChoiceList(
-                "Répond en tant que",
-                agentId,
-                state.agents
-                    .sortedBy { problem(it) != null }
-                    .map { agent ->
-                        PluginOption(
-                            agent.id,
-                            agent.name,
-                            problem(agent).orEmpty(),
-                            disabled = problem(agent) != null,
-                        )
-                    },
-                enabled = !state.busy,
-            ) {
-                agentId = it
-            }
-            Field(
-                "Messages par heure",
-                perHour,
-                { perHour = it.filter(Char::isDigit).take(3) },
-                enabled = !state.busy,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            )
-            if (accessMode == "everyone")
-                Field(
-                    "Messages par personne et par heure",
-                    perPerson,
-                    { perPerson = it.filter(Char::isDigit).take(2) },
-                    enabled = !state.busy,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                )
-        }
-        Toggle("Active", enabled) { if (!state.busy) enabled = it }
-    }
-}
-
-@Composable
-private fun FormError(text: String) {
+internal fun FormError(text: String) {
     Text(
         text,
         Modifier.fillMaxWidth()
@@ -1205,10 +700,14 @@ private fun FormError(text: String) {
  * page in a Custom Tab, until the installation holds the credential.
  */
 @Composable
-private fun DeviceSignIn(
+internal fun DeviceSignIn(
     manifest: PluginManifest,
     flow: PluginDeviceFlow?,
     error: String?,
+    /** The button starting a first sign-in, e.g. the step's title. */
+    label: String,
+    /** Saving comes next, on this same step. */
+    last: Boolean,
     enabled: Boolean,
     start: () -> Unit,
     cancel: () -> Unit,
@@ -1222,15 +721,13 @@ private fun DeviceSignIn(
             OutlinedButton(onClick = start, enabled = enabled) {
                 Icon(CairnIcons.Key, null, Modifier.size(16.dp))
                 Spacer(Modifier.width(8.dp))
-                Text(
-                    if (flow?.completed == true) "Se connecter avec un autre compte"
-                    else "Se connecter avec ${manifest.name}"
-                )
+                Text(if (flow?.completed == true) "Se connecter avec un autre compte" else label)
             }
         problem?.let { FormError(it) }
         if (flow?.completed == true)
             Text(
-                "Connecté. Enregistrez pour garder ce ${manifest.noun().lowercase()}.",
+                if (last) "Connecté. Enregistrez pour garder ce ${manifest.noun().lowercase()}."
+                else "Connecté.",
                 style = MaterialTheme.typography.bodySmall,
                 fontWeight = FontWeight.SemiBold,
                 color = signal.success,
@@ -1392,9 +889,14 @@ internal fun PluginFields(
             }
             when (field.type) {
                 "boolean" ->
-                    Toggle(field.title, values[field.key] == "true") {
-                        if (enabled) update(it.toString())
-                    }
+                    if (field.risk == null)
+                        Toggle(field.title, values[field.key] == "true") {
+                            if (enabled) update(it.toString())
+                        }
+                    else
+                        RiskToggle(field, values[field.key] == "true") {
+                            if (enabled) update(it.toString())
+                        }
                 "select" ->
                     // Dynamic and self-explaining choices read better as a list.
                     if (field.dynamic || choices.any { it.description.isNotBlank() || it.disabled })
@@ -1472,6 +974,29 @@ internal fun PluginFields(
                         else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
         }
+}
+
+/** A switch with what it lets agents do, e.g. « Risque élevé » for deleting mail. */
+@Composable
+private fun RiskToggle(field: PluginSetting, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .toggleable(value = checked, role = Role.Switch, onValueChange = onChange),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        FlowRow(
+            Modifier.weight(1f),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+            itemVerticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(field.title)
+            RiskPill(field.risk)
+        }
+        Switch(checked, null)
+    }
 }
 
 /** What agents get from a package: its declared commands, tools and programs. */
@@ -1917,7 +1442,7 @@ private fun Ability(ability: PluginAbility) {
 }
 
 @Composable
-private fun Pill(text: String, container: Color, content: Color) {
+internal fun Pill(text: String, container: Color, content: Color) {
     Text(
         text,
         Modifier.clip(CircleShape)

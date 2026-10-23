@@ -96,22 +96,35 @@ test('Discord bots are set up through the package’s own form and keep the toke
   await signIn(page)
 
   await expect(page.getByRole('link', { name: '1Password · Set up' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Discord · Set up' }).getByText('Paste a token')).toBeVisible()
   await page.getByRole('link', { name: 'Discord · Set up' }).click()
-  await expect(page.getByText('No bots yet. Add one to start using this plugin.')).toBeVisible()
-  await page.getByRole('button', { name: 'Add bot' }).click()
+  // Before the first bot, the page says what it takes and lists the steps.
+  const first = page.getByRole('region', { name: 'Set up your first bot' })
+  await expect(first).toContainText('Discord Developer Portal')
+  await expect(first.getByRole('list', { name: 'Setup steps' }).getByRole('listitem')).toHaveText([/Bot token/, /Where it answers/, /Who can talk to it/])
+  await first.getByRole('button', { name: 'Start setup' }).click()
   const dialog = page.getByRole('dialog', { name: 'New bot' })
+  await expect(dialog.getByText('Step 1 of 3')).toBeVisible()
   await expect(dialog.getByText('Create the bot')).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'Continue' })).toBeDisabled()
+  await expect(dialog.getByRole('button', { name: 'Where it answers' })).toBeDisabled()
 
   await expect(dialog.getByLabel('Bot token')).toHaveAttribute('type', 'password')
   await dialog.getByLabel('Bot token').fill(token)
   await expect(dialog.getByRole('status').filter({ hasText: 'Signed in as Cairn Bot' })).toBeVisible()
   await expect(dialog.getByRole('link', { name: 'Invite the bot to a server' })).toHaveAttribute('href', /permissions=309237746752/)
+  await dialog.getByRole('button', { name: 'Continue' }).click()
+  await expect(dialog.getByRole('heading', { name: 'Where it answers' })).toBeVisible()
+  // Server and channel are required before the next step.
+  await expect(dialog.getByRole('button', { name: 'Continue' })).toBeDisabled()
   await dialog.getByRole('combobox', { name: 'Server' }).selectOption('100')
   await expect(dialog.getByRole('radio', { name: /#leadership/ })).toBeDisabled()
   await expect(dialog.getByText('The bot can’t read this channel')).toBeVisible()
   await dialog.getByRole('radio', { name: /#support/ }).check()
   await expect(dialog.getByRole('checkbox', { name: /Read replies without a mention/ })).not.toBeChecked()
+  await dialog.getByRole('button', { name: 'Continue' }).click()
 
+  await expect(dialog.getByRole('heading', { name: 'Who can talk to it' })).toBeVisible()
   await expect(dialog.getByRole('radio', { name: /Approve people as they ask/ })).toBeChecked()
   // Anyone may only reach a read-only agent; this one isn't.
   await dialog.getByRole('radio', { name: /^Anyone/ }).check()
@@ -160,7 +173,10 @@ test('Discord bots are set up through the package’s own form and keep the toke
   const editor = page.getByRole('dialog', { name: 'Edit #support on Acme' })
   await expect(editor.getByLabel('New bot token (optional)')).toHaveValue('')
   await expect(editor.getByRole('status').filter({ hasText: 'Signed in as Cairn Bot' })).toBeVisible()
+  // An edit opens every step.
+  await editor.getByRole('button', { name: 'Next' }).click()
   await expect(editor.getByRole('radio', { name: /#support/ })).toBeChecked()
+  await editor.getByRole('button', { name: 'Who can talk to it' }).click()
   await editor.getByRole('radio', { name: /Only people I add/ }).check()
   await editor.getByLabel('Person’s ID').fill('300')
   await editor.getByRole('button', { name: 'Add', exact: true }).click()
@@ -225,7 +241,7 @@ test('Discord bots are set up through the package’s own form and keep the toke
 
   await bot.getByRole('button', { name: 'Delete #support on Acme' }).click()
   await page.getByRole('dialog').getByRole('button', { name: 'Delete bot' }).click()
-  await expect(page.getByText('No bots yet. Add one to start using this plugin.')).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Set up your first bot' })).toBeVisible()
 })
 
 test('TOML packages wait for review and connect through a generated form', async ({ page, workspace }) => {

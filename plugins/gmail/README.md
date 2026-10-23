@@ -7,16 +7,24 @@ mailbox. Agents need an explicit grant for every instance and must specify
 
 ## Connect accounts
 
-1. Enable the **Gmail API** in a Google Cloud project. Configure the OAuth consent
-   screen and create an OAuth **Web application** client.
-2. In Cairn → Plugins → Gmail → Add account, copy the callback URL into the client's
-   authorized redirect URIs. Enter its client ID and client secret in Cairn. The
-   secret and Google tokens stay in the encrypted installation vault.
+Gmail needs a Google Cloud app you own: Cairn has no shared Google client. The
+setup assistant (Cairn → Plugins → Gmail → Add account) walks through it:
+
+1. **Google Cloud app**, once: enable the **Gmail API** in a Google Cloud project,
+   configure the OAuth consent screen and create an OAuth **Web application**
+   client. The assistant links each Google Cloud page and shows the callback URL
+   to add to the client's authorized redirect URIs. Enter its client ID and client
+   secret. The secret and Google tokens stay in the encrypted installation vault.
+   Later mailboxes reuse this app (`sharedFrom`): the installation copies its
+   client ID and secret, which never reach the browser.
    The callback is the central Beacon URL (`https://cairn.build/plugins/oauth/callback`
    on the official service), shared by every installation and mailbox. Register it
    once per OAuth client; adding an installation needs no Google configuration.
-3. Choose capabilities, sign in with Google, verify the displayed email, then save.
-   Repeat for each mailbox. Grant the instances on each agent's page.
+2. **Permissions**: read only by default, or a preset (drafts, sending, inbox
+   management); fine-tune each switch, marked by risk.
+3. **Sign in with Google**, verify the displayed email, then **Agents**: tick those
+   allowed to use this mailbox, or grant it later on each agent's page. The
+   account is named after the verified mailbox. Repeat for each mailbox.
 4. Google external applications in **Testing** require test users and expire refresh
    tokens for these scopes after seven days. Use an appropriate Production or
    Workspace-internal OAuth application for unattended missions. Google may require

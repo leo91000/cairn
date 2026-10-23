@@ -40,6 +40,9 @@ scopes = [
   "read:org",
 ]
 
+[setup]
+summary = "GitHub connects with a one-time code on github.com. Nothing to create first."
+
 [[settings]]
 key = "login"
 title = "Account"
