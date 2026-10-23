@@ -7,12 +7,16 @@ mod checkpoints;
 mod common;
 #[path = "slack/controller.rs"]
 mod controller;
+#[path = "slack/interactions.rs"]
+mod interactions;
 #[path = "slack/recovery.rs"]
 mod recovery;
 #[path = "slack/reset.rs"]
 mod reset;
 #[path = "slack/socket.rs"]
 mod socket;
+#[path = "slack/state.rs"]
+mod state;
 
 use aws_lc_rs::hmac;
 use axum::{
@@ -54,10 +58,12 @@ const APP_TOKEN: &str = "xapp-synthetic-slack-test";
 #[derive(Default)]
 struct Slack {
     posts: Mutex<Vec<HashMap<String, String>>>,
+    post_ids: Mutex<HashMap<String, String>>,
     socket_opens: AtomicUsize,
     interrupt_socket_open: AtomicBool,
     private: AtomicBool,
     rate_limit_first: AtomicBool,
+    first_post_retry_after: AtomicUsize,
     post_attempts: AtomicUsize,
     rate_limit_second: AtomicBool,
     post_rate_error: Mutex<Option<String>>,
@@ -68,6 +74,7 @@ struct Slack {
     channel_attempts: AtomicUsize,
     metadata_attempts: AtomicUsize,
     metadata_errors: Mutex<VecDeque<String>>,
+    metadata_retry_after: AtomicUsize,
     channel_entered: Notify,
     release_channel: Notify,
     hold_reply_check: AtomicBool,
@@ -154,7 +161,14 @@ async fn api(
                 }
                 return (
                     StatusCode::OK,
-                    [("retry-after", "1")],
+                    [(
+                        "retry-after",
+                        slack
+                            .metadata_retry_after
+                            .load(Ordering::SeqCst)
+                            .max(1)
+                            .to_string(),
+                    )],
                     Json(json!({"ok": false, "error": error})),
                 )
                     .into_response();
@@ -188,14 +202,31 @@ async fn api(
                     .into_response();
             }
             if slack.rate_limit_first.swap(false, Ordering::SeqCst) {
+                let configured = slack.first_post_retry_after.load(Ordering::SeqCst);
                 return (
                     StatusCode::TOO_MANY_REQUESTS,
-                    [("retry-after", "900")],
+                    [(
+                        "retry-after",
+                        if configured == 0 { 900 } else { configured }.to_string(),
+                    )],
                     Json(json!({"ok": false, "error": "ratelimited"})),
                 )
                     .into_response();
             }
             let channel = values["channel"].clone();
+            let ts = format!("1700000001.{:06}", attempt + 1);
+            if let Some(blocks) = values.get("blocks") {
+                let blocks: Value = serde_json::from_str(blocks).unwrap();
+                for block in blocks.as_array().unwrap() {
+                    if let Some(id) = block["block_id"].as_str() {
+                        slack
+                            .post_ids
+                            .lock()
+                            .await
+                            .insert(id.to_owned(), ts.clone());
+                    }
+                }
+            }
             slack.posts.lock().await.push(values);
             if slack.uncertain_first.swap(false, Ordering::SeqCst) {
                 return (
@@ -208,7 +239,7 @@ async fn api(
                 )
                     .into_response();
             }
-            json!({"ok": true, "channel": channel, "ts": "1700000001.000001"})
+            json!({"ok": true, "channel": channel, "ts": ts})
         }
         _ => panic!("unexpected Slack method {path}"),
     };

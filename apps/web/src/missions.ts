@@ -118,7 +118,7 @@ export function missionFilter(task: Task, filter: MissionFilter) {
   return true
 }
 
-export const activeRun = (status?: RunStatus) => status === 'running' || status === 'queued'
+export const activeRun = (status?: RunStatus) => status === 'running' || status === 'queued' || status === 'waiting'
 export type MissionGroup = 'running' | 'review' | 'ready' | 'finished'
 export function missionGroup(run?: Pick<RunListItem, 'status' | 'outcome'>): MissionGroup {
   if (activeRun(run?.status))

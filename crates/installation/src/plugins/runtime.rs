@@ -251,6 +251,17 @@ pub async fn pump(s: &Service, connection: &Connection, session: &mut Session) -
         )
         .await;
         match result {
+            Ok(value) if value["retryAfter"].is_number() => {
+                // A definite pre-effect refusal (e.g. a provider cooldown) must
+                // keep the already-admitted event without spending error retries.
+                let seconds = value["retryAfter"]
+                    .as_f64()
+                    .unwrap_or(5.0)
+                    .clamp(1.0, 300.0);
+                let previous = event.clone();
+                event["nextAttemptAt"] = json!(now() + (seconds * 1000.0) as i64);
+                update_pending(s, EVENTS, &previous, &event).await?;
+            }
             Ok(_) => remove(s, EVENTS, &event).await?,
             Err(DispatchError::SubmissionLimited) => postpone_submission(s, &event).await?,
             Err(_) => {
@@ -328,9 +339,10 @@ pub async fn pump(s: &Service, connection: &Connection, session: &mut Session) -
                     .as_f64()
                     .unwrap_or(5.0)
                     .clamp(1.0, 300.0);
+                let previous = delivery.clone();
                 delivery["nextAttemptAt"] = json!(now() + (seconds * 1000.0) as i64);
                 delivery["state"] = value["state"].clone();
-                s.store.put(DELIVERIES, delivery).await?;
+                update_pending(s, DELIVERIES, &previous, &delivery).await?;
                 break;
             }
             Ok(_) => work::finish(s, &delivery, outcome).await?,
@@ -377,7 +389,7 @@ async fn follow(
             "question": question,
             "reply": delivery["reply"],
         });
-        let event = json!({ "name": "question", "revision": connection.revision, "routing": delivery["routing"] });
+        let event = json!({ "name": "question", "id": delivery["id"], "authorId": delivery["userId"], "revision": connection.revision, "routing": delivery["routing"] });
         match dispatch(s, connection, session, &event, "question", payload).await {
             Ok(value) if !value["retryAfter"].is_number() => {
                 s.store
@@ -419,23 +431,13 @@ async fn follow(
             "step": progress["step"],
             "reply": delivery["reply"],
         });
-        let event = json!({ "name": "progress", "revision": connection.revision, "routing": delivery["routing"] });
+        let event = json!({ "name": "progress", "id": delivery["id"], "authorId": delivery["userId"], "revision": connection.revision, "routing": delivery["routing"] });
         let _ = dispatch(s, connection, session, &event, "progress", payload).await;
         delivery["progressAt"] = json!(now());
         changed = true;
     }
     if changed {
-        let updated = delivery.clone();
-        s.store
-            .transaction(move |db| {
-                // A native wait may have replaced this reservation during dispatch.
-                // Never resurrect it or overwrite a newer scheduler decision.
-                if db.get(DELIVERIES, text(&previous, "id"))?.as_ref() == Some(&previous) {
-                    db.put(DELIVERIES, &updated)?;
-                }
-                Ok(())
-            })
-            .await?;
+        update_pending(s, DELIVERIES, &previous, delivery).await?;
     }
     Ok(())
 }
@@ -516,9 +518,13 @@ async fn owned(s: &Service, kind: &str, connection: &Connection) -> Result<Vec<V
 }
 
 async fn remove(s: &Service, kind: &'static str, value: &Value) -> Result<()> {
+    let expected = value.clone();
     let id = text(value, "id").to_owned();
     s.store
         .transaction(move |db| {
+            if db.get(kind, &id)?.as_ref() != Some(&expected) {
+                return Ok(());
+            }
             if kind == EVENTS {
                 work::remove_event(db, &id)
             } else {
@@ -528,22 +534,32 @@ async fn remove(s: &Service, kind: &'static str, value: &Value) -> Result<()> {
         .await
 }
 
-/// Keep only an existing, unchanged admission waiting. This is not a new
-/// authorization or a generic retry of uncertain package/provider side effects.
-async fn postpone_submission(s: &Service, event: &Value) -> Result<()> {
-    let expected = event.clone();
+/// Persist a handler result only while its admission is still the same. A
+/// concurrent deletion or a native wait replacing a reservation wins over a
+/// stale worker; neither cooldowns nor error retries may recreate retired data.
+async fn update_pending(
+    s: &Service,
+    kind: &'static str,
+    previous: &Value,
+    updated: &Value,
+) -> Result<()> {
+    let (previous, updated) = (previous.clone(), updated.clone());
     s.store
         .transaction(move |db| {
-            let id = text(&expected, "id");
-            if let Some(mut current) = db.get(EVENTS, id)?
-                && current == expected
-            {
-                current["nextAttemptAt"] = json!(now() + 5000);
-                db.put(EVENTS, &current)?;
+            if db.get(kind, text(&previous, "id"))?.as_ref() == Some(&previous) {
+                db.put(kind, &updated)?;
             }
             Ok(())
         })
         .await
+}
+
+/// This is backpressure on an existing admission, not a new authorization or a
+/// retry of an uncertain provider mutation.
+async fn postpone_submission(s: &Service, event: &Value) -> Result<()> {
+    let mut updated = event.clone();
+    updated["nextAttemptAt"] = json!(now() + 5000);
+    update_pending(s, EVENTS, event, &updated).await
 }
 
 /// Schedules another attempt; returns true when attempts are exhausted and the
@@ -556,9 +572,10 @@ async fn retry_later(s: &Service, kind: &'static str, value: &mut Value) -> Resu
         }
         return Ok(true);
     }
+    let previous = value.clone();
     value["attempts"] = json!(attempts);
     value["nextAttemptAt"] = json!(now() + 5000 * attempts as i64);
-    s.store.put(kind, value.clone()).await?;
+    update_pending(s, kind, &previous, value).await?;
     Ok(false)
 }
 

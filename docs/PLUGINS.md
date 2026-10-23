@@ -301,6 +301,26 @@ an existing key still fits when the general store reaches capacity. Keeping an
 expired cooldown reservation also prevents an older successful call from erasing
 a newer deadline. A package must refuse I/O if a required reservation cannot fit.
 
+For issued controls, `cairn.storage.set(key, value, { delivery = deliveryId })`
+ties the value to a pending native delivery. Create it in that delivery's
+`question`, `progress` or `reply` handler. An original-author `message` or
+`interaction` can update an already associated key for the same delivery. The
+host checks the current instance, revision, route and original person atomically;
+it refuses a foreign, missing or retired delivery and reassignment to another one.
+Pass the option on every update so deletion cannot race with an unscoped recreation.
+The value still uses the shared 1,000-key/64-KiB limits and contains ordinary
+plaintext data. Keep secret questions and answers out of it. Delivery settlement,
+revocation, continuation replacement, conversation purge and instance deletion
+retire owned values without requiring the package to run a cleanup handler.
+
+Queued event handlers (including `interaction`) may return `{ retryAfter = seconds }`
+for a definite refusal before an effect, such as a provider cooldown. The host
+retains that admitted event and its authority, schedules another attempt in
+1–300 seconds, and does not spend its finite unexpected-error retry budget.
+Longer provider deadlines remain the package's responsibility: preserve the
+deadline and defer again until it expires. Rechecks still reject revoked sources.
+This return must not blindly repeat an uncertain external write.
+
 Capabilities exposed to scripts:
 
 - `cairn.conversations.submit({ text, thread?, shared?, files?, reply? })`: only while
@@ -1333,8 +1353,9 @@ and its OAuth authorization. Plugin input cannot remove these checks. Reusing a 
 authority returns a conflict, including after reconnecting an account. Receipts
 created before these checks also conflict rather than returning an unverified
 result or repeating a potentially successful write. The stored shape and key
-namespace are unchanged; the new fingerprint requires the unreleased epoch-10
-compatibility gate, and old readers must not be used after migration.
+namespace are unchanged; the new fingerprint requires the
+[unreleased Slack compatibility gate](SLACK-PLUGIN-COMPATIBILITY.md), and old
+readers must not be used after migration.
 
 The host atomically claims a key scoped to the instance
 before sending. Completed responses replay from the durable receipt; different

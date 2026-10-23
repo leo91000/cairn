@@ -3094,3 +3094,61 @@ async fn full_instance_membership_is_readable_through_ui_and_both_management_too
     }
     assert_eq!(all, ui["items"].as_array().unwrap().clone());
 }
+
+#[tokio::test]
+async fn waiting_missions_are_visible_and_cancellable_through_both_installation_interfaces() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let agent_token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let owner_token = common::relay_fixture::grant(&s, &["read", "manage", "run"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    for (endpoint, token) in [
+        ("/mcp", owner_token.as_str()),
+        ("/mcp-installation", agent_token),
+    ] {
+        let (run, _) = active_run(&s, &main).await;
+        let run_id = run["id"].as_str().unwrap();
+        let wakeup = json!({ "id": cairn_installation::config::id(), "messageId": null, "reason": "Mission CI", "seconds": 60, "createdAt": 1, "wakeAt": 60_001 });
+        s.store
+            .patch_run(run_id, json!({ "status": "waiting", "wakeup": wakeup }))
+            .await
+            .unwrap();
+        let (status, fetched) =
+            node_management_call(&app, endpoint, token, "get_run", json!({ "runId": run_id }))
+                .await;
+        assert_eq!(status, StatusCode::OK, "{fetched}");
+        assert_eq!(result(&fetched)["run"]["status"], "waiting", "{fetched}");
+        assert_eq!(result(&fetched)["run"]["wakeup"], wakeup);
+        let (_, listed) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "list_runs",
+            json!({ "status": "waiting" }),
+        )
+        .await;
+        assert!(
+            result(&listed)
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["id"] == run_id && item["wakeup"] == wakeup)
+        );
+        let (_, cancelled) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "cancel_run",
+            json!({ "runId": run_id }),
+        )
+        .await;
+        assert_eq!(result(&cancelled)["cancelled"], true);
+        let final_run = s.store.run(run_id).await.unwrap();
+        assert_eq!(final_run["status"], "cancelled");
+        assert!(final_run["wakeup"].is_null());
+    }
+}

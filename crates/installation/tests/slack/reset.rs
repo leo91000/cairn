@@ -1,7 +1,7 @@
 //! Real package controls, with the parent's actual manager and provider process.
 use super::*;
 
-async fn control(
+pub(super) async fn control(
     app: &Router,
     instance: &str,
     payload: &Value,
@@ -67,11 +67,12 @@ pub(super) async fn round_trip(
     let occupied = capacity::occupy(service, &current).await;
     let ts = text(&envelope["event"], "ts");
     let action_ts = format!("{}.000100", now() / 1000);
+    let message_ts = slack.post_ids.lock().await[text(&blocks[1], "block_id")].clone();
     let payload = json!({
         "type": "block_actions", "api_app_id": "ATEST", "team": {"id": "TTEST"},
         "user": {"id": "UALICE"}, "channel": {"id": "CTEST"},
-        "container": {"type": "message", "channel_id": "CTEST", "message_ts": "1700000001.000001"},
-        "message": {"user": "UBOT", "app_id": "ATEST", "ts": "1700000001.000001", "thread_ts": ts},
+        "container": {"type": "message", "channel_id": "CTEST", "message_ts": message_ts},
+        "message": {"user": "UBOT", "app_id": "ATEST", "ts": message_ts, "thread_ts": ts},
         "actions": [{"type": "button", "action_id": "cairn_reset", "block_id": blocks[1]["block_id"], "value": old_chat, "action_ts": action_ts}],
         "response_url": "https://hooks.slack.com/actions/SYNTHETIC_DO_NOT_STORE",
         "state": {"values": {"unrelated": "PRIVATE_SYNTHETIC_STATE"}},

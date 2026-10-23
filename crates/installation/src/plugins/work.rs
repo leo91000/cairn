@@ -512,7 +512,7 @@ pub(crate) fn reserve_continuation(
                 "The previous continuation already began its reply.",
             ));
         }
-        db.remove(DELIVERIES, previous)?;
+        remove_delivery(db, &replaced)?;
     }
     pending_capacity(db, text(&delivery, "connectionId"))?;
     let fields = delivery.as_object_mut().unwrap();
@@ -1587,10 +1587,10 @@ pub(crate) async fn checkpoint_state(s: &Service, delivery: &Value) -> Result<Va
 /// Removes a delivery and records how its exchange ended.
 pub async fn finish(s: &Service, delivery: &Value, status: &'static str) -> Result<()> {
     let id = text(delivery, "id").to_owned();
+    let delivery = delivery.clone();
     s.store
         .transaction(move |db| {
-            db.remove(DELIVERIES, &id)?;
-            db.remove(CHECKPOINTS, &checkpoint_key(&id))?;
+            remove_delivery(db, &delivery)?;
             for mut value in db.list("plugin-activity")? {
                 if value["deliveryId"] == id {
                     value["status"] = json!(status);
@@ -1601,4 +1601,15 @@ pub async fn finish(s: &Service, delivery: &Value, status: &'static str) -> Resu
             Ok(())
         })
         .await
+}
+
+pub(crate) fn remove_delivery(db: &Db<'_>, delivery: &Value) -> Result<()> {
+    let id = text(delivery, "id");
+    let connection = text(delivery, "connectionId");
+    super::storage::forget_delivery(db, connection, id)?;
+    for (key, _) in db.keys(&format!("plugin-question-seen:{connection}:{id}:"))? {
+        db.delete(&key)?;
+    }
+    db.remove(DELIVERIES, id)?;
+    db.remove(CHECKPOINTS, &checkpoint_key(id))
 }

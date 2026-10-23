@@ -555,7 +555,8 @@ impl Execution<'_> {
             let run = crate::plugins::agents::with_instructions(self.s, self.run).await;
             return Ok(run_output::prompt(&run, false));
         }
-        let mut prompt = RESUME_PROMPT.to_owned();
+        let mut prompt =
+            crate::waits::mission_prompt(self.run).unwrap_or_else(|| RESUME_PROMPT.to_owned());
         let Some(restored) = self.run["restoredAt"].as_i64() else {
             return Ok(prompt);
         };
@@ -619,7 +620,7 @@ impl Execution<'_> {
             // Scheduled work uses the same authenticated protocol as
             // chats, while retaining its own task brief and session.
             chat["execution"] = json!({
-                "messageId": self.id,
+                "messageId": self.run["missionTurnId"].as_str().unwrap_or(&self.id),
                 "text": launch.prompt,
                 "recovery": resume.is_some(),
                 "attachments": [],
@@ -1057,7 +1058,28 @@ impl Execution<'_> {
         if status == RunStatus::Succeeded {
             patch["retry"] = Value::Null;
         }
-        s.store.patch_run(&self.id, patch).await?;
+        let id = self.id.clone();
+        let status = s.store.transaction(move |db| {
+            let current = db.run(&id)?.ok_or_else(|| Error::not_found("Run not found"))?;
+            let status = if !current["cancelRequestedAt"].is_null() {
+                RunStatus::Cancelled
+            } else if status == RunStatus::Succeeded && current["trigger"] != "chat" && current["wakeup"].is_object() {
+                if !has_session {
+                    return Err(Error::conflict("Cannot wait without a saved agent session. Working files were preserved."));
+                }
+                RunStatus::Waiting
+            } else { status };
+            patch["status"] = status.into();
+            if status == RunStatus::Waiting {
+                patch["finishedAt"] = Value::Null;
+                patch["resumeAvailable"] = true.into();
+                patch["outcome"] = Value::Null;
+            } else if current["trigger"] != "chat" {
+                patch["wakeup"] = Value::Null;
+            }
+            db.patch_run(&id, &patch)?;
+            Ok(status)
+        }).await?;
         s.store
             .event(&self.id, "status", status.as_str(), None)
             .await

@@ -114,6 +114,7 @@ function tile(run: RunListItem) {
 
 const statusLabels: Record<RunListItem['status'], string> = {
   queued: 'Queued',
+  waiting: 'Waiting for continuation',
   running: 'Running',
   succeeded: 'Finished',
   failed: 'Failed',

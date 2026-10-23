@@ -165,7 +165,7 @@ fn valid_record(db: &Db<'_>, record: &Value) -> Result<bool> {
     let Some(run) = db.run(text(record, "ownerRunId"))? else {
         return Ok(false);
     };
-    if run["chatExecution"]["messageId"] != record["messageId"] {
+    if *crate::waits::execution_id(&run) != record["messageId"] {
         return Ok(false);
     }
     let Ok(attempt) = authorize_run(db, &run, text(record, "nodeId")) else {
@@ -298,7 +298,7 @@ pub async fn acquire(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
                 "ownerRunId": run["id"],
                 "ownerAttemptId": owner_attempt,
                 "memberAttemptIds": members,
-                "messageId": run["chatExecution"]["messageId"],
+                "messageId": crate::waits::execution_id(&run),
                 "reason": input["reason"],
                 "input": input,
                 "createdAt": created,

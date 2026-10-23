@@ -3,6 +3,7 @@ local socket = require("./socket")
 local setup = require("./setup")
 local ingress = require("./ingress")
 local conversation = require("./conversation")
+local workControls = require("./work-controls")
 
 return {
     socket = socket.handle,
@@ -16,5 +17,6 @@ return {
     webhook = ingress.webhook,
     message = conversation.message,
     interaction = conversation.interaction,
+    question = workControls.question,
     reply = conversation.reply,
 }

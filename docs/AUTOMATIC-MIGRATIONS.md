@@ -33,15 +33,15 @@ trust and recovery rules remain required.
 
 ## Slack draft boundary
 
-PR #226 reserves epoch 10 / SQLite 9 for its incompatible plugin and requester
-contract. The transition below records main's reviewed epoch-9 qualification;
-it does not qualify Slack. The draft intentionally declares no automatic
-migration to epoch 10. Deployment from an earlier epoch remains blocked until
-[Slack's compatibility inventory](SLACK-PLUGIN-COMPATIBILITY.md) and a forward
-transition are fully qualified and independently reviewed. No operator should
-lower the version fence to bypass that gate.
+Main's mission-wait transition uses epoch 10 / SQLite 9. PR #226 reserves the
+higher epoch 11 / SQLite 10 for its incompatible plugin/requester contract.
+The retained transitions below do not qualify Slack. This draft declares no
+automatic migration to epoch 11; deployment from an earlier epoch remains blocked
+until [Slack's compatibility inventory](SLACK-PLUGIN-COMPATIBILITY.md) and a
+separate forward transition are fully qualified and independently reviewed.
+Do not lower the version fence to bypass this gate.
 
-## Reviewed main transition: epochs 3–8 to 9
+## Retained transition: epochs 3–8 to 9
 
 The served production source inspected during preparation was
 `067153e797f426e9b1d224cee0b2e48fab793ec3` (epoch 3, SQLite version 7).
@@ -90,3 +90,27 @@ pending candidate. Retry the same image or deploy a reviewed forward fix. Do not
 lower `user_version`, the data epoch or the legacy tree, or start an older manager
 against this database. Compatible same-epoch failures retain the normal image
 fallback. The release creates no backup or automatic data restore point.
+
+
+## Current transition: epochs 3–9 to 10
+
+Epoch 10 adds durable mission waits. SQLite advances from version 8 to 9 in the
+same transaction that rebuilds `runs_active_task` to include `waiting`. Existing
+run documents, conversation waits, checkpoints and all prior startup conversions
+are preserved. The index continues to prevent a second active execution of the
+same mission. A waiting run has no `finishedAt`, retains its checkpoint/session,
+and releases its process, account, MCP grants and execution slot before resuming.
+
+Mission wakeups and continuation identities are stored in the existing run JSON.
+Older managers neither understand `waiting` nor fence credentials against a new
+mission turn, so they must not read or write these records. The version-9 fence
+rejects every previous manager, including epoch 9. The updater retains the
+candidate after crossing this boundary. `upgrades_version_eight_and_keeps_waiting_missions_in_the_active_slot`
+verifies the index conversion, active query, duplicate admission rejection and
+version fence. The earlier migration tests remain required by the release gate.
+
+As with the earlier transition, a failure requires retrying this candidate or a
+reviewed forward fix. Preserve the installation data; never lower SQLite's
+`user_version` or roll an older binary onto the migrated database. Merging this
+change does not deploy an installation. Local storage measurements and the
+reproduction command are in [mission waits](MISSION-WAITS.md).

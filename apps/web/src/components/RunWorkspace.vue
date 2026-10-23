@@ -58,7 +58,12 @@ const { events, connectionNotice, catchingUp: loading } = live
 const run = computed(() => live.snapshot.value?.run ?? undefined)
 const suspended = computed(() => isExclusivelySuspended(run.value))
 const retryNotice = useRetryNotice(() => run.value)
-const waitNotice = computed(() => retryNotice.value ?? run.value?.accountWaitReason)
+const waitNotice = computed(() => {
+  const wakeup = run.value?.wakeup
+  if (run.value?.status === 'waiting' && wakeup)
+    return `${wakeup.reason} · ${wakeup.display?.title || (wakeup.condition ? 'Waiting for the condition' : 'Scheduled continuation')} · ${new Date(wakeup.wakeAt).toLocaleString()}`
+  return retryNotice.value ?? run.value?.accountWaitReason
+})
 const deliverables = computed(() => live.snapshot.value?.artifacts ?? [])
 const artifactViewer = ref<string | null>(null)
 const error = ref('')
@@ -78,7 +83,7 @@ const outcomeItem = computed(() => {
 const confirm = ref(false)
 const confirmCleanup = ref(false)
 const active = computed(
-  () => run.value && ['running', 'queued'].includes(run.value.status),
+  () => run.value && ['running', 'queued', 'waiting'].includes(run.value.status),
 )
 const task = computed(() => props.mission && run.value && run.value.trigger !== 'chat' ? state.tasks.find(task => task.id === run.value!.taskId) : undefined)
 const tabs = computed(() => [
@@ -237,8 +242,8 @@ async function copy() {
           />
           <Markdown v-if="run.summary" :content="run.summary" />
           <div v-else class="mini-empty flex flex-col items-center text-center pt-7 pb-8.5 text-subtle px-6">
-            <span v-if="!suspended" class="pulse-ring w-8 h-8 rounded-full border-2 border-line [border-top-color:light-dark(#6660a5,_var(--dark-border))] animate-spin mb-[17px]" />
-            <h3>{{ suspended ? exclusiveSuspensionLabel : active ? "Work is underway" : "No summary yet" }}</h3>
+            <span v-if="!suspended && run.status !== 'waiting'" class="pulse-ring w-8 h-8 rounded-full border-2 border-line [border-top-color:light-dark(#6660a5,_var(--dark-border))] animate-spin mb-[17px]" />
+            <h3>{{ run.status === 'waiting' ? 'Waiting for scheduled continuation' : suspended ? exclusiveSuspensionLabel : active ? "Work is underway" : "No summary yet" }}</h3>
             <p>
               Open Conversation to follow this run.
             </p>
@@ -251,7 +256,8 @@ async function copy() {
           :position="live.position.value"
           :deliverables="deliverables"
           :events="events"
-          :active="!!active"
+          :active="!!active && run.status !== 'waiting'"
+          :wakeup="{ wakeup: run.wakeup ?? null, paused: false, settled: run.status === 'waiting', canPause: false }"
           :suspended="suspended"
           :agent-id="run.snapshot.agent.id"
           :agent="run.snapshot.agent.name"

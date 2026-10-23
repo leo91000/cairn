@@ -218,7 +218,11 @@ export type Cairn = {
     -- capability "storage": up to 1000 values of 64 KB per connection.
     storage: {
         get: (key: string) -> Json,
-        set: (key: string, value: Json) -> (),
+        -- Optional native delivery ownership: create in question/progress/reply;
+        -- an admitted original-author control may update an existing owned key.
+        -- Retirement (including revocation/deletion) removes it atomically.
+        -- Keep passing delivery on updates so a raced deletion cannot recreate it.
+        set: (key: string, value: Json, options: { delivery: string }?) -> (),
         -- Atomic maximum of finite numbers; a later observation cannot shorten it.
         max: (key: string, value: number) -> number,
         delete: (key: string) -> (),

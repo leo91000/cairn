@@ -279,6 +279,8 @@ internal fun buildFeed(
                                 FeedKind.RUNNING_TASK,
                                 if (run.suspendedByExclusive != null)
                                     "Suspendue (exclusivité) · Mission · $agent"
+                                else if (run.status == "waiting")
+                                    "Attente programmée · ${run.wakeup?.reason ?: agent}"
                                 else if (run.status == "queued") "Mission en attente · $agent"
                                 else "Mission · $agent",
                             )

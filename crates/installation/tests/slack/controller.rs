@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 struct Attempt {
     done: watch::Receiver<Option<i32>>,
     logs: watch::Receiver<String>,
+    stop: CancellationToken,
 }
 
 pub struct Controller {
@@ -26,6 +27,7 @@ pub struct Controller {
     attempts: Mutex<HashMap<String, Attempt>>,
     pub plans: Mutex<Vec<Value>>,
     budget: Mutex<Value>,
+    stop: CancellationToken,
 }
 
 impl Controller {
@@ -34,6 +36,7 @@ impl Controller {
             config,
             attempts: Mutex::new(HashMap::new()),
             plans: Mutex::new(Vec::new()),
+            stop: CancellationToken::new(),
             budget: Mutex::new(
                 json!({"slots": 2, "limits": {"cpu": 2, "memoryMiB": 8192, "diskMiB": 65536}}),
             ),
@@ -42,6 +45,18 @@ impl Controller {
 
     pub fn router(self: &Arc<Self>) -> Router {
         Router::new().fallback(any(handle)).with_state(self.clone())
+    }
+
+    pub fn shutdown(&self) {
+        self.stop.cancel();
+    }
+
+    pub async fn stopped(&self) -> bool {
+        self.attempts
+            .lock()
+            .await
+            .values()
+            .any(|attempt| attempt.stop.is_cancelled() && attempt.done.borrow().is_some())
     }
 }
 
@@ -62,7 +77,7 @@ async fn handle(State(state): State<Arc<Controller>>, request: Request) -> Respo
         *state.budget.lock().await = budget;
         return Json(json!({})).into_response();
     }
-    if path.ends_with("/lease") || path.starts_with("/prepare/") || request.method() == "DELETE" {
+    if path.ends_with("/lease") || path.starts_with("/prepare/") {
         return Json(json!({})).into_response();
     }
     if path.ends_with("/administrative-pause") {
@@ -72,6 +87,31 @@ async fn handle(State(state): State<Arc<Controller>>, request: Request) -> Respo
         return StatusCode::NOT_FOUND.into_response();
     }
     let attempt = path.split('/').nth(2).unwrap().to_owned();
+    if request.method() == "DELETE" && path.split('/').count() == 3 {
+        let Some(mut attempt) = state.attempts.lock().await.get(&attempt).cloned() else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        // The real runner also cleans up completed attempts. Only an active
+        // adapter needs cancellation; a successful reply is not a Stop proof.
+        if attempt.done.borrow().is_none() {
+            attempt.stop.cancel();
+            let stopped = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if attempt.done.borrow().is_some() {
+                        return true;
+                    }
+                    if attempt.done.changed().await.is_err() {
+                        return false;
+                    }
+                }
+            })
+            .await;
+            if !matches!(stopped, Ok(true)) {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        }
+        return Json(json!({})).into_response();
+    }
     if path.ends_with("/logs") || path.ends_with("/wait") {
         let Some(mut attempt) = state.attempts.lock().await.get(&attempt).cloned() else {
             return StatusCode::NOT_FOUND.into_response();
@@ -125,6 +165,7 @@ async fn handle(State(state): State<Arc<Controller>>, request: Request) -> Respo
     state.plans.lock().await.push(plan.clone());
     let (done, receiver) = watch::channel(None);
     let (logs, output) = watch::channel(String::new());
+    let stop = state.stop.child_token();
     assert!(
         state
             .attempts
@@ -134,7 +175,8 @@ async fn handle(State(state): State<Arc<Controller>>, request: Request) -> Respo
                 attempt,
                 Attempt {
                     done: receiver,
-                    logs: output
+                    logs: output,
+                    stop: stop.clone(),
                 }
             )
             .is_none(),
@@ -166,8 +208,7 @@ async fn handle(State(state): State<Arc<Controller>>, request: Request) -> Respo
                 collected.send_modify(|output| output.push_str(&format!("{frame}\n")));
             }
         });
-        let result =
-            chat_process::run(&config, &home, chat, events, CancellationToken::new()).await;
+        let result = chat_process::run(&config, &home, chat, events, stop).await;
         output.await.unwrap();
         if let Err(error) = &result {
             eprintln!(

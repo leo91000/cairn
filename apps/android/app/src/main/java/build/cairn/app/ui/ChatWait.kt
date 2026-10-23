@@ -79,6 +79,8 @@ internal data class LiveWait(
     val settled: Boolean = true,
     /** Another action is under way, so pausing would be ignored. */
     val busy: Boolean = false,
+    /** Missions cancel their run instead of pausing a conversation. */
+    val canPause: Boolean = true,
 )
 
 internal val LocalLiveWait = compositionLocalOf<LiveWait?> { null }
@@ -375,7 +377,8 @@ internal fun waitProgress(wait: ActivityWait, live: LiveWait?): WaitProgress {
         cancelled,
         paused,
         pending = current && !paused && !finished,
-        pausable = current && !paused && wait.resumedAt == null && live?.settled == true,
+        pausable =
+            current && !paused && wait.resumedAt == null && live?.settled == true && live.canPause,
     )
 }
 

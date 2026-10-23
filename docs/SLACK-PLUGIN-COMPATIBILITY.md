@@ -13,17 +13,18 @@ manifest parser. An older host also lacks the requester and resource-authority
 checks required by newly admitted work. Treat starting that host on this data as
 an unsafe downgrade, even when some JSON records are syntactically readable.
 
-The installation epoch advances to **10**, with SQLite `user_version` **9**.
+The installation epoch advances to **11**, with SQLite `user_version` **10**.
 Main through `1e735587` already reserves epochs 5–7 for restart/native storage,
 epoch 8 for GitHub's plugin migration, and epoch 9 / SQLite 8 for the reviewed
-automatic transition. Slack uses a distinct higher boundary. `legacyTree` remains
+automatic transition. Main `64d92fe9` then uses epoch 10 / SQLite 9 for mission
+waits and their active-slot index. Slack uses a distinct higher boundary. `legacyTree` remains
 unchanged. Opening the candidate advances SQLite before service startup; earlier
 binaries reject that newer database instead of resuming work without Slack's
 requester checks.
 
 The historical automatic migration to epoch 9 remains documented in
 [AUTOMATIC-MIGRATIONS.md](AUTOMATIC-MIGRATIONS.md). Its evidence does **not**
-qualify this new boundary. This draft declares no `automaticMigration`, so the
+qualify this new boundary, nor does main's mission-wait transition. This draft declares no `automaticMigration`, so the
 production release gate refuses any earlier epoch. Final delivery must qualify
 and review a separate forward transition before enabling automatic deployment.
 No deployment, automatic backup, restoration or production transition is performed.
@@ -37,6 +38,7 @@ No deployment, automatic backup, restoration or production transition is perform
 | OAuth | New encrypted pending/completed authorizations, account/external subject links and generation records bind owner, package, resource and requester. Setup authorizations expire with their root and are promoted only in activation's transaction. External-consent event receipts contain only the pending key and requested scopes, are created with the pending consent, and retire atomically with their native event (including instance deletion); a superseded replay cannot acquire a fresh consent. Provider-consumed codes and rotated refresh tokens cannot be rolled back by restoring local JSON. |
 | Setup | Expiring root drafts and inert resource namespaces retain exact approval/owner provenance and TTLs. Activation atomically publishes original resource IDs and finished owner credentials; pending consent is never promoted. Discard and deletion retire corresponding secrets and references. |
 | Conversation and execution | Per-message requester proofs, shared-source bindings, generation/revision fences and new-turn bookkeeping preserve each author's authority through queue/preparation/wake. Existing un-attributed messages never gain another person's personal OAuth. An authenticated account captured while Beacon is unavailable has no personal membership-generation proof; later recovery cannot upgrade that turn. Verified proof records retain their existing serialized generation string. Exact owner-answer provenance is stored under the existing chat-control KV prefix, bound to the run, initiating turn and answer; edits retire it and conversation deletion clears that prefix. It permits only that answer's delivery and never restores suspended personal credentials. Older execution code cannot be used to resume work that depends on these checks. |
+| Issued question controls | Nonsecret plugin-storage values retain their `preparing`/`posting`/`sent` write intent, canonical fields/partial selections and exact delivery/person/provider-message binding across worker restart. Optional host-derived `deliveryId`/`chatId` fields bind their lifetime; all delivery-removal paths delete them atomically, including source revocation and conversation purge. Ordinary instance values and quotas keep their existing format. A queued interaction's existing `nextAttemptAt` also represents a definite provider cooldown without spending unexpected-error attempts. Native RPC question IDs include the provider turn as well as thread/item; reopening a session withdraws old requests and a new turn cannot inherit their answers or withdrawals. `blockingQuestion` is derived adapter inbox input, not a stored message field. Unknown POST outcomes are not silently replayed; unsupported/secret questions stay in Cairn. These additions remain inside the unqualified epoch-11 draft boundary. |
 | Clients | Android's ordinary setup-input snapshots are local, backup-excluded and bounded. They contain no declared secret fields; session/scope retirement clears them. They are disposable editor state, not installation data or an offline mutation queue. Web state remains browser-local. |
 
 The SQLite version fence advances; the existing application tables, storage
@@ -139,7 +141,7 @@ source, route, person, owner and approval proofs still apply. Capacity postponem
 updates the existing `nextAttemptAt` field without incrementing error attempts or
 rewriting identity. It never recreates a deleted or changed admission. Earlier
 readers can process these records but retain their earlier finite-retry behavior.
-The additive hint alone therefore does not change epoch10 / SQLite9 or the legacy
+The additive hint alone therefore does not change epoch11 / SQLite10 or the legacy
 tree. The full-PR inventory, forward migration/recovery and final qualification
 remain required. See the separately recorded pending-event storage observation.
 
@@ -171,8 +173,8 @@ finite handler-error budget is removed. Earlier development snapshots' already
 settled/orphaned deliveries are not reconstructed from arbitrary later output;
 start a new source request when no forwarding record remains.
 
-These are additive records inside the already incompatible, unreleased epoch-10
-/ SQLite-9 contract above; no additional table, vault envelope, transition,
+These are additive records inside the already incompatible, unreleased epoch-11
+/ SQLite-10 contract above; no additional table, vault envelope, transition,
 automatic migration or legacy-tree change is introduced. Pre-Slack downgrade and
 production deployment remain fenced. This is a checkpoint inventory, not final
 whole-contract compatibility qualification. Local overhead is recorded in

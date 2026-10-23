@@ -20,7 +20,7 @@ cairn.array_metatable = nil
 cairn.array = function(items) return setmetatable(items or {}, array_mt) end
 cairn.storage = {
     get = function(key) return call("storage.get", { key = key }) end,
-    set = function(key, value) call("storage.set", { key = key, value = value }) end,
+    set = function(key, value, options) call("storage.set", { key = key, value = value, delivery = options and options.delivery }) end,
     max = function(key, value) return call("storage.max", { key = key, value = value }) end,
     delete = function(key) call("storage.delete", { key = key }) end,
     list = function(prefix) return call("storage.list", { prefix = prefix or "" }) end,

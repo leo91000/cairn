@@ -157,10 +157,18 @@ impl Fixture {
     }
 
     pub async fn send(&self, payload: Value, id: &str) {
+        self.envelope("events_api", payload, id).await;
+    }
+
+    pub async fn interactive(&self, payload: Value, id: &str) {
+        self.envelope("interactive", payload, id).await;
+    }
+
+    async fn envelope(&self, kind: &str, payload: Value, id: &str) {
         self.outgoing
             .send(FixtureCommand::Frame(Message::text(
                 json!({
-                    "envelope_id": id, "type": "events_api", "accepts_response_payload": false,
+                    "envelope_id": id, "type": kind, "accepts_response_payload": false,
                     "payload": payload,
                 })
                 .to_string(),

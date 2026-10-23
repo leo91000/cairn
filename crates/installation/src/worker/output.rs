@@ -292,7 +292,7 @@ async fn apply_event(
         let outcome = &run["outcome"];
         if outcome["status"] == "completed"
             && outcome["messageId"].is_string()
-            && outcome["messageId"] == run["chatExecution"]["messageId"]
+            && outcome["messageId"] == *crate::waits::execution_id(&run)
         {
             s.question_release(id, None).await?;
         }

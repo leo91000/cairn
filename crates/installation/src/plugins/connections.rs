@@ -1379,6 +1379,8 @@ where
                     if value["connectionId"] == connection_id {
                         if *kind == super::work::EVENTS {
                             super::work::remove_event(db, text(&value, "id"))?;
+                        } else if *kind == super::work::DELIVERIES {
+                            super::work::remove_delivery(db, &value)?;
                         } else {
                             db.remove(kind, text(&value, "id"))?;
                         }

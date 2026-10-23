@@ -100,7 +100,7 @@ export type Task = z.infer<typeof taskInput> & {
   scheduleWaitReason?: string | null
 }
 export type RunStatus
-  = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'
+  = 'queued' | 'running' | 'waiting' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'
 /** Who must act next on work that is blocked or needs input; the user when absent. */
 export type OutcomeWaitingOn = 'user' | 'requester' | 'external'
 export interface TaskOutcome {
@@ -112,6 +112,8 @@ export interface TaskOutcome {
   messageId?: string | null
 }
 export interface Run {
+  /** A durable mission wait; the run keeps its active task slot. */
+  wakeup?: import('./chats').ChatWakeup | null
   executionBackend?: 'firecracker' | 'native' | null
   suspendedByExclusive?: import('./nodes').ExclusiveReservation | null
   retry?: {

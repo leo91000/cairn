@@ -1,11 +1,7 @@
 local api = require("./lib/api")
 local text = require("./lib/text")
-
--- Reply handlers for an app share one event worker. Luau's os.clock is
--- monotonic on the supported hosts. Prime a fresh worker for one second too,
--- so replacing the worker cannot immediately burst after its predecessor.
-local startedAfter = os.clock() + 1
-local nextPost = {}
+local messages = require("./lib/messages")
+local workControls = require("./work-controls")
 
 local function controls(event, part)
     return cairn.json.encode(cairn.array({
@@ -26,6 +22,9 @@ end
 
 return {
     interaction = function(event)
+        if event.action == "answer" or event.action == "stop" then
+            return workControls.interaction(event)
+        end
         assert(event.action == "reset", "Unknown Slack control")
         return cairn.conversations.reset({
             conversation = event.conversation,
@@ -43,6 +42,7 @@ return {
         })
     end,
     reply = function(event)
+        workControls.cleanup(event)
         local state = event.checkpoint
         if state and state.status == "sent" then
             return { done = true }
@@ -52,15 +52,9 @@ return {
             -- repeat an uncertain post; leave it visibly undelivered for recovery.
             error("Slack reply outcome is uncertain. Check the thread before retrying.")
         end
-        local channelKey = event.reply.workspace .. ":" .. event.reply.channel
-        local remaining = math.max(startedAfter, nextPost[channelKey] or 0) - os.clock()
-        if remaining > 0 then
+        local remaining = messages.ready(event.reply)
+        if remaining then
             return { retryAfter = remaining }
-        end
-        for key, deadline in nextPost do
-            if deadline <= os.clock() then
-                nextPost[key] = nil
-            end
         end
         local chunks = text.chunks(event.text)
         local index = if state and state.nextChunk then state.nextChunk else 1
@@ -80,7 +74,7 @@ return {
         end
         local finished = index == #chunks
         cairn.delivery.checkpoint({ status = "sending", nextChunk = index })
-        nextPost[channelKey] = os.clock() + 1
+        messages.before(event.reply)
         local result = api.request("POST", "chat.postMessage", {
             channel = event.reply.channel,
             thread_ts = event.reply.thread_ts,
@@ -93,7 +87,7 @@ return {
         }, { resource = event.reply.resource, secret = "botToken", prefix = "Bearer " }, event.reply.workspace)
         -- Wait from the response as well as from the request. This preserves
         -- a full second between provider arrivals despite different I/O delays.
-        nextPost[channelKey] = os.clock() + 1
+        messages.after(event.reply)
         if result.status == 429 then
             cairn.delivery.checkpoint({ status = "retryable", nextChunk = index })
             return { retryAfter = math.min(tonumber(result.headers["retry-after"]) or 5, 300) }

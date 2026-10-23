@@ -317,8 +317,7 @@ pub(crate) struct RunRequester {
 #[derive(Clone)]
 pub(crate) struct Observation {
     run: Value,
-    chat: String,
-    wakeup: Value,
+    owner: crate::waits::Owner,
     pub(crate) principal: Option<Principal>,
     approval: Option<super::registry::Approval>,
 }
@@ -330,9 +329,8 @@ impl Observation {
         let observation = s
             .store
             .read(move |db| {
-                let chat = crate::chats::chat_for_run(db, text(&run, "id"))?
-                    .ok_or_else(|| Error::forbidden("The waiting conversation was removed."))?;
-                if chat["wakeup"]["condition"] != condition {
+                let owner = crate::waits::Owner::for_run(db, &run)?;
+                if owner.record["wakeup"]["condition"] != condition {
                     return Err(Error::conflict("The waiting condition changed."));
                 }
                 let principal = captured_run(db, &run)?.map(|requester| requester.principal);
@@ -349,8 +347,7 @@ impl Observation {
                 };
                 let observation = Self {
                     run,
-                    chat: text(&chat, "id").to_owned(),
-                    wakeup: chat["wakeup"].clone(),
+                    owner,
                     principal,
                     approval,
                 };
@@ -384,15 +381,17 @@ impl Observation {
         let run = db
             .run(text(&self.run, "id"))?
             .ok_or_else(|| Error::forbidden("The waiting run was removed."))?;
-        let chat = db
-            .get("chats", &self.chat)?
-            .ok_or_else(|| Error::forbidden("The waiting conversation was removed."))?;
+        let owner = self
+            .owner
+            .reload(db)?
+            .ok_or_else(|| Error::forbidden("The waiting task was removed."))?;
         if run["snapshot"]["agent"] != self.run["snapshot"]["agent"]
-            || run["chatExecution"]["messageId"] != self.run["chatExecution"]["messageId"]
-            || chat["runId"] != run["id"]
-            || chat["wakeup"] != self.wakeup
-            || !crate::chats::continuation::resumable(&chat, Some(&run))
-            || chat["wakeup"]["wakeAt"]
+            || run["trigger"] != self.run["trigger"]
+            || crate::waits::execution_id(&run) != crate::waits::execution_id(&self.run)
+            || owner.run_id() != text(&run, "id")
+            || owner.record["wakeup"] != self.owner.record["wakeup"]
+            || !owner.resumable(&run)
+            || owner.record["wakeup"]["wakeAt"]
                 .as_i64()
                 .is_none_or(|at| at <= crate::config::now())
             || captured_run(db, &run)?.map(|requester| requester.principal) != self.principal
@@ -407,7 +406,7 @@ impl Observation {
         if let Some(approval) = &self.approval {
             approval.recheck_in(db)?;
         }
-        crate::chats::wait_for::access(db, &run, &self.wakeup["condition"])
+        crate::waits::access(db, &run, &self.owner.record["wakeup"]["condition"])
     }
 }
 

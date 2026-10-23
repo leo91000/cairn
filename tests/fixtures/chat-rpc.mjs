@@ -261,7 +261,7 @@ export function chatFixture() {
         asked = true
         hold = true
         questionRequest = 'question-1'
-        emit({
+        const ask = () => emit({
           id: questionRequest,
           method: 'item/tool/requestUserInput',
           params: {
@@ -272,13 +272,26 @@ export function chatFixture() {
             questions: [{
               id: 'direction',
               header: 'Direction',
-              question: 'How should we introduce the new navigation?',
+              question: text.includes('fixture:question-secret') ? 'PRIVATE_NATIVE_QUESTION_DO_NOT_EXPORT' : 'How should we introduce the new navigation?',
               isOther: true,
-              isSecret: false,
+              isSecret: text.includes('fixture:question-secret'),
               options: [{ label: 'Gradual rollout (Recommended)', description: 'Start with the chat view, then extend it to the rest of the app.' }, { label: 'Update everything', description: 'Refresh all views together in one release.' }],
-            }],
+            }, ...(text.includes('fixture:question-multiple')
+              ? [{
+                  id: 'delivery',
+                  header: 'Delivery',
+                  question: 'Which output should be delivered?',
+                  isOther: false,
+                  isSecret: false,
+                  options: [{ label: 'Patch', description: 'Deliver the implementation.' }, { label: 'Report', description: 'Deliver a written report.' }],
+                }]
+              : [])],
           },
         })
+        if (text.includes('fixture:question-delay'))
+          setTimeout(ask, 1500)
+        else
+          ask()
         if (text.includes('expire')) {
           notify('serverRequest/resolved', { threadId: thread.id, requestId: questionRequest })
           questionRequest = undefined

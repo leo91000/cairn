@@ -47,7 +47,21 @@ impl Worker {
             .keys()
             .cloned()
             .collect::<HashSet<_>>();
+        // Parked missions must release any pre-crash execution independently
+        // of their wakeup and of admission capacity for new processes.
+        for run in s.store.read(|db| db.active()).await? {
+            let run_id = text(&run, "id");
+            if run["status"] == RunStatus::Waiting
+                && run["recoveryPending"] == true
+                && !active.contains(run_id)
+            {
+                let preparation = self.run_preparation_lock(run_id).await;
+                let _preparation = preparation.lock().await;
+                recover_or_wait(s, &run).await?;
+            }
+        }
         s.chat_tick(&active).await?;
+        crate::waits::tick_missions(s, &active).await?;
         if s.shutdown.is_cancelled() || s.store.kv("deployment-lease").await?.is_some() {
             return Ok(());
         }
@@ -83,7 +97,7 @@ impl Worker {
                 db.0.execute("DELETE FROM kv WHERE expires IS NOT NULL AND expires<=?", [now()])?;
                 db.0.execute("DELETE FROM audit WHERE created_at<?", [now() - 90 * DAY_MS])?;
                 db.0.execute("DELETE FROM records WHERE kind='node-exclusive-requests' AND json_extract(data,'$.state') IN ('released','failed','expired') AND json_extract(data,'$.createdAt')<?", [now() - 30 * DAY_MS])?;
-                db.0.execute("DELETE FROM events WHERE created_at<? AND run_id IN (SELECT id FROM runs WHERE status NOT IN ('queued','running') AND json_extract(data,'$.trigger')!='chat')", [now() - 30 * DAY_MS])?;
+                db.0.execute("DELETE FROM events WHERE created_at<? AND run_id IN (SELECT id FROM runs WHERE status NOT IN ('queued','running','waiting') AND json_extract(data,'$.trigger')!='chat')", [now() - 30 * DAY_MS])?;
                 Ok(())
             })
             .await?;
@@ -296,7 +310,7 @@ impl Worker {
         let id = run_id.to_owned();
         let source = source.cloned();
         let expected_agent = prepared["snapshot"]["agent"].clone();
-        let expected_message = prepared["chatExecution"]["messageId"].clone();
+        let expected_message = crate::waits::execution_id(prepared).clone();
         let eligible = s
             .store
             .read(move |db| {
@@ -312,7 +326,7 @@ impl Worker {
                 // Account preparation can outlive cancellation, merge and resume.
                 // Its account and captured execution belong to this exact selection.
                 Ok(current["snapshot"]["agent"] == expected_agent
-                    && current["chatExecution"]["messageId"] == expected_message)
+                    && *crate::waits::execution_id(&current) == expected_message)
             })
             .await?;
         if !eligible {
@@ -447,19 +461,45 @@ async fn recover_or_wait(s: &Service, run: &Value) -> Result<bool> {
 /// checkpoint or clears it for relaunch (`true`).
 async fn recover(s: &Service, run: &Value) -> Result<bool> {
     let run_id = text(run, "id");
-    if !crate::nodes::moves::advance(s, run).await? {
+    let checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
+    let parked = run["status"] == RunStatus::Waiting
+        || (run["trigger"] != "chat"
+            && run["wakeup"].is_object()
+            && checkpoint.as_ref().is_some_and(RunCheckpoint::completed));
+    // A parked turn only needs fencing/release, including a completed turn
+    // requeued because its first fencing attempt failed. Placement and possible
+    // disk relocation belong to admission after its wakeup.
+    if !parked && !crate::nodes::moves::advance(s, run).await? {
         return Ok(false);
     }
     recovery::fence(s, run).await?;
     s.mcps.revoke_run(s, run_id).await?;
     s.accounts.recover_run(s, run).await?;
-    if !s.store.run(run_id).await?["cancelRequestedAt"].is_null() {
-        s.store.patch_run(run_id, cancelled_recovery()).await?;
+    let checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
+    let id = run_id.to_owned();
+    s.store
+        .transaction(move |db| finish_recovery(db, &id, checkpoint.as_ref()))
+        .await
+}
+
+/// Cancellation and the final recovery state commit together. In particular,
+/// a completed provider turn must never restore a wait cancellation removed.
+fn finish_recovery(db: &Db<'_>, id: &str, checkpoint: Option<&RunCheckpoint>) -> Result<bool> {
+    let current = db
+        .run(id)?
+        .ok_or_else(|| Error::not_found("Run not found"))?;
+    if !current["cancelRequestedAt"].is_null() {
+        db.patch_run(id, &cancelled_recovery())?;
         return Ok(false);
     }
-    if let Some(checkpoint) = RunCheckpoint::load(&s.store, run_id).await? {
+    if let Some(checkpoint) = checkpoint {
         if let Some(settled) = checkpoint.settled() {
-            s.store.patch_run(run_id, settled.run_patch()?).await?;
+            let mut patch = settled.run_patch()?;
+            if settled.status == RunStatus::Waiting {
+                patch["resumeAvailable"] = true.into();
+                patch["outcome"] = Value::Null;
+            }
+            db.patch_run(id, &patch)?;
             return Ok(false);
         }
         if checkpoint.completed() {
@@ -469,34 +509,35 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
                 }
                 message => message,
             };
-            let patch = json!({
-                "status": RunStatus::Succeeded,
-                "finishedAt": now(),
-                "resumeAvailable": false,
+            let waiting = current["trigger"] != "chat" && current["wakeup"].is_object();
+            if waiting && !current["sessionId"].is_string() {
+                db.patch_run(id, &json!({
+                    "status": RunStatus::Failed,
+                    "finishedAt": now(),
+                    "wakeup": null,
+                    "recoveryPending": false,
+                    "accountWaitReason": null,
+                    "error": "Cannot wait without a saved agent session. Working files were preserved.",
+                }))?;
+                return Ok(false);
+            }
+            let mut patch = json!({
+                "status": if waiting { RunStatus::Waiting } else { RunStatus::Succeeded },
+                "finishedAt": if waiting { None } else { Some(now()) },
+                "resumeAvailable": waiting,
                 "accountWaitReason": null,
                 "recoveryPending": false,
                 "summary": summary,
             });
-            s.store.patch_run(run_id, patch).await?;
+            if waiting {
+                patch["outcome"] = Value::Null;
+            }
+            db.patch_run(id, &patch)?;
             return Ok(false);
         }
     }
-    // A cancellation committed since the check above left this recovering run
-    // to the worker. Check again in the same transaction that ends recovery.
-    let id = run_id.to_owned();
-    s.store
-        .transaction(move |db| {
-            let current = db
-                .run(&id)?
-                .ok_or_else(|| Error::not_found("Run not found"))?;
-            if !current["cancelRequestedAt"].is_null() {
-                db.patch_run(&id, &cancelled_recovery())?;
-                return Ok(false);
-            }
-            db.patch_run(&id, &json!({ "recoveryPending": false }))?;
-            Ok(true)
-        })
-        .await
+    db.patch_run(id, &json!({ "recoveryPending": false }))?;
+    Ok(true)
 }
 
 /// Settles a recovering run whose cancellation was requested.
@@ -507,6 +548,7 @@ fn cancelled_recovery() -> Value {
         "accountWaitReason": null,
         "recoveryPending": false,
         "retry": null,
+        "wakeup": null,
     })
 }
 
@@ -595,6 +637,176 @@ mod tests {
             .unwrap();
 
         (root, service, chat_id, run_id, workspace)
+    }
+
+    #[tokio::test]
+    async fn waiting_mission_restart_releases_attempt_before_deadline_even_when_cancelled() {
+        for (cancel, remote, queued) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, true, false),
+            (false, false, true),
+            (true, false, true),
+            (false, true, true),
+            (true, true, true),
+        ] {
+            let (_root, original, chat_id, run_id, _workspace) = fixture().await;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed = requests.clone();
+            let remote_observed = requests.clone();
+            let app = axum::Router::new()
+                .route(
+                    "/runs/{attempt}",
+                    axum::routing::delete(move || async move {
+                        observed.fetch_add(1, Ordering::Relaxed);
+                        axum::http::StatusCode::NOT_FOUND
+                    }),
+                )
+                .route(
+                    "/internal/execution/{node}/runs/{attempt}",
+                    axum::routing::delete(move || async move {
+                        remote_observed.fetch_add(1, Ordering::Relaxed);
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE
+                    }),
+                );
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let mut config = original.config.clone();
+            config.runner_url = format!("http://{address}");
+            config.public_url = config.runner_url.clone();
+            let node = if remote {
+                "offline-node"
+            } else {
+                crate::nodes::LOCAL_NODE_ID
+            };
+            original
+                .store
+                .transaction(move |db| db.remove("chats", &chat_id))
+                .await
+                .unwrap();
+            drop(original);
+            let service = Service::new(config).await.unwrap();
+            let wakeup = json!({
+                "id": "wake", "seconds": 3600,
+                "createdAt": now(), "wakeAt": now() + 3_600_000,
+            });
+            service
+                .store
+                .patch_run(
+                    &run_id,
+                    json!({
+                        "status": if queued { "queued" } else { "waiting" },
+                        "recoveryPending": queued, "trigger": "manual", "sessionId": "saved",
+                        "isolated": true, "wakeup": wakeup,
+                    }),
+                )
+                .await
+                .unwrap();
+            let checkpoint = RunCheckpoint::from_value(json!({
+                "completed": true, "launched": true, "runnerId": "old-attempt",
+                "nodeId": node,
+                "prepared": { "isolated": true, "backend": "native" },
+            }))
+            .unwrap();
+            checkpoint.store(&service.store, &run_id).await.unwrap();
+            service
+                .store
+                .put(
+                    "node-attempts",
+                    json!({
+                        "id": "old-attempt", "runId": run_id,
+                        "nodeId": node, "released": false,
+                    }),
+                )
+                .await
+                .unwrap();
+
+            if remote {
+                // The previous remote execution lease has expired; its node
+                // cannot serve requests and has no available placement record.
+                service.node_lease_deadlines.lock().await.insert(
+                    "old-attempt".into(),
+                    tokio::time::Instant::now() - Duration::from_secs(30),
+                );
+            }
+            service.worker.initialize(&service).await.unwrap();
+            if cancel {
+                service.worker.cancel(&service, &run_id).await.unwrap();
+            }
+            service.worker.tick(&service).await.unwrap();
+
+            assert_eq!(requests.load(Ordering::Relaxed), 1);
+            let attempt = service
+                .store
+                .get("node-attempts", "old-attempt")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(attempt["released"], true);
+            let current = service.store.run(&run_id).await.unwrap();
+            assert_eq!(current["recoveryPending"], false);
+            assert_eq!(
+                current["status"],
+                if cancel { "cancelled" } else { "waiting" }
+            );
+            if cancel {
+                assert!(current["wakeup"].is_null());
+            } else {
+                assert_eq!(current["wakeup"], wakeup);
+                assert!(current["missionTurnId"].is_null());
+            }
+            assert!(service.worker.active.lock().await.is_empty());
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_mission_recovery_keeps_resume_and_cancellation_wins_atomically() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let record = json!({
+                    "id": "mission", "taskId": "task", "status": "queued", "createdAt": 0,
+                    "recoveryPending": true, "sessionId": "saved", "resumeAvailable": false,
+                    "wakeup": { "id": "wake" },
+                    "outcome": { "status": "completed" },
+                });
+                db.add_run(&record, None)?;
+                let checkpoint = RunCheckpoint::from_value(json!({ "completed": true }))?;
+                assert!(!finish_recovery(db, "mission", Some(&checkpoint))?);
+                let waiting = db.run("mission")?.unwrap();
+                assert_eq!(waiting["status"], "waiting");
+                assert_eq!(waiting["resumeAvailable"], true);
+                assert!(waiting["finishedAt"].is_null());
+                assert!(waiting["outcome"].is_null());
+                for settled in [false, true] {
+                    // A stale recovery snapshot preceded this cancellation. Completion
+                    // must read it in the same transaction that writes the next state.
+                    db.patch_run(
+                        "mission",
+                        &json!({
+                            "status": "queued", "recoveryPending": true,
+                            "cancelRequestedAt": now(), "wakeup": null,
+                        }),
+                    )?;
+                    let mut checkpoint = checkpoint.clone();
+                    if settled {
+                        checkpoint.settled = Some(Some(Settled::from_run(&waiting).unwrap()));
+                    }
+                    assert!(!finish_recovery(db, "mission", Some(&checkpoint))?);
+                    let cancelled = db.run("mission")?.unwrap();
+                    assert_eq!(cancelled["status"], "cancelled");
+                    assert!(cancelled["wakeup"].is_null());
+                    assert_eq!(cancelled["recoveryPending"], false);
+                    assert!(db.active()?.is_empty());
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

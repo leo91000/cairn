@@ -1,5 +1,6 @@
 -- Ingress calls this only after original-body host signature verification.
 local api = require("./lib/api")
+local workControls = require("./work-controls")
 
 local function response(status, body)
     return { status = status, body = body, headers = { ["content-type"] = "text/plain; charset=utf-8" } }
@@ -35,9 +36,12 @@ return { webhook = function(event, payload)
         return response(400, "Invalid source message")
     end
     local action = actions[1]
-    if type(action) ~= "table" or action.type ~= "button" or action.action_id ~= "cairn_reset"
-        or not timestamp(action.action_ts) or not conversationId(action.value) then
+    if type(action) ~= "table" or action.type ~= "button" or not timestamp(action.action_ts) then
         return response(400, "Invalid control")
+    end
+    local reset = action.action_id == "cairn_reset"
+    if reset and not conversationId(action.value) then
+        return response(400, "Invalid conversation control")
     end
     local selected, cursor = nil, nil
     repeat
@@ -59,14 +63,26 @@ return { webhook = function(event, payload)
         or (message.app_id ~= nil and message.app_id ~= payload.api_app_id) then
         return response(403, "Wrong source author")
     end
-    local id = table.concat({ "reset", payload.team.id, channel.id, message.ts, payload.user.id, action.action_ts }, ":")
+    local body = if reset then { action = "reset", conversation = action.value }
+        else workControls.source(action, selected, payload)
+    if not body then
+        return response(403, "Unavailable issued control")
+    end
+    local id = if reset
+        then table.concat({ "reset", payload.team.id, channel.id, message.ts, payload.user.id, action.action_ts }, ":")
+        else "control:" .. action.value .. ":" .. action.action_ts
     if #id > 200 then
         return response(400, "Invalid control identity")
     end
-    local safe, check = api.channel(selected.id, channel.id, payload.team.id)
-    if not safe then
-        return response(if check.status == 429 or check.status >= 500 then 503 else 403, "Channel unavailable")
+    if reset then
+        local safe, check = api.channel(selected.id, channel.id, payload.team.id)
+        if not safe then
+            return response(if check.status == 429 or check.status >= 500 then 503 else 403, "Channel unavailable")
+        end
     end
+    -- An issued question control has a confirmed local source binding. Admit it
+    -- durably before the 3s ACK; the consumer rechecks channel visibility and
+    -- native current-turn/author authority before applying any effect.
     -- Persist only trusted routing and the requested binding, never response_url,
     -- trigger_id, the message contents or unrelated interaction state.
     local result = cairn.inbound.deliver({
@@ -75,7 +91,7 @@ return { webhook = function(event, payload)
         resource = selected.id,
         author = { id = payload.user.id, name = payload.user.id },
         context = { team = payload.team.id, channel = channel.id, thread = message.thread_ts },
-        body = { action = "reset", conversation = action.value },
+        body = body,
     })
     return response(if result.status == "busy" then 503 else 200, result.status)
 end }

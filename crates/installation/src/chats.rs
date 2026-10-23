@@ -1,7 +1,8 @@
 pub(crate) mod continuation;
 mod handoff;
 pub(crate) mod questions;
-pub mod wait_for;
+
+pub use crate::waits as wait_for;
 
 pub use handoff::{execution_text, with_invoked_skills};
 pub use questions::{Question, QuestionField, QuestionStatus, question_prefix};
@@ -548,6 +549,14 @@ fn claim_steering(
             }
             message["status"] = MessageStatus::Sending.into();
             db.put_message(&message)?;
+            if let Some(id) = message["questionId"].as_str()
+                && let Some(question) = find_question(db, chat_id, id)?
+            {
+                // Derived adapter input only, not a persisted message field.
+                // During recovery an answer may precede the provider's reissued
+                // blocking RPC. It must wait for that request, not steer text.
+                message["blockingQuestion"] = question.blocking.into();
+            }
             steering.push(message);
         }
     }

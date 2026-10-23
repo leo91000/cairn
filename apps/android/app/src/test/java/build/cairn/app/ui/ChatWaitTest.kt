@@ -214,6 +214,33 @@ class ChatWaitTest {
     }
 
     @Test
+    fun `mission waits keep one live card without a conversation pause`() {
+        val scheduled = wakeup().copy(messageId = null)
+        val observation = buildJsonObject {
+            put("state", "completed")
+            put("type", "time")
+        }
+        val entries =
+            timelineEntries(
+                listOf(
+                    event("run.wait", scheduled.json()),
+                    event(
+                        "run.wakeup",
+                        JsonObject(scheduled.json() + ("observation" to observation)),
+                    ),
+                )
+            )
+        assertEquals(1, entries.count { it.wait != null })
+        assertEquals(observation, entries.single().wait?.observation)
+        assertTrue(entries.single().wait?.resumedAt != null)
+        val state =
+            waitProgress(ActivityWait(scheduled), LiveWait(scheduled, false, canPause = false))
+        assertTrue(state.pending)
+        assertFalse(state.pausable)
+        assertTrue(build.cairn.app.data.Run("mission", status = "waiting").active)
+    }
+
+    @Test
     fun `folds the wait tool and its events into one card that ends with the resumption`() {
         val scheduled = wakeup(checks)
         val observation = buildJsonObject {

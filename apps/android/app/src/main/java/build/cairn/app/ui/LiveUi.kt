@@ -747,7 +747,8 @@ internal fun timelineEntries(
             if (event.type == "turn.started") waitReason = ""
             when (event.type) {
                 "chat.sleep",
-                "chat.wait" -> {
+                "chat.wait",
+                "run.wait" -> {
                     val wakeup = event.wakeupPayload() ?: continue
                     if (wakeup.id in waits) continue
                     openWait?.let { index -> updateWait(index) { it.copy(ended = "replaced") } }
@@ -766,7 +767,8 @@ internal fun timelineEntries(
                     continue
                 }
                 // The condition completed: right away (the agent never waited) or while it waited.
-                "chat.wait_ready" -> {
+                "chat.wait_ready",
+                "run.wait_ready" -> {
                     val observation = event.activityData()
                     // Right away, the agent never waited, and this call replaced any wait.
                     val immediate =
@@ -784,10 +786,11 @@ internal fun timelineEntries(
                         folded
                             .drop(eventIndex + 1)
                             .takeWhile {
-                                it.type !in listOf("chat.user", "chat.wait", "chat.sleep")
+                                it.type !in
+                                    listOf("chat.user", "chat.wait", "chat.sleep", "run.wait")
                             }
                             .firstOrNull {
-                                it.type == "chat.wakeup" &&
+                                it.type in listOf("chat.wakeup", "run.wakeup") &&
                                     it.payload?.get("observation") == observation
                             }
                             ?.wakeupPayload()
@@ -838,7 +841,8 @@ internal fun timelineEntries(
                     if (immediate) waitReason = ""
                     continue
                 }
-                "chat.wakeup" -> {
+                "chat.wakeup",
+                "run.wakeup" -> {
                     val wakeup = event.wakeupPayload()
                     // Its scheduling may be in an older page of the history.
                     val index =
@@ -1079,6 +1083,9 @@ private val WAIT_BOUNDARIES =
         "chat.wait",
         "chat.wait_ready",
         "chat.wakeup",
+        "run.wait",
+        "run.wait_ready",
+        "run.wakeup",
     )
 private val TERMINAL_STATUSES = setOf("succeeded", "failed", "cancelled", "interrupted")
 

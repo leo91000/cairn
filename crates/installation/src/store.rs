@@ -41,7 +41,7 @@ const READERS: usize = 4;
 
 // Advanced before Service::new runs any data migration. Older managers refuse
 // this database, and installed host updaters retain the candidate after a failure.
-const DATABASE_VERSION: i64 = 9;
+const DATABASE_VERSION: i64 = 10;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,projec
 CREATE INDEX IF NOT EXISTS runs_status ON runs(status,created_at);
 CREATE INDEX IF NOT EXISTS runs_task ON runs(task_id,created_at DESC);
 CREATE INDEX IF NOT EXISTS runs_created ON runs(created_at DESC,id DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS runs_active_task ON runs(task_id) WHERE status IN ('queued','running');
+CREATE UNIQUE INDEX IF NOT EXISTS runs_active_task ON runs(task_id) WHERE status IN ('queued','running','waiting');
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL,type TEXT NOT NULL,text TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id,id);
 CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY,data TEXT NOT NULL,expires INTEGER);
@@ -103,6 +103,10 @@ CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at
             "CREATE TABLE IF NOT EXISTS chat_messages(id TEXT PRIMARY KEY,chat_id TEXT NOT NULL,data TEXT NOT NULL,created_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id,created_at);",
         )?;
+        if version < 9 {
+            tx.execute_batch("DROP INDEX runs_active_task;
+CREATE UNIQUE INDEX runs_active_task ON runs(task_id) WHERE status IN ('queued','running','waiting');")?;
+        }
         tx.pragma_update(None, "user_version", DATABASE_VERSION)?;
         // Backwards history excludes superseded text snapshots. These small keys
         // bound both the next-turn lookup and the same-message revision lookup.
@@ -537,7 +541,7 @@ impl Db<'_> {
 
     pub fn active(&self) -> Result<Vec<Value>> {
         self.json_rows(
-            "SELECT data FROM runs WHERE status IN ('queued','running') ORDER BY created_at",
+            "SELECT data FROM runs WHERE status IN ('queued','running','waiting') ORDER BY created_at",
             [],
         )
     }

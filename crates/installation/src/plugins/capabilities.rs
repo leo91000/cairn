@@ -163,7 +163,7 @@ where
 {
     match method {
         "storage.get" | "storage.set" | "storage.max" | "storage.delete" | "storage.list" => {
-            storage(s, context, method, &args).await
+            super::storage::call(s, context, method, &args).await
         }
         "http.request" => http(s, context, &args, authorize).await,
         "resources.get" | "resources.list" => {
@@ -177,103 +177,6 @@ where
         }
         _ => Err(Error::forbidden("Unknown plugin capability.")),
     }
-}
-
-fn key(args: &Value) -> Result<String> {
-    let key = text(args, "key");
-    if key.is_empty() || key.chars().count() > 200 || key.chars().any(char::is_control) {
-        return Err(Error::bad("Invalid storage key."));
-    }
-    Ok(key.to_owned())
-}
-
-/// Small connection-scoped values. Removed with the connection.
-async fn storage(s: &Service, context: &Context, method: &str, args: &Value) -> Result<Value> {
-    const KIND: &str = "plugin-storage";
-    let connection = context.connection.id.clone();
-    let management = context.management.clone();
-    let method = method.to_owned();
-    let args = args.clone();
-    s.store
-        .transaction(move |db| {
-            if let Some(authority) = management {
-                authority.authorize(db)?;
-            }
-            let owned = || {
-                db.list(KIND).map(|values| {
-                    values
-                        .into_iter()
-                        .filter(|value| value["connectionId"] == connection)
-                        .collect::<Vec<_>>()
-                })
-            };
-            if method == "storage.list" {
-                let prefix = text(&args, "prefix");
-                let mut keys = owned()?
-                    .iter()
-                    .map(|value| text(value, "key").to_owned())
-                    .filter(|key| key.starts_with(prefix))
-                    .collect::<Vec<_>>();
-                keys.sort();
-                return Ok(json!(keys));
-            }
-            let key = key(&args)?;
-            let record_id = format!("storage:{connection}:{}", crate::auth::hex_digest(&key));
-            match method.as_str() {
-                "storage.get" => Ok(db
-                    .get(KIND, &record_id)?
-                    .map_or(Value::Null, |value| value["value"].clone())),
-                "storage.delete" => {
-                    db.remove(KIND, &record_id)?;
-                    Ok(Value::Null)
-                }
-                _ => {
-                    let mut value = args.get("value").cloned().unwrap_or(Value::Null);
-                    if method == "storage.max" {
-                        let number = value
-                            .as_f64()
-                            .filter(|value| value.is_finite())
-                            .ok_or_else(|| Error::bad("Store a finite number."))?;
-                        let previous = db.get(KIND, &record_id)?;
-                        let current = previous
-                            .as_ref()
-                            .map(|row| {
-                                row["value"]
-                                    .as_f64()
-                                    .ok_or_else(|| Error::bad("The stored value is not a number."))
-                            })
-                            .transpose()?;
-                        if current.is_some_and(|current| current >= number) {
-                            value = previous.unwrap()["value"].clone();
-                        }
-                    }
-                    if serde_json::to_string(&value)?.len() > 65_536 {
-                        return Err(Error::too_large("Stored values are limited to 64 KB."));
-                    }
-                    if db.get(KIND, &record_id)?.is_none() && owned()?.len() >= 1000 {
-                        return Err(Error::too_large(
-                            "A connection can keep at most 1000 values.",
-                        ));
-                    }
-                    db.put(
-                        KIND,
-                        &json!({
-                            "id": record_id,
-                            "connectionId": connection,
-                            "key": key,
-                            "value": value,
-                            "updatedAt": now(),
-                        }),
-                    )?;
-                    Ok(if method == "storage.max" {
-                        value
-                    } else {
-                        Value::Null
-                    })
-                }
-            }
-        })
-        .await
 }
 
 /// Checks a URL against the hosts the plugin declares: HTTPS (or WSS for sockets),

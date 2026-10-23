@@ -58,7 +58,7 @@ export interface ChatWakeup {
   nextCheckAt?: number
   lastError?: string
   id: string
-  messageId: string
+  messageId: string | null
   reason: string
   seconds: number
   createdAt: number

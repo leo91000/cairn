@@ -245,7 +245,7 @@ pub async fn observe(
     let project = s
         .store
         .read(move |db| {
-            crate::chats::wait_for::access(db, &caller, &source)?;
+            crate::waits::access(db, &caller, &source)?;
             if source.get("projectId").is_some() {
                 project(db, &caller, &source).map(Some)
             } else {
@@ -334,9 +334,9 @@ pub async fn observe(
     })
 }
 
-fn watchable(chat: &Value, run: &Value, time: i64) -> bool {
-    let wakeup = &chat["wakeup"];
-    crate::chats::continuation::resumable(chat, Some(run))
+fn watchable(owner: &crate::waits::Owner, run: &Value, time: i64) -> bool {
+    let wakeup = &owner.record["wakeup"];
+    owner.resumable(run)
         && is_condition(&wakeup["condition"])
         && !wakeup["observation"].is_object()
         && wakeup["wakeAt"]
@@ -352,15 +352,29 @@ pub async fn poll_once(s: &Service) -> Result<()> {
     let groups = s
         .store
         .read(|db| {
-            let mut groups: BTreeMap<String, Vec<(Value, Value)>> = BTreeMap::new();
-            for chat in db.list("chats")? {
-                let Some(run) = db.run(text(&chat, "runId"))? else {
+            let mut groups: BTreeMap<String, Vec<(crate::waits::Owner, Value)>> = BTreeMap::new();
+            let mut owners = db
+                .list("chats")?
+                .into_iter()
+                .map(|record| crate::waits::Owner { chat: true, record })
+                .collect::<Vec<_>>();
+            owners.extend(
+                db.active()?
+                    .into_iter()
+                    .filter(|run| run["status"] == "waiting")
+                    .map(|record| crate::waits::Owner {
+                        chat: false,
+                        record,
+                    }),
+            );
+            for owner in owners {
+                let Some(run) = db.run(owner.run_id())? else {
                     continue;
                 };
-                if !watchable(&chat, &run, now()) {
+                if !watchable(&owner, &run, now()) {
                     continue;
                 }
-                let project_id = &chat["wakeup"]["condition"]["projectId"];
+                let project_id = &owner.record["wakeup"]["condition"]["projectId"];
                 let granted_origin = crate::project_workspaces::catalog(&run)
                     .into_iter()
                     .find(|project| &project["id"] == project_id)
@@ -368,18 +382,18 @@ pub async fn poll_once(s: &Service) -> Result<()> {
                 let key = json!({
                     "agentId": run["snapshot"]["agent"]["id"],
                     "access": policy(&run["snapshot"]["agent"]),
-                    "condition": chat["wakeup"]["condition"],
+                    "condition": owner.record["wakeup"]["condition"],
                     "projectOrigin": granted_origin,
                     "requester": super::requesters::observation_key_in(db, &run)?,
                 })
                 .to_string();
-                groups.entry(key).or_default().push((chat, run));
+                groups.entry(key).or_default().push((owner, run));
             }
             let mut groups: Vec<_> = groups.into_values().collect();
             groups.sort_by_key(|group| {
                 group
                     .iter()
-                    .filter_map(|(c, _)| c["wakeup"]["nextCheckAt"].as_i64())
+                    .filter_map(|(c, _)| c.record["wakeup"]["nextCheckAt"].as_i64())
                     .min()
                     .unwrap_or(0)
             });
@@ -390,7 +404,7 @@ pub async fn poll_once(s: &Service) -> Result<()> {
     let results = stream::iter(groups)
         .map(|group| async move {
             let (first, run) = &group[0];
-            let observed = observe(s, run, &first["wakeup"]["condition"], None).await;
+            let observed = observe(s, run, &first.record["wakeup"]["condition"], None).await;
             s.store
                 .transaction(move |db| record(db, group, &observed))
                 .await
@@ -408,39 +422,43 @@ pub async fn poll_once(s: &Service) -> Result<()> {
 /// Resolve one still-current wait from the snapshot used by a provider probe.
 fn current_wait(
     db: &Db<'_>,
-    expected: &Value,
+    expected: &crate::waits::Owner,
     observed_run: &Value,
-) -> Result<Option<(Value, Value)>> {
-    let Some(chat) = db.get("chats", text(expected, "id"))? else {
+) -> Result<Option<(crate::waits::Owner, Value)>> {
+    let Some(owner) = expected.reload(db)? else {
         return Ok(None);
     };
-    let Some(run) = db.run(text(&chat, "runId"))? else {
+    let Some(run) = db.run(owner.run_id())? else {
         return Ok(None);
     };
     if run["id"] != observed_run["id"]
         || run["snapshot"]["agent"] != observed_run["snapshot"]["agent"]
-        || chat["wakeup"] != expected["wakeup"]
-        || !watchable(&chat, &run, now())
+        || owner.record["wakeup"] != expected.record["wakeup"]
+        || !watchable(&owner, &run, now())
     {
         return Ok(None);
     }
-    Ok(Some((chat, run)))
+    Ok(Some((owner, run)))
 }
 
-fn record(db: &Db<'_>, group: Vec<(Value, Value)>, observed: &Result<Observed>) -> Result<()> {
-    // The shared probe carries its representative's turn proof. If that wait
-    // changed during I/O, retry unchanged peers under a current representative;
-    // its stale denial must not permanently resolve a different conversation.
+fn record(
+    db: &Db<'_>,
+    group: Vec<(crate::waits::Owner, Value)>,
+    observed: &Result<Observed>,
+) -> Result<()> {
+    // A shared probe carries its representative's requester proof. If its wait
+    // changed during I/O, retry peers under a current representative instead of
+    // permanently resolving another conversation or mission with a stale denial.
     if let Some((expected, run)) = group.first()
         && current_wait(db, expected, run)?.is_none()
     {
         return Ok(());
     }
     for (expected, observed_run) in group {
-        let Some((mut chat, run)) = current_wait(db, &expected, &observed_run)? else {
+        let Some((mut owner, run)) = current_wait(db, &expected, &observed_run)? else {
             continue;
         };
-        let authorized = crate::chats::wait_for::access(db, &run, &chat["wakeup"]["condition"]);
+        let authorized = crate::waits::access(db, &run, &owner.record["wakeup"]["condition"]);
         let result = match (&authorized, observed) {
             (Err(error), _) => Some(json!({ "state": "unavailable", "message": error.message })),
             (Ok(()), Ok(value)) => value.result.clone(),
@@ -451,29 +469,29 @@ fn record(db: &Db<'_>, group: Vec<(Value, Value)>, observed: &Result<Observed>) 
         };
         let mut delay = POLL_MS;
         if let Some(result) = result {
-            chat["wakeup"]["observation"] = result.clone();
+            owner.record["wakeup"]["observation"] = result.clone();
             db.event(
                 text(&run, "id"),
-                "chat.wait_ready",
+                owner.event("wait_ready"),
                 "Wait condition resolved",
                 Some(&result),
             )?;
         } else if observed.is_err() {
-            chat["wakeup"]["lastError"] =
+            owner.record["wakeup"]["lastError"] =
                 "The service is temporarily unavailable; retrying until the wait deadline.".into();
-        } else if let Some(wakeup) = chat["wakeup"].as_object_mut() {
+        } else if let Some(wakeup) = owner.record["wakeup"].as_object_mut() {
             // A successful check means the service answers again.
             wakeup.remove("lastError");
         }
         if let Ok(observed) = observed {
             if let Some(display) = &observed.display {
-                chat["wakeup"]["display"] = display.clone();
+                owner.record["wakeup"]["display"] = display.clone();
             }
             delay = observed.check_after.unwrap_or(POLL_MS);
         }
-        chat["wakeup"]["nextCheckAt"] = (now() + delay).into();
-        chat["updatedAt"] = now().into();
-        db.put("chats", &chat)?;
+        owner.record["wakeup"]["nextCheckAt"] = (now() + delay).into();
+        owner.record["updatedAt"] = now().into();
+        owner.save(db)?;
     }
     Ok(())
 }
@@ -535,9 +553,19 @@ mod tests {
                 let current_run =
                     db.patch_run("run", &json!({ "snapshot": { "agent": target } }))?;
                 let stale_denial =
-                    crate::chats::wait_for::access(db, &captured_run, &chat["wakeup"]["condition"])
+                    crate::waits::access(db, &captured_run, &chat["wakeup"]["condition"])
                         .unwrap_err();
-                record(db, vec![(chat.clone(), captured_run)], &Err(stale_denial))?;
+                record(
+                    db,
+                    vec![(
+                        crate::waits::Owner {
+                            chat: true,
+                            record: chat.clone(),
+                        },
+                        captured_run,
+                    )],
+                    &Err(stale_denial),
+                )?;
                 assert_eq!(db.get("chats", "chat")?.unwrap(), chat);
                 assert!(db.events("run", 0, 10)?.is_empty());
 
@@ -546,7 +574,17 @@ mod tests {
                     display: None,
                     check_after: None,
                 });
-                record(db, vec![(chat, current_run)], &fresh)?;
+                record(
+                    db,
+                    vec![(
+                        crate::waits::Owner {
+                            chat: true,
+                            record: chat,
+                        },
+                        current_run,
+                    )],
+                    &fresh,
+                )?;
                 assert_eq!(
                     db.get("chats", "chat")?.unwrap()["wakeup"]["observation"]["state"],
                     "completed"

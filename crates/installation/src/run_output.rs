@@ -377,8 +377,8 @@ pub fn prompt(run: &Value, chat: bool) -> String {
         } else {
             ""
         },
-        waiting = if chat && run["isolated"] == true {
-            crate::chats::continuation::INSTRUCTIONS
+        waiting = if run["isolated"] == true {
+            crate::waits::INSTRUCTIONS
         } else {
             ""
         },

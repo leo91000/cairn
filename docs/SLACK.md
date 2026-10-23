@@ -100,8 +100,48 @@ manager restart while paused, and aging an accepted delivery beyond 24 hours.
 They use a fake model process and local Slack HTTP fixtures; they do not prove a
 real Slack workspace, physical VM restoration or production object storage.
 The [storage observation](performance/SLACK-CONTINUATION-DELIVERY.md) describes
-reservation overhead and its limits. Questions, stop, full recovery qualification
-and all remaining Q1–Q20 functions remain required.
+reservation overhead and its limits. Full recovery qualification and all
+remaining Q1–Q20 functions remain required.
+
+## Author-controlled questions
+
+The package posts blocking, nonsecret multiple-choice questions in the source
+thread, with the question, option descriptions and an explicit choice button.
+This slice supports at most three fields with five options each, a 16,000-byte field
+schema and complete labels fitting Slack's 75-character button limit. Other
+questions display a Cairn fallback. Secret questions export neither prompts nor
+choices into Slack or plugin storage. Free text, optional questions and modal
+forms still need their accepted Slack interfaces.
+
+Only the original requester can answer or stop the execution from its issued
+question. Another allowed participant may contribute a separate request but
+cannot use those controls. The signature or Socket envelope, app, workspace,
+source bot, channel, thread, confirmed message timestamp and issued block are
+checked. The callback carries references and choice indices; the package selects
+the canonical answer, ignoring client text and unrelated `state`/`response_url`.
+Cairn rechecks the current execution and author before applying the answer/stop.
+
+The callback is durably admitted before its three-second acknowledgement; current
+channel visibility is checked by the consumer before any native effect. A slow
+metadata read cannot extend the ACK deadline, and a channel becoming private or
+person being revoked still prevents the action. Definite provider rate limits
+retain accepted controls through the cooldown without consuming error retries.
+Questions and replies share the same per-channel post pacing. Write intent is
+stored before posting; an uncertain question POST is not automatically repeated.
+Native delivery ownership removes these nonsecret states on every terminal path,
+including revocation and conversation purge.
+The [native storage observation](performance/SLACK-QUESTION-STATE.md) compares
+this ownership and cleanup with ordinary instance state near the key limit.
+
+When a provider session reopens, the old native RPC question is withdrawn. A
+reissued question uses the provider's new turn identity and receives a new Slack
+control; an old answer cannot apply to it. An early answer to a still-current
+blocking RPC waits for its registration instead of becoming ordinary steering.
+Fixtures exercise actual adapter RPC answers and cancellation over signed HTTP
+and verified WSS, plus manager restart, wrong authors/origins and post-admission
+visibility/revocation. These are local protocol fixtures, not live Slack evidence.
+General progress/Stop surfaces, optional/free-text questions and native Slack
+modals remain required.
 
 ## First Socket Mode exchange
 
@@ -215,8 +255,8 @@ test logs or the PR. No such live resources have been accessed or created here.
 The complete contract remains [SLACK-PLUGIN-SPEC.md](SLACK-PLUGIN-SPEC.md). The first
 slice does not finish Socket Mode replacement/overlap and full liveness qualification; Slack OAuth installation and personal OAuth;
 private channels, Slack Connect, DMs/group DMs; automatic following of engaged
-threads or authorized initial thread history; slash commands, shortcuts, buttons,
-questions, stop, modals, App Home or streaming; authenticated files and
+threads or authorized initial thread history; slash commands, shortcuts, general
+progress/Stop and complete question/modal surfaces, App Home or streaming; authenticated files and
 livrable links; collaboration/productivity tools and scoped agent profiles;
 workflows and bounded owner automations; or private ephemeral RTS search with
 verified engines. Expired mentions currently do not execute, but a private

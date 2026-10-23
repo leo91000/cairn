@@ -109,7 +109,7 @@ export interface ActivityWait {
 /** Historical marker for events that predate the explicit immediate boolean. */
 const immediateResult = 'Wait condition already completed'
 // Where a scheduled wait's card is placed: its turn ended, or a message or another wait event came.
-const waitBoundaries = new Set(['turn.started', 'turn.completed', 'turn.failed', 'chat.user', 'chat.sleep', 'chat.wait', 'chat.wait_ready', 'chat.wakeup'])
+const waitBoundaries = new Set(['turn.started', 'turn.completed', 'turn.failed', 'chat.user', 'chat.sleep', 'chat.wait', 'chat.wait_ready', 'chat.wakeup', 'run.wait', 'run.wait_ready', 'run.wakeup'])
 const terminalStatuses = new Set(['succeeded', 'failed', 'cancelled', 'interrupted'])
 
 // Codex names the workspace server; Claude and OpenCode prefix the tool with it.
@@ -149,7 +149,7 @@ export function activityPayload(event: RunEvent) {
     return event.payload
   try {
     const data = record(JSON.parse(event.text))
-    return event.type === 'chat.wait_ready' || data.type === event.type || Object.hasOwn(data, 'item') ? data : {}
+    return ['chat.wait_ready', 'run.wait_ready'].includes(event.type) || data.type === event.type || Object.hasOwn(data, 'item') ? data : {}
   }
   catch {
     return {}
@@ -232,7 +232,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       continue
     if (waitBoundaries.has(event.type) || (event.type === 'status' && terminalStatuses.has(event.text)))
       placeScheduled()
-    if (event.type === 'chat.sleep' || event.type === 'chat.wait') {
+    if (['chat.sleep', 'chat.wait', 'run.wait'].includes(event.type)) {
       const wakeup = record(event.payload) as unknown as ChatWakeup
       if (!wakeup.id || waits.has(wakeup.id))
         continue
@@ -252,9 +252,9 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     }
 
     // The condition completed right away: the agent never waited, and this call replaced any wait.
-    const observation = event.type === 'chat.wait_ready' ? activityPayload(event) : {}
+    const observation = ['chat.wait_ready', 'run.wait_ready'].includes(event.type) ? activityPayload(event) : {}
     const immediate = typeof observation.immediate === 'boolean' ? observation.immediate : event.text === immediateResult
-    if (event.type === 'chat.wait_ready' && immediate) {
+    if (['chat.wait_ready', 'run.wait_ready'].includes(event.type) && immediate) {
       if (openWait) {
         openWait.ended = 'replaced'
         openWait = undefined
@@ -275,11 +275,11 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
 
     // Polling found the result while the conversation waited. When the scheduling is outside the
     // loaded page, a later resumption or the live snapshot identifies the wait.
-    if (event.type === 'chat.wait_ready') {
+    if (['chat.wait_ready', 'run.wait_ready'].includes(event.type)) {
       const following = events.slice(eventIndex + 1)
-      const boundary = following.findIndex(next => ['chat.user', 'chat.wait', 'chat.sleep'].includes(next.type))
+      const boundary = following.findIndex(next => ['chat.user', 'chat.wait', 'chat.sleep', 'run.wait'].includes(next.type))
       const continuation = boundary < 0 ? following : following.slice(0, boundary)
-      const resumed = continuation.find(next => next.type === 'chat.wakeup'
+      const resumed = continuation.find(next => ['chat.wakeup', 'run.wakeup'].includes(next.type)
         && JSON.stringify(next.payload?.observation) === JSON.stringify(observation))
       const open = openWait?.wakeup?.condition ? openWait.wakeup : undefined
       const legacy = resumed?.payload as unknown as ChatWakeup | undefined
@@ -312,7 +312,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       continue
     }
 
-    if (event.type === 'chat.wakeup') {
+    if (['chat.wakeup', 'run.wakeup'].includes(event.type)) {
       const wakeup = record(event.payload) as unknown as ChatWakeup
       let wait = wakeup.id ? waits.get(wakeup.id) : undefined
       // Its scheduling may be in an older page of the history.
