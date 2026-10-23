@@ -462,6 +462,8 @@ impl Controller {
         if let Some(value) = plan.get_mut("args") {
             replace_origin(value, &origin);
         }
+        // `cairn plugin` reaches the same channel as the agent's MCP servers.
+        plan["mcpEnv"][crate::plugins::cli::ORIGIN_ENV] = origin.clone().into();
         let channel = stage.join("home").join(crate::microvm::mcp::SOCKET);
         tokio::spawn(relay(listener, channel, mcp_stop));
         let auth = stage
