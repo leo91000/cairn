@@ -261,6 +261,7 @@ def main():
             if run in started_runs:
                 script += 'test "$(cat /home/node/.claude/user-state.json)" = "new user state"\n'
             script += 'printf "new user state" > /home/node/.claude/user-state.json\n'
+            script += 'test "$(cat /run/cairn-chat/attachments/native-image/image.png)" = "synthetic image bytes"\n'
             script += 'test -f /home/node/.agents/skills/frozen/SKILL.md\n'
             script += 'if touch /home/node/.agents/skills/bad 2>/dev/null; then exit 83; fi\n'
             if legacy:
@@ -285,6 +286,10 @@ def main():
             if run in base_archives:
                 plan.update(nativeProjectArchives=base_archives[run], nativeProjectBase=base_keys[run])
                 os.link(state / 'native-bases' / base_keys[run] / 'pin', data / 'runs' / run / ('native-base-' + attempt + '.pin'))
+            image = data / 'runs' / run / 'chat-input/attachments/native-image/image.png'
+            image.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            image.write_text('synthetic image bytes')
+            image.chmod(0o600)
             (data / 'runner-plans' / (attempt + '.json')).write_text(json.dumps(plan))
             manager('checkpoint', run=run, attempt=attempt)
             api('/runs/' + attempt + '/lease', {'remainingMs': lease})

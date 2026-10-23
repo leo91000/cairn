@@ -493,18 +493,7 @@ impl Controller {
         tokio::fs::set_permissions(&plan_file, std::fs::Permissions::from_mode(0o444)).await?;
         // The staging inbox is readonly in the workload's mount namespace.
         private_dir(&stage.join("chat-input")).await?;
-        tokio::fs::set_permissions(
-            stage.join("chat-input"),
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .await?;
-        if stage.join("chat-input/messages.json").exists() {
-            tokio::fs::set_permissions(
-                stage.join("chat-input/messages.json"),
-                std::fs::Permissions::from_mode(0o444),
-            )
-            .await?;
-        }
+        crate::nodes::workspace::prepare_native_inbox(&stage.join("chat-input")).await?;
         let launch = systemd::Launch {
             id,
             plan: &plan,

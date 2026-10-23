@@ -359,6 +359,9 @@ pub async fn seed(
     } else {
         super::files::receive(&mut reader, temp.path(), budget).await?;
     }
+    if crate::native::enabled() && selection["kind"] == "initial" {
+        prepare_native_inbox(&temp.path().join("chat-input")).await?;
+    }
     // Preserve the directory inode mounted into a native workload. Replacing a
     // bind-mounted directory would leave it reading the previous inbox forever.
     if crate::native::enabled() && selection["kind"] == "inbox" {
@@ -372,18 +375,86 @@ pub async fn seed(
     Ok(())
 }
 
+/// Inbox bytes stay in private host staging and are mounted read-only into the
+/// unprivileged workload. Every entry must be readable before publication.
+pub(crate) async fn prepare_native_inbox(root: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut pending = vec![root.to_owned()];
+    while let Some(path) = pending.pop() {
+        let metadata = match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) => metadata,
+            Err(error) if path == root && error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).await?;
+            let mut entries = tokio::fs::read_dir(path).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                pending.push(entry.path());
+            }
+        } else if metadata.is_file() && metadata.nlink() == 1 {
+            tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).await?;
+        } else {
+            return Err(Error::bad(
+                "Native inbox contains an alias or unsupported entry.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn inbox_directory(path: &Path) -> Result<()> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Err(Error::bad("Native inbox directory was redirected.")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            tokio::fs::create_dir(path).await?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    // Never temporarily chmod a mounted inbox to 0700 during a refresh.
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).await?;
+    Ok(())
+}
+
 async fn install_native_inbox(source: &Path, target: &Path) -> Result<()> {
-    crate::skills::private_dir(target).await?;
-    let bytes = tokio::fs::read(source.join("messages.json")).await?;
-    crate::skills::atomic_write(&target.join("messages.json"), &bytes).await?;
-    tokio::fs::set_permissions(
-        target.join("messages.json"),
-        std::fs::Permissions::from_mode(0o444),
-    )
-    .await?;
-    // This root-owned inode is bind-mounted read-only into the workload. It
-    // must stay traversable after every refresh, including under UMask=0077.
-    tokio::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755)).await?;
+    prepare_native_inbox(source).await?;
+    let messages = source.join("messages.json");
+    if !tokio::fs::symlink_metadata(&messages).await?.is_file() {
+        return Err(Error::bad("Native inbox messages are missing."));
+    }
+    inbox_directory(target).await?;
+    let mut pending = vec![(source.to_owned(), target.to_owned())];
+    while let Some((directory, destination)) = pending.pop() {
+        let mut entries = tokio::fs::read_dir(directory).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            if entry.path() == messages {
+                continue;
+            }
+            let path = destination.join(entry.file_name());
+            if entry.file_type().await?.is_dir() {
+                inbox_directory(&path).await?;
+                pending.push((entry.path(), path));
+                continue;
+            }
+            match tokio::fs::symlink_metadata(&path).await {
+                Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
+                    return Err(Error::bad("Native inbox file was redirected."));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            tokio::fs::rename(entry.path(), path).await?;
+        }
+    }
+    // All attachments and their readable modes are installed before a message
+    // can reference them. The source file is already synchronized and 0444;
+    // publishing a 0600 replacement before chmod would race the agent's reader.
+    tokio::fs::rename(messages, target.join("messages.json")).await?;
     Ok(())
 }
 
@@ -433,6 +504,157 @@ pub async fn auth_listener(
 mod native_inbox_tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;
+
+    #[tokio::test]
+    async fn native_refresh_publishes_readable_attachments_before_messages() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("inbox");
+        crate::skills::private_dir(&target).await.unwrap();
+        let inode = tokio::fs::metadata(&target).await.unwrap().ino();
+        for name in ["initial", "follow-up"] {
+            let source = root.path().join(name);
+            let image = source.join("attachments").join(name).join("image.png");
+            crate::skills::private_dir(image.parent().unwrap())
+                .await
+                .unwrap();
+            tokio::fs::write(&image, b"synthetic image").await.unwrap();
+            tokio::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o600))
+                .await
+                .unwrap();
+            tokio::fs::write(source.join("messages.json"), name)
+                .await
+                .unwrap();
+            install_native_inbox(&source, &target).await.unwrap();
+            let received = target.join("attachments").join(name).join("image.png");
+            assert_eq!(
+                tokio::fs::read(&received).await.unwrap(),
+                b"synthetic image"
+            );
+            assert_eq!(
+                tokio::fs::metadata(&received)
+                    .await
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o444
+            );
+            assert_eq!(
+                tokio::fs::metadata(received.parent().unwrap())
+                    .await
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            );
+            assert_eq!(
+                tokio::fs::read(target.join("messages.json")).await.unwrap(),
+                name.as_bytes()
+            );
+            assert_eq!(tokio::fs::metadata(&target).await.unwrap().ino(), inode);
+        }
+        assert!(target.join("attachments/initial/image.png").exists());
+    }
+
+    #[tokio::test]
+    async fn native_initial_inbox_is_readable_without_relaxing_neighboring_secrets() {
+        let root = tempfile::tempdir().unwrap();
+        let inbox = root.path().join("chat-input");
+        let image = inbox.join("attachments/image/screenshot.png");
+        crate::skills::private_dir(image.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&image, b"image").await.unwrap();
+        tokio::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o600))
+            .await
+            .unwrap();
+        let secret = root.path().join("credential");
+        tokio::fs::write(&secret, b"synthetic secret")
+            .await
+            .unwrap();
+        tokio::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600))
+            .await
+            .unwrap();
+        prepare_native_inbox(&inbox).await.unwrap();
+        for path in [&inbox, &inbox.join("attachments"), image.parent().unwrap()] {
+            assert_eq!(
+                tokio::fs::metadata(path)
+                    .await
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            );
+        }
+        assert_eq!(
+            tokio::fs::metadata(&image)
+                .await
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o444
+        );
+        assert_eq!(
+            tokio::fs::metadata(secret)
+                .await
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[tokio::test]
+    async fn native_inbox_rejects_redirected_attachments_before_publishing_messages() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        let outside = root.path().join("private");
+        for path in [&source, &target, &outside] {
+            crate::skills::private_dir(path).await.unwrap();
+        }
+        tokio::fs::write(source.join("messages.json"), b"new")
+            .await
+            .unwrap();
+        tokio::fs::write(target.join("messages.json"), b"old")
+            .await
+            .unwrap();
+        tokio::fs::symlink(&outside, source.join("attachments"))
+            .await
+            .unwrap();
+        assert!(install_native_inbox(&source, &target).await.is_err());
+        assert_eq!(
+            tokio::fs::read(target.join("messages.json")).await.unwrap(),
+            b"old"
+        );
+        assert_eq!(
+            tokio::fs::metadata(&outside)
+                .await
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        tokio::fs::remove_file(source.join("attachments"))
+            .await
+            .unwrap();
+        crate::skills::private_dir(&source.join("attachments"))
+            .await
+            .unwrap();
+        tokio::fs::symlink(&outside, target.join("attachments"))
+            .await
+            .unwrap();
+        assert!(install_native_inbox(&source, &target).await.is_err());
+        assert_eq!(
+            tokio::fs::read(target.join("messages.json")).await.unwrap(),
+            b"old"
+        );
+    }
 
     #[tokio::test]
     async fn native_refresh_preserves_the_bound_directory_and_unprivileged_read_access() {
