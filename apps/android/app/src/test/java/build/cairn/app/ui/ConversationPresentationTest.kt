@@ -108,6 +108,41 @@ class ConversationPresentationTest {
     }
 
     @Test
+    fun `a reply that only repeats the turn failure folds into its notice`() {
+        val overloaded = "API Error: 529 Overloaded"
+        fun event(id: Long, type: String, payload: JsonObject? = null, raw: String = "") =
+            RunEvent(id, id, type, raw, payload, runId = "run")
+        fun reply(id: Long, text: String) =
+            event(
+                id,
+                "item.completed",
+                buildJsonObject {
+                    put(
+                        "item",
+                        buildJsonObject {
+                            put("id", "m$id")
+                            put("type", "agent_message")
+                            put("text", text)
+                        },
+                    )
+                },
+            )
+        val error = buildJsonObject {
+            put("error", buildJsonObject { put("message", overloaded) })
+        }
+        val history =
+            listOf(
+                event(1, "chat.user", raw = "Hello"),
+                event(2, "turn.started"),
+                reply(3, "Work is preserved."),
+                reply(4, overloaded),
+                event(5, "turn.failed", error),
+                event(6, "status", error, raw = "failed"),
+            )
+        assertEquals(setOf(4L), quotaHiddenEvents(history))
+    }
+
+    @Test
     fun `quota waits stop the working label and saved failures require manual resume`() {
         val message = "You've hit your individual spend limit · your weekly limit resets 3pm (UTC)"
         val run =
@@ -134,6 +169,67 @@ class ConversationPresentationTest {
             chatQuota(run.copy(status = "failed", error = "Authentication failed"), emptyList())
         )
         assertNull(chatQuota(run.copy(status = "succeeded", accountWaitReason = null), emptyList()))
+    }
+
+    @Test
+    fun `a failed run's banner is hidden once its reason shows as a failure notice`() {
+        val capacity = "Selected model is at capacity. Please try a different model."
+        val failure =
+            RunEvent(
+                1,
+                1,
+                "turn.failed",
+                capacity,
+                buildJsonObject {
+                    put("error", buildJsonObject { put("message", capacity) })
+                },
+                runId = "run",
+            )
+        val chat = Chat("chat", run = Run("run", status = "failed", error = capacity))
+        assertTrue(failureShown(chat, listOf(failure)))
+        assertFalse(failureShown(chat, emptyList()))
+        assertFalse(failureShown(chat, listOf(failure.copy(runId = "other"))))
+        assertFalse(failureShown(chat.copy(error = "Preparation failed"), listOf(failure)))
+        assertFalse(
+            failureShown(chat.copy(run = chat.run!!.copy(status = "queued")), listOf(failure))
+        )
+        // The timeline drops an adapter's report of a stop: it cannot stand for the reason.
+        val stop = "Claude execution stopped."
+        val echo =
+            failure.copy(
+                text = stop,
+                payload =
+                    buildJsonObject { put("error", buildJsonObject { put("message", stop) }) },
+            )
+        assertFalse(failureShown(chat.copy(run = chat.run!!.copy(error = stop)), listOf(echo)))
+        // A run records at most 10,000 characters of its error.
+        val truncated = chat.copy(run = chat.run!!.copy(error = capacity.take(20)))
+        assertTrue(failureShown(truncated, listOf(failure)))
+        // Quota bookkeeping hides the failed status of an exhausted turn: the banner keeps its
+        // reason.
+        val limit = "You've hit your usage limit"
+        val timeLimit = "Run exceeded its time limit."
+        val exhausted =
+            listOf(
+                RunEvent(1, 1, "turn.started", "", runId = "run"),
+                RunEvent(
+                    2,
+                    2,
+                    "turn.failed",
+                    limit,
+                    buildJsonObject { put("error", buildJsonObject { put("message", limit) }) },
+                    runId = "run",
+                ),
+                RunEvent(
+                    3,
+                    3,
+                    "status",
+                    "failed",
+                    buildJsonObject { put("error", buildJsonObject { put("message", timeLimit) }) },
+                    runId = "run",
+                ),
+            )
+        assertFalse(failureShown(chat.copy(run = chat.run!!.copy(error = timeLimit)), exhausted))
     }
 
     private val first = ChatMessage("one", text = "Bonjour")

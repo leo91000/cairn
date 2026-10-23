@@ -446,6 +446,9 @@ async fn chat(config: &Config, plan: Value, stop: CancellationToken) -> Result<i
         async move {
             let mut stdout = tokio::io::stdout();
             let mut heartbeat = cairn_installation::performance::heartbeat();
+            // A turn fails once. A later failure of the same turn, such as the
+            // adapter's own error after the provider reported why, repeats it.
+            let mut failed = false;
             loop {
                 let value = tokio::select! {
                     value = rx.recv() => match value {
@@ -457,6 +460,13 @@ async fn chat(config: &Config, plan: Value, stop: CancellationToken) -> Result<i
                         continue;
                     }
                 };
+                match value["type"].as_str() {
+                    Some("turn.started") => failed = false,
+                    Some("turn.failed") if failed => continue,
+                    Some("turn.failed") => failed = true,
+                    _ => {}
+                }
+
                 activity.output();
                 activity.observe(&value);
                 let bytes = cairn_installation::run_output::event_line(&value);
@@ -473,10 +483,13 @@ async fn chat(config: &Config, plan: Value, stop: CancellationToken) -> Result<i
     );
     let result = provider
         .adapter()
-        .run(config, plan, tx.clone(), stop)
+        .run(config, plan, tx.clone(), stop.clone())
         .instrument(span)
         .await;
-    if let Err(error) = &result {
+    // A stopped adapter did not fail its turn: the worker reports why it stopped.
+    if let Err(error) = &result
+        && !stop.is_cancelled()
+    {
         let failure = json!({
             "type": "turn.failed",
             "error": {

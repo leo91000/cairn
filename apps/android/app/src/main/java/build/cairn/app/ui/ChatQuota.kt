@@ -95,10 +95,14 @@ private data class QuotaTurn(
     var exhausted: Boolean = false,
     var legacyTool: Boolean = false,
     val causes: MutableSet<String> = mutableSetOf(),
+    val failures: MutableSet<String> = mutableSetOf(),
     val messages: MutableMap<String, QuotaEcho> = mutableMapOf(),
 )
 
-/** Keep recovered quota bookkeeping in run diagnostics, rather than restoring chat errors. */
+/**
+ * Keep recovered quota bookkeeping and replies echoing a failure in run diagnostics, rather than
+ * restoring chat errors.
+ */
 internal fun quotaHiddenEvents(events: List<RunEvent>): Set<Long> {
     val hidden = mutableSetOf<Long>()
     val turns = mutableMapOf<String, QuotaTurn>()
@@ -116,8 +120,20 @@ internal fun quotaHiddenEvents(events: List<RunEvent>): Set<Long> {
             val message = turn.messages.getOrPut(key) { QuotaEcho() }
             message.text = item.string("text").ifBlank { event.text }
             message.ids.add(event.id)
-            if (turn.exhausted && (isQuotaMessage(message.text) || message.text in turn.causes))
+            if (
+                (turn.exhausted && (isQuotaMessage(message.text) || message.text in turn.causes)) ||
+                    message.text.trim() in turn.failures
+            )
                 hidden.addAll(message.ids)
+        }
+        // An agent may also say its failure as a reply, as Claude Code does for API errors: the
+        // failure notice already shows it.
+        val reason = failureReason(event)?.trim()
+        if (!reason.isNullOrEmpty() && reason != "Conversation interrupted.") {
+            turn.failures.add(reason)
+            turn.messages.values
+                .filter { it.text.trim() == reason }
+                .forEach { hidden.addAll(it.ids) }
         }
         val cause = quotaFailure(event)
         if (cause.isNotEmpty()) {

@@ -11,6 +11,7 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import build.cairn.app.data.*
+import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -97,5 +98,72 @@ abstract class RetryNoticeCases {
         }
         compose.onAllNodesWithText("Temporary agent error.", substring = true).assertCountEquals(0)
         compose.onAllNodesWithText("Conversation en attente").assertCountEquals(0)
+    }
+
+    @Test
+    fun chatShowsOneRetryNoticePerFailureChainWithItsRetryTitle() {
+        fun failure(id: Long, message: String) =
+            RunEvent(
+                id,
+                id * 1000,
+                "turn.failed",
+                message,
+                mapOf("error" to buildJsonObject { put("message", message) }),
+            )
+        fun retry(id: Long) =
+            RunEvent(
+                id,
+                id * 1000,
+                "retry.scheduled",
+                "Temporary agent error.",
+                mapOf(
+                    "retry" to
+                        buildJsonObject {
+                            put("attempt", 1)
+                            put("limit", 3)
+                        }
+                ),
+            )
+        val capacity = "Selected model is at capacity. Please try a different model."
+        val connection = "WebSocket connection failed: 503 Service Unavailable"
+        var events by
+            mutableStateOf(
+                listOf(RunEvent(1, 1000, "turn.started", ""), failure(2, capacity), retry(3))
+            )
+        compose.setContent {
+            CairnTheme {
+                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                    Column(Modifier.safeDrawingPadding()) {
+                        timelineEntries(events, chat = true)
+                            .filter { it.notice }
+                            .forEach { entry ->
+                                ChatNotice(
+                                    presentActivity(entry.events.single()),
+                                    entry.noticeTitle,
+                                    entry.retrying,
+                                )
+                            }
+                    }
+                }
+            }
+        }
+        compose
+            .onNodeWithText("Erreur temporaire — nouvelle tentative automatique 1/3")
+            .assertIsDisplayed()
+        compose.onAllNodesWithText(capacity).assertCountEquals(1)
+        capture("failure-retrying")
+
+        events = events + RunEvent(4, 4000, "turn.started", "") + failure(5, capacity)
+        compose
+            .onNodeWithText("L’agent a rencontré une erreur après 1 nouvelle tentative automatique")
+            .assertIsDisplayed()
+        compose.onAllNodesWithText(capacity).assertCountEquals(1)
+
+        // A retry title says more than the connection pattern of its reason.
+        events = listOf(RunEvent(1, 1000, "turn.started", ""), failure(2, connection), retry(3))
+        compose
+            .onNodeWithText("Erreur temporaire — nouvelle tentative automatique 1/3")
+            .assertIsDisplayed()
+        compose.onNodeWithText("Connexion interrompue").assertDoesNotExist()
     }
 }

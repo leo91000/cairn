@@ -684,16 +684,20 @@ enum Turn {
         delivered: i64,
         run: String,
     },
+    /// The turn ended at `end`: `completed`, `failed`, or `cancelled` when Cairn stopped it.
     Done {
         delivered: i64,
         end: i64,
         run: String,
-        failed: bool,
+        status: &'static str,
     },
     Stopped {
         failed: bool,
     },
 }
+
+/// How long an account wait lasts before a failed turn answers the person.
+const ACCOUNT_WAIT_REPLY_MS: i64 = 2 * 60_000;
 
 fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> {
     if delivery["revision"] != connection.revision || !connection.allows(text(delivery, "userId")) {
@@ -722,19 +726,106 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> 
             _ => Turn::Waiting,
         });
     };
-    let end: Option<(i64, String)> = db.0.query_row(
-        "SELECT id, type FROM events WHERE run_id=?1 AND type IN ('turn.completed','turn.failed') AND id>?2 ORDER BY id LIMIT 1",
-        rusqlite::params![run_id, delivered], |row| Ok((row.get(0)?, row.get(1)?)),
-    ).optional()?;
-    if let Some((end, kind)) = end {
-        return Ok(Turn::Done {
-            delivered,
-            end,
-            run: run_id,
-            failed: kind == "turn.failed",
-        });
-    }
+    let mut statement = db.0.prepare(
+        "SELECT id, CASE WHEN type<>'status' THEN type WHEN text='cancelled' THEN 'cancelled' ELSE 'stopped' END FROM events WHERE run_id=?1 AND id>?2 AND (type IN ('turn.started','turn.completed','turn.failed','retry.scheduled') OR (type='status' AND text IN ('failed','cancelled','interrupted'))) ORDER BY id",
+    )?;
+    let history = statement
+        .query_map(rusqlite::params![run_id, delivered], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     let run = db.run(&run_id)?;
+
+    // A failed turn is final only once Cairn stops working on its message: an automatic
+    // retry, another account or a recovered controller continues it, and a later turn answers.
+    // A scheduled retry says so until the run stops; otherwise the run still works on this
+    // message.
+    let current = run
+        .as_ref()
+        .is_some_and(|run| run["chatExecution"]["messageId"] == delivery["id"]);
+    let active = run
+        .as_ref()
+        .and_then(crate::run_status::RunStatus::of)
+        .is_some_and(crate::run_status::RunStatus::is_active);
+    // Waiting for an account can last hours: once it lasts, the failure answers the person
+    // meanwhile. A quick switch to another account, recovery and capacity waits continue the
+    // message; a wait for the person to reconnect an account answers at once. These are the
+    // waits clients show as account waits.
+    let reason = run
+        .as_ref()
+        .map(|run| text(run, "accountWaitReason"))
+        .unwrap_or_default();
+    let account_wait = reason.starts_with("Usage exhausted.")
+        || (reason.starts_with("Waiting for a ")
+            && reason.contains(" account with available usage."));
+    let since: Option<i64> = if account_wait {
+        db.0.query_row(
+            "SELECT created_at FROM events WHERE run_id=?1 AND id>?2 AND type='status' AND (text=?3 OR (?4 AND text LIKE 'Usage exhausted.%')) ORDER BY id DESC LIMIT 1",
+            rusqlite::params![run_id, delivered, reason, reason.starts_with("Usage exhausted.")], |row| row.get(0),
+        ).optional()?
+    } else {
+        None
+    };
+    let waiting_for_account = run
+        .as_ref()
+        .is_some_and(|run| !run["accountRequired"].is_null())
+        || (account_wait && since.is_some_and(|since| now() - since >= ACCOUNT_WAIT_REPLY_MS));
+    let turn_end = |kind: &str| matches!(kind, "turn.completed" | "turn.failed");
+    let stopped = |kind: &str| match kind {
+        "cancelled" => Some("cancelled"),
+        "stopped" => Some("failed"),
+        _ => None,
+    };
+    for (index, (end, kind)) in history.iter().enumerate() {
+        // A turn Cairn stops reports no failure: the run's status ends this message.
+        if let Some(status) = stopped(kind) {
+            return Ok(Turn::Done {
+                delivered,
+                end: *end,
+                run: run_id,
+                status,
+            });
+        }
+        if !turn_end(kind) {
+            continue;
+        }
+        let failed = kind == "turn.failed";
+        // An older adapter repeats the failure of the same turn before Cairn schedules its
+        // retry. The retry continues this message until the run stops before another turn ends.
+        let mut rest = history[index + 1..]
+            .iter()
+            .skip_while(|(_, next)| next == "turn.failed");
+        let retried = rest
+            .next()
+            .is_some_and(|(_, next)| next == "retry.scheduled");
+        let stop = retried
+            .then(|| rest.find(|(_, next)| stopped(next).is_some() || turn_end(next)))
+            .flatten()
+            .and_then(|(stop, next)| stopped(next).map(|status| (*stop, status)));
+        // The run stopped during the retried attempt: the message ends there, with what that
+        // attempt said.
+        if failed && let Some((stop, status)) = stop {
+            return Ok(Turn::Done {
+                delivered,
+                end: stop,
+                run: run_id,
+                status,
+            });
+        }
+        let later = history[index + 1..].iter().any(|(_, next)| turn_end(next));
+        // While the run waits for an account on this message, its failure answers.
+        let waiting = waiting_for_account && current && !later;
+        let continued = failed && !waiting && (retried || (current && (later || active)));
+        if !continued {
+            return Ok(Turn::Done {
+                delivered,
+                end: *end,
+                run: run_id,
+                status: if failed { "failed" } else { "completed" },
+            });
+        }
+    }
+
     match run.as_ref().and_then(|run| run["status"].as_str()) {
         Some("failed" | "interrupted") => Ok(Turn::Stopped { failed: true }),
         Some("cancelled") => Ok(Turn::Stopped { failed: false }),
@@ -764,10 +855,15 @@ pub async fn reply(s: &Service, expected: &Connection, delivery: &Value) -> Resu
             Turn::Waiting | Turn::Working { .. } => Ok(None),
             Turn::Stopped { failed: false } => Ok(Some(Reply { text: "Stopped. Write again to continue.".into(), status: "cancelled", files: Vec::new() })),
             Turn::Stopped { failed: true } => Ok(Some(Reply { text: "The agent could not finish this request. Review the conversation in Cairn.".into(), status: "failed", files: Vec::new() })),
-            Turn::Done { delivered, end, run, failed } => {
+            Turn::Done { delivered, end, run, status } => {
+                // A retried turn answers with its last attempt, not with what a failed one said.
+                let answered: i64 = db.0.query_row(
+                    "SELECT COALESCE(MAX(id), ?2) FROM events WHERE run_id=?1 AND type='retry.scheduled' AND id>?2 AND id<?3",
+                    rusqlite::params![run, delivered, end], |row| row.get(0),
+                )?;
                 let final_text: Option<String> = db.0.query_row(
                     "SELECT json_extract(payload,'$.item.text') FROM events WHERE run_id=?1 AND id>?2 AND id<?3 AND json_extract(payload,'$.item.type')='agent_message' ORDER BY id DESC LIMIT 1",
-                    rusqlite::params![run, delivered, end], |row| row.get(0),
+                    rusqlite::params![run, answered, end], |row| row.get(0),
                 ).optional()?.flatten();
                 let mut statement = db.0.prepare(
                     "SELECT payload FROM events WHERE run_id=?1 AND type='artifact' AND id>?2 AND id<?3 ORDER BY id LIMIT 10",
@@ -784,9 +880,13 @@ pub async fn reply(s: &Service, expected: &Connection, delivery: &Value) -> Resu
                     }))
                     .collect();
                 let text = final_text.filter(|value| !value.is_empty()).unwrap_or_else(|| {
-                    if failed { "The agent could not finish this request. Review the conversation in Cairn." } else { "The agent finished without a text reply. Open the conversation in Cairn." }.into()
+                    match status {
+                        "cancelled" => "Stopped. Write again to continue.",
+                        "failed" => "The agent could not finish this request. Review the conversation in Cairn.",
+                        _ => "The agent finished without a text reply. Open the conversation in Cairn.",
+                    }.into()
                 });
-                Ok(Some(Reply { text, status: if failed { "failed" } else { "completed" }, files }))
+                Ok(Some(Reply { text, status, files }))
             }
         }
     }).await
