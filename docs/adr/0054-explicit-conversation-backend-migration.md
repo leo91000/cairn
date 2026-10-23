@@ -25,6 +25,11 @@ the private home, project workspace and output into a new filesystem. Both VM fl
 and paired layouts are accepted; redirected home caches are included. It never
 mounts the untrusted filesystem on the manager or follows its symlinks while writing.
 The manager needs fakeroot and e2fsprogs (`mkfs.ext4 -d` directory population).
+The userspace reader traverses the bounded circular journal across its physical
+end and honors committed revocations, including earlier transaction mappings.
+Later committed rewrites remain visible.
+Cairn pins this correction in [the reader patch](../../vendor/ext4-view/CAIRN-PATCH.md).
+The source image remains read-only, including when journal recovery is needed.
 A fake numeric ownership view makes VM files belong to its fixed UID 1000;
 native admission reconciles its own workload UID. Missing tools or unsupported
 filesystems fail without replacing the source.
