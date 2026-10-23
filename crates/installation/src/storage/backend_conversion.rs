@@ -15,6 +15,7 @@ use std::{
         fs::{FileExt, PermissionsExt},
     },
     path::{Component, Path, PathBuf},
+    time::Duration,
 };
 
 struct Reader {
@@ -176,7 +177,9 @@ impl Copy {
                         }
                     }
                     output.set_len(metadata.len())?;
-                    output.sync_all()?;
+                    // Packing reads this closed temporary tree. It is discarded
+                    // after interruption; only the published converted point is
+                    // durable, so each extracted file needs no separate fsync.
                     output.set_permissions(std::fs::Permissions::from_mode(
                         u32::from(metadata.mode() & 0o777) | 0o600,
                     ))?;
@@ -323,7 +326,10 @@ pub(crate) async fn convert(
     // metadata observed by mkfs, including symlink ownership, without following
     // copied links or requiring host chown privileges. Directory population also
     // works with the e2fsprogs 1.47.0 shipped in the installation image.
-    crate::microvm::host::command(
+    // Populating a large retained filesystem is a bulk copy. On remote staging,
+    // a valid image can exceed the host-setup helper's three-minute deadline.
+    // Keep this phase bounded without relaxing deadlines for other host commands.
+    crate::microvm::host::command_with_timeout(
         "fakeroot",
         &[
             "--",
@@ -335,6 +341,7 @@ pub(crate) async fn convert(
                 .ok_or_else(|| Error::bad("Invalid staging path."))?,
             target.to_str().unwrap(),
         ],
+        Duration::from_secs(2 * 60 * 60),
     )
     .await?;
     Ok(target)

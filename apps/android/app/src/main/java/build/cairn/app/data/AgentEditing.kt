@@ -212,11 +212,6 @@ fun agentErrors(draft: AgentDraft): Map<AgentSection, String> = buildMap {
         put(AgentSection.Engine, "Choisissez un modèle et un niveau de réflexion valides.")
     if (draft.timeout.trim().toIntOrNull() !in 0..720)
         put(AgentSection.Advanced, "Saisissez une limite entre 1 et 720 minutes.")
-    if (agent.access.backend == NATIVE_BACKEND && agent.access.nodes.isNullOrEmpty())
-        put(
-            AgentSection.Nodes,
-            "Choisissez au moins une node native : l’exécution native ne s’applique jamais à toutes les nodes.",
-        )
 }
 
 /** Which section a server error belongs to, when its message names one. */

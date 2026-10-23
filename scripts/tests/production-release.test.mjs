@@ -174,6 +174,36 @@ describe('production release', () => {
     await expect(verifyInstallationCompatibility(missing.before, missing.commitAll(), { cwd: missing.directory })).rejects.toThrow()
   })
 
+  it.each([
+    { schema: 2, epoch: 9, databaseVersion: 8 },
+    { schema: 2, epoch: 10, databaseVersion: 9 },
+  ])('retains reviewed schema-2 source $epoch with SQLite $databaseVersion', async (previous) => {
+    const f = await automaticRepository(previous)
+    await f.writeContract({
+      ...automaticContract,
+      epoch: 11,
+      databaseVersion: 10,
+      automaticMigration: { ...automaticContract.automaticMigration, fromEpochs: [9, 10], previousDatabaseVersion: 9 },
+    })
+    await expect(verifyInstallationCompatibility(f.before, f.commitAll(), { cwd: f.directory })).resolves.toBeUndefined()
+  })
+
+  it('refuses a source above the reviewed SQLite ceiling or outside the reviewed epochs', async () => {
+    for (const previous of [
+      { schema: 2, epoch: 9, databaseVersion: 10 },
+      { schema: 2, epoch: 8, databaseVersion: 8 },
+    ]) {
+      const f = await automaticRepository(previous)
+      await f.writeContract({
+        ...automaticContract,
+        epoch: 11,
+        databaseVersion: 10,
+        automaticMigration: { ...automaticContract.automaticMigration, fromEpochs: [9, 10], previousDatabaseVersion: 9 },
+      })
+      await expect(verifyInstallationCompatibility(f.before, f.commitAll(), { cwd: f.directory })).rejects.toThrow('reviewed forward migration')
+    }
+  })
+
   it('requires a valid recovery plan, monotonic database version and named regression coverage', async () => {
     const f = await automaticRepository()
     for (const automaticMigration of [

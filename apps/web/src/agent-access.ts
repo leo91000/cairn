@@ -307,7 +307,7 @@ export const backendOptions = [
   { value: 'native', label: 'Native process · trusted people only' },
 ] as const
 
-export const nativeHelp = 'Uses the host GPU and OS tools with weaker isolation. Choose native nodes explicitly; each node must also authorize the people directing this agent.'
+export const nativeHelp = 'Uses the host GPU and OS tools with weaker isolation. Each native node must enable execution and authorize the people directing this agent.'
 
 /** The agent's execution backend; records from before native execution run in Firecracker VMs. */
 export function backendOf(access: Pick<AgentAccess, 'backend'> | undefined): Backend {
@@ -355,7 +355,7 @@ export function unknownNode(node: ExecutionNode) {
 /**
  * Nodes an agent of `backend` can be granted: those of the same backend. The current runner is a
  * VM runner, always offered to Firecracker agents as Android does, even when the node list omits
- * it. A native agent never runs on "all nodes": its nodes are chosen one by one.
+ * it. Native grants also require each node to trust the originating people.
  */
 export function nodesFor(nodes: ExecutionNode[], backend: Backend) {
   const matching = nodes.filter(node => !node.revoked && nodeBackend(node) === backend && !(backend === 'native' && (node.local || node.id === LOCAL_NODE_ID)))

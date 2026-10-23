@@ -471,7 +471,7 @@ it('runs agents in Firecracker VMs unless native execution is chosen, and only o
   expect(reviewLines(saved, native, withNodes)[0]).toEqual({
     kind: 'power',
     section: 'nodes',
-    text: 'Added: native execution. Uses the host GPU and OS tools with weaker isolation. Choose native nodes explicitly; each node must also authorize the people directing this agent.',
+    text: 'Added: native execution. Uses the host GPU and OS tools with weaker isolation. Each native node must enable execution and authorize the people directing this agent.',
   })
   expect(reviewLines(native, saved, withNodes).map(line => line.text)).toEqual(['Removed: node Native desktop, native execution.'])
   const agent = { id: 'a', name: 'Agent', access: { projects: [], backend: 'native', nodes: ['desktop'] } } as unknown as Agent

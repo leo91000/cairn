@@ -20,6 +20,13 @@ relative to the unit root. The ublk backend enters a separate private mount
 namespace before adding the device. That namespace must never contain the
 filesystem it serves:
 [upstream describes a self-deadlock on namespace teardown](https://github.com/ublk-org/ublksrv#mount-namespace-caveat-containerpod).
+It must also drop inherited copies of earlier native filesystems: otherwise
+retiring an earlier device waits for a later backend's namespace and retains
+the physical execution slots. Under the controller's global disk lock, the
+native layer verifies each inherited mount against its private block attachment.
+The backend then makes its new namespace private and non-lazily unmounts only
+those copies before adding its own device. The controller's mounts and unrelated
+filesystems remain intact; an uncertain mount prevents admission.
 Journal and control threads retain the existing IO_FLUSHER requirement. The workload
 gets directory bindings from Cairn's root-private state, never a block device
 or a host mount capability. GPU sharing and the trust model are unchanged. Each native attempt activates the

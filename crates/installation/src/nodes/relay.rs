@@ -286,10 +286,13 @@ async fn forward(
             executor.prepare(master.client, master.url, master.token, attempt),
         )
         .await;
-        let status = if matches!(prepared, Ok(Ok(()))) {
-            200
-        } else {
-            503
+        let status = match prepared {
+            Ok(Ok(())) => 200,
+            Ok(Err(error)) => {
+                tracing::warn!(attempt, status = error.status, error = %error, "Node workspace preparation failed");
+                error.status
+            }
+            Err(_) => 504,
         };
         return master.send(&End::with_status(id, status)).await;
     }

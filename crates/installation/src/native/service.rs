@@ -16,6 +16,7 @@ use axum::{
     routing::any,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
+use bytes::Bytes;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -32,6 +33,15 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_PLAN: u64 = 8_000_000;
 const MAX_LOG: u64 = 64 * 1024 * 1024;
+
+fn native_budget(value: &Value) -> Result<crate::microvm::budget::Budget> {
+    let budget: crate::microvm::budget::Budget = serde_json::from_value(value.clone())?;
+    budget.limits.validate()?;
+    if !(1..=4096).contains(&budget.slots) {
+        return Err(Error::bad("Use between 1 and 4096 execution slots."));
+    }
+    Ok(budget)
+}
 
 struct Attempt {
     run: String,
@@ -129,7 +139,9 @@ impl Controller {
                 "Native execution lease is missing or expired.",
             ));
         }
-        if !self.active.lock().await.is_empty() {
+        if self.active.lock().await.len() as u64
+            >= self.budget.lock().await["slots"].as_u64().unwrap_or(0)
+        {
             return Err(Error::unavailable("The native execution slot is occupied."));
         }
         let plan = self.plan(id).await?;
@@ -758,16 +770,35 @@ impl Controller {
         })
     }
 
-    async fn wait(&self, id: &str) -> Result<Value> {
-        loop {
-            if !self.active.lock().await.contains_key(id)
-                && let Ok(code) = tokio::fs::read_to_string(self.file(id, "exit")).await
-            {
-                let code = code.parse::<i32>().map_err(Error::internal)?;
-                return Ok(json!({ "StatusCode": code }));
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+    /// Match the VM wait protocol: headers and spaces keep relayed waits alive.
+    fn wait(&self, id: &str) -> Response {
+        let stream = futures_util::stream::unfold(
+            (self.clone(), id.to_owned(), false),
+            |(controller, id, done)| async move {
+                if done {
+                    return None;
+                }
+                // An exit marker alone does not release physical ownership.
+                let released = !controller.active.lock().await.contains_key(&id);
+                if released
+                    && let Ok(code) = tokio::fs::read_to_string(controller.file(&id, "exit")).await
+                {
+                    let result = code
+                        .parse::<i32>()
+                        .map(|code| Bytes::from(json!({ "StatusCode": code }).to_string()))
+                        .map_err(std::io::Error::other);
+                    return Some((result, (controller, id, true)));
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let stopped = controller.stop.is_cancelled();
+                Some((Ok(Bytes::from_static(b" ")), (controller, id, stopped)))
+            },
+        );
+        (
+            [("content-type", "application/json")],
+            Body::from_stream(stream),
+        )
+            .into_response()
     }
 }
 
@@ -891,13 +922,14 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
     if path == "/health" && method == "GET" {
         let capabilities = crate::nodes::connector::capabilities(&controller.state)?;
         let usage = controller.usage().await?;
+        let budget = controller.budget.lock().await.clone();
         return Ok(Json(json!({
             "status": "ok", "backend": "native", "nodeProtocol": 2,
             "runtimeId": std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into()),
             "dataRoot": controller.data, "capabilities": capabilities,
             "runtimes": systemd::runtimes()?,
-            "pool": { "capacity": 1 }, "activeRuns": controller.active.lock().await.len(),
-            "sharedResources": true, "exclusiveReservations": false, "budget": *controller.budget.lock().await,
+            "pool": { "capacity": budget["slots"] }, "activeRuns": controller.active.lock().await.len(),
+            "sharedResources": true, "exclusiveReservations": false, "budget": budget,
             "usage": usage, "pressure": null
         })).into_response());
     }
@@ -910,11 +942,10 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
     let value = match (method.as_str(), parts.as_slice()) {
         ("POST", ["node-budget"]) => {
             let value = input(request, 16384).await?;
-            let resources: crate::nodes::Resources =
-                serde_json::from_value(value["limits"].clone())?;
-            resources.validate()?;
-            if value["slots"] != 1 {
-                return Err(Error::bad("Native nodes support one active execution."));
+            let budget = native_budget(&value)?;
+            let _admission = controller.admission.lock().await;
+            if value["limits"] != controller.budget.lock().await["limits"] {
+                systemd::apply_budget(&budget).await?;
             }
             atomic_write(
                 &controller.state.join(crate::microvm::budget::FILE),
@@ -961,7 +992,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         }
         ("POST", ["runs", id, "wait"]) => {
             uuid(id)?;
-            controller.wait(id).await?
+            return Ok(controller.wait(id));
         }
         ("GET", ["runs", id, "administrative-pause"]) => {
             uuid(id)?;
@@ -977,6 +1008,8 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 };
                 let mut offset = 0;
                 let mut buffer = vec![0u8; 65536];
+                let mut at_line_boundary = true;
+                let mut last_progress = tokio::time::Instant::now();
                 loop {
                     if file.seek(std::io::SeekFrom::Start(offset)).await.is_err() {
                         break;
@@ -986,19 +1019,38 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                             if !controller.active.lock().await.contains_key(&id) {
                                 break;
                             }
+                            // Idle transport frames must not split a log record
+                            // whose remaining bytes have not been appended yet.
+                            if at_line_boundary && last_progress.elapsed() >= Duration::from_secs(1)
+                            {
+                                if writer
+                                    .write_all(b"{\"type\":\"heartbeat\"}\n")
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                                last_progress = tokio::time::Instant::now();
+                            }
                             tokio::time::sleep(Duration::from_millis(100)).await;
                         }
                         Ok(count) => {
                             if writer.write_all(&buffer[..count]).await.is_err() {
                                 break;
                             }
+                            at_line_boundary = buffer[count - 1] == b'\n';
+                            last_progress = tokio::time::Instant::now();
                             offset += count as u64;
                         }
                         Err(_) => break,
                     }
                 }
             });
-            return Ok(Body::from_stream(tokio_util::io::ReaderStream::new(reader)).into_response());
+            return Ok((
+                [("content-type", "application/x-ndjson")],
+                Body::from_stream(tokio_util::io::ReaderStream::new(reader)),
+            )
+                .into_response());
         }
         ("POST", ["disks", run, "storage-status"]) => {
             uuid(run)?;
@@ -1486,11 +1538,8 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         }
         Err(error) => return Err(error.into()),
     };
-    let limits: crate::nodes::Resources = serde_json::from_value(budget["limits"].clone())?;
-    limits.validate()?;
-    if budget["slots"] != 1 {
-        return Err(Error::bad("Native nodes support one execution slot."));
-    }
+    let checked = native_budget(&budget)?;
+    systemd::apply_budget(&checked).await?;
     atomic_write(&budget_path, &serde_json::to_vec(&budget)?).await?;
     let controller = Controller {
         data,
@@ -1580,6 +1629,131 @@ mod tests {
             .header("authorization", "Bearer synthetic-private-controller-token")
             .body(Body::from(body.to_string()))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn native_wait_streams_heartbeats_until_physical_ownership_is_released() {
+        use futures_util::StreamExt;
+
+        let (_fixture, controller) = fixture().await;
+        let attempt = crate::config::id();
+        controller.active.lock().await.insert(
+            attempt.clone(),
+            Attempt {
+                run: crate::config::id(),
+                stop: CancellationToken::new(),
+                started: true,
+                protection: None,
+            },
+        );
+        atomic_write(&controller.file(&attempt, "exit"), b"17")
+            .await
+            .unwrap();
+
+        let response = tokio::time::timeout(
+            Duration::from_millis(250),
+            handler(
+                State(controller.clone()),
+                request(&format!("/runs/{attempt}/wait"), &json!({})),
+            ),
+        )
+        .await
+        .expect("Native wait must send response headers before the attempt finishes")
+        .unwrap();
+        assert_eq!(response.headers()["content-type"], "application/json");
+        let mut body = response.into_body().into_data_stream();
+        let mut received = Vec::new();
+        for _ in 0..2 {
+            let bytes = tokio::time::timeout(Duration::from_secs(2), body.next())
+                .await
+                .expect("An unfinished native attempt must keep its wait connection alive")
+                .unwrap()
+                .unwrap();
+            assert!(bytes.iter().all(u8::is_ascii_whitespace));
+            received.extend_from_slice(&bytes);
+        }
+
+        controller.active.lock().await.remove(&attempt);
+        while let Some(bytes) = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .unwrap()
+        {
+            received.extend_from_slice(&bytes.unwrap());
+        }
+        let result: Value = serde_json::from_slice(&received).unwrap();
+        assert_eq!(result, json!({ "StatusCode": 17 }));
+    }
+
+    #[tokio::test]
+    async fn native_logs_keep_quiet_attempts_alive_without_splitting_json_records() {
+        use futures_util::StreamExt;
+
+        let (_fixture, controller) = fixture().await;
+        let attempt = crate::config::id();
+        controller.active.lock().await.insert(
+            attempt.clone(),
+            Attempt {
+                run: crate::config::id(),
+                stop: CancellationToken::new(),
+                started: true,
+                protection: None,
+            },
+        );
+        let log = controller.file(&attempt, "log");
+        atomic_write(&log, b"").await.unwrap();
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("/runs/{attempt}/logs"))
+            .header("authorization", "Bearer synthetic-private-controller-token")
+            .body(Body::empty())
+            .unwrap();
+        let response = handler(State(controller.clone()), request).await.unwrap();
+        let mut body = response.into_body().into_data_stream();
+        let heartbeat = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .expect("A quiet native attempt must keep its logs connection alive")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&heartbeat).unwrap(),
+            json!({ "type": "heartbeat" }),
+        );
+
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&log)
+            .await
+            .unwrap();
+        file.write_all(b"{\"type\":\"agent_").await.unwrap();
+        file.flush().await.unwrap();
+        let prefix = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(&prefix[..], b"{\"type\":\"agent_");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1200), body.next())
+                .await
+                .is_err(),
+            "Heartbeats must not be inserted inside a partially written JSON record",
+        );
+        file.write_all(b"message\",\"text\":\"ok\"}\n")
+            .await
+            .unwrap();
+        file.flush().await.unwrap();
+        controller.active.lock().await.remove(&attempt);
+        let mut record = prefix.to_vec();
+        while let Some(bytes) = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .unwrap()
+        {
+            record.extend_from_slice(&bytes.unwrap());
+        }
+        assert_eq!(
+            serde_json::from_slice::<Value>(&record).unwrap(),
+            json!({ "type": "agent_message", "text": "ok" }),
+        );
     }
 
     async fn sparse(path: &Path, size: u64) {
@@ -2018,17 +2192,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_budget_refuses_concurrent_execution_slots() {
+    async fn native_budget_supports_six_slots_and_rejects_invalid_capacities() {
         let (_root, controller) = fixture().await;
-        let error = route(
-            controller,
+        route(
+            controller.clone(),
             request(
                 "/node-budget",
-                &json!({ "slots": 2, "limits": { "cpu": 1, "memoryMiB": 1024, "diskMiB": 1024 } }),
+                &json!({ "slots": 6, "limits": { "cpu": 1, "memoryMiB": 1024, "diskMiB": 1024 } }),
             ),
         )
         .await
-        .unwrap_err();
-        assert_eq!(error.status, 400);
+        .unwrap();
+        assert_eq!(controller.budget.lock().await["slots"], 6);
+        for slots in [json!(0), json!(4097), json!(1.5), json!(null)] {
+            assert!(route(controller.clone(), request("/node-budget", &json!({
+                "slots": slots, "limits": { "cpu": 1, "memoryMiB": 1024, "diskMiB": 1024 }
+            }))).await.is_err());
+        }
+        assert_eq!(controller.budget.lock().await["slots"], 6);
+    }
+
+    #[tokio::test]
+    async fn controller_enforces_all_configured_slots_before_preparing_an_attempt() {
+        let (_root, controller) = fixture().await;
+        controller.budget.lock().await["slots"] = 6.into();
+        let attempt = crate::config::id();
+        controller
+            .leases
+            .lock()
+            .await
+            .insert(attempt.clone(), crate::nodes::boot_ms() + 60000);
+        for _ in 0..5 {
+            controller.active.lock().await.insert(
+                crate::config::id(),
+                Attempt {
+                    run: crate::config::id(),
+                    stop: CancellationToken::new(),
+                    started: true,
+                    protection: None,
+                },
+            );
+        }
+        // Five occupied slots still admit a sixth attempt as far as plan loading.
+        assert_ne!(controller.start(&attempt).await.unwrap_err().status, 503);
+        let existing = crate::config::id();
+        controller.active.lock().await.insert(
+            existing.clone(),
+            Attempt {
+                run: crate::config::id(),
+                stop: CancellationToken::new(),
+                started: true,
+                protection: None,
+            },
+        );
+        assert_eq!(controller.start(&attempt).await.unwrap_err().status, 503);
+        // Retrying an existing attempt never consumes a second slot.
+        controller.start(&existing).await.unwrap();
+        controller.active.lock().await.remove(&existing);
+        assert_ne!(controller.start(&attempt).await.unwrap_err().status, 503);
     }
 }

@@ -190,7 +190,7 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
                 "node": {
                     "name": "Trusted desktop", "tags": ["gpu"],
                     "limits": { "cpu": 2, "memoryMiB": 2048, "diskMiB": 8192 },
-                    "slots": 1, "accepting": true,
+                    "slots": 6, "accepting": true,
                     "nativeEnabled": true, "nativeAccounts": [trusted],
                 },
             }),
@@ -207,6 +207,7 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
             .find(|node| node["id"] == next)
             .unwrap();
         assert_eq!(node["nativeAccounts"], json!([trusted]));
+        assert_eq!(node["slots"], 6);
         s.store
             .patch_run(
                 run["id"].as_str().unwrap(),

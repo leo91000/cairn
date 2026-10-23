@@ -2364,7 +2364,7 @@
   },
   {
     "name": "update_node",
-    "description": "Configure an enrolled node using its current name, tags, limits and admission setting from list_nodes. Native execution requires explicit nativeEnabled and nativeAccounts from list_native_callers, and one slot. Backend is immutable; enroll another node to change it. Agent access is managed through update_agent.",
+    "description": "Configure an enrolled node using its current name, tags, limits and admission setting from list_nodes. Native execution requires explicit nativeEnabled and nativeAccounts from list_native_callers, and trusted originating callers. Slots share the configured CPU/RAM/disk budgets. Backend is immutable; enroll another node to change it. Agent access is managed through update_agent.",
     "scope": "manage",
     "destructive": true,
     "inputSchema": {

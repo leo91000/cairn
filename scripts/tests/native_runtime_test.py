@@ -250,7 +250,8 @@ def main():
                 script += 'test "$(cat /home/node/.claude/CLAUDE.md)" = "legacy user instructions"\n'
                 script += 'test "$(cat /home/node/.codex/sessions/keep)" = "session state"\n'
             script += 'if test -e persisted; then test "$(cat persisted)" = "' + expected + '"; fi\n'
-            script += 'printf changed > persisted\nprintf temporary-artifact > /tmp/native-artifact\nprintf ready > ready\n'
+            script += 'printf changed > persisted\nprintf temporary-artifact > /tmp/native-artifact\n'
+            script += f'printf %s {attempt} > ready\n'
             if measure:
                 script += "while ! test -e measure-go; do sleep 0.05; done\n/usr/bin/python3 - <<'MEASURE' > measure.json\n" + MEASURE + '\nMEASURE\n'
                 script += 'printf measured > measure-ready\n'
@@ -266,7 +267,13 @@ def main():
             manager('checkpoint', run=run, attempt=attempt)
             api('/runs/' + attempt + '/lease', {'remainingMs': lease})
             api('/runs/' + attempt)
-            eventually(lambda: (managed(run) / 'ready').exists() or (state / (attempt + '.exit')).exists())
+            def execution_ready():
+                if (state / (attempt + '.exit')).exists():
+                    return True
+                # A preceding short execution can retain its readiness file.
+                return (managed(run) / 'ready').read_text() == attempt
+
+            eventually(execution_ready)
             if (state / (attempt + '.exit')).exists() and int((state / (attempt + '.exit')).read_text()) != 0:
                 for record in (state / (attempt + '.log')).read_text().splitlines():
                     event = json.loads(record)
@@ -304,6 +311,11 @@ def main():
                     view = task / 'root' / str(state).lstrip('/') / 'native' / run
                     assert (view / 'attempt').read_text() == attempt
                     assert not (view / 'data/workspaces/ready').exists(), 'Backend namespace contains its consumer filesystem.'
+                    for line in (task / 'mountinfo').read_text().splitlines():
+                        mount, _, filesystem = line.partition(' - ')
+                        path = mount.split()[4]
+                        assert not (path.startswith(str(state / 'native') + '/') and filesystem.startswith('ext4 ')), \
+                            'Backend namespace pins another conversation filesystem.'
                 assert api('/runs/' + attempt + '/artifact', dict(runId=run, path='/tmp/native-artifact'), raw=True) == b'temporary-artifact'
             if measure:
                 before = manager('metrics')['remoteRequests']
@@ -317,8 +329,8 @@ def main():
                 (managed(run) / 'ready').unlink()
             return attempt
 
-        def fenced(run, attempt):
-            eventually(lambda: (state / (attempt + '.exit')).exists(), timeout=90)
+        def fenced(run, attempt, timeout=90):
+            eventually(lambda: (state / (attempt + '.exit')).exists(), timeout=timeout)
             assert not (state / (attempt + '.active')).exists()
             active = command('systemctl', 'show', 'cairn-native-' + attempt + '.service', '--property=ActiveState', '--value').stdout.strip()
             assert active not in ('active', 'activating'), 'Descendant escaped cgroup fencing.'
@@ -429,6 +441,21 @@ def main():
             final = start(run, long=False)
             fenced(run, final)
             assert int((state / (final + '.exit')).read_text()) == 0
+            # Close the earlier disk while a later backend remains runnable.
+            # CLONE_NEWNS alone copies the earlier mount into that backend,
+            # causing DEL_DEV to block and retain every physical slot.
+            api('/node-budget', dict(limits=dict(diskMiB=4096, cpu=2, memoryMiB=1024), slots=2))
+            earlier = start(run)
+            later = start(other)
+            closing = time.monotonic()
+            api('/runs/' + earlier, method='DELETE')
+            fenced(run, earlier, timeout=15)
+            assert api('/health', method='GET')['activeRuns'] == 1
+            assert (managed(other) / 'persisted').read_text() == 'changed'
+            api('/runs/' + later, method='DELETE')
+            fenced(other, later, timeout=15)
+            metrics['concurrentCloseMs'] = (time.monotonic() - closing) * 1000
+            api('/node-budget', dict(limits=dict(diskMiB=4096, cpu=2, memoryMiB=1024), slots=1))
             assert not list((state / 'ublk-devices').glob('*.json')), 'Owned ublk registrations survived stopped workloads.'
             try:
                 api('/runs/' + final)
@@ -450,7 +477,7 @@ def main():
             (evidence / 'native-storage.json').write_text(json.dumps(metrics, indent=2) + '\n')
             print('PASS: real ublk/ext4, unprivileged runner-entry, read-only runtime secrets/skills, legacy cache/session migration, '
                   'S3 publish/ack, conditional clean eviction, unrelated conversation retained, lazy remote resume, repeated restore, '
-                  'lease/descendant/guardian/controller fencing, crash recovery, final checkpoint, retry tombstone.')
+                  'lease/descendant/guardian/controller fencing, crash recovery, concurrent disk retirement, final checkpoint, retry tombstone.')
         finally:
             helper.stdin.close()
             try:

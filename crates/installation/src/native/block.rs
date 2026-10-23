@@ -292,8 +292,19 @@ pub async fn mount(
         retire_attachment(&jail).await?;
         let (backend_volume, backend_state, backend_jail) =
             (volume.clone(), state.to_owned(), jail.clone());
+        // The controller's global disk lock keeps this inventory stable until
+        // the backend has cloned its namespace. Verify all inherited native
+        // filesystems before handing their paths to the storage transport.
+        let inherited = host_mounts(
+            state,
+            &std::fs::read_to_string("/proc/thread-self/mountinfo")?,
+        )?;
+        for mounted in &inherited {
+            verify_host_mount(state, mounted)?;
+        }
+        let inherited = inherited.into_iter().map(|mounted| mounted.path).collect();
         let device = tokio::task::spawn_blocking(move || {
-            storage::ublk::mount_host_disk(backend_volume, &backend_state, &backend_jail)
+            storage::ublk::mount_host_disk(backend_volume, &backend_state, &backend_jail, inherited)
         })
         .await
         .map_err(Error::internal)??;

@@ -1,14 +1,22 @@
 use super::checkpoint::{Checkpoint, RunCheckpoint};
 use crate::{error::Result, run_output, service::Service, validation::text};
 use serde_json::Value;
+use std::sync::LazyLock;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     sync::mpsc,
     time::Instant,
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum OutputKind {
+    Stdout,
+    Diagnostic,
+    Performance,
+}
+
 pub(super) struct Output {
-    pub diagnostic: bool,
+    pub kind: OutputKind,
     pub raw: String,
     pub received: Instant,
 }
@@ -16,7 +24,19 @@ pub(super) struct Output {
 impl Output {
     fn new(diagnostic: bool, raw: String) -> Self {
         Self {
-            diagnostic,
+            kind: if diagnostic {
+                OutputKind::Diagnostic
+            } else {
+                OutputKind::Stdout
+            },
+            raw,
+            received: Instant::now(),
+        }
+    }
+
+    fn performance(raw: String) -> Self {
+        Self {
+            kind: OutputKind::Performance,
             raw,
             received: Instant::now(),
         }
@@ -47,6 +67,17 @@ impl Output {
 const LOG_BUDGET: usize = 500_000;
 const ITEM_DETAIL_LIMIT: usize = run_output::ACTIVITY_DETAIL_LIMIT;
 const LINE_LIMIT: usize = 2_000_000;
+const DIAGNOSTIC_FRAGMENT_LIMIT: usize = 8192;
+
+// Match the runner's timestamp, level, optional field-bearing spans and target.
+// A target name mentioned in another logger's message is still a diagnostic.
+static AGENT_PERFORMANCE_RECORD: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+(?:TRACE|DEBUG|INFO|WARN|ERROR)\s+(?:[A-Za-z_][A-Za-z0-9_]*\{[^{}\r\n]*\}:\s*)*cairn_performance: ",
+    )
+    .unwrap()
+});
+
 // Match the resident Codex transport: supported tool frames must reach the JSON
 // parser intact before shortening. Large buffers are released after each frame.
 const TOOL_FRAME_LIMIT: usize = 100_000_000;
@@ -71,6 +102,10 @@ pub(super) async fn read_output(
     events: mpsc::Sender<Output>,
     secrets: Vec<String>,
 ) {
+    if diagnostic {
+        return read_diagnostics(reader, events).await;
+    }
+
     let mut bytes = [0; 8192];
     let mut line = Vec::new();
     let mut object_frame = None;
@@ -79,13 +114,6 @@ pub(super) async fn read_output(
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
-        if diagnostic {
-            let chunk = String::from_utf8_lossy(&bytes[..n]).into_owned();
-            if events.send(Output::new(true, chunk)).await.is_err() {
-                return;
-            }
-            continue;
-        }
         for byte in &bytes[..n] {
             if *byte != b'\n' {
                 if object_frame.is_none() && !byte.is_ascii_whitespace() {
@@ -118,6 +146,71 @@ pub(super) async fn read_output(
     }
 }
 
+/// Forwards agent stderr by whole lines, so styling and performance records are
+/// recognized intact. A long fragment without a line end is still forwarded.
+async fn read_diagnostics(mut reader: impl AsyncRead + Unpin, events: mpsc::Sender<Output>) {
+    let mut bytes = [0; 8192];
+    let mut pending = Vec::new();
+    let mut styling = run_output::TerminalStyling::default();
+    loop {
+        let n = match reader.read(&mut bytes).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        styling.push(&bytes[..n], &mut pending);
+
+        // Keep a trailing CR until the next byte, so a split CRLF stays together.
+        let complete = match pending.iter().enumerate().rfind(|(index, byte)| {
+            **byte == b'\n' || (**byte == b'\r' && index + 1 < pending.len())
+        }) {
+            Some((end, _)) => end + 1,
+            None if pending.len() >= DIAGNOSTIC_FRAGMENT_LIMIT => {
+                // Keep an incomplete UTF-8 character for the next read as well.
+                match std::str::from_utf8(&pending) {
+                    Err(error) if error.error_len().is_none() => error.valid_up_to(),
+                    _ => pending.len(),
+                }
+            }
+            None => continue,
+        };
+        let lines: Vec<u8> = pending.drain(..complete).collect();
+        if !forward_diagnostics(&lines, &events).await {
+            return;
+        }
+    }
+    if !pending.is_empty() {
+        // The receiver only disappears once the run stopped listening.
+        forward_diagnostics(&pending, &events).await;
+    }
+}
+
+/// Sends readable diagnostics to the run. The agent process's own performance
+/// records belong to the manager log, like the worker's.
+async fn forward_diagnostics(bytes: &[u8], events: &mpsc::Sender<Output>) -> bool {
+    let text = String::from_utf8_lossy(bytes);
+    let mut diagnostics = String::new();
+    let mut lines = text.split_inclusive(['\r', '\n']).peekable();
+    while let Some(line) = lines.next() {
+        if AGENT_PERFORMANCE_RECORD.is_match(line) {
+            // CRLF is one terminator; do not leave its LF as an empty diagnostic.
+            if line.ends_with('\r') && lines.peek() == Some(&"\n") {
+                lines.next();
+            }
+            if events
+                .send(Output::performance(line.trim_end().to_owned()))
+                .await
+                .is_err()
+            {
+                return false;
+            }
+        } else {
+            diagnostics.push_str(line);
+        }
+    }
+
+    diagnostics.is_empty() || events.send(Output::new(true, diagnostics)).await.is_ok()
+}
+
 /// Records one output line and returns whether it reports exhausted usage.
 pub(super) async fn record(
     s: &Service,
@@ -130,7 +223,14 @@ pub(super) async fn record(
 ) -> Result<bool> {
     let id = checkpoint.id.as_str();
     let raw = output.raw.as_str();
-    if output.diagnostic {
+    if output.kind == OutputKind::Performance {
+        // The consumer refreshes configured/account redactions before every output.
+        // Performance records never consume the run's persisted log budget.
+        let record = run_output::redact(raw, secrets);
+        tracing::info!(target: "cairn_performance", source = "agent_process", record = %record);
+        return Ok(false);
+    }
+    if output.kind == OutputKind::Diagnostic {
         record_raw(s, id, "diagnostic", raw, secrets, log_total).await?;
         return Ok(false);
     }

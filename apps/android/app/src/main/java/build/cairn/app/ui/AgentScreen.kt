@@ -1725,22 +1725,26 @@ private fun NodesSection(
         change { it.withBackend(on, locked) }
     }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-    if (!native)
-        SwitchRow(
-            "Toutes les nodes VM, y compris futures",
-            "Les nouvelles machines seront utilisables par cet agent dès leur inscription.",
-            access.nodes == null,
-            enabled = editable,
-        ) { all ->
-            change { it.copy(access = it.access.withAllNodes(all, nodes)) }
-        }
+    SwitchRow(
+        if (native) "Toutes les nodes natives, y compris futures"
+        else "Toutes les nodes VM, y compris futures",
+        if (native)
+            "Chaque node doit aussi activer l’exécution native et autoriser toutes les personnes qui dirigent la conversation."
+        else "Les nouvelles machines seront utilisables par cet agent dès leur inscription.",
+        access.nodes == null,
+        enabled = editable,
+    ) { all ->
+        change { it.copy(access = it.access.withAllNodes(all, nodes)) }
+    }
     if (native && loaded && choices.isEmpty())
         Note("Aucune node native. Inscrivez une machine en exécution native depuis Nodes.")
     if (!loaded) {
         // The machines are unknown: what the agent holds is listed as saved, read-only.
         Note(
             when {
-                access.nodes == null -> "Exécution autorisée sur toutes les nodes VM."
+                access.nodes == null ->
+                    if (native) "Exécution autorisée sur toutes les nodes natives de confiance."
+                    else "Exécution autorisée sur toutes les nodes VM."
                 access.nodes.isEmpty() -> "Exécution autorisée sur aucune node."
                 else -> "Exécution autorisée sur : ${access.nodes.joinToString(", ")}"
             }

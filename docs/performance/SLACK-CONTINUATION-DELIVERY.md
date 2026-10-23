@@ -48,4 +48,4 @@ It measures neither provider calls nor model/VM/S3 restoration. Higher resident
 record counts explain a repeatable size cost; these local timings promise no
 production response time. Actual-worker recovery and the capacity/replacement
 race are tested through the native implementation separately. The whole-PR
-epoch-11 compatibility and final qualification gates remain open.
+[compatibility](../SLACK-PLUGIN-COMPATIBILITY.md) and final qualification gates remain open.

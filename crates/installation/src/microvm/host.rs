@@ -32,6 +32,15 @@ pub async fn command(binary: &str, args: &[&str]) -> Result<()> {
     } else {
         180
     };
+    command_with_timeout(binary, args, Duration::from_secs(timeout)).await
+}
+
+/// Bulk image operations may need a larger bounded deadline than host setup.
+pub(crate) async fn command_with_timeout(
+    binary: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<()> {
     let output = Command::new(binary)
         .args(args)
         .stdin(Stdio::null())
@@ -39,11 +48,9 @@ pub async fn command(binary: &str, args: &[&str]) -> Result<()> {
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .output();
-    let result = tokio::time::timeout(Duration::from_secs(timeout), output)
-        .await
-        .map_err(|_| {
-            Error::unavailable(format!("VM infrastructure operation timed out: {binary}"))
-        })??;
+    let result = tokio::time::timeout(timeout, output).await.map_err(|_| {
+        Error::unavailable(format!("VM infrastructure operation timed out: {binary}"))
+    })??;
     // e2fsck returns 1 when it successfully corrected filesystem errors.
     let corrected = binary == "e2fsck" && result.status.code() == Some(1);
     if !result.status.success() && !corrected {
@@ -460,6 +467,24 @@ pub async fn settle_attempt(
 mod tests {
     use super::*;
     use tokio::net::UnixListener;
+
+    #[tokio::test]
+    async fn infrastructure_command_uses_its_explicit_deadline() {
+        command_with_timeout("sh", &["-c", "sleep 0.02"], Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        let error = command_with_timeout("sh", &["-c", "exec sleep 10"], Duration::from_millis(20))
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, 503);
+        assert_eq!(error.message, "VM infrastructure operation timed out: sh");
+
+        let error = command_with_timeout("sh", &["-c", "exit 7"], Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert_eq!(error.message, "VM infrastructure operation failed: sh");
+    }
 
     async fn request(listener: &UnixListener) -> (BufReader<UnixStream>, GuestRequest) {
         let (stream, _) = listener.accept().await.unwrap();

@@ -1,0 +1,120 @@
+{
+  "recordedAt": "2026-10-23",
+  "referenceRevision": "9deb771f4395c223c2fdfe7ff2d10b17b1cb572c",
+  "change": "Image-population command deadline changes from 180 seconds to 7200 seconds; CI node/native job budgets increase to allow slow Ubuntu preparation. File copy, image format, checksums and publication remain unchanged.",
+  "host": {
+    "kernel": "7.2.9-arch1-1",
+    "cpu": "Intel(R) Core(TM) i9-14900K",
+    "logicalCpus": 32
+  },
+  "conditions": "One local 128 MiB sample per revision. Reference is the final-candidate sample recorded in backend-conversion-journal-2026-10-23.json; that candidate tree equals the reference revision here. Candidate ran with desktop/game, web checks and Rust validation active. Advisory per-file cold hint, no global cache drop; no performance improvement or regression inferred.",
+  "command": "CARGO_BUILD_JOBS=2 pnpm test:backend -p cairn-installation --lib storage::backend_conversion -- --include-ignored --nocapture --test-threads=1",
+  "before": {
+    "accounting": [
+      {
+        "encodedBlockBytes": 8402008,
+        "imageBytes": 134217728,
+        "nonzeroBlockBytes": 41943040
+      },
+      {
+        "encodedBlockBytes": 8401659,
+        "imageBytes": 134217728,
+        "nonzeroBlockBytes": 41943040
+      }
+    ],
+    "conversion": {
+      "cpuMs": 67.15100000000001,
+      "wallMs": 111.758658
+    },
+    "convertedReads": [
+      {
+        "cpuMs": 6.369,
+        "wallMs": 6.3910420000000006
+      },
+      {
+        "cpuMs": 8.061999999999983,
+        "wallMs": 8.086431
+      }
+    ],
+    "payloadBytes": 8912909,
+    "referenceReads": [
+      {
+        "cpuMs": 7.478999999999999,
+        "wallMs": 7.513129
+      },
+      {
+        "cpuMs": 7.204999999999998,
+        "wallMs": 7.299316999999999
+      }
+    ],
+    "referenceWrite": {
+      "cpuMs": 43.056,
+      "wallMs": 68.508858
+    }
+  },
+  "after": {
+    "accounting": [
+      {
+        "encodedBlockBytes": 8402030,
+        "imageBytes": 134217728,
+        "nonzeroBlockBytes": 41943040
+      },
+      {
+        "encodedBlockBytes": 8401676,
+        "imageBytes": 134217728,
+        "nonzeroBlockBytes": 41943040
+      }
+    ],
+    "conversion": {
+      "cpuMs": 70.426,
+      "wallMs": 103.84593000000001
+    },
+    "convertedReads": [
+      {
+        "cpuMs": 5.081000000000003,
+        "wallMs": 5.098997
+      },
+      {
+        "cpuMs": 4.623999999999995,
+        "wallMs": 4.635349000000001
+      }
+    ],
+    "payloadBytes": 8912909,
+    "referenceReads": [
+      {
+        "cpuMs": 5.883000000000003,
+        "wallMs": 5.9123090000000005
+      },
+      {
+        "cpuMs": 5.687999999999995,
+        "wallMs": 5.728253
+      }
+    ],
+    "referenceWrite": {
+      "cpuMs": 35.365,
+      "wallMs": 58.869733000000004
+    }
+  },
+  "observedFailure": {
+    "host": "Separate Linux installation server with 64 GiB RAM; encrypted SSH/NBD temporary ext4 storage on a desktop host; temporary manager cap 24 GiB.",
+    "sourceLogicalImageBytes": 34359738368,
+    "sourceAllocatedBytes": 17548972032,
+    "sourceReadOnlyProbeEntries": 166021,
+    "sourceReadOnlyProbeFileBytes": 17373826519,
+    "extraction": "Completed successfully; destination image population then started.",
+    "partialDestinationAllocatedBytesBeforeTimeout": 2609135616,
+    "deadlineSeconds": 180,
+    "error": "VM infrastructure operation timed out: fakeroot",
+    "outcome": "No converted point published and no destination switch; original VM and ready S3 point retained. Temporary conversion tree removed."
+  },
+  "candidateBudgetSeconds": 7200,
+  "candidateLargeMigration": "Pending release and operational retry; local benchmark does not predict production network conversion duration.",
+  "ciQualification": {
+    "referenceRun": "https://github.com/leo91000/cairn/actions/runs/39881732766",
+    "nativeJob": "Cancelled at 15 minutes while still downloading the 51 MB Ubuntu kernel-module package; no native assertions started.",
+    "nodeChecksJob": "Dependency downloads took 7m42s for 30.4 MB and 13m4s for 51 MB. The 30 minute job was cancelled after one S3 recovery integration test passed and compilation of another fixture began.",
+    "newNativeJobBudgetMinutes": 30,
+    "newNodeChecksJobBudgetMinutes": 45,
+    "scope": "Only job budgets change. Qualification assertions and their operation-specific deadlines remain unchanged."
+  }
+}

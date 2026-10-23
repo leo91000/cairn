@@ -141,26 +141,34 @@ def download(manager, release, directory, tools=False, code=None, token=None):
     return target
 
 
-def unpack_tools(archive, directory):
+def tool_inventory(manifest):
+    if manifest.get('version') != 1 or manifest.get('os') != 'linux' or manifest.get('arch') != 'x86_64':
+        raise ValueError('Unknown native tool manifest.')
     expected = {'bin/codex', 'bin/claude', 'bin/opencode', 'bin/node', 'bin/gh'}
+    entries = manifest.get('files', [])
+    paths = {entry.get('path') for entry in entries}
+    # Older pinned runtimes remain recoverable with their original inventory.
+    if paths not in (expected, expected | {'bin/codex-code-mode-host'}) or len(entries) != len(paths):
+        raise ValueError('Incomplete native tool inventory.')
+    return entries
+
+
+def unpack_tools(archive, directory):
     destination = directory / 'tools'
     destination.mkdir(mode=0o755)
     destination.chmod(0o755)
     with zipfile.ZipFile(archive) as bundle:
         records = bundle.infolist()
         names = [record.filename for record in records]
-        if len(names) != len(set(names)) or set(names) != expected | {'bin/', 'manifest.json'}:
-            raise ValueError('Unexpected native tool bundle files.')
         if sum(record.file_size for record in records) > 1024 * 1024 * 1024:
             raise ValueError('Native tools exceed extracted size budget.')
         if bundle.getinfo('manifest.json').file_size > 65536:
             raise ValueError('Native tool manifest exceeds limit.')
         manifest = json.loads(bundle.read('manifest.json'))
-        if manifest.get('version') != 1 or manifest.get('os') != 'linux' or manifest.get('arch') != 'x86_64':
-            raise ValueError('Unknown native tool manifest.')
-        entries = manifest.get('files', [])
-        if len(entries) != len(expected) or {entry.get('path') for entry in entries} != expected:
-            raise ValueError('Incomplete native tool inventory.')
+        entries = tool_inventory(manifest)
+        expected = {entry['path'] for entry in entries}
+        if len(names) != len(set(names)) or set(names) != expected | {'bin/', 'manifest.json'}:
+            raise ValueError('Unexpected native tool bundle files.')
         (destination / 'bin').mkdir(mode=0o755)
         (destination / 'bin').chmod(0o755)
         for entry in entries:
@@ -192,10 +200,7 @@ def verify_installed(directory, release):
                 raise ValueError('Installed native integrity check failed.')
     verified(directory / 'cairn', release['size'], release['sha256'])
     manifest = json.loads((directory / 'tools/manifest.json').read_text())
-    expected = {'bin/codex', 'bin/claude', 'bin/opencode', 'bin/node', 'bin/gh'}
-    entries = manifest.get('files', [])
-    if len(entries) != len(expected) or {entry.get('path') for entry in entries} != expected:
-        raise ValueError('Installed native tool inventory changed.')
+    entries = tool_inventory(manifest)
     for entry in entries:
         verified(directory / 'tools' / entry['path'], entry['size'], entry['sha256'])
 
@@ -254,8 +259,13 @@ def verify_workload_tools(directory):
         home = Path(temporary)
         os.chown(home, workload.pw_uid, workload.pw_gid)
         environment = {'PATH': str(directory / 'tools/bin') + ':/usr/bin:/bin', 'HOME': str(home), 'LANG': 'C.UTF-8'}
-        for executable in [directory / 'cairn'] + [directory / 'tools/bin' / name for name in ('codex', 'claude', 'opencode', 'node', 'gh')]:
-            subprocess.run([str(executable), '--version'], check=True, timeout=30, cwd=home,
+        executables = [(directory / 'cairn', '--version')]
+        manifest = json.loads((directory / 'tools/manifest.json').read_text())
+        for entry in tool_inventory(manifest):
+            argument = '--help' if entry['path'] == 'bin/codex-code-mode-host' else '--version'
+            executables.append((directory / 'tools' / entry['path'], argument))
+        for executable, argument in executables:
+            subprocess.run([str(executable), argument], check=True, timeout=30, cwd=home,
                            user=workload.pw_uid, group=workload.pw_gid, extra_groups=[], env=environment,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 

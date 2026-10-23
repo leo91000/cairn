@@ -56,6 +56,8 @@ export interface ActivityArtifact {
   historical?: boolean
   statusLabel?: string
   attention?: boolean
+  /** Process output must be displayed as written, without interpreting embedded data. */
+  verbatim?: boolean
   subagent?: ActivitySubagent
 }
 export type ActivityEntry
@@ -145,6 +147,9 @@ function pretty(value: unknown) {
 }
 
 export function activityPayload(event: RunEvent) {
+  // Stderr can itself look like a protocol event; it is always process output.
+  if (event.type === 'diagnostic')
+    return {}
   if (event.payload)
     return event.payload
   try {
@@ -173,6 +178,15 @@ const collaborationTitles: Record<string, string> = {
   resumeAgent: 'Resumed a subagent',
   interruptAgent: 'Interrupted a subagent',
   closeAgent: 'Closed a subagent',
+}
+
+// CSI sequences (colors, cursor moves), OSC sequences (titles, links) and two-byte escapes.
+// eslint-disable-next-line no-control-regex
+const terminalEscape = /\x1B(?:\[[\x30-\x3F]*[\x20-\x2F]*[\x40-\x7E]|\][^\x07\x1B]*(?:\x07|\x1B\\)?|[\x40-\x5A\x5C-\x5F])/g
+
+/** Agent stderr recorded by older runners keeps its terminal styling. */
+function withoutTerminalStyling(value: string) {
+  return value.replace(terminalEscape, '')
 }
 
 /** Keep tool updates in their original position and fold actions between messages. */
@@ -227,7 +241,8 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     scheduled = undefined
   }
 
-  for (const [eventIndex, event] of events.entries()) {
+  for (const [eventIndex, stored] of events.entries()) {
+    const event = stored.type === 'diagnostic' ? { ...stored, text: withoutTerminalStyling(stored.text) } : stored
     if (event.type === 'artifact' || event.type === 'chat.wakeup.delivered')
       continue
     if (waitBoundaries.has(event.type) || (event.type === 'status' && terminalStatuses.has(event.text)))
@@ -639,7 +654,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
         'thread.started': 'Session connected',
         'turn.started': 'Started working',
         'turn.completed': 'Finished this turn',
-        'diagnostic': 'Worker diagnostic',
+        'diagnostic': 'Agent diagnostic',
         'output': 'Worker output',
         'error': 'Worker reported an error',
         'item.started': 'Tool activity',
@@ -653,8 +668,11 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
         block('Details', message)
       else if (!['status', 'thread.started', 'turn.started', 'turn.completed'].includes(event.type))
         block('Output', event.text, Object.keys(data).length ? 'json' : 'plaintext')
-      if (event.type === 'diagnostic')
+      if (event.type === 'diagnostic') {
         artifact.status = 'info'
+        artifact.verbatim = true
+      }
+
       const usage = record(data.usage)
       if (typeof usage.input_tokens === 'number' && typeof usage.output_tokens === 'number')
         artifact.subtitle = `${usage.input_tokens.toLocaleString()} input · ${usage.output_tokens.toLocaleString()} output tokens`

@@ -13,9 +13,18 @@ Retained older adapters ignore the optional fields; plans without them log
 `unknown`. Invalid correlation values also become `unknown`.
 
 Activity records have `side=adapter` (normalized events inside the agent process)
-or `side=worker` (events received by the manager). Match run, attempt and the
-local turn counter when comparing these records. Existing VM boot, preparation,
+or `side=worker` (events received by the manager). The agent process writes its
+records to stderr; the manager logs each one as `source=agent_process` with the
+sanitized line in `record`, rather than adding it to the run's diagnostics. Only
+the runner's formatted tracing records with the `cairn_performance` target are
+redirected; another logger mentioning that name remains a diagnostic. The
+consumer refreshes configured and account-secret redactions before logging these
+records, including after the run's diagnostic budget is exhausted. Match run,
+attempt and the local turn counter when comparing these records. Existing VM boot, preparation,
 shutdown and storage records retain their current run/VM identities.
+Terminal styling is removed before framing diagnostics, with parser state kept
+across reads and long fragments. Control-sequence bodies are discarded while
+streaming rather than buffered, and incomplete UTF-8 characters wait for the next read.
 Archive transfers add a UUID linking host and guest phases; see
 [VM import timings](VM-IMPORT-TIMINGS.md) for reading, transport, extraction and
 acknowledgement measurements. Guest measurements require the updated VM image;

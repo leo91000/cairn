@@ -13,23 +13,16 @@ import {
 } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
+import { pathToFileURL } from 'node:url'
 
-async function main() {
+export async function selectPinnedBinaries(packageRoot, versions) {
   // Runs in the reviewed runtime image after its pinned coding engines are installed.
   // Ship their actual ELF executables, not npm launchers referring to /pnpm paths.
-  const target = process.env.CAIRN_NATIVE_BUNDLE_OUTPUT || '/opt/cairn-native-tools'
-  await mkdir(`${target}/bin`, { recursive: true })
-  const wanted = new Set(['codex', 'claude', 'opencode'])
+  const wanted = new Set(versions.keys())
   const binaries = new Map()
-  const versions = new Map([...wanted].map((name) => {
-    const version = execFileSync(name, ['--version'], { encoding: 'utf8' }).match(/\b\d+\.\d+\.\d+\b/)?.[0]
-    if (!version)
-      throw new Error(`Cannot identify pinned CLI version: ${name}`)
-    return [name, version]
-  }))
   const scores = new Map()
   const visited = new Set()
-  const pending = ['/pnpm']
+  const pending = [packageRoot]
   while (pending.length) {
     const directory = await realpath(pending.pop())
     if (visited.has(directory))
@@ -70,6 +63,26 @@ async function main() {
       throw new Error(`Missing pinned native executable: ${name}`)
   }
 
+  // Codex resolves this companion beside its executable. Select it from the
+  // same pinned platform package, never from a different version or libc build.
+  const companion = path.join(path.dirname(binaries.get('codex')), 'codex-code-mode-host')
+  const bytes = await readFile(companion).catch(() => null)
+  if (!bytes || bytes.length < 20 || !bytes.subarray(0, 4).equals(Buffer.from([0x7F, 0x45, 0x4C, 0x46])) || bytes.readUInt16LE(18) !== 62)
+    throw new Error('Missing pinned native executable: codex-code-mode-host')
+  binaries.set('codex-code-mode-host', companion)
+  return binaries
+}
+
+async function main() {
+  const target = process.env.CAIRN_NATIVE_BUNDLE_OUTPUT || '/opt/cairn-native-tools'
+  await mkdir(`${target}/bin`, { recursive: true })
+  const versions = new Map(['codex', 'claude', 'opencode'].map((name) => {
+    const version = execFileSync(name, ['--version'], { encoding: 'utf8' }).match(/\b\d+\.\d+\.\d+\b/)?.[0]
+    if (!version)
+      throw new Error(`Cannot identify pinned CLI version: ${name}`)
+    return [name, version]
+  }))
+  const binaries = await selectPinnedBinaries('/pnpm', versions)
   binaries.set('node', '/usr/local/bin/node')
   binaries.set('gh', '/usr/local/bin/gh')
   const files = []
@@ -90,7 +103,9 @@ async function main() {
   execFileSync('/usr/bin/zip', ['-q', '-r', `${target}.zip`, 'bin', 'manifest.json'], { cwd: target })
 }
 
-main().catch((error) => {
-  process.stderr.write(`${error.message}\n`)
-  process.exitCode = 1
-})
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    process.stderr.write(`${error.message}\n`)
+    process.exitCode = 1
+  })
+}

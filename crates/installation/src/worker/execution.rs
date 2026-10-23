@@ -168,8 +168,8 @@ async fn record_failure(
     s.store.event(run_id, kind, &summary, None).await
 }
 
-/// A VM controller that became unavailable is retried a few times, and
-/// indefinitely while the run is moving or placed on a remote node.
+/// Controller recovery is bounded on both local and remote nodes. An explicit
+/// move retains its separate recovery policy while transferring ownership.
 async fn recovers_controller(
     s: &Service,
     checkpoint: &Checkpoint,
@@ -181,12 +181,8 @@ async fn recovers_controller(
         return Ok(false);
     }
     let run = s.store.run(&checkpoint.id).await?;
-    let remote = saved
-        .node_id()
-        .is_some_and(|node| node != crate::nodes::LOCAL_NODE_ID);
-    let may_retry = saved.controller_recoveries() < MAX_CONTROLLER_RECOVERIES
-        || run["moveRequest"].is_object()
-        || remote;
+    let may_retry =
+        saved.controller_recoveries() < MAX_CONTROLLER_RECOVERIES || run["moveRequest"].is_object();
     Ok(may_retry
         && run["sessionId"].is_string()
         && !checkpoint.expired()
@@ -350,6 +346,84 @@ async fn clear_credentials(s: &Service, run_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn remote_preparation_failures_stop_after_three_recoveries() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::config::Config {
+            data_dir: root.path().join("data"),
+            home: root.path().join("home"),
+            workspace_roots: vec![root.path().into()],
+            public_url: "http://localhost:4310".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            codex_bin: "codex".into(),
+            claude_bin: "claude".into(),
+            opencode_bin: "opencode".into(),
+            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            concurrency: 1,
+            logger: false,
+            worker_enabled: false,
+            runner_url: String::new(),
+        })
+        .await
+        .unwrap();
+        let run = crate::config::id();
+        service.store.transaction({
+            let run = run.clone();
+            move |db| {
+                let record = json!({
+                    "id": run,
+                    "status": "running",
+                    "sessionId": "saved-session",
+                });
+                db.0.execute("INSERT INTO runs(id,task_id,project_id,status,created_at,data) VALUES(?1,?1,'','running',0,?2)", rusqlite::params![run,record.to_string()])?;
+                Ok(())
+            }
+        }).await.unwrap();
+        let checkpoint = Checkpoint::new(
+            service.store.clone(),
+            run.clone(),
+            RunCheckpoint::from_value(json!({
+                "prepared": { "backend": "firecracker", "isolated": true },
+                "nodeId": crate::config::id(),
+                "runnerId": crate::config::id(),
+                "remainingMs": null,
+                "controllerRecoveries": MAX_CONTROLLER_RECOVERIES - 1,
+            }))
+            .unwrap(),
+        );
+        let cancel = CancellationToken::new();
+        let error =
+            Error::unavailable("Remote workspace preparation failed; source files are preserved.");
+        record_failure(&service, &checkpoint, &cancel, &error, &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            checkpoint.snapshot().await.controller_recoveries(),
+            MAX_CONTROLLER_RECOVERIES
+        );
+        assert!(checkpoint.snapshot().await.settled().is_none());
+        // The next failure must settle even though the node is remote and a session exists.
+        record_failure(&service, &checkpoint, &cancel, &error, &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            checkpoint
+                .snapshot()
+                .await
+                .settled()
+                .unwrap()
+                .run_patch()
+                .unwrap()["status"],
+            "failed"
+        );
+        assert_eq!(
+            checkpoint.snapshot().await.controller_recoveries(),
+            MAX_CONTROLLER_RECOVERIES
+        );
+        service.shutdown.cancel();
+    }
 
     #[tokio::test]
     async fn stopped_native_turns_retain_final_publication_demand_for_every_outcome() {

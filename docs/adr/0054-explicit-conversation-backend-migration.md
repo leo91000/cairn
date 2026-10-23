@@ -25,6 +25,11 @@ the private home, project workspace and output into a new filesystem. Both VM fl
 and paired layouts are accepted; redirected home caches are included. It never
 mounts the untrusted filesystem on the manager or follows its symlinks while writing.
 The manager needs fakeroot and e2fsprogs (`mkfs.ext4 -d` directory population).
+The userspace reader traverses the bounded circular journal across its physical
+end and honors committed revocations, including earlier transaction mappings.
+Later committed rewrites remain visible.
+Cairn pins this correction in [the reader patch](../../vendor/ext4-view/CAIRN-PATCH.md).
+The source image remains read-only, including when journal recovery is needed.
 A fake numeric ownership view makes VM files belong to its fixed UID 1000;
 native admission reconciles its own workload UID. Missing tools or unsupported
 filesystems fail without replacing the source.
@@ -59,6 +64,16 @@ below these roots are preserved. This prevents a saved root link from becoming a
 host bind source. Staging lives in a dedicated manager directory. Before another
 conversion starts, both storage locks exclude live converters while abandoned
 staging from a terminated manager is reclaimed, including on a retry.
+Cleanup preserves the staging root so it can be a separate mounted filesystem;
+it removes only that directory's abandoned contents without following symlinks.
+Extracted files are closed before packing, without a separate fsync for every
+temporary file. This tree is discarded after interruption; the durability
+boundary remains the verified converted recovery point, published before the
+original environment is replaced.
+Populating the new ext4 image is a bulk operation with a two-hour command budget.
+A valid retained environment with many files can exceed the ordinary three-minute
+host-command deadline on remote staging. Other host commands retain their
+existing limits; a failed or timed-out conversion still cannot replace the source.
 
 This supersedes the blanket native/VM conversion prohibition in
 [native journal storage](0052-native-ublk-workspaces-and-idle-eviction.md).

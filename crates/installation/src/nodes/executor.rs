@@ -2,6 +2,7 @@
 use super::workspace::{fetch, seed};
 use crate::{
     error::{Error, Result},
+    performance::Operation,
     validation::text,
 };
 use serde_json::{Value, json};
@@ -59,7 +60,7 @@ fn plan_path(data: &Path, attempt: &str) -> PathBuf {
 #[derive(Default)]
 pub struct Executor {
     attempts: Mutex<HashMap<String, CancellationToken>>,
-    preparation: Mutex<()>,
+    preparation: super::coordination::Coordination,
 }
 
 impl Executor {
@@ -70,10 +71,7 @@ impl Executor {
         token: &str,
         attempt: &str,
     ) -> Result<()> {
-        let _guard = self.preparation.lock().await;
-        if self.attempts.lock().await.contains_key(attempt) {
-            return Ok(());
-        }
+        let mut timing = Operation::new("node_prepare", attempt, "plan");
         let session = Session {
             client: client.clone(),
             master: master.clone(),
@@ -81,8 +79,19 @@ impl Executor {
             attempt: attempt.into(),
         };
         let data = super::node_data_dir();
-        let plan = stage_plan(&session, &data).await?;
+        let descriptor = session.json("plan", &json!({})).await?;
+        let run = text(&descriptor["plan"], "runId");
+        crate::validation::uuid(run)?;
+        timing.next("queue");
+        let _guard = self.preparation.lock(run).await;
+        if self.attempts.lock().await.contains_key(attempt) {
+            timing.finish();
+            return Ok(());
+        }
+        timing.next("seed");
+        let plan = stage_plan(&session, &data, descriptor).await?;
         let root = data.join("runs").join(text(&plan, "runId"));
+        timing.next("lease");
         grant_lease(&session, &data).await?;
         let stop = CancellationToken::new();
         self.attempts
@@ -109,6 +118,7 @@ impl Executor {
         );
         tokio::spawn(mcp);
         tokio::spawn(refresh_inbox(session, root, stop));
+        timing.finish();
         Ok(())
     }
 
@@ -194,8 +204,7 @@ impl Executor {
 }
 
 /// Fetches the attempt's plan and initial files, and stores the plan for the local runner.
-async fn stage_plan(session: &Session, data: &Path) -> Result<Value> {
-    let descriptor = session.json("plan", &json!({})).await?;
+async fn stage_plan(session: &Session, data: &Path, descriptor: Value) -> Result<Value> {
     let mut plan = descriptor["plan"].clone();
     if !crate::native::enabled() && descriptor["dataRoot"] != data.to_string_lossy().as_ref() {
         return Err(Error::conflict(
@@ -226,7 +235,17 @@ async fn stage_plan(session: &Session, data: &Path) -> Result<Value> {
         }
     }
     let root = data.join("runs").join(text(&plan, "runId"));
-    session.seed(json!({ "kind": "initial" }), &root).await?;
+    let seed_workspace = crate::native::enabled() || plan["resumeWorkspace"] != true;
+    session
+        .seed(
+            json!({ "kind": "initial", "workspace": seed_workspace }),
+            &root,
+        )
+        .await?;
+    plan["workspaceSeeded"] = seed_workspace.into();
+    if !seed_workspace {
+        resume_import_directories(&plan, &root).await?;
+    }
     crate::skills::private_dir(&data.join("runner-plans")).await?;
     // A disconnected connector cannot leave a newly prepared VM runnable forever.
     plan["nodeLeaseRequired"] = true.into();
@@ -243,6 +262,37 @@ async fn stage_plan(session: &Session, data: &Path) -> Result<Value> {
     )
     .await?;
     Ok(plan)
+}
+
+/// Keep mount-source validation intact without copying the projects held by the
+/// guest disk. These empty host directories must never initialize a fresh guest.
+async fn resume_import_directories(plan: &Value, root: &Path) -> Result<()> {
+    let Some(project_root) = plan["projectRoot"].as_str().map(Path::new) else {
+        return Ok(());
+    };
+    for import in plan["imports"].as_array().into_iter().flatten() {
+        let source = Path::new(text(import, "source"));
+        if !source.starts_with(project_root) {
+            continue;
+        }
+        let relative = source.strip_prefix(root).map_err(Error::internal)?;
+        let mut directory = root.to_owned();
+        for part in relative.components() {
+            if !matches!(part, std::path::Component::Normal(_)) {
+                return Err(Error::bad("Invalid workspace import directory."));
+            }
+            directory.push(part);
+            match tokio::fs::symlink_metadata(&directory).await {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => return Err(Error::bad("Workspace import is not a directory.")),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    crate::skills::private_dir(&directory).await?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Hands the master's first lease to the local controller, minus the time already spent.
@@ -305,6 +355,30 @@ async fn refresh_inbox(session: Session, root: PathBuf, stop: CancellationToken)
 mod tests {
     use super::*;
     use axum::{Json, Router, body::Body, routing::post};
+
+    #[tokio::test]
+    async fn resume_import_directories_reject_symlinks_and_parent_traversal() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let project = root.path().join("workspace");
+        tokio::fs::create_dir(&project).await.unwrap();
+        tokio::fs::symlink(outside.path(), project.join("link"))
+            .await
+            .unwrap();
+        for source in [project.join("link/child"), project.join("../escape")] {
+            let plan = json!({"projectRoot":project,"imports":[{"source":source}]});
+            let error = resume_import_directories(&plan, root.path())
+                .await
+                .unwrap_err();
+            assert_eq!(error.status, 400);
+            assert!(!outside.path().join("child").exists());
+            assert!(!root.path().join("escape").exists());
+        }
+        let source = project.join("safe/child");
+        let plan = json!({"projectRoot":project,"imports":[{"source":source}]});
+        resume_import_directories(&plan, root.path()).await.unwrap();
+        assert_eq!(tokio::fs::canonicalize(&source).await.unwrap(), source);
+    }
 
     #[tokio::test]
     async fn oversized_change_detection_replaces_stale_input_for_controller_validation() {

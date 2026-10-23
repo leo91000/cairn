@@ -558,7 +558,7 @@ class AgentEditingTest {
     }
 
     @Test
-    fun runPermissionsOnUnusableNodesAreReportedAndNativeNeedsANode() {
+    fun runPermissionsOnUnusableNodesAreReportedAndNativeSupportsAllNodes() {
         val desk =
             ExecutionNode(
                 "desk",
@@ -575,10 +575,10 @@ class AgentEditingTest {
         assertTrue(issues.any { it.text == "Une node autorisée n’existe plus ou a été révoquée." })
 
         val native = agent.withBackend(native = true)
-        assertEquals(
-            "Choisissez au moins une node native : l’exécution native ne s’applique jamais à toutes les nodes.",
-            agentErrors(AgentDraft(native))[AgentSection.Nodes],
-        )
+        assertFalse(AgentSection.Nodes in agentErrors(AgentDraft(native)))
+        val allNative = native.copy(access = native.access.withAllNodes(true, nodes + desk))
+        assertNull(allNative.access.nodes)
+        assertFalse(AgentSection.Nodes in agentErrors(AgentDraft(allNative)))
         assertFalse(AgentSection.Nodes in agentErrors(AgentDraft(native.withNodeRun("desk", true))))
     }
 

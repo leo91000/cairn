@@ -161,8 +161,8 @@ retries acknowledge an existing answer without recapturing a later turn's author
 reusing that receipt ID for a new question is refused.
 
 New persisted plugin
-manifests require a separate compatibility boundary: epoch 11 / SQLite 10, above
-main `64d92fe9` and its reserved epochs 5–10. The [persistent-format inventory and
+manifests require a separate compatibility boundary: epoch 12 / SQLite 11, above
+main `0a46294c` and its reserved epochs 5–11. The [persistent-format inventory and
 forward recovery plan](SLACK-PLUGIN-COMPATIBILITY.md) retain the unchanged legacy
 tree and require a separately reviewed production transition. The route-authority
 measurements document bounded record shape and their limits; full native/storage

@@ -29,16 +29,26 @@ static PROCESS: LazyLock<String> = LazyLock::new(id);
 fn migration_staging(data_dir: &Path) -> Result<PathBuf> {
     let root = data_dir.join("backend-migration-staging");
     match std::fs::symlink_metadata(&root) {
-        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&root)?,
+        Ok(metadata) if metadata.is_dir() => {
+            // The root may be a separately mounted staging filesystem. Remove
+            // abandoned conversions without trying to unlink its mountpoint.
+            for entry in std::fs::read_dir(&root)? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    std::fs::remove_dir_all(entry.path())?;
+                } else {
+                    std::fs::remove_file(entry.path())?;
+                }
+            }
+        }
         Ok(_) => {
             return Err(Error::conflict(
                 "Migration staging root must be a directory.",
             ));
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir(&root)?,
         Err(error) => return Err(error.into()),
     }
-    std::fs::create_dir(&root)?;
     Ok(root)
 }
 
@@ -656,11 +666,41 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires CAP_SYS_ADMIN; uses a disposable private mount namespace"]
+    fn migration_staging_preserves_a_mounted_storage_root() {
+        std::thread::spawn(|| {
+            crate::storage::ublk::private_mount_namespace(&[]).unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let staging = migration_staging(root.path()).unwrap();
+            let target = std::ffi::CString::new(staging.as_os_str().as_encoded_bytes()).unwrap();
+            assert_eq!(
+                unsafe {
+                    libc::mount(
+                        c"tmpfs".as_ptr(),
+                        target.as_ptr(),
+                        c"tmpfs".as_ptr(),
+                        0,
+                        std::ptr::null(),
+                    )
+                },
+                0
+            );
+            std::fs::write(staging.join("abandoned"), b"old conversion").unwrap();
+            let result = migration_staging(root.path());
+            assert_eq!(unsafe { libc::umount2(target.as_ptr(), 0) }, 0);
+            assert_eq!(result.unwrap(), staging);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
     fn retry_reclaims_staging_abandoned_by_a_terminated_process() {
         let root = tempfile::tempdir().unwrap();
         let unrelated = root.path().join("other-storage");
         std::fs::write(&unrelated, b"retained").unwrap();
         let staging = migration_staging(root.path()).unwrap();
+        std::os::unix::fs::symlink(&unrelated, staging.join("abandoned-link")).unwrap();
         let abandoned = tempfile::tempdir_in(&staging).unwrap().keep();
         std::fs::write(abandoned.join("source.ext4"), b"source blocks").unwrap();
         std::fs::create_dir(abandoned.join("tree")).unwrap();

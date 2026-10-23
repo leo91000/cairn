@@ -30,7 +30,7 @@ pub fn environment(config: &Config, directory: &Path) -> Environment {
 }
 
 /// Points the CLI at `directory` for its state and credentials, without inherited credentials,
-/// updates or browser launches.
+/// updates, browser launches or native background tasks.
 pub fn configure(env: &mut Environment, directory: &Path) {
     sanitize(env);
     env.insert(
@@ -39,6 +39,8 @@ pub fn configure(env: &mut Environment, directory: &Path) {
     );
     env.insert("DISABLE_AUTOUPDATER".into(), "1".into());
     env.insert("BROWSER".into(), "true".into());
+    // Cairn owns durable waits; native background tasks can keep a finished turn open.
+    env.insert("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS".into(), "1".into());
 }
 
 /// Subscription runs never use API keys, cloud providers or alternate OAuth overrides.
