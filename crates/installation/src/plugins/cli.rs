@@ -9,6 +9,9 @@ use serde_json::{Value, json};
 use std::io::Write;
 
 const USAGE: &str = "Use cairn plugin <plugin> <command> [arguments], for example cairn plugin onepassword accounts.";
+/// The run channel's origin when it differs from the VM relay: native nodes
+/// share the host loopback, so each attempt listens on its own port.
+pub(crate) const ORIGIN_ENV: &str = "CAIRN_MCP_ORIGIN";
 
 pub fn arguments(args: &[String]) -> Result<Value> {
     let plugin = args.first().filter(|plugin| {
@@ -28,8 +31,24 @@ pub fn arguments(args: &[String]) -> Result<Value> {
     }))
 }
 
+/// The run-local channel, never an arbitrary URL: only a loopback port may
+/// replace the VM relay, so the run token cannot be sent off the machine.
+fn origin(configured: Option<&str>) -> Result<String> {
+    let Some(configured) = configured else {
+        return Ok(crate::microvm::mcp::ORIGIN.to_owned());
+    };
+    let loopback = configured
+        .strip_prefix("http://127.0.0.1:")
+        .and_then(|port| port.parse::<u16>().ok())
+        .filter(|port| *port != 0)
+        .map(|port| format!("http://127.0.0.1:{port}"))
+        .filter(|loopback| loopback == configured);
+    loopback.ok_or_else(|| Error::unavailable("Plugin channel unavailable."))
+}
+
 pub async fn run(args: &[String]) -> Result<()> {
     let input = arguments(args)?;
+    let origin = origin(std::env::var(ORIGIN_ENV).ok().as_deref())?;
     let bearer = std::env::var("CAIRN_MCP_RUN_TOKEN").map_err(|_| {
         Error::unauthorized("Run this command inside an active Cairn conversation.")
     })?;
@@ -44,9 +63,9 @@ pub async fn run(args: &[String]) -> Result<()> {
         args.get(1).map(String::as_str),
         Some("--upload" | "--download" | "--delete-file")
     ) {
-        return transfer(&client, &bearer, args).await;
+        return transfer(&client, &origin, &bearer, args).await;
     }
-    let value = request(&client, &bearer, &input).await?;
+    let value = request(&client, &origin, &bearer, &input).await?;
     let output = match text(&value, "output") {
         "secret" => text(&value, "value").to_owned(),
         "text" => format!("{}\n", text(&value, "value")),
@@ -56,9 +75,14 @@ pub async fn run(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-async fn request(client: &reqwest::Client, bearer: &str, input: &Value) -> Result<Value> {
+async fn request(
+    client: &reqwest::Client,
+    origin: &str,
+    bearer: &str,
+    input: &Value,
+) -> Result<Value> {
     let response = client
-        .post(format!("{}/plugin-command", crate::microvm::mcp::ORIGIN))
+        .post(format!("{origin}/plugin-command"))
         .bearer_auth(bearer)
         .json(input)
         .send()
@@ -81,7 +105,12 @@ async fn request(client: &reqwest::Client, bearer: &str, input: &Value) -> Resul
 
 /// Transfer directly between the conversation VM and the installation. Every
 /// chunk uses the same run grant and account ownership gate as plugin tools.
-async fn transfer(client: &reqwest::Client, bearer: &str, args: &[String]) -> Result<()> {
+async fn transfer(
+    client: &reqwest::Client,
+    origin: &str,
+    bearer: &str,
+    args: &[String],
+) -> Result<()> {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use std::{fs::OpenOptions, io::Read, os::unix::fs::OpenOptionsExt};
     let usage = "Use cairn plugin PLUGIN --upload INSTANCE PATH, --download INSTANCE HANDLE PATH, or --delete-file INSTANCE HANDLE.";
@@ -91,7 +120,7 @@ async fn transfer(client: &reqwest::Client, bearer: &str, args: &[String]) -> Re
         file["instance"] = json!(account);
         let input = json!({ "plugin": args[0], "file": file });
         async move {
-            request(client, bearer, &input)
+            request(client, origin, bearer, &input)
                 .await
                 .map(|v| v["value"].clone())
         }
@@ -182,7 +211,7 @@ async fn transfer(client: &reqwest::Client, bearer: &str, args: &[String]) -> Re
 
 #[cfg(test)]
 mod tests {
-    use super::arguments;
+    use super::{arguments, origin};
     use serde_json::json;
 
     fn words(values: &[&str]) -> Vec<String> {
@@ -209,6 +238,26 @@ mod tests {
             vec!["One", "read"],
         ] {
             assert!(arguments(&words(&invalid)).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn the_channel_stays_on_the_run_loopback() {
+        assert_eq!(origin(None).unwrap(), crate::microvm::mcp::ORIGIN);
+        assert_eq!(
+            origin(Some("http://127.0.0.1:44855")).unwrap(),
+            "http://127.0.0.1:44855"
+        );
+        for invalid in [
+            "",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:44855/",
+            "http://127.0.0.1:044855",
+            "http://127.0.0.1:44855@example.com",
+            "https://example.com:443",
+            "http://localhost:44855",
+        ] {
+            assert!(origin(Some(invalid)).is_err(), "{invalid}");
         }
     }
 }
