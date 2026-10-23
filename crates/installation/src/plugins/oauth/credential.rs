@@ -513,27 +513,124 @@ pub(crate) async fn access_token_managed(
     connection: &connections::Connection,
     management: Option<&super::super::management::Authority>,
 ) -> Result<Option<String>> {
-    access_token_with(s, connection, management, false).await
+    access_token_with(s, connection, management, None).await
+}
+
+struct ConfigurationRefresh<'a> {
+    owner: &'a super::super::operations::Owner,
+    approved: &'a registry::ApprovedPackage,
+}
+
+struct RefreshSnapshot {
+    connection: connections::Connection,
+    management: Option<super::super::management::Authority>,
+    editing: bool,
+    approval: registry::Approval,
+    credential: Value,
+}
+
+impl RefreshSnapshot {
+    fn new(
+        connection: &connections::Connection,
+        management: Option<&super::super::management::Authority>,
+        editing: bool,
+        approval: registry::Approval,
+        credential: Value,
+    ) -> Self {
+        Self {
+            connection: connection.clone(),
+            management: management.cloned(),
+            editing,
+            approval,
+            credential,
+        }
+    }
+
+    fn authorize(&self, db: &crate::store::Db<'_>, vault: &crate::vault::Vault) -> Result<()> {
+        self.approval.recheck_in(db)?;
+        if let Some(authority) = &self.management {
+            authority.authorize(db)?;
+        }
+        authorize_token(db, &self.connection, self.editing)?;
+        let key = connections::credential_key(&self.connection.id);
+        if vault.get_in(db, &key)?.as_ref() != Some(&self.credential) {
+            return Err(Error::conflict(
+                "The OAuth credential changed. Reconnect this account.",
+            ));
+        }
+        Ok(())
+    }
+}
+
+async fn recheck_refresh(
+    s: &Service,
+    management: Option<&super::super::management::Authority>,
+    configuration: Option<&ConfigurationRefresh<'_>>,
+    approved: &registry::ApprovedPackage,
+) -> Result<()> {
+    if let Some(configuration) = configuration {
+        configuration.owner.recheck(s).await?;
+    }
+    if let Some(authority) = management {
+        authority.recheck(s).await?;
+    }
+    approved.recheck(s).await
+}
+
+/// Compare the credential and its authority in the same transaction. A second
+/// host or a concurrent edit cannot consume or replace another refresh's state.
+async fn persist_refresh_state(
+    s: &Service,
+    connection: &connections::Connection,
+    management: Option<&super::super::management::Authority>,
+    editing: bool,
+    approval: registry::Approval,
+    previous: Value,
+    replacement: &Value,
+) -> Result<()> {
+    let key = connections::credential_key(&connection.id);
+    let vault = s.vault.clone();
+    let encrypted = vault.encrypt(&key, replacement)?;
+    let snapshot = RefreshSnapshot::new(connection, management, editing, approval, previous);
+    s.store
+        .transaction(move |db| {
+            snapshot.authorize(db, &vault)?;
+            db.set(&format!("mcp-secret:{key}"), &encrypted, None)
+        })
+        .await
 }
 
 pub(crate) async fn draft_token(
     s: &Service,
     connection: &connections::Connection,
     management: Option<&super::super::management::Authority>,
+    owner: &super::super::operations::Owner,
+    approved: &registry::ApprovedPackage,
 ) -> Result<Option<String>> {
-    access_token_with(s, connection, management, true).await
+    access_token_with(
+        s,
+        connection,
+        management,
+        Some(ConfigurationRefresh { owner, approved }),
+    )
+    .await
 }
 
 async fn access_token_with(
     s: &Service,
     connection: &connections::Connection,
     management: Option<&super::super::management::Authority>,
-    editing: bool,
+    configuration: Option<ConfigurationRefresh<'_>>,
 ) -> Result<Option<String>> {
+    let editing = configuration.is_some();
     let lock = s.plugins.oauth_flows.lock(&connection.id);
     let _guard = lock.lock().await;
     if let Some(authority) = management {
         authority.recheck(s).await?;
+    }
+    if let Some(configuration) = &configuration {
+        configuration.owner.recheck(s).await?;
+        configuration.approved.recheck(s).await?;
     }
     if !editing {
         connections::ensure_owner(s, connection).await?;
@@ -552,6 +649,11 @@ async fn access_token_with(
     let Some(saved) = s.vault.get(&key).await? else {
         return Ok(None);
     };
+    if saved["oauth"]["refreshing"] == true {
+        return Err(Error::unauthorized(
+            "The last authorization renewal was interrupted. Reconnect this account.",
+        ));
+    }
     if saved.get("oauth").is_none()
         || saved["oauth"]["expiresAt"]
             .as_i64()
@@ -559,7 +661,15 @@ async fn access_token_with(
     {
         return Ok(saved["token"].as_str().map(str::to_owned));
     }
-    let package = registry::active(s, &connection.plugin_id).await?;
+    let operational;
+    let approved = if let Some(configuration) = &configuration {
+        configuration.approved
+    } else {
+        operational = registry::approved(s, &connection.plugin_id).await?;
+        &operational
+    };
+    approved.recheck(s).await?;
+    let package = &approved.package;
     let oauth = package
         .manifest
         .credential
@@ -582,11 +692,42 @@ async fn access_token_with(
     if let Some(secret) = metadata["clientSecret"].as_str() {
         fields.push(("client_secret".into(), secret.to_owned()));
     }
+    // Consume the single-use refresh credential before provider I/O. Removing it
+    // also makes an earlier reader fail closed instead of replaying the token.
+    let mut consuming = saved.clone();
+    let stored_metadata = consuming["oauth"].as_object_mut().ok_or_else(expired)?;
+    stored_metadata.remove("refreshToken");
+    stored_metadata.insert("refreshing".into(), json!(true));
+    let approval = approved.snapshot();
+    persist_refresh_state(
+        s,
+        connection,
+        management,
+        editing,
+        approval.clone(),
+        saved.clone(),
+        &consuming,
+    )
+    .await?;
+    recheck_refresh(s, management, configuration.as_ref(), approved).await?;
+    // The final owner lookup can outlive a local edit/removal. Recheck the exact
+    // instance and consumed credential after it, immediately before token I/O.
+    let snapshot = RefreshSnapshot::new(
+        connection,
+        management,
+        editing,
+        approval.clone(),
+        consuming.clone(),
+    );
+    let vault = s.vault.clone();
+    s.store
+        .read(move |db| snapshot.authorize(db, &vault))
+        .await?;
     let response = post(s, &package.manifest, &oauth.token_url, &fields).await?;
     let flow = Flow {
         id: id(),
         plugin: connection.plugin_id.clone(),
-        package_digest: package.digest,
+        package_digest: package.digest.clone(),
         binding: String::new(),
         instance: Some(connection.id.clone()),
         revision: Some(connection.revision.clone()),
@@ -606,21 +747,11 @@ async fn access_token_with(
         message: None,
     };
     let refreshed = credentials(&response, &flow, oauth, Some(&saved))?;
-    if let Some(authority) = management {
-        authority.recheck(s).await?;
-    }
-    let encrypted = s.vault.encrypt(&key, &refreshed)?;
-    let expected = connection.clone();
-    let management = management.cloned();
-    s.store
-        .transaction(move |db| {
-            if let Some(authority) = management {
-                authority.authorize(db)?;
-            }
-            authorize_token(db, &expected, editing)?;
-            db.set(&format!("mcp-secret:{key}"), &encrypted, None)
-        })
-        .await?;
+    recheck_refresh(s, management, configuration.as_ref(), approved).await?;
+    persist_refresh_state(
+        s, connection, management, editing, approval, consuming, &refreshed,
+    )
+    .await?;
     Ok(refreshed["token"].as_str().map(str::to_owned))
 }
 

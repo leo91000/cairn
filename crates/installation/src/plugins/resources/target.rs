@@ -35,6 +35,21 @@ impl Target {
         }))
     }
 
+    /// A caller which already loaded a package must not replace its approval
+    /// while loading the root. Retain one proof for form code and capabilities.
+    pub(crate) async fn active_with_approval(
+        s: &Service,
+        instance: &str,
+        approved: &registry::ApprovedPackage,
+    ) -> Result<Arc<Self>> {
+        Ok(Arc::new(Self::Active {
+            connection: Box::new(
+                connections::get(s, &approved.package.manifest.id, instance).await?,
+            ),
+            approved: approved.clone(),
+        }))
+    }
+
     pub(crate) async fn setup(
         s: &Service,
         plugin: &str,
@@ -76,8 +91,12 @@ impl Target {
     }
 
     pub(crate) fn package(&self) -> &registry::Package {
+        &self.approved().package
+    }
+
+    pub(crate) fn approved(&self) -> &registry::ApprovedPackage {
         match self {
-            Self::Active { approved, .. } | Self::Setup { approved, .. } => &approved.package,
+            Self::Active { approved, .. } | Self::Setup { approved, .. } => approved,
         }
     }
 

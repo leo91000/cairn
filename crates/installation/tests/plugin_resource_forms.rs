@@ -1,4 +1,6 @@
 mod common;
+#[path = "plugin_resource_forms/oauth.rs"]
+mod oauth;
 
 use axum::{Router, body::Body, http::StatusCode, response::Response};
 use cairn_installation::{

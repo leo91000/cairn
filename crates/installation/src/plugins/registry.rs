@@ -46,6 +46,7 @@ pub struct Package {
 
 /// The exact approval which selected these loaded files. A delayed configuration
 /// write must not survive uninstall/reinstallation of otherwise identical files.
+#[derive(Clone)]
 pub(crate) struct ApprovedPackage {
     pub package: Package,
     record: Option<Value>,

@@ -236,14 +236,17 @@ async fn form_authorized(
     owner: Arc<super::operations::Owner>,
     management: Option<super::management::Authority>,
 ) -> Result<Value> {
-    let package = registry::active(s, plugin_id).await?;
+    let approved = registry::approved(s, plugin_id).await?;
+    let package = &approved.package;
     let manifest = &package.manifest;
     if !manifest.instance_form {
         return Err(Error::not_found("This plugin has no instance form."));
     }
     let evaluation = Evaluation::preview(&manifest.settings, &["credential"], input)?;
     let root = match input["instance"].as_str() {
-        Some(id) => Some(super::resources::target::Target::active(s, plugin_id, id).await?),
+        Some(id) => {
+            Some(super::resources::target::Target::active_with_approval(s, id, &approved).await?)
+        }
         None => None,
     };
     let instance = root.as_ref().map(|root| root.instance().to_owned());
@@ -282,13 +285,15 @@ async fn form_authorized(
             )
             .map(|result| response(&result));
     }
-    let credential = match (&instance, token.is_empty()) {
+    let credential = match (&root, token.is_empty()) {
         (_, false) => Some(token.to_owned()),
-        (Some(id), true) => {
+        (Some(root), true) => {
             super::oauth::draft_token(
                 s,
-                &connections::get(s, plugin_id, id).await?,
+                &root.connection(),
                 management.as_ref(),
+                &owner,
+                &approved,
             )
             .await?
         }
@@ -311,7 +316,7 @@ async fn form_authorized(
     let settings = partial_values(&manifest.settings, &input["settings"])?;
     let result = run(
         s,
-        &package,
+        package,
         instance.as_deref(),
         settings,
         draft,

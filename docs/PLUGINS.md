@@ -690,6 +690,27 @@ operational; ordinary resource references still require every ancestor enabled.
 Owner OAuth uses the same serialized, single-use refresh path and retains setup
 expiry/provenance. An uncertain refresh requires reconnection.
 
+For a saved root app, resource forms also renew its root OAuth credential through
+the shared per-instance lock before invoking Luau. This works while the instance
+is paused. Root forms and save-time validation capture the configuration owner's
+exact access grant; a slow renewal rechecks that grant and the approved package
+before storing rotated credentials, alongside the existing instance revision
+fence. Removal, replacement or revoked authority cannot publish the late result.
+The approval is the one which loaded that form, including while waiting for the
+refresh lock or an owner lookup. Renewal also retains the originally loaded root
+revision. After the final remote authority lookup, a native read rechecks that
+root and the exact consumed credential immediately before the provider POST.
+Before sending, the host removes the stored
+refresh token and records `oauth.refreshing = true` in the encrypted credential.
+Only a confirmed response under the same authority replaces this consumed state.
+Uncertainty requires new consent, including after reopening the store; it cannot
+replay a potentially rotated refresh token. A successful new sign-in replaces the
+consumed state through ordinary revision-checked saving.
+Tokens remain in the host. This does not complete root OAuth sign-in/activation
+for inert setup drafts, which remains a separate draft-PR delivery requirement.
+The [local encrypted-record observation](performance/ROOT-FORM-CREDENTIAL-RENEWAL.md)
+records the reused storage shape and its limits.
+
 Both clients discard obsolete responses when the editor or parent changes, keep
 typed secrets only in memory, show errors and wait for the current form before
 enabling Save. Saving reruns the package with `submit = true`, validates derived

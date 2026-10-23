@@ -43,6 +43,21 @@ No deployment, automatic backup, restoration or production transition is perform
 | Ordinary progress controls | One delivery-owned `progress:<deliveryId>` plugin-storage value retains an eight-second `readyAt` wall deadline, `preparing`/`posting`/`sent` intent, exact source/person/delivery/message binding, confirmed short native step label and optional `updateStatus = sending`. Only definite quota rejection clears the relevant in-flight intent for retry. The confirmed Stop binding remains usable after an uncertain edit; an uncertain initial creation is not replayed. Final reply handling deletes the reference before optional provider cleanup; native delivery removal still retires it atomically. Values use the existing store envelope and quota; no new table, index, native capability or credential shape is introduced. Epoch 12 / SQLite 11 and the unchanged legacy tree remain the draft boundary. [Local measurements](performance/SLACK-PROGRESS-STATE.md) compare the representative full record with ordinary instance state. |
 | Clients | Android's ordinary setup-input snapshots are local, backup-excluded and bounded. They contain no declared secret fields; session/scope retirement clears them. They are disposable editor state, not installation data or an offline mutation queue. Web state remains browser-local. |
 
+Saved-root OAuth renewal in resource forms reuses the encrypted credential key
+and per-instance lock. Root preview/save/resource-form owner authority and original
+package approval remain runtime snapshots. Encrypted root `oauth` metadata now
+has an optional `refreshing = true` consumed state, committed with `refreshToken`
+removed before provider I/O. A confirmed, authorized response replaces that state
+with the ordinary credential shape. Missing flags on older records retain normal
+behavior; an interrupted state requires reconnection. Earlier readers also refuse
+to refresh a record with no refresh token, rather than replaying it. Consumption
+and completion compare the prior credential in the authorization transaction.
+No table, key count, encryption envelope, epoch, legacy tree or migration changes;
+the additive metadata stays inside this unreleased epoch-12 / SQLite-11 draft.
+The [native record observation](performance/ROOT-FORM-CREDENTIAL-RENEWAL.md)
+includes all three states. Inert root OAuth activation and whole-PR production
+transition/recovery qualification remain open.
+
 The SQLite version fence advances; the existing application tables, storage
 envelopes, installation identity and old package files are not rewritten merely
 to add these declarations. Forward installation opens the existing store and

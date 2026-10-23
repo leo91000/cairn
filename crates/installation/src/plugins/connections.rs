@@ -728,7 +728,7 @@ where
     let source = existing.map_or(SaveSource::New, SaveSource::Existing);
     let prepared = prepare_managed(
         s,
-        &approved.package,
+        &approved,
         input,
         source,
         Some(owner.clone()),
@@ -770,22 +770,23 @@ where
 
 pub(crate) async fn prepare(
     s: &Service,
-    package: &registry::Package,
+    approved: &registry::ApprovedPackage,
     input: &Value,
     source: SaveSource<'_>,
     request_owner: Option<std::sync::Arc<super::operations::Owner>>,
 ) -> Result<Prepared> {
-    prepare_managed(s, package, input, source, request_owner, None).await
+    prepare_managed(s, approved, input, source, request_owner, None).await
 }
 
 async fn prepare_managed(
     s: &Service,
-    package: &registry::Package,
+    approved: &registry::ApprovedPackage,
     input: &Value,
     source: SaveSource<'_>,
     request_owner: Option<std::sync::Arc<super::operations::Owner>>,
     management: Option<super::management::Authority>,
 ) -> Result<Prepared> {
+    let package = &approved.package;
     let (existing, setup, updating) = match source {
         SaveSource::New => (None, None, false),
         SaveSource::Existing(id) => (Some(id), None, true),
@@ -793,7 +794,10 @@ async fn prepare_managed(
     };
     let plugin_id = package.manifest.id.as_str();
     let root = if updating {
-        Some(super::resources::target::Target::active(s, plugin_id, existing.unwrap()).await?)
+        Some(
+            super::resources::target::Target::active_with_approval(s, existing.unwrap(), approved)
+                .await?,
+        )
     } else {
         None
     };
@@ -964,9 +968,21 @@ async fn prepare_managed(
                 .get(&credential_key(id))
                 .await?
                 .and_then(|record| record["token"].as_str().map(str::to_owned)),
-            (true, Some(id)) => {
-                super::oauth::draft_token(s, &get(s, plugin_id, id).await?, management.as_ref())
-                    .await?
+            (true, Some(_)) => {
+                let form_owner = request_owner.as_deref().ok_or_else(|| {
+                    Error::forbidden("This configuration has no current owner authority.")
+                })?;
+                let root = root.as_ref().ok_or_else(|| {
+                    Error::forbidden("This configuration has no original root snapshot.")
+                })?;
+                super::oauth::draft_token(
+                    s,
+                    &root.connection(),
+                    management.as_ref(),
+                    form_owner,
+                    approved,
+                )
+                .await?
             }
             (true, None) => None,
         };

@@ -235,13 +235,24 @@ impl Form {
         let values = super::super::forms::partial_values(&self.collection.settings, &values)?;
         let connection = self.target.connection();
         let app = super::super::scope::summary(&connection);
-        let draft = super::super::forms::Draft {
-            management: None,
-            credential: s
-                .vault
+        let credential = if self.target.is_setup() {
+            s.vault
                 .get(&connections::credential_key(&connection.id))
                 .await?
-                .and_then(|v| v["token"].as_str().map(str::to_owned)),
+                .and_then(|v| v["token"].as_str().map(str::to_owned))
+        } else {
+            super::super::oauth::draft_token(
+                s,
+                &connection,
+                None,
+                &self.owner,
+                self.target.approved(),
+            )
+            .await?
+        };
+        let draft = super::super::forms::Draft {
+            management: None,
+            credential,
             secrets: connections::secret_values(s, &connection.id).await?,
             setup: self.target.setup_snapshot().cloned().map(Box::new),
             urls: None,

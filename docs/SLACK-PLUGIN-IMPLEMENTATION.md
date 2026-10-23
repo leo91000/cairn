@@ -1628,3 +1628,52 @@ records the representative progress value and its lifetime cost. No native API,
 web/Android UI capability or new persisted envelope is added; the inventory stays
 within the unqualified epoch-12 / SQLite-11 boundary. Full final review/validation,
 live Slack qualification and all remaining Q1–Q20 gates still apply.
+
+### Root OAuth renewal in resource configuration
+
+The actual owner HTTP/Luau regression reproduced a resource form using an expired
+root token without invoking renewal. Saved roots now use the existing serialized
+configuration refresh helper, preserving paused-instance editing. Concurrent
+previews share one refresh and receive only provider data, never credentials.
+Inert setup roots keep their current typed-secret path; root OAuth draft sign-in
+and activation remain unimplemented and mandatory.
+
+The next fixture reproduced late writes after owner revocation and package
+approval replacement: the form response failed but its rotated token had already
+been published. Root previews, save-time validation and resource forms now carry
+the captured owner grant into renewal. The helper rechecks it after provider I/O,
+then revalidates installed files/approval after the final remote authority lookup.
+Approval and instance identity are fenced again in the vault-write transaction.
+Fresh review also found adoption of a replacement approval before the helper's
+own snapshot. A provider owner-policy gate reproduced that race before token I/O;
+the helper now receives the original `ApprovedPackage` from each configuration
+caller, including root saving and setup preparation, rather than loading a new
+configuration approval. The stale form cannot consume or renew under a successor.
+Fixtures hold the real token endpoint response while changing owner access,
+editing/removing the root or replacing approval; stale work cannot publish tokens
+or send the downstream resource request. Provider-side token consumption cannot
+be rolled back; interrupted or refused renewal may require reconnection.
+
+The inherited root engine also repeated a refresh after an interrupted provider
+response. The public form regression first observed a second successful request
+where reconnection was required. Renewal now commits consumed state before the
+POST, removes the replayable refresh token, and compares exact previous state plus
+approval/instance/management authority in both consumption and completion writes.
+The owner/approval checks repeat immediately before the POST and final write.
+The final remote lookup is followed by a read of the exact instance and consumed
+credential under their authorization snapshot; deletion or revision changes
+during that lookup cannot send an old token. Root preview/save callers retain the
+connection captured by their original Target instead of reloading a successor.
+Both races were reproduced separately at public owner-policy HTTP gates before
+the correction, requiring zero token POSTs from the stale request.
+Uncertainty remains quarantined across a fresh native Service/store reopening;
+new code consent and ordinary save restore a working form. This is not a process
+restart or physical recovery experiment. Late authority changes can retain a
+consumed intent but cannot publish new tokens; deleting the root removes it.
+
+The [storage observation](performance/ROOT-FORM-CREDENTIAL-RENEWAL.md) compares
+actual pre/post-renewal encrypted records using local native reads/writes. The
+existing vault envelope and key count are reused; the optional consumed metadata
+is inventoried inside the unreleased epoch-12 / SQLite-11 boundary. This repairs
+foundation gaps; it does not complete Slack OAuth,
+root setup OAuth, management-tool parity or the accepted Q1–Q20 contract.

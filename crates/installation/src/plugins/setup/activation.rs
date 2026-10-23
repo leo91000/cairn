@@ -49,7 +49,7 @@ pub(crate) async fn activate(
         .await?;
     let prepared = connections::prepare(
         s,
-        target.package(),
+        target.approved(),
         &values,
         connections::SaveSource::Setup(&draft),
         None,
