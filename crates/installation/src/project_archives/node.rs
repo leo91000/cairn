@@ -182,7 +182,25 @@ pub(crate) async fn prefetch(
     descriptors: Vec<Archive>,
     stop: CancellationToken,
 ) -> Result<()> {
-    let root = crate::nodes::node_data_dir();
+    prefetch_into(
+        crate::nodes::node_data_dir(),
+        client,
+        master,
+        token,
+        descriptors,
+        stop,
+    )
+    .await
+}
+
+async fn prefetch_into(
+    root: PathBuf,
+    client: reqwest::Client,
+    master: url::Url,
+    token: String,
+    descriptors: Vec<Archive>,
+    stop: CancellationToken,
+) -> Result<()> {
     for descriptor in descriptors {
         // A best-effort warmer never queues behind active filesystem mutation.
         let state = crate::native::state_dir();
@@ -199,8 +217,13 @@ pub(crate) async fn prefetch(
             return Ok(());
         };
         clean_interrupted_downloads(&root).await?;
-        if cached(&root, &descriptor).await?.is_some() {
-            continue;
+        match cached(&root, &descriptor).await {
+            Ok(Some(_)) => continue,
+            Ok(None) => {}
+            Err(error) => {
+                tracing::debug!(project_id = %descriptor.project_id, status = error.status, "Project archive preload deferred");
+                continue;
+            }
         }
         let fetch = async {
             let response = client
@@ -224,7 +247,9 @@ pub(crate) async fn prefetch(
         tokio::select! {
             () = stop.cancelled() => return Ok(()),
             () = foreground_waiter(&state), if crate::native::enabled() => return Ok(()),
-            result = fetch => result?,
+            result = fetch => if let Err(error) = result {
+                tracing::debug!(project_id = %descriptor.project_id, status = error.status, "Project archive preload deferred");
+            },
         }
     }
     Ok(())
@@ -249,6 +274,61 @@ async fn foreground_waiter(state: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_project_does_not_starve_later_background_downloads() {
+        use axum::{
+            Router, body::Body, extract::Path as RoutePath, http::StatusCode, routing::post,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let payload = b"second project archive";
+        let first = Archive {
+            project_id: crate::config::id(),
+            key: "a".repeat(64),
+            revision: "b".repeat(40),
+            hash: blake3::hash(payload).to_hex().to_string(),
+            bytes: payload.len() as u64,
+            logical_bytes: 100,
+        };
+        let second = Archive {
+            project_id: crate::config::id(),
+            ..first.clone()
+        };
+        let first_id = first.project_id.clone();
+        let app = Router::new().route(
+            "/internal/node-workspace/cache/{project}",
+            post(move |RoutePath(project): RoutePath<String>| {
+                let failed = project == first_id;
+                async move {
+                    if failed {
+                        (StatusCode::INSUFFICIENT_STORAGE, Body::empty())
+                    } else {
+                        (StatusCode::OK, Body::from("second project archive"))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let master = format!("http://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        prefetch_into(
+            root.path().to_owned(),
+            reqwest::Client::new(),
+            master,
+            "fixture".into(),
+            vec![first, second.clone()],
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            tokio::fs::read(second.path(root.path())).await.unwrap(),
+            payload
+        );
+        server.abort();
+    }
 
     #[tokio::test]
     async fn foreground_storage_preempts_a_stalled_background_transfer() {
