@@ -402,6 +402,7 @@ async fn heartbeat(
 ) -> Result<()> {
     let controller = super::local_client()?;
     let mut budget_error_value = Value::Null;
+    let archive_warmer = std::sync::Arc::new(tokio::sync::Mutex::new(()));
     loop {
         let started = super::boot_ms();
         let runner = std::env::var("RUNNER_URL").unwrap_or_default();
@@ -451,6 +452,34 @@ async fn heartbeat(
                     .await
                     .map_err(|_| Error::bad("Invalid master heartbeat."))?;
                 if ready {
+                    if let Ok(guard) = archive_warmer.clone().try_lock_owned()
+                        && let Some(descriptors) = value.get("projectArchives")
+                    {
+                        let descriptors = serde_json::from_value(descriptors.clone())?;
+                        let (client, origin, token, stop) = (
+                            client.clone(),
+                            origin.clone(),
+                            identity.token.clone(),
+                            stop.clone(),
+                        );
+                        tokio::spawn(async move {
+                            let _guard = guard;
+                            if let Err(error) = crate::project_archives::prefetch(
+                                client,
+                                origin,
+                                token,
+                                descriptors,
+                                stop,
+                            )
+                            .await
+                            {
+                                tracing::debug!(
+                                    status = error.status,
+                                    "Project archive preload deferred"
+                                );
+                            }
+                        });
+                    }
                     forward_leases(&controller, &runner, &value, started).await?;
                     let budget = json!({ "slots": value["slots"], "limits": value["limits"] });
                     if health["budget"].is_object() && health["budget"] != budget {

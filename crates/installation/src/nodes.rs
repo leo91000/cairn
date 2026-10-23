@@ -1199,7 +1199,11 @@ async fn heartbeat(s: &Service, input: &Input) -> Result<Value> {
     for lease in &reply.leases {
         record_lease(s, &lease.id, lease.remaining_ms).await;
     }
-    Ok(serde_json::to_value(reply)?)
+    let mut value = serde_json::to_value(&reply)?;
+    // Older connectors ignore this optional, credential-free cache catalogue.
+    value["projectArchives"] =
+        serde_json::to_value(crate::project_archives::catalog(s, &reply.node_id).await?)?;
+    Ok(value)
 }
 
 fn record_heartbeat(

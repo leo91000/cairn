@@ -1,0 +1,260 @@
+use super::*;
+use futures_util::StreamExt;
+use tokio::io::AsyncWriteExt;
+use tokio_util::sync::CancellationToken;
+
+async fn download(
+    root: &Path,
+    descriptor: &Archive,
+    response: reqwest::Response,
+    budget: u64,
+) -> Result<std::fs::File> {
+    descriptor.validate()?;
+    if !response.status().is_success() {
+        return Err(Error::unavailable("Project archive download rejected."));
+    }
+    if descriptor.bytes > budget {
+        return Err(Error::new(
+            507,
+            "Project archive exceeds free node disk budget.",
+        ));
+    }
+    prune(root, descriptor.bytes).await?;
+    let directory = root.join("project-archives");
+    let temporary = tempfile::NamedTempFile::new_in(&directory)?;
+    let mut output = tokio::fs::File::from_std(temporary.reopen()?);
+    let mut stream = response.bytes_stream();
+    let mut bytes = 0u64;
+    let mut hash = blake3::Hasher::new();
+    while let Some(chunk) = tokio::time::timeout(std::time::Duration::from_secs(30), stream.next())
+        .await
+        .map_err(|_| Error::timeout("Project archive download stalled."))?
+    {
+        let chunk =
+            chunk.map_err(|_| Error::unavailable("Project archive download interrupted."))?;
+        bytes = bytes.saturating_add(chunk.len() as u64);
+        if bytes > descriptor.bytes {
+            return Err(Error::too_large("Project archive length changed."));
+        }
+        hash.update(&chunk);
+        output.write_all(&chunk).await?;
+    }
+    if bytes != descriptor.bytes || hash.finalize().to_hex().as_str() != descriptor.hash {
+        return Err(Error::bad("Project archive checksum mismatch."));
+    }
+    output.sync_all().await?;
+    drop(output);
+    tokio::fs::rename(temporary.path(), descriptor.path(root)).await?;
+    tokio::fs::File::open(&directory).await?.sync_all().await?;
+    Ok(tokio::fs::File::open(descriptor.path(root))
+        .await?
+        .into_std()
+        .await)
+}
+
+async fn budget() -> Result<u64> {
+    if crate::native::enabled() {
+        crate::native::disk::staging_budget().await
+    } else {
+        Ok(CACHE_BYTES)
+    }
+}
+
+/// Pins each immutable archive into this attempt's private staging directory.
+/// The controller extracts directly to the durable filesystem, without a
+/// second node-side expanded project tree.
+pub(crate) async fn stage(
+    session: &crate::nodes::executor::Session,
+    root: &Path,
+    descriptors: &[Archive],
+) -> Result<()> {
+    let run = root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| Error::bad("Missing run identity."))?;
+    let retained = crate::native::state_dir()
+        .join("native")
+        .join(run)
+        .join("block-initialized")
+        .exists();
+    if retained {
+        for descriptor in descriptors {
+            descriptor.validate()?;
+            crate::skills::private_dir(&root.join("workspace").join(&descriptor.project_id))
+                .await?;
+        }
+        return Ok(());
+    }
+    let _disk = crate::native::disk::lock(&crate::native::state_dir()).await?;
+    let _guard = lock().lock().await;
+    let data = crate::nodes::node_data_dir();
+    crate::skills::private_dir(&root.join("project-archives")).await?;
+    for descriptor in descriptors {
+        descriptor.validate()?;
+        let cached_file = cached(&data, descriptor).await?;
+        let verified = if let Some(file) = cached_file {
+            let (hash, bytes) = fingerprint(file).await?;
+            hash == descriptor.hash && bytes == descriptor.bytes
+        } else {
+            false
+        };
+        if !verified {
+            let selection =
+                serde_json::json!({ "projectId": descriptor.project_id, "hash": descriptor.hash });
+            let response = crate::nodes::workspace::fetch(
+                &session.client,
+                &session.master,
+                &session.token,
+                &session.attempt,
+                "archive",
+                &selection,
+            )
+            .await?;
+            download(&data, descriptor, response, budget().await?).await?;
+        }
+        let target = root
+            .join("project-archives")
+            .join(format!("{}.zip", descriptor.project_id));
+        tokio::fs::hard_link(descriptor.path(&data), target).await?;
+        crate::skills::private_dir(&root.join("workspace").join(&descriptor.project_id)).await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn prefetch(
+    client: reqwest::Client,
+    master: url::Url,
+    token: String,
+    descriptors: Vec<Archive>,
+    stop: CancellationToken,
+) -> Result<()> {
+    let root = crate::nodes::node_data_dir();
+    for descriptor in descriptors {
+        // A best-effort warmer never queues behind active filesystem mutation.
+        let state = crate::native::state_dir();
+        let _disk = if crate::native::enabled() {
+            match crate::file_lock::exclusive(&state.join("storage.lock"), "Native storage busy.") {
+                Ok(guard) => Some(guard),
+                Err(error) if error.status == 409 => return Ok(()),
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
+        let Some(_guard) = lock().try_lock().ok() else {
+            return Ok(());
+        };
+        if cached(&root, &descriptor).await?.is_some() {
+            continue;
+        }
+        let fetch = async {
+            let response = client
+                .post(
+                    master
+                        .join(&format!(
+                            "internal/node-workspace/cache/{}",
+                            descriptor.project_id
+                        ))
+                        .map_err(Error::internal)?,
+                )
+                .timeout(std::time::Duration::from_secs(300))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "hash": descriptor.hash }))
+                .send()
+                .await
+                .map_err(|_| Error::unavailable("Project archive preload interrupted."))?;
+            download(&root, &descriptor, response, budget().await?).await?;
+            Ok::<_, Error>(())
+        };
+        tokio::select! {
+            () = stop.cancelled() => return Ok(()),
+            () = foreground_waiter(&state), if crate::native::enabled() => return Ok(()),
+            result = fetch => result?,
+        }
+    }
+    Ok(())
+}
+
+/// OS locks make the foreground priority visible to the controller process as
+/// well as the connector. Cancellation releases both the partial file and the
+/// exclusive mutation lock; no partially downloaded archive becomes visible.
+async fn foreground_waiter(state: &Path) {
+    loop {
+        match crate::file_lock::exclusive(
+            &state.join("storage-foreground.lock"),
+            "Foreground storage operation waiting.",
+        ) {
+            Ok(probe) => drop(probe),
+            Err(_) => return,
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn foreground_storage_preempts_a_stalled_background_transfer() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().to_owned();
+        let storage = crate::file_lock::exclusive(&state.join("storage.lock"), "busy").unwrap();
+        let background = tokio::spawn({
+            let state = state.clone();
+            async move {
+                let _storage = storage;
+                tokio::select! {
+                    () = foreground_waiter(&state) => {},
+                    () = std::future::pending::<()>() => {},
+                }
+            }
+        });
+        // This is the real foreground lock, not a process-local notification.
+        let foreground = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            crate::native::disk::lock(&state),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        background.await.unwrap();
+        drop(foreground);
+    }
+
+    #[tokio::test]
+    async fn interrupted_and_corrupt_downloads_never_publish_cache_objects() {
+        use axum::{Router, body::Body, routing::post};
+        let root = tempfile::tempdir().unwrap();
+        let bytes = b"expected contents";
+        let archive = Archive {
+            project_id: crate::config::id(),
+            key: "b".repeat(64),
+            revision: "a".repeat(40),
+            hash: blake3::hash(bytes).to_hex().to_string(),
+            bytes: bytes.len() as u64,
+            logical_bytes: 100,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/truncated", post(|| async { Body::from("expected") }))
+            .route(
+                "/corrupt",
+                post(|| async { Body::from("modified contents") }),
+            )
+            .route("/valid", post(|| async { Body::from("expected contents") }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        for path in ["truncated", "corrupt", "valid"] {
+            let response = reqwest::Client::new()
+                .post(format!("{url}/{path}"))
+                .send()
+                .await
+                .unwrap();
+            let result = download(root.path(), &archive, response, CACHE_BYTES).await;
+            assert_eq!(result.is_ok(), path == "valid");
+            assert_eq!(archive.path(root.path()).exists(), path == "valid");
+        }
+        server.abort();
+    }
+}

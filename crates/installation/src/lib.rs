@@ -44,6 +44,7 @@ pub mod outcome;
 pub mod performance;
 pub mod plugins;
 pub mod process;
+pub(crate) mod project_archives;
 pub mod project_git;
 pub mod project_workspaces;
 pub mod provider;

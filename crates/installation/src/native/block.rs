@@ -481,7 +481,16 @@ pub async fn initialize(state: &Path, run: &str, plan: &Value, budget: u64) -> R
                 .imports()
                 .find(|import| import.target == text(plan, "projectRoot"))
                 .ok_or_else(|| Error::bad("Missing native workspace seed."))?;
-            workspace::copy(source.source, &staged.join("workspaces"), budget).await?;
+            if !crate::project_archives::initialize(
+                plan,
+                source.source,
+                &staged.join("workspaces"),
+                budget,
+            )
+            .await?
+            {
+                workspace::copy(source.source, &staged.join("workspaces"), budget).await?;
+            }
         }
         for name in ["home", "workspaces", "output"] {
             let target = data.join(name);
@@ -504,6 +513,22 @@ pub async fn initialize(state: &Path, run: &str, plan: &Value, budget: u64) -> R
     let runtime = tokio::fs::read(environment::directory(state, run)?.join("runtime.json")).await?;
     atomic_write(&root.join("runtime.json"), &runtime).await?;
     tokio::fs::remove_file(root.join("block-seeding")).await?;
+    // Pins protect an archive only until the private disk is durably complete.
+    // Retaining them for every conversation would prevent cache reclamation.
+    if plan["nativeProjectArchives"].is_array() {
+        let seed = crate::microvm::plan::Plan::new(plan.clone());
+        if let Some(source) = seed
+            .imports()
+            .find(|import| import.target == text(plan, "projectRoot"))
+            && let Some(parent) = source.source.parent()
+        {
+            match tokio::fs::remove_dir_all(parent.join("project-archives")).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
     Ok(())
 }
 

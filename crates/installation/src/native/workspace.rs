@@ -621,6 +621,22 @@ pub async fn bytes(root: &Path) -> Result<u64> {
 /// Descriptor-relative traversal is shared by synchronous block admission and
 /// asynchronous status sampling. It never follows workload links or opens FIFOs.
 pub(crate) fn measure(root: &Path, physical: bool) -> Result<u64> {
+    measure_with_seen(root, physical, None)
+}
+
+pub(crate) fn measure_unique(
+    root: &Path,
+    physical: bool,
+    seen: &mut std::collections::HashSet<(u64, u64)>,
+) -> Result<u64> {
+    measure_with_seen(root, physical, Some(seen))
+}
+
+fn measure_with_seen(
+    root: &Path,
+    physical: bool,
+    mut seen: Option<&mut std::collections::HashSet<(u64, u64)>>,
+) -> Result<u64> {
     use std::{
         ffi::CString,
         os::{
@@ -669,6 +685,12 @@ pub(crate) fn measure(root: &Path, physical: bool) -> Result<u64> {
             stack.push((file, entries));
         } else if metadata.is_file() {
             use std::os::unix::fs::MetadataExt;
+            if seen
+                .as_mut()
+                .is_some_and(|seen| !seen.insert((metadata.dev(), metadata.ino())))
+            {
+                continue;
+            }
             let size = if physical {
                 metadata.blocks().saturating_mul(512)
             } else {

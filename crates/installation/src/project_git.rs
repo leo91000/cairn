@@ -100,6 +100,42 @@ fn remote(raw: &str, credentials: &[GitAccess]) -> Result<String> {
     Ok(raw.to_owned())
 }
 
+pub async fn revision(source: &Path, config: &Config) -> Result<String> {
+    git(config, &[], &["-C", path(source)?, "rev-parse", "HEAD"]).await
+}
+
+pub(crate) async fn remote_revision(
+    source: &Path,
+    project: &Value,
+    config: &Config,
+    credentials: &[GitAccess],
+) -> Result<Option<String>> {
+    let origin = git(
+        config,
+        &[],
+        &["-C", path(source)?, "config", "--get", "remote.origin.url"],
+    )
+    .await
+    .ok();
+    let Some(origin) = origin.filter(|origin| !origin.is_empty()) else {
+        return Ok(None);
+    };
+    let remote = remote(&origin, credentials)?;
+    let branch = format!("refs/heads/{}", text(project, "baseBranch"));
+    git(config, credentials, &["check-ref-format", &branch]).await?;
+    let result = git(
+        config,
+        credentials,
+        &["ls-remote", "--exit-code", "--", &remote, &branch],
+    )
+    .await?;
+    let revision = result
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| Error::bad("Project branch is missing."))?;
+    Ok(Some(revision.to_owned()))
+}
+
 pub async fn clone(
     source: &Path,
     target: &Path,

@@ -235,14 +235,46 @@ async fn stage_plan(session: &Session, data: &Path, descriptor: Value) -> Result
         }
     }
     let root = data.join("runs").join(text(&plan, "runId"));
-    let seed_workspace = crate::native::enabled() || plan["resumeWorkspace"] != true;
+    let archive_controller =
+        if crate::native::enabled() && descriptor.get("projectArchives").is_some() {
+            let health = super::local_client()?
+                .get("http://localhost/health")
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await;
+            match health {
+                Ok(response) if response.status().is_success() => response
+                    .json::<Value>()
+                    .await
+                    .ok()
+                    .is_some_and(|health| health["projectArchives"] == 1),
+                _ => false,
+            }
+        } else {
+            false
+        };
+    let archives: Option<Vec<crate::project_archives::Archive>> = if archive_controller {
+        descriptor
+            .get("projectArchives")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()?
+    } else {
+        None
+    };
+    let seed_workspace =
+        (crate::native::enabled() || plan["resumeWorkspace"] != true) && archives.is_none();
     session
         .seed(
-            json!({ "kind": "initial", "workspace": seed_workspace }),
+            json!({ "kind": "initial", "workspace": seed_workspace, "projectArchives": archives.is_some() }),
             &root,
         )
         .await?;
     plan["workspaceSeeded"] = seed_workspace.into();
+    if let Some(archives) = archives {
+        crate::project_archives::stage(session, &root, &archives).await?;
+        plan["nativeProjectArchives"] = serde_json::to_value(archives)?;
+    }
     if !seed_workspace {
         resume_import_directories(&plan, &root).await?;
     }

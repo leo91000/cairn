@@ -159,7 +159,11 @@ pub(super) async fn prepare_project(
         WorkspaceKind::Copy
     } else if is_isolated || project["sourceMode"] != "local" {
         let access = credentials.fetch_for(project);
-        crate::project_git::clone(&source, &target, project, config, access).await?;
+        let cached = is_isolated
+            && crate::project_archives::checkout(&source, &target, project, config, access).await?;
+        if !cached {
+            crate::project_git::clone(&source, &target, project, config, access).await?;
+        }
         WorkspaceKind::Clone
     } else {
         if target == root {

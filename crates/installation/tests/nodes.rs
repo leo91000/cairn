@@ -1262,6 +1262,128 @@ async fn workspace_seed_omits_projects_only_for_an_explicit_vm_resume() {
 }
 
 #[tokio::test]
+async fn native_project_archive_handshake_skips_the_tree_and_rechecks_cache_grants() {
+    let owner = Owner::new().await;
+    let (node, token, person, project, run, attempt) =
+        (id(), auth::token(), id(), id(), id(), id());
+    owner.register_node(&node, &token).await;
+    owner
+        .put(
+            "nodes",
+            json!({
+                "id": node, "revoked": false, "accepting": true,
+                "capabilities": { "backend": "native" }, "nativeEnabled": true,
+                "nativeAccounts": [person],
+            }),
+        )
+        .await;
+    owner
+        .service
+        .store
+        .set(
+            "native-authority",
+            json!({ "observedAt": now(), "accounts": { person.clone(): {} } }),
+            None,
+        )
+        .await
+        .unwrap();
+    owner.put("agents", json!({
+        "id": MAIN_AGENT_ID, "access": { "backend": "native", "nodes": [node], "projects": [project] },
+    })).await;
+    let root = owner.service.config.data_dir.join("runs").join(&run);
+    let project_path = root.join("workspace").join(&project);
+    std::fs::create_dir_all(&project_path).unwrap();
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    std::fs::write(project_path.join("file"), "project seed").unwrap();
+    std::fs::write(root.join("home/config"), "fresh configuration").unwrap();
+    let project_record = json!({ "id": project, "path": project_path, "sourceMode": "remote", "baseBranch": "main" });
+    owner.put("projects", project_record.clone()).await;
+    let mut record = run_record(&run, RunStatus::Running);
+    record["snapshot"] = json!({ "agent": { "id": MAIN_AGENT_ID, "access": { "backend": "native" } }, "projects": [project_record] });
+    record["workspaces"] =
+        json!([{ "projectId": project, "revision": "a".repeat(40), "path": project_path }]);
+    record["nativePrincipals"] = json!([person]);
+    record["nativeAuthorityNodes"] = json!([node]);
+    record["nativeProvenanceUnknown"] = false.into();
+    owner.add_run(&record).await;
+    owner
+        .put(
+            "node-attempts",
+            json!({ "id": attempt, "runId": run, "nodeId": node, "released": false }),
+        )
+        .await;
+    owner
+        .set_checkpoint(&run, json!({ "nodeId": node, "runnerId": attempt }))
+        .await;
+    let plans = owner.service.config.data_dir.join("runner-plans");
+    std::fs::create_dir_all(&plans).unwrap();
+    std::fs::write(
+        plans.join(format!("{attempt}.json")),
+        json!({
+            "id": attempt, "runId": run, "backend": "native", "projectRoot": root.join("workspace"),
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let (status, plan) = owner
+        .call(
+            "POST",
+            &format!("/internal/node-workspace/{attempt}/plan"),
+            json!({}),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{plan}");
+    let archive = &plan["projectArchives"][0];
+    assert_eq!(archive["projectId"], project);
+    for (kind, path) in [
+        ("seed", format!("/internal/node-workspace/{attempt}/seed")),
+        (
+            "archive",
+            format!("/internal/node-workspace/cache/{project}"),
+        ),
+    ] {
+        let body = if kind == "seed" {
+            json!({ "kind": "initial", "workspace": false, "projectArchives": true })
+        } else {
+            json!({ "hash": archive["hash"] })
+        };
+        let request = owner
+            .request("POST", &path)
+            .header("authorization", bearer(&token))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = common::send(&owner.app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        if kind == "seed" {
+            let destination = TempDir::new().unwrap();
+            files::receive(&mut bytes.as_ref(), destination.path(), 1_000_000)
+                .await
+                .unwrap();
+            assert!(!destination.path().join("workspace").exists());
+            assert!(destination.path().join("home/config").exists());
+        } else {
+            assert_eq!(
+                blake3::hash(&bytes).to_hex().as_str(),
+                archive["hash"].as_str().unwrap()
+            );
+        }
+    }
+    owner.grant_nodes(MAIN_AGENT_ID, json!([])).await;
+    let (status, _) = owner
+        .call(
+            "POST",
+            &format!("/internal/node-workspace/cache/{project}"),
+            json!({ "hash": archive["hash"] }),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn node_preparations_isolate_conversations_and_coalesce_duplicate_attempts() {
     let owner = Owner::new().await;
     let identity = owner
