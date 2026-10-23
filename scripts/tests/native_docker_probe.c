@@ -31,7 +31,7 @@ int main(int argc, char **argv) {
         require((info.st_mode & 07777) == 06750);
         uint32_t capability[6] = {0};
         ssize_t size = getxattr("capability", "security.capability", capability, sizeof(capability));
-        require(size >= 20 && capability[1] == (1 << 10));
+        require(size == 20 && capability[1] == (1 << 10));
         puts("metadata-preserved");
     } else if (!strcmp(argv[1], "oom")) {
         sleep(10); /* Let the disposable harness record readiness first. */

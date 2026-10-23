@@ -25,6 +25,15 @@ def release(**changes):
 
 
 class NativeHostTests(unittest.TestCase):
+    def test_disabled_user_namespaces_fail_without_changing_global_restrictions(self):
+        with patch.object(host.subprocess, 'run', return_value=Mock(stdout='systemd 255')), \
+                patch.object(host.Path, 'exists', return_value=True), \
+                patch.object(host.Path, 'read_text', return_value='0'), \
+                patch.object(host.Path, 'write_text') as write, \
+                self.assertRaisesRegex(ValueError, 'enabled unprivileged user namespaces'):
+            host.require_docker_host()
+        write.assert_not_called()
+
     def test_rootless_mapping_fails_before_enrollment_on_implicit_nnp_systemd(self):
         with patch.object(host.subprocess, 'run', return_value=Mock(stdout='systemd 252')), \
                 self.assertRaisesRegex(ValueError, 'systemd 255'):

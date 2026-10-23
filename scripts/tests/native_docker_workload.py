@@ -107,7 +107,7 @@ def main():
     command('docker', 'context', 'ls')
     command('docker', 'run', '--help')
     assert not Path('/run/cairn-docker/daemon.started').exists(), 'Client-only command launched the daemon.'
-    timed('firstDaemonMs', '/run/cairn-entrypoint/cairn', 'native-docker')
+    timed('firstDaemonMs', 'docker', 'info')
     info = json.loads(command('docker', 'info', '--format', '{{json .}}'))
     assert 'name=rootless' in info['SecurityOptions'], info['SecurityOptions']
     metrics['cgroupDriver'] = info['CgroupDriver']
@@ -155,6 +155,8 @@ def main():
         dockerfile = context / 'Dockerfile'
         dockerfile.write_text('FROM ' + ALPINE + '\nRUN head -c 64 /dev/urandom > /cache-token\n')
         timed('buildMs', 'docker', 'buildx', 'build', '--load', '--progress=plain', '-t', 'cairn-cache', str(context))
+        command('docker', 'tag', 'cairn-cache', 'cairn.local/fixture/cache:dev')
+        command('docker', 'image', 'inspect', 'cairn.local/fixture/cache:dev')
         cached = command('docker', 'run', '--rm', 'cairn-cache', 'sha256sum', '/cache-token')
         if phase == 'fresh':
             (Path.home() / '.docker-cache-token').write_text(cached)

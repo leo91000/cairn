@@ -253,6 +253,12 @@ impl Policy {
             path = &path[version.len() + 2..];
             let _ = rest;
         }
+        // Docker escapes registry/repository separators inside image references.
+        // Keep all management routes strict, including encoded container paths.
+        let image_path = path.replace("%2F", "/").replace("%2f", "/");
+        if path.starts_with("/images/") || path.starts_with("/distribution/") {
+            path = &image_path;
+        }
         if path.contains('%') || path.contains("..") || path.contains("//") {
             return Err(Error::forbidden("Invalid Docker API path."));
         }
@@ -737,6 +743,14 @@ mod tests {
                     .is_err()
             );
         }
+        assert!(
+            policy()
+                .authorize(&json!({
+                    "RequestUri": "/v1.55/images/ghcr.io%2Fexample%2Fapp:dev/json",
+                    "RequestMethod": "GET",
+                }))
+                .is_ok()
+        );
         assert!(
             policy()
                 .authorize(&json!({"RequestUri":"/v1.55/info","RequestMethod":"GET"}))
