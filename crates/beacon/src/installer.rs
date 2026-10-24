@@ -23,7 +23,40 @@ pub fn router(origin: String) -> Router {
                 "../../../deploy/nodes/host.py"
             ))),
         );
+    // Nodes added without a manager address install this gateway first.
+    let node_script = include_str!("../../../deploy/nodes/bootstrap.sh")
+        .replace("__CAIRN_BEACON_ORIGIN__", &shell_quote(&origin))
+        .replace(
+            "__CAIRN_GATEWAY_SHA256__",
+            &hex::encode(Sha256::digest(include_bytes!(
+                "../../../deploy/nodes/gateway.py"
+            ))),
+        );
     Router::new()
+        .route(
+            "/install/node.sh",
+            get(move || async move {
+                (
+                    [
+                        (header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8"),
+                        (header::CACHE_CONTROL, "no-store"),
+                    ],
+                    node_script,
+                )
+            }),
+        )
+        .route(
+            "/install/node-gateway.py",
+            get(|| async {
+                (
+                    [
+                        (header::CONTENT_TYPE, "text/x-python; charset=utf-8"),
+                        (header::CACHE_CONTROL, "no-store"),
+                    ],
+                    include_str!("../../../deploy/nodes/gateway.py"),
+                )
+            }),
+        )
         .route(
             "/install.sh",
             get(move || async move {

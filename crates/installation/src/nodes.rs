@@ -810,9 +810,20 @@ pub(crate) async fn invite(
         return Err(Error::bad("Unknown execution backend."));
     }
     let backend = request.backend;
-    let origin = match request.manager_url {
+    let direct = match request.manager_url {
         Some(value) => Some(connector::master(value.trim())?),
-        None => connector::master(&s.config.public_url).ok(),
+        None => None,
+    };
+    // Without an address, a claimed installation is reached through Beacon:
+    // no address, certificate or incoming port on the manager.
+    let beacon = match direct {
+        Some(_) => None,
+        None => crate::relay::node_channel_route(&s.config.data_dir).await?,
+    };
+    let origin = match (direct, &beacon) {
+        (Some(direct), _) => Some(direct),
+        (None, None) => connector::master(&s.config.public_url).ok(),
+        (None, Some(_)) => None,
     };
     let manager_url = origin
         .as_ref()
@@ -828,10 +839,17 @@ pub(crate) async fn invite(
             db.set(&key, &invitation, Some(expires))
         })
         .await?;
-    let install = (backend == "native" || maintenance::release().is_ok())
-        .then_some(origin)
-        .flatten()
-        .map(|origin| {
+    let installable = backend == "native" || maintenance::release().is_ok();
+    let route = if beacon.is_some() { "beacon" } else { "direct" };
+    let install = match (installable, beacon, origin) {
+        (false, _, _) => None,
+        (true, Some((beacon, installation)), _) => {
+            let script = format!("{beacon}/install/node.sh").replace('\'', "'\\''");
+            Some(format!(
+                "curl --fail --silent --show-error '{script}' | sudo bash -s -- '{installation}' {backend}"
+            ))
+        }
+        (true, None, Some(origin)) => {
             let mut script = origin.clone();
             script.set_path(if backend == "native" {
                 "/internal/nodes/native-install.sh"
@@ -840,11 +858,16 @@ pub(crate) async fn invite(
             });
             let quoted = script.as_str().replace('\'', "'\\''");
             let manager = origin.as_str().trim_end_matches('/').replace('\'', "'\\''");
-            format!("curl --fail --silent --show-error '{quoted}' | sudo bash -s -- '{manager}'")
-        });
+            Some(format!(
+                "curl --fail --silent --show-error '{quoted}' | sudo bash -s -- '{manager}'"
+            ))
+        }
+        (true, None, None) => None,
+    };
     Ok(json!({
         "code": code,
         "expiresAt": expires,
+        "route": route,
         "managerUrl": manager_url,
         "installCommand": install,
         "backend": backend,
@@ -1507,6 +1530,18 @@ pub async fn daemon(
         }
     });
     let directory = directory.to_owned();
+    // Bound before the connector starts, so its first request finds the gateway.
+    if let Some(socket) = std::env::var_os("CAIRN_NODE_GATEWAY_SOCKET")
+        && let Some(listener) = connector::bind_gateway(&directory).await?
+    {
+        let gateway_stop = stop.child_token();
+        let socket = std::path::PathBuf::from(socket);
+        tokio::spawn(async move {
+            if let Err(error) = connector::serve_gateway(listener, socket, gateway_stop).await {
+                tracing::warn!(%error, "Node gateway bridge stopped");
+            }
+        });
+    }
     let connector_stop = stop.child_token();
     let mut connector =
         tokio::spawn(async move { connector::connect(&directory, connector_stop).await });

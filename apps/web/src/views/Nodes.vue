@@ -31,15 +31,17 @@ import {
 const nodes = ref<ExecutionNode[]>([])
 const nativeCallers = ref<Array<{ id: string, email: string }>>([])
 const enrollmentBackend = ref<'firecracker' | 'native'>('firecracker')
+
 // Stops before deleting while a conversation disk is mounted and keeps the unit until the rest is gone, so it can be rerun.
-const nativeUninstallCommand = `sudo sh -c 'if [ -e /etc/systemd/system/cairn-native-node.service ]; then systemctl disable --now cairn-native-node || exit; fi; mounts=$(findmnt -rno TARGET) || { echo "findmnt could not list mounts." >&2; exit 1; }; printf "%s\\n" "$mounts" | grep ^/var/lib/cairn-native/; match=$?; if [ "$match" -ne 1 ]; then echo "Mount safety could not be confirmed. Run sudo systemctl start cairn-native-node to release owned conversation disks, then retry." >&2; exit 1; fi; cairn_policy() { grep -Fqx "# Cairn native administrator; protected units retain NoNewPrivileges." "$1" || return $?; grep -Fqx "cairn-workload ALL=(ALL:ALL) NOPASSWD: ALL" "$1"; }; for policy in /etc/sudoers.d/cairn-native-*; do [ -e "$policy" ] || [ -L "$policy" ] || continue; case "$policy" in */cairn-native-*[!0-9]*|*/cairn-native-) continue ;; esac; if [ -L "$policy" ] || [ ! -f "$policy" ]; then echo "Unrecognized native sudo policy: host-owner review required." >&2; exit 1; fi; if cairn_policy "$policy"; then rm -f -- "$policy" || exit; else policy_status=$?; [ "$policy_status" -eq 1 ] || exit "$policy_status"; fi; done; rm -rf /opt/cairn-native /var/lib/cairn-native && { userdel cairn-workload || ! id cairn-workload >/dev/null 2>&1; } && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload'`
+// Both runtimes share the gateway to Cairn; the last one on the machine removes it.
+const nativeUninstallCommand = `sudo sh -c 'if [ -e /etc/systemd/system/cairn-native-node.service ]; then systemctl disable --now cairn-native-node || exit; fi; mounts=$(findmnt -rno TARGET) || { echo "findmnt could not list mounts." >&2; exit 1; }; printf "%s\\n" "$mounts" | grep ^/var/lib/cairn-native/; match=$?; if [ "$match" -ne 1 ]; then echo "Mount safety could not be confirmed. Run sudo systemctl start cairn-native-node to release owned conversation disks, then retry." >&2; exit 1; fi; cairn_policy() { grep -Fqx "# Cairn native administrator; protected units retain NoNewPrivileges." "$1" || return $?; grep -Fqx "cairn-workload ALL=(ALL:ALL) NOPASSWD: ALL" "$1"; }; for policy in /etc/sudoers.d/cairn-native-*; do [ -e "$policy" ] || [ -L "$policy" ] || continue; case "$policy" in */cairn-native-*[!0-9]*|*/cairn-native-) continue ;; esac; if [ -L "$policy" ] || [ ! -f "$policy" ]; then echo "Unrecognized native sudo policy: host-owner review required." >&2; exit 1; fi; if cairn_policy "$policy"; then rm -f -- "$policy" || exit; else policy_status=$?; [ "$policy_status" -eq 1 ] || exit "$policy_status"; fi; done; rm -rf /opt/cairn-native /var/lib/cairn-native && { userdel cairn-workload || ! id cairn-workload >/dev/null 2>&1; } && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload && { if [ ! -e /var/lib/cairn-node ]; then systemctl disable --now cairn-node-gateway 2>/dev/null; rm -rf /etc/systemd/system/cairn-node-gateway.service /opt/cairn-gateway /var/lib/cairn-gateway; systemctl daemon-reload; fi; }'`
 // The node a guided backend switch replaces, while the new runtime's enrollment is pending.
 const replacing = ref<ExecutionNode | null>(null)
 // Once the replacement connects and its setup steps end, retiring the previous node is offered.
 let replacement: { previous: string, next: string } | null = null
 const retiring = ref<{ previous: ExecutionNode, next: ExecutionNode } | null>(null)
 const uninstallCommands = {
-  firecracker: 'sudo systemctl disable --now cairn-node; sudo docker rm -f cairn-execution-node; sudo rm -rf /etc/systemd/system/cairn-node.service /opt/cairn-node /var/lib/cairn-node',
+  firecracker: `sudo systemctl disable --now cairn-node; sudo docker rm -f cairn-execution-node; sudo rm -rf /etc/systemd/system/cairn-node.service /opt/cairn-node /var/lib/cairn-node; sudo sh -c 'if [ ! -e /var/lib/cairn-native ]; then systemctl disable --now cairn-node-gateway 2>/dev/null; rm -rf /etc/systemd/system/cairn-node-gateway.service /opt/cairn-gateway /var/lib/cairn-gateway; systemctl daemon-reload; fi'`,
   native: nativeUninstallCommand,
 }
 const backendNames = { firecracker: 'Firecracker VM', native: 'native process' }
@@ -150,7 +152,8 @@ function enroll() {
     knownBeforeEnrollment = new Set(nodes.value.map(node => node.id))
     enrollment.value = await api<NodeEnrollment>('/nodes/enrollments', {
       method: 'POST',
-      body: JSON.stringify({ name: name.value, managerUrl: managerUrl.value.trim(), backend: enrollmentBackend.value }),
+      // Without an address, the machine reaches the manager through Cairn.
+      body: JSON.stringify({ name: name.value, managerUrl: managerUrl.value.trim() || undefined, backend: enrollmentBackend.value }),
     })
   })
 }
@@ -385,7 +388,7 @@ function statusLabel(node: ExecutionNode) {
           Connect a trusted Linux machine, then choose its execution backend and authorized agents.
         </p>
         <p class="text-sm text-muted">
-          The node must reach the manager directly over your local network, VPN or an optional public URL. It does not use the relay. Disk blocks never pass through the relay.
+          The machine connects out through Cairn: no manager address, certificate or open port is needed. Its traffic with the manager, including conversation disks, passes through Cairn’s servers without being stored.
         </p>
         <UiAlert v-if="error">
           {{ error }}
@@ -409,16 +412,20 @@ function statusLabel(node: ExecutionNode) {
             maxlength="100"
             required
           ></label>
-          <label>Direct manager address<input
-            v-model="managerUrl"
-            type="url"
-            placeholder="https://manager.vpn.example:4310"
-            aria-describedby="node-manager-address-help"
-            required
-          ></label>
-          <p id="node-manager-address-help" class="text-sm text-muted">
-            Use HTTPS with a certificate trusted by the node. HTTP is allowed only on loopback for local tests. This is the manager’s address, not the beacon app’s address.
-          </p>
+          <details class="text-sm" :open="managerUrl !== ''">
+            <summary class="cursor-pointer text-muted">
+              Connect directly instead
+            </summary>
+            <label class="mt-2 block">Direct manager address<input
+              v-model="managerUrl"
+              type="url"
+              placeholder="https://manager.vpn.example:4310"
+              aria-describedby="node-manager-address-help"
+            ></label>
+            <p id="node-manager-address-help" class="mt-1 text-muted">
+              Optional. A LAN or VPN address keeps node traffic off Cairn’s servers. Use HTTPS with a certificate trusted by the node; HTTP is allowed only on loopback for local tests. This is the manager’s address, not the beacon app’s address.
+            </p>
+          </details>
           <UiButton type="submit" :disabled="busy">
             Create enrollment code
           </UiButton>
@@ -431,9 +438,11 @@ function statusLabel(node: ExecutionNode) {
           </template>
           <template v-else>
             <p>Assisted installation is unavailable: the manager has no pinned node image. Set <code>CAIRN_NODE_IMAGE</code> on the manager to the deployed image with its digest (<code>image@sha256:…</code>) and create a new code.</p>
-            <p>Meanwhile, on a machine with the matching <code>cairn</code> binary, run:</p>
-            <code v-if="enrollmentCommand" class="block break-all select-all" aria-label="Node enrollment command">{{ enrollmentCommand }}</code>
-            <p>Paste this single-use code, press Enter, then Ctrl+D to finish standard input. It expires {{ new Date(enrollment.expiresAt).toLocaleString() }}:</p>
+            <template v-if="enrollmentCommand">
+              <p>Meanwhile, on a machine with the matching <code>cairn</code> binary, run:</p>
+              <code class="block break-all select-all" aria-label="Node enrollment command">{{ enrollmentCommand }}</code>
+              <p>Paste this single-use code, press Enter, then Ctrl+D to finish standard input. It expires {{ new Date(enrollment.expiresAt).toLocaleString() }}:</p>
+            </template>
           </template>
           <code class="block break-all select-all" aria-label="Single-use enrollment code">{{ enrollment.code }}</code>
           <UiAlert v-if="replacing && !enrollment.nodeId">

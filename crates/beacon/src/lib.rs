@@ -388,7 +388,15 @@ pub async fn router_with_installation_hosts(
                     "/api/relay/device-claim/poll",
                     post(installations::poll_device),
                 )
-                .route("/api/relay/{installation}/connect", get(relay::upgrade)),
+                .route("/api/relay/{installation}/connect", get(relay::upgrade))
+                .route(
+                    "/api/relay/{installation}/nodes/connect",
+                    get(relay::nodes::connect),
+                )
+                .route(
+                    "/api/relay/{installation}/nodes/{channel}/accept",
+                    get(relay::nodes::accept),
+                ),
         )
         .with_state(service)
         .merge(installer)
