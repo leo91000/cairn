@@ -133,6 +133,25 @@ describe('application image tool versions', () => {
     expect(jobs.publish.needs).toContain('backend')
   })
 
+  it('holds an engine at an exact version given as its channel', async () => {
+    const channel = engines.opencode.channel
+    engines.opencode.channel = '1.19.3'
+    try {
+      expect((await buildVersions({ request: fixture({ 'https://registry.npmjs.org/opencode-ai/1.19.3': { version: '1.19.3' } }) })).opencode).toBe('1.19.3')
+    }
+    finally {
+      engines.opencode.channel = channel
+    }
+  })
+
+  it('deploys a release only after its rollback checks read the served release', () => {
+    const jobs = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8')).jobs
+    const [guard] = jobs.deploy.steps
+    expect(guard.env.SERVED_FOUND).toBe(`\${{ needs.resolve.outputs.served-found }}`)
+    expect(guard.run).toContain('test "$SERVED_FOUND" != true')
+    expect(guard.run).toContain('exit 1')
+  })
+
   it('authenticates only GitHub discovery and keeps npm requests public', async () => {
     const requests = []
     const request = fixture()

@@ -84,7 +84,7 @@ Images built before an engine was resolved record no version; they shipped its
 1.19.0). When production or the registry cannot be read, no version is guessed:
 the rollback checks are skipped with a warning, and the evidence records
 `served: null`. Such evidence is never reused, so main or the release validates
-again. The served release runs through the candidate's adapter, while a real
+again, and a release cannot deploy until a run has read the served release. The served release runs through the candidate's adapter, while a real
 rollback runs its own image's adapter. When an adapter change needs a newer
 engine release, set that engine's `minimum`: an older served release is then
 skipped, with a warning. Main and tags reuse evidence only when its served
@@ -105,8 +105,10 @@ Direct Docker builds must pass these build arguments too; see
 
 A new channel release ships through the normal validated build and its automated
 checks above. A release that fails them blocks validation. There is no hold or
-override setting: the remedy is a reviewed change that adapts the adapter or makes
-`scripts/cli-updates.mjs` select a working release for that engine. Claude Code
+override setting: the remedy is a reviewed change that adapts the adapter, or that
+sets the engine's `channel` in `scripts/cli-updates.mjs` to the last working
+version until it does. npm serves an exact version at the same URL as a dist-tag,
+so the same validation applies. Claude Code
 behavior those checks cannot reach without a subscription relies on Anthropic's
 stable channel between qualifications: the `auth login --claudeai` flow, quota
 values from `get_usage`, the OAuth client and token endpoint, and subscription

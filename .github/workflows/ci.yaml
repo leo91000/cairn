@@ -1040,6 +1040,14 @@ jobs:
       group: coolify-production
       cancel-in-progress: false
     steps:
+      - name: Require rollback checks against the served release
+        env:
+          SERVED_FOUND: ${{ needs.resolve.outputs.served-found }}
+        run: |
+          if test "$SERVED_FOUND" != true; then
+            echo "::error title=Served release::The served release could not be read, so this release's rollback checks did not run. Re-run the release once production and its registry are reachable."
+            exit 1
+          fi
       - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
