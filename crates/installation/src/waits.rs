@@ -51,6 +51,24 @@ fn run_finished() -> Value {
     })
 }
 
+fn task_finished() -> Value {
+    json!({
+        "type": "object",
+        "description": "Resume when a task this conversation delegated with delegate_task finishes.",
+        "properties": {
+            "type": { "const": "task_finished" },
+            "chatId": { "type": "string", "format": "uuid" },
+        },
+        "required": ["type", "chatId"],
+        "additionalProperties": false,
+    })
+}
+
+/// Cairn's own external conditions: a run or a delegated task finishing.
+fn native(condition: &Value) -> bool {
+    matches!(text(condition, "type"), "run_finished" | "task_finished")
+}
+
 fn delay() -> Value {
     json!({
         "type": "object",
@@ -89,14 +107,19 @@ fn date_millis(condition: &Value) -> Result<i64> {
     Ok(date.timestamp_millis() + extra_millisecond)
 }
 
-/// The single wait tool: native time/run conditions and conditions of granted plugins.
-pub fn tool(plugin_conditions: &[Value]) -> Value {
+/// The single wait tool: native time/run conditions and conditions of granted plugins. Only a
+/// conversation that may delegate is offered the delegated-task condition.
+pub fn tool(plugin_conditions: &[Value], delegates: bool) -> Value {
     let mut conditions = vec![delay(), at(), run_finished()];
+    if delegates {
+        conditions.push(task_finished());
+    }
     conditions.extend(plugin_conditions.iter().cloned());
     json!({
         "name": "wait_for",
         "description": "Wait durably for a duration (delay), a date (at), an authorized Cairn run \
-            to finish, or a condition provided by a plugin granted to this agent. List one condition, \
+            to finish, a task this conversation delegated to finish (task_finished), or a condition \
+            provided by a plugin granted to this agent. List one condition, \
             or several external ones with mode all (every result) or any (the first result). \
             Time conditions are used alone and take no timeoutSeconds; external conditions require \
             it (1 to 86400 seconds), as the deadline of the whole group. \
@@ -107,7 +130,8 @@ pub fn tool(plugin_conditions: &[Value]) -> Value {
             A time reached is completed, not timed_out. External completion includes failure and \
             cancellation; a group result lists each condition with its result, or null when it has none yet. \
             Inspect the results before acting. Never use this for local background \
-            processes that need this execution. Run dependencies require installation access; plugin \
+            processes that need this execution. Run dependencies require installation access; delegated \
+            tasks require delegation; plugin \
             conditions use the agent's plugin grants. One wait is stored per conversation or mission run. Identical \
             repeated requests preserve the deadline; a different request replaces the previous wait. \
             Queued follow-ups start after the continuation. A new user message, stop, deletion, \
@@ -265,12 +289,17 @@ async fn external(s: &Service, agent_id: &str, condition: &Value) -> Result<Valu
     if let Some(condition) = conditions::normalize(s, agent_id, condition).await? {
         return Ok(condition);
     }
-    if !jsonschema::is_valid(&run_finished(), condition) {
+    let (schema, key) = if condition["type"] == "task_finished" {
+        (task_finished(), "chatId")
+    } else {
+        (run_finished(), "runId")
+    };
+    if !jsonschema::is_valid(&schema, condition) {
         return Err(Error::bad(
             "Provide supported conditions and a concrete reason. Time conditions take no timeoutSeconds; external conditions require 1 to 86400 seconds.",
         ));
     }
-    uuid(text(condition, "runId"))?;
+    uuid(text(condition, key))?;
     Ok(condition.clone())
 }
 
@@ -361,13 +390,27 @@ fn registering(db: &Db<'_>, bearer: &str, input: &Value) -> Result<(Value, Owner
         crate::installation_mcp::authorize_in(db, bearer)?;
     }
     let mut pending = Vec::new();
-    for condition in dependencies {
-        if run_result(db, condition)?.is_none() {
-            pending.push(text(condition, "runId").to_owned());
+    for condition in members(&input["condition"]) {
+        if native(condition)
+            && native_result(db, condition)?.is_none()
+            && let Some(target) = dependency(db, condition)?
+        {
+            pending.push(target);
         }
     }
     check_dependencies(db, text(&run, "id"), pending)?;
     Ok((run, owner))
+}
+
+/// The run a native condition waits on; a delegated task has none before its first turn.
+fn dependency(db: &Db<'_>, condition: &Value) -> Result<Option<String>> {
+    match text(condition, "type") {
+        "run_finished" => Ok(Some(text(condition, "runId").to_owned())),
+        "task_finished" => Ok(db
+            .get("chats", text(condition, "chatId"))?
+            .and_then(|chat| chat["runId"].as_str().map(str::to_owned))),
+        _ => Ok(None),
+    }
 }
 
 /// Runs reachable through pending run dependencies, grouped ones included, must never lead
@@ -392,8 +435,8 @@ fn check_dependencies(db: &Db<'_>, caller: &str, targets: Vec<String>) -> Result
         };
         let owner = Owner::for_run(db, &run)?;
         for condition in members(&owner.record["wakeup"]["condition"]) {
-            if condition["type"] == "run_finished" {
-                next.push(text(condition, "runId").to_owned());
+            if let Some(target) = dependency(db, condition)? {
+                next.push(target);
             }
         }
     }
@@ -431,10 +474,19 @@ pub(crate) fn access(db: &Db<'_>, run: &Value, condition: &Value) -> Result<()> 
             db.run(text(condition, "runId"))?
                 .ok_or_else(|| Error::not_found("The target run no longer exists."))?;
         }
+        "task_finished" => crate::delegation::wait_access(db, run, condition)?,
         _ if conditions::is_condition(condition) => conditions::access(db, run, condition)?,
         _ => return Err(Error::bad("Unsupported wait condition.")),
     }
     Ok(())
+}
+
+fn native_result(db: &Db<'_>, condition: &Value) -> Result<Option<Value>> {
+    if condition["type"] == "task_finished" {
+        crate::delegation::wait_result(db, condition)
+    } else {
+        run_result(db, condition)
+    }
 }
 
 fn run_result(db: &Db<'_>, condition: &Value) -> Result<Option<Value>> {
@@ -481,6 +533,7 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
         return Ok(json!({ "deferred": true, "wakeup": owner.record["wakeup"] }));
     }
     // Each plugin condition is checked once before registering, in parallel for a group.
+    let grouped = is_group(&input["condition"]);
     let checks = members(&input["condition"]).into_iter().map(|condition| {
         let run = &run;
         async move {
@@ -488,8 +541,10 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
                 return Ok(None);
             }
             let observed = conditions::observe(s, run, condition).await?;
-            // A condition that cannot be observed is refused rather than awaited.
-            if let Some(result) = &observed.result
+            // Keep the single-condition refusal contract. In a group, unavailable is a
+            // result too: all still awaits the others, and any may return it immediately.
+            if !grouped
+                && let Some(result) = &observed.result
                 && result["state"] == "unavailable"
             {
                 return Err(Error::conflict(text(result, "message").to_owned()));
@@ -529,8 +584,8 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
             let mut results = Vec::new();
             let mut slots = Vec::new();
             for (member, checked) in members(condition).into_iter().zip(&checked) {
-                let result = if member["type"] == "run_finished" {
-                    run_result(db, member)?
+                let result = if native(member) {
+                    native_result(db, member)?
                 } else {
                     checked.as_ref().and_then(|checked| checked.result.clone())
                 };
@@ -642,30 +697,41 @@ pub(crate) fn member_results(db: &Db<'_>, run: &Value, wakeup: &Value) -> Vec<Op
         .into_iter()
         .enumerate()
         .map(|(index, condition)| {
-            let recorded = &wakeup["members"][index]["observation"];
-            if recorded.is_object() {
-                return Some(recorded.clone());
-            }
             let unavailable =
                 |error: Error| json!({ "state": "unavailable", "message": error.message });
             if let Err(error) = access(db, run, condition) {
                 return Some(unavailable(error));
             }
-            if condition["type"] != "run_finished" {
+            // Once the group has resolved, preserve its snapshot (including nulls for
+            // any's remaining members), while still rechecking each member's access.
+            if wakeup["observation"].is_object() {
+                return wakeup["observation"]["members"][index]["result"]
+                    .as_object()
+                    .map(|_| wakeup["observation"]["members"][index]["result"].clone());
+            }
+            let recorded = &wakeup["members"][index]["observation"];
+            if recorded.is_object() {
+                return Some(recorded.clone());
+            }
+            if !native(condition) {
                 return None;
             }
-            run_result(db, condition).unwrap_or_else(|error| Some(unavailable(error)))
+            native_result(db, condition).unwrap_or_else(|error| Some(unavailable(error)))
         })
         .collect()
 }
 
 /// A group's result once it can resume: completed by its results, or its deadline.
 fn group_observation(db: &Db<'_>, run: &Value, wakeup: &Value, time: i64) -> Option<Value> {
-    if wakeup["observation"].is_object() {
-        return Some(wakeup["observation"].clone());
-    }
     let condition = &wakeup["condition"];
     let results = member_results(db, run, wakeup);
+    if wakeup["observation"].is_object() {
+        return Some(group_result(
+            text(&wakeup["observation"], "state"),
+            condition,
+            &results,
+        ));
+    }
     if settled(condition, &results) {
         return Some(group_result("completed", condition, &results));
     }
@@ -804,8 +870,8 @@ pub(crate) fn observation(
             json!({ "state": "unavailable", "message": error.message }),
         ));
     }
-    if condition["type"] == "run_finished" {
-        match run_result(db, condition) {
+    if native(condition) {
+        match native_result(db, condition) {
             Ok(Some(result)) => return Ok(Some(result)),
             Ok(None) => {}
             Err(error) => {

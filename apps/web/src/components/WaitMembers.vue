@@ -70,7 +70,7 @@ function status(member: WaitMember) {
     return 'Awaiting its result'
   if (member.lastError)
     return 'Check failed · retrying'
-  if (member.kind === 'run')
+  if (member.kind === 'run' || member.kind === 'task')
     return 'Waiting for it to finish'
   if (member.nextCheckAt)
     return member.nextCheckAt > props.now ? `Next check in ${timeLeft(member.nextCheckAt - props.now)}` : 'Checking…'
@@ -140,10 +140,10 @@ const tones: Record<State, string> = {
           <span class="block truncate text-2xs" :class="member.lastError && !member.outcome && live ? 'text-warning' : tones[state(member)]">{{ status(member) }}</span>
         </span>
         <RouterLink
-          v-if="member.runId"
-          :to="`/runs/${member.runId}`"
+          v-if="member.chatId || member.runId"
+          :to="member.chatId ? `/chats/${member.chatId}` : `/runs/${member.runId}`"
           class="grid size-7 shrink-0 place-items-center rounded-lg text-muted hover:bg-hover hover:text-ink phone:size-10"
-          :aria-label="`Open run ${member.details[0] ?? ''}`"
+          :aria-label="`Open ${member.chatId ? 'task' : 'run'} ${member.details[0] ?? ''}`"
         >
           <Icon :name="ArrowUpRight" :size="14" />
         </RouterLink>

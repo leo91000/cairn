@@ -133,3 +133,33 @@ it('lists the conditions of a group with their results as they arrive', async ()
   expect(resumed).toContain('aria-expanded="false"')
   expect(resumed).not.toContain('data-testid="wait-member"')
 })
+
+it('identifies delegated tasks, links their conversations and shows task failures', async () => {
+  const chatId = 'a11ce123-2222-4333-8444-555555555555'
+  const otherId = 'b11ce123-2222-4333-8444-555555555555'
+  const group: ChatWakeup = {
+    ...wakeup,
+    wakeAt: Date.now() + 600_000,
+    condition: {
+      type: 'group',
+      mode: 'all',
+      conditions: [{ type: 'task_finished', chatId }, { type: 'task_finished', chatId: otherId }],
+    },
+    members: [{
+      observation: {
+        state: 'completed',
+        type: 'task_finished',
+        status: 'failed',
+        error: 'Review failed',
+      },
+    }, {}],
+  }
+  const html = await render({ wakeup: group }, { wakeup: group, paused: false })
+  expect(html).toContain('Delegated task')
+  expect(html).toContain('a11ce123')
+  expect(html).toContain('b11ce123')
+  expect(html).toContain(`/chats/${chatId}`)
+  expect(html).toContain(`/chats/${otherId}`)
+  expect(html).toContain('The task failed · Review failed')
+  expect(html).toContain('text-danger')
+})

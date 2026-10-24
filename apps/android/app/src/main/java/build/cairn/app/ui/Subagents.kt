@@ -1,10 +1,20 @@
 package build.cairn.app.ui
 
+import build.cairn.app.data.Chat
 import build.cairn.app.data.RunEvent
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.longOrNull
+
+private val workspaceDelegateTool = Regex("^(?:mcp__)?cairn_workspace(?:__|_|\\.)delegate_task$")
+
+/** Successful calls are represented by Cairn's chat.delegated team event. */
+internal fun isDelegateTool(item: JsonObject?): Boolean {
+    val tool = item.string("tool")
+    return workspaceDelegateTool.matches(tool) ||
+        (item.string("server") == "cairn_workspace" && tool == "delegate_task")
+}
 
 internal enum class SubagentState(val label: String) {
     RUNNING("En cours"),
@@ -35,6 +45,16 @@ internal data class Subagent(
     val tokens: Long?,
     val toolUses: Long?,
     val steps: List<SubagentStep>,
+    /** A task Cairn delegated to another conversation, followed through that conversation. */
+    val delegation: SubagentDelegation? = null,
+)
+
+/** Where a delegated task works, and what its conversation shows now. */
+internal data class SubagentDelegation(
+    val chatId: String,
+    val agentName: String,
+    val provider: String,
+    val summary: String = "",
 )
 
 internal sealed interface SubagentStep {
@@ -69,6 +89,7 @@ private class SubagentBuilder(val id: String, val startedAt: Long) {
     var durationMs: Long? = null
     var tokens: Long? = null
     var toolUses: Long? = null
+    var delegation: SubagentDelegation? = null
     var updated = false
     // Child builders for nested subagents, presentations for the subagent's own steps.
     val steps = linkedMapOf<String, Any>()
@@ -107,7 +128,8 @@ private class SubagentBuilder(val id: String, val startedAt: Long) {
 
     /** The run ended: a subagent still marked as working will not report anymore. */
     fun stop(at: Long) {
-        if (state != SubagentState.RUNNING) return
+        // A delegated task keeps working in its own conversation.
+        if (state != SubagentState.RUNNING || delegation != null) return
         state = SubagentState.STOPPED
         durationMs = (at - startedAt).coerceAtLeast(0)
         for ((key, step) in steps) {
@@ -137,6 +159,7 @@ private class SubagentBuilder(val id: String, val startedAt: Long) {
                 if (step is SubagentBuilder) SubagentStep.Agent(step.build())
                 else SubagentStep.Action(key, step as ActivityPresentation)
             },
+            delegation,
         )
 }
 
@@ -168,6 +191,27 @@ internal fun subagentTimeline(events: List<RunEvent>): SubagentTimeline {
         if (ended)
             for ((key, builder) in builders) if (key.startsWith("${event.runId}:"))
                 builder.stop(event.createdAt)
+
+        // A delegated task works like a subagent, in a conversation of its own.
+        if (event.type == "chat.delegated") {
+            val data = event.payload?.let(::JsonObject)
+            val chatId = data.string("chatId")
+            if (chatId.isNotBlank() && "delegated:$chatId" !in builders) {
+                val builder = SubagentBuilder("delegated:$chatId", event.createdAt)
+                builder.name =
+                    data.string("title").ifBlank { event.text.ifBlank { "Tâche déléguée" } }
+                builder.type = data.string("agentName")
+                builder.prompt = data.string("task")
+                builder.model = data.string("model")
+                builder.background = true
+                builder.delegation =
+                    SubagentDelegation(chatId, data.string("agentName"), data.string("provider"))
+                builders[builder.id] = builder
+                anchors[event.id] = builder
+            }
+            captured += event.id
+            continue
+        }
 
         val item = event.item()
         val type = item.string("type")
@@ -205,7 +249,51 @@ internal fun subagentTimeline(events: List<RunEvent>): SubagentTimeline {
 
 /** A subagent still marked as working once the run has ended will not report anymore. */
 internal fun Subagent.state(active: Boolean) =
-    if (state == SubagentState.RUNNING && !active) SubagentState.STOPPED else state
+    if (state == SubagentState.RUNNING && !active && delegation == null) SubagentState.STOPPED
+    else state
+
+/** A delegated task as its conversation shows it now; a missing conversation was deleted. */
+internal fun Subagent.followed(chat: Chat?): Subagent {
+    val delegation = delegation ?: return this
+    if (chat == null || chat.lifecycle != "active")
+        return copy(
+            state = SubagentState.STOPPED,
+            delegation = delegation.copy(summary = "Conversation supprimée"),
+        )
+    val state =
+        when {
+            chat.status in listOf("failed", "interrupted") -> SubagentState.FAILED
+            chat.paused || chat.status == "cancelled" -> SubagentState.STOPPED
+            chat.pendingQuestions > 0 ||
+                chat.status in listOf("running", "queued") ||
+                chat.wakeup != null -> SubagentState.RUNNING
+            chat.status == "idle" -> SubagentState.STOPPED
+            else -> SubagentState.DONE
+        }
+    val summary =
+        when {
+            state == SubagentState.RUNNING && chat.pendingQuestions > 1 ->
+                "${chat.pendingQuestions} questions attendent une réponse"
+            state == SubagentState.RUNNING && chat.pendingQuestions == 1 -> "Pose une question"
+            state == SubagentState.RUNNING ->
+                if (chat.status in listOf("queued", "idle")) "En attente d’un runner"
+                else if (chat.wakeup != null) "En attente" else "En cours"
+            state == SubagentState.FAILED -> "Échec"
+            state == SubagentState.STOPPED -> "Arrêtée"
+            else -> chat.preview ?: "A rendu compte"
+        }
+    return copy(state = state, delegation = delegation.copy(summary = summary))
+}
+
+/** Delegated tasks of a timeline, followed through the conversations [chats] lists. */
+internal fun List<TimelineEntry>.followingDelegations(chats: List<Chat>?): List<TimelineEntry> {
+    if (none { entry -> entry.agents.any { it.delegation != null } }) return this
+    val byId = chats.orEmpty().associateBy { it.id }
+    return map { entry ->
+        if (entry.agents.none { it.delegation != null }) entry
+        else entry.copy(agents = entry.agents.map { it.followed(byId[it.delegation?.chatId]) })
+    }
+}
 
 internal fun subagentInitials(name: String): String {
     val words = name.split(Regex("\\s+")).filter { word -> word.any { it.isLetterOrDigit() } }
@@ -225,6 +313,9 @@ private fun firstLine(value: String) =
 
 /** What the subagent does now, or what it reported. */
 internal fun Subagent.summary(active: Boolean): String {
+    delegation?.let {
+        return it.summary.ifBlank { "En cours" }
+    }
     val report = firstLine(result).ifEmpty { firstLine(message) }
     return when (state(active)) {
         SubagentState.RUNNING -> {
@@ -250,7 +341,9 @@ internal fun Subagent.summary(active: Boolean): String {
 }
 
 internal fun Subagent.elapsed(active: Boolean, now: Long): String =
-    if (state(active) == SubagentState.RUNNING) liveElapsed(startedAt, now)
+    // A delegated task's time is its conversation's.
+    if (delegation != null) ""
+    else if (state(active) == SubagentState.RUNNING) liveElapsed(startedAt, now)
     // liveElapsed formats any span; anchor this one at an arbitrary positive start.
     else durationMs?.let { liveElapsed(1, 1 + it) }.orEmpty()
 
@@ -318,8 +411,9 @@ internal class SubagentTeamKeys {
 internal fun currentSubagents(timeline: List<TimelineEntry>): List<Subagent> {
     val start = timeline.indexOfLast { it.message && it.events.single().type == "chat.user" }
     val current = subagentTeams(timeline.drop(start + 1)).flatten().map { it.id }.toSet()
+    // A delegated task reports through its own conversation: earlier ones stay with their request.
     return subagentTeams(timeline).flatten().filter {
-        it.id in current || it.state == SubagentState.RUNNING
+        it.id in current || (it.state == SubagentState.RUNNING && it.delegation == null)
     }
 }
 

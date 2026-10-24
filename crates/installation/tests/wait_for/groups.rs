@@ -322,3 +322,212 @@ async fn cycles_through_grouped_dependencies_are_rejected() {
         true
     );
 }
+
+#[tokio::test]
+async fn initial_unavailable_plugin_results_count_without_aborting_the_group() {
+    for mode in ["all", "any"] {
+        let f = Fixture::new().await;
+        let target = f.target().await;
+        let mut invalid = f.github_condition();
+        invalid["headSha"] = "2222222222222222222222222222222222222222".into();
+        let wait = f
+            .group(mode, vec![invalid, run_condition(&target)])
+            .await
+            .unwrap();
+        if mode == "any" {
+            assert_eq!(wait["deferred"], false);
+            assert_eq!(
+                wait["observation"]["members"][0]["result"]["state"],
+                "unavailable"
+            );
+            assert!(wait["observation"]["members"][1]["result"].is_null());
+        } else {
+            assert_eq!(wait["deferred"], true);
+            assert_eq!(
+                wait["wakeup"]["members"][0]["observation"]["state"],
+                "unavailable"
+            );
+            f.finish().await;
+            assert_eq!(f.tick().await["run"]["status"], "succeeded");
+            f.set_status(&target, "succeeded").await;
+            let resumed = f.tick().await;
+            assert_eq!(resumed["run"]["status"], "queued");
+            assert!(text(&resumed["run"]["chatExecution"], "text").contains("unavailable"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn recorded_member_and_final_group_results_recheck_authorization_before_resuming() {
+    for finalized in [false, true] {
+        for revoke_grant in [false, true] {
+            let f = Fixture::new().await;
+            let target = f.target().await;
+            f.github_state("completed", Some("success"), 0);
+            f.group("all", vec![f.github_condition(), run_condition(&target)])
+                .await
+                .unwrap();
+            f.finish().await;
+            assert_eq!(
+                f.wakeup().await["members"][0]["observation"]["conclusion"],
+                "success"
+            );
+            f.set_status(&target, "succeeded").await;
+            if finalized {
+                f.record_groups().await;
+                assert_eq!(f.wakeup().await["observation"]["state"], "completed");
+            }
+            let calls = f.calls().len();
+            if revoke_grant {
+                connections::set_enabled(&f.s, "github", &f.instance, &json!({ "enabled": false }))
+                    .await
+                    .unwrap();
+            } else {
+                let mut project = f.s.get("projects", &f.project).await.unwrap();
+                project["origin"] = "https://github.com/another/repository.git".into();
+                f.s.store.put("projects", project).await.unwrap();
+            }
+            let resumed = f.tick().await;
+            assert_eq!(resumed["run"]["status"], "queued");
+            let prompt = text(&resumed["run"]["chatExecution"], "text");
+            assert!(prompt.contains(r#""state":"unavailable""#));
+            assert!(!prompt.contains(r#""conclusion":"success""#));
+            assert_eq!(f.calls().len(), calls);
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_recorded_any_result_keeps_its_snapshot_until_the_conversation_resumes() {
+    let f = Fixture::new().await;
+    let (first, second) = (f.target().await, f.target().await);
+    f.group("any", vec![run_condition(&first), run_condition(&second)])
+        .await
+        .unwrap();
+    f.finish().await;
+    f.set_status(&second, "failed").await;
+    f.record_groups().await;
+    f.set_status(&first, "succeeded").await;
+    let resumed = f.tick().await;
+    let prompt = text(&resumed["run"]["chatExecution"], "text");
+    assert!(prompt.contains(r#""result":null"#));
+    assert!(prompt.contains(r#""status":"failed""#));
+    assert!(!prompt.contains(r#""status":"succeeded""#));
+}
+
+#[tokio::test]
+#[ignore = "local grouped-wait storage measurements; run explicitly after builds/tests finish"]
+async fn measure_group_metadata() {
+    for count in [1, 2, 8] {
+        let f = Fixture::new().await;
+        let mut targets = Vec::new();
+        for _ in 0..count {
+            targets.push(f.target().await);
+        }
+        let conditions = targets.iter().map(run_condition).collect::<Vec<_>>();
+        let mut writes = Vec::new();
+        let cpu_start = process_cpu_ms();
+        for index in 0..100 {
+            let started = std::time::Instant::now();
+            wait_for::schedule(
+                &f.s,
+                &f.token,
+                &json!({
+                    "conditions": conditions,
+                    "mode": "all",
+                    "reason": format!("Grouped measurement {index}"),
+                    "timeoutSeconds": 420,
+                }),
+            )
+            .await
+            .unwrap();
+            writes.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        let write_cpu = process_cpu_ms() - cpu_start;
+        let pending = f.s.get("chats", &f.chat).await.unwrap();
+        let mut warm = Vec::new();
+        for _ in 0..500 {
+            let started = std::time::Instant::now();
+            std::hint::black_box(f.s.get("chats", &f.chat).await.unwrap());
+            warm.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        let mut cold = Vec::new();
+        let mut pool_open = Vec::new();
+        for _ in 0..20 {
+            let started = std::time::Instant::now();
+            let store = cairn_installation::store::Store::open(&f.s.config.data_dir).unwrap();
+            pool_open.push(started.elapsed().as_secs_f64() * 1000.0);
+            let started = std::time::Instant::now();
+            std::hint::black_box(store.get("chats", &f.chat).await.unwrap());
+            cold.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        f.finish().await;
+        let mut idle = Vec::new();
+        let cpu_start = process_cpu_ms();
+        for _ in 0..100 {
+            let started = std::time::Instant::now();
+            f.record_groups().await;
+            idle.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        let idle_cpu = process_cpu_ms() - cpu_start;
+        let mut progress = Vec::new();
+        let mut progress_cpu = 0.0;
+        let mut first_bytes = 0;
+        // Setup and target writes stay outside each timed progress tick. The reference
+        // has one native condition, so this extra group scan has no progress to persist.
+        for index in 0..20 {
+            for target in &targets {
+                f.set_status(target, "queued").await;
+            }
+            f.s.store
+                .patch_run(&f.run, json!({ "status": "running" }))
+                .await
+                .unwrap();
+            wait_for::schedule(
+                &f.s,
+                &f.token,
+                &json!({
+                    "conditions": conditions,
+                    "mode": "all",
+                    "reason": format!("Progress measurement {index}"),
+                    "timeoutSeconds": 420,
+                }),
+            )
+            .await
+            .unwrap();
+            f.finish().await;
+            for (position, target) in targets.iter().enumerate() {
+                f.set_status(target, "succeeded").await;
+                let cpu_start = process_cpu_ms();
+                let started = std::time::Instant::now();
+                f.record_groups().await;
+                progress.push(started.elapsed().as_secs_f64() * 1000.0);
+                progress_cpu += process_cpu_ms() - cpu_start;
+                if index == 0 && position == 0 {
+                    first_bytes = serde_json::to_vec(&f.wakeup().await).unwrap().len();
+                }
+            }
+        }
+        let completed = f.wakeup().await;
+        println!(
+            "GROUP_WAIT_MEASUREMENT {}",
+            json!({
+                "conditions": count,
+                "pendingWakeupBytes": serde_json::to_vec(&pending["wakeup"]).unwrap().len(),
+                "pendingChatBytes": serde_json::to_vec(&pending).unwrap().len(),
+                "firstProgressWakeupBytes": first_bytes,
+                "finalWakeupBytes": serde_json::to_vec(&completed).unwrap().len(),
+                "registration": milliseconds(&mut writes),
+                "registrationProcessCpuMs": write_cpu,
+                "warmRead": milliseconds(&mut warm),
+                "freshPoolFirstRead": milliseconds(&mut cold),
+                "freshPoolOpen": milliseconds(&mut pool_open),
+                "idleGroupTick": milliseconds(&mut idle),
+                "idleGroupTickProcessCpuMs": idle_cpu,
+                "progressGroupTick": milliseconds(&mut progress),
+                "progressGroupTickProcessCpuMs": progress_cpu,
+                "externalProbeRequests": f.calls().len(),
+            })
+        );
+    }
+}

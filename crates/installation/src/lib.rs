@@ -20,6 +20,7 @@ pub mod coding_agent;
 pub mod config;
 pub mod conversation_deletion;
 pub mod conversation_lifecycle;
+pub mod delegation;
 pub mod direct;
 pub mod error;
 pub mod execution;

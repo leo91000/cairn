@@ -7,7 +7,8 @@ travail autorisé avec un résultat précis.
 
 ## Ce que cette PR permet déjà
 
-Cairn fournit les conditions temporelles `delay` et `at`, ainsi que `run_finished` ;
+Cairn fournit les conditions temporelles `delay` et `at`, ainsi que `run_finished`
+et `task_finished` pour les conversations qui peuvent déléguer ;
 les plugins accordés à l’agent ajoutent les leurs,
 de type `<plugin>_<nom>` (voir les [conditions de plugins](PLUGINS.md#conditions)).
 Le plugin GitHub livré en ajoute deux :
@@ -23,6 +24,15 @@ Le plugin GitHub livré en ajoute deux :
   à l’installation et peut viser les exécutions d’autres agents de cette
   installation, selon la délégation du propriétaire décrite dans
   [l’accès agent](AGENT-ACCESS.md).
+- `task_finished` : une tâche que cette conversation a déléguée avec
+  `delegate_task` ne travaille plus : son tour est fini sans réveil ni message à
+  traiter, son premier message a été retiré avant de démarrer, ou elle est en
+  pause, arrêtée ou supprimée. Cette source exige la
+  délégation de tâches et ne vise que les tâches de la conversation qui attend.
+  Le résultat indique aussi sa pause et son erreur éventuelle, y compris un
+  échec de préparation avant son premier tour ; une tâche supprimée masque l’erreur.
+  Le rapport se lit ensuite avec `task_status` (voir les
+  [tâches déléguées](adr/0059-delegated-tasks.md)).
 - `github_workflow` : un workflow GitHub Actions identifié par un projet autorisé,
   un identifiant d’exécution et le SHA complet du commit termine. Le résultat
   inclut sa conclusion et son numéro de tentative. Le compte GitHub accordé à
@@ -147,6 +157,12 @@ Avec 2 à 8 conditions externes différentes, `mode` choisit quand reprendre :
 
 - `all` : quand chaque condition a un résultat ;
 - `any` : au premier résultat.
+
+Les groupes acceptent `run_finished`, `task_finished` et les conditions des
+plugins accordés. Chaque membre conserve ses contrôles d’accès : les tâches
+déléguées restent réservées à leur conversation demandeuse, sans exiger
+l’accès installation. Les résultats déjà enregistrés sont revérifiés au réveil
+si les permissions ou l’origine du projet ont changé.
 
 ```json
 {

@@ -73,6 +73,7 @@ const icons: Record<string, IconName> = {
   timer: Hourglass,
   condition: Workflow,
   run: Bot,
+  task: Bot,
   group: Layers,
 }
 

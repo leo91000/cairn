@@ -597,3 +597,21 @@ describe('grouped waits', () => {
     expect(waitOutcome(observation('timed_out', 'any', [null, null]))).toEqual({ tone: 'warning', title: 'Deadline reached', detail: 'No results yet' })
   })
 })
+
+it('includes delegated task failures in group summaries and distinguishes deleted tasks', () => {
+  const failed = {
+    state: 'completed',
+    type: 'task_finished',
+    status: 'failed',
+    error: 'Review failed',
+  }
+  expect(waitOutcome(failed)).toEqual({ tone: 'error', title: 'The task failed', detail: 'Review failed' })
+  expect(waitOutcome({
+    state: 'completed',
+    type: 'group',
+    mode: 'all',
+    members: [{ result: failed }, { result: { ...failed, status: 'succeeded' } }],
+  }))
+    .toEqual({ tone: 'error', title: 'All 2 results in', detail: '1 failed · 1 succeeded' })
+  expect(waitOutcome({ ...failed, status: 'deleted', error: null })).toEqual({ tone: 'warning', title: 'The task was deleted', detail: '' })
+})

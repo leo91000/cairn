@@ -7,7 +7,7 @@ import type {
 import type { ActivityWait } from './activity'
 
 /** What a conversation waits for: a timer, a plugin's condition, another Cairn run, or several of them. */
-export type WaitKind = 'timer' | 'condition' | 'run' | 'group'
+export type WaitKind = 'timer' | 'condition' | 'run' | 'task' | 'group'
 export type WaitTone = 'ok' | 'error' | 'warning' | 'neutral'
 
 export interface WaitTarget {
@@ -66,11 +66,13 @@ export function waited(ms: number) {
 
 /** One condition of a group, as its card lists it. */
 export interface WaitMember {
-  kind: 'condition' | 'run'
+  kind: 'condition' | 'run' | 'task'
   title: string
   details: string[]
   /** The run it waits for, which its row links to. */
   runId?: string
+  /** The delegated conversation, available before its first run starts. */
+  chatId?: string
   /** Its result, once it has one; failures included. */
   outcome: WaitOutcome | null
   /** A plugin condition Cairn still checks: when it checks again, and why its last check failed. */
@@ -112,6 +114,17 @@ export function waitMembers(wakeup: Pick<ChatWakeup, 'condition' | 'members'> | 
         title: 'Cairn run',
         details: runId ? [runId.slice(0, 8)] : [],
         runId: runId || undefined,
+        outcome,
+      }
+    }
+
+    if (condition?.type === 'task_finished') {
+      const chatId = String((condition as { chatId: string }).chatId ?? '')
+      return {
+        kind: 'task',
+        title: 'Delegated task',
+        details: chatId ? [chatId.slice(0, 8)] : [],
+        chatId: chatId || undefined,
         outcome,
       }
     }
@@ -161,6 +174,15 @@ export function waitTarget(wakeup: Pick<ChatWakeup, 'condition' | 'display' | 'w
       kind: 'run',
       title: 'Waiting for another run to finish',
       short: 'Another run',
+      details: [],
+    }
+  }
+
+  if (condition?.type === 'task_finished') {
+    return {
+      kind: 'task',
+      title: 'Waiting for a delegated task to finish',
+      short: 'Delegated task',
       details: [],
     }
   }
@@ -308,6 +330,8 @@ export function observedTarget(observation: Record<string, unknown> | null | und
   const members = groupObservation(observation)
   if (members)
     return observation.mode === 'any' ? `First of ${members.length} results` : `${members.length} results`
+  if (observation.type === 'task_finished')
+    return 'Delegated task'
   if (observation.type === 'run_finished')
     return 'Another run'
   if (observation.type === 'time')
@@ -339,6 +363,15 @@ export function waitOutcome(observation: Record<string, unknown> | null | undefi
     return { tone: 'warning', title: 'Deadline reached without a result', detail: '' }
   if (state === 'unavailable')
     return { tone: 'warning', title: 'Result unavailable', detail: typeof observation.message === 'string' ? observation.message : '' }
+
+  if (observation.type === 'task_finished') {
+    const status = String(observation.status ?? '')
+    const detail = typeof observation.error === 'string' ? observation.error : ''
+    if (status === 'succeeded')
+      return { tone: 'ok', title: 'The task finished', detail: runOutcomes[String(observation.outcomeStatus)] ?? '' }
+    const ended = status === 'failed' ? 'failed' : status === 'cancelled' ? 'was cancelled' : status === 'deleted' ? 'was deleted' : status === 'interrupted' ? 'was interrupted' : 'stopped'
+    return { tone: status === 'failed' ? 'error' : 'warning', title: `The task ${ended}`, detail }
+  }
 
   if (observation.type === 'run_finished') {
     const status = String(observation.status ?? '')

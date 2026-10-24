@@ -157,6 +157,44 @@ class WaitGroupViewsTest {
         shot("wait-group-dark")
     }
 
+    @Test
+    fun `a delegated task row opens its conversation and displays its failure`() {
+        val chatId = "a11ce123-2222-4333-8444-555555555555"
+        val task = buildJsonObject {
+            put("type", "task_finished")
+            put("chatId", chatId)
+        }
+        val failed = buildJsonObject {
+            put("state", "completed")
+            put("type", "task_finished")
+            put("status", "failed")
+            put("error", "Review failed")
+        }
+        val waiting =
+            wakeup(
+                group("all", task, run(nextRun)),
+                buildJsonObject { put("observation", failed) },
+                JsonObject(emptyMap()),
+            )
+        val opened = mutableListOf<String>()
+        compose.setContent {
+            CairnTheme("light") {
+                Surface {
+                    CompositionLocalProvider(
+                        LocalLiveWait provides LiveWait(waiting, false, openChat = { opened += it })
+                    ) {
+                        WaitCard(ActivityWait(waiting))
+                    }
+                }
+            }
+        }
+        compose.onNodeWithText("Tâche déléguée").assertIsDisplayed()
+        compose.onNodeWithText("a11ce123").assertIsDisplayed()
+        compose.onNodeWithText("La tâche a échoué · Review failed").assertIsDisplayed()
+        compose.onAllNodesWithTag("wait-member")[0].performClick()
+        assertEquals(listOf(chatId), opened)
+    }
+
     private fun shot(name: String) {
         val dir = System.getProperty("cairn.screenshots.dir") ?: return
         File(dir).mkdirs()

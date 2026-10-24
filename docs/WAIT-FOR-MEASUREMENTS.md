@@ -144,3 +144,63 @@ including the message-revision checks used by external conditions. This adds
 about 0.56 ms to the local duration median in this sample. Warm read medians are
 about 0.04 ms in both versions. These samples establish local costs for this
 workload; they provide no production latency or physical-disk performance claim.
+
+## Grouped waits (2026-10-24)
+
+Compared one `run_finished` condition with `all` groups of 2 and 8 distinct run
+conditions at the same source tree. The [raw measurements](measurements/grouped-wait-for.json)
+record the implementation tree, host conditions and all samples' summaries.
+
+```sh
+CARGO_INCREMENTAL=0 pnpm test:backend -p cairn-installation --test wait_for \
+  groups::measure_group_metadata -- --ignored --exact --nocapture
+```
+
+Each fixture has one caller conversation and 1, 2 or 8 target runs. The workload
+records 100 distinct registrations/replacements, reads the pending conversation
+500 times with its warm pool, and opens 20 new pools for their first reads. Pool
+creation is timed separately. It then measures 100 idle `tick_groups` scans and
+20 progress sequences, completing one target before each scan (20, 40 and 160
+progress samples). Setup, target-state writes and registration of each progress
+sequence stay outside progress timing. Group progress ticks include both the scan
+and its transaction; the last result also writes the ready event. Encoded sizes
+cover the persisted pending, first-progress and final wakeup.
+
+Host: shared native Linux 7.2.9-arch1-1 x86_64, Intel Core i9-14900K, 32 logical
+CPUs and about 94 GiB RAM; temporary SQLite databases under `/tmp` on ext4. Rust
+1.97.1, dev/test profile with debug info enabled and incremental compilation
+disabled. Compilation and this task's other tests finished before timing; other
+host workloads were not controlled (starting load averages 14.70 / 20.17 / 20.60).
+Fresh pools reset SQLite connection/statement/page caches; OS caches stay warm.
+Process CPU uses `CLOCK_PROCESS_CPUTIME_ID` across all manager threads. The native
+run workloads make no external queries or child processes during timing.
+
+| Metric | Single run reference | `all`, 2 runs | `all`, 8 runs |
+| --- | ---: | ---: | ---: |
+| Pending wakeup JSON bytes | 276 | 410 | 854 |
+| Pending conversation JSON bytes | 797 | 927 | 1,374 |
+| Wakeup bytes after first progress tick | 276 | 600 | 1,044 |
+| Wakeup bytes after final progress tick | 277 | 1,409 | 4,619 |
+| Registration/write median / p95, ms | 6.320 / 10.048 | 6.402 / 9.282 | 9.999 / 13.574 |
+| Process CPU for 100 registrations, ms | 322.848 | 308.050 | 662.472 |
+| Warm read median / p95, ms | 0.061 / 0.086 | 0.064 / 0.078 | 0.041 / 0.063 |
+| First read, fresh pool median / p95, ms | 0.580 / 0.649 | 0.511 / 0.597 | 0.508 / 0.623 |
+| Fresh pool open median, ms | 4.750 | 4.480 | 4.201 |
+| Idle group scan median / p95, ms | 0.114 / 0.249 | 0.513 / 0.855 | 1.603 / 2.441 |
+| Process CPU for 100 idle scans, ms | 15.074 | 56.930 | 171.629 |
+| Progress group tick median / p95, ms | 0.286 / 0.308 | 5.033 / 9.016 | 6.729 / 10.195 |
+| Process CPU per progress tick, ms | 0.294 | 1.692 | 3.336 |
+
+The reference progress tick only scans: single conditions keep their previous
+storage contract, so this new observer does not write their results. Its actual
+scheduler resumption is excluded. The reference's final wakeup differs by one
+byte because the measured reason has a longer sequence number. Group sizes after
+completion include the per-member results and the complete group observation;
+the 8-run wakeup remains below 5 KiB in this workload. Conversation sizes also
+include variable-length generated slugs.
+
+These are local metadata costs against an in-build single-condition reference,
+not a comparison with the different hosts used in the earlier sections. They do
+not measure cold physical-disk reads, production network latency, plugin response
+sizes, or scans across a large installation. No codec, compression, SQLite schema,
+journal policy or compatibility epoch changes are involved.

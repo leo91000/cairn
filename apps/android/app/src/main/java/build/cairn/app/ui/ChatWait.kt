@@ -39,6 +39,7 @@ internal enum class WaitKind {
     TIMER,
     CONDITION,
     RUN,
+    TASK,
     GROUP,
 }
 
@@ -61,7 +62,7 @@ internal data class WaitOutcome(val tone: WaitTone, val title: String, val detai
 
 /** One condition of a group, as its card lists it. */
 internal data class WaitMember(
-    /** [WaitKind.RUN] or [WaitKind.CONDITION]. */
+    /** A native run/task, or a plugin condition. */
     val kind: WaitKind,
     val title: String,
     val details: List<String>,
@@ -74,6 +75,8 @@ internal data class WaitMember(
      */
     val nextCheckAt: Long? = null,
     val lastError: String? = null,
+    /** The delegated conversation, available before its first run starts. */
+    val chatId: String? = null,
 )
 
 /** A durable wait the agent scheduled with `sleep` or `wait_for`, then how it ended. */
@@ -110,6 +113,7 @@ internal data class LiveWait(
     val canPause: Boolean = true,
     /** Opens a run a grouped wait waits for. */
     val openRun: ((String) -> Unit)? = null,
+    val openChat: ((String) -> Unit)? = null,
 )
 
 internal val LocalLiveWait = compositionLocalOf<LiveWait?> { null }
@@ -223,6 +227,15 @@ internal fun waitMembers(wakeup: ChatWakeup?, observation: JsonObject? = null): 
                 runId.ifBlank { null },
                 outcome,
             )
+        } else if (condition.string("type") == "task_finished") {
+            val chatId = condition.string("chatId")
+            WaitMember(
+                WaitKind.TASK,
+                "Tâche déléguée",
+                listOfNotNull(chatId.take(8).ifBlank { null }),
+                outcome = outcome,
+                chatId = chatId.ifBlank { null },
+            )
         } else {
             // A plugin condition reads as its plugin words it, or by its type.
             val display = progress?.get("display").asObject()
@@ -295,6 +308,13 @@ internal fun waitTarget(wakeup: ChatWakeup, now: Long = System.currentTimeMillis
                 WaitKind.RUN,
                 "Attente de la fin d’une autre exécution",
                 "Autre exécution",
+                emptyList(),
+            )
+        condition.string("type") == "task_finished" ->
+            WaitTarget(
+                WaitKind.TASK,
+                "Attente de la fin d’une tâche déléguée",
+                "Tâche déléguée",
                 emptyList(),
             )
         // A plugin condition reads as its plugin words it.
@@ -401,6 +421,32 @@ internal fun waitOutcome(observation: JsonObject?): WaitOutcome {
                 observation.string("message"),
             )
     }
+    if (observation.string("type") == "task_finished") {
+        val status = observation.string("status")
+        if (status == "succeeded")
+            return WaitOutcome(
+                WaitTone.OK,
+                "La tâche est terminée",
+                when (observation.string("outcomeStatus")) {
+                    "blocked" -> "Bloquée"
+                    "needs_input" -> "Attend votre réponse"
+                    else -> ""
+                },
+            )
+        val title =
+            when (status) {
+                "failed" -> "La tâche a échoué"
+                "cancelled" -> "La tâche a été annulée"
+                "deleted" -> "La tâche a été supprimée"
+                "interrupted" -> "La tâche a été interrompue"
+                else -> "La tâche s’est arrêtée"
+            }
+        return WaitOutcome(
+            if (status == "failed") WaitTone.ERROR else WaitTone.WARNING,
+            title,
+            observation.string("error"),
+        )
+    }
     if (observation.string("type") == "run_finished")
         return when (val status = observation.string("status")) {
             "succeeded" ->
@@ -495,7 +541,8 @@ private fun waitIcon(kind: WaitKind) =
     when (kind) {
         WaitKind.TIMER -> CairnIcons.Hourglass
         WaitKind.CONDITION -> CairnIcons.Workflow
-        WaitKind.RUN -> CairnIcons.Orbit
+        WaitKind.RUN,
+        WaitKind.TASK -> CairnIcons.Orbit
         WaitKind.GROUP -> CairnIcons.Layers
     }
 
@@ -511,6 +558,7 @@ internal fun observedTarget(observation: JsonObject?): String =
                 if (observation.string("mode") == "any") "Premier de $it résultats"
                 else "$it résultats"
             }
+        observation.string("type") == "task_finished" -> "Tâche déléguée"
         observation.string("type") == "run_finished" -> "Autre exécution"
         observation.string("type") == "time" -> "Heure prévue"
         else ->
@@ -846,6 +894,7 @@ internal fun WaitCard(wait: ActivityWait) {
                     folded = finished && !current,
                     now = now,
                     openRun = live?.openRun,
+                    openChat = live?.openChat,
                     modifier = Modifier.padding(start = 58.dp, end = 12.dp, bottom = 12.dp),
                 )
             if (pausable && live != null)
@@ -927,6 +976,7 @@ private fun WaitMembers(
     folded: Boolean,
     now: Long,
     openRun: ((String) -> Unit)?,
+    openChat: ((String) -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
     var open by rememberSaveable(folded) { mutableStateOf(!folded) }
@@ -1024,6 +1074,7 @@ private fun WaitMembers(
                             index == first,
                             now,
                             openRun,
+                            openChat,
                         )
                     }
                 }
@@ -1041,6 +1092,7 @@ private fun WaitMemberRow(
     first: Boolean,
     now: Long,
     openRun: ((String) -> Unit)?,
+    openChat: ((String) -> Unit)?,
 ) {
     val outcome = member.outcome
     val status =
@@ -1052,7 +1104,7 @@ private fun WaitMemberRow(
                 else "Inutile : un autre résultat est arrivé avant"
             !live -> "Résultat attendu"
             member.lastError != null -> "Contrôle échoué · nouvel essai"
-            member.kind == WaitKind.RUN -> "Attente de sa fin"
+            member.kind in setOf(WaitKind.RUN, WaitKind.TASK) -> "Attente de sa fin"
             member.nextCheckAt != null ->
                 if (member.nextCheckAt > now) "Contrôle dans ${timeLeft(member.nextCheckAt - now)}"
                 else "Contrôle en cours…"
@@ -1066,15 +1118,23 @@ private fun WaitMemberRow(
             live && member.lastError != null -> signal.warning
             else -> MaterialTheme.colorScheme.onSurfaceVariant
         }
-    val runId = member.runId
+    val openTarget =
+        when {
+            member.chatId != null && openChat != null -> ({ openChat(member.chatId) })
+            member.runId != null && openRun != null -> ({ openRun(member.runId) })
+            else -> null
+        }
+    val openLabel = if (member.chatId != null) "Ouvrir la tâche" else "Ouvrir l’exécution"
     Row(
         Modifier.fillMaxWidth()
             .testTag("wait-member")
             .then(
-                if (runId != null && openRun != null)
-                    Modifier.clickable(role = Role.Button, onClickLabel = "Ouvrir l’exécution") {
-                        openRun(runId)
-                    }
+                if (openTarget != null)
+                    Modifier.clickable(
+                        role = Role.Button,
+                        onClickLabel = openLabel,
+                        onClick = openTarget,
+                    )
                 else Modifier
             )
             .alpha(if (finished && outcome == null) 0.6f else 1f)
@@ -1151,7 +1211,7 @@ private fun WaitMemberRow(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        if (runId != null && openRun != null)
+        if (openTarget != null)
             Icon(
                 CairnIcons.Right,
                 null,

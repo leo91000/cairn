@@ -995,4 +995,51 @@ class ChatWaitTest {
             waitOutcome(groupResult("timed_out", "any", JsonNull, JsonNull)),
         )
     }
+
+    @Test
+    fun `delegated tasks retain their identity and failure outcome in a group`() {
+        val first = buildJsonObject {
+            put("type", "task_finished")
+            put("chatId", "a11ce123-task")
+        }
+        val second = buildJsonObject {
+            put("type", "task_finished")
+            put("chatId", "b11ce123-task")
+        }
+        val failed = buildJsonObject {
+            put("state", "completed")
+            put("type", "task_finished")
+            put("status", "failed")
+            put("error", "Review failed")
+        }
+        val group = buildJsonObject {
+            put("type", "group")
+            put("mode", "all")
+            put("conditions", JsonArray(listOf(first, second)))
+        }
+        val members =
+            waitMembers(
+                wakeup(group)
+                    .copy(
+                        members =
+                            JsonArray(
+                                listOf(
+                                    buildJsonObject { put("observation", failed) },
+                                    JsonObject(emptyMap()),
+                                )
+                            )
+                    )
+            )
+        assertEquals(listOf("a11ce123-task", "b11ce123-task"), members.map { it.chatId })
+        assertEquals(listOf("a11ce123"), members.first().details)
+        assertEquals(WaitKind.TASK, members.first().kind)
+        assertEquals(
+            WaitOutcome(WaitTone.ERROR, "La tâche a échoué", "Review failed"),
+            members.first().outcome,
+        )
+        assertEquals(
+            WaitTone.ERROR,
+            waitOutcome(groupResult("completed", "all", failed, passedChecks)).tone,
+        )
+    }
 }

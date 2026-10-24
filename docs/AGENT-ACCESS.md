@@ -24,6 +24,16 @@ even when the agent's direct resource, plugin or node permissions are restricted
 It includes changing other agents' permissions and managing their work. Account
 administration remains outside the public MCP catalogue.
 
+**Task delegation** is a narrower opt-in power in the same section. It gives a
+conversation's agent the `cairn_workspace` tools `delegate_task`, `task_status` and
+`task_cancel`, without installation management. A delegated task is an ordinary
+conversation, possibly on another coding agent and model, that records its
+requester and reports back; the requester waits with the `task_finished`
+condition of `wait_for`. The task runs as the requesting agent or as another agent
+whose access the requester covers, in its own workspace. Delegated conversations
+cannot delegate further and a requester has at most five working tasks. Turning
+the power off is a reduction. See [delegated tasks](adr/0059-delegated-tasks.md).
+
 The `delete_agent` management tool removes an unused agent, including its saved
 portrait and plugin grants (GitHub accounts, 1Password). Main, agents referenced by tasks
 (including archived tasks), and agents with active work cannot be deleted. Move
