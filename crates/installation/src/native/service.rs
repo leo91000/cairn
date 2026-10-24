@@ -34,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 const MAX_PLAN: u64 = 8_000_000;
 const MAX_LOG: u64 = 64 * 1024 * 1024;
 
-fn native_budget(value: &Value) -> Result<crate::microvm::budget::Budget> {
+pub(crate) fn native_budget(value: &Value) -> Result<crate::microvm::budget::Budget> {
     let mut value = value.clone();
     if let Some(protocol) = value
         .as_object_mut()

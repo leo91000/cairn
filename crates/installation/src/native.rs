@@ -16,6 +16,7 @@ mod watchdog;
 mod workspace;
 
 pub(crate) use mode::matches as mode_matches;
+pub(crate) use service::native_budget;
 pub use service::serve;
 pub use watchdog::serve as watchdog;
 

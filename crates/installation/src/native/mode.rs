@@ -12,6 +12,7 @@ use std::{
 };
 
 pub const FILE: &str = "native-mode.json";
+const SUDO_HEADER: &str = "# Cairn native administrator; protected units retain NoNewPrivileges.";
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -84,28 +85,56 @@ fn sudoers(identity: &systemd::Identity) -> PathBuf {
     PathBuf::from(format!("/etc/sudoers.d/cairn-native-{}", identity.uid))
 }
 
-pub async fn sudo(identity: &systemd::Identity, enabled: bool) -> Result<()> {
-    let path = sudoers(identity);
-    if !enabled {
-        match tokio::fs::remove_file(&path).await {
-            Ok(()) => {
-                tokio::fs::File::open(path.parent().unwrap())
-                    .await?
-                    .sync_all()
-                    .await?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
+async fn remove_sudo_policies(directory: &Path, user: &str) -> Result<()> {
+    let mut entries = match tokio::fs::read_dir(directory).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let grant = format!("{user} ALL=(ALL:ALL) NOPASSWD: ALL");
+    let mut changed = false;
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name();
+        let Some(suffix) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("cairn-native-"))
+        else {
+            continue;
+        };
+        if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
         }
-        return Ok(());
+        if !entry.file_type().await?.is_file() {
+            return Err(Error::conflict(
+                "An unrecognized native sudo policy entry needs host-owner review.",
+            ));
+        }
+        let rule = tokio::fs::read_to_string(entry.path()).await?;
+        if rule.lines().any(|line| line == SUDO_HEADER) && rule.lines().any(|line| line == grant) {
+            tokio::fs::remove_file(entry.path()).await?;
+            changed = true;
+        }
     }
+    if changed {
+        tokio::fs::File::open(directory).await?.sync_all().await?;
+    }
+    Ok(())
+}
+
+pub async fn sudo(identity: &systemd::Identity, enabled: bool) -> Result<()> {
+    if !enabled {
+        // A supported reinstall can assign this username a different UID.
+        // Remove its owned grants across generations, not just today's filename.
+        return remove_sudo_policies(Path::new("/etc/sudoers.d"), &identity.user).await;
+    }
+    let path = sudoers(identity);
     if !available() {
         return Err(Error::unavailable(
             "Install sudo with its standard sudoers.d include before enabling native administrator.",
         ));
     }
     let rule = format!(
-        "# Cairn native administrator; protected units retain NoNewPrivileges.\n{} ALL=(ALL:ALL) NOPASSWD: ALL\n",
+        "{SUDO_HEADER}\n{} ALL=(ALL:ALL) NOPASSWD: ALL\n",
         identity.user
     );
     atomic_write(&path, rule.as_bytes()).await?;
@@ -147,6 +176,53 @@ pub async fn sudo(identity: &systemd::Identity, enabled: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn protected_cleanup_removes_owned_grants_across_uid_changes_only() {
+        let root = tempfile::tempdir().unwrap();
+        for uid in [1000, 2000] {
+            tokio::fs::write(
+                root.path().join(format!("cairn-native-{uid}")),
+                format!("{SUDO_HEADER}\ncairn-workload ALL=(ALL:ALL) NOPASSWD: ALL\n"),
+            )
+            .await
+            .unwrap();
+        }
+        let other = root.path().join("cairn-native-3000");
+        let manual = root.path().join("manual-policy");
+        tokio::fs::write(
+            &other,
+            format!("{SUDO_HEADER}\nother-workload ALL=(ALL:ALL) NOPASSWD: ALL\n"),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(&manual, "cairn-workload ALL=(ALL:ALL) NOPASSWD: ALL\n")
+            .await
+            .unwrap();
+        remove_sudo_policies(root.path(), "cairn-workload")
+            .await
+            .unwrap();
+        assert!(!root.path().join("cairn-native-1000").exists());
+        assert!(!root.path().join("cairn-native-2000").exists());
+        assert!(other.exists());
+        assert!(manual.exists());
+        remove_sudo_policies(root.path(), "cairn-workload")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn protected_cleanup_refuses_unrecognized_entries_without_following_links() {
+        let root = tempfile::tempdir().unwrap();
+        let target = tempfile::NamedTempFile::new().unwrap();
+        std::os::unix::fs::symlink(target.path(), root.path().join("cairn-native-1000")).unwrap();
+        assert!(
+            remove_sudo_policies(root.path(), "cairn-workload")
+                .await
+                .is_err()
+        );
+        assert!(target.path().exists());
+    }
 
     #[test]
     fn unknown_modes_and_stale_or_unconfirmed_plans_fail_closed() {

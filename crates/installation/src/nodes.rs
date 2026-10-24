@@ -940,7 +940,13 @@ async fn grant_agents(s: &Service, node: &str, body: Value) -> Result<Value> {
                 }
                 set_node_grant(db, agent, &node, granted)?;
             }
-            db.put("nodes", &record)?;
+            // Revoking placement can also release exclusive reservations on
+            // this record. Persist only our admission field onto that new copy.
+            let mut current = db.get("nodes", &node)?.unwrap();
+            if current["nativeReviewedAgents"] != record["nativeReviewedAgents"] {
+                current["nativeReviewedAgents"] = record["nativeReviewedAgents"].clone();
+                db.put("nodes", &current)?;
+            }
             db.audit(
                 "node.agents.configured",
                 &json!({ "nodeId": node, "agentIds": request.agent_ids }),
