@@ -4,6 +4,7 @@ import http.client
 import os
 import pwd
 import shutil
+import shlex
 import socket
 from pathlib import Path
 import subprocess
@@ -26,6 +27,13 @@ def command(*args, success=True):
     if not success:
         assert result.returncode != 0, 'Restricted Docker operation succeeded: ' + ' '.join(args)
     return result.stdout.strip()
+
+
+def http_command(body, port=80):
+    # Alpine's minimal BusyBox omits httpd; nc is included in the base image.
+    # Keep the fixture self-contained and avoid package downloads at startup.
+    response = f'HTTP/1.1 200 OK\r\nContent-Length: {len(body.encode())}\r\nConnection: close\r\n\r\n{body}'
+    return ['sh', '-c', f"while :; do printf '%s' {shlex.quote(response)} | nc -l -p {port}; done"]
 
 
 def wait_http(expected):
@@ -208,7 +216,7 @@ def main():
         assert not command('docker', 'image', 'ls', '-q'), 'Other conversation can see images.'
         command('docker', 'pull', ALPINE)
         command('docker', 'run', '-d', '--name', 'other-http', '-p', str(PORT) + ':80', ALPINE,
-                'sh', '-c', 'mkdir /www; echo other >/www/index.html; exec httpd -f -p 80 -h /www')
+                *http_command('other'))
         wait_http(b'other')
     else:
         context = Path('.docker-fixture')
@@ -238,7 +246,7 @@ def main():
         compose = dict(services=dict(
             db=dict(image=POSTGRES, environment=dict(POSTGRES_PASSWORD='fixture-only'), volumes=['database:/var/lib/postgresql/data']),
             redis=dict(image=REDIS),
-            app=dict(image=ALPINE, ports=[str(PORT) + ':80'], command=['sh', '-c', 'mkdir -p /www; echo conversation >/www/index.html; exec httpd -f -p 80 -h /www'])),
+            app=dict(image=ALPINE, ports=[str(PORT) + ':80'], command=http_command('conversation'))),
             volumes=dict(database={}))
         compose_path = context / 'compose.json'
         compose_path.write_text(json.dumps(compose))
