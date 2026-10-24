@@ -53,6 +53,10 @@ management-created and historical edges still require installation access. Both
 the saved and current parent permissions, caller authority and node ceiling are
 checked at admission and renewal.
 
+Saved plugin bot approvals that predate `access.delegation` read its absence as
+`false`. They remain authorized with delegation off; enabling the power still
+suspends them until the owner approves the changed access.
+
 The requester's history records a `chat.delegated` event where the task started.
 Clients show these as the existing subagent team card, followed through the
 delegated conversation for its live state; opening a task opens its conversation.
