@@ -612,29 +612,65 @@ test('a transient agent error shows a retry countdown and resumes without user i
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.retry?.attempt).toBe(1)
   const waiting = (await workspace.api(`/api/chats/${chat.id}`)).run
   expect(waiting.status).toBe('queued')
+  waiting.retry.nextAttemptAt = Date.now() + 60_000
+  workspace.service.store.updateRun(waiting.id, { retry: waiting.retry })
   // A retry keeps earlier conversation events, including an interrupted background wait.
   workspace.service.store.event(waiting.id, 'turn.waiting', '', {
     tasks: [{ id: 'old-build', description: 'Earlier background build' }],
   })
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
-  const notice = page.getByRole('status').filter({ hasText: /Temporary agent error\. Retrying in \d+ seconds \(attempt 1\/3\)\./ })
+  const notice = page.getByTestId('recovery-notice')
   await expect(notice).toBeVisible()
   // The failed attempt shows one card, marked as a temporary error Cairn retries itself.
   const failure = page.getByRole('note').filter({ hasText: 'workspace routing discovery timed out' })
   await expect(failure).toHaveCount(1)
-  await expect(failure).toContainText('Temporary error — automatic retry 1/3')
+  await expect(failure).toContainText('Temporary error — automatic retry 1/5')
   await expect(page.locator('.agent-waiting')).toHaveCount(0)
   await expect(page.getByText('Background task', { exact: true })).toHaveCount(0)
   const before = await notice.textContent()
   await expect.poll(() => notice.textContent()).not.toBe(before)
-  await page.screenshot({ path: test.info().outputPath('agent-retry-countdown.png') })
+  for (const colorScheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme })
+    for (const width of [1280, 390, 320]) {
+      await page.setViewportSize({ width, height: 900 })
+      await expect(notice).toBeVisible()
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+      await page.screenshot({ path: test.info().outputPath(`agent-retry-${colorScheme}-${width}.png`) })
+    }
+  }
+
   expect((await workspace.api(`/api/chats/${chat.id}`)).paused).toBe(false)
   workspace.service.store.updateRun(waiting.id, { retry: { ...waiting.retry, nextAttemptAt: Date.now() } })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
   await expect(page.getByText('Ready for the next step.', { exact: false }).last()).toBeVisible()
   await expect(notice).toHaveCount(0)
   await expect(failure).toHaveCount(1)
+})
+
+test('cancelling automatic recovery pauses the conversation and preserves its work', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+    id: randomUUID(),
+    text: 'fixture:agent-failures:[{"code":"server_overloaded","message":"Please try again"}]',
+  })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.retry?.attempt).toBe(1)
+  const waiting = (await workspace.api(`/api/chats/${chat.id}`)).run
+  workspace.service.store.updateRun(waiting.id, { retry: { ...waiting.retry, nextAttemptAt: Date.now() + 60_000 } })
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const notice = page.getByTestId('recovery-notice')
+  await expect(notice.getByText('Retry 1 of 5')).toBeVisible()
+  await notice.getByText('What happened').click()
+  await expect(notice.getByText('Please try again')).toBeVisible()
+  await notice.getByRole('button', { name: 'Cancel retry' }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).paused).toBe(true)
+  await expect(notice).toHaveCount(0)
+  const stopped = (await workspace.api(`/api/chats/${chat.id}`)).run
+  expect(stopped.id).toBe(waiting.id)
+  expect(stopped.workspace).toBe(waiting.workspace)
+  expect(stopped.retry).toBeNull()
+  expect(stopped.status).toBe('cancelled')
 })
 
 test('native Codex reconnect notices remain visible until work continues', async ({ page, workspace }) => {

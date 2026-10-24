@@ -397,9 +397,44 @@ impl Execution<'_> {
         if !self.checkpoint.read(RunCheckpoint::launched).await {
             return Ok(None);
         }
-        let Some(session) =
-            saved_session(s, self.run, &workspace.state_home, workspace.cwd()).await?
-        else {
+        let pending_startup = self
+            .checkpoint
+            .read(|saved| {
+                saved
+                    .retry_cause
+                    .as_ref()
+                    .and_then(Option::as_ref)
+                    .is_some_and(|cause| cause.startup)
+            })
+            .await;
+        if !self.run["sessionId"].is_string() && pending_startup {
+            // The adapter confirmed no new turn was submitted; preserve the same
+            // prepared workspace and retry its initial authentication safely.
+            return Ok(None);
+        }
+        let session = match saved_session(s, self.run, &workspace.state_home, workspace.cwd()).await
+        {
+            Ok(session) => session,
+            Err(error) => {
+                // Local session discovery happens before any new turn is submitted.
+                // Preserve its specific transient failure instead of the previous cause.
+                if let Some(failure) = crate::run_retry::startup_failure(&error) {
+                    let cause = crate::run_retry::Cause::classify(&failure["error"]);
+                    self.checkpoint
+                        .update(|saved| {
+                            saved.completed = Some(false);
+                            saved.last_error = Some(Some(error.message.clone()));
+                            saved.retry_cause = Some(cause);
+                        })
+                        .await?;
+                    s.store
+                        .event(&self.id, "turn.failed", &error.message, Some(failure))
+                        .await?;
+                }
+                return Err(error);
+            }
+        };
+        let Some(session) = session else {
             s.store.event(
                 &self.id,
                 "status",
@@ -1060,8 +1095,8 @@ impl Execution<'_> {
         if status == RunStatus::Failed
             && !exit.timed_out
             && !self.stopping()
-            && has_session
             && let Some(cause) = saved.retry_cause.as_ref().and_then(Option::as_ref)
+            && (has_session || cause.startup)
         {
             // The provider confirmed this turn failed. Recovery is scheduled by
             // the worker after the previous execution is fenced, not replayed here.
@@ -1197,7 +1232,10 @@ mod tests {
             public_url: "http://localhost:4310".into(),
             host: "127.0.0.1".into(),
             port: 0,
-            codex_bin: "/bin/false".into(),
+            codex_bin: Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/codex.mjs")
+                .to_string_lossy()
+                .into_owned(),
             claude_bin: "/bin/false".into(),
             opencode_bin: "/bin/false".into(),
             opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),

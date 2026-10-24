@@ -156,6 +156,9 @@ impl Worker {
         {
             return Ok(());
         }
+        if super::retry::expire(s, &run_id).await? {
+            return Ok(());
+        }
         // Serialize only the preparation window, until placement has reserved
         // the node slot. Running VMs use node slots without a global ceiling.
         let preparation = if execution::uses_vm(&run, &s.config) {
@@ -245,8 +248,8 @@ impl Worker {
         let expected_message = crate::waits::execution_id(prepared).clone();
         let eligible = s
             .store
-            .read(move |db| {
-                if !eligible_run(db, &id)? {
+            .transaction(move |db| {
+                if !eligible_run(db, &id)? || super::retry::expire_in(db, &id)? {
                     return Ok(false);
                 }
                 let current = db
@@ -873,6 +876,42 @@ mod tests {
         assert!(
             !workspace.exists(),
             "Account preparation must not recreate a purged run directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retry_that_expires_during_preparation_cannot_register() {
+        let (_root, service, _chat_id, run_id, workspace) = fixture().await;
+        let prepared = service.store.patch_run(&run_id, json!({
+            "retry": { "attempt": 1, "limit": 5, "nextAttemptAt": now() - 1, "deadlineAt": now() + 60_000 },
+        })).await.unwrap();
+        // Admission captured an eligible run, then waits behind asynchronous work.
+        let active = service.worker.active.lock().await;
+        let registration = service
+            .worker
+            .register(&service, &prepared, CancellationToken::new());
+        tokio::pin!(registration);
+        std::future::poll_fn(|cx| {
+            assert!(registration.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        service
+            .store
+            .patch_run(&run_id, json!({ "retry": { "deadlineAt": now() - 1 } }))
+            .await
+            .unwrap();
+        drop(active);
+        assert!(!registration.await.unwrap());
+        let stopped = service.store.run(&run_id).await.unwrap();
+        assert_eq!(stopped["status"], RunStatus::Failed);
+        assert!(stopped["retry"]["nextAttemptAt"].is_null());
+        assert!(service.worker.active.lock().await.is_empty());
+        assert_eq!(
+            tokio::fs::read_to_string(workspace.join("work.txt"))
+                .await
+                .unwrap(),
+            "Private work"
         );
     }
 
