@@ -51,6 +51,10 @@ La mise en relation par Beacon d’une interface et d’une installation pour é
 **Autorisation de connexion directe** :
 La permission signée par Beacon, limitée à une installation, un compte, une session et quelques minutes, sans laquelle l’installation refuse une connexion directe. Sa révocation ou son échéance ferme la connexion.
 
+**Passerelle de node** :
+Service local d’une machine ajoutée sans adresse du manager, par lequel sa node joint le manager à travers Beacon. Elle ne détient aucun droit : la node et le manager s’authentifient toujours entre eux.
+_Avoid_ : proxy, tunnel de node
+
 **Node d’exécution** :
 Machine rattachée à une installation pour y effectuer le travail d’un agent, selon ses capacités et les autorisations accordées. Une node peut être disponible de manière intermittente.
 _Avoid_ : agent (qui désigne l’agent chargé du travail, et non la machine)

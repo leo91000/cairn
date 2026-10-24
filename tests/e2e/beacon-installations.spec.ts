@@ -106,14 +106,19 @@ test('selects installations, remembers the last one and honours deep workspace U
     await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
     await page.reload()
     await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
-    // Node administration travels through the beacon relay; the machine itself
-    // needs a separately configured direct manager address, even on a LAN or VPN.
+    // Without an address, the machine reaches the manager through the beacon.
     await page.getByRole('link', { name: 'Nodes', exact: true }).click()
     await page.getByRole('button', { name: 'Add a machine', exact: true }).click()
     const nodeDialog = page.getByRole('dialog', { name: 'Add a machine' })
-    await expect(nodeDialog).toContainText('does not use the relay')
-    await expect(nodeDialog).toContainText('Disk blocks never pass through the relay')
+    await expect(nodeDialog).toContainText('no manager address, certificate or open port is needed')
+    await nodeDialog.getByLabel('Machine name').fill('Office node')
+    await nodeDialog.getByRole('button', { name: 'Create enrollment code' }).click()
+    const beaconScript = `${url}/install/node.sh`.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    await expect(nodeDialog.getByLabel('Node installation command')).toHaveText(new RegExp(`^curl --fail --silent --show-error '${beaconScript}' \\| sudo bash -s -- '[0-9a-f-]{36}' firecracker$`))
+    await nodeDialog.getByRole('button', { name: 'Hide code' }).click()
+    // A LAN or VPN address remains available to keep node traffic off the beacon.
     await nodeDialog.getByLabel('Machine name').fill('VPN node')
+    await nodeDialog.getByText('Connect directly instead').click()
     await nodeDialog.getByLabel('Direct manager address').fill('https://manager.vpn.example:4310/')
     await nodeDialog.getByRole('button', { name: 'Create enrollment code' }).click()
     await expect(nodeDialog.getByLabel('Node installation command')).toHaveText('curl --fail --silent --show-error \'https://manager.vpn.example:4310/internal/nodes/install.sh\' | sudo bash -s -- \'https://manager.vpn.example:4310\'')

@@ -112,6 +112,8 @@ export interface NodeEnrollment {
   nodeId?: string
   backend?: 'firecracker' | 'native'
   installCommand?: string | null
+  // `beacon` when the machine reaches the manager through Cairn without an address.
+  route?: 'beacon' | 'direct'
   managerUrl?: string | null
   code: string
   expiresAt: number
