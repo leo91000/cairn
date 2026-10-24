@@ -1,4 +1,4 @@
-> Statut : Remplacée par [ADR-0060](0060-grouped-wait-conditions.md) pour la limite de profondeur des dépendances ; les conditions durables restent applicables.
+> Statut : Remplacée par [ADR-0060](0060-grouped-wait-conditions.md) pour la limite de profondeur des dépendances et [ADR-0053](0053-github-as-a-bundled-plugin.md) pour les identifiants GitHub et leur observation, désormais assurés par une instance de plugin accordée et son gestionnaire de conditions ; les conditions durables restent applicables.
 
 # Durable conditions for conversation continuation
 

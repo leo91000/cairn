@@ -1,3 +1,5 @@
+> Statut : Remplacée par [ADR-0053](0053-github-as-a-bundled-plugin.md) pour les identifiants GitHub et le mécanisme d’observation, désormais fournis par le plugin accordé ; la sémantique des checks requis reste applicable.
+
 # Wait for required pull-request checks at an exact head
 
 Date: 2026-10-13.
