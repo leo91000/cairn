@@ -55,6 +55,12 @@ class SignalJourneyTest {
             MAIN_AGENT_ID,
             cron = "0 9 * * *",
             nextRun = now + 3_600_000,
+            scheduleFailure =
+                ScheduleFailure(
+                    "Aucune node native autorisée.",
+                    now - 82_800_000,
+                    now - 82_800_000,
+                ),
         )
     private val failed =
         Run(
@@ -506,6 +512,10 @@ class SignalJourneyTest {
         compose.onNodeWithText("09:00").assertExists()
         // The failure is flagged on the card and listed in the history.
         compose.onAllNodesWithText("Échec").assertCountEquals(2)
+        // A skipped scheduled occurrence is explained instead of leaving a silent gap.
+        compose
+            .onNodeWithText("n’a pas démarré : Aucune node native autorisée.", substring = true)
+            .assertExists()
         capture("mission-sheet-light")
         compose.onNodeWithContentDescription("Mettre en pause").performScrollTo().performClick()
         waitCall("PUT", "/api/installations/fixture/api/tasks/daily")

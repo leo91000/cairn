@@ -878,7 +878,19 @@ impl Service {
                 }
             };
 
-            if let Err(error) = admission
+            // A skipped occurrence stays on the task until a later one is admitted or the task
+            // is saved, so a mission never looks healthy while its schedule silently fails.
+            let failure = match &admission {
+                Ok(_) => Some(Value::Null),
+                Err(error) if error.status != 409 => Some(json!({
+                    "message": error.message,
+                    "scheduledFor": task["nextRun"],
+                    "at": now(),
+                })),
+                Err(_) => None,
+            };
+
+            if let Err(error) = &admission
                 && error.status != 409
             {
                 let detail = json!({
@@ -895,6 +907,9 @@ impl Service {
                         && current["nextRun"] == task["nextRun"]
                     {
                         current["nextRun"] = next.into();
+                        if let Some(failure) = failure {
+                            current["scheduleFailure"] = failure;
+                        }
                         db.put("tasks", &current)?;
                     }
                     Ok(())

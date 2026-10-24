@@ -122,10 +122,43 @@ struct Stoppable<'a, R> {
     stop: &'a tokio_util::sync::CancellationToken,
 }
 
+#[derive(Debug)]
+struct ExtractionStopped;
+
+impl std::fmt::Display for ExtractionStopped {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Project extraction stopped.")
+    }
+}
+
+impl std::error::Error for ExtractionStopped {}
+
+fn extraction_stopped(error: &std::io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(<dyn std::error::Error + Send + Sync>::is::<ExtractionStopped>)
+}
+
+fn extraction_io_error(error: std::io::Error) -> Error {
+    if extraction_stopped(&error) {
+        return Error::conflict("Project extraction stopped.");
+    }
+    error.into()
+}
+
+fn extraction_archive_error(error: zip::result::ZipError) -> Error {
+    if let zip::result::ZipError::Io(error) = &error
+        && extraction_stopped(error)
+    {
+        return Error::conflict("Project extraction stopped.");
+    }
+    archive_error(error)
+}
+
 impl<R: Read> Read for Stoppable<'_, R> {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
         if self.stop.is_cancelled() {
-            return Err(std::io::Error::other("Project extraction stopped."));
+            return Err(std::io::Error::other(ExtractionStopped));
         }
         self.input.read(bytes)
     }
@@ -134,7 +167,7 @@ impl<R: Read> Read for Stoppable<'_, R> {
 impl<R: Seek> Seek for Stoppable<'_, R> {
     fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
         if self.stop.is_cancelled() {
-            return Err(std::io::Error::other("Project extraction stopped."));
+            return Err(std::io::Error::other(ExtractionStopped));
         }
         self.input.seek(position)
     }
@@ -150,7 +183,8 @@ pub(super) fn allocation_budget(
     unit: u64,
     stop: &tokio_util::sync::CancellationToken,
 ) -> Result<u64> {
-    let archive = ZipArchive::new(Stoppable { input: file, stop }).map_err(archive_error)?;
+    let archive =
+        ZipArchive::new(Stoppable { input: file, stop }).map_err(extraction_archive_error)?;
     if archive.len() > MAX_ENTRIES {
         return Err(Error::too_large("Too many project archive entries."));
     }
@@ -168,12 +202,13 @@ pub(crate) fn extract(file: File, target: &Path, budget: u64) -> Result<u64> {
 }
 
 pub(super) fn extract_with_stop(
-    file: File,
+    file: impl Read + Seek,
     target: &Path,
     budget: u64,
     stop: &tokio_util::sync::CancellationToken,
 ) -> Result<u64> {
-    let mut archive = ZipArchive::new(Stoppable { input: file, stop }).map_err(archive_error)?;
+    let mut archive =
+        ZipArchive::new(Stoppable { input: file, stop }).map_err(extraction_archive_error)?;
     if archive.len() > MAX_ENTRIES {
         return Err(Error::too_large("Too many project archive entries."));
     }
@@ -183,9 +218,9 @@ pub(super) fn extract_with_stop(
     let mut directories = Vec::new();
     for index in 0..archive.len() {
         if stop.is_cancelled() {
-            return Err(Error::unavailable("Project extraction stopped."));
+            return Err(Error::conflict("Project extraction stopped."));
         }
-        let mut entry = archive.by_index(index).map_err(archive_error)?;
+        let mut entry = archive.by_index(index).map_err(extraction_archive_error)?;
         let path = entry
             .enclosed_name()
             .ok_or_else(|| Error::bad("Project archive escapes its root."))?;
@@ -219,7 +254,9 @@ pub(super) fn extract_with_stop(
                 return Err(Error::bad("Project archive symlink is too long."));
             }
             let mut link = String::new();
-            entry.read_to_string(&mut link)?;
+            entry
+                .read_to_string(&mut link)
+                .map_err(extraction_io_error)?;
             symlink(link, destination)?;
         } else {
             if mode & libc::S_IFMT != 0 && mode & libc::S_IFMT != libc::S_IFREG {
@@ -234,7 +271,7 @@ pub(super) fn extract_with_stop(
                 .open(destination)?;
             let input = entry.take(expected + 1);
             let mut input = Stoppable { input, stop };
-            if std::io::copy(&mut input, &mut file)? != expected {
+            if std::io::copy(&mut input, &mut file).map_err(extraction_io_error)? != expected {
                 return Err(Error::bad("Project archive size changed."));
             }
             file.flush()?;
@@ -250,6 +287,78 @@ pub(super) fn extract_with_stop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_archive_preflight_is_retryable_and_corruption_remains_invalid() {
+        let stop = tokio_util::sync::CancellationToken::new();
+        stop.cancel();
+        let file = tempfile::tempfile().unwrap();
+        assert_eq!(
+            allocation_budget(file.try_clone().unwrap(), 4096, 4096, &stop)
+                .unwrap_err()
+                .status,
+            409
+        );
+        let target = tempfile::tempdir().unwrap();
+        assert_eq!(
+            extract_with_stop(file.try_clone().unwrap(), target.path(), 4096, &stop)
+                .unwrap_err()
+                .status,
+            409
+        );
+        assert_eq!(extract(file, target.path(), 4096).unwrap_err().status, 400);
+    }
+
+    #[test]
+    fn interrupted_archive_payload_is_retryable_without_an_internal_error() {
+        struct CancelPayload {
+            file: File,
+            destination: std::path::PathBuf,
+            stop: tokio_util::sync::CancellationToken,
+        }
+
+        impl Read for CancelPayload {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                let length = bytes.len().min(512);
+                let count = self.file.read(&mut bytes[..length])?;
+                if count > 0 && self.destination.exists() {
+                    self.stop.cancel();
+                }
+                Ok(count)
+            }
+        }
+
+        impl Seek for CancelPayload {
+            fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+                self.file.seek(position)
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let file = tempfile::tempfile().unwrap();
+        let mut writer = ZipWriter::new(file.try_clone().unwrap());
+        writer
+            .start_file(
+                "payload",
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+            )
+            .unwrap();
+        let payload = vec![42; 64 * 1024];
+        writer.write_all(&payload).unwrap();
+        writer.finish().unwrap();
+        let stop = tokio_util::sync::CancellationToken::new();
+        let target = root.path().join("target");
+        let reader = CancelPayload {
+            file,
+            destination: target.join("payload"),
+            stop: stop.clone(),
+        };
+        let error = extract_with_stop(reader, &target, payload.len() as u64, &stop).unwrap_err();
+        assert!(stop.is_cancelled());
+        let partial = std::fs::metadata(target.join("payload")).unwrap().len();
+        assert!(partial > 0 && partial < payload.len() as u64);
+        assert_eq!(error.status, 409, "{error}");
+    }
 
     #[test]
     fn project_roundtrip_preserves_links_modes_and_excludes_provider_state() {
