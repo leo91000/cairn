@@ -799,6 +799,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_merges_wait_for_live_conversion_but_allow_failed_or_interrupted_ones() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::config::Config {
+            data_dir: root.path().join("data"),
+            home: root.path().join("home"),
+            workspace_roots: vec![root.path().to_owned()],
+            public_url: "http://localhost:4310".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            codex_bin: "codex".into(),
+            claude_bin: "claude".into(),
+            opencode_bin: "opencode".into(),
+            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            concurrency: 1,
+            logger: false,
+            worker_enabled: false,
+            runner_url: String::new(),
+        })
+        .await
+        .unwrap();
+        for stopped_process in [Value::Null, json!(id())] {
+            let source = service
+                .agent(json!({ "name": "Converting source" }), None)
+                .await
+                .unwrap();
+            let run_id = id();
+            let run = json!({
+                "id": run_id, "taskId": id(), "createdAt": now(),
+                "status": "cancelled", "executionBackend": "native",
+                "snapshot": { "agent": source },
+                "backendMigration": { "id": id(), "process": PROCESS.as_str() },
+            });
+            let record = run.clone();
+            service
+                .store
+                .transaction(move |db| db.add_run(&record, None))
+                .await
+                .unwrap();
+            let input = json!({
+                "sourceId": source["id"], "targetId": crate::config::MAIN_AGENT_ID, "confirm": true,
+            });
+
+            // Conversion already fenced the worker but still owns asynchronous
+            // capture/restore or a capacity wait. Its profile must remain live.
+            let error = service.merge_agents(input.clone()).await.unwrap_err();
+            assert_eq!(error.status, 409);
+            assert!(error.message.contains("active work"), "{error}");
+            assert_eq!(
+                service.get("agents", text(&source, "id")).await.unwrap(),
+                source
+            );
+            assert_eq!(
+                service.store.run(&run_id).await.unwrap()["snapshot"]["agent"],
+                source
+            );
+
+            service
+                .store
+                .patch_run(
+                    &run_id,
+                    json!({
+                        "backendMigration": { "process": stopped_process },
+                    }),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                service.merge_agents(input).await.unwrap()["transferred"]["runs"],
+                1
+            );
+            assert_eq!(
+                service.store.run(&run_id).await.unwrap()["snapshot"]["agent"]["id"],
+                crate::config::MAIN_AGENT_ID
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn conversions_only_target_vm_nodes_the_agent_still_allows() {
         let root = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(root.path()).unwrap();

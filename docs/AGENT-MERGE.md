@@ -33,7 +33,8 @@ records the source, destination and transferred task/chat/run counts.
 The operation requires two existing, different profiles. Main can only be the
 destination. Before changing anything it refuses:
 
-- A source with queued, running, recovering or still settling execution. Wait
+- A source with queued, running, recovering or still settling execution, including
+  a live backend conversion after its worker has stopped. Wait
   for it to finish and retry; a merge never cancels work.
 - A destination that does not already cover the source's access, node selection,
   plugin grants (including GitHub credentials) and exclusive node grants. Grant
