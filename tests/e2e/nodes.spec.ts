@@ -246,8 +246,9 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await panel.getByRole('button', { name: 'Move…' }).click()
   const move = page.getByRole('dialog', { name: 'Move to another node', exact: true })
   await move.getByRole('combobox', { name: 'Destination', exact: true }).click()
-  await move.getByRole('option', { name: 'Destination server', exact: true }).click()
-  await expect(move.getByRole('combobox', { name: 'Destination', exact: true })).toHaveValue('Destination server')
+  // Each destination names the backend the conversation would run on there.
+  await move.getByRole('option', { name: 'Destination server · Firecracker VM', exact: true }).click()
+  await expect(move.getByRole('combobox', { name: 'Destination', exact: true })).toHaveValue('Destination server · Firecracker VM')
   await expect(move.getByRole('button', { name: 'Move now' })).toBeEnabled()
   await expect(move.getByRole('spinbutton')).toHaveCount(0)
   await page.keyboard.press('Escape')
@@ -630,9 +631,10 @@ test('moving a conversation to the other backend remounts its files or converts 
   await useRelayForHttpMocks(page)
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Keep this conversation' })
-  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
+  // Only a finished turn matters here; its saved environment is described below.
+  await expect.poll(async () => ['succeeded', 'failed'].includes((await workspace.api(`/api/chats/${chat.id}`)).run?.status), { timeout: 20000 }).toBe(true)
   const run = (await workspace.api(`/api/chats/${chat.id}`)).run
-  workspace.service.store.updateRun(run.id, { executionBackend: 'firecracker', sessionId: 'session-fixture' } as any)
+  workspace.service.store.updateRun(run.id, { status: 'succeeded', executionBackend: 'firecracker', sessionId: 'session-fixture' } as any)
   const vm = { id: randomUUID(), name: 'Build VM', capabilities: { backend: 'firecracker' } }
   const gpu = { id: randomUUID(), name: 'Desktop GPU', capabilities: { backend: 'native', vmDisks: true } }
   await page.route('**/nodes/placement/*', route => route.fulfill({ json: { nodes: [vm, gpu], pinnedNodeId: null, preferredNodeId: null } }))

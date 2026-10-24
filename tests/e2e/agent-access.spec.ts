@@ -831,7 +831,7 @@ test('an agent can run on VM and native nodes alike, each native node reviewed l
   await expect(review).toHaveCount(0)
   await expect.poll(async () => (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id).access.nodes).toBeNull()
   await page.getByRole('link', { name: 'Overview', exact: true }).click()
-  await expect(page.getByRole('button', { name: /^Execution / })).toContainText('Native nodes')
+  await expect(page.getByRole('button', { name: /^Execution All nodes/ })).toContainText('Native nodes')
 })
 
 test('a rejected first creation says the agent was not saved', async ({ page, workspace }) => {
