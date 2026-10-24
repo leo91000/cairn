@@ -65,10 +65,14 @@ test('asks side questions about a running reply without steering, queuing or rec
   expect(JSON.stringify(workspace.service.store.events(detail.run.id, 0, 200))).not.toContain('Side answer')
 
   // Steering still reaches the turn, which then finishes; side questions wait for the next reply.
+  const header = message.locator('p').first()
+  const running = (await header.boundingBox())!.height
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('finish now')
   await page.getByRole('button', { name: 'Steer now' }).click()
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
   await expect(message.getByRole('button', { name: 'Ask about this reply' })).toHaveCount(0)
+  // The action leaving does not move the conversation, which keeps following its end.
+  expect((await header.boundingBox())!.height).toBe(running)
   await message.getByRole('button', { name: 'Show 2 side questions about this reply' }).click()
   await expect(panel.getByText('Side questions are answered while Codex or Claude Code works on a reply.')).toBeVisible()
   await expect(panel.getByText('About one reply')).toBeVisible()

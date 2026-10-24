@@ -517,13 +517,14 @@ defineExpose({
                   :class="visibleOutcome && entry.id === outcomeEntryId ? 'mb-1!' : ''"
                   :data-item-id="chat ? entry.itemId : undefined"
                 >
+                  <!-- Its actions come and go with the reply's state: they never change the line's height, so the conversation does not move. -->
                   <p class="mb-1.5! flex items-center justify-between gap-3 text-2xs text-muted">
                     <span class="truncate">{{ agent }}<template v-if="entry.via"> · via {{ entry.via }}</template></span>
                     <span class="flex shrink-0 items-center gap-1">
                       <button
                         v-if="chat && entry.itemId && sideQuestions?.[entry.itemId]"
                         type="button"
-                        class="side-question-count inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-[11px] font-medium text-accent hover:bg-accent/16"
+                        class="side-question-count relative -my-1 inline-flex h-5 items-center gap-1 rounded-full bg-accent/10 px-2 text-[11px] leading-none font-medium text-accent after:absolute after:-inset-2 after:content-[''] hover:bg-accent/16"
                         :aria-label="`Show ${sideQuestions[entry.itemId]} side ${sideQuestions[entry.itemId] === 1 ? 'question' : 'questions'} about this reply`"
                         @click="emit('sideQuestions', entry.itemId)"
                       >
@@ -532,7 +533,7 @@ defineExpose({
                       <button
                         v-if="chat && canAsk && entry.itemId"
                         type="button"
-                        :class="twMerge(iconButton, 'size-6 phone:min-h-9 phone:min-w-9')"
+                        :class="twMerge(iconButton, 'relative -my-1 size-5 phone:min-h-0 phone:min-w-0 after:absolute after:-inset-2.5 after:content-[\'\']')"
                         aria-label="Ask about this reply"
                         title="Ask about this reply without interrupting the agent"
                         @click="emit('ask', { itemId: entry.itemId, quote: '' })"

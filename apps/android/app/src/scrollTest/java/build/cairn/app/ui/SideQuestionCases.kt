@@ -248,8 +248,12 @@ abstract class SideQuestionCases {
             assertEquals(listOf("reply-1" to ""), asked)
             compose.onNodeWithText("2").performClick()
             assertEquals(listOf("reply-1"), shown)
+            val label = compose.onNodeWithText("Agent").getBoundsInRoot()
             canAsk = false
             compose.waitForIdle()
+            // The action leaving does not move the reply, so the history keeps its position.
+            val after = compose.onNodeWithText("Agent").getBoundsInRoot()
+            assertEquals(label.top to label.bottom, after.top to after.bottom)
             compose.onNodeWithContentDescription("Poser une question à côté").assertDoesNotExist()
             compose.onNodeWithText("2").assertExists()
         } finally {

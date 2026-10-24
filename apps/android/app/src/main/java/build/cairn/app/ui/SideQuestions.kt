@@ -9,6 +9,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -35,6 +36,15 @@ internal class SideQuestionActions(
 )
 
 internal val LocalSideQuestions = compositionLocalOf<SideQuestionActions?> { null }
+
+/**
+ * Lays out an action without adding to its line's height: its touch target overflows the line,
+ * centred on it. Actions that appear and disappear then never move the history.
+ */
+internal fun Modifier.withoutLineHeight() = layout { measurable, constraints ->
+    val placeable = measurable.measure(constraints.copy(minHeight = 0))
+    layout(placeable.width, 0) { placeable.place(0, -placeable.height / 2) }
+}
 
 /** Asks about the passage selected in a reply, from its text selection menu. */
 internal val LocalSideQuestionAsk = compositionLocalOf<((String) -> Unit)?> { null }

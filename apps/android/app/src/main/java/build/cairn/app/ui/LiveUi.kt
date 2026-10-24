@@ -1375,28 +1375,34 @@ fun EventRow(vm: CairnViewModel, event: RunEvent, agent: String = "Cairn") {
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                     val asked = side?.counts?.get(itemId) ?: 0
+                                    // These actions come and go with the reply's state; they
+                                    // never change the line's height, so the history does not move.
                                     if (side != null && itemId.isNotEmpty() && asked > 0)
-                                        TextButton(
-                                            onClick = { side.show(itemId) },
-                                            contentPadding = PaddingValues(horizontal = 8.dp),
-                                        ) {
-                                            Icon(
-                                                CairnIcons.SideQuestion,
-                                                null,
-                                                Modifier.size(14.dp),
-                                            )
-                                            Spacer(Modifier.width(4.dp))
-                                            Text(
-                                                "$asked",
-                                                style = MaterialTheme.typography.labelSmall,
-                                            )
+                                        Box(Modifier.withoutLineHeight()) {
+                                            TextButton(
+                                                onClick = { side.show(itemId) },
+                                                contentPadding = PaddingValues(horizontal = 8.dp),
+                                            ) {
+                                                Icon(
+                                                    CairnIcons.SideQuestion,
+                                                    null,
+                                                    Modifier.size(14.dp),
+                                                )
+                                                Spacer(Modifier.width(4.dp))
+                                                Text(
+                                                    "$asked",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                )
+                                            }
                                         }
                                     if (side?.canAsk == true && itemId.isNotEmpty())
-                                        ActionIcon(
-                                            "Poser une question à côté",
-                                            CairnIcons.SideQuestion,
-                                        ) {
-                                            side.ask(itemId, "")
+                                        Box(Modifier.withoutLineHeight()) {
+                                            ActionIcon(
+                                                "Poser une question à côté",
+                                                CairnIcons.SideQuestion,
+                                            ) {
+                                                side.ask(itemId, "")
+                                            }
                                         }
                                     Text(
                                         time,
