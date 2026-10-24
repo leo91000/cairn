@@ -1,8 +1,6 @@
 package build.cairn.app.ui
 
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -42,10 +40,11 @@ internal fun ChatRunWaitingNotice(
 internal fun RunWaitingReason(run: Run) {
     val message = retryNotice(run, retryNow(run)) ?: run.accountWaitReason
     message?.let {
-        Text(
-            "En attente : $it",
-            Modifier.padding(horizontal = 20.dp),
-            style = MaterialTheme.typography.bodySmall,
+        Notice(
+            it,
+            Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            title = "En attente",
+            icon = CairnIcons.Hourglass,
         )
     }
 }

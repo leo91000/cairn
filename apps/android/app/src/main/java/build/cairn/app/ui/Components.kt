@@ -134,25 +134,14 @@ fun Empty(
 
 @Composable
 fun ErrorNotice(message: String, dismiss: () -> Unit) {
-    Surface(color = MaterialTheme.colorScheme.errorContainer, shape = MaterialTheme.shapes.medium) {
-        Row(
-            Modifier.fillMaxWidth().padding(start = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                message,
-                Modifier.weight(1f).padding(vertical = 8.dp),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onErrorContainer,
+    Notice(message, tone = NoticeTone.ERROR, maxLines = 4) {
+        IconButton(onClick = dismiss) {
+            Icon(
+                CairnIcons.Close,
+                "Masquer l’erreur",
+                Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            IconButton(onClick = dismiss) {
-                Icon(
-                    CairnIcons.Close,
-                    "Masquer l’erreur",
-                    Modifier.size(18.dp),
-                    tint = MaterialTheme.colorScheme.onErrorContainer,
-                )
-            }
         }
     }
 }

@@ -820,4 +820,37 @@ class ChatWaitTest {
         assertEquals(listOf("chat:paused"), feed.recent.map { it.key })
         assertEquals(feed.keys(), listOf("chat:sooner", "chat:later", "chat:paused"))
     }
+
+    @Test
+    fun `lists a mission that scheduled its continuation with waiting conversations`() {
+        val done = Run("run", status = "succeeded")
+        val feed =
+            buildFeed(
+                listOf(
+                    Chat(
+                        "later",
+                        status = "succeeded",
+                        run = done,
+                        wakeup = wakeup(wakeAt = 9000),
+                    )
+                ),
+                listOf(
+                    Run(
+                        "watch-1",
+                        taskId = "watch",
+                        status = "waiting",
+                        trigger = "manual",
+                        wakeup = wakeup(wakeAt = 5000),
+                    )
+                ),
+                listOf(Task("watch", "Surveiller la CI")),
+            )
+        assertTrue(feed.running.isEmpty())
+        assertEquals(listOf("run:watch-1", "chat:later"), feed.waiting.map { it.key })
+        assertEquals(FeedKind.WAITING_TASK, feed.waiting[0].kind)
+        assertEquals("Surveiller la CI", feed.waiting[0].title)
+        assertEquals("Merger après la CI", feed.waiting[0].subtitle)
+        assertEquals(5000L, feed.waiting[0].wakeAt)
+        assertEquals("2 reprises prévues", feedSummary(feed))
+    }
 }
