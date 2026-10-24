@@ -150,11 +150,11 @@ impl Capacity {
             let mut requests = Vec::new();
             for (id, attempt) in attempts {
                 let directory = crate::storage::environment::directory(&state, &attempt.run)?;
-                let local = super::disk::exclusive_bytes(&directory.join("lazy"), true)?;
+                let local = crate::storage::LazyDisk::cached_backing_bytes(&directory.join("lazy"))
+                    .unwrap_or(0);
                 let temporary = super::workspace::directory(&state, &attempt.run)?.join("tmp");
-                // Old journal frames and cache amplification do not consume
-                // the logical workspace allowance a second time. Credit only
-                // the live workspace consumption actually backed locally.
+                // Withhold journal credit: obsolete append frames are not
+                // current backing, even below the logical consumption cap.
                 let owned = local
                     .min(attempt.workspace_bytes)
                     .saturating_add(super::disk::exclusive_bytes(&temporary, false)?);
@@ -252,7 +252,8 @@ fn retained_credits(state: &Path, active: &HashSet<String>) -> Result<HashMap<St
         {
             continue;
         }
-        let owned = super::disk::exclusive_bytes(&directory, true)?
+        let owned = crate::storage::LazyDisk::cached_backing_bytes(&directory)
+            .unwrap_or(0)
             .min(workspace)
             .saturating_add(super::disk::exclusive_bytes(&root.join("tmp"), false)?);
         credits.insert(run, owned);
@@ -263,7 +264,20 @@ fn retained_credits(state: &Path, active: &HashSet<String>) -> Result<HashMap<St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
+
+    struct Offline;
+
+    impl crate::storage::BlockSource for Offline {
+        fn fetch(&self, _: &str) -> std::io::Result<Vec<u8>> {
+            panic!("Capacity must not fetch remote blocks")
+        }
+    }
+
+    fn remote_manifest(hash: &str) -> Value {
+        let block = 4 * MIB;
+        json!({ "version": 1, "size": 5 * block, "blockSize": block,
+            "blocks": (0..5).map(|index| json!({ "offset": index * block, "size": block, "hash": hash })).collect::<Vec<_>>() })
+    }
 
     #[tokio::test]
     async fn retained_credit_survives_controller_restart_but_not_a_journal_replacement() {
@@ -273,13 +287,27 @@ mod tests {
             .unwrap()
             .join("lazy");
         let root = super::super::workspace::directory(state.path(), &run).unwrap();
-        std::fs::create_dir_all(&directory).unwrap();
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("attempt"), &attempt).unwrap();
-        std::fs::write(directory.join("payload"), b"retained payload").unwrap();
-        record_retained(&directory, &attempt, MIB).await.unwrap();
-        let sample = Capacity::default().report(state.path(), MIB).await.unwrap();
+        let payload = vec![7; 4 * MIB as usize];
+        let hash = crate::storage::digest::block(&payload);
+        let disk = crate::storage::LazyDisk::create(
+            &directory,
+            &remote_manifest(&hash),
+            std::sync::Arc::new(Offline),
+        )
+        .unwrap();
+        std::fs::create_dir(directory.join("cache")).unwrap();
+        std::fs::write(directory.join("cache").join(&hash), &payload).unwrap();
+        record_retained(&directory, &attempt, 20 * MIB)
+            .await
+            .unwrap();
+        let sample = Capacity::default()
+            .report(state.path(), 4 * MIB)
+            .await
+            .unwrap();
         assert!(sample.retained_bytes[&run] > 0);
+        drop(disk);
         let original = directory.with_file_name("previous");
         std::fs::rename(&directory, &original).unwrap();
         std::fs::create_dir(&directory).unwrap();
@@ -288,28 +316,32 @@ mod tests {
             directory.join("capacity.json"),
         )
         .unwrap();
-        std::fs::write(directory.join("payload"), b"different journal").unwrap();
         let sample = Capacity::default().report(state.path(), MIB).await.unwrap();
         assert!(!sample.retained_bytes.contains_key(&run));
     }
 
     #[tokio::test]
-    async fn observations_do_not_credit_sparse_tmp_or_journal_amplification_as_consumed_allowance()
+    async fn observations_exclude_repeated_journal_overwrites_sparse_tmp_and_old_cache_generations()
     {
+        use crate::storage::Disk;
         let state = tempfile::tempdir().unwrap();
         let (run, attempt) = (crate::config::id(), crate::config::id());
         let directory = crate::storage::environment::directory(state.path(), &run)
             .unwrap()
             .join("lazy");
-        std::fs::create_dir_all(&directory).unwrap();
-        let mut payload = vec![0; 2 * MIB as usize];
-        std::fs::File::open("/dev/urandom")
-            .unwrap()
-            .read_exact(&mut payload)
-            .unwrap();
-        let mut journal = std::fs::File::create(directory.join("journal-payload")).unwrap();
-        journal.write_all(&payload).unwrap();
-        journal.sync_all().unwrap();
+        let payload = vec![7; 4 * MIB as usize];
+        let hash = crate::storage::digest::block(&payload);
+        let disk = crate::storage::LazyDisk::create(
+            &directory,
+            &remote_manifest(&hash),
+            std::sync::Arc::new(Offline),
+        )
+        .unwrap();
+        for byte in 1..=16 {
+            disk.write_at(0, &vec![byte; MIB as usize]).unwrap();
+        }
+        disk.sync().unwrap();
+        assert!(super::super::disk::exclusive_bytes(&directory, true).unwrap() > 8 * MIB);
         let temporary = super::super::workspace::directory(state.path(), &run)
             .unwrap()
             .join("tmp");
@@ -319,10 +351,30 @@ mod tests {
             .set_len(16 * MIB)
             .unwrap();
         let mut capacity = Capacity::default();
-        capacity.register(&attempt, &run, 32 * MIB);
-        capacity.observe(&attempt, MIB, 16 * MIB, 32 * MIB).unwrap();
-        let sample = capacity.report(state.path(), 18 * MIB).await.unwrap();
-        assert_eq!(sample.owned_bytes[&attempt], MIB);
+        capacity.register(&attempt, &run, 64 * MIB);
+        capacity
+            .observe(&attempt, 20 * MIB, 16 * MIB, 64 * MIB)
+            .unwrap();
+        let sample = capacity.report(state.path(), 40 * MIB).await.unwrap();
+        assert_eq!(sample.owned_bytes[&attempt], 0);
+        std::fs::create_dir(directory.join("cache")).unwrap();
+        std::fs::write(directory.join("cache").join(&hash), &payload).unwrap();
+        std::fs::write(directory.join("cache").join("obsolete-hash"), &payload).unwrap();
+        let sample = capacity.report(state.path(), 48 * MIB).await.unwrap();
+        assert!(sample.owned_bytes[&attempt] > 0 && sample.owned_bytes[&attempt] <= 4 * MIB);
+        std::fs::hard_link(
+            directory.join("cache").join(&hash),
+            state.path().join("shared"),
+        )
+        .unwrap();
+        assert_eq!(
+            capacity
+                .report(state.path(), 48 * MIB)
+                .await
+                .unwrap()
+                .owned_bytes[&attempt],
+            0
+        );
     }
 
     #[test]

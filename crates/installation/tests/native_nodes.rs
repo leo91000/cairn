@@ -1126,9 +1126,16 @@ async fn native_same_node_resume_reuses_retained_capacity_on_a_small_pool() {
         }),
     )
     .await;
+    placement::materialize(&f.service, &first).await.unwrap();
     placement::release(&f.service, &first).await.unwrap();
     let volume_id = format!("{}:{}", text(&run, "id"), text(&node, "id"));
-    let mut volume = f.service.store.get("node-volumes", &volume_id).await.unwrap().unwrap();
+    let mut volume = f
+        .service
+        .store
+        .get("node-volumes", &volume_id)
+        .await
+        .unwrap()
+        .unwrap();
     volume["materialized"] = true.into();
     volume["storageMode"] = "on-demand".into();
     volume["diskMiB"] = 256.into();

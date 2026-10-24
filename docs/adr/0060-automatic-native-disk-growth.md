@@ -22,12 +22,13 @@ events and `run.diskCapacity` carry the same information to existing clients.
 The manager grants space in the same serialized database transaction used for
 admission. It counts measured local usage plus every unreleased attempt's unused
 allowance. Only exclusively owned local payloads, on the node's accounting basis,
-reduce that attempt's unused promise. Workspace credit cannot exceed live workspace
-consumption; old journal frames do not consume the allowance again. Temporary-file
-credit excludes unallocated sparse holes. These conservative credits also protect
+reduce that attempt's unused promise. Workspace credit includes only decoded cached
+objects referenced by the current published base, bounded by live workspace usage.
+Journal frames and metadata receive no credit because retained append history is
+not necessarily current backing. Temporary-file credit excludes unallocated sparse holes. These conservative credits also protect
 future host allocations. Shared prepared-base segments get no duplicate credit.
 A fenced native mount records its logical usage beside its journal. Fresh health
-observations measure that stopped journal's exclusive backing, bounded by the
+observations measure that stopped journal's current exclusive cache backing, bounded by the
 recorded usage and directory identity. Same-node admission reuses this credit;
 restored/rebuilt journals invalidate it. Missing observations remain conservative.
 Older clean caches can be reclaimed while their conversation queues for resumption.
