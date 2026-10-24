@@ -126,4 +126,6 @@ the first automatically resolved release, answered the same credential-free
 request with the same model fields plus `supportsThinkingOff`. Its default catalog
 lists `opus` and `fable` instead of `opus[1m]` and `claude-fable-5-1`. Both remain
 documented `--model` values, so saved agents keep working. It ships the same OAuth
-client and token endpoint.
+client and token endpoint. CI now runs every resolved release through the adapter's
+native tests against a local Messages API, including session resumption with the
+release production serves (see [tool versions](CLI-UPDATES.md)).

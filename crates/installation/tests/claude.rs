@@ -249,7 +249,8 @@ async fn default_model_labels_survive_missing_metadata_without_pinning() {
 }
 
 /// Optional native qualification: the real Claude Code release answers the control
-/// protocol Cairn's model discovery uses, with synthetic credentials and no inference.
+/// protocol Cairn's model discovery and usage use, with synthetic credentials and no
+/// inference.
 /// Run with CLAUDE_NATIVE_BIN set via the credential-isolated backend launcher.
 #[tokio::test]
 #[ignore = "requires a native Claude Code binary"]
@@ -262,7 +263,7 @@ async fn native_cli_lists_its_model_catalog_without_inference() {
     })
     .await
     .unwrap();
-    connected(&s).await;
+    let id = connected(&s).await;
     let catalog = claude::model_catalog(&s).await.unwrap();
     assert_eq!(catalog["stale"], false, "{catalog}");
     let models = catalog["models"].as_array().unwrap();
@@ -281,6 +282,19 @@ async fn native_cli_lists_its_model_catalog_without_inference() {
                     .is_some_and(|name| !name.is_empty())
         }),
         "{catalog}"
+    );
+    // Account usage uses the same protocol. Without a subscription, the CLI answers
+    // that no limits are available, in the fields the adapter reads.
+    let usage = claude::query_metadata(
+        &s,
+        &id,
+        Some(json!({ "subtype": "get_usage", "skip_behaviors": true })),
+    )
+    .await
+    .unwrap();
+    assert!(
+        usage.get("rate_limits_available").is_some() && usage.get("rate_limits").is_some(),
+        "{usage}"
     );
 }
 
@@ -405,6 +419,127 @@ async fn run_to_end(c: &Config, p: Value) -> (Result<()>, Vec<Value>) {
     let (tx, rx) = mpsc::channel(64);
     let result = claude_process::run(c, p, tx, CancellationToken::new()).await;
     (result, drain(rx).await)
+}
+
+/// Optional native qualification: the real Claude Code release runs a turn through
+/// the adapter against a local Messages API, then resumes that session, optionally
+/// with another release (CLAUDE_NATIVE_RESUME_BIN), as after an update or a rollback.
+/// Run with CLAUDE_NATIVE_BIN set via the credential-isolated backend launcher.
+#[tokio::test]
+#[ignore = "requires a native Claude Code binary"]
+async fn native_cli_executes_and_resumes_a_session_against_a_local_model() {
+    use axum::{Router, body::Bytes, routing::post};
+    const REPLY: &str = "Native Claude Code local model passed.";
+    let binary = std::env::var("CLAUDE_NATIVE_BIN").expect("set CLAUDE_NATIVE_BIN");
+    let resume = std::env::var("CLAUDE_NATIVE_RESUME_BIN").unwrap_or_else(|_| binary.clone());
+    let requests = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let recorded = requests.clone();
+    let router = Router::new()
+        .route(
+            "/v1/messages",
+            post(move |body: Bytes| async move {
+                let request: Value = serde_json::from_slice(&body).unwrap();
+                recorded.lock().unwrap().push(request.clone());
+                let event = |name: &str, data: Value| format!("event: {name}\ndata: {data}\n\n");
+                let message = json!({ "id": "msg_local", "type": "message", "role": "assistant", "model": request["model"], "content": [], "stop_reason": null, "usage": { "input_tokens": 10, "output_tokens": 0 } });
+                let body = [
+                    event("message_start", json!({ "type": "message_start", "message": message })),
+                    event("content_block_start", json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text", "text": "" } })),
+                    event("content_block_delta", json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": REPLY } })),
+                    event("content_block_stop", json!({ "type": "content_block_stop", "index": 0 })),
+                    event("message_delta", json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" }, "usage": { "output_tokens": 8 } })),
+                    event("message_stop", json!({ "type": "message_stop" })),
+                ]
+                .concat();
+                ([("content-type", "text/event-stream")], body)
+            }),
+        )
+        .route(
+            "/v1/messages/count_tokens",
+            post(|| async { axum::Json(json!({ "input_tokens": 10 })) }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let root = TempDir::new().unwrap();
+    let mut c = setup(&root);
+    // The adapter never forwards an API key or endpoint override to subscription runs.
+    // Only this test's launcher points the CLI at the local model with a synthetic key.
+    let launcher = |name: &str, binary: &str| {
+        let path = root.path().join(name);
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nexport ANTHROPIC_BASE_URL=http://{address} ANTHROPIC_API_KEY=sk-ant-local-test CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1\nexec '{binary}' \"$@\"\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        path.to_string_lossy().into_owned()
+    };
+    c.claude_bin = launcher("claude-first", &binary);
+    let mut p = plan(
+        &root,
+        "Reply with the local model result. Do not call tools.",
+    );
+    let (result, events) =
+        tokio::time::timeout(Duration::from_secs(120), run_to_end(&c, p.clone()))
+            .await
+            .expect("native execution timed out");
+    result.unwrap();
+    assert!(completes(&events), "{events:?}");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("result.md")).unwrap(),
+        REPLY
+    );
+    let session = events
+        .iter()
+        .find(|event| event["type"] == "thread.started")
+        .unwrap()["thread_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    c.claude_bin = launcher("claude-resume", &resume);
+    let first_turn = requests.lock().unwrap().len();
+    p["sessionId"] = session.clone().into();
+    p["execution"]["messageId"] = "follow-up".into();
+    p["execution"]["text"] = "Continue in the same session. Do not call tools.".into();
+    p["output"] = root
+        .path()
+        .join("follow-up.md")
+        .to_string_lossy()
+        .into_owned()
+        .into();
+    let (result, events) = tokio::time::timeout(Duration::from_secs(120), run_to_end(&c, p))
+        .await
+        .expect("native resume timed out");
+    server.abort();
+    result.unwrap();
+    assert!(completes(&events), "{events:?}");
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == "thread.started" && event["thread_id"] == session)
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("follow-up.md")).unwrap(),
+        REPLY
+    );
+    // The resuming release sent the stored history rather than starting over.
+    assert!(
+        requests.lock().unwrap()[first_turn..]
+            .iter()
+            .any(|request| {
+                let messages = request["messages"].to_string();
+                messages.contains("Reply with the local model result")
+                    && messages.contains(REPLY)
+                    && messages.contains("Continue in the same session")
+            }),
+        "The follow-up request did not include the first turn"
+    );
 }
 
 #[tokio::test]

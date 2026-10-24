@@ -495,6 +495,41 @@ async fn cancellation_stops_a_busy_native_turn() {
     );
 }
 
+/// Optional native qualification: the real OpenCode release reports the provider and
+/// model catalog that account connection and the model picker read.
+/// Run with OPENCODE_NATIVE_BIN set via the credential-isolated backend launcher.
+#[tokio::test]
+#[ignore = "requires a native OpenCode binary"]
+async fn native_cli_lists_providers_and_models() {
+    let binary = std::env::var("OPENCODE_NATIVE_BIN").expect("set OPENCODE_NATIVE_BIN");
+    let root = TempDir::new().unwrap();
+    let s = Service::new(Config {
+        opencode_bin: binary,
+        ..common::config(root.path())
+    })
+    .await
+    .unwrap();
+    let providers = s.opencode.providers(&s).await.unwrap();
+    for provider in ["opencode", "openai"] {
+        assert!(
+            providers
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["id"] == provider && !text(p, "name").is_empty()),
+            "{providers}"
+        );
+    }
+    // Connecting checks the provider against the same native catalog.
+    s.accounts
+        .connect_api_key(&s, Provider::Opencode, "OpenAI", "openai", KEY, None)
+        .await
+        .unwrap();
+    let models = s.opencode.models(&s).await.unwrap();
+    assert_eq!(models["error"], "", "{models}");
+    assert!(!models["models"].as_array().unwrap().is_empty(), "{models}");
+}
+
 /// Optional pinned-native smoke: real OpenCode, a local model server, synthetic auth.
 /// Run with OPENCODE_NATIVE_BIN set via the credential-isolated backend launcher.
 /// OPENCODE_NATIVE_RESUME_BIN resumes the session with another release: a newer

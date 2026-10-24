@@ -97,15 +97,28 @@ describe('application image tool versions', () => {
     const served = jobs.resolve.steps.find(step => step.id === 'served')
     expect(served.run).toBe('node scripts/served-tools.mjs')
     expect(served.env.CAIRN_BEACON_ORIGIN).toBe(expression('vars.CAIRN_BEACON_ORIGIN'))
-    expect(jobs.resolve.outputs['served-opencode']).toBe(expression('steps.served.outputs.opencode'))
+    for (const tool of ['claude', 'opencode']) {
+      expect(jobs.resolve.outputs[`served-${tool}`]).toBe(expression(`steps.served.outputs.${tool}`))
+      // Evidence records which served release the rollback checks used; null when unknown.
+      const record = jobs.publish.steps.find(step => step.name === 'Record the validated image')
+      expect(record.env[`SERVED_${tool.toUpperCase()}`]).toBe(expression(`needs.resolve.outputs.served-${tool}`))
+      expect(record.run).toContain(`${tool}: process.env.SERVED_${tool.toUpperCase()} || null`)
+    }
+
     const opencode = jobs.backend.steps.find(step => step.name === 'Qualify the resolved OpenCode release against its native adapter')
     expect(opencode.env).toEqual({
       OPENCODE_VERSION: expression('needs.resolve.outputs.opencode'),
       SERVED_OPENCODE: expression('needs.resolve.outputs.served-opencode'),
     })
     const claude = jobs.backend.steps.find(step => step.name === 'Qualify the resolved Claude Code release against its native adapter')
-    expect(claude.env).toEqual({ CLAUDE_VERSION: expression('needs.resolve.outputs.claude') })
-    expect(claude.run).toContain('native_cli_lists_its_model_catalog_without_inference')
+    expect(claude.env).toEqual({
+      CLAUDE_VERSION: expression('needs.resolve.outputs.claude'),
+      SERVED_CLAUDE: expression('needs.resolve.outputs.served-claude'),
+    })
+    for (const test of ['native_cli_lists_its_model_catalog_without_inference', 'native_cli_executes_and_resumes_a_session_against_a_local_model'])
+      expect(claude.run).toContain(test)
+    for (const test of ['native_cli_lists_providers_and_models', 'pinned_native_cli_executes_and_resumes_without_global_plugins'])
+      expect(opencode.run).toContain(test)
     // Images cannot be published unless both qualifications passed.
     expect(jobs.publish.needs).toContain('backend')
   })

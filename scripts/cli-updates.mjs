@@ -7,18 +7,25 @@ const registry = 'https://registry.npmjs.org'
 // Coding engines installed from their official npm packages. Each build takes the
 // version currently published on the vendor's named release channel (an npm
 // dist-tag), like Codex; CI then runs it through its adapter before an image can
-// be validated. See docs/CLI-UPDATES.md.
+// be validated. `legacy` is the release images shipped before the engine was
+// resolved; their configuration records no version. See docs/CLI-UPDATES.md.
 export const engines = {
   codex: { name: 'Codex', package: '@openai/codex', channel: 'latest' },
   // Anthropic's documented stable channel: about a week old, skipping releases
   // with major regressions. Its `latest` channel is not used.
-  claude: { name: 'Claude Code', package: '@anthropic-ai/claude-code', channel: 'stable' },
-  // The oldest release whose protocol the adapter speaks (opencode::MINIMUM).
+  claude: {
+    name: 'Claude Code',
+    package: '@anthropic-ai/claude-code',
+    channel: 'stable',
+    legacy: '2.1.280',
+  },
   opencode: {
     name: 'OpenCode',
     package: 'opencode-ai',
     channel: 'latest',
+    // The oldest release whose protocol the adapter speaks (opencode::MINIMUM).
     minimum: '1.19.0',
+    legacy: '1.19.0',
   },
 }
 

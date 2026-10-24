@@ -76,6 +76,6 @@ if (import.meta.main) {
   }
 
   if (process.env.GITHUB_OUTPUT)
-    await appendFile(process.env.GITHUB_OUTPUT, `opencode=${tools.opencode ?? ''}\n`)
+    await appendFile(process.env.GITHUB_OUTPUT, `claude=${tools.claude ?? ''}\nopencode=${tools.opencode ?? ''}\n`)
   console.log(JSON.stringify(tools))
 }

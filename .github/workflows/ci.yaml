@@ -38,6 +38,7 @@ jobs:
       gh: ${{ steps.tools.outputs.gh }}
       claude: ${{ steps.tools.outputs.claude }}
       opencode: ${{ steps.tools.outputs.opencode }}
+      served-claude: ${{ steps.served.outputs.claude }}
       served-opencode: ${{ steps.served.outputs.opencode }}
     steps:
       - uses: actions/checkout@v7.0.1
@@ -186,12 +187,12 @@ jobs:
           OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
           SERVED_OPENCODE: ${{ needs.resolve.outputs.served-opencode }}
         run: |
-          # The resolved release runs a turn, then resumes sessions an installation can hold:
-          # from the oldest supported release, and both ways with the served release, as
-          # after an update or a rollback. Images built before OpenCode was resolved
-          # record no version; they shipped the oldest supported release.
-          minimum=$(node --input-type=module -e "import { engines } from './scripts/cli-updates.mjs'; console.log(engines.opencode.minimum)")
-          served=${SERVED_OPENCODE:-$minimum}
+          # The resolved release lists its catalog and runs a turn, then resumes sessions an
+          # installation can hold: from the oldest supported release, and both ways with the
+          # served release, as after an update or a rollback.
+          engine() { node --input-type=module -e "import { engines } from './scripts/cli-updates.mjs'; console.log(engines.opencode.$1)"; }
+          minimum=$(engine minimum)
+          served=${SERVED_OPENCODE:-$(engine legacy)}
           if test "$(printf '%s\n' "$minimum" "$served" | sort -V | head -n 1)" != "$minimum"; then
             # A rollback runs the served image's own adapter, which this adapter cannot stand in for.
             echo "Production serves OpenCode $served, older than this adapter's minimum $minimum; its rollback is not qualified here."
@@ -203,11 +204,14 @@ jobs:
             test "$("$RUNNER_TEMP/opencode-$1/bin/opencode" --version)" = "$1" || return 1
             echo "$RUNNER_TEMP/opencode-$1/bin/opencode"
           }
+          native() {
+            node scripts/test-backend.mjs -p cairn-installation --features ublk-prototype --test opencode -- --ignored --exact "$1"
+          }
           qualify() {
-            OPENCODE_NATIVE_BIN="$1" OPENCODE_NATIVE_RESUME_BIN="$2" \
-              node scripts/test-backend.mjs -p cairn-installation --features ublk-prototype --test opencode -- --ignored --exact pinned_native_cli_executes_and_resumes_without_global_plugins
+            OPENCODE_NATIVE_BIN="$1" OPENCODE_NATIVE_RESUME_BIN="$2" native pinned_native_cli_executes_and_resumes_without_global_plugins
           }
           resolved=$(install "$OPENCODE_VERSION")
+          OPENCODE_NATIVE_BIN="$resolved" native native_cli_lists_providers_and_models
           qualify "$resolved" "$resolved"
           if test "$minimum" != "$OPENCODE_VERSION" && test "$minimum" != "$served"; then
             oldest=$(install "$minimum")
@@ -221,11 +225,32 @@ jobs:
       - name: Qualify the resolved Claude Code release against its native adapter
         env:
           CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
+          SERVED_CLAUDE: ${{ needs.resolve.outputs.served-claude }}
         run: |
-          npm install --global --prefix "$RUNNER_TEMP/claude" --allow-scripts=@anthropic-ai/claude-code "@anthropic-ai/claude-code@${CLAUDE_VERSION}"
-          test "$("$RUNNER_TEMP/claude/bin/claude" --version)" = "${CLAUDE_VERSION} (Claude Code)"
-          CLAUDE_NATIVE_BIN="$RUNNER_TEMP/claude/bin/claude" \
-            node scripts/test-backend.mjs -p cairn-installation --features ublk-prototype --test claude -- --ignored --exact native_cli_lists_its_model_catalog_without_inference
+          # The resolved release answers model discovery and usage, runs a turn against a
+          # local Messages API and resumes it. Sessions also move both ways with the served
+          # release, as after an update or a rollback.
+          served=${SERVED_CLAUDE:-$(node --input-type=module -e "import { engines } from './scripts/cli-updates.mjs'; console.log(engines.claude.legacy)")}
+          # Command substitutions do not inherit errexit, so installation failures return explicitly.
+          install() {
+            npm install --global --prefix "$RUNNER_TEMP/claude-$1" --allow-scripts=@anthropic-ai/claude-code "@anthropic-ai/claude-code@$1" >&2 || return 1
+            test "$("$RUNNER_TEMP/claude-$1/bin/claude" --version)" = "$1 (Claude Code)" || return 1
+            echo "$RUNNER_TEMP/claude-$1/bin/claude"
+          }
+          native() {
+            node scripts/test-backend.mjs -p cairn-installation --features ublk-prototype --test claude -- --ignored --exact "$1"
+          }
+          qualify() {
+            CLAUDE_NATIVE_BIN="$1" CLAUDE_NATIVE_RESUME_BIN="$2" native native_cli_executes_and_resumes_a_session_against_a_local_model
+          }
+          resolved=$(install "$CLAUDE_VERSION")
+          CLAUDE_NATIVE_BIN="$resolved" native native_cli_lists_its_model_catalog_without_inference
+          qualify "$resolved" "$resolved"
+          if test "$served" != "$CLAUDE_VERSION"; then
+            served=$(install "$served")
+            qualify "$served" "$resolved"
+            qualify "$resolved" "$served"
+          fi
   node-checks:
     services:
       postgres:
@@ -962,11 +987,13 @@ jobs:
           GH_VERSION: ${{ needs.resolve.outputs.gh }}
           CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
           OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
+          SERVED_CLAUDE: ${{ needs.resolve.outputs.served-claude }}
+          SERVED_OPENCODE: ${{ needs.resolve.outputs.served-opencode }}
         run: |
           mkdir -p release-evidence
           node --input-type=module <<'JS'
           import { writeFileSync } from 'node:fs'
-          writeFileSync('release-evidence/image.json', JSON.stringify({ schema: 3, beaconDigest: process.env.BEACON_IMAGE_DIGEST, repository: process.env.GITHUB_REPOSITORY.toLowerCase(), tree: process.env.GIT_TREE, commit: process.env.GITHUB_SHA, digest: process.env.IMAGE_DIGEST, runId: Number(process.env.GITHUB_RUN_ID), tools: { codex: process.env.CODEX_VERSION, gh: process.env.GH_VERSION, claude: process.env.CLAUDE_VERSION, opencode: process.env.OPENCODE_VERSION } }))
+          writeFileSync('release-evidence/image.json', JSON.stringify({ schema: 3, beaconDigest: process.env.BEACON_IMAGE_DIGEST, repository: process.env.GITHUB_REPOSITORY.toLowerCase(), tree: process.env.GIT_TREE, commit: process.env.GITHUB_SHA, digest: process.env.IMAGE_DIGEST, runId: Number(process.env.GITHUB_RUN_ID), tools: { codex: process.env.CODEX_VERSION, gh: process.env.GH_VERSION, claude: process.env.CLAUDE_VERSION, opencode: process.env.OPENCODE_VERSION }, served: { claude: process.env.SERVED_CLAUDE || null, opencode: process.env.SERVED_OPENCODE || null } }))
           JS
       - uses: actions/upload-artifact@v7.0.1
         if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')

@@ -16,8 +16,8 @@ existing path. It prints JSON and, when `GITHUB_OUTPUT` is set, appends the exac
 | Tool | Official source | Channel | Native check in CI |
 | --- | --- | --- | --- |
 | Codex | npm `@openai/codex` | dist-tag `latest` | none |
-| Claude Code | npm `@anthropic-ai/claude-code` | dist-tag `stable` | `initialize` model catalog |
-| OpenCode | npm `opencode-ai` | dist-tag `latest` | turn and session resumption |
+| Claude Code | npm `@anthropic-ai/claude-code` | dist-tag `stable` | catalog, usage, turn, resumption |
+| OpenCode | npm `opencode-ai` | dist-tag `latest` | catalog, turn, resumption |
 | GitHub CLI | GitHub `cli/cli` latest release | not draft or prerelease | none |
 
 Every tool follows its channel into new minor and major releases. There is no
@@ -63,22 +63,29 @@ runtime stage.
 The `backend` job also runs the real engine releases it resolved through their
 adapters, without credentials or inference against a vendor:
 
-- OpenCode executes a turn against a local model server, without loading global
-  config. Its session then resumes with the history it stored. Sessions created
-  by the oldest supported release resume on the resolved one. Sessions also move
-  both ways between the resolved release and the release production serves, as
-  after an update or a rollback. The `resolve` job reads the served version from
-  the configuration of the installation image production reports at
-  `CAIRN_BEACON_ORIGIN/install/release` (`scripts/served-tools.mjs`). It checks
-  registry content against its digest. Images built before OpenCode was resolved
-  record no version; they shipped 1.19.0, the oldest supported release. The same
-  fallback applies, with a warning, when production or the registry is unavailable.
-  A served release older than the adapter's minimum is skipped, because a rollback
-  runs that image's own adapter.
-- Claude Code answers the `initialize` control request that model discovery uses,
-  with synthetic credentials, and lists a catalog with its `default` alias.
+- OpenCode lists its provider and model catalog. It executes a turn against a
+  local model server, without loading global config, and its session resumes with
+  the history it stored. Sessions created by the oldest supported release resume
+  on the resolved one.
+- Claude Code answers the `initialize` and `get_usage` control requests that model
+  discovery and account usage use, with synthetic credentials, and lists a catalog
+  with its `default` alias. It executes a turn through the adapter against a local
+  Messages API with a synthetic API key, and its session resumes with its history.
+- For both engines, sessions move both ways between the resolved release and the
+  release production serves, as after an update or a rollback.
 
-Validation evidence (`image.json`, schema 3) records all four versions. An image
+The `resolve` job reads the served versions from the configuration of the
+installation image production reports at `CAIRN_BEACON_ORIGIN/install/release`
+(`scripts/served-tools.mjs`), and checks registry content against its digest.
+Images built before an engine was resolved record no version; they shipped its
+`legacy` release in `scripts/cli-updates.mjs` (Claude Code 2.1.280, OpenCode
+1.19.0). The same fallback applies, with a warning, when production or the
+registry is unavailable. The evidence records the served versions found, or
+`null`. A served OpenCode release older than the adapter's minimum is skipped,
+because a rollback runs that image's own adapter.
+
+Validation evidence (`image.json`, schema 3) records all four versions under
+`tools`, and the served versions the rollback checks used under `served`. An image
 can be reused for the same source tree only when every resolved version matches
 its evidence. Evidence recorded before Claude Code and OpenCode were resolved
 names only Codex and GitHub CLI. It is never reused, so the first build after
@@ -93,28 +100,27 @@ Direct Docker builds must pass these build arguments too; see
 A new channel release ships through the normal validated build and its automated
 checks above. A release that fails them blocks validation. There is no hold or
 override setting: the remedy is a reviewed change that adapts the adapter or makes
-`scripts/cli-updates.mjs` select a working release for that engine. Claude Code behavior those checks cannot reach
-without a subscription — `get_usage` quota fields, the OAuth client and token
-endpoint, and resuming a real session — relies on Anthropic's stable channel
-between qualifications. A change in an adapter that depends on engine behavior,
-or a reported engine regression, needs the following checks before merge:
+`scripts/cli-updates.mjs` select a working release for that engine. Claude Code
+behavior those checks cannot reach without a subscription relies on Anthropic's
+stable channel between qualifications: quota values from `get_usage`, the OAuth
+client and token endpoint, and subscription inference. A change in an adapter
+that depends on engine behavior, or a reported engine regression, needs the
+following checks before merge:
 
-- OpenCode: run the native adapter test with the candidate binary:
-  `OPENCODE_NATIVE_BIN=/path/to/opencode pnpm test:backend -p cairn-installation --test opencode -- --include-ignored`.
-  Check the `/global/health` version, the session and event protocol, and
-  resuming a session that the previous release created.
-- Claude Code: run
-  `CLAUDE_NATIVE_BIN=/path/to/claude pnpm test:backend -p cairn-installation --test claude -- --ignored --exact native_cli_lists_its_model_catalog_without_inference`,
-  and compare a credential-free `initialize` control response from the candidate
-  with the current release. Check the model catalog fields and
-  aliases, and confirm that stored agent models remain valid `--model` values.
-  Check the OAuth client and token endpoint in `accounts/claude.rs`. With a test
-  account, check `get_usage` quota fields and resuming an existing session.
-- All engines: keep their autoupdaters disabled at runtime and keep their
-  private state layout compatible with retained conversations. Engine changes
-  never rewrite persisted Cairn data. Follow the
+- OpenCode: run the native adapter tests with the candidate binary:
+  `OPENCODE_NATIVE_BIN=/path/to/opencode pnpm test:backend -p cairn-installation --test opencode -- --include-ignored`,
+  and with `OPENCODE_NATIVE_RESUME_BIN` set to the previous release. Check the
+  `/global/health` version, the session and event protocol, and the catalog.
+- Claude Code: run the ignored native tests in `tests/claude.rs` the same way,
+  with `CLAUDE_NATIVE_BIN` and `CLAUDE_NATIVE_RESUME_BIN`. Compare the credential-free
+  `initialize` response with the current release's: the model catalog fields and
+  aliases, and whether stored agent models remain valid `--model` values. Check
+  the OAuth client and token endpoint in `accounts/claude.rs`. With a test
+  account, check `get_usage` quota values and resuming a subscription session.
+- All engines: keep their autoupdaters disabled at runtime. Engine session state
+  in account homes is persisted installation data. The
   [installation data compatibility contract](PRODUCTION-CAIRN.md#installation-data-compatibility)
-  if one would.
+  applies to it: the served release must still read what the new release writes.
 
 Installations follow approved, paired immutable images through
 `cairn-installation-update.timer`. This host updater retains the persisted
