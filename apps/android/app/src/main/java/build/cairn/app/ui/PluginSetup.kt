@@ -479,7 +479,7 @@ internal fun PluginSetup(
                     Choice(
                         "Agent des conversations entrantes",
                         agentId,
-                        state.agents.filter { it.eligibleForPlugins() }.map { it.id to it.name },
+                        state.agents.map { it.id to it.name },
                     ) {
                         agentId = it
                     }
@@ -488,6 +488,18 @@ internal fun PluginSetup(
                         "Les personnes doivent être approuvées. Vous pourrez régler leurs accès et les limites après activation.",
                         style = MaterialTheme.typography.bodySmall,
                     )
+                if (manifest.delegates) {
+                    val selected = state.agents.find { it.id == agentId }
+                    val risks = selected?.delegationRisks(emptyList(), everyone = false).orEmpty()
+                    if (selected != null && risks.isNotEmpty())
+                        Notice(
+                            title =
+                                "Les personnes autorisées peuvent utiliser tout ce que ${selected.name} sait faire",
+                            text =
+                                "Via le bot, ces personnes peuvent ${listed(risks)}. N’autorisez que des personnes de confiance ou choisissez un agent plus limité.",
+                            tone = NoticeTone.WARNING,
+                        )
+                }
                 Toggle("Démarrer immédiatement", enabled) {
                     if (!state.busy && !resourceWork && available) enabled = it
                 }

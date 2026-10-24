@@ -349,7 +349,7 @@ test('blocked missions ask only when they wait on the user, and can be set aside
   await expect(recent.locator(`[data-fil-key="task:${proof.task.id}"]`)).toContainText('Dismissed')
 })
 
-test('a waiting mission stays live, shows its wait and can be stopped', async ({ page, workspace }) => {
+test('a waiting mission sits in Waiting, shows its wait and can be stopped', async ({ page, workspace }) => {
   const task = await workspace.api('/api/tasks', 'POST', {
     agentId: MAIN_AGENT_ID,
     name: 'Mission waiting for CI',
@@ -369,9 +369,11 @@ test('a waiting mission stays live, shows its wait and can be stopped', async ({
   workspace.service.store.updateRun(run.id, { status: 'waiting', finishedAt: null, wakeup })
   workspace.service.store.event(run.id, 'run.wait', wakeup.reason, wakeup)
   await signIn(page)
-  const live = page.getByRole('region', { name: 'Live', exact: true })
-  await expect(live.getByText(task.name, { exact: true })).toBeVisible()
-  await live.locator(`[data-fil-key="task:${task.id}"]`).click()
+  const waiting = page.getByRole('region', { name: 'Waiting', exact: true })
+  await expect(waiting.getByText(task.name, { exact: true })).toBeVisible()
+  await expect(waiting.locator(`[data-fil-key="task:${task.id}"]`)).toContainText('Wait for mission CI')
+  await expect(page.getByRole('region', { name: 'Live', exact: true }).getByText(task.name, { exact: true })).toHaveCount(0)
+  await waiting.locator(`[data-fil-key="task:${task.id}"]`).click()
   const card = page.locator('.chat-wait')
   await expect(card).toHaveCount(1)
   await expect(card).toContainText('Wait for mission CI')

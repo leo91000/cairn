@@ -1,5 +1,5 @@
 import type { Locator, Route } from '@playwright/test'
-import type { PluginRoute } from '../../apps/web/src/plugins'
+import type { PluginConnection, PluginRoute } from '../../apps/web/src/plugins'
 import { Buffer } from 'node:buffer'
 import { createHmac } from 'node:crypto'
 import {
@@ -374,15 +374,18 @@ test('Discord bots are set up through the package’s own form and keep the toke
 
   await expect(dialog.getByRole('heading', { name: 'Who can talk to it' })).toBeVisible()
   await expect(dialog.getByRole('radio', { name: /Approve people as they ask/ })).toBeChecked()
-  // Anyone may only reach a read-only agent; this one isn't.
+  // Any agent can answer anyone; the owner is warned of what a writing agent allows.
   await dialog.getByRole('radio', { name: /^Anyone/ }).check()
-  await expect(dialog.getByRole('radio', { name: /Discord helper/ })).toBeDisabled()
-  await expect(dialog.getByText('Not read-only').first()).toBeVisible()
+  await dialog.getByRole('radio', { name: /Discord helper/ }).check()
+  await expect(dialog.getByText('Anyone in the channel can use everything Discord helper can do')).toBeVisible()
+  await expect(dialog.getByText(/they can change files and run commands/)).toBeVisible()
   await dialog.getByRole('radio', { name: /Approve people as they ask/ }).check()
+  await expect(dialog.getByText(/can use everything Discord helper can do/)).toBeHidden()
   await dialog.getByLabel('Person’s ID').fill('300')
   await dialog.getByRole('button', { name: 'Add', exact: true }).click()
   await expect(dialog.getByText('300', { exact: true })).toBeVisible()
-  await expect(dialog.getByRole('radio', { name: /Release helper/ })).toBeDisabled()
+  await dialog.getByRole('radio', { name: /Release helper/ }).check()
+  await expect(dialog.getByText('The people you allow can use everything Release helper can do')).toBeVisible()
   await dialog.getByRole('radio', { name: /Discord helper/ }).check()
   await dialog.getByLabel('Name', { exact: true }).fill('#support on Acme')
   await dialog.getByRole('button', { name: 'Save bot' }).click()
@@ -2233,10 +2236,11 @@ test('resource routes preserve exact conditions, require explicit grants and edi
   await selectField(routes, 'Project', 'No project')
   const agentSelect = routes.getByRole('combobox', { name: 'Agent', exact: true })
   await agentSelect.fill(broad.name)
-  await expect(routes.getByRole('option', { name: broad.name, exact: true })).toHaveAttribute('aria-disabled', 'true')
-  await agentSelect.press('Escape')
-  await expect(agentSelect).toHaveValue('')
+  await expect(routes.getByRole('option', { name: broad.name, exact: true })).toHaveAttribute('aria-disabled', 'false')
+  await routes.getByRole('option', { name: broad.name, exact: true }).click()
+  await expect(routes.getByRole('status').filter({ hasText: 'can use everything' })).toBeVisible()
   await selectField(routes, 'Agent', agent.name)
+  await expect(routes.getByRole('status').filter({ hasText: 'can use everything' })).toHaveCount(0)
   await selectField(routes, 'Who may participate', 'Listed people only')
   await routes.getByLabel('Allowed person IDs', { exact: true }).fill('U1\nU2')
   await expect(routes.getByRole('button', { name: 'Save route', exact: true })).toBeDisabled()
@@ -2280,6 +2284,34 @@ test('resource routes preserve exact conditions, require explicit grants and edi
   await route.getByRole('button', { name: 'Confirm delete', exact: true }).click()
   await expect(routes.getByText('No routes yet. No one can start a conversation through this resource.', { exact: true })).toBeVisible()
   expect((await workspace.api(path)).items).toHaveLength(0)
+})
+
+test('resource route warnings include scoped grants without refusing the selected agent', async ({ page, workspace }) => {
+  const fixture = await conversationRoutesFixture(workspace, 'route-warning')
+  const permissions = await resourceAccessFixture(workspace, 'route-warning-permissions')
+  await workspace.api(permissions.path, 'POST', { agentId: fixture.agent.id, profile: 'read', scopes: { channel: ['C1'] } })
+  await page.goto(workspacePath(`/plugins/${fixture.id}`))
+  await signIn(page)
+  await page.getByRole('article', { name: 'Engineering', exact: true }).getByRole('button', { name: 'Conversation routes', exact: true }).click()
+  const routes = page.getByRole('dialog', { name: 'Conversation routes · Engineering', exact: true })
+  await routes.getByRole('button', { name: 'Add route', exact: true }).click()
+  await routes.getByLabel('Route name', { exact: true }).fill('Public support')
+  await selectField(routes, 'Who may participate', 'Anyone')
+  await selectField(routes, 'Agent', fixture.agent.name)
+  await expect(routes.getByRole('status').filter({ hasText: 'use its plugins' })).toBeVisible()
+  await selectField(routes, 'Who may participate', 'Approve people as they ask')
+  await expect(routes.getByRole('status').filter({ hasText: 'use its plugins' })).toHaveCount(0)
+  await selectField(routes, 'Who may participate', 'Anyone')
+  await expect(routes.getByRole('status').filter({ hasText: 'use its plugins' })).toBeVisible()
+  await routes.getByRole('button', { name: 'Add condition', exact: true }).click()
+  await routes.getByLabel('Condition 1 key', { exact: true }).fill('channel')
+  await routes.getByLabel('Condition 1 value', { exact: true }).fill('C1')
+  await expect(routes.getByRole('button', { name: 'Save route', exact: true })).toBeEnabled()
+  await routes.getByRole('button', { name: 'Save route', exact: true }).click()
+  await expect(routes.getByRole('article', { name: 'Public support', exact: true })).toBeVisible()
+  expect((await workspace.api(fixture.path)).items[0]).toMatchObject({ agentId: fixture.agent.id, accessMode: 'everyone' })
+  const agent = (await workspace.api('/api/agents')).find((agent: { id: string }) => agent.id === fixture.agent.id)
+  expect(agent.plugins).toEqual([])
 })
 
 test('resource routes refresh an uncertain creation without repeating the write', async ({ page, workspace }) => {
@@ -3420,6 +3452,98 @@ test('agent pages show scoped resource rights independently from instance grants
   expect(rules[0]).toMatchObject({ agentId: agent.id, profile: 'contribute', scopes: { channel: ['C222'] } })
   const saved = (await workspace.api('/api/agents')).find((item: any) => item.id === agent.id)
   expect(saved.plugins).toEqual([])
+})
+
+test('bot warnings include the current instance and new draft plugin grants', async ({ page, workspace }) => {
+  const helper = await workspace.api('/api/agents', 'POST', {
+    name: 'Plugin helper',
+    access: {
+      projects: [],
+      mcps: [],
+      installation: false,
+      sandbox: 'read-only',
+    },
+  })
+  await useRelayForHttpMocks(page)
+  const manifest = {
+    id: 'hybrid',
+    name: 'Hybrid',
+    version: '1.0.0',
+    apiVersion: 2,
+    description: 'A plugin that both answers people and offers tools to agents.',
+    capabilities: ['conversations.submit'],
+    instances: { singular: 'Bot', plural: 'Bots' },
+    agentAccess: { description: 'Agents can use this bot’s tools.' },
+    settings: [],
+  }
+  const connection: PluginConnection = {
+    id: 'hybrid-bot',
+    pluginId: 'hybrid',
+    name: 'Hybrid bot',
+    settings: {},
+    agentIds: [helper.id],
+    agentId: helper.id,
+    projectId: null,
+    accessMode: 'everyone',
+    userIds: [],
+    people: [],
+    requests: [],
+    enabled: false,
+    status: { state: 'paused' },
+    usage: { hour: 0 },
+    activity: [],
+    maxMessagesPerHour: 20,
+    maxPerPersonPerHour: 5,
+  }
+  await page.route('**/plugins/packages/hybrid', route => route.fulfill({
+    json: {
+      id: 'hybrid',
+      builtin: false,
+      status: 'active',
+      active: '1.0.0',
+      manifest,
+      capabilities: [],
+      instanceReads: true,
+      accessReads: true,
+    },
+  }))
+  await page.route('**/plugins/packages/hybrid/connections', route => route.fulfill({
+    json: { items: [connection], nextCursor: null },
+  }))
+  await page.route('**/plugins/instance-access', route => route.fulfill({
+    json: {
+      items: [{
+        id: connection.id,
+        pluginId: 'hybrid',
+        pluginName: 'Hybrid',
+        name: connection.name,
+        enabled: connection.enabled,
+        agentIds: connection.agentIds,
+        resourceAgentIds: [],
+      }],
+      nextCursor: null,
+    },
+  }))
+  await page.goto(workspacePath('/plugins/hybrid'))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Edit Hybrid bot', exact: true }).click()
+  const edited = page.getByRole('dialog', { name: 'Edit Hybrid bot' })
+  await expect(edited.getByRole('status').filter({ hasText: 'they can use its plugins' })).toBeVisible()
+  await edited.getByRole('button', { name: 'Cancel', exact: true }).click()
+
+  // Another instance has no grant: only the new draft can provide plugin access.
+  connection.agentIds = []
+  await page.reload()
+  await page.getByRole('button', { name: 'Add bot', exact: true }).click()
+  const draft = page.getByRole('dialog', { name: 'New bot' })
+  await draft.getByRole('radio', { name: /^Anyone/ }).check()
+  await draft.getByRole('radio', { name: /Plugin helper/ }).check()
+  await expect(draft.getByText(/can use everything Plugin helper can do/)).toBeHidden()
+  await draft.getByRole('button', { name: 'Continue', exact: true }).click()
+  await draft.getByRole('checkbox', { name: /Plugin helper/ }).check()
+  await expect(draft.getByRole('status').filter({ hasText: 'they can use its plugins' })).toBeVisible()
+  await draft.getByRole('checkbox', { name: /Plugin helper/ }).uncheck()
+  await expect(draft.getByText(/can use everything Plugin helper can do/)).toBeHidden()
 })
 
 test('a package with device sign-in saves an account without the token reaching the browser', async ({ page }) => {

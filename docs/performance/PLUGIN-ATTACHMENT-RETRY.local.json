@@ -1,0 +1,182 @@
+{
+  "cache": "new Store connection after writes; first metadata read connection-cold followed by five in the same actor; OS cache retained",
+  "cases": [
+    {
+      "encodedJsonBytes": 1698,
+      "keyBytes": 534,
+      "logicalFileBytes": 6144,
+      "reads": [
+        {
+          "processCpuMs": 0.6201159999999959,
+          "returnedJsonBytes": 283,
+          "sample": 0,
+          "wallMs": 0.5295500000000001
+        },
+        {
+          "processCpuMs": 0.058267000000000735,
+          "returnedJsonBytes": 283,
+          "sample": 1,
+          "wallMs": 0.055894
+        },
+        {
+          "processCpuMs": 0.010868000000016309,
+          "returnedJsonBytes": 283,
+          "sample": 2,
+          "wallMs": 0.010518
+        },
+        {
+          "processCpuMs": 0.011651000000000522,
+          "returnedJsonBytes": 283,
+          "sample": 3,
+          "wallMs": 0.011302
+        },
+        {
+          "processCpuMs": 0.008196999999995569,
+          "returnedJsonBytes": 283,
+          "sample": 4,
+          "wallMs": 0.007882
+        },
+        {
+          "processCpuMs": 0.008003999999999678,
+          "returnedJsonBytes": 283,
+          "sample": 5,
+          "wallMs": 0.007666000000000001
+        }
+      ],
+      "records": 6,
+      "shape": "fresh-id-reference",
+      "writes": [
+        {
+          "processCpuMs": 1.5722189999999898,
+          "sample": 0,
+          "wallMs": 11.538041
+        },
+        {
+          "processCpuMs": 1.50049199999998,
+          "sample": 1,
+          "wallMs": 36.597541
+        },
+        {
+          "processCpuMs": 1.3354070000000036,
+          "sample": 2,
+          "wallMs": 8.562166
+        },
+        {
+          "processCpuMs": 1.254353000000009,
+          "sample": 3,
+          "wallMs": 11.514072
+        },
+        {
+          "processCpuMs": 1.3246680000000026,
+          "sample": 4,
+          "wallMs": 13.657842
+        },
+        {
+          "processCpuMs": 1.383406000000008,
+          "sample": 5,
+          "wallMs": 11.474948000000001
+        }
+      ]
+    },
+    {
+      "encodedJsonBytes": 283,
+      "keyBytes": 89,
+      "logicalFileBytes": 1024,
+      "reads": [
+        {
+          "processCpuMs": 0.8766139999999893,
+          "returnedJsonBytes": 283,
+          "sample": 0,
+          "wallMs": 0.5516260000000001
+        },
+        {
+          "processCpuMs": 0.029401000000007116,
+          "returnedJsonBytes": 283,
+          "sample": 1,
+          "wallMs": 0.028818
+        },
+        {
+          "processCpuMs": 0.022034000000019205,
+          "returnedJsonBytes": 283,
+          "sample": 2,
+          "wallMs": 0.020868
+        },
+        {
+          "processCpuMs": 0.023932999999999538,
+          "returnedJsonBytes": 283,
+          "sample": 3,
+          "wallMs": 0.022660999999999997
+        },
+        {
+          "processCpuMs": 0.021213000000017246,
+          "returnedJsonBytes": 283,
+          "sample": 4,
+          "wallMs": 0.020107
+        },
+        {
+          "processCpuMs": 0.02073400000000447,
+          "returnedJsonBytes": 283,
+          "sample": 5,
+          "wallMs": 0.019658000000000002
+        }
+      ],
+      "records": 1,
+      "shape": "reused-admission-id",
+      "writes": [
+        {
+          "processCpuMs": 1.123739999999998,
+          "sample": 0,
+          "wallMs": 10.129644
+        },
+        {
+          "processCpuMs": 0.3211950000000172,
+          "sample": 1,
+          "wallMs": 0.294878
+        },
+        {
+          "processCpuMs": 0.1747790000000009,
+          "sample": 2,
+          "wallMs": 0.175068
+        },
+        {
+          "processCpuMs": 0.13745399999999108,
+          "sample": 3,
+          "wallMs": 0.130938
+        },
+        {
+          "processCpuMs": 0.11716599999999744,
+          "sample": 4,
+          "wallMs": 0.109492
+        },
+        {
+          "processCpuMs": 0.09046999999998206,
+          "sample": 5,
+          "wallMs": 0.072642
+        }
+      ]
+    }
+  ],
+  "host": {
+    "cpuMax": null,
+    "ioPressure": "some avg10=33.79 avg60=27.36 avg300=22.27 total=360149964978\nfull avg10=25.32 avg60=20.08 avg300=17.05 total=314873946314\n",
+    "loadavg": "17.37 12.12 10.67 13/8435 2257550\n",
+    "memoryMax": null,
+    "parallelism": 12
+  },
+  "limits": "UUID generation excluded; logical files and encoded metadata/keys exclude SQLite pages, WAL, indexes and filesystem allocation; reads exclude actor scheduling and writes include it; fixed case order with uncontrolled host load; excludes plugin ID derivation, dispatch, downloads, authority calls and end-to-end recovery",
+  "workload": "six native Service::store_attachment calls per case with identical synthetic 1 KiB files; fresh IDs versus reuse of one ID",
+  "provenance": {
+    "launcherSeconds": 1.2588200189638883,
+    "sourceUnchanged": true,
+    "proof": "slack-r73-native632-merge-attachment-storage-proof.json",
+    "head": "c5af0882a19f38ac8d7bc0bc1153f8ee8cec1a6c",
+    "mergeHead": "590c73644196a58ab5e0e4abf678cc89e03b286a",
+    "kernel": "7.2.9-arch1-1",
+    "libc": [
+      "glibc",
+      "2.44"
+    ],
+    "cpu": "Intel Core i9-14900K",
+    "otherTaskOwnedWork": "No emulator, browser or other task-owned build/test active; unrelated host load uncontrolled."
+  }
+}

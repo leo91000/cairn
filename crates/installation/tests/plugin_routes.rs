@@ -1,6 +1,12 @@
+#[path = "plugin_routes/attachment_retries.rs"]
+mod attachment_retries;
+#[path = "plugin_routes/authority_outages.rs"]
+mod authority_outages;
 mod common;
 #[path = "plugin_routes/continuations.rs"]
 mod continuations;
+#[path = "plugin_routes/metadata.rs"]
+mod metadata;
 
 use aws_lc_rs::hmac;
 use axum::{body::Body, http::StatusCode, response::IntoResponse};
@@ -67,6 +73,7 @@ async fn configured_fixture_with_runner(
                 "http",
                 "conversations.submit",
                 "conversations.control",
+                "files",
             ],
             "hosts": ["api.example.test"],
             "agentAccess": {},
@@ -173,7 +180,16 @@ async fn configured_fixture_with_runner(
                 return {status = 200, body = cairn.json.encode(result)}
             end,
             message = function(event)
-                return cairn.conversations.submit({text = event.text, thread = event.context.thread, shared = true, newTurn = event.newTurn,
+                if event.failHandler then error('Synthetic package handler failure') end
+                if event.uncertainWrite then
+                    cairn.http.request({url = 'https://api.example.test/uncertain-write', method = 'POST',
+                        json = {id = event.id}, idempotencyKey = 'uncertain:' .. event.id})
+                end
+                if event.notifyThenSubmit then
+                    cairn.http.request({url = 'https://api.example.test/quota-notification', method = 'POST',
+                        json = {id = event.id}, idempotencyKey = event.receipted and ('quota:' .. event.id) or nil})
+                end
+                return cairn.conversations.submit({text = event.text, files = event.files, thread = event.context.thread, shared = true, newTurn = event.newTurn,
                     reply = {resource = event.resource, route = event.route, channel = event.context.channel, trace = event.trace, holdProgress = event.holdProgress}})
             end,
             progress = function(event)
@@ -4766,7 +4782,7 @@ async fn route_eligibility_uses_native_resource_grants_without_disclosing_owner_
         "name": "Dedicated read-only",
         "access": {"sandbox": "read-only", "projects": [], "installation": false, "github": false, "mcps": []},
     }), None).await.unwrap();
-    let unsafe_agent = s
+    let broad_agent = s
         .agent(
             json!({
                 "name": "Installation agent",
@@ -4795,12 +4811,12 @@ async fn route_eligibility_uses_native_resource_grants_without_disclosing_owner_
         .unwrap();
     assert_eq!(current["eligible"], true);
     assert!(current.get("grantedAccess").is_none());
-    let blocked = items
+    let broad = items
         .iter()
-        .find(|item| item["agentId"] == unsafe_agent["id"])
+        .find(|item| item["agentId"] == broad_agent["id"])
         .unwrap();
-    assert_eq!(blocked["eligible"], false);
-    assert!(!text(blocked, "reason").is_empty());
+    assert_eq!(broad["eligible"], true);
+    assert_eq!(current["pluginAccess"], false);
 
     let grants =
         format!("/api/plugins/router/connections/{instance}/resources/workspace/{resource}/grants");
@@ -4831,11 +4847,11 @@ async fn route_eligibility_uses_native_resource_grants_without_disclosing_owner_
         .iter()
         .find(|item| item["agentId"] == safe["id"])
         .unwrap();
+    assert_eq!(current["eligible"], true);
     assert_eq!(
-        current["eligible"], false,
-        "resource-granted agent must not accept everyone"
+        current["pluginAccess"], true,
+        "The owner must see the resource grant warning"
     );
-    assert!(!text(current, "reason").is_empty());
 
     let route_path =
         format!("/api/plugins/router/connections/{instance}/resources/workspace/{resource}/routes");
@@ -4844,8 +4860,8 @@ async fn route_eligibility_uses_native_resource_grants_without_disclosing_owner_
     }))).await;
     assert_eq!(
         response.status(),
-        StatusCode::BAD_REQUEST,
-        "preview must match save"
+        StatusCode::OK,
+        "the owner may choose a resource-granted agent after the warning"
     );
 
     let response = common::send(
@@ -4868,6 +4884,7 @@ async fn route_eligibility_uses_native_resource_grants_without_disclosing_owner_
         .find(|item| item["agentId"] == safe["id"])
         .unwrap();
     assert_eq!(current["eligible"], true);
+    assert_eq!(current["pluginAccess"], false);
 
     let mut member = read();
     member
@@ -5024,7 +5041,7 @@ async fn stale_route_edits_cannot_restore_a_revoked_participant() {
 }
 
 #[tokio::test]
-async fn external_routes_require_an_agent_that_can_run_without_native_host_provenance() {
+async fn external_route_configuration_does_not_grant_native_host_provenance() {
     let (_root, s, instance, resource, app) = fixture().await;
     let node = json!({
         "id": cairn_installation::config::id(),
@@ -5071,10 +5088,9 @@ async fn external_routes_require_an_agent_that_can_run_without_native_host_prove
         .find(|item| item["agentId"] == agent["id"])
         .unwrap();
     assert_eq!(
-        item["eligible"], false,
-        "external routes have no native host origin"
+        item["eligible"], true,
+        "the owner may configure any chosen agent"
     );
-    assert!(text(item, "reason").contains("native node"));
     let response = common::send(
         &app,
         owner_request(
@@ -5092,25 +5108,46 @@ async fn external_routes_require_an_agent_that_can_run_without_native_host_prove
     .await;
     let status = response.status();
     let refused = common::read_json(response).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
-    assert!(refused.to_string().contains("native node"));
+    assert_eq!(status, StatusCode::OK, "{refused}");
+    let error = s
+        .chat_create(json!({"agentId": agent["id"]}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, 403);
+    assert!(
+        error.message.contains("native node"),
+        "Unknown callers must not inherit native authority from configuration: {error:?}"
+    );
+    assert!(s.chat_list().await.unwrap().is_empty());
     let response = common::send(
         &app,
         owner_request("GET", &format!("{base}/routes"), Value::Null),
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(common::read_json(response).await["items"], json!([]));
+    assert_eq!(
+        common::read_json(response).await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
-async fn route_eligibility_matches_the_exact_project_and_allows_paused_configuration() {
+async fn route_eligibility_requires_the_selected_project_and_allows_paused_configuration() {
     let (root, s, instance, resource, app) = fixture().await;
     let project = s
         .project(
             json!({ "name": "Support", "path": root.path().join("home") }),
             None,
         )
+        .await
+        .unwrap();
+    let other_path = root.path().join("other-project");
+    std::fs::create_dir(&other_path).unwrap();
+    let other_project = s
+        .project(json!({"name": "Other", "path": other_path}), None)
         .await
         .unwrap();
     let agent = s
@@ -5131,7 +5168,14 @@ async fn route_eligibility_matches_the_exact_project_and_allows_paused_configura
         .unwrap();
     let base = format!("/api/plugins/router/connections/{instance}/resources/workspace/{resource}");
     for (query, eligible) in [
-        ("accessMode=everyone".to_owned(), false),
+        ("accessMode=everyone".to_owned(), true),
+        (
+            format!(
+                "accessMode=everyone&projectId={}",
+                text(&other_project, "id")
+            ),
+            false,
+        ),
         (
             format!("accessMode=everyone&projectId={}", text(&project, "id")),
             true,
@@ -5160,12 +5204,10 @@ async fn route_eligibility_matches_the_exact_project_and_allows_paused_configura
             .unwrap();
         assert_eq!(item["eligible"], eligible, "{query}");
         for item in result["items"].as_array().unwrap() {
-            assert!(
-                item.as_object()
-                    .unwrap()
-                    .keys()
-                    .all(|key| matches!(key.as_str(), "agentId" | "eligible" | "reason"))
-            );
+            assert!(item.as_object().unwrap().keys().all(|key| matches!(
+                key.as_str(),
+                "agentId" | "eligible" | "reason" | "pluginAccess"
+            )));
         }
     }
     for query in [
@@ -6109,10 +6151,12 @@ async fn submit_after_held_attachment_authority_change(
     use std::sync::atomic::{AtomicBool, Ordering};
     let (_root, s, instance, resource, app) = fixture().await;
     let package = registry::active(&s, "router").await.unwrap();
-    let before = "return cairn.conversations.submit({text = event.text,";
+    let before = "files = event.files";
     assert_eq!(package.source.main.matches(before).count(), 1);
-    let source = package.source.main.replace(before,
-        "return cairn.conversations.submit({files = {{url = 'https://api.example.test/download', name = 'note.txt'}}, text = event.text,");
+    let source = package.source.main.replace(
+        before,
+        "files = {{url = 'https://api.example.test/download', name = 'note.txt'}}",
+    );
     let mut manifest = serde_json::to_value(&package.manifest).unwrap();
     manifest["version"] = json!("2");
     let installed = registry::install(&s, &json!({"manifest": manifest, "source": source}))
@@ -6338,7 +6382,7 @@ async fn approval_replacement_while_an_attachment_waits_for_quota_prevents_publi
 }
 
 #[tokio::test]
-async fn everyone_routes_refuse_resource_grants_without_losing_admission() {
+async fn owner_resource_grants_keep_everyone_routes_and_independent_admission() {
     let (_root, s, instance, resource, app) = fixture().await;
     let mut agents = Vec::new();
     for name in ["Public route agent", "Restricted agent"] {
@@ -6379,8 +6423,8 @@ async fn everyone_routes_refuse_resource_grants_without_losing_admission() {
     let response = common::send(&app, grant(public)).await;
     assert_eq!(
         response.status(),
-        StatusCode::BAD_REQUEST,
-        "An Everyone route must not be disabled by a new credential grant: {}",
+        StatusCode::OK,
+        "An explicit owner resource grant must preserve the public route: {}",
         common::read_text(response).await,
     );
 
@@ -6388,7 +6432,7 @@ async fn everyone_routes_refuse_resource_grants_without_losing_admission() {
         &app,
         &instance,
         json!({
-            "id": "public-after-refused-grant", "resource": resource,
+            "id": "public-after-owner-grant", "resource": resource,
             "author": {"id": "alice"}, "context": {"channel": "C1", "thread": "public"},
             "body": {"text": "Hello"},
         }),
@@ -6416,12 +6460,17 @@ async fn everyone_routes_refuse_resource_grants_without_losing_admission() {
         "{}",
         common::read_text(response).await
     );
-    let response = common::send(&app, grant(public)).await;
+    let response = common::send(&app, owner_request("GET", &path, Value::Null)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let rules = common::read_json(response).await;
     assert_eq!(
-        response.status(),
-        StatusCode::OK,
-        "{}",
-        common::read_text(response).await
+        rules["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|rule| rule["agentId"] == public["id"])
+            .count(),
+        1
     );
 }
 
@@ -6799,7 +6848,7 @@ async fn native_source_is_retained_across_owner_lookup_and_temporary_failures() 
 }
 
 #[tokio::test]
-async fn a_new_instance_grant_retires_public_routed_work_without_stalling_the_scheduler() {
+async fn owner_instance_grants_keep_public_routed_work_and_scheduler_admission() {
     let QueuedRoutedRequest {
         _root,
         s,
@@ -6831,12 +6880,12 @@ async fn a_new_instance_grant_retires_public_routed_work_without_stalling_the_sc
     let current = s.store.run(&run).await.unwrap();
     assert!(
         result.is_ok(),
-        "A withdrawn public source aborted scheduling: {result:?}"
+        "A current public source aborted scheduling: {result:?}"
     );
-    assert_eq!(current["status"], "cancelled");
+    assert_eq!(current["status"], "queued");
     assert!(s.worker.active.lock().await.is_empty());
-    // Revoked public eligibility also refuses new ingress instead of retaining
-    // a reusable input-validation error or widening the route's permissions.
+    // An explicit owner grant is live without replacing the route's participant
+    // or agent-policy snapshots, as for Main's ordinary bot delegation.
     let response = deliver(
         &app,
         &instance,
@@ -6846,7 +6895,8 @@ async fn a_new_instance_grant_retires_public_routed_work_without_stalling_the_sc
         }),
     )
     .await;
-    assert_eq!(response.0, StatusCode::FORBIDDEN);
+    assert_eq!(response.0, StatusCode::OK);
+    assert_eq!(response.1["status"], "accepted");
 }
 
 async fn assert_invalid_package_does_not_stall_scheduler(change: &str) {

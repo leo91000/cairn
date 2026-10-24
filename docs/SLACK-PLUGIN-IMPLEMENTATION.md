@@ -1,5 +1,11 @@
 # Slack plugin implementation
 
+Current integration reserves epoch 14 / SQLite 13 after Main adopted epoch 13 /
+SQLite 12 for native administrator mode. Historical checkpoints below describe
+their own earlier boundaries and test sources. No automatic Slack transition,
+deployment or complete-contract qualification is implied.
+
+
 Q20 authorized the complete contract in `SLACK-PLUGIN-SPEC.md`, including its
 dedicated branch and PR. Base: `be40dc4b3a75a788a7678e310f185b9bb1eba12a`.
 
@@ -1887,3 +1893,79 @@ independent review and CI remain separate from these targeted local proofs.
 Routes, participants, grants, resource/personal OAuth mutation parity, guided
 inert setup and all remaining Slack Q1–Q20 are still required. No live Slack
 workspace was used; PR #226 remains draft and unmerged.
+
+## Accepted ingress during owner-policy outages
+
+A real-worker regression reproduces a pre-submission loss: five unavailable
+Beacon owner-policy checks were counted as package-handler failures and deleted
+an already-accepted event while retaining its source deduplication key. The
+runtime now preserves the native 503 through route binding and capability checks
+so the supervisor retries the same admission without spending handler attempts
+before an external effect starts. HTTP mutation sends and program execution mark
+that boundary. Generic provider errors and failures after an effect starts retain
+their finite package-error handling and uncertain HTTP receipts. The same
+distinction applies before final reply dispatch. Changed authority remains
+subject to the existing refusal checks.
+
+The targeted witnesses retain a signed request through six unavailable checks at
+each of four pre-submission boundaries, then verify one native conversation
+submission after recovery and no duplicate submission on source redelivery. A
+deliberate failing Luau handler still stops after five attempts. An HTTP mutation
+followed by unavailable authority keeps a pending native receipt and is sent only
+once; its handler retains the finite error budget. This is not a final
+provider-response or live Slack proof.
+No persisted shape or compatibility boundary changes; the current draft remains
+epoch 14 / SQLite 13 with no automatic migration. Narrow native Store observations
+and their limits are recorded in
+[authority outage storage](performance/PLUGIN-AUTHORITY-OUTAGE.md). Broader
+qualification, mutation parity, guided setup and the remaining Q1–Q20 gates stay
+open.
+
+### Uploaded files survive a pre-submission retry
+
+The same native authority retry exposed a second loss at the attachment quota:
+an individually committed upload was given a new ID on retry. Submission now
+reuses an opaque UUID per host admission and file position. Existing name/digest
+checks refuse changed bytes and reuse matching uploads before charging quota.
+Three real-worker regressions cover restart, the exact 200 MiB quota, refusing a
+replacement and distinct files from two admissions in the same conversation.
+Owner HTTP verifies the stored bytes. The reference failure and narrow native
+storage observations are recorded in
+[attachment retry storage](performance/PLUGIN-ATTACHMENT-RETRY.md).
+This adds no persisted shape or automatic migration and does not complete Slack
+file support, live validation or whole-PR transition/recovery qualification.
+
+### Metadata management retains the source requester
+
+A routed installation-enabled run could still use all five plugin metadata reads
+after its external participant was removed, although resource management already
+refused that same source. The signed-ingress/real-worker regression reproduced
+this in 0.75s. A second witness reproduced returning metadata without a final
+source check. Both now pass: each read captures the original requester before
+loading metadata, rechecks it afterward, then validates that same source and the
+execution grant in one final database snapshot. Reapproval cannot revive the
+old turn; public owner reads retain their own authorization.
+
+The two tests use genuine execution grants and a native lifecycle fixture rather
+than launching a VM or provider process. The late-revocation witness holds the
+final native owner-policy lookup while the owner removes the source participant.
+This adds no stored format, key or migration. It does not complete the remaining
+management mutation families or the accepted Slack contract.
+
+### Submission backpressure after an external effect
+
+A native submission quota must not grant unlimited retries to a handler that
+already posted a notification or started a program. A real-worker witness fills
+the actual 20-delivery queue, then posts before submitting without the optional
+`startsWork` hint. The old classifier kept replaying that notification after
+seven wakes without spending the handler budget. Submission deferral now uses
+the same pre-effect boundary as native authority outages; post-effect failures
+retain the ordinary five-error budget.
+
+The positive receipt witness confirms that seven wakes still retain a submission
+when its earlier notification is cached, with exactly one provider POST. Cached
+receipts start no new external effect. Both notification cases and the existing
+authority/finite-handler/uncertain-write controls pass with real workers and a
+synthetic HTTP provider. These tests use queued native submissions rather than
+launching their VM/provider executions. There is no new stored shape, key family
+or migration; the existing bounded queue/error-record observations still apply.

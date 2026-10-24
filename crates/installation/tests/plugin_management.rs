@@ -268,27 +268,27 @@ async fn resource_lifecycle(inert: bool) {
 
 #[tokio::test]
 async fn resource_form_parity_preserves_private_parent_credentials_and_owner_grants() {
-    resource_form_case(FormCase::Ordinary).await;
+    Box::pin(resource_form_case(FormCase::Ordinary)).await;
 }
 
 #[tokio::test]
 async fn revoked_management_cannot_publish_a_resource_after_provider_io() {
-    resource_form_case(FormCase::Revoked).await;
+    Box::pin(resource_form_case(FormCase::Revoked)).await;
 }
 
 #[tokio::test]
 async fn moving_to_a_public_parent_does_not_require_the_old_parents_credential() {
-    resource_form_case(FormCase::MoveToPublic).await;
+    Box::pin(resource_form_case(FormCase::MoveToPublic)).await;
 }
 
 #[tokio::test]
 async fn inert_private_parent_forms_remain_owner_only() {
-    resource_form_case(FormCase::Inert).await;
+    Box::pin(resource_form_case(FormCase::Inert)).await;
 }
 
 #[tokio::test]
 async fn remote_resource_choices_match_owner_http_and_both_management_tools() {
-    resource_form_case(FormCase::RemoteLookup).await;
+    Box::pin(resource_form_case(FormCase::RemoteLookup)).await;
 }
 
 enum FormCase {
@@ -299,6 +299,8 @@ enum FormCase {
     RemoteLookup,
 }
 
+// This shared fixture holds several owner/tool request futures. Keep its callers
+// boxed so they exercise those requests on the default test-thread stack.
 async fn resource_form_case(case: FormCase) {
     use axum::{Json, Router, http::HeaderMap, routing::get};
     use std::sync::{

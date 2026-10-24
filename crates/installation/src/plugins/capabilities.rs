@@ -11,7 +11,31 @@ use cairn_plugin_api::Manifest;
 use cairn_plugin_host::Denied;
 use futures_util::StreamExt;
 use serde_json::{Map, Value, json};
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
+
+/// Only effects outside Cairn make a native authority refusal unsafe to replay.
+/// Local submission receipts retain their own source-bound idempotency.
+#[derive(Default)]
+pub(crate) struct InvocationEffects {
+    external: AtomicBool,
+}
+
+impl InvocationEffects {
+    pub(super) fn started(&self) -> bool {
+        self.external.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn start(&self) {
+        self.external.store(true, Ordering::Relaxed);
+    }
+}
 
 /// What a handler acts for: its connection and the event being handled.
 pub struct Context {
@@ -59,15 +83,26 @@ pub(crate) async fn approved(
     method: &str,
     args: Value,
 ) -> Result<Value> {
+    approved_with_effects(s, context, digest, method, args, None).await
+}
+
+pub(crate) async fn approved_with_effects(
+    s: &Service,
+    context: &Context,
+    digest: &str,
+    method: &str,
+    args: Value,
+    effects: Option<&InvocationEffects>,
+) -> Result<Value> {
     super::registry::require_digest(s, &context.manifest.id, digest).await?;
-    let result = checked_approval(s, context, Some(digest), method, args).await?;
+    let result = checked_approval(s, context, Some(digest), method, args, effects).await?;
     super::registry::require_digest(s, &context.manifest.id, digest).await?;
     Ok(result)
 }
 
 /// A long-lived worker's call, after rechecking the owner and the instance.
 pub async fn checked(s: &Service, context: &Context, method: &str, args: Value) -> Result<Value> {
-    checked_approval(s, context, None, method, args).await
+    checked_approval(s, context, None, method, args, None).await
 }
 
 async fn checked_approval(
@@ -76,6 +111,7 @@ async fn checked_approval(
     digest: Option<&str>,
     method: &str,
     args: Value,
+    effects: Option<&InvocationEffects>,
 ) -> Result<Value> {
     ensure_owner(s, &context.connection).await?;
     if let Some(author) = context.event["authorId"].as_str() {
@@ -106,15 +142,22 @@ async fn checked_approval(
         _ if method.starts_with("oauth.") => super::oauth::call(s, context, method, &args).await,
         _ if method.starts_with("socket.") => super::socket::call(s, context, method, &args).await,
         _ => {
-            effect(s, context, method, args, || async {
-                ensure_owner(s, &context.connection).await?;
-                if let Some(digest) = &execution_digest {
-                    super::registry::require_digest(s, &context.manifest.id, digest).await?;
-                }
-                let expected = context.connection.clone();
-                s.store.read(move |db| authorize(db, &expected)).await?;
-                Ok(())
-            })
+            effect_with_tracking(
+                s,
+                context,
+                method,
+                args,
+                || async {
+                    ensure_owner(s, &context.connection).await?;
+                    if let Some(digest) = &execution_digest {
+                        super::registry::require_digest(s, &context.manifest.id, digest).await?;
+                    }
+                    let expected = context.connection.clone();
+                    s.store.read(move |db| authorize(db, &expected)).await?;
+                    Ok(())
+                },
+                effects,
+            )
             .await
         }
     }?;
@@ -161,16 +204,31 @@ where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
 {
+    effect_with_tracking(s, context, method, args, authorize, None).await
+}
+
+async fn effect_with_tracking<F, Fut>(
+    s: &Service,
+    context: &Context,
+    method: &str,
+    args: Value,
+    authorize: F,
+    effects: Option<&InvocationEffects>,
+) -> Result<Value>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
     match method {
         "storage.get" | "storage.set" | "storage.max" | "storage.delete" | "storage.list" => {
             super::storage::call(s, context, method, &args).await
         }
-        "http.request" => http(s, context, &args, authorize).await,
+        "http.request" => http(s, context, &args, authorize, effects).await,
         "resources.get" | "resources.list" => {
             super::resources::call(s, context, method, &args).await
         }
         "timers.after" | "timers.cancel" => timers(s, context, method, &args).await,
-        "exec.run" => super::programs::run(s, context, &args, authorize).await,
+        "exec.run" => super::programs::run_tracked(s, context, &args, authorize, effects).await,
         "files.create" | "files.append" | "files.read" | "files.delete" | "files.composeMime" => {
             authorize_management(s, context).await?;
             s.plugins.files.call(&context.connection, method, &args)
@@ -376,7 +434,13 @@ pub(crate) async fn secrets(s: &Service, context: &Context) -> Result<Map<String
 
 /// HTTPS to hosts the manifest lists. With `auth = true`, the host adds the
 /// connection's credential using the manifest's rule; scripts never see it.
-async fn http<F, Fut>(s: &Service, context: &Context, args: &Value, authorize: F) -> Result<Value>
+async fn http<F, Fut>(
+    s: &Service,
+    context: &Context,
+    args: &Value,
+    authorize: F,
+    effects: Option<&InvocationEffects>,
+) -> Result<Value>
 where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
@@ -390,6 +454,7 @@ where
         "DELETE" => reqwest::Method::DELETE,
         _ => return Err(invalid("Unsupported HTTP method.")),
     };
+    let external_write = method != reqwest::Method::GET;
     let target = target(s, &context.manifest, text(args, "url"), "https")?;
     let configuration = args["auth"].get("configuration");
     if configuration.is_some()
@@ -560,6 +625,9 @@ where
     }
     authorize().await?;
     recheck_http_access(s, context, resource.as_ref(), oauth.as_ref()).await?;
+    if external_write && let Some(effects) = effects {
+        effects.start();
+    }
     let response = request
         .send()
         .await

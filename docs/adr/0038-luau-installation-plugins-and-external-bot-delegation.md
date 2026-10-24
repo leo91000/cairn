@@ -3,7 +3,10 @@
 Date: 2026-10-12.
 
 Arbitrary native execution and the built-in-only 1Password capability are
-superseded by [ADR-0045](0045-declarative-plugin-contributions.md).
+superseded by [ADR-0045](0045-declarative-plugin-contributions.md). The agent
+restrictions on delegations are superseded by
+[ADR-0059](0059-owner-chosen-agents-for-bot-delegation.md): the owner chooses any
+agent and is warned about its access.
 
 ## Decision
 

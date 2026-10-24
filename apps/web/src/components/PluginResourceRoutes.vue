@@ -9,9 +9,11 @@ import {
 } from 'vue'
 import { api, date, state } from '../api'
 import { pluginManagementItems } from '../plugin-management'
+import { delegationRisks, listed } from '../plugins'
 import Modal from './Modal.vue'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
+import UiNotice from './UiNotice.vue'
 import VirtualSelect from './VirtualSelect.vue'
 
 const props = defineProps<{ path: string, name: string, enabled: boolean }>()
@@ -39,6 +41,10 @@ const personalHourly = ref(5)
 const eligibility = ref<RouteEligibility[]>([])
 const eligibilityReady = ref(false)
 const eligibilityError = ref('')
+const chosenAgent = computed(() => state.agents.find(item => item.id === agent.value))
+const chosenRisks = computed(() => chosenAgent.value && eligibilityReady.value
+  ? delegationRisks(chosenAgent.value, [], mode.value === 'everyone', eligibility.value.find(item => item.agentId === agent.value)?.pluginAccess ? [agent.value] : [])
+  : [])
 const projectOptions = computed(() => [
   { value: '', label: 'No project' },
   ...state.projects.map(item => ({ value: item.id, label: item.name })),
@@ -439,8 +445,17 @@ onBeforeUnmount(() => {
           :disabled="busy || !eligibilityReady || !props.enabled"
         />
         <p class="text-xs text-muted">
-          The agent must be dedicated to the selected project. Anyone access requires a read-only agent without installation, GitHub, MCP or plugin access.
+          The agent must be able to open the selected project.
         </p>
+        <UiNotice
+          v-if="chosenAgent && chosenRisks.length"
+          tone="warning"
+          role="status"
+          :title="`${mode === 'everyone' ? 'Anyone in the channel' : 'The people you allow'} can use everything ${chosenAgent.name} can do`"
+        >
+          Through the bot, they can {{ listed(chosenRisks) }}.
+          {{ mode === 'everyone' ? 'For a public channel, prefer a read-only agent with one project.' : 'Only allow people you trust, or choose a more limited agent.' }}
+        </UiNotice>
         <fieldset class="grid min-w-0 gap-2">
           <legend class="text-sm font-bold">
             Source conditions

@@ -26,8 +26,9 @@ import {
 import { pluginOperation } from '../plugin-operations'
 import {
   delegates,
-  eligibleAgent,
+  delegationRisks,
   formResult,
+  listed,
   unshownFormErrors,
 } from '../plugins'
 import Modal from './Modal.vue'
@@ -36,6 +37,7 @@ import PluginResources from './PluginResources.vue'
 import PluginView from './PluginView.vue'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
+import UiNotice from './UiNotice.vue'
 import VirtualSelect from './VirtualSelect.vue'
 
 const props = defineProps<{ plugin: string, manifest: Manifest, initial: PluginSetupDraft }>()
@@ -82,7 +84,8 @@ const edited = computed(() => name.value.trim() !== draft.value.name
   || Boolean(token.value.trim()) || Object.keys(pluginSecrets(secrets.value)).length > 0)
 const dirty = computed(() => edited.value || signIn.completed.value)
 const available = computed(() => draft.value.status === 'setup' && !expired.value)
-const eligible = computed(() => state.agents.filter(eligibleAgent))
+const chosenAgent = computed(() => state.agents.find(agent => agent.id === agentId.value))
+const chosenRisks = computed(() => chosenAgent.value ? delegationRisks(chosenAgent.value, [], false) : [])
 const consentBasis = computed(() => {
   if (!oauth.value)
     return ''
@@ -339,12 +342,20 @@ onBeforeUnmount(() => {
         <VirtualSelect
           v-model="agentId"
           label="Agent for incoming conversations"
-          placeholder="Choose a dedicated agent"
-          :options="eligible.map(agent => ({ value: agent.id, label: agent.name }))"
+          placeholder="Choose an agent"
+          :options="state.agents.map(agent => ({ value: agent.id, label: agent.name }))"
           :disabled="busy || resourceWork || !available"
           required
         />
         <small>People must be approved before their messages are accepted. You can configure people and limits after activation.</small>
+        <UiNotice
+          v-if="chosenAgent && chosenRisks.length"
+          tone="warning"
+          role="status"
+          :title="`The people you allow can use everything ${chosenAgent.name} can do`"
+        >
+          Through the bot, they can {{ listed(chosenRisks) }}. Only allow people you trust, or choose a more limited agent.
+        </UiNotice>
       </div>
       <label class="flex flex-row! items-center gap-2!"><input
         v-model="enabled"

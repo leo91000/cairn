@@ -556,9 +556,37 @@ internal fun PluginResourceRoutes(
                     input("agent", it)
                 }
                 Text(
-                    "L’agent doit être dédié au projet choisi. Tout le monde exige un agent en lecture seule sans accès installation, GitHub, MCP ou plugin.",
+                    "L’agent doit pouvoir ouvrir le projet choisi.",
                     style = MaterialTheme.typography.bodySmall,
                 )
+                if (previewFor == previewKey) {
+                    val selected = state.agents.find { it.id == agentId }
+                    val risks =
+                        selected
+                            ?.delegationRisks(
+                                emptyList(),
+                                everyone = mode == "everyone",
+                                pluginAccess =
+                                    eligibility.find { it.agentId == agentId }?.pluginAccess ==
+                                        true,
+                            )
+                            .orEmpty()
+                    if (selected != null && risks.isNotEmpty())
+                        Notice(
+                            title =
+                                if (mode == "everyone")
+                                    "Tout le monde dans le salon peut utiliser tout ce que ${selected.name} sait faire"
+                                else
+                                    "Les personnes autorisées peuvent utiliser tout ce que ${selected.name} sait faire",
+                            text =
+                                "Via le bot, ces personnes peuvent ${listed(risks)}. " +
+                                    if (mode == "everyone")
+                                        "Pour un salon public, préférez un agent en lecture seule avec un seul projet."
+                                    else
+                                        "N’autorisez que des personnes de confiance ou choisissez un agent plus limité.",
+                            tone = NoticeTone.WARNING,
+                        )
+                }
                 Text("Conditions de source", style = MaterialTheme.typography.titleSmall)
                 Text(
                     "Mode avancé : clés et valeurs exactes du contexte fourni par l’intégration. Toutes les conditions doivent correspondre.",

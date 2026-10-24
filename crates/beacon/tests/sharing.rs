@@ -1954,7 +1954,7 @@ async fn revoked_and_unclaimed_identities_explain_scheduled_work_without_audit_f
 }
 
 #[tokio::test]
-async fn a_task_preparation_error_advances_only_its_occurrence_and_is_audited_once() {
+async fn a_task_preparation_error_advances_only_its_occurrence_and_is_audited_and_shown_once() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     let id = relay.session["installations"][0]["id"].as_str().unwrap();
     let tasks = format!("/api/installations/{id}/api/tasks");
@@ -1980,6 +1980,9 @@ async fn a_task_preparation_error_advances_only_its_occurrence_and_is_audited_on
         task["nextRun"] = 1.into();
         // Replay the persisted wait status from an earlier authority outage.
         task["scheduleWaitReason"] = "Task-author check unavailable.".into();
+        // An earlier skipped occurrence clears once a later one is admitted.
+        task["scheduleFailure"] =
+            json!({ "message": "Earlier failure", "scheduledFor": 0, "at": 0 });
         relay
             .installation
             .store
@@ -2025,6 +2028,24 @@ async fn a_task_preparation_error_advances_only_its_occurrence_and_is_audited_on
             .iter()
             .all(|task| task["scheduleWaitReason"].is_null())
     );
+
+    let skipped = tasks
+        .iter()
+        .find(|task| task["name"] == "Invalid skill")
+        .unwrap();
+    assert_eq!(skipped["scheduleFailure"]["scheduledFor"], 1);
+    assert_ne!(skipped["scheduleFailure"]["message"], "Earlier failure");
+    assert!(
+        !skipped["scheduleFailure"]["message"]
+            .as_str()
+            .unwrap()
+            .is_empty()
+    );
+    let admitted = tasks
+        .iter()
+        .find(|task| task["name"] == "Valid work")
+        .unwrap();
+    assert!(admitted["scheduleFailure"].is_null());
 
     let audit: Vec<Value> = relay
         .get("/audit")

@@ -32,6 +32,8 @@ export const agentInput = z.object({
   // service accounts.
   exclusiveNodes: z.array(id).max(100).default([]),
   plugins: z.array(id).max(100).default([]),
+  // An acknowledgement for this save, removed before persistence; never a profile mode.
+  nativeNodeReviews: z.array(id).max(100).optional().describe('Owner confirmation of specifically reviewed administrator node IDs already covered by access.nodes, including wildcard access. Reviews only these nodes while preserving the placement selection. These grant unrestricted passwordless sudo on the real host, including access to locally present credentials and services. Never infer confirmation from an all-node grant or conversion. Not saved on the agent; delegated installation agents cannot approve it.'),
 })
 export const agentUpdate = z.object({
   provider: agentInput.shape.provider.removeDefault().optional(),
@@ -49,6 +51,7 @@ export const agentUpdate = z.object({
   }).optional(),
   exclusiveNodes: agentInput.shape.exclusiveNodes.removeDefault().optional(),
   plugins: agentInput.shape.plugins.removeDefault().optional(),
+  nativeNodeReviews: agentInput.shape.nativeNodeReviews,
 })
 export const projectInput = z.object({
   name,
@@ -98,6 +101,8 @@ export type Task = z.infer<typeof taskInput> & {
   authorId?: string | null
   authorRemoved?: boolean | null
   scheduleWaitReason?: string | null
+  /** The latest scheduled occurrence that could not start; cleared by the next admitted one. */
+  scheduleFailure?: { message: string, scheduledFor: number, at: number } | null
 }
 export type RunStatus
   = 'queued' | 'running' | 'waiting' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'
@@ -132,6 +137,7 @@ export interface Run {
     freeBytes?: number
     reserveBytes?: number
   }
+  nativeMode?: import('./nodes').NativeModeRequest | null
   nodeState?: string | null
   pinnedNodeId?: string | null
   preferredNodeId?: string | null

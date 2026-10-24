@@ -201,8 +201,10 @@ impl Service {
             access,
             expected_revision,
             inherited_grants,
+            native_reviews,
             ..
         } = draft;
+        let owner_review = crate::nodes::native_mode::owner().is_some();
         let (agent, created) = self
             .store
             .transaction(move |db| {
@@ -231,7 +233,7 @@ impl Service {
                     crate::agent_grants::normalize(&mut agent);
                 }
                 crate::agent_grants::validate(db, &agent, &accepts_agents)?;
-                let agent = save_agent(db, agent, &access)?;
+                let agent = save_agent(db, agent, &access, owner_review, &native_reviews)?;
                 for connection in &reapprove {
                     crate::plugins::connections::reapprove(db, connection, &agent)?;
                 }
@@ -274,6 +276,18 @@ impl Service {
                     .as_str()
                     .is_some_and(|revision| !revision.is_empty())
             });
+        let native_reviews = input
+            .as_object_mut()
+            .and_then(|fields| fields.remove("nativeNodeReviews"))
+            .unwrap_or_else(|| json!([]));
+        let native_reviews: Vec<String> = serde_json::from_value(native_reviews)
+            .map_err(|_| Error::bad("Native node reviews must be an explicit node list."))?;
+        if native_reviews.len() > 100 {
+            return Err(Error::bad("Review at most 100 administrative nodes."));
+        }
+        for node in &native_reviews {
+            crate::validation::uuid(node)?;
+        }
         let reapprove = input
             .as_object_mut()
             .and_then(|fields| fields.remove("reapproveDelegations"))
@@ -346,6 +360,7 @@ impl Service {
             expected_revision,
             reapprove,
             inherited_grants,
+            native_reviews,
         })
     }
 
@@ -882,7 +897,19 @@ impl Service {
                 }
             };
 
-            if let Err(error) = admission
+            // A skipped occurrence stays on the task until a later one is admitted or the task
+            // is saved, so a mission never looks healthy while its schedule silently fails.
+            let failure = match &admission {
+                Ok(_) => Some(Value::Null),
+                Err(error) if error.status != 409 => Some(json!({
+                    "message": error.message,
+                    "scheduledFor": task["nextRun"],
+                    "at": now(),
+                })),
+                Err(_) => None,
+            };
+
+            if let Err(error) = &admission
                 && error.status != 409
             {
                 let detail = json!({
@@ -899,6 +926,9 @@ impl Service {
                         && current["nextRun"] == task["nextRun"]
                     {
                         current["nextRun"] = next.into();
+                        if let Some(failure) = failure {
+                            current["scheduleFailure"] = failure;
+                        }
                         db.put("tasks", &current)?;
                     }
                     Ok(())
@@ -1033,7 +1063,7 @@ fn ensure_removable(db: &Db<'_>, kind: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Drops an agent's portrait, plugin grants and exclusive node grants.
+/// Drops an agent's portrait, plugin grants and node admission reviews.
 pub(crate) fn forget_agent(db: &Db<'_>, id: &str) -> Result<()> {
     db.delete(&format!("agent-avatar:{id}"))?;
     for grant in db.list(crate::plugins::grants::KIND)? {
@@ -1041,6 +1071,7 @@ pub(crate) fn forget_agent(db: &Db<'_>, id: &str) -> Result<()> {
             db.remove(crate::plugins::grants::KIND, text(&grant, "id"))?;
         }
     }
+    crate::nodes::native_mode::forget_agent(db, id)?;
     crate::agent_grants::forget_agent(db, id)
 }
 
@@ -1096,6 +1127,7 @@ struct AgentDraft {
     expected_revision: Option<Value>,
     reapprove: Vec<String>,
     inherited_grants: Vec<&'static str>,
+    native_reviews: Vec<String>,
 }
 
 /// Marks a changed agent record so concurrent editors can detect the change.
@@ -1121,7 +1153,13 @@ fn validate_access(agent: &Value, access: &Value) -> Result<()> {
     Ok(())
 }
 
-fn save_agent(db: &Db<'_>, mut agent: Value, access: &Value) -> Result<Value> {
+fn save_agent(
+    db: &Db<'_>,
+    mut agent: Value,
+    access: &Value,
+    owner_review: bool,
+    native_reviews: &[String],
+) -> Result<Value> {
     // Nodes held before stay accepted only while the execution backend is unchanged.
     let previous_nodes = db
         .get("agents", text(&agent, "id"))?
@@ -1167,6 +1205,13 @@ fn save_agent(db: &Db<'_>, mut agent: Value, access: &Value) -> Result<Value> {
     {
         agent["avatar"] = avatar.clone();
     }
+    crate::nodes::native_mode::review_agent(
+        db,
+        &agent,
+        db.get("agents", text(&agent, "id"))?.as_ref(),
+        owner_review,
+        native_reviews,
+    )?;
     touch(&mut agent);
     db.put("agents", &agent)?;
     crate::agent_grants::mirror(db, &agent)?;

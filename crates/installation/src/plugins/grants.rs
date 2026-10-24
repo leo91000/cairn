@@ -84,10 +84,6 @@ fn permits(grant: &Grant, operation: &Operation, input: Option<&Value>) -> bool 
     })
 }
 
-pub(crate) fn agent_has_grants(db: &Db<'_>, agent: &str) -> Result<bool> {
-    Ok(db.list(KIND)?.iter().any(|grant| grant["agentId"] == agent))
-}
-
 /// Saved rules, including inactive rules. Never interpreted as whole-instance access.
 pub(crate) fn counts(db: &Db<'_>) -> Result<Value> {
     let mut counts = serde_json::Map::new();
@@ -271,15 +267,6 @@ pub async fn create(
             }
             if db.get("agents", &grant.agent_id)?.is_none() {
                 return Err(Error::bad("Agent not found."));
-            }
-            for kind in [connections::KIND, super::routes::KIND] {
-                if db.list(kind)?.iter().any(|value| {
-                    value["agentId"] == grant.agent_id && value["accessMode"] == "everyone"
-                }) {
-                    return Err(Error::bad(
-                        "An agent reachable by anyone cannot receive resource credentials.",
-                    ));
-                }
             }
             if db
                 .list(KIND)?

@@ -1,0 +1,170 @@
+{
+  "cache": "fresh Store after seed; first read connection-cold followed by five reads in the same actor/connection; OS cache retained",
+  "cases": [
+    {
+      "encodedJsonBytes": 43800,
+      "reads": [
+        {
+          "processCpuMs": 0.6909880000000008,
+          "returnedJsonBytes": 876,
+          "sample": 0,
+          "wallMs": 0.5301589999999999
+        },
+        {
+          "processCpuMs": 0.03837800000000158,
+          "returnedJsonBytes": 876,
+          "sample": 1,
+          "wallMs": 0.037015
+        },
+        {
+          "processCpuMs": 0.03412399999999849,
+          "returnedJsonBytes": 876,
+          "sample": 2,
+          "wallMs": 0.032926000000000004
+        },
+        {
+          "processCpuMs": 0.03315700000000277,
+          "returnedJsonBytes": 876,
+          "sample": 3,
+          "wallMs": 0.032011000000000005
+        },
+        {
+          "processCpuMs": 0.034872000000000014,
+          "returnedJsonBytes": 876,
+          "sample": 4,
+          "wallMs": 0.03355
+        },
+        {
+          "processCpuMs": 0.034075999999998885,
+          "returnedJsonBytes": 876,
+          "sample": 5,
+          "wallMs": 0.032681
+        }
+      ],
+      "records": 50,
+      "shape": "handler-retry-reference",
+      "writes": [
+        {
+          "processCpuMs": 0.36800100000000313,
+          "sample": 0,
+          "wallMs": 3.8831949999999997
+        },
+        {
+          "processCpuMs": 0.24517999999999773,
+          "sample": 1,
+          "wallMs": 3.9437200000000003
+        },
+        {
+          "processCpuMs": 0.29928699999999964,
+          "sample": 2,
+          "wallMs": 3.654023
+        },
+        {
+          "processCpuMs": 0.28247400000000056,
+          "sample": 3,
+          "wallMs": 3.75005
+        },
+        {
+          "processCpuMs": 0.3406300000000009,
+          "sample": 4,
+          "wallMs": 3.793046
+        },
+        {
+          "processCpuMs": 0.3954140000000024,
+          "sample": 5,
+          "wallMs": 3.865688
+        }
+      ]
+    },
+    {
+      "encodedJsonBytes": 43800,
+      "reads": [
+        {
+          "processCpuMs": 0.6832419999999999,
+          "returnedJsonBytes": 876,
+          "sample": 0,
+          "wallMs": 0.5337299999999999
+        },
+        {
+          "processCpuMs": 0.038215000000001,
+          "returnedJsonBytes": 876,
+          "sample": 1,
+          "wallMs": 0.036976
+        },
+        {
+          "processCpuMs": 0.034834000000003584,
+          "returnedJsonBytes": 876,
+          "sample": 2,
+          "wallMs": 0.033596999999999995
+        },
+        {
+          "processCpuMs": 0.03313200000000194,
+          "returnedJsonBytes": 876,
+          "sample": 3,
+          "wallMs": 0.031974999999999996
+        },
+        {
+          "processCpuMs": 0.035004999999998176,
+          "returnedJsonBytes": 876,
+          "sample": 4,
+          "wallMs": 0.033725
+        },
+        {
+          "processCpuMs": 0.03342199999999451,
+          "returnedJsonBytes": 876,
+          "sample": 5,
+          "wallMs": 0.032295000000000004
+        }
+      ],
+      "records": 50,
+      "shape": "authority-retained",
+      "writes": [
+        {
+          "processCpuMs": 0.3568700000000007,
+          "sample": 0,
+          "wallMs": 3.6802330000000003
+        },
+        {
+          "processCpuMs": 0.18658199999999425,
+          "sample": 1,
+          "wallMs": 3.539323
+        },
+        {
+          "processCpuMs": 0.20046800000000076,
+          "sample": 2,
+          "wallMs": 3.543942
+        },
+        {
+          "processCpuMs": 0.2164239999999964,
+          "sample": 3,
+          "wallMs": 3.614829
+        },
+        {
+          "processCpuMs": 0.209341000000002,
+          "sample": 4,
+          "wallMs": 3.525358
+        },
+        {
+          "processCpuMs": 0.2265379999999979,
+          "sample": 5,
+          "wallMs": 3.67124
+        }
+      ]
+    }
+  ],
+  "host": {
+    "cpuMax": null,
+    "ioPressure": "some avg10=30.46 avg60=31.03 avg300=31.26 total=358807349583\nfull avg10=26.09 avg60=25.59 avg300=24.51 total=313838566898\n",
+    "loadavg": "9.93 15.59 20.70 7/10606 1876020\n",
+    "memoryMax": null,
+    "parallelism": 12,
+    "kernel": "7.2.9-arch1-1",
+    "libc": [
+      "glibc",
+      "2.44"
+    ],
+    "cpuModel": "Intel(R) Core(TM) i9-14900K"
+  },
+  "limits": "serialized JSON bytes exclude SQLite pages/WAL/indexes; reads exclude actor scheduling, writes include it; fixed case order and uncontrolled host load; this does not benchmark the dispatch/retry selector, authority/network/provider work or end-to-end recovery",
+  "workload": "50 synthetic plugin event records per case; old fourth-error shape versus unchanged retained admission; six reads and six same-value writes per shape"
+}

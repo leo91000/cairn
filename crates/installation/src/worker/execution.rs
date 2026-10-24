@@ -177,14 +177,16 @@ async fn recovers_controller(
     cancel: &CancellationToken,
     error: &Error,
 ) -> Result<bool> {
+    let run = s.store.run(&checkpoint.id).await?;
+    let mode_change = run["nativeModeInterruption"].is_string();
     if !error.is_unavailable() || !saved.managed() {
         return Ok(false);
     }
-    let run = s.store.run(&checkpoint.id).await?;
-    let may_retry =
-        saved.controller_recoveries() < MAX_CONTROLLER_RECOVERIES || run["moveRequest"].is_object();
+    let may_retry = mode_change
+        || saved.controller_recoveries() < MAX_CONTROLLER_RECOVERIES
+        || run["moveRequest"].is_object();
     Ok(may_retry
-        && run["sessionId"].is_string()
+        && (mode_change || run["sessionId"].is_string())
         && !checkpoint.expired()
         && !cancel.is_cancelled()
         && !s.shutdown.is_cancelled())
@@ -421,6 +423,81 @@ mod tests {
         assert_eq!(
             checkpoint.snapshot().await.controller_recoveries(),
             MAX_CONTROLLER_RECOVERIES
+        );
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn native_mode_recovery_retries_pre_session_interruptions_but_not_revocations() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::config::Config {
+            data_dir: root.path().join("data"),
+            home: root.path().join("home"),
+            workspace_roots: vec![root.path().into()],
+            public_url: "http://localhost:4310".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            codex_bin: "codex".into(),
+            claude_bin: "claude".into(),
+            opencode_bin: "opencode".into(),
+            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            concurrency: 1,
+            logger: false,
+            worker_enabled: false,
+            runner_url: String::new(),
+        })
+        .await
+        .unwrap();
+        let run = crate::config::id();
+        let record = json!({
+            "id": run, "taskId": crate::config::id(), "status": "running", "createdAt": now(),
+            "nativeModeInterruption": crate::config::id(),
+        });
+        service
+            .store
+            .transaction(move |db| db.add_run(&record, None).map(|_| ()))
+            .await
+            .unwrap();
+        let saved = RunCheckpoint::from_value(json!({
+            "prepared": { "backend": "native", "isolated": true },
+            "nodeId": crate::config::id(), "runnerId": crate::config::id(),
+            "controllerRecoveries": MAX_CONTROLLER_RECOVERIES + 1, "remainingMs": null,
+        }))
+        .unwrap();
+        let checkpoint = Checkpoint::new(service.store.clone(), run, saved.clone());
+        let cancel = CancellationToken::new();
+        assert!(
+            recovers_controller(
+                &service,
+                &checkpoint,
+                &saved,
+                &cancel,
+                &Error::unavailable("Controlled native stop")
+            )
+            .await
+            .unwrap()
+        );
+        for error in [
+            Error::forbidden("Native admission revoked"),
+            Error::conflict("Saved session unavailable"),
+        ] {
+            assert!(
+                !recovers_controller(&service, &checkpoint, &saved, &cancel, &error)
+                    .await
+                    .unwrap()
+            );
+        }
+        cancel.cancel();
+        assert!(
+            !recovers_controller(
+                &service,
+                &checkpoint,
+                &saved,
+                &cancel,
+                &Error::unavailable("Controlled native stop")
+            )
+            .await
+            .unwrap()
         );
         service.shutdown.cancel();
     }

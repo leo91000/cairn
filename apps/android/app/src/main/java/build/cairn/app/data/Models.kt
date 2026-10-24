@@ -112,7 +112,12 @@ data class Task(
     val archived: Boolean = false,
     val worktree: Boolean = true,
     val nextRun: Long? = null,
+    /** The latest scheduled occurrence that could not start; read-only. */
+    val scheduleFailure: ScheduleFailure? = null,
 )
+
+@Serializable
+data class ScheduleFailure(val message: String = "", val scheduledFor: Long = 0, val at: Long = 0)
 
 @Serializable
 data class Skill(
@@ -199,6 +204,7 @@ data class Run(
     /** The opening of the agent's final message, while unread. */
     val preview: String? = null,
     val nodeId: String? = null,
+    val nativeMode: NativeModeState? = null,
     val nodeState: String? = null,
     val resources: NodeResources? = null,
     val pinnedNodeId: String? = null,

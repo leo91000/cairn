@@ -62,6 +62,7 @@ private class PendingReview(
     val edited: Agent,
     val lines: List<ReviewLine>,
     val delegations: List<AgentDelegationEffect>,
+    val nativeNodes: List<String>,
 )
 
 /**
@@ -211,7 +212,11 @@ private fun AgentPage(
     }
     BackHandler(enabled = !saving) { leave() }
 
-    suspend fun commit(edited: Agent, approved: List<String>) {
+    suspend fun commit(
+        edited: Agent,
+        approved: List<String>,
+        nativeNodes: List<String> = emptyList(),
+    ) {
         // A profile already saved (only its reload failed) is not sent again.
         val profilePending = baseline.id.isBlank() || profileChanged(baseline, edited)
         val saved: Agent =
@@ -231,6 +236,7 @@ private fun AgentPage(
                                         approved,
                                         mcpIds,
                                         liveGrants,
+                                        nativeNodeReviews = nativeNodes,
                                     )
                                 },
                                 createValue = {
@@ -239,6 +245,7 @@ private fun AgentPage(
                                         approved,
                                         mcpIds,
                                         liveGrants,
+                                        nativeNodeReviews = nativeNodes,
                                     )
                                 },
                                 onCreated = {
@@ -261,7 +268,13 @@ private fun AgentPage(
                     vm.api.send(
                         "PUT",
                         "/agents/${segment(agentId)}",
-                        agentSaveBody(edited, approved, mcpIds, liveGrants),
+                        agentSaveBody(
+                            edited,
+                            approved,
+                            mcpIds,
+                            liveGrants,
+                            nativeNodeReviews = nativeNodes,
+                        ),
                     )
             }
 
@@ -325,7 +338,8 @@ private fun AgentPage(
                 if (needsReview(lines, preview)) {
                     val suspended = preview?.suspendedDelegations().orEmpty()
                     reapprove = preview?.preselectedReapprovals().orEmpty()
-                    review = PendingReview(edited, lines, suspended)
+                    review =
+                        PendingReview(edited, lines, suspended, edited.nativeReviewNodes(resources))
                 } else commit(edited, emptyList())
             } catch (e: Exception) {
                 fail(e)
@@ -510,7 +524,7 @@ private fun AgentPage(
             saving = true
             scope.launch {
                 try {
-                    commit(pending.edited, reapprove.toList())
+                    commit(pending.edited, reapprove.toList(), pending.nativeNodes)
                 } catch (e: Exception) {
                     fail(e)
                 } finally {
@@ -1734,7 +1748,7 @@ private fun NodesSection(
         access.nodes == null,
         enabled = editable,
     ) { all ->
-        change { it.copy(access = it.access.withAllNodes(all, nodes)) }
+        change { it.copy(access = it.access.withAllNodes(all, nodes, agent.id)) }
     }
     if (native && loaded && choices.isEmpty())
         Note("Aucune node native. Inscrivez une machine en exécution native depuis Nodes.")
@@ -1810,11 +1824,19 @@ private fun NodesSection(
                             ))
                         .joinToString(" · ")
                 if (facts.isNotBlank()) Note(facts)
+                val administrator = node.nativeModeRequest?.mode == "administrator"
+                if (administrator)
+                    Note(
+                        "Natif administrateur : accorder l’accès donne sudo sans mot de passe sur l’hôte réel. Root peut lire les fichiers et identifiants locaux, modifier les services et contourner les limites coopératives. Le retour en protégé ne restaure pas la machine."
+                    )
                 SwitchRow(
                     "Exécuter ses conversations",
-                    if (access.nodes == null) "Inclus dans « Toutes les nodes »" else "",
+                    if (administrator && agent.id !in node.nativeReviewedAgents)
+                        "Accès administrateur à examiner par le propriétaire"
+                    else if (access.nodes == null) "Inclus dans « Toutes les nodes »" else "",
                     runs,
                     enabled = editable && access.nodes != null,
+                    power = administrator,
                     description = "Exécuter ses conversations sur ${node.name}",
                 ) { on ->
                     change { it.withNodeRun(node.id, on, locked) }

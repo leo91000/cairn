@@ -642,7 +642,7 @@ abstract class PluginsCases {
     }
 
     @Test
-    fun selectedPackagePublicChoicesKeepOtherPackagesResourceRestrictions() {
+    fun selectedPackagePublicChoicesWarnAboutOtherPackagesResourceAccess() {
         val paths = CopyOnWriteArrayList<String>()
         val instance =
             PluginConnection(
@@ -724,18 +724,35 @@ abstract class PluginsCases {
                     compose.onAllNodesWithText("Modifier").fetchSemanticsNodes().isNotEmpty()
                 }
                 compose.onNodeWithText("Modifier").performScrollTo().performClick()
-                compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
                 compose
                     .onNode(
                         hasContentDescription("Qui peut lui parler", substring = true) and
                             hasClickAction()
                     )
                     .performClick()
-                compose.onNodeWithText("A des plugins").assertExists()
-                compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("utiliser ses plugins", substring = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose
+                    .onNodeWithText("utiliser ses plugins", substring = true)
+                    .performScrollTo()
+                    .assertIsDisplayed()
+                compose.onNodeWithText("Enregistrer").assertIsEnabled()
+                capture("plugin-selected-package-public-resource-access")
+                compose.onNodeWithText("Tout le monde").performScrollTo().performClick()
+                compose.onNodeWithText("Valider les personnes à leur demande").performClick()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("utiliser ses plugins", substring = true)
+                        .fetchSemanticsNodes()
+                        .isEmpty()
+                }
+                compose.onNodeWithText("Enregistrer").assertIsEnabled()
                 assertFalse(paths.any { it.endsWith("/api/plugins") })
                 assertTrue(paths.any { it.endsWith("/instance-access?cursor=next") })
-                capture("plugin-selected-package-public-resource-access")
             } finally {
                 models.clear()
             }
@@ -3989,6 +4006,122 @@ abstract class PluginsCases {
                 capture("route-summary-refreshed")
             } finally {
                 release.countDown()
+                models.clear()
+            }
+        }
+    }
+
+    @Test
+    fun resourceRouteWarningsFollowTheCurrentParticipationMode() {
+        val root = "/plugins/warnings/connections/app/resources/workspace/engineering"
+        val previews = AtomicInteger()
+        MockWebServer().use { server ->
+            server.dispatcher =
+                dispatcher(
+                    read = { path ->
+                        when {
+                            path.endsWith("$root/routes") ->
+                                wireJson.encodeToString(
+                                    PluginPage(
+                                        listOf(
+                                            PluginRoute(
+                                                id = "support",
+                                                name = "Support",
+                                                agentId = "helper",
+                                                accessMode = "everyone",
+                                                match = mapOf("channel" to "C1"),
+                                            )
+                                        )
+                                    )
+                                )
+                            path.contains("$root/route-eligibility?") -> {
+                                previews.incrementAndGet()
+                                wireJson.encodeToString(
+                                    PluginPage(
+                                        listOf(
+                                            RouteEligibility(
+                                                agentId = "helper",
+                                                eligible = true,
+                                                pluginAccess = true,
+                                            )
+                                        )
+                                    )
+                                )
+                            }
+                            else -> null
+                        }
+                    }
+                ) { _, _ ->
+                    null
+                }
+            server.start()
+            val helper =
+                Agent(
+                    id = "helper",
+                    name = "Resource helper",
+                    access =
+                        AccessPolicy(
+                            projects = emptyList(),
+                            mcps = emptyList(),
+                            sandbox = "read-only",
+                        ),
+                )
+            val vm =
+                show(server) { model, state ->
+                    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                        PluginResourceRoutes(
+                            model,
+                            state.copy(agents = listOf(helper)),
+                            root,
+                            "Engineering",
+                            true,
+                        ) {}
+                    }
+                }
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            try {
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("Routes de conversation")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.onNodeWithText("Routes de conversation").performClick()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("Modifier la route Support")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.onNodeWithText("Modifier la route Support").performScrollTo().performClick()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("utiliser ses plugins", substring = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose
+                    .onNodeWithText("utiliser ses plugins", substring = true)
+                    .performScrollTo()
+                    .assertIsDisplayed()
+                capture("resource-route-plugin-warning")
+                compose.onNodeWithText("Tout le monde").performScrollTo().performClick()
+                compose.onNodeWithText("Approuver sur demande").performClick()
+                compose.waitUntil(10000) {
+                    previews.get() >= 2 &&
+                        compose
+                            .onAllNodesWithText("utiliser ses plugins", substring = true)
+                            .fetchSemanticsNodes()
+                            .isEmpty()
+                }
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodes(hasText("Enregistrer") and isEnabled())
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.onNodeWithText("Enregistrer").assertIsEnabled()
+            } finally {
                 models.clear()
             }
         }

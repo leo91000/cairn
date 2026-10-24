@@ -474,7 +474,10 @@ Scheduled admissions run in their own loop, independently of launching queued
 work. A slow beacon check cannot delay already admitted work. Authority failures
 preserve the due time and expose `scheduleWaitReason` on the affected tasks;
 recovery clears that status. Preparation errors specific to a task are audited
-and advance its next occurrence, allowing other due tasks to proceed.
+and advance its next occurrence, allowing other due tasks to proceed. The skipped
+occurrence is kept on the task as `scheduleFailure` (`message`, `scheduledFor`,
+`at`) and shown on the mission until a later occurrence is admitted or the task
+is saved.
 
 The Beacon can request `POST /api/task-authors/refresh` through the
 existing relay request path after changing membership. This path is reserved

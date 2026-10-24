@@ -3,8 +3,9 @@
 use crate::{
     error::{Error, Result},
     installation_mcp,
-    plugins::{connections, registry, resources},
+    plugins::{connections, registry, requesters, resources},
     service::Service,
+    store::Db,
     validation::text,
 };
 use serde_json::Value;
@@ -41,9 +42,14 @@ pub(super) async fn invoke(
     args: Value,
     bearer: Option<&str>,
 ) -> Result<Value> {
-    if let Some(bearer) = bearer {
-        installation_mcp::authorize(s, bearer).await?;
-    }
+    // Keep this turn's requester: a later turn or fresh approval cannot replace it.
+    let requester = match bearer {
+        Some(bearer) => {
+            let run = installation_mcp::authorize(s, bearer).await?;
+            requesters::for_run(s, &run).await?
+        }
+        None => None,
+    };
     let cursor = args["cursor"].as_str();
     let result = match name {
         "list_plugin_packages" => registry::owner::list(s, cursor).await?,
@@ -64,8 +70,27 @@ pub(super) async fn invoke(
         }
         _ => return Err(Error::not_found("Unknown plugin metadata operation.")),
     };
+    if let Some(requester) = &requester {
+        requesters::recheck(s, requester).await?;
+    }
     if let Some(bearer) = bearer {
-        installation_mcp::authorize(s, bearer).await?;
+        let bearer = bearer.to_owned();
+        s.store
+            .read(move |db| {
+                // Execution and source authority must still agree in one snapshot.
+                let transaction = rusqlite::Transaction::new_unchecked(
+                    db.0,
+                    rusqlite::TransactionBehavior::Deferred,
+                )?;
+                let db = &Db(&transaction);
+                installation_mcp::authorize_in(db, &bearer)?;
+                if let Some(requester) = &requester {
+                    requesters::recheck_in(db, requester)?;
+                }
+                transaction.commit()?;
+                Ok(())
+            })
+            .await?;
     }
     bounded(result)
 }

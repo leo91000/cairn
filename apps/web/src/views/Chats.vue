@@ -56,6 +56,7 @@ import SubagentPanel from '../components/SubagentPanel.vue'
 import ThemeControl from '../components/ThemeControl.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
+import UiNotice from '../components/UiNotice.vue'
 import VirtualSelect from '../components/VirtualSelect.vue'
 import {
   ArrowDown,
@@ -68,6 +69,8 @@ import {
   ChevronLeft,
   FileText,
   FolderGit2,
+  Hourglass,
+  KeyRound,
   Layers,
   LoaderCircle,
   Maximize2,
@@ -1084,27 +1087,39 @@ function key(event: KeyboardEvent) {
                 </RouterLink>. This conversation and its files stay saved.
               </p>
             </section>
-            <UiAlert v-else-if="visibleError && !dismissedError && !errorShown" class="mb-3 flex items-start gap-2">
-              <span class="min-w-0 flex-1">{{ visibleError }}</span><button
-                :class="iconButton"
-                class="shrink-0"
-                aria-label="Dismiss error"
-                @click="dismissedError = true"
-              >
-                <Icon :name="X" :size="14" />
-              </button>
-            </UiAlert>
-            <div v-if="waitNotice && !quota" class="mb-3 rounded-lg border border-line bg-soft px-4 py-3 text-sm" role="status">
-              <p v-if="waitNotice.account" class="mb-1 font-semibold">
-                {{ waitNotice.account }} account needed
-              </p>
-              <p class="wrap-anywhere">
+            <UiNotice
+              v-else-if="visibleError && !dismissedError && !errorShown"
+              role="alert"
+              tone="danger"
+              class="error mb-3"
+            >
+              {{ visibleError }}
+              <template #action>
+                <button
+                  :class="iconButton"
+                  class="shrink-0"
+                  aria-label="Dismiss error"
+                  @click="dismissedError = true"
+                >
+                  <Icon :name="X" :size="14" />
+                </button>
+              </template>
+            </UiNotice>
+            <UiNotice
+              v-if="waitNotice && !quota"
+              role="status"
+              class="mb-3"
+              :tone="waitNotice.account ? 'warning' : 'info'"
+              :icon="waitNotice.account ? KeyRound : Hourglass"
+              :title="waitNotice.account ? `${waitNotice.account} account needed` : undefined"
+            >
+              <p>
                 {{ waitNotice.message }}
               </p>
-              <RouterLink v-if="waitNotice.account && state.installationRole === 'owner'" to="/connections" class="mt-2 inline-flex font-semibold text-accent underline">
+              <RouterLink v-if="waitNotice.account && state.installationRole === 'owner'" to="/connections" class="mt-1 inline-flex font-semibold text-accent underline">
                 Open Connections
               </RouterLink>
-            </div>
+            </UiNotice>
             <div v-if="detail?.canRequestNewSession" class="mb-3 rounded-lg border border-line p-3 text-sm">
               <p>If the restored native session is incompatible, start a fresh session using the preserved history and files.</p>
               <UiButton :disabled="busy" @click="newSession = true">

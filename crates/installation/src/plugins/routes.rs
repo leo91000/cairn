@@ -7,7 +7,7 @@ use super::{
 use crate::{
     config::{id, now},
     error::{Error, Result},
-    service::{Service, policy},
+    service::Service,
     store::Db,
     validation::{text, uuid},
 };
@@ -538,22 +538,16 @@ pub(crate) async fn select(
 }
 
 fn apply(db: &Db<'_>, mut root: Connection, route: Route, binding: Binding) -> Result<Connection> {
-    let agent = db
-        .get("agents", &route.agent_id)?
-        .ok_or_else(|| Error::forbidden("The route's agent was removed."))?;
-    if policy(&agent) != route.granted_access {
+    let access = connections::delegation_access(
+        db,
+        &route.agent_id,
+        route.project_id.as_deref(),
+        route.access_mode,
+    )?;
+    if access != route.granted_access {
         return Err(Error::forbidden(
             "Review the route after the agent's access changed.",
         ));
-    }
-    if route.access_mode == AccessMode::Everyone {
-        connections::public_safe(db, &route.agent_id, &route.granted_access).map_err(|error| {
-            if error.status == 400 {
-                Error::forbidden("The route's public delegation is no longer eligible.")
-            } else {
-                error
-            }
-        })?;
     }
     root.agent_id = route.agent_id;
     root.project_id = route.project_id;

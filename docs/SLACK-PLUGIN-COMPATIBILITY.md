@@ -1,5 +1,13 @@
 # Slack foundations: installation-data compatibility
 
+Current candidate: **epoch 14 / SQLite 13**. Main's native administrator feature
+now owns the reviewed epoch-13 / SQLite-12 boundary. Earlier Slack checkpoints
+reserved that pair before Main advanced; those observations keep their historical
+source scope. The candidate retains Main's native defaults/reviews and its
+reviewed transition documentation, but declares no automatic Slack migration.
+A marker-only preservation test is separate from full service/vault, forward
+transition, recovery and live Slack qualification.
+
 Status: implementation review for draft PR #226, **not deployment approval**. The
 Slack package and final qualification remain unfinished. Do not merge or deploy
 this draft. This inventory must be revisited as later lots add persistent data.
@@ -10,7 +18,7 @@ The existing `reply.failed` boolean is retained, and an earlier marker without
 `status` still reads through that boolean without searching later turns. New
 ranges use the same terminal selector as live replies before the next requester
 can start; they retain the final attempt and its stop status. This adds no key,
-table, index or envelope and remains inside the unqualified epoch-13 / SQLite-12
+table, index or envelope and remains inside the unqualified epoch-14 / SQLite-13
 boundary below. The higher boundary, forward transition and recovery gates stay
 required; no deployment or downgrade is qualified by this change.
 
@@ -23,15 +31,15 @@ manifest parser. An older host also lacks the requester and resource-authority
 checks required by newly admitted work. Treat starting that host on this data as
 an unsafe downgrade, even when some JSON records are syntactically readable.
 
-The installation epoch advances to **13**, with SQLite `user_version` **12**.
+The installation epoch advances to **14**, with SQLite `user_version` **13**.
 Main through `1e735587` already reserves epochs 5–7 for restart/native storage,
 epoch 8 for GitHub's plugin migration, and epoch 9 / SQLite 8 for the reviewed
 automatic transition. Main `64d92fe9` then uses epoch 10 / SQLite 9 for mission
 waits and their active-slot index. Main through `0a46294c` then reserves epoch 11 /
 SQLite 10 for native concurrency and node access. Main `d81a3a87` adds guided
-plugin setup at epoch 12 / SQLite 11. Integrating it raises this unreleased
-branch's previous 12/11 reservation to 13/12, preserving a distinct higher boundary. `legacyTree` remains
-unchanged. Opening the candidate advances SQLite before service startup; earlier
+plugin setup at epoch 12 / SQLite 11, which raised this branch's earlier
+reservation to 13/12. Main `590c7364` now retains the reviewed native administrator
+boundary at 13/12, so this candidate moves to 14/13. `legacyTree` remains unchanged. Opening the candidate advances SQLite before service startup; earlier
 binaries reject that newer database instead of resuming work without Slack's
 requester checks.
 
@@ -51,8 +59,8 @@ No deployment, automatic backup, restoration or production transition is perform
 | OAuth | New encrypted pending/completed authorizations, account/external subject links and generation records bind owner, package, resource and requester. Setup authorizations expire with their root and are promoted only in activation's transaction. External-consent event receipts contain only the pending key and requested scopes, are created with the pending consent, and retire atomically with their native event (including instance deletion); a superseded replay cannot acquire a fresh consent. Provider-consumed codes and rotated refresh tokens cannot be rolled back by restoring local JSON. |
 | Setup | Expiring root drafts and inert resource namespaces retain exact approval/owner provenance and TTLs. Activation atomically publishes original resource IDs and finished owner credentials; pending consent is never promoted. Discard and deletion retire corresponding secrets and references. |
 | Conversation and execution | Per-message requester proofs, shared-source bindings, generation/revision fences and new-turn bookkeeping preserve each author's authority through queue/preparation/wake. Existing un-attributed messages never gain another person's personal OAuth. An authenticated account captured while Beacon is unavailable has no personal membership-generation proof; later recovery cannot upgrade that turn. Verified proof records retain their existing serialized generation string. Exact owner-answer provenance is stored under the existing chat-control KV prefix, bound to the run, initiating turn and answer; edits retire it and conversation deletion clears that prefix. It permits only that answer's delivery and never restores suspended personal credentials. Older execution code cannot be used to resume work that depends on these checks. |
-| Issued question controls | Nonsecret plugin-storage values retain their `preparing`/`posting`/`sent` write intent, canonical fields/partial selections and exact delivery/person/provider-message binding across worker restart. Optional host-derived `deliveryId`/`chatId` fields bind their lifetime; all delivery-removal paths delete them atomically, including source revocation and conversation purge. Ordinary instance values and quotas keep their existing format. A queued interaction's existing `nextAttemptAt` also represents a definite provider cooldown without spending unexpected-error attempts. Native RPC question IDs include the provider turn as well as thread/item; reopening a session withdraws old requests and a new turn cannot inherit their answers or withdrawals. `blockingQuestion` is derived adapter inbox input, not a stored message field. Unknown POST outcomes are not silently replayed; unsupported/secret questions stay in Cairn. These additions remain inside the unqualified epoch-13 draft boundary. |
-| Ordinary progress controls | One delivery-owned `progress:<deliveryId>` plugin-storage value retains an eight-second `readyAt` wall deadline, `preparing`/`posting`/`sent` intent, exact source/person/delivery/message binding, confirmed short native step label and optional `updateStatus = sending`. Only definite quota rejection clears the relevant in-flight intent for retry. The confirmed Stop binding remains usable after an uncertain edit; an uncertain initial creation is not replayed. Final reply handling deletes the reference before optional provider cleanup; native delivery removal still retires it atomically. Values use the existing store envelope and quota; no new table, index, native capability or credential shape is introduced. Epoch 13 / SQLite 12 and the unchanged legacy tree remain the draft boundary. [Local measurements](performance/SLACK-PROGRESS-STATE.md) compare the representative full record with ordinary instance state. |
+| Issued question controls | Nonsecret plugin-storage values retain their `preparing`/`posting`/`sent` write intent, canonical fields/partial selections and exact delivery/person/provider-message binding across worker restart. Optional host-derived `deliveryId`/`chatId` fields bind their lifetime; all delivery-removal paths delete them atomically, including source revocation and conversation purge. Ordinary instance values and quotas keep their existing format. A queued interaction's existing `nextAttemptAt` also represents a definite provider cooldown without spending unexpected-error attempts. Native RPC question IDs include the provider turn as well as thread/item; reopening a session withdraws old requests and a new turn cannot inherit their answers or withdrawals. `blockingQuestion` is derived adapter inbox input, not a stored message field. Unknown POST outcomes are not silently replayed; unsupported/secret questions stay in Cairn. These additions remain inside the unqualified epoch-14 draft boundary. |
+| Ordinary progress controls | One delivery-owned `progress:<deliveryId>` plugin-storage value retains an eight-second `readyAt` wall deadline, `preparing`/`posting`/`sent` intent, exact source/person/delivery/message binding, confirmed short native step label and optional `updateStatus = sending`. Only definite quota rejection clears the relevant in-flight intent for retry. The confirmed Stop binding remains usable after an uncertain edit; an uncertain initial creation is not replayed. Final reply handling deletes the reference before optional provider cleanup; native delivery removal still retires it atomically. Values use the existing store envelope and quota; no new table, index, native capability or credential shape is introduced. Epoch 14 / SQLite 13 and the unchanged legacy tree remain the draft boundary. [Local measurements](performance/SLACK-PROGRESS-STATE.md) compare the representative full record with ordinary instance state. |
 | Clients | Android's ordinary setup-input snapshots are local, backup-excluded and bounded. They contain no declared secret fields; session/scope retirement clears them. They are disposable editor state, not installation data or an offline mutation queue. Web state remains browser-local. |
 
 Saved-root OAuth renewal in resource forms reuses the encrypted credential key
@@ -65,7 +73,7 @@ behavior; an interrupted state requires reconnection. Earlier readers also refus
 to refresh a record with no refresh token, rather than replaying it. Consumption
 and completion compare the prior credential in the authorization transaction.
 No table, key count, encryption envelope, epoch, legacy tree or migration changes;
-the additive metadata stays inside this unreleased epoch-13 / SQLite-12 draft.
+the additive metadata stays inside this unreleased epoch-14 / SQLite-13 draft.
 The [native record observation](performance/ROOT-FORM-CREDENTIAL-RENEWAL.md)
 includes all three states. Inert root OAuth activation and whole-PR production
 transition/recovery qualification remain open.
@@ -76,7 +84,7 @@ root app and workspace before any token-bearing I/O. A missing or different app
 ID is refused, including a root edited before activation. Older workspace rows
 are not assigned the current root app automatically: the owner must reload,
 preview and save their workspace so its bot is checked again. The existing vault,
-resource IDs, routes, table layout and epoch-13 / SQLite-12 draft boundary remain.
+resource IDs, routes, table layout and epoch-14 / SQLite-13 draft boundary remain.
 This is an authority restriction inside the unreleased candidate, not a qualified
 production migration or permission to run an earlier feature-branch binary.
 [Local resource measurements](performance/SLACK-WORKSPACE-APP-BINDING.md) record
@@ -199,7 +207,7 @@ source, route, person, owner and approval proofs still apply. Capacity postponem
 updates the existing `nextAttemptAt` field without incrementing error attempts or
 rewriting identity. It never recreates a deleted or changed admission. Earlier
 readers can process these records but retain their earlier finite-retry behavior.
-The additive hint alone therefore does not change epoch13 / SQLite12 or the legacy
+The additive hint alone therefore does not change the current epoch-14 / SQLite-13 candidate or the legacy
 tree. The full-PR inventory, forward migration/recovery and final qualification
 remain required. See the separately recorded pending-event storage observation.
 
@@ -231,8 +239,8 @@ finite handler-error budget is removed. Earlier development snapshots' already
 settled/orphaned deliveries are not reconstructed from arbitrary later output;
 start a new source request when no forwarding record remains.
 
-These are additive records inside the already incompatible, unreleased epoch-13
-/ SQLite-12 contract above; no additional table, vault envelope, transition,
+These are additive records inside the already incompatible, unreleased epoch-14
+/ SQLite-13 contract above; no additional table, vault envelope, transition,
 automatic migration or legacy-tree change is introduced. Pre-Slack downgrade and
 production deployment remain fenced. This is a checkpoint inventory, not final
 whole-contract compatibility qualification. Local overhead is recorded in
@@ -255,7 +263,7 @@ Activation also refuses a concurrent consumed intent in the promotion transactio
 Older normal OAuth records remain unchanged. Earlier development readers lack
 the setup sign-in endpoint and have incomplete root OAuth activation/renewal;
 they are not a supported way to operate this draft feature. The already
-unreleased epoch-13 / SQLite-12 boundary and legacy tree stay unchanged, and this
+unreleased epoch-14 / SQLite-13 boundary and legacy tree stay unchanged, and this
 inventory does not qualify production transition, physical recovery, downgrade,
 deployment or release. [Local measurements](performance/SETUP-OAUTH-EXPIRATION.md)
 separate encoded-value sizes from KV expiry and production latency. Web/Android
@@ -269,5 +277,14 @@ configuration retains additional in-memory run/requester/instance authority;
 owner-only calls retain their existing storage reads and writes. The credential
 guard adds authorization reads for delegated calls, not a persisted cache or
 format. There is no new table, key, serialized field, envelope, epoch or migration.
-The unreleased epoch-13 / SQLite-12 candidate still requires whole-PR forward
+The unreleased epoch-14 / SQLite-13 candidate still requires whole-PR forward
 transition and recovery qualification before any production migration.
+
+
+After integrating Main's reviewed epoch-13 native administrator contract, the
+candidate marker advances to SQLite 13 and epoch 14. The local Store regression
+preserves native-review/plugin records and opaque KV values and refuses a future
+marker. [Marker observations](performance/PLUGIN-COMPATIBILITY-FENCE.md) compare
+encoded bytes, reads, writes and CPU against version 12 with their explicit
+scope. This is not a complete startup/vault/forward-recovery qualification; no
+automatic transition is declared.

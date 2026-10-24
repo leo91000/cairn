@@ -10,6 +10,7 @@ pub struct Error {
     pub status: u16,
     pub message: String,
     pub oauth: Option<String>,
+    authority_unavailable: bool,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -20,6 +21,7 @@ impl Error {
             status,
             message: message.into(),
             oauth: None,
+            authority_unavailable: false,
         }
     }
 
@@ -67,6 +69,17 @@ impl Error {
         Self::new(503, message)
     }
 
+    pub(crate) fn authority_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            authority_unavailable: true,
+            ..Self::unavailable(message)
+        }
+    }
+
+    pub(crate) fn is_authority_unavailable(&self) -> bool {
+        self.status == 503 && self.authority_unavailable
+    }
+
     pub fn gateway_timeout(message: impl Into<String>) -> Self {
         Self::new(504, message)
     }
@@ -96,6 +109,7 @@ impl Error {
             status: 400,
             message: message.into(),
             oauth: Some(code.into()),
+            authority_unavailable: false,
         }
     }
 

@@ -66,7 +66,7 @@ export function sandboxOptionsFor(backend: 'firecracker' | 'native') {
   if (backend !== 'native')
     return sandboxOptions
   return sandboxOptions.map(option => option.value === 'yolo'
-    ? { ...option, description: 'Native process under a managed account on the host: GPU and system tools, no sudo or Docker. Default.' }
+    ? { ...option, description: 'Native process under a managed account. Host privileges follow the node’s confirmed protected or administrator mode. Default.' }
     : option)
 }
 
@@ -452,6 +452,7 @@ export function instanceState(connection: AgentPluginInstance): { tone: 'granted
 }
 
 export interface Context {
+  agentId?: string
   projects: Pick<Project, 'id' | 'name'>[]
   skills: Skill[]
   mcps: McpView[]
@@ -548,9 +549,18 @@ function restrictedTools(saved: AgentAccess, draft: AgentAccess) {
  * What saving would grant or take away that deserves a look first: new powers and
  * secrets, and removed access when `runs` says work is affected.
  */
+export function nativeReviewNodes(draft: AgentDraft, context: Context) {
+  if (backendOf(draft.access) !== 'native' || draft.access.nodes === null)
+    return []
+  return context.nodes.filter(node => node.nativeModeRequest?.mode === 'administrator'
+    && draft.access.nodes!.includes(node.id) && !node.nativeReviewedAgents?.includes(context.agentId ?? '')).map(node => node.id)
+}
+
 export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Context, runs = { queued: 0, running: 0 }) {
   const lines: ReviewLine[] = []
   const node = (id: string) => nodeName(context.nodes.find(item => item.id === id), id)
+  for (const id of nativeReviewNodes(draft, context))
+    lines.push({ kind: 'power', section: 'nodes', text: `Added: administrator access to ${node(id)}. Every admitted conversation receives unrestricted passwordless sudo on the real host. Root can read local files and credentials, change services and defeat cooperative limits. Returning to protected does not clean or restore the machine.` })
 
   for (const id of listChanges(saved.exclusiveNodes ?? [], draft.exclusiveNodes ?? []).added)
     lines.push({ kind: 'power', section: 'nodes', text: `Added: exclusive reservation on ${node(id)}. This agent will be able to suspend other agents’ conversations on this machine.` })

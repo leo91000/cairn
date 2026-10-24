@@ -15,6 +15,7 @@ use crate::{
 use cairn_plugin_api::Manifest;
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 pub const EVENTS: &str = "plugin-events";
@@ -601,6 +602,24 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
     submit_approved(s, context, args, None).await
 }
 
+/// The host admission and file position survive worker restart. The attachment
+/// store verifies name/digest before reusing this opaque UUID, including at quota.
+fn submission_attachment_id(connection: &Connection, event: &Value, index: usize) -> String {
+    let source = format!(
+        "plugin-attachment:{}:{}:{index}",
+        connection.id,
+        text(event, "id")
+    );
+    let digest = Sha256::digest(source.as_bytes());
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    uuid::Builder::from_bytes(bytes)
+        .with_variant(uuid::Variant::RFC4122)
+        .with_version(uuid::Version::Custom)
+        .into_uuid()
+        .to_string()
+}
+
 async fn submission_authority(
     s: &Service,
     context: &Context,
@@ -788,8 +807,8 @@ pub(crate) async fn submit_approved(
         }
     }
     let mut attachment_ids = Vec::new();
-    for (name, bytes) in files {
-        let attachment = id();
+    for (index, (name, bytes)) in files.into_iter().enumerate() {
+        let attachment = submission_attachment_id(expected, event, index);
         let approval = package.clone();
         let expected = expected.clone();
         let event = event.clone();

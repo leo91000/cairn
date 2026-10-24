@@ -123,13 +123,15 @@ Scripts receive validated settings in their `start` event; credentials stay in t
 
 Every plugin uses the same connection model: name, settings, optional credential
 (encrypted in the vault), and, when the package can start conversations, an owner
-delegation: one dedicated agent (one project at most, no installation access), the
-people allowed (listed, approved as they ask, or anyone), and an hourly message limit.
-“Anyone” is meant for public channels such as customer support: it requires an agent
-with a read-only sandbox and no installation, MCP or plugin access (GitHub, 1Password…)
-(rechecked before every effect, so a later grant suspends the connection), adds a
-per-person hourly limit, and lets only listed people or a conversation's starter
-answer for it or stop it. The
+delegation: the agent that answers, the people allowed (listed, approved as they ask,
+or anyone), and an hourly message limit. Any agent can answer
+([ADR-0059](adr/0059-owner-chosen-agents-for-bot-delegation.md)); the setup assistant
+warns when it can manage the installation or open several projects, and, for anyone,
+when it can also write, run commands or use MCP connections or plugins (GitHub,
+1Password…). The agent must be able to open the delegation's project. “Anyone” is
+meant for public channels such as customer support: it adds a per-person hourly
+limit, and lets only listed people or a conversation's starter answer for it or stop
+it. The
 connection is bound to the owner's current access and the agent's recorded policy.
 External plugin identities do not supply the Cairn origin required by
 [trusted native execution](NATIVE-NODES.md). Delegation configuration and route
@@ -822,9 +824,10 @@ a resource provider through OAuth does not grant any agent access by itself.
 
 Rules are bound to the verified current owner's access, and rechecked alongside
 instance, resource/parent revisions and approval before capabilities and before
-returning results. Deleting resources removes their rules. Agents reachable by
-anyone cannot receive resource credentials; adding such a delegation also checks
-existing resource rules.
+returning results. Deleting resources removes their rules. The owner may grant
+resource operations to an agent that answers a public bot, as for whole-instance
+grants. Both clients warn about its plugin access; the grant does not replace a
+requester's personal OAuth, provider visibility or the route's participation rules.
 
 ### Owner-selected conversation routes
 
@@ -837,12 +840,17 @@ last opaque `revision`. A route contains `name`, `enabled`, exact string `match`
 conditions on source context, `agentId`, optional `projectId`, `accessMode`,
 `userIds`, optional `people`, and hourly limits. Defaults are 20 messages per hour
 and five per person; the latter applies to everyone access. No route or person is
-granted by default. The selected agent must have only the selected project's access
-and no installation access; everyone access retains the stricter public-agent rules.
+granted by default. The owner can choose any agent that can open the selected
+project. Both clients warn about installation-wide or multi-project access and,
+for everyone access, writing, MCP and saved plugin permissions. These are warnings,
+not configuration refusals. Choosing a native agent does not give external callers
+native host provenance; execution retains its independent trust checks.
 An owner can preview eligible agents at the sibling endpoint
 `/route-eligibility?accessMode=allowlist|requests|everyone&projectId=<optional-id>`.
-It returns `{items: [{agentId, eligible, reason?}]}` without access policies or
-credentials. The result is advisory: save and effects recheck current authority.
+It returns `{items: [{agentId, eligible, reason?, pluginAccess}]}` without access
+policies, credential values or grant details. `pluginAccess` indicates saved root
+or granular plugin grants for the public-mode warning, including grants on another
+package. The result is advisory: save and effects recheck current authority.
 Configuration remains available while the instance or resource is paused.
 
 Listed routes include an owner-only `summary` with `hourStartedAt` (UTC epoch
@@ -1385,7 +1393,7 @@ remain individually selectable: equal visible labels cannot prove equal secrets.
 
 Installed manifests with `[setup]` require epoch 12 / SQLite version 11, which
 fences previous readers before plugin loading. The unqualified Slack branch
-reserves epoch 13 / SQLite 12 above this Main transition; see its
+reserves epoch 14 / SQLite 13 above Main’s reviewed epoch-13 / SQLite-12 transition; see its
 [compatibility inventory](SLACK-PLUGIN-COMPATIBILITY.md). Existing package files, approvals,
 connections and vault entries are preserved. See the
 [forward migration and recovery plan](AUTOMATIC-MIGRATIONS.md#current-transition-epochs-311-to-12).
@@ -1869,9 +1877,8 @@ Adding a bot, on the web or Android:
    too) also delivers replies in its threads or to the bot; “Answer every message in
    the channel” turns it on.
 4. **People, agent and limits**, like every delegating plugin: approve people as they
-   ask (recommended), only listed Discord user IDs, or anyone with a read-only agent;
-   an agent restricted to one project at most without installation access; an hourly
-   limit.
+   ask (recommended), only listed Discord user IDs, or anyone; any agent, with a
+   warning about the access it gives these people; an hourly limit.
 
 The transport worker follows Discord's Gateway lifecycle, checked against
 `@discordjs/ws`:

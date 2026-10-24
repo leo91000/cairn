@@ -86,12 +86,12 @@ import {
   connectionState,
   contributions,
   delegates as delegating,
-  eligibleAgent,
+  delegationRisks,
   formResult,
   hasSetup,
   instanceNoun,
+  listed,
   personName,
-  publicProblem,
   unshownFormErrors,
 } from '../plugins'
 import { buttonBase, buttonSizes, buttonVariants } from '../ui'
@@ -169,21 +169,15 @@ const activityTones = {
   stopped: ['bg-hover text-muted', 'Stopped'],
 } as const
 
-/** Why an agent can't answer this instance's people, or '' when it can. */
-function problem(agent: Agent) {
-  if (form.value.accessMode === 'everyone') {
-    return publicProblem(agent, Boolean(configuration.value?.resourceAgentIds.includes(agent.id)
-      || configuration.value?.access.some(item => item.agentIds.includes(agent.id) || item.resourceAgentIds.includes(agent.id))))
-  }
-
-  return eligibleAgent(agent) ? '' : 'Too broad'
+/** What this instance's people could do through an agent, for the owner's warning. */
+function risks(agent: Agent) {
+  return delegationRisks(agent, configuration.value?.access ?? [], form.value.accessMode === 'everyone', [...(editing.value ? [] : grants.value), ...(configuration.value?.resourceAgentIds ?? [])])
 }
 
-const agents = computed(() => [...state.agents].sort((a, b) => Number(Boolean(problem(a))) - Number(Boolean(problem(b)))))
-const delegationReady = computed(() => {
-  const agent = state.agents.find(item => item.id === form.value.agentId)
-  return !delegates.value || Boolean(agent && !problem(agent))
-})
+const agents = computed(() => [...state.agents].sort((a, b) => Number(risks(a).length > 0) - Number(risks(b).length > 0)))
+const chosenAgent = computed(() => state.agents.find(agent => agent.id === form.value.agentId))
+const chosenRisks = computed(() => chosenAgent.value ? risks(chosenAgent.value) : [])
+const delegationReady = computed(() => !delegates.value || Boolean(chosenAgent.value))
 const singular = computed(() => instanceNoun(manifest.value, 1))
 const plural = computed(() => instanceNoun(manifest.value, 2))
 // A completed device sign-in gives the draft its credential; the package's form handler then
@@ -455,8 +449,7 @@ function stepProblem(item: SetupStep | undefined): string {
   }
 
   if (item.kind === 'people' && delegates.value) {
-    const agent = state.agents.find(item => item.id === form.value.agentId)
-    if (!agent || problem(agent))
+    if (!chosenAgent.value)
       return 'Choose the agent that answers.'
     if (form.value.accessMode === 'allowlist' && !people.value.length)
       return 'Add at least one person.'
@@ -529,7 +522,8 @@ async function save() {
       // Existing grants are reread before save; new instances use the final setup step.
       ...(delegates.value && {
         agentId: form.value.agentId,
-        projectId: agent?.access.projects?.[0] ?? null,
+        // An agent with one project answers in it; a broader one answers outside projects.
+        projectId: agent?.access.projects?.length === 1 ? agent.access.projects[0] : null,
         accessMode: form.value.accessMode,
         userIds: people.value.map(item => item.id),
         people: people.value,
@@ -1272,7 +1266,7 @@ onBeforeUnmount(() => {
                 type="radio"
                 value="everyone"
                 class="mt-0.5 w-auto!"
-              >Anyone<small class="col-start-2 font-normal">Needs a read-only agent with at most one project and no MCP or plugin access.</small></label>
+              >Anyone<small class="col-start-2 font-normal">Everyone who can post in the channel, within an hourly limit per person.</small></label>
             </fieldset>
             <fieldset class="grid gap-2" :disabled="busy">
               <legend class="mb-1 text-xs font-semibold">
@@ -1308,18 +1302,17 @@ onBeforeUnmount(() => {
                 v-for="agent in agents"
                 :key="agent.id"
                 class="grid! grid-cols-[auto_1fr_auto] items-center gap-x-2.5! rounded-xl border border-line px-3.5 py-2 font-normal!"
-                :class="problem(agent) ? 'opacity-60' : form.agentId === agent.id ? 'border-accent bg-soft' : ''"
+                :class="form.agentId === agent.id ? 'border-accent bg-soft' : ''"
               >
                 <input
                   v-model="form.agentId"
                   type="radio"
                   class="w-auto!"
                   :value="agent.id"
-                  :disabled="Boolean(problem(agent))"
                 ><span class="truncate text-xs font-semibold">{{ agent.name }}</span>
-                <span v-if="problem(agent)" class="rounded-full bg-warning-surface px-2 py-px text-3xs font-semibold text-warning">{{ problem(agent) }}</span>
+                <span v-if="risks(agent).length" class="rounded-full bg-warning-surface px-2 py-px text-3xs font-semibold text-warning">Broad access</span>
               </label>
-              <small>People reach only this agent: one project at most and no installation access. <RouterLink to="/agents" class="text-accent">Create a dedicated agent</RouterLink></small>
+              <small>People reach this agent with all of its access. <RouterLink to="/agents" class="text-accent">Create a dedicated agent</RouterLink> to limit what they can do.</small>
             </fieldset>
             <label>Messages per hour<input
               v-model="form.maxMessagesPerHour"
@@ -1376,6 +1369,15 @@ onBeforeUnmount(() => {
               </p>
             </section>
           </template>
+
+          <div v-if="delegates && ['people', 'agents'].includes(current.kind) && chosenAgent && chosenRisks.length" class="flex gap-2.5 rounded-xl bg-warning-surface px-3.5 py-2.5 text-xs leading-relaxed text-warning" role="status">
+            <Icon :name="TriangleAlert" :size="15" class="mt-0.5 shrink-0" />
+            <p>
+              <b class="block">{{ form.accessMode === 'everyone' ? 'Anyone in the channel' : 'The people you allow' }} can use everything {{ chosenAgent.name }} can do</b>
+              Through the bot, they can {{ listed(chosenRisks) }}.
+              {{ form.accessMode === 'everyone' ? 'For a public channel, prefer a read-only agent with one project.' : 'Only allow people you trust, or choose a more limited agent.' }}
+            </p>
+          </div>
 
           <template v-if="last || editing">
             <hr class="border-line">

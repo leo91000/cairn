@@ -61,7 +61,7 @@ async fn upgrades_version_ten_preserving_plugin_packages_and_fences_older_binari
     let version: i64 = db
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
     // Epoch-11 managers reject anything above ten before reading installed manifests.
     assert!(version > 10);
     drop(upgraded);
@@ -79,7 +79,7 @@ async fn upgrades_version_ten_preserving_plugin_packages_and_fences_older_binari
 
 #[tokio::test]
 async fn upgrades_version_five_without_changing_records_and_fences_older_binaries() {
-    for previous in [5, 8, 9, 10, 11] {
+    for previous in [5, 8, 9, 10, 11, 12] {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
         store
@@ -161,7 +161,7 @@ PRAGMA user_version=8;",
     let version: i64 = db
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
     assert!(
         version > 8,
         "Older managers must refuse mission wait records"
@@ -192,7 +192,7 @@ async fn upgrades_version_nine_preserving_native_nodes_and_fences_older_binaries
     let version: i64 = db
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
     // Epoch-10 managers enforce a maximum of nine before opening application records.
     assert!(version > 9);
     drop(upgraded);
@@ -205,5 +205,129 @@ async fn upgrades_version_nine_preserving_native_nodes_and_fences_older_binaries
         db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap(),
         version + 1
+    );
+}
+
+#[tokio::test]
+async fn upgrades_version_eleven_preserving_protected_native_defaults() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    let node = json!({ "id": "native", "nativeEnabled": true, "capabilities": { "backend": "native" }, "nativeAccounts": ["trusted"] });
+    let agent = json!({ "id": "agent", "access": { "backend": "native", "nodes": null } });
+    store.put("nodes", node.clone()).await.unwrap();
+    store.put("agents", agent.clone()).await.unwrap();
+    store
+        .transaction(|db| {
+            db.0.execute_batch("PRAGMA user_version=11;")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    drop(store);
+    let upgraded = Store::open(root.path()).unwrap();
+    assert_eq!(
+        upgraded.get("nodes", "native").await.unwrap(),
+        Some(node.clone())
+    );
+    assert_eq!(
+        upgraded.get("agents", "agent").await.unwrap(),
+        Some(agent.clone())
+    );
+    assert_eq!(
+        cairn_installation::nodes::native_mode::requested(&node),
+        json!({ "mode": "protected", "generation": null })
+    );
+    assert!(cairn_installation::nodes::native_mode::applied(&node));
+    let db = Connection::open(root.path().join("manager.db")).unwrap();
+    assert_eq!(
+        db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        13
+    );
+    // An epoch-12 manager rejects SQLite versions above eleven before mutations.
+    assert!(
+        db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap()
+            > 11
+    );
+}
+
+#[tokio::test]
+async fn upgrades_version_twelve_preserving_native_reviews_and_plugin_records() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    let node = json!({
+        "id": "native", "nativeEnabled": true, "capabilities": {"backend": "native"},
+        "nativeModeRequest": {"mode": "administrator", "generation": "reviewed-generation"},
+        "nativeReviewedAgents": ["reviewed-agent"],
+    });
+    let resource = json!({
+        "id": "workspace", "connectionId": "app", "collection": "workspaces",
+        "settings": {"workspaceId": "T111", "appId": "A111"}, "secretKeys": ["token"],
+        "revision": "workspace-revision",
+    });
+    let route = json!({
+        "id": "route", "resourceId": "workspace", "agentId": "reviewed-agent",
+        "revision": "route-revision", "userIds": ["alice"], "ownerAccessId": "original-owner-access",
+    });
+    let retained = json!({"ciphertext": "opaque-encrypted-oauth-fixture"});
+    store.put("nodes", node.clone()).await.unwrap();
+    store
+        .put("plugin-resources", resource.clone())
+        .await
+        .unwrap();
+    store.put("plugin-routes", route.clone()).await.unwrap();
+    store
+        .set("retained-oauth", retained.clone(), None)
+        .await
+        .unwrap();
+    store
+        .transaction(|db| {
+            db.0.execute_batch("PRAGMA user_version=12;")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    drop(store);
+
+    let upgraded = Store::open(root.path()).unwrap();
+    assert_eq!(upgraded.get("nodes", "native").await.unwrap(), Some(node));
+    assert_eq!(
+        upgraded.get("plugin-resources", "workspace").await.unwrap(),
+        Some(resource)
+    );
+    assert_eq!(
+        upgraded.get("plugin-routes", "route").await.unwrap(),
+        Some(route)
+    );
+    assert_eq!(upgraded.kv("retained-oauth").await.unwrap(), Some(retained));
+    let db = Connection::open(root.path().join("manager.db")).unwrap();
+    let version: i64 = db
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        version, 13,
+        "The Slack candidate must fence Main's SQLite-12 reader before service startup"
+    );
+    let contract: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../deploy/installations/data-compatibility.json"
+    ))
+    .unwrap();
+    assert_eq!(contract["epoch"], 14);
+    assert_eq!(contract["databaseVersion"], 13);
+    assert!(
+        contract.get("automaticMigration").is_none(),
+        "The full Slack transition is not qualified"
+    );
+    drop(upgraded);
+    db.pragma_update(None, "user_version", 14).unwrap();
+    assert_eq!(
+        Store::open(root.path()).err().unwrap().message,
+        "This database belongs to a newer application version."
+    );
+    assert_eq!(
+        db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        14
     );
 }

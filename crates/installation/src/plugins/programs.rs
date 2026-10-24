@@ -62,6 +62,20 @@ where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
 {
+    run_tracked(s, context, args, authorize, None).await
+}
+
+pub(crate) async fn run_tracked<F, Fut>(
+    s: &Service,
+    context: &Context,
+    args: &Value,
+    authorize: F,
+    effects: Option<&capabilities::InvocationEffects>,
+) -> Result<Value>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
     let manifest = &context.manifest;
     let program = manifest
         .program(text(args, "program"))
@@ -143,6 +157,9 @@ where
     // an obsolete credential or a replacement credential from its new revision.
     authorize().await?;
     capabilities::authorize_management(s, context).await?;
+    if let Some(effects) = effects {
+        effects.start();
+    }
     let mut child = command.spawn().map_err(|_| {
         Error::unavailable("The program could not start. Is it installed on this server?")
     })?;

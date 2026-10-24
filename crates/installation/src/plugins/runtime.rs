@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -27,11 +27,12 @@ use tokio_util::sync::CancellationToken;
 
 const ATTEMPTS: u64 = 5;
 
-/// Native submission backpressure is distinct from a failed package handler:
-/// accepted work waits without spending the finite error retry budget.
+/// Native submission backpressure and unavailable pre-dispatch authority are
+/// distinct from package failures, which have a finite retry budget.
 enum DispatchError {
     Invocation(InvocationError),
     SubmissionLimited,
+    AuthorityUnavailable(Error),
 }
 
 impl From<InvocationError> for DispatchError {
@@ -226,6 +227,7 @@ pub async fn begin(s: &Service, connection: &Connection, session: &mut Session) 
         DispatchError::SubmissionLimited => {
             Error::too_many_requests("Connection has too much pending work.")
         }
+        DispatchError::AuthorityUnavailable(error) => error,
     })
 }
 
@@ -264,6 +266,7 @@ pub async fn pump(s: &Service, connection: &Connection, session: &mut Session) -
             }
             Ok(_) => remove(s, EVENTS, &event).await?,
             Err(DispatchError::SubmissionLimited) => postpone_submission(s, &event).await?,
+            Err(DispatchError::AuthorityUnavailable(error)) => return Err(error),
             Err(_) => {
                 if retry_later(s, EVENTS, &mut event).await? {
                     audit_failure(s, connection, &name).await?;
@@ -346,6 +349,7 @@ pub async fn pump(s: &Service, connection: &Connection, session: &mut Session) -
                 break;
             }
             Ok(_) => work::finish(s, &delivery, outcome).await?,
+            Err(DispatchError::AuthorityUnavailable(error)) => return Err(error),
             Err(_) => {
                 if retry_later(s, DELIVERIES, &mut delivery).await? {
                     work::finish(s, &delivery, "failed").await?;
@@ -457,7 +461,16 @@ async fn dispatch(
         .map_err(|e| InvocationError::Failed(e.message))?;
     let connection = super::routes::bound(s, connection, &event["routing"])
         .await
-        .map_err(|e| InvocationError::Failed(e.message))?;
+        .map_err(|error| {
+            // No handler or provider effect has begun. The supervisor can retry
+            // the current admission after authority recovers without spending
+            // the finite budget reserved for package execution failures.
+            if error.is_authority_unavailable() {
+                DispatchError::AuthorityUnavailable(error)
+            } else {
+                DispatchError::Invocation(InvocationError::Failed(error.message))
+            }
+        })?;
     if let Some(author) = event["authorId"].as_str() {
         super::routes::require_person(&connection, author)
             .map_err(|e| InvocationError::Failed(e.message))?;
@@ -482,12 +495,31 @@ async fn dispatch(
     let context = &context;
     let digest_ref = &digest;
     // Recheck in submit remains authoritative if capacity changes after preflight.
-    // Only that native refusal, never an arbitrary provider failure, can defer work.
+    // Only a native refusal before an external effect can defer work. Cached
+    // receipts can reach submission again without repeating a confirmed effect.
     let limited = AtomicBool::new(false);
     let limited_ref = &limited;
+    let effects = capabilities::InvocationEffects::default();
+    let effects_ref = &effects;
+    let authority_failure = Mutex::new(None);
+    let authority_ref = &authority_failure;
     let result = session
         .dispatch(name, payload, |method, args| async move {
-            let result = capabilities::approved(s, context, digest_ref, &method, args).await;
+            let result = capabilities::approved_with_effects(
+                s,
+                context,
+                digest_ref,
+                &method,
+                args,
+                Some(effects_ref),
+            )
+            .await;
+            if let Err(error) = &result
+                && error.is_authority_unavailable()
+                && !effects_ref.started()
+            {
+                *authority_ref.lock().unwrap() = Some(error.clone());
+            }
             if method == "conversations.submit"
                 && result.as_ref().is_err_and(|error| error.status == 429)
             {
@@ -496,7 +528,13 @@ async fn dispatch(
             result.map_err(|error| cairn_plugin_host::Denied(capabilities::code(&error)))
         })
         .await;
-    if result.is_err() && limited.load(Ordering::Relaxed) {
+    if result.is_err()
+        && !effects.started()
+        && let Some(error) = authority_failure.lock().unwrap().clone()
+    {
+        return Err(DispatchError::AuthorityUnavailable(error));
+    }
+    if result.is_err() && limited.load(Ordering::Relaxed) && !effects.started() {
         return Err(DispatchError::SubmissionLimited);
     }
     let result = result?;

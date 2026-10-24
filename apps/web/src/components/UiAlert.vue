@@ -1,5 +1,9 @@
+<script setup lang="ts">
+import UiNotice from './UiNotice.vue'
+</script>
+
 <template>
-  <p role="alert" class="error my-3 rounded-lg border border-line bg-danger-surface px-4 py-3 text-sm leading-relaxed text-danger">
+  <UiNotice role="alert" tone="danger" class="error">
     <slot />
-  </p>
+  </UiNotice>
 </template>
