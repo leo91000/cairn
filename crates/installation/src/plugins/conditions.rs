@@ -332,6 +332,9 @@ pub async fn observe(s: &Service, run: &Value, condition: &Value) -> Result<Obse
 /// One plugin condition of a wait: the whole wait (`None`), or one condition of a group.
 type Slot = Option<usize>;
 
+// Share each wait snapshot: cloning its full member list per watcher is quadratic.
+type Watch = (Arc<crate::waits::Owner>, Arc<Value>, Slot);
+
 fn condition_of(wakeup: &Value, slot: Slot) -> &Value {
     match slot {
         Some(index) => &wakeup["condition"]["conditions"][index],
@@ -386,8 +389,7 @@ pub async fn poll_once(s: &Service) -> Result<()> {
     let groups = s
         .store
         .read(|db| {
-            let mut groups: BTreeMap<String, Vec<(crate::waits::Owner, Value, Slot)>> =
-                BTreeMap::new();
+            let mut groups: BTreeMap<String, Vec<Watch>> = BTreeMap::new();
             let mut owners = db
                 .list("chats")?
                 .into_iter()
@@ -406,6 +408,8 @@ pub async fn poll_once(s: &Service) -> Result<()> {
                 let Some(run) = db.run(owner.run_id())? else {
                     continue;
                 };
+                let owner = Arc::new(owner);
+                let run = Arc::new(run);
                 for slot in watched(&owner, &run, now()) {
                     let condition = condition_of(&owner.record["wakeup"], slot);
                     let project_id = &condition["projectId"];
@@ -476,11 +480,7 @@ fn unchanged(current: &Value, expected: &Value, slot: Slot) -> bool {
     }
 }
 
-fn record(
-    db: &Db<'_>,
-    group: Vec<(crate::waits::Owner, Value, Slot)>,
-    observed: &Result<Observed>,
-) -> Result<()> {
+fn record(db: &Db<'_>, group: Vec<Watch>, observed: &Result<Observed>) -> Result<()> {
     for (expected, observed_run, slot) in group {
         let Some(mut owner) = expected.reload(db)? else {
             continue;
@@ -607,8 +607,9 @@ mod tests {
                         crate::waits::Owner {
                             chat: true,
                             record: chat.clone(),
-                        },
-                        captured_run,
+                        }
+                        .into(),
+                        captured_run.into(),
                         None,
                     )],
                     &Err(stale_denial),
@@ -627,8 +628,9 @@ mod tests {
                         crate::waits::Owner {
                             chat: true,
                             record: chat,
-                        },
-                        current_run,
+                        }
+                        .into(),
+                        current_run.into(),
                         None,
                     )],
                     &fresh,
