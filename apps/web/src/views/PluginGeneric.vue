@@ -159,8 +159,7 @@ const activityTones = {
 
 /** What this instance's people could do through an agent, for the owner's warning. */
 function risks(agent: Agent) {
-  const others = catalog.value.connections.filter(item => item.id !== editing.value?.id)
-  return delegationRisks(agent, others, form.value.accessMode === 'everyone')
+  return delegationRisks(agent, catalog.value.connections, form.value.accessMode === 'everyone', editing.value ? [] : grants.value)
 }
 
 const agents = computed(() => [...state.agents].sort((a, b) => Number(risks(a).length > 0) - Number(risks(b).length > 0)))
@@ -1161,14 +1160,6 @@ onBeforeUnmount(() => {
                 ><span class="truncate text-xs font-semibold">{{ agent.name }}</span>
                 <span v-if="risks(agent).length" class="rounded-full bg-warning-surface px-2 py-px text-3xs font-semibold text-warning">Broad access</span>
               </label>
-              <div v-if="chosenAgent && chosenRisks.length" class="flex gap-2.5 rounded-xl bg-warning-surface px-3.5 py-2.5 text-xs leading-relaxed text-warning" role="status">
-                <Icon :name="TriangleAlert" :size="15" class="mt-0.5 shrink-0" />
-                <p>
-                  <b class="block">{{ form.accessMode === 'everyone' ? 'Anyone in the channel' : 'The people you allow' }} can use everything {{ chosenAgent.name }} can do</b>
-                  Through the bot, they can {{ listed(chosenRisks) }}.
-                  {{ form.accessMode === 'everyone' ? 'For a public channel, prefer a read-only agent with one project.' : 'Only allow people you trust, or choose a more limited agent.' }}
-                </p>
-              </div>
               <small>People reach this agent with all of its access. <RouterLink to="/agents" class="text-accent">Create a dedicated agent</RouterLink> to limit what they can do.</small>
             </fieldset>
             <label>Messages per hour<input
@@ -1226,6 +1217,15 @@ onBeforeUnmount(() => {
               </p>
             </section>
           </template>
+
+          <div v-if="delegates && ['people', 'agents'].includes(current.kind) && chosenAgent && chosenRisks.length" class="flex gap-2.5 rounded-xl bg-warning-surface px-3.5 py-2.5 text-xs leading-relaxed text-warning" role="status">
+            <Icon :name="TriangleAlert" :size="15" class="mt-0.5 shrink-0" />
+            <p>
+              <b class="block">{{ form.accessMode === 'everyone' ? 'Anyone in the channel' : 'The people you allow' }} can use everything {{ chosenAgent.name }} can do</b>
+              Through the bot, they can {{ listed(chosenRisks) }}.
+              {{ form.accessMode === 'everyone' ? 'For a public channel, prefer a read-only agent with one project.' : 'Only allow people you trust, or choose a more limited agent.' }}
+            </p>
+          </div>
 
           <template v-if="last || editing">
             <hr class="border-line">

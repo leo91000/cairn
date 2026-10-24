@@ -325,7 +325,7 @@ export function personName(connection: PluginConnection, id: string) {
  * owner's warning. Nothing is refused: the owner chooses who may reach which agent.
  * For anyone in a channel, writing, MCP and plugin access matter as well.
  */
-export function delegationRisks(agent: Agent, connections: Pick<PluginConnection, 'agentIds'>[], everyone: boolean) {
+export function delegationRisks(agent: Agent, connections: Pick<PluginConnection, 'agentIds'>[], everyone: boolean, draftGrants: string[] = []) {
   const risks: string[] = []
   if (agent.access.installation === true)
     risks.push('manage your whole installation')
@@ -339,7 +339,7 @@ export function delegationRisks(agent: Agent, connections: Pick<PluginConnection
     risks.push('change files and run commands')
   if (!Array.isArray(agent.access.mcps) || agent.access.mcps.length)
     risks.push('use its MCP connections')
-  if (connections.some(connection => connection.agentIds?.includes(agent.id)))
+  if (draftGrants.includes(agent.id) || connections.some(connection => connection.agentIds?.includes(agent.id)))
     risks.push('use its plugins, such as GitHub or 1Password')
   return risks
 }

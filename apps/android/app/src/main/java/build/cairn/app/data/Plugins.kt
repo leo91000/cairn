@@ -420,19 +420,22 @@ fun PluginManifest.contributions(): List<String> = buildList {
  * warning. Nothing is refused: the owner chooses who may reach which agent. For anyone in a
  * channel, writing, MCP and plugin access matter as well.
  */
-fun Agent.delegationRisks(connections: List<PluginConnection>, everyone: Boolean): List<String> =
-    buildList {
-        if (access.installation) add("gérer toute votre installation")
-        when {
-            access.projects == null -> add("ouvrir tous les projets")
-            access.projects.size > 1 -> add("ouvrir ${access.projects.size} projets")
-        }
-        if (!everyone) return@buildList
-        if (access.sandbox != "read-only") add("modifier des fichiers et lancer des commandes")
-        if (access.mcps == null || access.mcps.isNotEmpty()) add("utiliser ses connexions MCP")
-        if (connections.any { id in it.agentIds })
-            add("utiliser ses plugins, comme GitHub ou 1Password")
+fun Agent.delegationRisks(
+    connections: List<PluginConnection>,
+    everyone: Boolean,
+    draftGrants: List<String> = emptyList(),
+): List<String> = buildList {
+    if (access.installation) add("gérer toute votre installation")
+    when {
+        access.projects == null -> add("ouvrir tous les projets")
+        access.projects.size > 1 -> add("ouvrir ${access.projects.size} projets")
     }
+    if (!everyone) return@buildList
+    if (access.sandbox != "read-only") add("modifier des fichiers et lancer des commandes")
+    if (access.mcps == null || access.mcps.isNotEmpty()) add("utiliser ses connexions MCP")
+    if (id in draftGrants || connections.any { id in it.agentIds })
+        add("utiliser ses plugins, comme GitHub ou 1Password")
+}
 
 /** `a, b et c`. */
 fun listed(items: List<String>): String =

@@ -52,6 +52,21 @@ class PluginDelegationTest {
     }
 
     @Test
+    fun `warns about grants to the edited instance and unsaved instance`() {
+        val helper = agent(limited.copy(projects = listOf("project")))
+        val warning = listOf("utiliser ses plugins, comme GitHub ou 1Password")
+        assertEquals(
+            warning,
+            helper.delegationRisks(listOf(PluginConnection(agentIds = listOf("helper"))), true),
+        )
+        assertEquals(warning, helper.delegationRisks(emptyList(), true, listOf("helper")))
+        assertEquals(
+            emptyList<String>(),
+            helper.delegationRisks(emptyList(), true, listOf("other")),
+        )
+    }
+
+    @Test
     fun `risks read as a sentence`() {
         assertEquals("", listed(emptyList()))
         assertEquals("a", listed(listOf("a")))

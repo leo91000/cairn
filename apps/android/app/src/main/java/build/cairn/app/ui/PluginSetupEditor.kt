@@ -151,10 +151,13 @@ internal fun InstanceEditor(
     var completing by remember(initial.id) { mutableStateOf(manifest.instanceForm) }
     // Each change asks the package again; a newer question cancels the older one.
     var asking by remember(initial.id) { mutableStateOf(0 to listOf<String?>(null)) }
-    val others = connections.filter { it.id != initial.id }
     /** What this instance's people could do through an agent, for the owner's warning. */
     fun risks(agent: Agent): List<String> =
-        agent.delegationRisks(others, everyone = accessMode == "everyone")
+        agent.delegationRisks(
+            connections,
+            everyone = accessMode == "everyone",
+            draftGrants = if (creating) grants else emptyList(),
+        )
     fun refresh(key: String?) {
         asking = (asking.first + 1) to listOf(key)
     }
@@ -825,23 +828,6 @@ internal fun InstanceEditor(
                     ) {
                         agentId = it
                     }
-                    val chosenRisks = agent?.let(::risks).orEmpty()
-                    if (agent != null && chosenRisks.isNotEmpty()) {
-                        val everyone = accessMode == "everyone"
-                        SetupWarning(
-                            title =
-                                if (everyone)
-                                    "Tout le monde dans le salon peut utiliser tout ce que ${agent.name} sait faire"
-                                else
-                                    "Les personnes autorisées peuvent utiliser tout ce que ${agent.name} sait faire",
-                            text =
-                                "Via le bot, il est possible de ${listed(chosenRisks)}. " +
-                                    if (everyone)
-                                        "Pour un salon public, préférez un agent en lecture seule avec un seul projet."
-                                    else
-                                        "N’autorisez que des personnes de confiance, ou choisissez un agent plus limité.",
-                        )
-                    }
                     Note(
                         "Les personnes parlent à cet agent avec tous ses accès. Créez un agent dédié pour limiter ce qu’elles peuvent faire."
                     )
@@ -902,6 +888,26 @@ internal fun InstanceEditor(
                             }
                         }
                     }
+
+                if (manifest.delegates && current.kind in listOf("people", "agents")) {
+                    val chosenRisks = agent?.let(::risks).orEmpty()
+                    if (agent != null && chosenRisks.isNotEmpty()) {
+                        val everyone = accessMode == "everyone"
+                        SetupWarning(
+                            title =
+                                if (everyone)
+                                    "Tout le monde dans le salon peut utiliser tout ce que ${agent.name} sait faire"
+                                else
+                                    "Les personnes autorisées peuvent utiliser tout ce que ${agent.name} sait faire",
+                            text =
+                                "Via le bot, il est possible de ${listed(chosenRisks)}. " +
+                                    if (everyone)
+                                        "Pour un salon public, préférez un agent en lecture seule avec un seul projet."
+                                    else
+                                        "N’autorisez que des personnes de confiance, ou choisissez un agent plus limité.",
+                        )
+                    }
+                }
 
                 if (saving) {
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)

@@ -38,3 +38,12 @@ it('lists risks as a sentence', () => {
   expect(listed(['a'])).toBe('a')
   expect(listed(['a', 'b', 'c'])).toBe('a, b and c')
 })
+
+it('warns about grants to the edited instance and unsaved instance', () => {
+  const helper = agent({ projects: ['project'] })
+  expect(delegationRisks(helper, [{ agentIds: ['helper'] }], true))
+    .toEqual(['use its plugins, such as GitHub or 1Password'])
+  expect(delegationRisks(helper, [], true, ['helper']))
+    .toEqual(['use its plugins, such as GitHub or 1Password'])
+  expect(delegationRisks(helper, [], true, ['other'])).toEqual([])
+})
