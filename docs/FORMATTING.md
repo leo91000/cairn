@@ -66,9 +66,14 @@ changes separately from refactors, and use existing tests to check behavior.
 ## Release builds
 
 The standard release profile uses ThinLTO, one codegen unit and stripped debug
-information. Build with `cargo build --locked --release --bin cairn --features ublk
---timings` on one line. Compare the same source, toolchain, features and CPU
-conditions, and keep cold and warm cache observations separate.
+information. Build with the pinned tools:
+
+```sh
+cargo build --locked --release --bin cairn --features ublk --timings
+```
+
+Compare the same source, toolchain, features and CPU conditions, and keep cold
+and warm cache observations separate.
 
 ## Native test coverage
 
