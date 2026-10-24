@@ -61,7 +61,8 @@ differs from the image's resolved version. MicroVM guests are built from the sam
 runtime stage.
 
 The `backend` job also runs the real engine releases it resolved through their
-adapters, without credentials or inference against a vendor:
+adapters, without credentials and without inference against a vendor. As in
+production, the CLIs may still contact their vendors' public endpoints:
 
 - OpenCode lists its provider and model catalog. It executes a turn against a
   local model server, without loading global config, and its session resumes with
@@ -83,8 +84,10 @@ Images built before an engine was resolved record no version; they shipped its
 `legacy` release in `scripts/cli-updates.mjs` (Claude Code 2.1.280, OpenCode
 1.19.0). When production or the registry cannot be read, no version is guessed:
 the rollback checks are skipped with a warning, and the evidence records
-`served: null`. Such evidence is never reused, so main or the release validates
-again, and a release cannot deploy until a run has read the served release. The served release runs through the candidate's adapter, while a real
+`served: null`. Such evidence is never reused, and a tag fails at once, before
+building. Before deploying, the release job reads the served release again and
+stops unless it still matches the versions its rollback checks used, or already
+runs this release's own engines, as when a deploy is retried. The served release runs through the candidate's adapter, while a real
 rollback runs its own image's adapter. When an adapter change needs a newer
 engine release, set that engine's `minimum`: an older served release is then
 skipped, with a warning. Main and tags reuse evidence only when its served

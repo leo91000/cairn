@@ -82,18 +82,29 @@ export function rollbackTarget(tool, served, resolved) {
   return { target: served === resolved ? null : served, reason: '' }
 }
 
+async function currentTargets(publicUrl = process.env.CAIRN_BEACON_ORIGIN, options = {}) {
+  if (!publicUrl)
+    throw new Error('CAIRN_BEACON_ORIGIN is not set')
+  return rollbackTargets(await servedTools(publicUrl, options))
+}
+
 async function printServed() {
   // An unknown served release is never replaced by a guess: CI then skips the
-  // rollback checks, and the evidence it records cannot be reused.
+  // rollback checks, the evidence it records cannot be reused, and a release fails.
   let targets = null
+  let failure = ''
   try {
-    if (!process.env.CAIRN_BEACON_ORIGIN)
-      throw new Error('CAIRN_BEACON_ORIGIN is not set')
-    targets = rollbackTargets(await servedTools(process.env.CAIRN_BEACON_ORIGIN))
+    targets = await currentTargets()
   }
   catch (error) {
-    const message = `The served release is unknown, so rollbacks to it are not qualified: ${error.message}`
-    console.error(process.env.GITHUB_ACTIONS ? `::warning title=Served release::${message}` : message)
+    failure = `The served release is unknown, so rollbacks to it are not qualified: ${error.message}`
+  }
+
+  if (failure) {
+    const release = process.env.GITHUB_REF_TYPE === 'tag'
+    console.error(process.env.GITHUB_ACTIONS ? `::${release ? 'error' : 'warning'} title=Served release::${failure}` : failure)
+    if (release)
+      process.exitCode = 1
   }
 
   if (process.env.GITHUB_OUTPUT)
@@ -101,8 +112,35 @@ async function printServed() {
   console.log(JSON.stringify(targets))
 }
 
+// A deploy proceeds only if production still serves the engine releases its
+// rollback checks used, since another deploy may have happened after validation,
+// or already serves this release's own engines, as when a deploy is retried.
+export async function verifyServed({ qualified, resolved, publicUrl }, options = {}) {
+  if (!qualified)
+    throw new Error('This release\'s validation could not read the served release, so its rollback checks did not run.')
+  const current = await currentTargets(publicUrl, options)
+  const matches = expected => Object.keys(qualified).every(tool => current[tool] === expected[tool])
+  if (!matches(qualified) && !matches(resolved))
+    throw new Error(`Production now serves ${JSON.stringify(current)}, not the ${JSON.stringify(qualified)} this release's rollback checks used. Re-run the release.`)
+  return current
+}
+
 if (import.meta.main) {
-  if (process.argv[2] === 'rollback-target') {
+  if (process.argv[2] === 'verify-served') {
+    try {
+      const { env } = process
+      const current = await verifyServed({
+        qualified: env.SERVED_FOUND === 'true' ? { claude: env.SERVED_CLAUDE, opencode: env.SERVED_OPENCODE } : null,
+        resolved: { claude: env.CLAUDE_VERSION, opencode: env.OPENCODE_VERSION },
+      })
+      console.log(`Production serves the engine releases this release was qualified with: ${JSON.stringify(current)}.`)
+    }
+    catch (error) {
+      console.error(process.env.GITHUB_ACTIONS ? `::error title=Served release::${error.message}` : error.message)
+      process.exitCode = 1
+    }
+  }
+  else if (process.argv[2] === 'rollback-target') {
     const { target, reason } = rollbackTarget(process.argv[3], process.argv[4], process.argv[5])
     if (reason)
       console.error(process.env.GITHUB_ACTIONS ? `::warning title=Rollback not qualified::${reason}` : reason)

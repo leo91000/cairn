@@ -229,7 +229,8 @@ jobs:
           # runs a turn against a local Messages API and resumes it. Sessions created by the
           # legacy release resume on it, and sessions move both ways with the served release,
           # as after an update or a rollback.
-          legacy=$(node --input-type=module -e "import { engines } from './scripts/cli-updates.mjs'; console.log(engines.claude.legacy)")
+          # The oldest release this adapter runs: its minimum, if any, else the legacy release.
+          legacy=$(node --input-type=module -e "import { engines } from './scripts/cli-updates.mjs'; console.log(engines.claude.minimum ?? engines.claude.legacy)")
           served=$(node scripts/served-tools.mjs rollback-target claude "$SERVED_CLAUDE" "$CLAUDE_VERSION")
           # Command substitutions do not inherit errexit, so installation failures return explicitly.
           install() {
@@ -1040,20 +1041,21 @@ jobs:
       group: coolify-production
       cancel-in-progress: false
     steps:
-      - name: Require rollback checks against the served release
-        env:
-          SERVED_FOUND: ${{ needs.resolve.outputs.served-found }}
-        run: |
-          if test "$SERVED_FOUND" != true; then
-            echo "::error title=Served release::The served release could not be read, so this release's rollback checks did not run. Re-run the release once production and its registry are reachable."
-            exit 1
-          fi
       - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-pnpm
         with:
           cache: true
+      - name: Require rollback checks against the release served now
+        env:
+          CAIRN_BEACON_ORIGIN: ${{ vars.CAIRN_BEACON_ORIGIN }}
+          SERVED_FOUND: ${{ needs.resolve.outputs.served-found }}
+          SERVED_CLAUDE: ${{ needs.resolve.outputs.served-claude }}
+          SERVED_OPENCODE: ${{ needs.resolve.outputs.served-opencode }}
+          CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
+          OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
+        run: node scripts/served-tools.mjs verify-served
       - name: Verify installation data compatibility
         env:
           CAIRN_BEACON_ORIGIN: ${{ vars.CAIRN_BEACON_ORIGIN }}

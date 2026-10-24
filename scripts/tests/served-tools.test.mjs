@@ -1,6 +1,21 @@
+import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import process from 'node:process'
 import { describe, expect, it } from 'vitest'
-import { rollbackTarget, rollbackTargets, servedTools } from '../served-tools.mjs'
+import {
+  rollbackTarget,
+  rollbackTargets,
+  servedTools,
+  verifyServed,
+} from '../served-tools.mjs'
 
 const digestOf = body => `sha256:${createHash('sha256').update(body).digest('hex')}`
 
@@ -75,5 +90,39 @@ describe('rollback targets', () => {
     expect(rollbackTarget('claude', '', '2.1.308')).toMatchObject({ target: null, reason: expect.stringContaining('unknown') })
     // A rollback runs the served image's own adapter.
     expect(rollbackTarget('opencode', '1.18.35', '1.19.4')).toMatchObject({ target: null, reason: expect.stringContaining('older than this adapter\'s minimum 1.19.0') })
+  })
+})
+
+describe('deploy verification', () => {
+  const served = registry({ env: ['APP_CLAUDE_VERSION=2.1.308', 'APP_OPENCODE_VERSION=1.19.4'] })
+  const verify = (qualified, resolved) => verifyServed({ qualified, resolved, publicUrl: 'https://cairn.example' }, { fetch: served })
+
+  it('accepts the release the rollback checks used, or this release\'s own engines on a retry', async () => {
+    expect(await verify({ claude: '2.1.308', opencode: '1.19.4' }, { claude: '2.1.315', opencode: '1.19.5' })).toEqual({ claude: '2.1.308', opencode: '1.19.4' })
+    expect(await verify({ claude: '2.1.280', opencode: '1.19.0' }, { claude: '2.1.308', opencode: '1.19.4' })).toEqual({ claude: '2.1.308', opencode: '1.19.4' })
+  })
+
+  it('refuses when another release was deployed since validation, or none was read', async () => {
+    await expect(verify({ claude: '2.1.280', opencode: '1.19.0' }, { claude: '2.1.315', opencode: '1.19.5' })).rejects.toThrow('Production now serves')
+    await expect(verify(null, { claude: '2.1.308', opencode: '1.19.4' })).rejects.toThrow('could not read the served release')
+  })
+})
+
+describe('served-tools command', () => {
+  it('warns on pull requests and main, but fails a release, when the served release is unknown', () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'cairn-served-tools-'))
+    try {
+      const output = path.join(directory, 'outputs')
+      for (const [refType, status] of [['branch', 0], ['tag', 1]]) {
+        writeFileSync(output, '')
+        const { CAIRN_BEACON_ORIGIN: _, ...env } = process.env
+        const result = spawnSync(process.execPath, ['scripts/served-tools.mjs'], { encoding: 'utf8', env: { ...env, GITHUB_OUTPUT: output, GITHUB_REF_TYPE: refType }, timeout: 10000 })
+        expect(result.status).toBe(status)
+        expect(readFileSync(output, 'utf8')).toBe('found=false\nclaude=\nopencode=\n')
+      }
+    }
+    finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
   })
 })

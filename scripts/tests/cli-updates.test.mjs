@@ -144,12 +144,17 @@ describe('application image tool versions', () => {
     }
   })
 
-  it('deploys a release only after its rollback checks read the served release', () => {
+  it('deploys a release only while production serves what its rollback checks used', () => {
     const jobs = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8')).jobs
-    const [guard] = jobs.deploy.steps
-    expect(guard.env.SERVED_FOUND).toBe(`\${{ needs.resolve.outputs.served-found }}`)
-    expect(guard.run).toContain('test "$SERVED_FOUND" != true')
-    expect(guard.run).toContain('exit 1')
+    const guard = jobs.deploy.steps.findIndex(step => step.run === 'node scripts/served-tools.mjs verify-served')
+    const deploy = jobs.deploy.steps.findIndex(step => step.name === 'Deploy the published image and verify the running commit')
+    expect(guard).toBeGreaterThan(0)
+    expect(guard).toBeLessThan(deploy)
+    expect(jobs.deploy.steps[guard].env).toMatchObject({
+      SERVED_FOUND: `\${{ needs.resolve.outputs.served-found }}`,
+      SERVED_CLAUDE: `\${{ needs.resolve.outputs.served-claude }}`,
+      CLAUDE_VERSION: `\${{ needs.resolve.outputs.claude }}`,
+    })
   })
 
   it('authenticates only GitHub discovery and keeps npm requests public', async () => {
