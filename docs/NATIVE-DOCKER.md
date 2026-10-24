@@ -20,11 +20,19 @@ The outer RootlessKit bootstrap needs the distribution's setuid `newuidmap` and
 `newgidmap` helpers. Its unit permits that transition under the unique account;
 the enclave sets NoNewPrivileges before starting the engine or daemon. Managed
 roots, read-only system bindings, device filtering, cgroup protection and the
-existing guardian remain. No systemwide removal of user namespace restrictions
+existing guardian remain. The bootstrap retains module/clock/raw-I/O/reboot/swap
+syscall filters and excludes their capabilities. Proc/sys/cgroup read-only masks
+are installed inside the new namespace before the engine starts: inherited locked
+systemd submounts prevent RootlessKit from creating private procfs/sysfs. A failed
+private procfs check refuses execution; it never accepts the host proc view.
+Network sysctls remain configurable by namespace root for Docker's private bridge;
+engine UID 1000 cannot write them, and they do not address the host network. No systemwide removal of user namespace restrictions
 or privilege hardening is required. On restricted AppArmor hosts the installer
 loads a profile allowing user namespaces only for the managed RootlessKit binary.
 
-Docker uses the same agent-visible workspace paths. A mandatory authorization
+Docker uses the same agent-visible workspace paths. Bind sources must already
+exist and contain no symlink components; create source directories from the shell
+first, or use ordinary named volumes. A mandatory authorization
 plugin refuses privileged containers/exec, added capabilities, host PID/IPC/UTS
 namespaces, devices, alternate runtimes, volume driver options and mounts outside
 the conversation's home, workspace, output and temporary directories. Recursive
@@ -34,7 +42,10 @@ Before forwarding a container create, the gateway resolves bind sources with
 `openat2` without symlinks, clones the pinned mount descriptors, and gives Docker
 immutable private mirror paths. Replacing a source name cannot redirect Docker
 to private runtime or store files. Mirrors are rebuilt from durable source records
-before daemon startup and rechecked against the current turn's rights.
+before daemon startup and rechecked against the current turn's rights. Runtime
+mirrors are limited to 4,096 per turn, including deleted-container mirrors pending
+reclamation; a new turn reclaims unreferenced mirrors. This bounds metadata outside
+the ext4 payload as well as the payload's normal disk budget.
 The read-only system/credential bindings remain read-only through Docker too.
 YOLO does not grant host administrator rights. The engine cannot read or replace
 raw daemon metadata, its authorization plugin or its configuration.
@@ -105,7 +116,8 @@ and the existing ublk/ext4 prerequisites. Mapping helpers must be root-owned,
 setuid and not writable by workloads. Unsupported prerequisites fail explicitly.
 The installer does not install/start a host Docker daemon or alter GPU drivers.
 
-Rootless Docker is not full host Docker compatibility. Privileged containers,
+Rootless Docker is not full host Docker compatibility. NoNewPrivileges also
+applies to containers, so setuid binaries cannot grant additional privilege. Privileged containers,
 GPU containers, Docker plugins/Swarm, alternate volume drivers and insecure build
 entitlements are unavailable. Buildx's default Docker driver is supported; its
 privileged docker-container driver is refused. Volumes use container UID/GID

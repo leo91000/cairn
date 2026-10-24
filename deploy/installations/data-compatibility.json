@@ -43,7 +43,9 @@
       "native::docker::tests::docker_driver_options_and_unrecognized_management_apis_fail_closed",
       "native::identity::reconcile::tests::capability_and_acl_ids_follow_the_namespace_mapping",
       "native::identity::reconcile::tests::pending_metadata_replay_restores_mode_even_after_ownership_changed",
-      "native::docker::mounts::tests::replaced_source_names_cannot_redirect_a_pinned_descriptor"
+      "native::docker::mounts::tests::replaced_source_names_cannot_redirect_a_pinned_descriptor",
+      "native::identity::reconcile::tests::legacy_acl_qualifiers_are_preserved_without_collapsing_distinct_users",
+      "native::docker::proxy::tests::client_negotiation_does_not_need_a_start_socket_or_daemon"
     ]
   }
 }

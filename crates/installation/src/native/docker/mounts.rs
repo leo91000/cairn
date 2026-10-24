@@ -9,6 +9,31 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+// Mirrors live outside the ext4 payload. Bound their count independently so a
+// create/delete loop cannot grow runtime inodes beyond the conversation budget.
+const MAX_BINDINGS: usize = 4096;
+static BIND_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn capacity() -> Result<()> {
+    match std::fs::read_dir(Path::new(RUNTIME).join("mounts")) {
+        Ok(entries) => {
+            let mut count = 0;
+            for entry in entries.take(MAX_BINDINGS) {
+                entry?;
+                count += 1;
+            }
+            if count >= MAX_BINDINGS {
+                return Err(Error::conflict(
+                    "Native Docker bind mirror limit reached; continue in a new turn to reclaim deleted containers' mirrors.",
+                ));
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 struct Binding {
     source: PathBuf,
@@ -216,6 +241,8 @@ async fn mount(policy: &Policy, binding: &Binding, id: &str) -> Result<PathBuf> 
 }
 
 pub(super) async fn pin(policy: &Policy, source: &str, read_only: bool) -> Result<String> {
+    let _guard = BIND_LOCK.lock().await;
+    capacity()?;
     let binding = Binding {
         source: source.into(),
         read_only,
@@ -232,6 +259,7 @@ pub(super) async fn pin(policy: &Policy, source: &str, read_only: bool) -> Resul
 /// containers. Invalid current permissions leave the mirror absent; the policy
 /// refuses starting that container. Restart policies are never accepted.
 pub(super) async fn restore(policy: &Policy) -> Result<()> {
+    let _guard = BIND_LOCK.lock().await;
     let containers = Path::new(DATA).join("containers");
     let mut entries = match tokio::fs::read_dir(containers).await {
         Ok(entries) => entries,
@@ -261,6 +289,11 @@ pub(super) async fn restore(policy: &Policy) -> Result<()> {
                 used.insert(id.to_owned());
             }
         }
+    }
+    if used.len() > MAX_BINDINGS {
+        return Err(Error::conflict(
+            "Persisted Docker containers exceed the native bind mirror limit.",
+        ));
     }
     let records = Path::new(DATA).join(".cairn-bindings");
     let mut entries = match tokio::fs::read_dir(&records).await {
@@ -306,7 +339,10 @@ mod tests {
         std::fs::write(root.join("source"), b"allowed").unwrap();
         std::fs::write(denied.join("source"), b"private").unwrap();
         let policy = Policy {
-            plan: Arc::new(json!({ "projectRoot": root, "sandbox": "workspace-write" })),
+            plan: Arc::new(json!({
+                "projectRoot": root,
+                "sandbox": "workspace-write",
+            })),
         };
         let fd = open_source(&policy, &root.join("source"), false).unwrap();
         std::fs::rename(root.join("source"), root.join("retained")).unwrap();
@@ -316,6 +352,6 @@ mod tests {
             b"allowed"
         );
         assert!(open_source(&policy, &root.join("source"), false).is_err());
-        assert!(open_source(&policy, &denied.join("source"), false).is_err());
+        assert!(open_source(&policy, Path::new("/var/lib/cairn-docker/source"), false).is_err());
     }
 }

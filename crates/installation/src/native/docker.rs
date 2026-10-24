@@ -21,6 +21,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod hardening;
 mod mounts;
 mod proxy;
 
@@ -334,9 +335,10 @@ impl Policy {
             }
             Some("volumes") => {
                 if method == "POST" && segments.get(1) == Some(&"create") {
-                    self.volume_driver(
-                        &json!({ "Name": json_body["Driver"], "Options": json_body["DriverOpts"] }),
-                    )?;
+                    self.volume_driver(&json!({
+                        "Name": json_body["Driver"],
+                        "Options": json_body["DriverOpts"],
+                    }))?;
                 }
             }
             Some("networks") => {
@@ -365,7 +367,10 @@ impl Policy {
 async fn authorization(State(policy): State<Policy>, Json(request): Json<Value>) -> Json<Value> {
     match policy.authorize(&request) {
         Ok(()) => Json(json!({ "Allow": true })),
-        Err(error) => Json(json!({ "Allow": false, "Msg": error.message })),
+        Err(error) => Json(json!({
+            "Allow": false,
+            "Msg": error.message,
+        })),
     }
 }
 
@@ -448,6 +453,7 @@ pub async fn enclave(stop: CancellationToken) -> Result<i32> {
             "Native enclave requires its managed rootless namespace.",
         ));
     }
+    hardening::apply()?;
     let plan: Value = serde_json::from_slice(&tokio::fs::read("/run/cairn-plan.json").await?)?;
     let policy = Policy {
         plan: Arc::new(plan),
@@ -478,15 +484,11 @@ pub async fn enclave(stop: CancellationToken) -> Result<i32> {
         }
     }
     let runtime = Path::new(RUNTIME);
-    tokio::fs::create_dir_all(runtime.join("plugins")).await?;
     tokio::fs::set_permissions(runtime, std::fs::Permissions::from_mode(0o755)).await?;
-    tokio::fs::set_permissions(
-        runtime.join("plugins"),
-        std::fs::Permissions::from_mode(0o700),
-    )
-    .await?;
-    // New runtime files never travel with a published environment.
-    let plugin = tokio::net::UnixListener::bind(runtime.join("plugins/cairn.sock"))?;
+    crate::skills::private_dir(std::path::Path::new("/run/docker/plugins")).await?;
+    // Docker discovers Unix sockets here in both rootful and rootless modes;
+    // .spec files in this directory are not part of its discovery contract.
+    let plugin = tokio::net::UnixListener::bind("/run/docker/plugins/cairn.sock")?;
     let router = Router::new()
         .route(
             "/Plugin.Activate",
@@ -594,14 +596,7 @@ pub async fn enclave(stop: CancellationToken) -> Result<i32> {
                 .await;
         }
     });
-    // The plugin spec directory and config are root-private within the managed
-    // runtime bind. The engine cannot replace the policy or daemon configuration.
-    tokio::fs::create_dir_all("/run/docker/plugins").await?;
-    tokio::fs::write(
-        "/run/docker/plugins/cairn.spec",
-        b"unix:///run/cairn-docker/plugins/cairn.sock",
-    )
-    .await?;
+    // Daemon configuration remains namespace-root private.
     tokio::fs::write(
         runtime.join("daemon.json"),
         b"{\"features\":{\"containerd-snapshotter\":false}}",
@@ -698,9 +693,12 @@ mod tests {
 
     fn policy() -> Policy {
         Policy {
-            plan: Arc::new(
-                json!({ "sandbox": "workspace-write", "projectRoot": "/workspace", "guestDataRoot": "/data", "runId": "run" }),
-            ),
+            plan: Arc::new(json!({
+                "sandbox": "workspace-write",
+                "projectRoot": "/workspace",
+                "guestDataRoot": "/data",
+                "runId": "run",
+            })),
         }
     }
 
@@ -719,16 +717,28 @@ mod tests {
         ] {
             assert!(policy().host_config(&host).is_err(), "{host}");
         }
-        assert!(policy().host_config(&json!({"Binds":["database:/var/lib/postgresql/data"],"RestartPolicy":{"Name":"no"}})).is_ok());
+        assert!(
+            policy()
+                .host_config(&json!({
+                    "Binds": ["database:/var/lib/postgresql/data"],
+                    "RestartPolicy": { "Name": "no" },
+                }))
+                .is_ok()
+        );
     }
 
     #[test]
     fn docker_driver_options_and_unrecognized_management_apis_fail_closed() {
         assert!(
             policy()
-                .volume_driver(
-                    &json!({"Name":"local","Options":{"device":"/host","type":"none","o":"bind"}})
-                )
+                .volume_driver(&json!({
+                    "Name": "local",
+                    "Options": {
+                        "device": "/host",
+                        "type": "none",
+                        "o": "bind",
+                    },
+                }))
                 .is_err()
         );
         for path in [
@@ -739,7 +749,10 @@ mod tests {
         ] {
             assert!(
                 policy()
-                    .authorize(&json!({"RequestUri":path,"RequestMethod":"POST"}))
+                    .authorize(&json!({
+                        "RequestUri": path,
+                        "RequestMethod": "POST",
+                    }))
                     .is_err()
             );
         }
@@ -753,7 +766,10 @@ mod tests {
         );
         assert!(
             policy()
-                .authorize(&json!({"RequestUri":"/v1.55/info","RequestMethod":"GET"}))
+                .authorize(&json!({
+                    "RequestUri": "/v1.55/info",
+                    "RequestMethod": "GET",
+                }))
                 .is_ok()
         );
     }

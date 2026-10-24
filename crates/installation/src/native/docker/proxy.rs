@@ -108,7 +108,29 @@ async fn forward(policy: Policy, mut request: Request) -> Result<Response> {
     Ok(response.map(Body::new))
 }
 
-async fn handler(State(policy): State<Policy>, request: Request) -> Response {
+#[derive(Clone)]
+struct Gateway {
+    policy: Policy,
+    api_version: String,
+}
+
+async fn handler(State(gateway): State<Gateway>, request: Request) -> Response {
+    // API negotiation is a client probe, not a reason to create a daemon. The
+    // installer records this version from the checksum-pinned paired CLI.
+    if request.uri().path() == "/_ping" && (request.method() == "GET" || request.method() == "HEAD")
+    {
+        return Response::builder()
+            .header("API-Version", &gateway.api_version)
+            .header("Docker-Experimental", "false")
+            .header("OSType", "linux")
+            .body(Body::from(if request.method() == "HEAD" {
+                ""
+            } else {
+                "OK"
+            }))
+            .unwrap();
+    }
+    let policy = gateway.policy;
     match forward(policy, request).await {
         Ok(response) => response,
         Err(error) => (
@@ -124,11 +146,56 @@ pub(super) async fn serve(policy: Policy, stop: CancellationToken) -> Result<()>
     let listener = tokio::net::UnixListener::bind(&socket)?;
     std::os::unix::fs::chown(&socket, None, Some(1000))?;
     tokio::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o660)).await?;
-    let router = Router::new().fallback(handler).with_state(policy);
+    let metadata: Value =
+        serde_json::from_slice(&tokio::fs::read("/opt/cairn-docker/engine-api.json").await?)?;
+    let api_version = metadata["apiVersion"]
+        .as_str()
+        .filter(|version| {
+            version.split_once('.').is_some_and(|(major, minor)| {
+                !major.is_empty()
+                    && !minor.is_empty()
+                    && major
+                        .bytes()
+                        .chain(minor.bytes())
+                        .all(|byte| byte.is_ascii_digit())
+            })
+        })
+        .ok_or_else(|| Error::unavailable("Managed Docker API metadata is invalid."))?
+        .to_owned();
+    let router = Router::new().fallback(handler).with_state(Gateway {
+        policy,
+        api_version,
+    });
     tokio::spawn(async move {
         let _ = axum::serve(listener, router)
             .with_graceful_shutdown(stop.cancelled_owned())
             .await;
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn client_negotiation_does_not_need_a_start_socket_or_daemon() {
+        for method in ["GET", "HEAD"] {
+            let gateway = Gateway {
+                policy: Policy {
+                    plan: Arc::new(serde_json::json!({})),
+                },
+                api_version: "1.55".into(),
+            };
+            let request = Request::builder()
+                .method(method)
+                .uri("/_ping")
+                .body(Body::empty())
+                .unwrap();
+            let response = handler(State(gateway), request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["API-Version"], "1.55");
+        }
+    }
 }

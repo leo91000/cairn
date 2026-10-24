@@ -358,10 +358,6 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
         "KillMode=control-group",
         "TimeoutStopSec=10s",
         "SendSIGKILL=yes",
-        "ProtectKernelTunables=yes",
-        "ProtectKernelModules=yes",
-        "ProtectControlGroups=yes",
-        "ProtectClock=yes",
         "ProtectProc=invisible",
         "ProtectSystem=strict",
         "MountAPIVFS=yes",
@@ -381,8 +377,11 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
         // RootlessKit's newuidmap/newgidmap need their standard setuid transition
         // under the unique host account. The immutable namespace entrypoint sets
         // NNP before any daemon or engine is launched and empties the engine's
-        // bounding set. Retain every mount/device/cgroup restriction here.
+        // bounding set. Proc/sys/cgroup read-only mounts are installed inside
+        // the new namespace: inherited locked masks prevent a private procfs.
         property("NoNewPrivileges=no".into());
+        property("CapabilityBoundingSet=~CAP_SYS_MODULE CAP_SYS_RAWIO CAP_SYS_TIME CAP_WAKE_ALARM CAP_SYS_BOOT".into());
+        property("SystemCallFilter=~@clock @module @raw-io @reboot @swap".into());
         for group in ["render", "video"] {
             if std::fs::read_to_string("/etc/group")?
                 .lines()
@@ -392,6 +391,14 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
             }
         }
     } else {
+        for value in [
+            "ProtectKernelTunables=yes",
+            "ProtectKernelModules=yes",
+            "ProtectControlGroups=yes",
+            "ProtectClock=yes",
+        ] {
+            property(value.into());
+        }
         property("NoNewPrivileges=yes".into());
         property("CapabilityBoundingSet=".into());
         property("RestrictSUIDSGID=yes".into());
@@ -511,7 +518,7 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
             property(format!("ReadWritePaths=+{target}"));
         }
         let tools = std::env::var("CAIRN_NATIVE_DOCKER_TOOLS")
-            .unwrap_or_else(|_| "/opt/cairn-native/docker-tools/v1".into());
+            .unwrap_or_else(|_| "/opt/cairn-native/docker-tools/v2".into());
         property(format!(
             "BindReadOnlyPaths={}:/opt/cairn-docker",
             path_property(Path::new(&tools))?

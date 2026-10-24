@@ -477,13 +477,31 @@ impl Controller {
             .join("home")
             .join(crate::nodes::workspace::provider_home(&plan))
             .join("cairn-auth.sock");
+        let channel = stage.join("home").join(crate::microvm::mcp::SOCKET);
         if plan["chat"].is_object() {
             let _ = tokio::time::timeout(Duration::from_secs(3), async {
-                while !auth.exists() {
+                while !auth.exists() || !channel.exists() {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             })
             .await;
+        }
+        if channel.exists() {
+            use std::os::unix::fs::FileTypeExt;
+            if !tokio::fs::symlink_metadata(&channel)
+                .await?
+                .file_type()
+                .is_socket()
+            {
+                return Err(Error::unavailable(
+                    "Native conversation MCP channel is not a socket.",
+                ));
+            }
+            std::os::unix::fs::lchown(&channel, Some(identity.root_uid), Some(identity.root_gid))?;
+        } else if plan["chat"].is_object() {
+            return Err(Error::unavailable(
+                "Native conversation MCP channel did not become available.",
+            ));
         }
         let auth = if auth.exists() {
             std::os::unix::fs::lchown(&auth, Some(identity.uid()), Some(identity.gid()))?;

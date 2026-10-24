@@ -18,6 +18,7 @@ import random
 import resource
 import select
 import stat
+import socketserver
 import subprocess
 import sys
 import tempfile
@@ -83,6 +84,7 @@ def main():
     supervisor = 'cairn-native-smoke-' + identifier + '.service'
     token = 'synthetic-controller-credential'
     attempts, runs, reserved_users = [], [], []
+    mcp_servers = {}
     metrics = dict(host=dict(kernel=platform.release(), machine=platform.machine(), cpuCount=os.cpu_count(),
                             cpu=Path('/proc/cpuinfo').read_text().split('model name')[1].splitlines()[0],
                             memory=Path('/proc/meminfo').read_text().splitlines()[0]),
@@ -258,13 +260,41 @@ def main():
             cached.unlink()
             metrics['preparedBaseMetadataBytes'] = ready['metadataBytes']
 
+        class PluginChannel(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_POST(self):
+                assert self.path == '/plugin-command'
+                assert self.headers.get('Authorization') == 'Bearer fixture-plugin-' + self.server.run_id
+                body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))))
+                assert body['plugin'] == 'fixture' and body['command'] == 'identity'
+                response = json.dumps(dict(output='text', value=self.server.run_id)).encode()
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(response)))
+                self.send_header('Connection', 'close')
+                self.end_headers()
+                self.wfile.write(response)
+
         def start(run, long=True, lease=90000, expected='changed', legacy=False, measure=None, docker_script='', sandbox='workspace-write'):
             seed(run)
+            channel = data / 'runs' / run / 'home/cairn-mcp.sock'
+            if run in mcp_servers:
+                mcp_servers[run].shutdown()
+                mcp_servers[run].server_close()
+            channel.unlink(missing_ok=True)
+            server = socketserver.ThreadingUnixStreamServer(str(channel), PluginChannel)
+            server.daemon_threads = True
+            server.run_id = run
+            channel.chmod(0o600)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            mcp_servers[run] = server
             attempt = str(uuid.uuid4())
             attempts.append(attempt)
             workspace = data / 'runs' / run / 'workspace'
             script = '#!/bin/sh\nset -eux\n'
             script += 'test "$(id -u)" -ne 0\ntest ! -e ' + str(private) + '\n'
+            script += 'test "$(CAIRN_MCP_RUN_TOKEN=fixture-plugin-' + run + ' cairn plugin fixture identity)" = "' + run + '"\n'
             script += 'test ! -e /run/docker.sock\nif touch /usr/cairn-should-be-readonly 2>/dev/null; then exit 81; fi\n'
             script += "test \"$(cat /home/node/.codex/auth.json)\" = '" + SECRET + "'\n"
             script += 'if echo bad > /home/node/.codex/auth.json 2>/dev/null; then exit 82; fi\n'
@@ -619,6 +649,9 @@ def main():
                 helper.kill()
                 helper.wait()
             bridge.shutdown()
+            for server in mcp_servers.values():
+                server.shutdown()
+                server.server_close()
             for unit in [supervisor] + ['cairn-native-' + attempt + '.service' for attempt in attempts] + ['cairn-native-guardian-' + attempt + '.service' for attempt in attempts]:
                 subprocess.run(['systemctl', 'stop', unit], capture_output=True, timeout=30)
             for current in runs:

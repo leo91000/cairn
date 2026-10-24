@@ -86,6 +86,12 @@ def main():
     assert status['NoNewPrivs'].strip() == '1'
     assert int(status['CapBnd'].strip(), 16) == 0
     assert os.getuid() == 1000
+    assert len(status['NSpid'].split()) == 1, 'procfs exposes a parent PID namespace.'
+    mounts = [line.split() for line in Path('/proc/self/mountinfo').read_text().splitlines()]
+    for protected in ('/proc/sys', '/proc/sysrq-trigger', '/sys', '/sys/fs/cgroup'):
+        matches = [fields for fields in mounts if fields[4] == protected]
+        assert matches and 'ro' in matches[-1][5].split(','), protected
+    assert not os.access('/proc/sys/net/ipv4/ip_forward', os.W_OK), 'Engine can change enclave network sysctls.'
     assert not Path('/run/docker.sock').exists()
     assert not Path('/var/run/docker.sock').exists()
     try:

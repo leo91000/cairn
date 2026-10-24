@@ -65,6 +65,17 @@ for plugin in buildx compose; do
     ln -s "/opt/cairn-docker/plugins/docker-$plugin" "$client_config/cli-plugins/docker-$plugin"
   fi
 done
+case "${1:-}" in
+  compose|buildx)
+    plugin=$1
+    case "${2:-}" in
+      version|--help|help)
+        shift
+        exec "/opt/cairn-docker/plugins/docker-$plugin" "$@"
+        ;;
+    esac
+    ;;
+esac
 export DOCKER_HOST=unix:///run/cairn-docker/docker.sock
 exec /opt/cairn-docker/bin/docker "$@"
 '''
@@ -99,7 +110,8 @@ def require_docker_host():
 
 
 def prepare_docker_tools():
-    target = INSTALL / 'docker-tools/v1'
+    # Bump this package generation when wrapper or generated metadata changes.
+    target = INSTALL / 'docker-tools/v2'
     if target.exists():
         manifest = json.loads((target / 'manifest.json').read_text())
         for name, digest in manifest.items():
@@ -137,9 +149,22 @@ def prepare_docker_tools():
                 shutil.copyfile(archive, stage / names[''])
             archive.unlink()
         (stage / 'docker').write_text(DOCKER_WRAPPER)
+        # Extract the paired client's API version without ever contacting a daemon.
+        # Client version output is emitted even when the explicit missing socket
+        # makes the server half of `docker version` fail.
+        client = stage / 'bin/docker'
+        client.chmod(0o555)
+        probe = subprocess.run([str(client), 'version', '--format', '{{json .Client}}'],
+            env=dict(PATH=os.defpath, HOME=str(stage), DOCKER_CONFIG=str(stage / 'client-probe'),
+                     DOCKER_HOST='unix://' + str(stage / 'unavailable.sock')),
+            capture_output=True, text=True, timeout=20)
+        version = json.loads(probe.stdout)['ApiVersion']
+        if not re.fullmatch(r'[0-9]+\.[0-9]+', version):
+            raise ValueError('Managed Docker API version probe failed.')
+        (stage / 'engine-api.json').write_text(json.dumps(dict(apiVersion=version)))
         inventory = {}
-        for path in [stage / 'docker', *(stage / 'bin').iterdir(), *(stage / 'plugins').iterdir()]:
-            path.chmod(0o555)
+        for path in [stage / 'docker', stage / 'engine-api.json', *(stage / 'bin').iterdir(), *(stage / 'plugins').iterdir()]:
+            path.chmod(0o444 if path.name == 'engine-api.json' else 0o555)
             inventory[str(path.relative_to(stage))] = hashlib.sha256(path.read_bytes()).hexdigest()
         atomic_json(stage / 'manifest.json', inventory)
         (stage / 'manifest.json').chmod(0o444)
@@ -420,7 +445,7 @@ def environment(directory):
             'RUNNER_STATE_DIR': str(ROOT / 'state'), 'RUNNER_URL': 'http://127.0.0.1:4311', 'RUNNER_BIND': '127.0.0.1:4311',
             'CAIRN_NODE_BACKEND': 'native', 'CAIRN_NATIVE_TOOLS': str(directory / 'tools'),
             'CAIRN_NATIVE_SUPERVISOR_UNIT': SERVICE, 'APP_RUNTIME_ID': release['runtimeId'],
-            'CAIRN_NATIVE_DOCKER_TOOLS': str(INSTALL / 'docker-tools/v1')}
+            'CAIRN_NATIVE_DOCKER_TOOLS': str(INSTALL / 'docker-tools/v2')}
 
 
 def require_storage():
