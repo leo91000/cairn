@@ -2,6 +2,7 @@
 use crate::{
     auth::hex_digest,
     config::Config,
+    context_usage::ContextUsage,
     error::{Error, Result},
     rpc::{Incoming, Session},
     skills::atomic_write,
@@ -32,6 +33,7 @@ pub fn chat_item(mut item: Value) -> Value {
         "reasoning" | "plan" => "reasoning",
         "webSearch" => "web_search",
         "collabAgentToolCall" => "collab_tool_call",
+        "contextCompaction" => "context_compaction",
         kind => kind,
     }
     .to_owned();
@@ -152,6 +154,11 @@ fn inbox(plan: &Value) -> &Path {
     Path::new(text(plan, "inputDirectory"))
 }
 
+/// An execution that compacts the native context instead of delivering a message.
+fn compacting(plan: &Value) -> bool {
+    plan["execution"]["operation"] == "compact"
+}
+
 /// Protects against a server that keeps answering with cursors it already gave.
 struct Cursors {
     seen: HashSet<String>,
@@ -192,6 +199,10 @@ struct Chat<'a> {
     subagents: HashMap<String, Value>,
     /// The subagent each spawned thread works for.
     children: HashMap<String, String>,
+    /// The latest context usage shown, so unchanged reports are not repeated.
+    context: Option<ContextUsage>,
+    /// Whether Codex reported a completed compaction during this execution.
+    compacted: bool,
 }
 
 impl Chat<'_> {
@@ -260,8 +271,32 @@ impl Chat<'_> {
                 self.ask_in_message(&item).await?;
             }
         }
-        self.emit(json!({ "type": kind, "item": chat_item(item) }))
-            .await
+        let mut item = chat_item(item);
+        if item["type"] == "context_compaction" {
+            // Codex reports only the lifecycle; the visible transcript is never rewritten.
+            let completed = kind == "item.completed";
+            self.compacted |= completed;
+            item["status"] = if completed {
+                "completed"
+            } else {
+                "in_progress"
+            }
+            .into();
+        }
+        self.emit(json!({ "type": kind, "item": item })).await
+    }
+
+    /// `thread/tokenUsage/updated`, also replayed when a saved thread is resumed.
+    async fn token_usage(&mut self, params: &Value) -> Result<()> {
+        let Some(usage) = ContextUsage::codex(&params["tokenUsage"]) else {
+            return Ok(());
+        };
+        if self.context.as_ref() == Some(&usage) {
+            return Ok(());
+        }
+        let event = usage.event();
+        self.context = Some(usage);
+        self.emit(event).await
     }
 
     /// Codex's subagent tools as the subagents they start and the statuses they report. Waiting
@@ -659,6 +694,7 @@ impl Chat<'_> {
                 self.item(params["item"].clone(), &kind).await?;
             }
             "item/agentMessage/delta" => self.message_delta(&params).await?,
+            "thread/tokenUsage/updated" => self.token_usage(&params).await?,
             // Each update replaces the turn's whole plan.
             "turn/plan/updated" => {
                 let id = format!("plan:{}", text(&params, "turnId"));
@@ -887,7 +923,15 @@ impl Chat<'_> {
     async fn execute(&mut self, plan: &Value) -> Result<()> {
         let effort = self.effort(plan).await;
         let resume = plan["sessionId"].is_string();
+        if compacting(plan) && !resume {
+            return Err(Error::conflict(
+                "This conversation has no saved Codex session to compact.",
+            ));
+        }
         let result = self.open_thread(plan, &effort, resume).await?;
+        if compacting(plan) {
+            return self.compact(plan).await;
+        }
         let (turns, paginated) = self.history(&result, resume).await?;
         for turn in &turns {
             for item in turn["items"].as_array().into_iter().flatten() {
@@ -952,6 +996,20 @@ impl Chat<'_> {
             .await
     }
 
+    /// Compacts the resumed thread. Codex replaces any running turn with its compaction
+    /// turn, so Cairn only starts one while the conversation is idle. A restarted attempt
+    /// compacts again: compaction has no external effects and keeps the thread usable.
+    async fn compact(&mut self, plan: &Value) -> Result<()> {
+        self.request(
+            "thread/compact/start",
+            json!({
+                "threadId": self.thread,
+            }),
+        )
+        .await?;
+        self.wait(plan).await
+    }
+
     /// Steers the turn with the user's new messages until it completes.
     async fn wait(&mut self, plan: &Value) -> Result<()> {
         let mut interval = tokio::time::interval(Duration::from_millis(250));
@@ -983,10 +1041,20 @@ impl Chat<'_> {
                 .await?;
             return Err(Error::conflict(text(&error, "message")));
         }
+        if compacting(plan) && !self.compacted {
+            let message = "Codex finished without reporting a context compaction.";
+            self.emit(json!({ "type": "turn.failed", "error": { "message": message } }))
+                .await?;
+            return Err(Error::bad_gateway(message));
+        }
         self.finish(plan).await
     }
 
     async fn steer(&mut self, plan: &Value) -> Result<()> {
+        // Messages sent meanwhile stay queued for the next turn.
+        if compacting(plan) {
+            return Ok(());
+        }
         let Some(bytes) =
             crate::chat_inbox::read(inbox(plan), crate::chat_inbox::ADAPTER_LIMIT).await?
         else {
@@ -1138,6 +1206,8 @@ async fn run_session(
         subagents: HashMap::new(),
         children: HashMap::new(),
         questions: HashMap::new(),
+        context: None,
+        compacted: false,
     };
     let mut result = chat.execute(&plan).await;
     if result.is_ok() && reusable {

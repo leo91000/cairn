@@ -70,6 +70,31 @@ data class ChatWakeup(
     val display: JsonObject? = null,
 )
 
+/**
+ * How full the coding agent's context was at its latest report. [contextTokens] is what the latest
+ * model request occupied, never the conversation's cumulative spend.
+ */
+@Serializable
+data class ContextUsage(
+    val contextTokens: Long = 0,
+    /** The model's context window; absent when the coding agent does not report it. */
+    val contextWindow: Long? = null,
+    /** Of [contextTokens], input read from the prompt cache, when reported. */
+    val cachedTokens: Long? = null,
+    /** A local estimate: before the session's first response, or right after a compaction. */
+    val estimated: Boolean = false,
+)
+
+/** Whether the coding agent can compact its context now, and why not when it cannot. */
+@Serializable
+data class ChatCompaction(
+    /** The coding agent offers a compaction control. OpenCode does not. */
+    val supported: Boolean = false,
+    val running: Boolean = false,
+    val available: Boolean = false,
+    val reason: String? = null,
+)
+
 @Serializable
 data class Chat(
     val id: String,
@@ -88,6 +113,9 @@ data class Chat(
     val provider: String? = null,
     /** When the agent's latest turn ended. */
     val finishedAt: Long? = null,
+    /** Absent for older servers and before the coding agent reports it. */
+    val contextUsage: ContextUsage? = null,
+    val compaction: ChatCompaction? = null,
     /** The agent finished a turn this account has not opened since. */
     val unread: Boolean = false,
     /** The opening of the agent's final message, while unread. */

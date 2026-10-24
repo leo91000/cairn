@@ -66,6 +66,13 @@ activity heartbeat reports `waiting_for_background` with the number of tasks.
 Resume ignores legacy completion receipts that never acknowledged the request,
 preventing an empty result from repeatedly restarting the same pending message.
 
+Léo asks Claude Code for its context usage with the stream-json control request
+`get_context_usage` (`detail: "summary"`, answered locally without a model call), then
+measures each main-thread response's prompt (`input`, cache creation and cache read
+tokens). Automatic compactions (`compact_boundary`) show as a divider in the conversation.
+An explicit compaction resumes the session and sends Claude Code's local `/compact`
+command; it is never a user message. See [context compaction](CONTEXT-COMPACTION.md).
+
 An explicit provider choice is saved with each queued message. Steering cannot
 change the running turn's provider. Older clients that omit the provider continue
 with the chat's current provider. Completion receipts prevent finished requests

@@ -18,6 +18,7 @@ mod codex_background;
 mod codex_login;
 pub mod coding_agent;
 pub mod config;
+pub mod context_usage;
 pub mod conversation_deletion;
 pub mod conversation_lifecycle;
 pub mod direct;

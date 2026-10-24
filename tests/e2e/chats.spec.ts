@@ -1511,3 +1511,79 @@ test('a plugin condition wait reads in its plugin\'s words, with generic fallbac
   await expect(cards.last()).toContainText('A condition · The result was already available')
   await expect(cards.filter({ hasText: /GitHub|unreachable/ })).toHaveCount(0)
 })
+
+test('context usage shows the latest request and an explicit compaction keeps the visible history', async ({ page, workspace }, testInfo) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Measure the context' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 15000 }).toBe('succeeded')
+  const opened = await workspace.api(`/api/chats/${chat.id}`)
+  const before = opened.run
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+
+  // Codex reports the latest request (40,900 tokens), not the thread's cumulative total.
+  const indicator = page.getByTestId('context-indicator')
+  await expect(indicator).toHaveText('Context 41K / 258K · 16%')
+  await expect(page.getByText('Ready for the next step.')).toBeVisible()
+  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
+  const details = page.getByRole('dialog', { name: 'Chat details', exact: true })
+  await expect(details.getByTestId('context-usage')).toContainText('40,900 of 258,400 tokens (16%)')
+  await expect(details.getByTestId('context-usage')).toContainText('36,000 tokens read from cache')
+  await page.screenshot({ path: testInfo.outputPath('context-details.png'), animations: 'disabled' })
+  await details.getByRole('button', { name: 'Compact context', exact: true }).click()
+  const confirmation = page.getByRole('dialog', { name: 'Compact the agent context?', exact: true })
+  await expect(confirmation).toContainText('Every message stays visible')
+  await confirmation.getByRole('button', { name: 'Compact context', exact: true }).click()
+  await expect(confirmation).toHaveCount(0)
+
+  const divider = page.getByTestId('context-compaction')
+  await expect(divider).toHaveCount(1)
+  await expect(divider).toContainText('Context compacted', { timeout: 15000 })
+  await expect(indicator).toHaveText('Context ≈ 6K / 258K · 2%')
+  // The earlier reply and request stay in the transcript; no reply or new finish is invented.
+  await expect(page.getByText('Ready for the next step.')).toBeVisible()
+  await expect(page.locator('.user-bubble').filter({ hasText: 'Measure the context' })).toBeVisible()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).compaction?.available).toBe(true)
+  const after = await workspace.api(`/api/chats/${chat.id}`)
+  expect(after.run.status).toBe('succeeded')
+  expect(after.run.finishedAt).toBe(before.finishedAt)
+  expect(after.run.summary).toBe(before.summary)
+  // The compaction is not a chat message.
+  expect(after.messages).toEqual(opened.messages)
+  expect(after.contextUsage).toEqual({
+    contextTokens: 6200,
+    contextWindow: 258400,
+    cachedTokens: null,
+    estimated: true,
+  })
+
+  for (const colorScheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme })
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 844 })
+      await divider.scrollIntoViewIfNeeded()
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+      await page.screenshot({ path: testInfo.outputPath(`context-compaction-${colorScheme}-${width}.png`), animations: 'disabled' })
+    }
+  }
+
+  // On phones the details sheet carries the same measurement and action.
+  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
+  await expect(details.getByTestId('context-usage')).toContainText('Estimated by the coding agent')
+  await expect(details.getByRole('button', { name: 'Compact context', exact: true })).toBeEnabled()
+  await page.screenshot({ path: testInfo.outputPath('context-details-phone.png'), animations: 'disabled' })
+})
+
+test('compaction is unavailable while a turn runs and explains why', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:chat-hang' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 15000 }).toBe('running')
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
+  const details = page.getByRole('dialog', { name: 'Chat details', exact: true })
+  await expect(details.getByRole('button', { name: 'Compact context', exact: true })).toBeDisabled()
+  await expect(details).toContainText('Wait for the current turn to finish before compacting.')
+  await expect(workspace.api(`/api/chats/${chat.id}/compact`, 'POST', {})).rejects.toThrow(/Wait for the current turn to finish/)
+  await workspace.api(`/api/chats/${chat.id}/stop`, 'POST', {})
+})

@@ -58,6 +58,7 @@ import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
 import UiNotice from '../components/UiNotice.vue'
 import VirtualSelect from '../components/VirtualSelect.vue'
+import { contextSummary } from '../context-usage'
 import {
   ArrowDown,
   ArrowUp,
@@ -623,8 +624,10 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
 }
 
 const newSession = ref(false)
+const compacting = ref(false)
+const context = computed(() => contextSummary(detail.value?.contextUsage))
 
-async function action(name: 'pause' | 'stop' | 'restore' | 'new-session', body?: object) {
+async function action(name: 'pause' | 'stop' | 'restore' | 'new-session' | 'compact', body?: object) {
   if (!detail.value || busy.value)
     return false
   busy.value = true
@@ -720,6 +723,15 @@ function key(event: KeyboardEvent) {
 </script>
 
 <template>
+  <Modal v-if="compacting" title="Compact the agent context?" @close="compacting = false">
+    <div class="p-6">
+      <p>The coding agent summarizes its earlier context to free space in its window. This uses the agent's model, like a short turn.</p>
+      <p>Every message stays visible in this conversation. Messages you send meanwhile wait for the compaction to finish.</p>
+      <UiButton :disabled="busy || !detail?.compaction?.available" @click="action('compact').then((succeeded) => { if (succeeded) compacting = false })">
+        Compact context
+      </UiButton>
+    </div>
+  </Modal>
   <Modal v-if="newSession" title="Start a fresh agent session?" @close="newSession = false">
     <div class="p-6">
       <p>The conversation history and working files will be preserved. The next message will use a new native agent session.</p>
@@ -755,6 +767,14 @@ function key(event: KeyboardEvent) {
         </dt><dd class="m-0 flex items-center gap-2">
           <span class="size-1.5 rounded-full bg-accent" />{{ chatStatus }}
         </dd>
+        <template v-if="detail?.run">
+          <dt class="text-muted">
+            Context
+          </dt><dd class="m-0" data-testid="context-usage">
+            <span class="block">{{ context.label }}</span>
+            <span v-for="line in context.details" :key="line" class="block text-muted">{{ line }}</span>
+          </dd>
+        </template>
       </dl>
       <button class="chat-detail-action" @click="detailAction(newConversation)">
         <Icon :name="Plus" :size="18" />New chat
@@ -767,6 +787,20 @@ function key(event: KeyboardEvent) {
       >
         <Icon :name="FileText" :size="18" />Files <span class="ml-auto text-muted">{{ fileCount }}</span>
       </button>
+      <template v-if="detail?.compaction?.supported && !inactive">
+        <button
+          class="chat-detail-action"
+          aria-haspopup="dialog"
+          :disabled="!detail.compaction.available"
+          :aria-describedby="detail.compaction.reason ? 'compaction-reason' : undefined"
+          @click="detailAction(() => { compacting = true })"
+        >
+          <Icon :name="Layers" :size="18" />{{ detail.compaction.running ? 'Compacting context…' : 'Compact context' }}
+        </button>
+        <p v-if="detail.compaction.reason && !detail.compaction.running" id="compaction-reason" class="m-0! mb-1! px-3 text-2xs text-muted">
+          {{ detail.compaction.reason }}
+        </p>
+      </template>
       <button class="chat-detail-action" @click="detailAction(() => { history = true })">
         <Icon :name="Search" :size="18" />Search conversations
       </button>
@@ -899,6 +933,13 @@ function key(event: KeyboardEvent) {
                 <span class="flex min-w-0 items-center gap-1.5"><Icon :name="FolderGit2" :size="13" /><span class="truncate max-w-48">{{ heading.projectName }}</span></span>
               </template>
               <span v-if="detail" class="flex items-center gap-1.5 font-semibold" :class="chatStatus === 'Working' ? 'text-accent' : chatStatus === 'Failed' || chatStatus === 'Interrupted' ? 'text-coral' : ''"><span v-if="chatStatus !== 'Working'" class="size-1 shrink-0 rounded-full" :class="active ? 'bg-accent' : 'bg-muted'" />{{ chatStatus }}<span v-if="chatStatus === 'Working'" class="working-wave"><i /><i /><i /></span></span>
+              <span
+                v-if="context.percent !== null || detail?.contextUsage"
+                class="tabular-nums"
+                :class="(context.percent ?? 0) >= 85 ? 'text-coral' : ''"
+                :title="[context.label, ...context.details].join('\n')"
+                data-testid="context-indicator"
+              >Context {{ context.short }}</span>
               <NodeExecution v-if="detail?.run && state.installationRole === 'owner'" :key="detail.run.id" :run="detail.run" />
             </div>
           </div>

@@ -712,6 +712,7 @@ pub(crate) async fn invoke(
         | "rename_chat"
         | "set_chat_paused"
         | "stop_chat"
+        | "compact_chat"
         | "delete_chat" => chat_tools::invoke(s, name, args, bearer).await,
         "list_agents" => Ok(s.store.list("agents").await?.into()),
         "list_projects" => Ok(s.store.list("projects").await?.into()),

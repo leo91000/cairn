@@ -37,6 +37,13 @@ _Avoid_ : invité, collaborateur
 **Installation courante** :
 L’installation dans laquelle on travaille dans l’interface ; on n’en voit qu’une à la fois et on passe de l’une à l’autre.
 
+**Occupation du contexte** :
+La part de la fenêtre de contexte du modèle qu’occupait la dernière requête de l’agent de code, telle que celui-ci la mesure ou l’estime. Elle n’est jamais déduite de la consommation cumulée d’une conversation ; sans mesure, elle reste indisponible.
+_Avoid_ : consommation, usage cumulé
+
+**Compaction du contexte** :
+Le résumé, par l’agent de code, de son contexte antérieur pour libérer de la place dans sa fenêtre. Elle ne modifie pas l’historique visible de la conversation et n’est pas un message de l’utilisateur.
+
 **Relais** :
 Le passage par Beacon des échanges entre l’interface et une installation, sur la connexion sortante ouverte par l’installation. C’est la voie de secours quand la connexion directe est impossible ou interrompue ; il transporte le travail des agents sans le conserver.
 _Avoid_ : tunnel (qui désigne la connexion technique de l’installation)

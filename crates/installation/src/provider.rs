@@ -48,6 +48,12 @@ impl Provider {
         }
     }
 
+    /// Whether the coding agent can compact its native context on request. OpenCode runs
+    /// with automatic compaction disabled and exposes no compaction control to Cairn.
+    pub fn compacts_context(self) -> bool {
+        matches!(self, Self::Codex | Self::Claude)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Codex => "Codex",
