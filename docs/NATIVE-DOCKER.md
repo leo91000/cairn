@@ -12,7 +12,8 @@ Each conversation has its own nologin host account and non-overlapping 65,536-en
 subordinate UID and GID ranges. Namespace-root host UIDs/GIDs are explicitly
 allocated from 500,000,000–501,048,575, outside the host's small system-service
 account pool, skipping host identities and subordinate ranges. A durable sequence
-prevents reuse even after interrupted account creation. RootlessKit starts a private user, mount, PID, IPC,
+prevents reuse even after interrupted account creation. Actual kernel UID/GID
+maps are checked against the reserved identity before engine admission. RootlessKit starts a private user, mount, PID, IPC,
 UTS and slirp network namespace under that account. The engine runs as namespace
 UID/GID 1000 with an empty capability bounding set and NoNewPrivileges. Namespace
 root is an unprivileged host UID, reserved for the immutable enclave supervisor
@@ -138,7 +139,10 @@ Primary references: [Docker rootless requirements](https://docs.docker.com/engin
 
 The `native-runtime` CI job uses a disposable Linux host, synthetic credentials
 and loopback Moto S3. It executes the shipped native controller and entrypoint,
-the real systemd/ublk/ext4 stack and the managed Docker tools. No qualification
+the real systemd/ublk/ext4 stack and the managed Docker tools. Reference binaries
+may be reused only for the same exact base, pinned Rust/profile/features and runner
+image, with recorded binary checksums and original build run. The complete reference
+qualification still runs on the current host before candidate measurements. No qualification
 command runs against the owner's desktop node or its Docker daemon.
 
 `native-storage.json` records the host/kernel/build profile, shared budgets,

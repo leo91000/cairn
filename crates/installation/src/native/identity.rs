@@ -32,6 +32,30 @@ impl Identity {
     pub fn gid(&self) -> u32 {
         self.subgid + 999
     }
+
+    pub(super) fn verify_maps(&self, uid_map: &str, gid_map: &str) -> Result<()> {
+        for (actual, root, start) in [
+            (uid_map, self.root_uid, self.subuid),
+            (gid_map, self.root_gid, self.subgid),
+        ] {
+            let parsed = actual
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| {
+                    line.split_whitespace()
+                        .map(str::parse::<u32>)
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Error::internal)?;
+            if parsed != vec![vec![0, root, 1], vec![1, start, COUNT]] {
+                return Err(Error::unavailable(
+                    "RootlessKit UID/GID maps do not match this conversation's reserved identity.",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 async fn output(binary: &str, args: &[&str]) -> Result<std::process::Output> {
@@ -121,6 +145,15 @@ fn selected(user: &str, text: &str) -> Result<Option<u32>> {
 fn occupied(uids: &str, gids: &str, passwd: &str, groups: &str) -> Result<Vec<(String, u32, u32)>> {
     let mut occupied = ranges(uids)?;
     occupied.extend(ranges(gids)?);
+    // Numeric owner keys are valid subordinate-ID grants too. Do not assign a
+    // new host identity an orphaned account's pre-existing mapping authority.
+    let numeric_owners: Vec<u32> = occupied
+        .iter()
+        .filter_map(|(name, _, _)| name.parse().ok())
+        .collect();
+    for id in numeric_owners {
+        occupied.push((String::new(), id, id.saturating_add(1)));
+    }
     for (text, fields) in [(passwd, &[2usize, 3][..]), (groups, &[2usize][..])] {
         for line in text.lines().filter(|line| !line.is_empty()) {
             let columns: Vec<_> = line.split(':').collect();
@@ -331,8 +364,8 @@ pub(super) async fn provision(state: &Path, run_id: &str) -> Result<Identity> {
         None => free_range(
             &uids,
             &gids,
-            &tokio::fs::read_to_string("/etc/passwd").await?,
-            &tokio::fs::read_to_string("/etc/group").await?,
+            &run("/usr/bin/getent", &["passwd"]).await?,
+            &run("/usr/bin/getent", &["group"]).await?,
         )?,
     };
     let range = format!("{start}-{}", start + COUNT - 1);
@@ -368,6 +401,41 @@ fn translate(id: u32, old_root: u32, old_start: u32, root: u32, start: u32) -> u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn namespace_maps_must_match_the_reserved_identity_exactly() {
+        let identity = Identity {
+            user: "fixture".into(),
+            root_uid: ROOT_FIRST,
+            root_gid: ROOT_FIRST + 1,
+            subuid: 100000,
+            subgid: 200000,
+        };
+        let uid_map = format!("0 {} 1\n1 100000 65536\n", identity.root_uid);
+        let gid_map = format!("0 {} 1\n1 200000 65536\n", identity.root_gid);
+        assert!(identity.verify_maps(&uid_map, &gid_map).is_ok());
+        assert!(
+            identity
+                .verify_maps(&uid_map.replace("100000", "300000"), &gid_map)
+                .is_err()
+        );
+        assert!(
+            identity
+                .verify_maps(&uid_map, &gid_map.replace("65536", "65535"))
+                .is_err()
+        );
+        assert_eq!(
+            free_root_id(
+                ROOT_FIRST,
+                &format!("{ROOT_FIRST}:100000:65536\n"),
+                "",
+                "",
+                ""
+            )
+            .unwrap(),
+            ROOT_FIRST + 1
+        );
+    }
 
     #[test]
     fn root_ids_skip_host_accounts_groups_and_subordinates_beyond_system_pool_limits() {

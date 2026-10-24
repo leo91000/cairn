@@ -467,6 +467,7 @@ impl Controller {
             .to_string_lossy()
             .into_owned()
             .into();
+        plan["nativeIdentity"] = serde_json::to_value(&identity)?;
         plan["nativeHomeBindings"] = serde_json::to_value(bindings)?;
         if plan["chat"]["provider"] == "claude" {
             plan["chat"]["claudeCredentialsDirectory"] = super::home::CLAUDE_AUTH_DIRECTORY.into();

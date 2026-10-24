@@ -47,7 +47,10 @@
       "native::identity::reconcile::tests::legacy_acl_qualifiers_are_preserved_without_collapsing_distinct_users",
       "native::docker::proxy::tests::client_negotiation_does_not_need_a_start_socket_or_daemon",
       "native::identity::tests::root_ids_skip_host_accounts_groups_and_subordinates_beyond_system_pool_limits",
-      "native::identity::tests::reserved_root_ids_are_not_recycled_after_interrupted_account_creation"
+      "native::identity::tests::reserved_root_ids_are_not_recycled_after_interrupted_account_creation",
+      "native::identity::tests::namespace_maps_must_match_the_reserved_identity_exactly",
+      "native::docker::tests::plugin_rpc_without_json_media_type_still_enforces_authorization",
+      "native::docker::tests::unversioned_version_and_volume_routes_are_not_misread_as_api_versions"
     ]
   }
 }

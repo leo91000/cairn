@@ -260,9 +260,22 @@ jobs:
           python3 -m venv .native-s3-test
           .native-s3-test/bin/pip install 'moto[server]==5.2.3' awscli
       - run: rustup toolchain install 1.97.1 --profile minimal
-      - name: Build and qualify the exact base reference on the same disposable host
+      - name: Identify the exact reference build
+        id: native-reference-key
         env:
           REFERENCE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          echo "sha=$REFERENCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "key=native-reference-v1-$REFERENCE_SHA-$ImageOS-$ImageVersion-rust1.97.1-dev0-ublk" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v6.1.0
+        id: native-reference-cache
+        with:
+          path: reference-native/
+          key: ${{ steps.native-reference-key.outputs.key }}
+      - name: Build the exact base reference
+        if: steps.native-reference-cache.outputs.cache-hit != 'true'
+        env:
+          REFERENCE_SHA: ${{ steps.native-reference-key.outputs.sha }}
           CARGO_PROFILE_DEV_DEBUG: '0'
           CARGO_INCREMENTAL: '0'
         run: |
@@ -270,13 +283,41 @@ jobs:
           git fetch --no-tags origin "$REFERENCE_SHA"
           git worktree add --detach /tmp/cairn-native-reference "$REFERENCE_SHA"
           CARGO_TARGET_DIR="$PWD/reference-target" cargo +1.97.1 build --locked --manifest-path /tmp/cairn-native-reference/Cargo.toml --bin cairn --example native_storage_qualifier --features ublk
-          mkdir -p native-storage-evidence/reference
+          mkdir -p reference-native/examples
+          cp reference-target/debug/cairn reference-native/cairn
+          cp reference-target/debug/examples/native_storage_qualifier reference-native/examples/native_storage_qualifier
           python3 - <<'PYREF'
-          import json, os
+          import hashlib, json, os
           from pathlib import Path
-          Path('native-storage-evidence/reference/revision.json').write_text(json.dumps(dict(headSha=os.environ['REFERENCE_SHA'], profile='development, debug=0, incremental=0', source='exact base, built on disposable runner'), indent=2))
+          binaries = ['cairn', 'examples/native_storage_qualifier']
+          checksums = {name: hashlib.sha256((Path('reference-native') / name).read_bytes()).hexdigest() for name in binaries}
+          Path('reference-native/revision.json').write_text(json.dumps(dict(headSha=os.environ['REFERENCE_SHA'], profile='development, debug=0, incremental=0', features='ublk', rust='1.97.1', image=os.environ['ImageVersion'], buildRun=os.environ['GITHUB_RUN_ID'], sha256=checksums), indent=2))
           PYREF
-          sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/reference" .native-s3-test/bin/python scripts/tests/node_s3_test.py --native-runtime reference-target/debug/cairn --qualifier reference-target/debug/examples/native_storage_qualifier
+      - uses: actions/cache/save@v6.1.0
+        if: steps.native-reference-cache.outputs.cache-hit != 'true'
+        with:
+          path: reference-native/
+          key: ${{ steps.native-reference-key.outputs.key }}
+      - name: Qualify the exact reference on the current disposable host
+        env:
+          REFERENCE_SHA: ${{ steps.native-reference-key.outputs.sha }}
+        run: |
+          python3 - <<'PYREF'
+          import hashlib, json, os
+          from pathlib import Path
+          metadata = json.loads(Path('reference-native/revision.json').read_text())
+          assert metadata['headSha'] == os.environ['REFERENCE_SHA']
+          assert metadata['image'] == os.environ['ImageVersion']
+          assert metadata['rust'] == '1.97.1' and metadata['features'] == 'ublk'
+          assert metadata['profile'] == 'development, debug=0, incremental=0'
+          assert set(metadata['sha256']) == {'cairn', 'examples/native_storage_qualifier'}
+          for name, checksum in metadata['sha256'].items():
+              assert hashlib.sha256((Path('reference-native') / name).read_bytes()).hexdigest() == checksum
+          Path('native-storage-evidence/reference').mkdir(parents=True)
+          Path('native-storage-evidence/reference/revision.json').write_text(json.dumps(metadata, indent=2))
+          PYREF
+          chmod +x reference-native/cairn reference-native/examples/native_storage_qualifier
+          sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/reference" .native-s3-test/bin/python scripts/tests/node_s3_test.py --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier
       - name: Qualify real ublk, S3, eviction, systemd ownership and crash recovery
         run: |
           chmod +x target/debug/cairn target/debug/examples/native_storage_qualifier

@@ -246,7 +246,9 @@ impl Policy {
     fn authorize(&self, request: &Value) -> Result<()> {
         let uri = text(request, "RequestUri");
         let mut path = uri.split('?').next().unwrap_or("");
-        if let Some(versioned) = path.strip_prefix("/v") {
+        if let Some(versioned) = path.strip_prefix("/v")
+            && versioned.as_bytes().first().is_some_and(u8::is_ascii_digit)
+        {
             let (version, rest) = versioned
                 .split_once('/')
                 .ok_or_else(|| Error::forbidden("Invalid Docker API path."))?;
@@ -369,8 +371,13 @@ impl Policy {
     }
 }
 
-async fn authorization(State(policy): State<Policy>, Json(request): Json<Value>) -> Json<Value> {
-    match policy.authorize(&request) {
+async fn authorization(State(policy): State<Policy>, body: axum::body::Bytes) -> Json<Value> {
+    // Docker's private plugin RPC does not promise an application/json header.
+    // Decode its bounded JSON body directly; malformed requests still fail shut.
+    let result = serde_json::from_slice::<Value>(&body)
+        .map_err(|_| Error::bad("Invalid Docker authorization request."))
+        .and_then(|request| policy.authorize(&request));
+    match result {
         Ok(()) => Json(json!({ "Allow": true })),
         Err(error) => Json(json!({
             "Allow": false,
@@ -458,8 +465,14 @@ pub async fn enclave(stop: CancellationToken) -> Result<i32> {
             "Native enclave requires its managed rootless namespace.",
         ));
     }
-    hardening::apply()?;
     let plan: Value = serde_json::from_slice(&tokio::fs::read("/run/cairn-plan.json").await?)?;
+    let identity: super::identity::Identity =
+        serde_json::from_value(plan["nativeIdentity"].clone())?;
+    identity.verify_maps(
+        &tokio::fs::read_to_string("/proc/self/uid_map").await?,
+        &tokio::fs::read_to_string("/proc/self/gid_map").await?,
+    )?;
+    hardening::apply()?;
     let policy = Policy {
         plan: Arc::new(plan),
     };
@@ -704,6 +717,55 @@ mod tests {
                 "guestDataRoot": "/data",
                 "runId": "run",
             })),
+        }
+    }
+
+    #[test]
+    fn unversioned_version_and_volume_routes_are_not_misread_as_api_versions() {
+        for (path, method) in [("/version", "GET"), ("/volumes/create", "POST")] {
+            assert!(
+                policy()
+                    .authorize(&json!({
+                        "RequestUri": path,
+                        "RequestMethod": method,
+                    }))
+                    .is_ok()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_rpc_without_json_media_type_still_enforces_authorization() {
+        use tower::ServiceExt;
+        for (path, method, body, expected) in [
+            ("/v1.56/info", "GET", Value::Null, true),
+            (
+                "/v1.56/containers/create",
+                "POST",
+                json!({ "HostConfig": { "Privileged": true } }),
+                false,
+            ),
+        ] {
+            let router = Router::new()
+                .route("/AuthZPlugin.AuthZReq", post(authorization))
+                .with_state(policy());
+            let payload = json!({
+                "RequestUri": path,
+                "RequestMethod": method,
+                "RequestBody": STANDARD.encode(serde_json::to_vec(&body).unwrap()),
+            });
+            let request = axum::http::Request::post("/AuthZPlugin.AuthZReq")
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&payload).unwrap(),
+                ))
+                .unwrap();
+            let response = router.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let response: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(response["Allow"], expected);
         }
     }
 
