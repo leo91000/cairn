@@ -1,5 +1,4 @@
 import type { Locator, Page } from '@playwright/test'
-import type { Service } from '../fixtures/legacy/server/service'
 import { execFileSync, spawn } from 'node:child_process'
 import { once } from 'node:events'
 import {
@@ -14,13 +13,11 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { test as base, expect } from '@playwright/test'
-import { config as loadConfig } from '../fixtures/legacy/server/config'
-import { Service as SeedService } from '../fixtures/legacy/server/service'
-import { Store } from '../fixtures/legacy/server/store'
 import { beaconRelayFixture, executeBeaconSql } from './beacon-relay-fixture'
+import { NativeFixture } from './native-fixture'
 
 export interface Workspace {
-  service: Service
+  service: NativeFixture
   restart: () => Promise<void>
   url: string
   installationUrl: string
@@ -77,21 +74,18 @@ export const test = base.extend<object, { workspace: Workspace }>({
     isolatedDatabase.searchParams.set('options', `-c search_path=${schema}`)
     const accountEmail = `${schema}@example.test`
     await Promise.all([mkdir(home), mkdir(projectPath)])
-    const config = loadConfig({
+    const config = {
       dataDir: path.join(directory, 'data'),
       home,
       workspaceRoots: [projectPath],
       codexBin: path.resolve('tests/fixtures/codex.mjs'),
-      ghBin: '/nonexistent/fixture-gh',
       publicUrl: managerUrl,
       logger: false,
       host: '127.0.0.1',
       port,
       workerEnabled: true,
-    })
-    // The old service only seeds/inspects the shared database. Every HTTP request,
-    // scheduled run, account refresh and chat is handled by the native process.
-    const service = new SeedService(new Store(config.dataDir), config)
+    }
+    const service = new NativeFixture(config)
     const configuration = path.join(directory, 'config.json')
     const usageFile = path.join(directory, 'usage.json')
     const usage: Record<string, unknown> = {}
@@ -318,11 +312,10 @@ export const test = base.extend<object, { workspace: Workspace }>({
         setOpenCodeGoUsage: (id, apiKey, value) => {
           goUsage.set(apiKey, value)
           // Let the next explicit refresh poll the fixture without waiting a minute.
-          const row = service.store.db.prepare('SELECT data FROM records WHERE id=? AND kind=?').get(id, 'agentAccounts') as { data: string }
-          const account = JSON.parse(row.data)
+          const account = service.store.get('agentAccounts', id)
           if (account.usage)
             account.usage.attemptedAt = Date.now() - 60001
-          service.store.db.prepare('UPDATE records SET data=? WHERE id=? AND kind=?').run(JSON.stringify(account), id, 'agentAccounts')
+          service.store.put('agentAccounts', account)
         },
       })
     }
@@ -332,8 +325,6 @@ export const test = base.extend<object, { workspace: Workspace }>({
       await beacon.close()
       executeBeaconSql(database, `DROP SCHEMA ${schema} CASCADE`)
       currentWorkspace = undefined
-      await service.accounts.close()
-      service.store.close()
       await rm(directory, { recursive: true, force: true })
     }
   }, { scope: 'worker', timeout: 120000 }],
