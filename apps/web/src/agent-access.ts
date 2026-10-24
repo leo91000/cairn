@@ -65,7 +65,7 @@ export function sandboxOptionsFor(backend: 'firecracker' | 'native') {
   if (backend !== 'native')
     return sandboxOptions
   return sandboxOptions.map(option => option.value === 'yolo'
-    ? { ...option, description: 'Native process under a managed account on the host: GPU and system tools, no sudo or Docker. Default.' }
+    ? { ...option, description: 'Native process under a managed account. Host privileges follow the node’s confirmed protected or administrator mode. Default.' }
     : option)
 }
 
@@ -99,6 +99,7 @@ export function newAgentDraft(): AgentDraft {
       mcps: [],
       mcpTools: {},
       installation: false,
+      delegation: false,
       sandbox: 'yolo',
     },
     exclusiveNodes: [],
@@ -125,6 +126,7 @@ export function draftOf(agent: Agent): AgentDraft {
       mcps: access.mcps ? [...access.mcps] : null,
       mcpTools: structuredClone(JSON.parse(JSON.stringify(access.mcpTools ?? {}))),
       installation: access.installation ?? false,
+      delegation: access.delegation ?? false,
       sandbox: access.sandbox ?? 'yolo',
     },
     // Responses omit empty live grants: absent means none.
@@ -449,6 +451,7 @@ export function instanceState(connection: PluginConnection): { tone: 'granted' |
 }
 
 export interface Context {
+  agentId?: string
   projects: Pick<Project, 'id' | 'name'>[]
   skills: Skill[]
   mcps: McpView[]
@@ -506,7 +509,7 @@ export function changes(saved: AgentDraft, draft: AgentDraft) {
   for (const connection of tools)
     add('mcps', Number(asSet(savedTools[connection]) !== asSet(draftTools[connection])))
   add('sandbox', Number(saved.access.sandbox !== draft.access.sandbox))
-  add('powers', Number(saved.access.installation !== draft.access.installation))
+  add('powers', Number(saved.access.installation !== draft.access.installation) + Number(!!saved.access.delegation !== !!draft.access.delegation))
   add('nodes', Number(backendOf(saved.access) !== backendOf(draft.access)))
   add('nodes', listCount(saved.access.nodes, draft.access.nodes))
   // Responses omit empty live grants: absent means none.
@@ -545,9 +548,18 @@ function restrictedTools(saved: AgentAccess, draft: AgentAccess) {
  * What saving would grant or take away that deserves a look first: new powers and
  * secrets, and removed access when `runs` says work is affected.
  */
+export function nativeReviewNodes(draft: AgentDraft, context: Context) {
+  if (backendOf(draft.access) !== 'native' || draft.access.nodes === null)
+    return []
+  return context.nodes.filter(node => node.nativeModeRequest?.mode === 'administrator'
+    && draft.access.nodes!.includes(node.id) && !node.nativeReviewedAgents?.includes(context.agentId ?? '')).map(node => node.id)
+}
+
 export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Context, runs = { queued: 0, running: 0 }) {
   const lines: ReviewLine[] = []
   const node = (id: string) => nodeName(context.nodes.find(item => item.id === id), id)
+  for (const id of nativeReviewNodes(draft, context))
+    lines.push({ kind: 'power', section: 'nodes', text: `Added: administrator access to ${node(id)}. Every admitted conversation receives unrestricted passwordless sudo on the real host. Root can read local files and credentials, change services and defeat cooperative limits. Returning to protected does not clean or restore the machine.` })
 
   for (const id of listChanges(saved.exclusiveNodes ?? [], draft.exclusiveNodes ?? []).added)
     lines.push({ kind: 'power', section: 'nodes', text: `Added: exclusive reservation on ${node(id)}. This agent will be able to suspend other agents’ conversations on this machine.` })
@@ -555,6 +567,8 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
     lines.push({ kind: 'power', section: 'nodes', text: `Added: native execution. ${nativeHelp}` })
   if (draft.access.installation && !saved.access.installation)
     lines.push({ kind: 'power', section: 'powers', text: 'Added: installation management. This agent will be able to create and change agents, projects, skills, MCP connections, missions and runs on your behalf.' })
+  if (draft.access.delegation && !saved.access.delegation)
+    lines.push({ kind: 'power', section: 'powers', text: 'Added: task delegation. This agent will be able to start conversations that report back to it, on any coding agent and model, as itself or as an agent whose access it covers.' })
   for (const id of listChanges(saved.plugins ?? [], draft.plugins ?? []).added)
     lines.push({ kind: 'secret', section: 'plugins', text: `Added: ${connectionLabel(id, context)} — effective immediately, including in running conversations.` })
 
@@ -581,6 +595,8 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
     removed.push(connectionLabel(id, context))
   if (saved.access.installation && !draft.access.installation)
     removed.push('installation management')
+  if (saved.access.delegation && !draft.access.delegation)
+    removed.push('task delegation')
   if (backendOf(saved.access) === 'native' && backendOf(draft.access) !== 'native')
     removed.push('native execution')
   if (sandboxStrictness[draft.access.sandbox] > sandboxStrictness[saved.access.sandbox]) {
@@ -738,6 +754,8 @@ export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 
     parts.push('Exclusive reservation')
   if (access.installation)
     parts.push('Installation management')
+  if (access.delegation)
+    parts.push('Task delegation')
   return parts.join(' · ')
 }
 

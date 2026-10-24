@@ -1,0 +1,165 @@
+{
+  "date": "2026-10-24",
+  "candidateSourceTree": "f9569b4339426b479bb03a7568fd76ef4ec1238d",
+  "reference": "One run_finished condition at the same source tree; groups use all with 2 or 8 distinct run_finished conditions.",
+  "conditions": {
+    "host": "Native shared Linux 7.2.9-arch1-1 x86_64; Intel Core i9-14900K; 32 logical CPUs; 98638380 kB RAM",
+    "filesystem": "ext4; temporary SQLite fixtures under /tmp; existing schema, JSON encoding and journal settings",
+    "rust": "1.97.1; dev/test profile; debug info enabled; CARGO_INCREMENTAL=0",
+    "startedAt": "2026-10-24T19:13:22Z",
+    "hostLoadAverage": [
+      "10.91",
+      "12.05",
+      "16.07"
+    ],
+    "isolation": "Compilation, web tests and Android tests finished before timing. Other host workloads were not reserved or controlled.",
+    "cache": "500 warm reads, 20 fresh SQLite pools with separately timed pool opens and first reads; OS caches not evicted. Fresh-pool reads are not cold-disk measurements.",
+    "workload": "One caller chat plus 1, 2 or 8 target runs. 100 distinct registrations/replacements; 100 idle group scans; 20 progress sequences, one target finishing per tick. Setup, target-state writes and registration of each progress sequence are outside progress timing.",
+    "cpu": "CLOCK_PROCESS_CPUTIME_ID over all process threads. No child processes or external condition queries in the timed native-run workloads.",
+    "referenceProgress": "The single-condition reference is scanned but never written by tick_groups. Its real scheduler resumption is not included; this metric measures only the additional grouped observer path.",
+    "network": "No production network requests, GitHub calls, model tokens, object storage or VM resume latency are measured."
+  },
+  "samples": [
+    {
+      "conditions": 1,
+      "externalProbeRequests": 0,
+      "finalWakeupBytes": 277,
+      "firstProgressWakeupBytes": 276,
+      "freshPoolFirstRead": {
+        "meanMs": 0.54238105,
+        "medianMs": 0.546045,
+        "p95Ms": 0.589333,
+        "samples": 20
+      },
+      "freshPoolOpen": {
+        "meanMs": 4.9407162499999995,
+        "medianMs": 4.481566,
+        "p95Ms": 8.186572,
+        "samples": 20
+      },
+      "idleGroupTick": {
+        "meanMs": 0.18480084000000002,
+        "medianMs": 0.189209,
+        "p95Ms": 0.271339,
+        "samples": 100
+      },
+      "idleGroupTickProcessCpuMs": 19.584846999999968,
+      "pendingChatBytes": 795,
+      "pendingWakeupBytes": 276,
+      "progressGroupTick": {
+        "meanMs": 0.2688345,
+        "medianMs": 0.264152,
+        "p95Ms": 0.328544,
+        "samples": 20
+      },
+      "progressGroupTickProcessCpuMs": 5.585733000000346,
+      "registration": {
+        "meanMs": 6.39082134,
+        "medianMs": 5.912819,
+        "p95Ms": 6.979716000000001,
+        "samples": 100
+      },
+      "registrationProcessCpuMs": 289.416978,
+      "warmRead": {
+        "meanMs": 0.04629804000000002,
+        "medianMs": 0.048142000000000004,
+        "p95Ms": 0.066839,
+        "samples": 500
+      }
+    },
+    {
+      "conditions": 2,
+      "externalProbeRequests": 0,
+      "finalWakeupBytes": 1409,
+      "firstProgressWakeupBytes": 600,
+      "freshPoolFirstRead": {
+        "meanMs": 0.5072975,
+        "medianMs": 0.5145679999999999,
+        "p95Ms": 0.584277,
+        "samples": 20
+      },
+      "freshPoolOpen": {
+        "meanMs": 4.6193415,
+        "medianMs": 4.516555,
+        "p95Ms": 4.638383999999999,
+        "samples": 20
+      },
+      "idleGroupTick": {
+        "meanMs": 0.6561432899999999,
+        "medianMs": 0.582762,
+        "p95Ms": 0.884404,
+        "samples": 100
+      },
+      "idleGroupTickProcessCpuMs": 66.78459699999985,
+      "pendingChatBytes": 930,
+      "pendingWakeupBytes": 410,
+      "progressGroupTick": {
+        "meanMs": 5.218274750000001,
+        "medianMs": 5.07425,
+        "p95Ms": 6.645707,
+        "samples": 40
+      },
+      "progressGroupTickProcessCpuMs": 66.72030299999915,
+      "registration": {
+        "meanMs": 6.709008000000001,
+        "medianMs": 6.567769,
+        "p95Ms": 7.78021,
+        "samples": 100
+      },
+      "registrationProcessCpuMs": 332.6884540000001,
+      "warmRead": {
+        "meanMs": 0.06299779800000008,
+        "medianMs": 0.064928,
+        "p95Ms": 0.079991,
+        "samples": 500
+      }
+    },
+    {
+      "conditions": 8,
+      "externalProbeRequests": 0,
+      "finalWakeupBytes": 4619,
+      "firstProgressWakeupBytes": 1044,
+      "freshPoolFirstRead": {
+        "meanMs": 0.6304409000000001,
+        "medianMs": 0.630549,
+        "p95Ms": 0.689505,
+        "samples": 20
+      },
+      "freshPoolOpen": {
+        "meanMs": 166.55375895000003,
+        "medianMs": 168.489053,
+        "p95Ms": 365.32633599999997,
+        "samples": 20
+      },
+      "idleGroupTick": {
+        "meanMs": 1.932975480000001,
+        "medianMs": 1.679163,
+        "p95Ms": 2.743737,
+        "samples": 100
+      },
+      "idleGroupTickProcessCpuMs": 194.47101500000008,
+      "pendingChatBytes": 1373,
+      "pendingWakeupBytes": 854,
+      "progressGroupTick": {
+        "meanMs": 16.500186399999997,
+        "medianMs": 7.380785,
+        "p95Ms": 87.214288,
+        "samples": 160
+      },
+      "progressGroupTickProcessCpuMs": 578.5207079999991,
+      "registration": {
+        "meanMs": 17.306139759999997,
+        "medianMs": 12.172539,
+        "p95Ms": 16.491075000000002,
+        "samples": 100
+      },
+      "registrationProcessCpuMs": 852.9928649999999,
+      "warmRead": {
+        "meanMs": 0.08670232399999994,
+        "medianMs": 0.08475999999999999,
+        "p95Ms": 0.114387,
+        "samples": 500
+      }
+    }
+  ]
+}

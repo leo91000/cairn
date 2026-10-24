@@ -185,6 +185,7 @@ fun agentChanges(original: Agent, draft: AgentDraft): List<AgentSection> {
             add(AgentSection.Nodes)
         if (after.sandbox != before.sandbox) add(AgentSection.Sandbox)
         if (after.installation != before.installation) add(AgentSection.Powers)
+        if ((after.delegation == true) != (before.delegation == true)) add(AgentSection.Powers)
     }
 }
 
@@ -329,12 +330,25 @@ fun Agent.withNodeRun(node: String, run: Boolean, readOnlyGrants: Boolean = fals
  * removed except future machines. Without the machine list (it failed to load), nothing changes:
  * restricting then would keep the current runner only.
  */
-fun AccessPolicy.withAllNodes(all: Boolean, nodes: List<ExecutionNode>): AccessPolicy =
+fun AccessPolicy.withAllNodes(
+    all: Boolean,
+    nodes: List<ExecutionNode>,
+    agentId: String = "",
+): AccessPolicy =
     when {
         all -> copy(nodes = null)
         this.nodes != null -> this
         nodes.isEmpty() -> this
-        else -> copy(nodes = agentNodeChoices(nodes, backend).map { it.id })
+        else ->
+            copy(
+                nodes =
+                    agentNodeChoices(nodes, backend)
+                        .filter {
+                            it.nativeModeRequest?.mode != "administrator" ||
+                                agentId in it.nativeReviewedAgents
+                        }
+                        .map { it.id }
+            )
     }
 
 fun Agent.withExclusive(node: String, granted: Boolean): Agent =
@@ -481,6 +495,7 @@ fun agentAccessSummary(
             )
                 add("Exclusivité")
             if (access.installation) add("Gestion de l’installation")
+            if (access.delegation == true) add("Délégation de tâches")
         }
         .joinToString(" · ")
 }
@@ -701,6 +716,7 @@ fun agentReductions(
         .filter { it !in edited.plugins }
         .forEach { id -> add(pluginGrantLabel(id, resources.catalog)) }
     if (before.installation && !after.installation) add("gestion de l’installation")
+    if (before.delegation == true && after.delegation != true) add("délégation de tâches")
     if (before.backend == NATIVE_BACKEND && after.backend != NATIVE_BACKEND) add("exécution native")
     if ((sandboxStrictness[after.sandbox] ?: 0) > (sandboxStrictness[before.sandbox] ?: 0))
         add("mode d’exécution « ${sandboxLabel(after.sandbox)} »")
@@ -728,6 +744,17 @@ private fun runsSentence(runs: AgentPreviewRuns): String {
 }
 
 /** The review shown before saving: powers and secrets added, and work a reduction stops. */
+fun Agent.nativeReviewNodes(resources: AgentResources): List<String> =
+    if (access.backend != NATIVE_BACKEND || access.nodes == null) emptyList()
+    else
+        resources.nodes
+            .filter {
+                it.nativeModeRequest?.mode == "administrator" &&
+                    it.id in access.nodes &&
+                    id !in it.nativeReviewedAgents
+            }
+            .map { it.id }
+
 fun agentReview(
     original: Agent,
     edited: Agent,
@@ -737,6 +764,15 @@ fun agentReview(
     val before = original.access
     val after = edited.access
     val nodes = agentNodeChoices(resources.nodes)
+    edited.nativeReviewNodes(resources).forEach { id ->
+        val name = resources.nodes.find { it.id == id }?.name ?: id
+        add(
+            ReviewLine(
+                ReviewKind.Power,
+                "Ajout : accès administrateur à $name. Toutes ses conversations admises auront sudo sans mot de passe sur l’hôte réel. Root peut lire les fichiers et identifiants locaux, modifier les services et contourner les limites coopératives. Le retour en protégé ne nettoie ni ne restaure la machine.",
+            )
+        )
+    }
     if (after.backend == NATIVE_BACKEND && before.backend != NATIVE_BACKEND)
         add(
             ReviewLine(
@@ -760,6 +796,13 @@ fun agentReview(
             ReviewLine(
                 ReviewKind.Power,
                 "Ajout : gestion de l’installation. Cet agent pourra créer et modifier les agents (y compris leurs permissions), projets, skills, connexions MCP, missions et exécutions de toute l’installation.",
+            )
+        )
+    if (after.delegation == true && before.delegation != true)
+        add(
+            ReviewLine(
+                ReviewKind.Power,
+                "Ajout : délégation de tâches. Cet agent pourra lancer des conversations qui lui rendent compte, sur tout agent de code et modèle, en tant que lui-même ou qu’un agent dont il couvre les accès.",
             )
         )
     edited.plugins
@@ -866,6 +909,7 @@ fun rebaseAgent(
                 mcps = mergeList(a.mcps, m.mcps, t.mcps),
                 mcpTools = tools,
                 installation = pick(a.installation, m.installation, t.installation),
+                delegation = pick(a.delegation, m.delegation, t.delegation),
                 sandbox = pick(a.sandbox, m.sandbox, t.sandbox),
                 backend = pick(a.backend, m.backend, t.backend),
             ),
@@ -923,6 +967,7 @@ fun agentSaveBody(
      * so an installation upgraded between load and save never reads them as "none".
      */
     liveGrants: Boolean = true,
+    nativeNodeReviews: List<String> = emptyList(),
 ): JsonObject {
     val fields =
         wireJson
@@ -947,5 +992,6 @@ fun agentSaveBody(
     access["mcps"] = list(agent.access.mcps)
     fields["access"] = JsonObject(access)
     if (reapprove.isNotEmpty()) fields["reapproveDelegations"] = list(reapprove)
+    if (nativeNodeReviews.isNotEmpty()) fields["nativeNodeReviews"] = list(nativeNodeReviews)
     return JsonObject(fields)
 }

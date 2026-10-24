@@ -35,6 +35,10 @@ pub(super) async fn invoke(
         "update_node" => {
             nodes::configure_node(s, text(&args, "nodeId"), args["node"].clone(), authorize).await
         }
+        "change_native_node_mode" => {
+            nodes::native_mode::change(s, text(&args, "nodeId"), args["change"].clone(), authorize)
+                .await
+        }
         "update_node_storage" => {
             nodes::configure_storage(s, text(&args, "nodeId"), &args["storage"], authorize).await
         }

@@ -35,6 +35,7 @@ import {
   grantablePackages,
   isolationNote,
   mainLockedSections,
+  nativeReviewNodes,
   needsReview,
   newAgentDraft,
   nodeName,
@@ -138,7 +139,7 @@ const serverError = ref('')
 const conflict = ref(false)
 const attempted = ref(false)
 const fieldErrors = ref<Partial<Record<SectionId, string>>>({})
-const review = ref<{ lines: ReviewLine[], delegations: DelegationEffect[] } | null>(null)
+const review = ref<{ lines: ReviewLine[], delegations: DelegationEffect[], nativeNodes: string[] } | null>(null)
 const reviewError = ref('')
 const leaving = ref(false)
 const pendingLeave = ref<string | null>(null)
@@ -146,6 +147,7 @@ const deleting = ref(false)
 const heading = ref<HTMLElement>()
 
 const context = computed<Context>(() => ({
+  agentId: agent.value?.id,
   projects: state.projects,
   skills: state.skills,
   mcps: state.mcps,
@@ -217,7 +219,7 @@ const pluginSummary = computed(() => {
 
   return [...counts].map(([name, count]) => name === '1Password' ? `1Password: ${count} ${count === 1 ? 'account' : 'accounts'}` : count > 1 ? `${name} (${count})` : name).join(' · ')
 })
-const powers = computed(() => exclusiveNodes.value.length + Number(access.value.installation))
+const powers = computed(() => exclusiveNodes.value.length + Number(access.value.installation) + Number(access.value.delegation))
 const mcpCount = computed(() => access.value.mcps === null ? state.mcps.length : access.value.mcps.length)
 // Connections whose tools are limited to a chosen few, also under "All, including future".
 const limitedMcps = computed(() => state.mcps.filter(connection => connection.id in access.value.mcpTools && (access.value.mcps === null || access.value.mcps.includes(connection.id))))
@@ -237,7 +239,7 @@ const summaries = computed<Record<SectionId, { short: string, long: string }>>((
     ? { short: 'Unavailable', long: 'Not loaded' }
     : { short: `${backend.value === 'native' ? 'Native · ' : ''}${short(access.value.nodes, availableNodes.value.length)}`, long: `${backend.value === 'native' ? 'Native process · ' : ''}${selectionSummary(access.value.nodes, availableNodes.value.length)}${exclusiveNodes.value.length ? ` · exclusive on ${exclusiveNodes.value.length}` : ''}` },
   sandbox: { short: sandbox.value.label, long: sandbox.value.label },
-  powers: { short: powers.value ? String(powers.value) : nodesError.value ? 'Unavailable' : 'None', long: [nodesError.value ? 'Exclusive reservation not loaded' : exclusiveNodes.value.length ? 'Exclusive reservation' : '', access.value.installation ? 'Installation management' : ''].filter(Boolean).join(' · ') || 'None' },
+  powers: { short: powers.value ? String(powers.value) : nodesError.value ? 'Unavailable' : 'None', long: [nodesError.value ? 'Exclusive reservation not loaded' : exclusiveNodes.value.length ? 'Exclusive reservation' : '', access.value.installation ? 'Installation management' : '', access.value.delegation ? 'Task delegation' : ''].filter(Boolean).join(' · ') || 'None' },
   advanced: { short: draft.value.timeoutMinutes ? `${draft.value.timeoutMinutes} min` : '', long: draft.value.timeoutMinutes ? `Time limit: ${draft.value.timeoutMinutes} minutes` : 'No time limit' },
 }))
 
@@ -310,6 +312,15 @@ const overview = computed(() => [
         summary: access.value.installation ? 'On' : 'Off',
         detail: access.value.installation ? 'Manages agents, projects, skills, MCP connections, missions and runs' : 'Cannot manage agents, projects or missions',
         chip: access.value.installation ? { tone: 'power' as const, label: 'Power' } : undefined,
+        power: true,
+      },
+      {
+        id: 'delegation',
+        section: 'powers' as const,
+        title: 'Task delegation',
+        summary: access.value.delegation ? 'On' : 'Off',
+        detail: access.value.delegation ? 'Starts conversations on other coding agents and models that report back to it' : 'Cannot hand tasks to other conversations',
+        chip: access.value.delegation ? { tone: 'power' as const, label: 'Power' } : undefined,
         power: true,
       },
       {
@@ -517,7 +528,7 @@ watch(draft, () => {
     validate()
 }, { deep: true })
 
-function body(reapprove: string[] = []) {
+function body(reapprove: string[] = [], nativeNodes: string[] = []) {
   // Also set once a new agent exists: a recovery update must not overwrite another client's change.
   const revision = agent.value?.revision
   // Only a loaded connection list says which ones were deleted.
@@ -527,6 +538,7 @@ function body(reapprove: string[] = []) {
     ...(legacy.value ? profile : { ...profile, exclusiveNodes: draft.value.exclusiveNodes, plugins: draft.value.plugins }),
     ...(revision && !legacy.value ? { revision } : {}),
     ...(reapprove.length ? { reapproveDelegations: reapprove } : {}),
+    ...(nativeNodes.length ? { nativeNodeReviews: nativeNodes } : {}),
   }
 }
 
@@ -571,7 +583,7 @@ async function requestSave() {
   // else saves directly.
   if (needsReview(lines, current)) {
     reviewError.value = ''
-    review.value = { lines, delegations: effects }
+    review.value = { lines, delegations: effects, nativeNodes: nativeReviewNodes(draft.value, context.value) }
     return
   }
 
@@ -595,6 +607,7 @@ function failed(e: unknown) {
 }
 
 async function commit(reapprove: string[]) {
+  const nativeNodes = review.value?.nativeNodes ?? []
   busy.value = true
   serverError.value = ''
   reviewError.value = ''
@@ -604,7 +617,7 @@ async function commit(reapprove: string[]) {
   try {
     if (isNew.value) {
       result = await creation.save<Agent>('/agents', {
-        body: () => body(reapprove),
+        body: () => body(reapprove, nativeNodes),
         // A replayed creation updates the agent it created, at that agent's revision.
         onCreated: (created) => { agent.value = created },
       })
@@ -612,7 +625,7 @@ async function commit(reapprove: string[]) {
     else if (profileChanged) {
       result = await api<Agent>(`/agents/${id.value}`, {
         method: 'PUT',
-        body: JSON.stringify(body(reapprove)),
+        body: JSON.stringify(body(reapprove, nativeNodes)),
       })
     }
     else {
@@ -1132,6 +1145,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               v-model:access="draft.access"
               v-model:exclusive-nodes="draft.exclusiveNodes"
               :nodes="nodes"
+              :agent-id="agent?.id"
               :read-only-grants="legacy ? updateForGrants : ''"
             />
           </template>
@@ -1174,6 +1188,19 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
                 </p>
               </div>
               <UiSwitch v-model="draft.access.installation" power label="Installation management" />
+            </div>
+            <div class="flex items-center justify-between gap-4 rounded-xl border border-power/30 bg-surface px-5 py-4 phone:px-4">
+              <div class="min-w-0">
+                <p class="flex flex-wrap items-center gap-2 text-sm font-semibold">
+                  Task delegation<AccessChip v-if="access.delegation" tone="power">
+                    Power
+                  </AccessChip>
+                </p>
+                <p class="mt-1 text-xs leading-relaxed text-muted">
+                  Hand tasks from a conversation to new conversations that report back to it, on any coding agent and model. Each runs as this agent, or as another agent whose access this one covers, in its own workspace. Delegated conversations cannot delegate further, and at most 5 work at a time.
+                </p>
+              </div>
+              <UiSwitch v-model="draft.access.delegation" power label="Task delegation" />
             </div>
             <div class="flex items-center justify-between gap-4 rounded-xl border border-power/30 bg-surface px-5 py-4 phone:px-4">
               <div class="min-w-0">

@@ -138,7 +138,7 @@ state, diagnose and retry it or apply a reviewed forward fix. Never lower
 Manager/runner rollout uses the existing automatic migration gate. This release
 does not create or restore backups, convert conversations, or grant host trust.
 
-## Current transition: epochs 3–11 to 12
+## Retained transition: epochs 3–11 to 12
 
 Epoch 12 adds optional `[setup]` declarations to installed plugin manifests.
 Previous binaries reject this field, so SQLite advances from version 10 to 11
@@ -161,3 +161,25 @@ package files, vault and identity, then retry this candidate or deploy a reviewe
 forward fix. Never lower SQLite `user_version`, the epoch or the legacy tree, or
 start an older manager against the migrated installation. Merging does not
 release or deploy an installation.
+
+## Current transition: epochs 3–12 to 13
+
+Epoch 13 adds native node privilege requests, observed generation/state and
+owner-reviewed administrator admission. SQLite advances from 11 to 12 before
+startup reads any records. Existing records remain unchanged: absent mode means
+protected, absent reviews never grant administrator access. Existing tasks,
+provenance, files and history are preserved. There is no default elevation.
+`upgrades_version_eleven_preserving_protected_native_defaults` verifies this
+preservation and the older-version fence. The retained transition regressions
+remain part of exact-tree validation.
+
+Native supervisors require the matching new release through the reviewed epoch
+update procedure described above; no release or host update is performed by this
+PR. The controller writes `nativeModeProtocol: 1` in its strict on-disk budget;
+older native binaries reject this field. Public health keeps the ordinary budget
+shape. New controllers read both budgets. Supervisor state records pending,
+applied or failed mode transitions atomically, and refuses unconfirmed plans.
+Failure recovery is a forward fix with the candidate and state retained. Never
+lower the epoch/database version or remove the native marker to restart an older
+controller. Returning to protected is a runtime mode change, not data rollback or
+host restoration. See [native administrator](NATIVE-ADMINISTRATOR.md).

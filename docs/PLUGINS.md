@@ -123,13 +123,15 @@ Scripts receive validated settings in their `start` event; credentials stay in t
 
 Every plugin uses the same connection model: name, settings, optional credential
 (encrypted in the vault), and, when the package can start conversations, an owner
-delegation: one dedicated agent (one project at most, no installation access), the
-people allowed (listed, approved as they ask, or anyone), and an hourly message limit.
-“Anyone” is meant for public channels such as customer support: it requires an agent
-with a read-only sandbox and no installation, MCP or plugin access (GitHub, 1Password…)
-(rechecked before every effect, so a later grant suspends the connection), adds a
-per-person hourly limit, and lets only listed people or a conversation's starter
-answer for it or stop it. The
+delegation: the agent that answers, the people allowed (listed, approved as they ask,
+or anyone), and an hourly message limit. Any agent can answer
+([ADR-0059](adr/0059-owner-chosen-agents-for-bot-delegation.md)); the setup assistant
+warns when it can manage the installation or open several projects, and, for anyone,
+when it can also write, run commands or use MCP connections or plugins (GitHub,
+1Password…). The agent must be able to open the delegation's project. “Anyone” is
+meant for public channels such as customer support: it adds a per-person hourly
+limit, and lets only listed people or a conversation's starter answer for it or stop
+it. The
 connection is bound to the owner's current access and the agent's recorded policy.
 The web and Android render this delegation, the people allowed and pending requests,
 hourly usage and recent activity for every package with `conversations.submit`.
@@ -671,7 +673,9 @@ properties.sha = { type = "string", pattern = "^[0-9a-f]{40}$" }
 `wait_for` provides native `delay`, `at` and `run_finished` conditions. Plugins add
 service-specific conditions through the same `condition` handler; no host-side
 service-specific dispatch is needed. Temporal waits take no `timeoutSeconds`;
-plugin conditions require it.
+plugin conditions require it. Agents can group a plugin condition with other
+external conditions (`mode: all` or `any`); each grouped condition is observed and
+scheduled on its own, so the handler is unchanged.
 
 Granted agents see each condition in `wait_for` as type `<plugin>_<name>` (plugin
 IDs have no `_`, so types never collide), with `projectId` when `project = true`; Cairn records the plugin
@@ -910,9 +914,8 @@ Adding a bot, on the web or Android:
    too) also delivers replies in its threads or to the bot; “Answer every message in
    the channel” turns it on.
 4. **People, agent and limits**, like every delegating plugin: approve people as they
-   ask (recommended), only listed Discord user IDs, or anyone with a read-only agent;
-   an agent restricted to one project at most without installation access; an hourly
-   limit.
+   ask (recommended), only listed Discord user IDs, or anyone; any agent, with a
+   warning about the access it gives these people; an hourly limit.
 
 The transport worker follows Discord's Gateway lifecycle, checked against
 `@discordjs/ws`:

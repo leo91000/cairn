@@ -310,6 +310,65 @@ test('a durable condition wait follows a dependency across restart and queue pau
   }
 })
 
+test('a grouped wait shows each result as it arrives and resumes once all are in', async ({ page, workspace }) => {
+  test.setTimeout(90000)
+  const agent = workspace.service.store.get('agents', '00000000-0000-4000-8000-000000000001')!
+  workspace.service.store.put('agents', { ...agent, access: { ...agent.access, installation: true } })
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Finish after both dependencies' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
+  const detail = await workspace.api(`/api/chats/${chat.id}`)
+  workspace.service.store.set('deployment-lease', 'grouped-wait-fixture', Date.now() + 120000)
+  try {
+    const [first, second] = await Promise.all(['First grouped dependency', 'Second grouped dependency'].map(async (name) => {
+      const task = await workspace.api('/api/tasks', 'POST', {
+        name,
+        prompt: 'Other work',
+        agentId: agent.id,
+        worktree: false,
+      })
+      return workspace.api(`/api/tasks/${task.id}/run`, 'POST', {})
+    }))
+    workspace.service.store.updateRun(first.id, { status: 'failed', finishedAt: Date.now() })
+    const conditions = [{ type: 'run_finished' as const, runId: first.id }, { type: 'run_finished' as const, runId: second.id }]
+    const wakeup = {
+      id: randomUUID(),
+      messageId: detail.run.chatExecution.messageId,
+      reason: 'Join both dependencies',
+      seconds: 420,
+      createdAt: Date.now(),
+      wakeAt: Date.now() + 420000,
+      condition: { type: 'group' as const, mode: 'all' as const, conditions },
+      members: [{}, {}],
+    }
+    workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, wakeup })
+    workspace.service.store.event(detail.run.id, 'chat.wait', wakeup.reason, wakeup)
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+    const card = page.locator('.chat-wait')
+    await expect(card).toContainText('Waiting for 2 results')
+    // The failure already counts as a result: Cairn records it while the other run is pending.
+    await expect(card.getByTestId('wait-member')).toHaveCount(2)
+    await expect(card.getByTestId('wait-member').first()).toContainText('The run failed')
+    await expect(card.getByTestId('wait-member').last()).toContainText('Waiting for it to finish')
+    await expect(card).toContainText('1/2')
+    await expect(page.getByRole('region', { name: 'Waiting', exact: true }).locator(`[data-fil-key="chat:${chat.id}"]`)).toContainText('1 of 2 results')
+    await expect(card.getByRole('link', { name: `Open run ${first.id.slice(0, 8)}` })).toHaveAttribute('href', new RegExp(`/runs/${first.id}$`))
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 844 })
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+    }
+
+    workspace.service.store.delete('deployment-lease')
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.summary, { timeout: 30000 }).toContain('Cairn resumed this conversation')
+    await expect(card).toContainText('All 2 results in')
+    await expect(card).toContainText('1 failed · 1 succeeded')
+  }
+  finally {
+    workspace.service.store.delete('deployment-lease')
+  }
+})
+
 test('verbose tool calls keep their action steps with abbreviated details', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
@@ -349,6 +408,36 @@ test('verbose tool calls keep their action steps with abbreviated details', asyn
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
     await page.screenshot({ path: test.info().outputPath(`abbreviated-tool-details-${width}.png`) })
   }
+})
+
+test('a delegated team row opens its child conversation directly', async ({ page, workspace }) => {
+  const parent = await workspace.api('/api/chats', 'POST', {})
+  const child = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${parent.id}/messages`, 'POST', {
+    id: randomUUID(),
+    text: 'Review the send queue.',
+  })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${parent.id}`)).run?.status, { timeout: 15000 }).toBe('succeeded')
+  const detail = await workspace.api(`/api/chats/${parent.id}`)
+  workspace.service.store.event(detail.run.id, 'chat.delegated', '', {
+    chatId: child.id,
+    title: 'Review on another coding agent',
+    agentId: child.agentId,
+    agentName: 'Reviewer',
+    provider: 'codex',
+    model: 'gpt-fixture-mini',
+    task: 'Review the pushed send queue changes.',
+  })
+  await page.goto(workspacePath(`/chats/${parent.id}`))
+  await authenticateWorkspace(page)
+  const team = page.getByTestId('subagent-team')
+  await expect(team).toContainText('1 delegated task')
+  const header = team.locator(':scope > button')
+  if (await header.getAttribute('aria-expanded') === 'false')
+    await header.click()
+  await team.getByRole('link', { name: /^Review on another coding agent,/ }).click()
+  await expect(page).toHaveURL(workspacePath(`/chats/${child.id}`))
+  await expectChatReady(page)
 })
 
 test('subagents show as a team with their own steps and report', async ({ page, workspace }) => {
@@ -582,29 +671,65 @@ test('a transient agent error shows a retry countdown and resumes without user i
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.retry?.attempt).toBe(1)
   const waiting = (await workspace.api(`/api/chats/${chat.id}`)).run
   expect(waiting.status).toBe('queued')
+  waiting.retry.nextAttemptAt = Date.now() + 60_000
+  workspace.service.store.updateRun(waiting.id, { retry: waiting.retry })
   // A retry keeps earlier conversation events, including an interrupted background wait.
   workspace.service.store.event(waiting.id, 'turn.waiting', '', {
     tasks: [{ id: 'old-build', description: 'Earlier background build' }],
   })
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
-  const notice = page.getByRole('status').filter({ hasText: /Temporary agent error\. Retrying in \d+ seconds \(attempt 1\/3\)\./ })
+  const notice = page.getByTestId('recovery-notice')
   await expect(notice).toBeVisible()
   // The failed attempt shows one card, marked as a temporary error Cairn retries itself.
   const failure = page.getByRole('note').filter({ hasText: 'workspace routing discovery timed out' })
   await expect(failure).toHaveCount(1)
-  await expect(failure).toContainText('Temporary error — automatic retry 1/3')
+  await expect(failure).toContainText('Temporary error — automatic retry 1/5')
   await expect(page.locator('.agent-waiting')).toHaveCount(0)
   await expect(page.getByText('Background task', { exact: true })).toHaveCount(0)
   const before = await notice.textContent()
   await expect.poll(() => notice.textContent()).not.toBe(before)
-  await page.screenshot({ path: test.info().outputPath('agent-retry-countdown.png') })
+  for (const colorScheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme })
+    for (const width of [1280, 390, 320]) {
+      await page.setViewportSize({ width, height: 900 })
+      await expect(notice).toBeVisible()
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+      await page.screenshot({ path: test.info().outputPath(`agent-retry-${colorScheme}-${width}.png`) })
+    }
+  }
+
   expect((await workspace.api(`/api/chats/${chat.id}`)).paused).toBe(false)
   workspace.service.store.updateRun(waiting.id, { retry: { ...waiting.retry, nextAttemptAt: Date.now() } })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
   await expect(page.getByText('Ready for the next step.', { exact: false }).last()).toBeVisible()
   await expect(notice).toHaveCount(0)
   await expect(failure).toHaveCount(1)
+})
+
+test('cancelling automatic recovery pauses the conversation and preserves its work', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+    id: randomUUID(),
+    text: 'fixture:agent-failures:[{"code":"server_overloaded","message":"Please try again"}]',
+  })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.retry?.attempt).toBe(1)
+  const waiting = (await workspace.api(`/api/chats/${chat.id}`)).run
+  workspace.service.store.updateRun(waiting.id, { retry: { ...waiting.retry, nextAttemptAt: Date.now() + 60_000 } })
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const notice = page.getByTestId('recovery-notice')
+  await expect(notice.getByText('Retry 1 of 5')).toBeVisible()
+  await notice.getByText('What happened').click()
+  await expect(notice.getByText('Please try again')).toBeVisible()
+  await notice.getByRole('button', { name: 'Cancel retry' }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).paused).toBe(true)
+  await expect(notice).toHaveCount(0)
+  const stopped = (await workspace.api(`/api/chats/${chat.id}`)).run
+  expect(stopped.id).toBe(waiting.id)
+  expect(stopped.workspace).toBe(waiting.workspace)
+  expect(stopped.retry).toBeNull()
+  expect(stopped.status).toBe('cancelled')
 })
 
 test('native Codex reconnect notices remain visible until work continues', async ({ page, workspace }) => {

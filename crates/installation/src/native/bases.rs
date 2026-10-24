@@ -385,7 +385,7 @@ impl Bases {
         if stop.is_cancelled() {
             return Err(Error::unavailable("Native base clone stopped."));
         }
-        let lease = environment::lock(&self.state, run, "Native disk is active.").await?;
+        let lease = environment::lock(&self.state, run, super::block::DISK_BUSY).await?;
         for name in [
             "lazy",
             "data.ext4",
