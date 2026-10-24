@@ -64,6 +64,7 @@ rtc = { version = "=0.21.0", default-features = false, features = [ "crypto-aws-
 tokio-tungstenite = "0.29"
 webauthn-authenticator-rs = { version = "0.5.4", features = [ "softpasskey" ] }
 cairn-installation = { path = "../installation" }
+cairn-node-gateway = { path = "../node-gateway" }
 tempfile = "3"
 tokio-util = { version = "0.7", features = [ "rt" ] }
 webrtc = { version = "=0.21.0", default-features = false, features = [

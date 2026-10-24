@@ -2,6 +2,7 @@
 //! Requests are independent: future streaming frames can share their request ID.
 pub mod data_channel;
 pub mod direct;
+pub mod nodes;
 pub mod slugs;
 
 use serde::{Deserialize, Serialize};
@@ -199,11 +200,26 @@ pub enum Frame {
         delivered: bool,
     },
     // Version 5 only. Beacon asks the installation to accept a node channel by
-    // opening its own authenticated WebSocket for this ID.
+    // opening its own authenticated WebSocket for this ID. The node and the
+    // manager speak TLS inside it, so Beacon carries bytes it cannot read.
     NodeChannel {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         address: Option<String>,
+    },
+    // Version 5 only. Beacon forwards a node's WebRTC offer, with every
+    // candidate already gathered, so the node can reach the manager directly.
+    NodeOffer {
+        id: String,
+        sdp: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        address: Option<String>,
+    },
+    // The installation's complete answer, or no SDP to refuse the offer.
+    NodeAnswer {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sdp: Option<String>,
     },
 }
 

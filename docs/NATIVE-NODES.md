@@ -19,8 +19,8 @@ The installation manager and its S3 storage must be configured normally.
 
 As the installation owner, open Nodes, add a machine and choose Native process.
 Use the generated installer on that node and enter the single-use code when asked.
-Without a direct manager address, it first installs the node gateway that reaches
-the manager through Beacon ([additional execution nodes](DEPLOYMENT.md#additional-execution-nodes)).
+Without a direct manager address, it first installs the node gateway, which Beacon
+introduces to the manager ([additional execution nodes](DEPLOYMENT.md#additional-execution-nodes)).
 The installer creates `cairn-workload`, installs a root-owned systemd controller,
 and leaves native execution disabled. In Configure, explicitly enable native work,
 select trusted people and conservative CPU/RAM/disk limits. Configure a native

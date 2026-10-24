@@ -394,6 +394,12 @@ pub async fn router_with_installation_hosts(
                     get(relay::nodes::connect),
                 )
                 .route(
+                    "/api/relay/{installation}/nodes/direct",
+                    get(relay::nodes::ice)
+                        .post(relay::nodes::offer)
+                        .layer(relay::nodes::offer_limit()),
+                )
+                .route(
                     "/api/relay/{installation}/nodes/{channel}/accept",
                     get(relay::nodes::accept),
                 ),

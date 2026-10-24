@@ -1,12 +1,15 @@
-//! Node channels: an execution node reaches its manager through Beacon without
-//! a manager address, certificate or incoming port. Beacon pairs the node's
-//! WebSocket with one the installation opens for it, and copies the bytes.
-//! The node and manager keep authenticating each HTTP request themselves.
+//! Nodes added without a manager address. Beacon introduces a node to its
+//! manager: it forwards the node's WebRTC offer and the installation's answer,
+//! after which they talk directly. When the networks prevent that, Beacon
+//! pairs the node's WebSocket with one the installation opens and copies the
+//! bytes: TLS that ends on the manager certificate the node pinned, so Beacon
+//! cannot read them. The manager still authenticates every node request.
 use super::{Tunnel, active_slots, identity_is_current};
 use crate::{ApiError, Service, digest};
 use axum::{
+    Json,
     extract::{
-        ConnectInfo, Path, State, WebSocketUpgrade,
+        ConnectInfo, DefaultBodyLimit, Path, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
     http::{HeaderMap, StatusCode},
@@ -19,6 +22,8 @@ use futures_util::{
     SinkExt, StreamExt,
     stream::{SplitSink, SplitStream},
 };
+use serde::Deserialize;
+use serde_json::{Value, json};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::{oneshot, watch};
 
@@ -27,6 +32,9 @@ const HEARTBEAT: Duration = Duration::from_secs(15);
 const SILENCE: Duration = Duration::from_secs(45);
 // Python supervisors open one channel per request; this still bounds abuse.
 const OPENED_PER_MINUTE: i32 = 600;
+// A node offers again only when its direct connection ends.
+const OFFERS_PER_MINUTE: i32 = 30;
+const ANSWER_TIMEOUT: Duration = Duration::from_secs(15);
 
 const OFFLINE: ApiError = ApiError::Http(
     StatusCode::SERVICE_UNAVAILABLE,
@@ -38,6 +46,96 @@ const BUSY: ApiError = ApiError::Http(
     "Too many node connections to this installation. Try again later.",
 );
 
+fn installation_id(installation: &str) -> Result<(), ApiError> {
+    uuid::Uuid::parse_str(installation)
+        .map(|_| ())
+        .map_err(|_| ApiError::Http(StatusCode::NOT_FOUND, "Installation not found"))
+}
+
+/// The STUN server a node uses to find its public address before offering.
+pub(crate) async fn ice(
+    State(service): State<Service>,
+    Path(installation): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    installation_id(&installation)?;
+    Ok(Json(json!({
+        "iceServers": [{ "urls": [service.relay.stun_url(&service.origin)] }],
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Offer {
+    sdp: String,
+}
+
+pub(crate) fn offer_limit() -> DefaultBodyLimit {
+    DefaultBodyLimit::max(cairn_protocol::nodes::MAX_SDP + 1024)
+}
+
+/// Forwards a node's offer, with its candidates, and returns the
+/// installation's answer. The pinned DTLS certificate in that answer is what
+/// the node trusts, not Beacon.
+pub(crate) async fn offer(
+    State(service): State<Service>,
+    Path(installation): Path<String>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(input): Json<Offer>,
+) -> Result<Json<Value>, ApiError> {
+    installation_id(&installation)?;
+    if input.sdp.len() > cairn_protocol::nodes::MAX_SDP {
+        return Err(ApiError::Http(StatusCode::BAD_REQUEST, "Offer too large"));
+    }
+    let address = crate::network::rate_limit_address(peer.ip());
+    crate::consume_limit(
+        &service.pool,
+        &format!("node-offer:{address}"),
+        OFFERS_PER_MINUTE,
+    )
+    .await?;
+    let tunnel = current_tunnel(&service, &installation)?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let (reply, answer) = oneshot::channel();
+    {
+        let mut offers = tunnel.node_offers.lock().unwrap();
+        if offers.len() >= cairn_protocol::nodes::MAX_PEERS {
+            return Err(BUSY);
+        }
+        offers.insert(id.clone(), reply);
+    }
+    let request = Frame::NodeOffer {
+        id: id.clone(),
+        sdp: input.sdp,
+        address: Some(peer.ip().to_string()),
+    };
+    let sent = tunnel.node_requests.try_send(request).is_ok();
+    let answer = if sent {
+        tokio::time::timeout(ANSWER_TIMEOUT, answer).await.ok()
+    } else {
+        None
+    };
+    tunnel.node_offers.lock().unwrap().remove(&id);
+    match answer {
+        Some(Ok(Some(sdp))) => Ok(Json(json!({ "sdp": sdp }))),
+        _ => Err(ApiError::Http(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The installation did not accept a direct connection.",
+        )),
+    }
+}
+
+fn current_tunnel(service: &Service, installation: &str) -> Result<Arc<Tunnel>, ApiError> {
+    service
+        .relay
+        .connections
+        .lock()
+        .unwrap()
+        .get(installation)
+        .cloned()
+        .filter(|tunnel| !*tunnel.stop.borrow() && tunnel.version >= NODE_CHANNEL_VERSION)
+        .ok_or(OFFLINE)
+}
+
 /// The node side. Anyone may ask; the manager behind it still requires its
 /// enrollment code, node token or disk grant for every request.
 pub(crate) async fn connect(
@@ -46,12 +144,7 @@ pub(crate) async fn connect(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
-    if uuid::Uuid::parse_str(&installation).is_err() {
-        return Err(ApiError::Http(
-            StatusCode::NOT_FOUND,
-            "Installation not found",
-        ));
-    }
+    installation_id(&installation)?;
     let address = crate::network::rate_limit_address(peer.ip());
     crate::consume_limit(
         &service.pool,
@@ -60,15 +153,7 @@ pub(crate) async fn connect(
     )
     .await?;
 
-    let tunnel = service
-        .relay
-        .connections
-        .lock()
-        .unwrap()
-        .get(&installation)
-        .cloned()
-        .filter(|tunnel| !*tunnel.stop.borrow() && tunnel.version >= NODE_CHANNEL_VERSION)
-        .ok_or(OFFLINE)?;
+    let tunnel = current_tunnel(&service, &installation)?;
     let permit = tunnel
         .node_slots
         .clone()

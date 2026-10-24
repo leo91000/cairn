@@ -114,17 +114,27 @@ while unclaimed. Successful reclamation rotates it and keeps the same ID.
 For deployment migration, interrupted claims and recovery after losing the
 private identity file, follow [DEPLOYMENT.md](DEPLOYMENT.md). Execution nodes
 keep their own node credentials on every request, whatever path carries them.
-A node enrolled without an address reaches the manager through a **node channel**
-(protocol 5): its local gateway opens `/api/relay/{installation}/nodes/connect`,
-Beacon sends `NodeChannel { id, address }` on this tunnel, the installation opens
-`/api/relay/{installation}/nodes/{id}/accept` with its bearer credential, and
-Beacon copies binary WebSocket messages between the two sockets. These channels
-are separate from the tunnel: they carry raw HTTP/1.1 for the node routes only,
-never `/api/*`, and close with the tunnel. Disk traffic of these nodes therefore
-transits Beacon, in memory only
-([ADR-0059](adr/0059-nodes-reach-their-manager-through-beacon.md)). A node enrolled
-with a reachable manager address (LAN, VPN or public HTTPS origin) bypasses
-Beacon. See [additional execution nodes](DEPLOYMENT.md#additional-execution-nodes).
+Beacon introduces a node enrolled without an address to its manager (protocol 5,
+[ADR-0059](adr/0059-nodes-introduced-by-beacon.md)):
+
+- **Direct.** The node's gateway posts a complete WebRTC offer to
+  `/api/relay/{installation}/nodes/direct`. Beacon sends `NodeOffer { id, sdp,
+  address }` on this tunnel and returns the installation's complete
+  `NodeAnswer { id, sdp }`, or 503 when it has none. The node and the manager
+  then exchange UDP without Beacon, one DataChannel per HTTP connection.
+- **Node channel.** Otherwise the gateway opens
+  `/api/relay/{installation}/nodes/connect`, Beacon sends `NodeChannel { id,
+  address }` on this tunnel, the installation opens
+  `/api/relay/{installation}/nodes/{id}/accept` with its bearer credential, and
+  Beacon copies binary WebSocket messages between the two sockets. These
+  channels are separate from the tunnel and close with it.
+
+Both paths carry raw HTTP/1.1 for the node routes only, never `/api/*`, and end
+on the manager's node certificate: DTLS directly, TLS inside the node channel.
+The node pins that certificate from its install command, so Beacon only ever
+relays ciphertext. A node enrolled with a reachable manager address (LAN, VPN or
+public HTTPS origin) bypasses Beacon. See
+[additional execution nodes](DEPLOYMENT.md#additional-execution-nodes).
 
 The installation initiates a TLS WebSocket at
 `/api/relay/{installation}/connect` with its bearer credential. `Hello` offers

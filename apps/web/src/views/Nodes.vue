@@ -152,7 +152,7 @@ function enroll() {
     knownBeforeEnrollment = new Set(nodes.value.map(node => node.id))
     enrollment.value = await api<NodeEnrollment>('/nodes/enrollments', {
       method: 'POST',
-      // Without an address, the machine reaches the manager through Cairn.
+      // Without an address, Beacon introduces the machine to the manager.
       body: JSON.stringify({ name: name.value, managerUrl: managerUrl.value.trim() || undefined, backend: enrollmentBackend.value }),
     })
   })
@@ -388,7 +388,7 @@ function statusLabel(node: ExecutionNode) {
           Connect a trusted Linux machine, then choose its execution backend and authorized agents.
         </p>
         <p class="text-sm text-muted">
-          The machine connects out through Cairn: no manager address, certificate or open port is needed. Its traffic with the manager, including conversation disks, passes through Cairn’s servers without being stored.
+          Cairn introduces the machine to the manager: no manager address, certificate or open port is needed. They connect directly when the networks allow it. Otherwise their traffic, including conversation disks, passes through Cairn’s servers encrypted end to end, so Cairn cannot read it.
         </p>
         <UiAlert v-if="error">
           {{ error }}
@@ -423,7 +423,7 @@ function statusLabel(node: ExecutionNode) {
               aria-describedby="node-manager-address-help"
             ></label>
             <p id="node-manager-address-help" class="mt-1 text-muted">
-              Optional. A LAN or VPN address keeps node traffic off Cairn’s servers. Use HTTPS with a certificate trusted by the node; HTTP is allowed only on loopback for local tests. This is the manager’s address, not the beacon app’s address.
+              Optional. A LAN or VPN address keeps node traffic off Cairn’s servers even when the networks prevent a direct connection. Use HTTPS with a certificate trusted by the node; HTTP is allowed only on loopback for local tests. This is the manager’s address, not the beacon app’s address.
             </p>
           </details>
           <UiButton type="submit" :disabled="busy">
