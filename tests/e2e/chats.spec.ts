@@ -320,14 +320,15 @@ test('a grouped wait shows each result as it arrives and resumes once all are in
   const detail = await workspace.api(`/api/chats/${chat.id}`)
   workspace.service.store.set('deployment-lease', 'grouped-wait-fixture', Date.now() + 120000)
   try {
-    const task = await workspace.api('/api/tasks', 'POST', {
-      name: 'Grouped dependency',
-      prompt: 'Other work',
-      agentId: agent.id,
-      worktree: false,
-    })
-    const first = await workspace.api(`/api/tasks/${task.id}/run`, 'POST', {})
-    const second = await workspace.api(`/api/tasks/${task.id}/run`, 'POST', {})
+    const [first, second] = await Promise.all(['First grouped dependency', 'Second grouped dependency'].map(async (name) => {
+      const task = await workspace.api('/api/tasks', 'POST', {
+        name,
+        prompt: 'Other work',
+        agentId: agent.id,
+        worktree: false,
+      })
+      return workspace.api(`/api/tasks/${task.id}/run`, 'POST', {})
+    }))
     workspace.service.store.updateRun(first.id, { status: 'failed', finishedAt: Date.now() })
     const conditions = [{ type: 'run_finished' as const, runId: first.id }, { type: 'run_finished' as const, runId: second.id }]
     const wakeup = {
