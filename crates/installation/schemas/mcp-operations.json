@@ -2657,5 +2657,56 @@
       ],
       "additionalProperties": false
     }
+  },
+  {
+    "name": "manage_plugin_setup",
+    "description": "Prepare an inert plugin setup before activation. list/get return bounded redacted drafts; save creates or replaces complete name/settings/secrets with a saved revision when editing; form evaluates saved draft settings; delete and activate require data.revision. signin starts root OAuth using the saved revision, signin_status/signin_cancel use flowId; consent takes place in the owner browser and save consumes data.credentialFlow. Agent grants cannot be edited here. Installation access never grants a draft's saved private credentials: those configuration actions require the owner through public MCP or the owner plugin page.",
+    "scope": "manage",
+    "destructive": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "pluginId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "list",
+            "get",
+            "save",
+            "delete",
+            "form",
+            "activate",
+            "signin",
+            "signin_status",
+            "signin_cancel"
+          ]
+        },
+        "draftId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "flowId": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "cursor": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "pluginId",
+        "action"
+      ],
+      "additionalProperties": false
+    }
   }
 ]

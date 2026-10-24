@@ -2,6 +2,7 @@
 
 package build.cairn.app.ui
 
+import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -10,12 +11,16 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.core.net.toUri
+import androidx.lifecycle.viewModelScope
 import build.cairn.app.data.*
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
 
 /** Owner configuration is kept on the installation; typed secrets stay in memory. */
@@ -64,15 +69,110 @@ internal fun PluginSetup(
     var changedField by remember(initial.id) { mutableStateOf<String?>(null) }
     var expired by remember(initial.id) { mutableStateOf(false) }
     val path = "/plugins/${segment(initial.pluginId)}/setup-drafts/${segment(initial.id)}"
-    val dirty =
+    val oauth = manifest.credential?.oauth
+    var signIn by remember(initial.id) { mutableStateOf<PluginDeviceFlow?>(null) }
+    var signInError by remember(initial.id) { mutableStateOf<String?>(null) }
+    var signingIn by remember(initial.id) { mutableStateOf(false) }
+    var signInGeneration by remember(initial.id) { mutableIntStateOf(0) }
+    val signInBusy = signingIn || signIn?.pending == true
+    val context = LocalContext.current
+    fun retireFlow(flow: PluginDeviceFlow) {
+        if (flow.state != "expired")
+            vm.viewModelScope.launch {
+                runCatching {
+                    vm.api.request(
+                        "DELETE",
+                        "/plugins/${segment(flow.pluginId)}/oauth/${segment(flow.id)}",
+                    )
+                }
+            }
+    }
+    fun cancelSignIn() {
+        signInGeneration++
+        val previous = signIn
+        signIn = null
+        signInError = null
+        signingIn = false
+        previous?.let(::retireFlow)
+    }
+    fun startSignIn() {
+        cancelSignIn()
+        val attempt = signInGeneration
+        val savedRevision = revision
+        signingIn = true
+        vm.viewModelScope.launch {
+            try {
+                val next =
+                    vm.api.send<PluginDeviceFlow>(
+                        "POST",
+                        "$path/oauth",
+                        buildJsonObject { put("revision", savedRevision) },
+                    )
+                if (attempt != signInGeneration) retireFlow(next) else signIn = next
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (attempt == signInGeneration)
+                    signInError = e.message ?: "La connexion n’a pas pu démarrer."
+            } finally {
+                if (attempt == signInGeneration) signingIn = false
+            }
+        }
+    }
+    val consentBasis = oauth?.let { config ->
+        val client = config["clientIdSetting"]?.jsonPrimitive?.contentOrNull
+        val secret = config["clientSecretSetting"]?.jsonPrimitive?.contentOrNull
+        val keys = listOfNotNull(client) + (config["scopeSettings"] as? JsonObject)?.keys.orEmpty()
+        wireJson.encodeToString(
+            listOf(
+                revision,
+                *keys.map { values[it].orEmpty() }.toTypedArray(),
+                secret?.let { secrets[it] }.orEmpty(),
+            )
+        )
+    }
+    LaunchedEffect(consentBasis) {
+        if (signIn != null || signingIn) cancelSignIn()
+    }
+    val polling = signIn?.takeIf { it.pending }
+    LaunchedEffect(polling?.id) {
+        val flow = polling ?: return@LaunchedEffect
+        while (true) {
+            delay(2000)
+            val next =
+                try {
+                    vm.api.get<PluginDeviceFlow>(
+                        "/plugins/${segment(flow.pluginId)}/oauth/${segment(flow.id)}"
+                    )
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    if (signIn?.id != flow.id) return@LaunchedEffect
+                    if (e is ApiException && e.status == 404) {
+                        signIn = flow.copy(state = "expired", message = e.message)
+                        return@LaunchedEffect
+                    }
+                    signInError = e.message
+                    continue
+                }
+            if (signIn?.id != flow.id) return@LaunchedEffect
+            signIn = next
+            signInError = null
+            if (!next.pending) return@LaunchedEffect
+        }
+    }
+    DisposableEffect(initial.id) { onDispose { cancelSignIn() } }
+    val edited =
         name.trim() != draft.name ||
             pluginSettings(manifest.settings, values) != draft.settings ||
             token.isNotBlank() ||
             secrets.values.any { it.isNotBlank() }
+    val dirty = edited || signIn?.completed == true
     var ready by remember(initial.id) { mutableStateOf(false) }
     var readError by remember(initial.id) { mutableStateOf<String?>(null) }
     var readAttempt by remember(initial.id) { mutableIntStateOf(0) }
     val validDraft = draft.status == "setup" && !expired
+    LaunchedEffect(validDraft) { if (!validDraft) cancelSignIn() }
     val available = validDraft && ready
     LaunchedEffect(initial.id, readAttempt) {
         ready = false
@@ -196,35 +296,86 @@ internal fun PluginSetup(
                     "Nom",
                     name,
                     { name = it },
-                    enabled = !state.busy && !resourceWork && available,
+                    enabled = !state.busy && !resourceWork && !signInBusy && available,
                 )
-                manifest.credential?.let { credential ->
-                    OutlinedTextField(
-                        token,
-                        {
-                            token = it
-                            refresh("credential")
-                        },
-                        Modifier.fillMaxWidth(),
-                        label = { Text(credential.label) },
-                        isError = completion?.errors?.containsKey("credential") == true,
-                        supportingText = {
-                            completion?.errors?.get("credential")?.let { Text(it) }
-                        },
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = InputKeyboards.Password,
-                        singleLine = true,
+                if (oauth != null) {
+                    Text(
+                        manifest.credential?.label.orEmpty(),
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        "Enregistrez les réglages de l’application avant de vous connecter. Les identifiants restent sur l’installation.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    signInError?.let { FormError(it) }
+                    signInProblem(signIn)?.let { FormError(it) }
+                    SignalButton(
+                        "Se connecter avec ${manifest.name}",
                         enabled =
-                            !state.busy &&
-                                !resources.busy &&
-                                !resources.pending &&
-                                !resources.editing &&
-                                available,
-                        placeholder = {
-                            if (draft.credential) Text("Enregistré · laissez vide pour le garder")
-                        },
+                            available &&
+                                !state.busy &&
+                                !resourceWork &&
+                                !completing &&
+                                !edited &&
+                                !signInBusy &&
+                                signIn?.completed != true,
+                    ) {
+                        startSignIn()
+                    }
+                    signIn
+                        ?.takeIf { it.pending }
+                        ?.let { flow ->
+                            TextButton(
+                                onClick = {
+                                    CustomTabsIntent.Builder()
+                                        .build()
+                                        .launchUrl(context, flow.link.toUri())
+                                }
+                            ) {
+                                Text("Ouvrir la page de connexion")
+                            }
+                        }
+                    if (signIn != null || signingIn)
+                        TextButton(onClick = ::cancelSignIn) { Text("Annuler la connexion") }
+                    Text(
+                        if (signIn?.completed == true)
+                            "Connexion terminée. Enregistrez la configuration pour garder ce compte."
+                        else if (signInBusy) "Connexion en cours…"
+                        else if (draft.credential) "Un compte est enregistré."
+                        else "Aucun compte connecté.",
+                        style = MaterialTheme.typography.bodySmall,
                     )
                 }
+                manifest.credential
+                    ?.takeIf { oauth == null }
+                    ?.let { credential ->
+                        OutlinedTextField(
+                            token,
+                            {
+                                token = it
+                                refresh("credential")
+                            },
+                            Modifier.fillMaxWidth(),
+                            label = { Text(credential.label) },
+                            isError = completion?.errors?.containsKey("credential") == true,
+                            supportingText = {
+                                completion?.errors?.get("credential")?.let { Text(it) }
+                            },
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = InputKeyboards.Password,
+                            singleLine = true,
+                            enabled =
+                                !state.busy &&
+                                    !resources.busy &&
+                                    !resources.pending &&
+                                    !resources.editing &&
+                                    available,
+                            placeholder = {
+                                if (draft.credential)
+                                    Text("Enregistré · laissez vide pour le garder")
+                            },
+                        )
+                    }
                 PluginFields(
                     manifest.settings.map { it.copy(required = false) },
                     values,
@@ -238,7 +389,7 @@ internal fun PluginSetup(
                         refresh()
                     },
                     draft.secretKeys,
-                    enabled = !state.busy && !resourceWork && available,
+                    enabled = !state.busy && !resourceWork && !signInBusy && available,
                     options = completion?.options.orEmpty(),
                     errors = completion?.errors.orEmpty(),
                     refresh = { refresh(it) },
@@ -255,6 +406,7 @@ internal fun PluginSetup(
                         !state.busy &&
                             !resourceWork &&
                             !completing &&
+                            !signInBusy &&
                             available &&
                             name.isNotBlank(),
                 ) {
@@ -275,9 +427,13 @@ internal fun PluginSetup(
                                                 .mapValues { JsonPrimitive(it.value.trim()) }
                                         ),
                                     )
-                                    if (token.isNotBlank()) put("token", token.trim())
+                                    credentialInput(token, signIn)?.let { (key, value) ->
+                                        put(key, value)
+                                    }
                                 },
                             )
+                        signIn = null
+                        signInError = null
                         revision = draft.revision
                         changedField = null
                         name = draft.name
@@ -306,7 +462,7 @@ internal fun PluginSetup(
                         state,
                         manifest,
                         PluginResourceLocation(initial.pluginId, draft.id, draft.revision),
-                        enabled = available && !dirty && !completing && !state.busy,
+                        enabled = available && !dirty && !signInBusy && !completing && !state.busy,
                         stateChanged = { resources = it },
                     )
                 if (manifest.agentAccess != null) {
@@ -342,6 +498,7 @@ internal fun PluginSetup(
                             !state.busy &&
                             !resourceWork &&
                             !dirty &&
+                            !signInBusy &&
                             !completing &&
                             (!manifest.instanceForm ||
                                 (completion != null && completion?.errors?.isEmpty() == true)) &&

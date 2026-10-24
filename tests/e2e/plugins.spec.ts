@@ -922,6 +922,69 @@ test('setup agent and resource parent selection preserve explicit authority', as
   expect(active.enabled).toBe(false)
 })
 
+test('root setup signs in with its saved revision and can cancel before activation', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const manifest = {
+    id: 'root-consent-ui',
+    name: 'Root service',
+    version: '1',
+    apiVersion: 2,
+    capabilities: ['http', 'resources'],
+    hosts: ['provider.example.test'],
+    credential: {
+      label: 'Service account',
+      header: 'authorization',
+      prefix: 'Bearer ',
+      oauth: {
+        authorizationUrl: 'https://provider.example.test/authorize',
+        tokenUrl: 'https://provider.example.test/token',
+        clientIdSetting: 'clientId',
+        scopes: ['app:read'],
+      },
+    },
+    settings: [{
+      key: 'clientId',
+      title: 'Client ID',
+      type: 'string',
+      required: true,
+    }],
+    resources: [{ name: 'workspace', title: 'Workspaces', singular: 'Workspace' }],
+  }
+  const installed = await workspace.api('/api/plugins/packages', 'POST', { manifest, source: 'return {}' })
+  await workspace.api(`/api/plugins/packages/${manifest.id}/approve`, 'POST', { version: '1', digest: installed.digest })
+  await page.goto(workspacePath(`/plugins/${manifest.id}`))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Add instance', exact: true }).click()
+  const setup = page.getByRole('dialog', { name: 'Set up Root service' })
+  const connect = setup.getByRole('button', { name: 'Sign in with Root service', exact: true })
+  await expect(connect).toBeVisible()
+  await expect(setup.getByLabel('Service account', { exact: true })).toHaveCount(0)
+  await setup.getByLabel('Client ID', { exact: true }).fill('draft-client-ui')
+  await expect(connect).toBeDisabled()
+  await setup.getByRole('button', { name: 'Save setup', exact: true }).click()
+  await expect(setup.getByText('All changes saved', { exact: true })).toBeVisible()
+  await expect(connect).toBeEnabled()
+  const drafts = await workspace.api(`/api/plugins/${manifest.id}/setup-drafts`)
+  const draft = drafts.items[0]
+  const start = page.waitForRequest(request => request.method() === 'POST' && request.url().includes(`/setup-drafts/${draft.id}/oauth`))
+  await connect.click()
+  expect((await start).postDataJSON()).toEqual({ revision: draft.revision })
+  const link = setup.getByRole('link', { name: 'Open sign-in page', exact: true })
+  await expect(link).toBeVisible()
+  const url = new URL((await link.getAttribute('href'))!)
+  expect(url.origin).toBe('https://provider.example.test')
+  expect(url.searchParams.get('client_id')).toBe('draft-client-ui')
+  expect(url.searchParams.get('state')).toBeTruthy()
+  await expect(setup.getByRole('button', { name: 'Activate instance', exact: true })).toBeDisabled()
+  await setup.getByRole('button', { name: 'Cancel sign-in', exact: true }).click()
+  await expect(link).toHaveCount(0)
+  await expect(connect).toBeEnabled()
+  const saved = await workspace.api(`/api/plugins/${manifest.id}/setup-drafts/${draft.id}`)
+  expect(saved.credential).toBe(false)
+  const catalog = await workspace.api('/api/plugins')
+  expect(catalog.connections.filter((item: any) => item.pluginId === manifest.id)).toEqual([])
+})
+
 test('setup explains credential errors and accepts an empty form answer', async ({ page, workspace }) => {
   const manifest = {
     id: 'setup-feedback',

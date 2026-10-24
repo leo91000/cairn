@@ -1812,6 +1812,255 @@ async fn plugin_setup_is_available_on_both_endpoints_without_granting_private_ac
 }
 
 #[tokio::test]
+async fn inert_plugin_setup_matches_both_management_tools_and_keeps_revision_and_grant_boundaries()
+{
+    use cairn_installation::{plugins::registry, validation::text};
+
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    s.plugins
+        .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let package = registry::install(&s, &json!({
+        "manifest": {
+            "id": "managed-setup", "name": "Managed setup", "version": "1", "apiVersion": 2,
+            "capabilities": [],
+            "settings": [{"key": "label", "title": "Label", "type": "string", "required": true}],
+        },
+        "source": "return {}",
+    })).await.unwrap();
+    registry::approve(&s, "managed-setup", "1", text(&package, "digest"))
+        .await
+        .unwrap();
+    for internal in [false, true] {
+        let invoke = |action: &str, draft: Option<&str>, data: Value| {
+            let mut args = json!({"pluginId": "managed-setup", "action": action, "data": data});
+            if let Some(draft) = draft {
+                args["draftId"] = json!(draft);
+            }
+            let s = s.clone();
+            let configuration = configuration.clone();
+            async move {
+                if internal {
+                    call(&s, &configuration, "manage_plugin_setup", args).await
+                } else {
+                    public_call(&s, &["manage"], "manage_plugin_setup", args).await
+                }
+            }
+        };
+        let created = invoke(
+            "save",
+            None,
+            json!({"name": "Inert", "settings": {"label": "Initial"}}),
+        )
+        .await;
+        let draft = result(&created).clone();
+        assert_eq!(draft["status"], "setup");
+        assert!(s.store.list("plugin-connections").await.unwrap().is_empty());
+        let updated = invoke(
+            "save",
+            Some(text(&draft, "id")),
+            json!({
+                "name": "Configured", "settings": {"label": "Saved"}, "revision": draft["revision"],
+            }),
+        )
+        .await;
+        let updated = result(&updated).clone();
+        let stale = invoke(
+            "delete",
+            Some(text(&draft, "id")),
+            json!({"revision": draft["revision"]}),
+        )
+        .await;
+        assert_eq!(stale["result"]["isError"], true, "{stale}");
+        let denied = invoke(
+            "activate",
+            Some(text(&draft, "id")),
+            json!({
+                "revision": updated["revision"], "agentIds": [MAIN_AGENT_ID],
+            }),
+        )
+        .await;
+        assert_eq!(denied["result"]["isError"], true, "{denied}");
+        let activated = invoke(
+            "activate",
+            Some(text(&draft, "id")),
+            json!({
+                "revision": updated["revision"], "enabled": true,
+            }),
+        )
+        .await;
+        assert_eq!(result(&activated)["settings"]["label"], "Saved");
+        assert_eq!(result(&activated)["agentIds"], json!([]));
+        let gone = invoke("get", Some(text(&draft, "id")), json!({})).await;
+        assert_eq!(gone["result"]["isError"], true, "{gone}");
+        s.remove("plugin-connections", text(&draft, "id"))
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn setup_tools_do_not_turn_installation_access_into_private_draft_credentials() {
+    use cairn_installation::{plugins::registry, validation::text};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    s.plugins
+        .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let reads = Arc::new(AtomicUsize::new(0));
+    let calls = reads.clone();
+    let provider = axum::Router::new().route(
+        "/verify",
+        axum::routing::get(move |headers: axum::http::HeaderMap| {
+            let calls = calls.clone();
+            async move {
+                assert_eq!(headers["authorization"], "Bearer fixture-private-draft");
+                calls.fetch_add(1, Ordering::SeqCst);
+                axum::Json(json!({"label": "Verified"}))
+            }
+        }),
+    );
+    let (origin, server) = common::serve_locally(provider).await;
+    s.plugins.route_http_to(Some(origin));
+    let installed = registry::install(&s, &json!({
+        "manifest": {
+            "id": "private-setup", "name": "Private setup", "version": "1", "apiVersion": 2,
+            "capabilities": ["http"], "hosts": ["api.example.test"], "instanceForm": true,
+            "credential": {"label": "Account", "header": "authorization", "prefix": "Bearer "},
+            "settings": [{"key": "label", "title": "Label", "type": "string"}],
+        },
+        "source": "return {form = function(event) local reply = cairn.http.request({url = 'https://api.example.test/verify', auth = true}); return {values = {label = reply.json.label}} end}",
+    })).await.unwrap();
+    registry::approve(&s, "private-setup", "1", text(&installed, "digest"))
+        .await
+        .unwrap();
+    let created = public_call(&s, &["manage"], "manage_plugin_setup", json!({
+        "pluginId": "private-setup", "action": "save", "data": {"name": "Private draft", "token": "fixture-private-draft"},
+    })).await;
+    let draft = result(&created);
+    assert_eq!(draft["credential"], true);
+    assert!(!created.to_string().contains("fixture-private-draft"));
+    let args = json!({"pluginId": "private-setup", "draftId": draft["id"], "action": "form", "data": {"revision": draft["revision"]}});
+    let owner = public_call(&s, &["manage"], "manage_plugin_setup", args.clone()).await;
+    assert_eq!(result(&owner)["values"]["label"], "Verified");
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    for action in ["form", "activate", "save", "signin"] {
+        let mut args = args.clone();
+        args["action"] = json!(action);
+        let denied = call(&s, &configuration, "manage_plugin_setup", args).await;
+        assert_eq!(denied["result"]["isError"], true, "{denied}");
+    }
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    let mut args = args.clone();
+    args["action"] = json!("get");
+    let redacted = call(&s, &configuration, "manage_plugin_setup", args.clone()).await;
+    assert_eq!(result(&redacted)["credential"], true);
+    assert!(!redacted.to_string().contains("fixture-private-draft"));
+    args["action"] = json!("delete");
+    let removed = call(&s, &configuration, "manage_plugin_setup", args).await;
+    assert_eq!(result(&removed)["deleted"], true);
+    server.abort();
+}
+
+#[tokio::test]
+async fn setup_form_and_activation_cannot_finish_after_the_management_run_is_revoked() {
+    use cairn_installation::{plugins::registry, validation::text};
+    use tokio::{
+        sync::Notify,
+        time::{Duration, timeout},
+    };
+
+    for action in ["form", "activate"] {
+        let root = TempDir::new().unwrap();
+        let s = service(&root).await;
+        s.plugins
+            .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+        let main = enabled_main(&s).await;
+        let (run, configuration) = active_run(&s, &main).await;
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let (started, resumed) = (entered.clone(), release.clone());
+        let provider = axum::Router::new().route(
+            "/label",
+            axum::routing::get(move || {
+                let (started, resumed) = (started.clone(), resumed.clone());
+                async move {
+                    started.notify_one();
+                    resumed.notified().await;
+                    axum::Json(json!({"label": "Loaded"}))
+                }
+            }),
+        );
+        let (origin, server) = common::serve_locally(provider).await;
+        s.plugins.route_http_to(Some(origin));
+        let installed = registry::install(&s, &json!({
+            "manifest": {
+                "id": "slow-setup", "name": "Slow setup", "version": "1", "apiVersion": 2,
+                "capabilities": ["http"], "hosts": ["api.example.test"], "instanceForm": true,
+                "settings": [{"key": "label", "title": "Label", "type": "string", "required": true}],
+            },
+            "source": "return {form = function(event) local reply = cairn.http.request({url = 'https://api.example.test/label'}); return {values = {label = reply.json.label}} end}",
+        })).await.unwrap();
+        registry::approve(&s, "slow-setup", "1", text(&installed, "digest"))
+            .await
+            .unwrap();
+        let saved = public_call(
+            &s,
+            &["manage"],
+            "manage_plugin_setup",
+            json!({
+                "pluginId": "slow-setup", "action": "save", "data": {"name": "Inert"},
+            }),
+        )
+        .await;
+        let draft = result(&saved).clone();
+        let pending = tokio::spawn({
+            let s = s.clone();
+            let draft = draft.clone();
+            async move {
+                call(
+                    &s,
+                    &configuration,
+                    "manage_plugin_setup",
+                    json!({
+                        "pluginId": "slow-setup", "draftId": draft["id"], "action": action,
+                        "data": {"revision": draft["revision"], "enabled": true},
+                    }),
+                )
+                .await
+            }
+        });
+        timeout(Duration::from_secs(10), entered.notified())
+            .await
+            .unwrap();
+        s.mcps.revoke_run(&s, text(&run, "id")).await.unwrap();
+        release.notify_one();
+        let response = timeout(Duration::from_secs(10), pending)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        let current = public_call(
+            &s,
+            &["manage"],
+            "manage_plugin_setup",
+            json!({
+                "pluginId": "slow-setup", "draftId": draft["id"], "action": "get",
+            }),
+        )
+        .await;
+        assert_eq!(result(&current), &draft);
+        assert!(s.store.list("plugin-connections").await.unwrap().is_empty());
+        server.abort();
+    }
+}
+
+#[tokio::test]
 async fn both_mcp_endpoints_can_pause_and_delete_instances_pending_package_reapproval() {
     use cairn_installation::{
         plugins::{connections, registry},

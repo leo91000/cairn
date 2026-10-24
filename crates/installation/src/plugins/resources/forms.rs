@@ -221,6 +221,7 @@ impl Form {
         json!({
             "collection": self.collection.name,
             "id": self.existing.as_ref().map(|r| &r.id),
+            "settings": self.existing.as_ref().map(|r| &r.settings),
             "parent": self.parent,
             "secrets": self.secrets.keys().collect::<Vec<_>>(),
         })

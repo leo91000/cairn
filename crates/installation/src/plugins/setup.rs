@@ -16,7 +16,7 @@ const LIFETIME: i64 = 86_400_000;
 
 mod activation;
 
-pub(crate) use activation::activate;
+pub(crate) use activation::{activate, activate_managed};
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -134,7 +134,12 @@ pub async fn load(s: &Service, draft: &str) -> Result<SetupDraft> {
         .await
 }
 
-async fn owned(s: &Service, plugin: &str, draft: &str, account: &str) -> Result<SetupDraft> {
+pub(crate) async fn owned(
+    s: &Service,
+    plugin: &str,
+    draft: &str,
+    account: &str,
+) -> Result<SetupDraft> {
     let draft = stored(s, draft).await?;
     let current = owner(s).await?;
     if draft.plugin_id != plugin
@@ -210,12 +215,23 @@ pub async fn form(
     account: &str,
     input: &Value,
 ) -> Result<Value> {
+    form_managed(s, plugin, draft, account, input, None).await
+}
+
+pub(crate) async fn form_managed(
+    s: &Service,
+    plugin: &str,
+    draft: &str,
+    account: &str,
+    input: &Value,
+    management: Option<super::management::Authority>,
+) -> Result<Value> {
     let draft = owned(s, plugin, draft, account).await?;
     if input["revision"].as_str() != Some(&draft.revision) {
         return Err(Error::conflict("Setup changed. Reload its form."));
     }
     let approved = approved_package(s, &draft).await?;
-    super::forms::setup_form(s, &approved, draft, input).await
+    super::forms::setup_form(s, &approved, draft, input, management).await
 }
 
 #[derive(Deserialize)]
@@ -239,6 +255,20 @@ pub async fn save(
     input: &Value,
     existing: Option<&str>,
 ) -> Result<Value> {
+    save_managed(s, plugin, account, input, existing, None).await
+}
+
+pub(crate) async fn save_managed(
+    s: &Service,
+    plugin: &str,
+    account: &str,
+    input: &Value,
+    existing: Option<&str>,
+    management: Option<super::management::Authority>,
+) -> Result<Value> {
+    if let Some(authority) = &management {
+        authority.recheck(s).await?;
+    }
     let input: Input =
         serde_json::from_value(input.clone()).map_err(|_| Error::bad("Invalid setup draft."))?;
     let flow_lock = input
@@ -361,8 +391,14 @@ pub async fn save(
     let encrypted = s.vault.encrypt(&secret_key, &json!({"fields": fields}))?;
     let result = draft.public(true);
     approved.recheck(s).await?;
+    if let Some(authority) = &management {
+        authority.recheck(s).await?;
+    }
     s.store
         .transaction(move |db| {
+            if let Some(authority) = &management {
+                authority.authorize(db)?;
+            }
             approved.recheck_in(db)?;
             if db.keys(PREFIX)? != setup_snapshot {
                 return Err(Error::conflict("Setup changed. Reload before saving."));
@@ -426,12 +462,29 @@ pub async fn remove(
     account: &str,
     input: &Value,
 ) -> Result<Value> {
+    remove_managed(s, plugin, draft, account, input, None).await
+}
+
+pub(crate) async fn remove_managed(
+    s: &Service,
+    plugin: &str,
+    draft: &str,
+    account: &str,
+    input: &Value,
+    management: Option<super::management::Authority>,
+) -> Result<Value> {
     let draft = owned(s, plugin, draft, account).await?;
     if text(input, "revision") != draft.revision {
         return Err(Error::conflict("Setup changed. Reload before discarding."));
     }
+    if let Some(authority) = &management {
+        authority.recheck(s).await?;
+    }
     s.store
         .transaction(move |db| {
+            if let Some(authority) = &management {
+                authority.authorize(db)?;
+            }
             let key = format!("{PREFIX}{}", draft.id);
             if db.kv(&key)?.as_ref() != Some(&serde_json::to_value(&draft)?) {
                 return Err(Error::conflict("Setup changed. Reload before discarding."));

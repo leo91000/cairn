@@ -1,4 +1,5 @@
 local API = "https://slack.com/api/"
+local appId = nil
 
 local RETRYABLE_READ_ERRORS = {
     fatal_error = true,
@@ -53,6 +54,14 @@ local function request(method, name, values, auth, workspace)
     -- workspace. Slack's method limit belongs to that workspace, not a resource.
     if auth and auth.resource then
         assert(type(workspace) == "string" and workspace ~= "", "Name the verified Slack workspace")
+        local resource = cairn.resources.get({ collection = "workspace", resource = auth.resource })
+        if type(appId) ~= "string" or appId == "" or type(resource.settings) ~= "table" or resource.settings.appId ~= appId
+            or resource.settings.externalId ~= workspace then
+            -- Root edits retain resource IDs and encrypted fields. They cannot
+            -- transfer a bot verified for another app, or an unbound legacy bot.
+            -- Refuse before even a metadata read can use that saved credential.
+            return { status = 403, headers = {}, json = { ok = false, error = "workspace_app_needs_verification" } }
+        end
     end
     local key, retryAt = nil, nil
     if auth and auth.resource then
@@ -103,6 +112,11 @@ local function request(method, name, values, auth, workspace)
 end
 
 return {
+    bindApp = function(value)
+        -- Only trusted host start/webhook settings supply this worker's app.
+        -- It is process-local; a replacement worker must bind its own context.
+        appId = value
+    end,
     request = request,
     channel = function(resource, channel, workspace)
         -- Every accepted mention may need this method later. Reserve its quota

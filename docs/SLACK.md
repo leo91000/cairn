@@ -41,6 +41,20 @@ agent access by default. Then mention the bot in the configured channel. The roo
 requests and answers are shared with installation members and follow Cairn
 retention.
 
+Workspace verification saves the app ID returned by `bots.info` with the workspace
+metadata. Every operational HTTP request checks that identity and the workspace
+before using its encrypted bot token. Changing the root app ID therefore leaves
+old workspace credentials unusable; edit and save each workspace with a token for
+the selected app. Records from an earlier package without a verified app ID also
+require this owner revalidation. No app identity is guessed or migrated from the
+new root settings, including when those settings change before activation.
+
+A saved resource keeps its verified workspace identity. Preview and save compare
+the provider's workspace with the host's saved revision, even if a submitted
+hidden workspace ID is missing or forged. Renewing a token for that workspace is
+supported. Connecting another workspace requires a new resource and its own
+explicit routes and grants.
+
 The HTTP endpoint verifies Slack's HMAC over the original request body and the
 signed timestamp before starting Luau. The package checks the app, workspace,
 channel and human author, then asks Cairn to commit admission. Queue pressure

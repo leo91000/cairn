@@ -2315,6 +2315,199 @@ abstract class PluginsCases {
         }
     }
 
+    @Test fun preparedRootOAuthUsesItsSavedRevisionAndCanBeCancelled() = rootOAuthConsent(false)
+
+    @Test fun preparedRootOAuthSavesTheCompletedFlowWithoutAClientToken() = rootOAuthConsent(true)
+
+    @Test
+    fun closingRootOAuthRetiresAConsentWhoseStartResponseArrivesLate() =
+        rootOAuthConsent(false, true)
+
+    private fun rootOAuthConsent(complete: Boolean, closeDuringStart: Boolean = false) {
+        val starts = CopyOnWriteArrayList<JsonObject>()
+        val patches = CopyOnWriteArrayList<JsonObject>()
+        val completed = java.util.concurrent.atomic.AtomicBoolean(false)
+        val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
+        val releaseStart = CountDownLatch(1)
+        val visible = mutableStateOf(true)
+        val draft =
+            PluginSetupDraft(
+                id = "draft-root",
+                pluginId = "root-consent-ui",
+                name = "Root service",
+                settings = buildJsonObject { put("clientId", "draft-client-ui") },
+                revision = "saved-revision",
+                expiresAt = System.currentTimeMillis() + 600000,
+            )
+        val root = "/plugins/${draft.pluginId}/setup-drafts/${draft.id}"
+        val flowPath = "/plugins/${draft.pluginId}/oauth/oauth-root"
+        val flow =
+            PluginDeviceFlow(
+                id = "oauth-root",
+                pluginId = draft.pluginId,
+                verificationUri = "https://provider.example.test/authorize?state=synthetic",
+                expiresAt = System.currentTimeMillis() + 600000,
+            )
+        val manifest =
+            PluginManifest(
+                id = draft.pluginId,
+                name = "Root service",
+                settings =
+                    listOf(PluginSetting(key = "clientId", title = "Client ID", required = true)),
+                credential =
+                    PluginCredential(
+                        label = "Service account",
+                        oauth =
+                            buildJsonObject {
+                                put("clientIdSetting", "clientId")
+                                put("authorizationUrl", "https://provider.example.test/authorize")
+                                put("tokenUrl", "https://provider.example.test/token")
+                            },
+                    ),
+                resources =
+                    listOf(
+                        PluginResourceCollection(
+                            name = "workspace",
+                            title = "Workspaces",
+                            singular = "Workspace",
+                        )
+                    ),
+            )
+        MockWebServer().use { server ->
+            val fallback = dispatcher { _, _ -> null }
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val path = request.path.orEmpty()
+                        if (path.endsWith(root) && request.method == "GET")
+                            return MockResponse().setBody(wireJson.encodeToString(draft))
+                        if (path.endsWith(root) && request.method == "PATCH") {
+                            val body =
+                                wireJson.parseToJsonElement(request.body.readUtf8()).jsonObject
+                            assertEquals("saved-revision", body["revision"]?.jsonPrimitive?.content)
+                            assertEquals(flow.id, body["credentialFlow"]?.jsonPrimitive?.content)
+                            assertFalse(body.containsKey("token"))
+                            patches += body
+                            return MockResponse()
+                                .setBody(
+                                    wireJson.encodeToString(
+                                        draft.copy(revision = "consent-saved", credential = true)
+                                    )
+                                )
+                        }
+                        if (path.endsWith("$root/oauth") && request.method == "POST") {
+                            assertEquals("fixture-csrf", request.getHeader("X-CSRF-Token"))
+                            starts +=
+                                wireJson.parseToJsonElement(request.body.readUtf8()).jsonObject
+                            if (closeDuringStart)
+                                assertTrue(releaseStart.await(10, TimeUnit.SECONDS))
+                            return MockResponse().setBody(wireJson.encodeToString(flow))
+                        }
+                        if (path.endsWith(flowPath)) {
+                            if (request.method == "DELETE") {
+                                assertEquals("fixture-csrf", request.getHeader("X-CSRF-Token"))
+                                cancelled.set(true)
+                                return MockResponse().setBody("{}")
+                            }
+                            return MockResponse()
+                                .setBody(
+                                    wireJson.encodeToString(
+                                        if (completed.get())
+                                            flow.copy(state = "completed", verificationUri = "")
+                                        else flow
+                                    )
+                                )
+                        }
+                        if (path.endsWith("$root/resources/workspace"))
+                            return MockResponse().setBody("""{"items":[]}""")
+                        return fallback.dispatch(request)
+                    }
+                }
+            server.start()
+            show(server) { vm, state ->
+                if (visible.value)
+                    PluginSetup(
+                        vm,
+                        state,
+                        manifest,
+                        draft,
+                        close = { visible.value = false },
+                        changed = {},
+                        activated = {},
+                    )
+            }
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Se connecter avec Root service") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNode(hasText("Service account") and hasSetTextAction()).assertDoesNotExist()
+            compose
+                .onNodeWithText("Se connecter avec Root service")
+                .performScrollTo()
+                .performClick()
+            compose.waitUntil(10000) { starts.isNotEmpty() }
+            assertEquals(buildJsonObject { put("revision", draft.revision) }, starts.single())
+            if (closeDuringStart) {
+                compose.onNodeWithContentDescription("Fermer").performClick()
+                compose.onNodeWithText("Configurer Root service").assertDoesNotExist()
+                releaseStart.countDown()
+                compose.waitUntil(10000) {
+                    compose.onAllNodes(isRoot()).fetchSemanticsNodes()
+                    cancelled.get()
+                }
+                return@use
+            }
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Ouvrir la page de connexion")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Activer l’instance").assertIsNotEnabled()
+            capture("plugin-root-oauth-pending")
+            if (complete) {
+                completed.set(true)
+                // Polling uses Compose's test clock. Drive its next two-second
+                // interval before waiting for the real HTTP response and UI.
+                compose.mainClock.advanceTimeBy(2000)
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText(
+                            "Connexion terminée. Enregistrez la configuration pour garder ce compte."
+                        )
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.onNodeWithText("Activer l’instance").assertIsNotEnabled()
+                compose
+                    .onNodeWithText(
+                        "Connexion terminée. Enregistrez la configuration pour garder ce compte."
+                    )
+                    .performScrollTo()
+                capture("plugin-root-oauth-complete")
+                compose
+                    .onNodeWithText("Enregistrer la configuration")
+                    .performScrollTo()
+                    .performClick()
+                compose.waitUntil(10000) { patches.isNotEmpty() }
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodes(hasText("Activer l’instance") and isEnabled())
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                assertFalse(cancelled.get())
+            } else {
+                compose.onNodeWithText("Annuler la connexion").performScrollTo().performClick()
+                compose.waitUntil(10000) { cancelled.get() }
+                compose.onNodeWithText("Ouvrir la page de connexion").assertDoesNotExist()
+                compose.onNodeWithText("Se connecter avec Root service").assertIsEnabled()
+            }
+        }
+    }
+
     @Test
     fun membersCanOpenTheirOwnPluginAccountsWithoutOwnerManagement() {
         MockWebServer().use { server ->

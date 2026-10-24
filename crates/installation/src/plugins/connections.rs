@@ -823,7 +823,7 @@ where
     .map(|shared| shared.apply(input));
     let input = shared_input.as_ref().unwrap_or(input);
     let source = existing.map_or(SaveSource::New, SaveSource::Existing);
-    let prepared = prepare_managed(
+    let prepared = prepare(
         s,
         &approved,
         input,
@@ -866,16 +866,6 @@ where
 }
 
 pub(crate) async fn prepare(
-    s: &Service,
-    approved: &registry::ApprovedPackage,
-    input: &Value,
-    source: SaveSource<'_>,
-    request_owner: Option<std::sync::Arc<super::operations::Owner>>,
-) -> Result<Prepared> {
-    prepare_managed(s, approved, input, source, request_owner, None).await
-}
-
-async fn prepare_managed(
     s: &Service,
     approved: &registry::ApprovedPackage,
     input: &Value,

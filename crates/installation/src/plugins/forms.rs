@@ -347,7 +347,11 @@ pub(crate) async fn setup_form(
     approved: &registry::ApprovedPackage,
     setup: super::setup::SetupDraft,
     input: &Value,
+    management: Option<super::management::Authority>,
 ) -> Result<Value> {
+    if let Some(authority) = &management {
+        authority.recheck(s).await?;
+    }
     let package = &approved.package;
     if !package.manifest.instance_form {
         return Err(Error::not_found("This plugin has no instance form."));
@@ -363,14 +367,17 @@ pub(crate) async fn setup_form(
     let owner = Arc::new(super::operations::Owner::for_account(s, &setup.owner_account).await?);
     let credential = match typed_credential(&package.manifest, &input["token"])? {
         Some(token) => Some(token),
-        None => super::oauth::credential::setup_token(s, &setup, approved, &owner, None).await?,
+        None => {
+            super::oauth::credential::setup_token(s, &setup, approved, &owner, management.as_ref())
+                .await?
+        }
     };
     let root = Arc::new(super::resources::target::Target::Setup {
         draft: Box::new(setup.clone()),
         approved: approved.clone(),
     });
     let draft = Draft {
-        management: None,
+        management,
         credential,
         secrets: secrets(&package.manifest, &input["secrets"], saved),
         setup: Some(Box::new(setup)),

@@ -10,6 +10,20 @@ pub(crate) async fn activate(
     account: &str,
     input: &Value,
 ) -> Result<Value> {
+    activate_managed(s, plugin, draft_id, account, input, None).await
+}
+
+pub(crate) async fn activate_managed(
+    s: &Service,
+    plugin: &str,
+    draft_id: &str,
+    account: &str,
+    input: &Value,
+    management: Option<super::super::management::Authority>,
+) -> Result<Value> {
+    if let Some(authority) = &management {
+        authority.recheck(s).await?;
+    }
     let target = Target::setup(s, plugin, draft_id, account).await?;
     let draft = target.setup_snapshot().ok_or_else(missing)?.clone();
     if input["revision"] != draft.revision {
@@ -55,6 +69,7 @@ pub(crate) async fn activate(
         Some(std::sync::Arc::new(
             super::super::operations::Owner::for_account(s, account).await?,
         )),
+        management.clone(),
     )
     .await?;
     // The final form may make network requests. It must not finish a former
@@ -68,10 +83,16 @@ pub(crate) async fn activate(
         ));
     }
     target.recheck_package(s).await?;
+    if let Some(authority) = &management {
+        authority.recheck(s).await?;
+    }
     let vault = s.vault.clone();
     let result = s
         .store
         .transaction(move |db| {
+            if let Some(authority) = &management {
+                authority.authorize(db)?;
+            }
             target.current(db)?;
             // Another form can start renewal after preparation. Its committed
             // intent must remain inert until the confirmed credential arrives.

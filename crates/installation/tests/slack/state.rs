@@ -204,6 +204,95 @@ async fn measure_progress_state_storage() {
     measure_state_storage(true).await;
 }
 
+#[tokio::test]
+#[ignore = "local native workspace app-binding record comparison; run alone"]
+async fn measure_workspace_app_binding_storage() {
+    use cairn_installation::store::Store;
+
+    let root = TempDir::new().unwrap();
+    let service = Service::new(common::config(root.path())).await.unwrap();
+    common::relay_fixture::claimed(&service).await.unwrap();
+    service
+        .plugins
+        .use_worker(PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+    let slack = Arc::new(Slack::default());
+    let provider = Router::new()
+        .route("/api/{method}", post(api).get(api))
+        .with_state(slack);
+    let (origin, server) = common::serve_locally(provider).await;
+    service.plugins.route_http_to(Some(origin));
+    let app = cairn_installation::http::router(service.clone())
+        .await
+        .unwrap();
+    let (_, resource) = configure(&app, &service).await;
+    let id = text(&resource, "id").to_owned();
+    let saved = service
+        .store
+        .get("plugin-resources", &id)
+        .await
+        .unwrap()
+        .unwrap();
+    service.store.transaction(|db| {
+        for index in 0..63 {
+            db.put("plugin-resources", &json!({"id": format!("unrelated-{index}"), "settings": {"label": "x".repeat(1800)}}))?;
+        }
+        Ok(())
+    }).await.unwrap();
+    let mut cases = Vec::new();
+    for bound in [false, true] {
+        let mut row = saved.clone();
+        if !bound {
+            row["settings"].as_object_mut().unwrap().remove("appId");
+        }
+        service
+            .store
+            .put("plugin-resources", row.clone())
+            .await
+            .unwrap();
+        let reopened = Store::open(&service.config.data_dir).unwrap();
+        let key = id.clone();
+        let reads = reopened.read(move |db| {
+            let mut samples = Vec::new();
+            for sample in 0..6 {
+                let cpu = checkpoints::cpu_ms();
+                let at = Instant::now();
+                let actual = db.get("plugin-resources", &key)?.unwrap();
+                samples.push(json!({"sample": sample, "wallMs": at.elapsed().as_secs_f64()*1000.0,
+                    "processCpuMs": checkpoints::cpu_ms()-cpu, "returnedJsonBytes": serde_json::to_vec(&actual)?.len()}));
+            }
+            Ok(samples)
+        }).await.unwrap();
+        let mut writes = Vec::new();
+        for sample in 0..6 {
+            let cpu = checkpoints::cpu_ms();
+            let at = Instant::now();
+            service
+                .store
+                .put("plugin-resources", row.clone())
+                .await
+                .unwrap();
+            writes.push(
+                json!({"sample": sample, "wallMs": at.elapsed().as_secs_f64()*1000.0,
+                "processCpuMs": checkpoints::cpu_ms()-cpu}),
+            );
+        }
+        cases.push(json!({"appBound": bound, "unrelatedRows": 63,
+            "rowJsonBytes": serde_json::to_vec(&row).unwrap().len(), "reads": reads, "writes": writes}));
+    }
+    eprintln!(
+        "WORKSPACE_APP_BINDING_STORAGE {}",
+        json!({"cases": cases,
+        "workload": "same verified synthetic resource; previous row without appId versus candidate with provider-verified appId; six reads on each reopened reader and six raw store writes",
+        "cache": "first read connection-cold, five warm; OS caches retained; setup/schema and initial row writes excluded",
+        "limits": "row JSON excludes vault/database/WAL/index pages; reads exclude actor queue, writes include actor queue; no plugin RPC/approval/auth/provider or production network latency measurement",
+        "host": {"parallelism": std::thread::available_parallelism().ok().map(std::num::NonZero::get),
+            "ioPressure": std::fs::read_to_string("/proc/pressure/io").ok(),
+            "memoryPressure": std::fs::read_to_string("/proc/pressure/memory").ok()}})
+    );
+    service.shutdown.cancel();
+    server.abort();
+}
+
 async fn measure_state_storage(progress: bool) {
     use cairn_installation::store::Store;
     let mut cases = Vec::new();

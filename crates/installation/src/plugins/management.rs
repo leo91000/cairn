@@ -9,6 +9,8 @@ use crate::{
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+pub(crate) mod setup;
+
 /// Management access does not replace a saved instance's separate agent grant, for
 /// the instance it edits and for the one whose shared setup it reuses.
 #[derive(Clone)]
@@ -17,6 +19,8 @@ pub struct Authority {
     requester: Option<super::requesters::RunRequester>,
     instance: Option<Box<connections::Connection>>,
     shared: Option<Box<connections::Connection>>,
+    setup: Option<Box<super::setup::SetupDraft>>,
+    uses_setup_credentials: bool,
 }
 
 impl Authority {
@@ -45,7 +49,30 @@ impl Authority {
                 ));
             }
         }
+        if let Some(expected) = &self.setup {
+            expected.recheck_in(db)?;
+            if self.uses_setup_credentials
+                && (expected.credential || !expected.secret_keys.is_empty())
+            {
+                return Err(Error::forbidden(
+                    "Installation management does not grant this setup's saved credentials. Finish private setup from the owner's plugin page.",
+                ));
+            }
+        }
         Ok(())
+    }
+}
+
+async fn requester(
+    s: &Service,
+    bearer: Option<&str>,
+) -> Result<Option<super::requesters::RunRequester>> {
+    match bearer {
+        Some(bearer) => {
+            let run = crate::installation_mcp::authorize(s, bearer).await?;
+            super::requesters::for_run(s, &run).await
+        }
+        None => Ok(None),
     }
 }
 
@@ -55,13 +82,7 @@ pub(crate) async fn invoke(
     args: &Value,
     bearer: Option<&str>,
 ) -> Result<Value> {
-    let requester = match bearer {
-        Some(bearer) => {
-            let run = crate::installation_mcp::authorize(s, bearer).await?;
-            super::requesters::for_run(s, &run).await?
-        }
-        None => None,
-    };
+    let requester = requester(s, bearer).await?;
     if name == "list_plugins" {
         let mut catalog = registry::catalog(s).await?;
         catalog["connections"] = json!(connections::overview(s).await?);
@@ -104,6 +125,8 @@ pub(crate) async fn invoke(
         requester,
         instance: saved_instance,
         shared: shared_instance,
+        setup: None,
+        uses_setup_credentials: false,
     });
     let authorize = {
         let authority = authority.clone();

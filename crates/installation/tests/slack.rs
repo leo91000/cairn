@@ -17,6 +17,8 @@ mod reset;
 mod socket;
 #[path = "slack/state.rs"]
 mod state;
+#[path = "slack/workspace_identity.rs"]
+mod workspace_identity;
 
 use aws_lc_rs::hmac;
 use axum::{

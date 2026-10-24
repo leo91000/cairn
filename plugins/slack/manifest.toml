@@ -125,6 +125,14 @@ required = true
 maxLength = 80
 
 [[resources.settings]]
+key = "appId"
+title = "Verified app ID"
+type = "string"
+hidden = true
+required = true
+maxLength = 80
+
+[[resources.settings]]
 key = "botId"
 title = "Bot user ID"
 type = "string"

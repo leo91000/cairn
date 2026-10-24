@@ -29,6 +29,35 @@ impl Drop for Fixture {
 }
 
 impl Fixture {
+    async fn manage(&self, action: &str, data: Value, flow: Option<&str>) -> Value {
+        let token = common::relay_fixture::grant(&self.s, &["manage"]).await;
+        let app = common::relay_fixture::router(self.s.clone()).await.unwrap();
+        let mut args = json!({"pluginId": "setup-oauth", "action": action, "draftId": self.draft["id"], "data": data});
+        if let Some(flow) = flow {
+            args["flowId"] = json!(flow);
+        }
+        let response = common::send(
+            &app,
+            common::request("POST", "/mcp")
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::from(
+                    json!({
+                        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                        "params": common::mcp_arguments("manage_plugin_setup", &args),
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = common::read_json(response).await;
+        assert_ne!(body["result"]["isError"], true, "{body}");
+        assert!(!body.to_string().contains("draft-access-fixture"));
+        assert!(!body.to_string().contains("draft-refresh-fixture"));
+        body["result"]["structuredContent"]["result"].clone()
+    }
+
     async fn new() -> Self {
         let root = TempDir::new().unwrap();
         let s = Service::new(common::config(root.path())).await.unwrap();
@@ -204,6 +233,49 @@ impl Fixture {
         self.s.vault.set(&key, &saved).await.unwrap();
         self.renewed.store(true, Ordering::SeqCst);
     }
+}
+
+#[tokio::test]
+async fn owner_mcp_can_finish_root_consent_and_activate_without_receiving_credentials() {
+    let f = Fixture::new().await;
+    let flow = f
+        .manage("signin", json!({"revision": f.draft["revision"]}), None)
+        .await;
+    assert_eq!(flow["state"], "pending");
+    let response = common::send(
+        &f.app,
+        request(
+            "POST",
+            "/api/plugins/oauth/callback",
+            json!({
+                "state": flow["id"], "code": "draft-code-fixture",
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let completed = f
+        .manage("signin_status", json!({}), Some(text(&flow, "id")))
+        .await;
+    assert_eq!(completed["state"], "completed");
+    let saved = f.manage("save", json!({
+        "revision": f.draft["revision"], "name": f.draft["name"], "settings": f.draft["settings"],
+        "credentialFlow": flow["id"],
+    }), None).await;
+    assert_eq!(saved["credential"], true);
+    let form = f
+        .manage("form", json!({"revision": saved["revision"]}), None)
+        .await;
+    assert_eq!(form["values"]["verified"], "Verified");
+    let active = f
+        .manage(
+            "activate",
+            json!({"revision": saved["revision"], "enabled": true}),
+            None,
+        )
+        .await;
+    assert_eq!(active["settings"]["verified"], "Verified");
+    assert_eq!(active["agentIds"], json!([]));
 }
 
 #[tokio::test]

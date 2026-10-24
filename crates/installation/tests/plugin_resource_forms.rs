@@ -54,6 +54,12 @@ return {form = function(event)
     assert(event.app.id == event.instance and event.app.settings.token == nil)
     assert(event.resource.collection == 'channels')
     assert(event.values.token == nil)
+    if event.resource.id then
+        assert(type(event.resource.settings) == 'table')
+        assert(event.resource.settings.token == nil)
+    else
+        assert(event.resource.settings == nil)
+    end
     if event.resource.parent == nil then
         return {errors = {parentId = 'Choose a workspace first.'}}
     end

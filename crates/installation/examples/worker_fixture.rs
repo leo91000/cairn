@@ -1,4 +1,5 @@
-//! Test-only worker executable with a synthetic task-author authority.
+//! Test-only worker executable with synthetic authority, or the real Beacon for
+//! browser journeys which replace only the external provider's HTTP transport.
 //! No browser hosting, local login or OAuth endpoints are added.
 #[allow(dead_code)]
 #[path = "../src/main.rs"]
@@ -48,7 +49,11 @@ async fn router(
             service.plugins.route_sockets_to(Some(origin));
         }
     }
-    relay_fixture::router(service).await
+    if std::env::var("CAIRN_FIXTURE_BEACON_AUTHORITY").as_deref() == Ok("true") {
+        cairn_installation::http::router(service).await
+    } else {
+        relay_fixture::router(service).await
+    }
 }
 
 fn main() -> std::process::ExitCode {

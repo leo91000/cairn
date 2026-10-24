@@ -1740,3 +1740,63 @@ file loader in the blocking pool, retaining the original approval and later
 checks. The uncertain-refresh regression passes with unchanged stack/deadlines;
 [local measurements](performance/PACKAGE-APPROVAL-READ.md) record its I/O/CPU
 limits. Complete merged-tree validation and fresh review remain separate gates.
+
+## Inert root OAuth clients and verified workspace identity
+
+Web and Android now save a root draft before starting revision-bound OAuth,
+poll/cancel its consent, and save a completed flow before activation. No OAuth
+access token is pasted into these editors or returned to a client. Consent edits
+and closing retire known and late returned flows. Real browser fixtures reproduced
+a start continuing after close while a previous cancellation was pending; the
+generation is now captured before that await. A controlled Android old/new
+comparison reproduced the late-flow lifetime defect with the same UI driver.
+
+Public owner MCP and the installation tool expose root draft operations through
+`manage_plugin_setup`. Installation management does not confer saved private
+credential access or owner consent; those operations require the owner app/MCP.
+Both paths preserve live run/requester/draft fences and grant no agent at creation
+or activation. Broader resource, route, grant and personal-OAuth mutation parity
+remains unfinished. A separate root dispatch also removes a reproduced default
+stack overflow from the unrelated legacy management future, without a stack or
+deadline increase.
+
+Frozen R1 qualification passed 752 JavaScript tests, lint/types/build, 111 native
+configuration/OAuth/resource tests (three optional observations ignored), workspace
+Clippy, 701 Android JVM tests (two ignored), lint/APKs, and 140 Chromium/WebKit
+journeys. The final Android test driver explicitly advances its Compose clock to
+the two-second poll; its ten-second assertion is unchanged. Three API36 SDK cases
+then pass on the source without temporary instrumentation: cancel, completed-flow
+save and close during a late start. These use the real client/SDK with local HTTP
+fixtures, not live provider consent or a proven Custom Tab handoff. Earlier SDK
+fixture-connection/idling failures and an isolated failure remain unexplained;
+the later passes do not establish their cause or a production fix.
+
+R1 review found retained bot credentials after a root app replacement. Actual
+signed HTTP/Luau reproduced acceptance for the wrong app. Workspaces now retain
+the app ID verified by `bots.info`; every operational resource-authenticated
+request checks app/workspace before token-bearing I/O. Active/prepared root
+replacement and owner revalidation of an unbound legacy workspace pass. The
+[record measurement](performance/SLACK-WORKSPACE-APP-BINDING.md) records bytes,
+local reads/writes, CPU and limits; it excludes the added operational RPC.
+
+The full R2 Slack suite passes 71 cases (six optional observations ignored).
+Its fresh Standards review found a second identity defect: a submitted hidden
+workspace ID could bypass the previous-workspace comparison. Owner HTTP reproduced
+200 instead of 400. Resource forms now receive previous nonsecret settings from
+their existing revision snapshot; Slack compares that trusted identity before
+preview/save. Active and inert cases pass for omitted/forged IDs, unchanged
+resource/vault/routes, same-workspace token renewal and distinct new-workspace
+resources. The generic event field changes no stored record or envelope.
+
+On the corrected sources, the resource-form, setup-activation and Slack suites
+pass 104 cases (eight optional observations ignored), including all 73 Slack
+cases. The first two suites completed before an interruption; Slack was then
+run to completion separately with unchanged sources and rebuilt manager/worker.
+The final Android check passes 701 JVM tests (two ignored), lint and both APKs.
+Its initial NodePlacement timeout passes alone and in the unchanged full repeat;
+its cause remains unestablished. That test and its deadlines were not changed.
+
+These results retain their exact reviewed/tested source identities. The two
+earlier 67/68 Slack suites remain unexplained. All accepted Q1–Q20, full parity,
+live Slack, and epoch-13 / SQLite-12 forward-transition/recovery gates remain
+open. PR #226 stays draft and unmerged.

@@ -60,6 +60,28 @@ The [native record observation](performance/ROOT-FORM-CREDENTIAL-RENEWAL.md)
 includes all three states. Inert root OAuth activation and whole-PR production
 transition/recovery qualification remain open.
 
+Slack workspace settings now retain the nonsecret app ID verified by `bots.info`.
+Operational resource-authenticated requests compare it with the worker's trusted
+root app and workspace before any token-bearing I/O. A missing or different app
+ID is refused, including a root edited before activation. Older workspace rows
+are not assigned the current root app automatically: the owner must reload,
+preview and save their workspace so its bot is checked again. The existing vault,
+resource IDs, routes, table layout and epoch-13 / SQLite-12 draft boundary remain.
+This is an authority restriction inside the unreleased candidate, not a qualified
+production migration or permission to run an earlier feature-branch binary.
+[Local resource measurements](performance/SLACK-WORKSPACE-APP-BINDING.md) record
+the added field's bytes and store timings separately from the operational RPC.
+
+Resource-form events also expose the previous nonsecret settings from their
+existing revision snapshot (`resource.settings`, null on creation). This additive
+API-v2 event field introduces no stored field, read, key, table or envelope; it
+reuses the resource already loaded for form authorization. Slack compares that
+trusted workspace ID with the provider's identity before preview/save, preventing
+submitted hidden values from moving an existing resource's rules to another
+workspace. Same-workspace token renewal and creating a distinct workspace resource
+remain supported. No automatic identity migration or production transition is
+implied.
+
 Installed-package approval reads retain the same files, manifest parser, digest
 and original approval snapshots. Synchronous loading/validation now uses the
 blocking pool so nested OAuth forms do not exhaust their default stack. No new

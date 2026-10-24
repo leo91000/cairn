@@ -6,8 +6,15 @@ import {
   onMounted,
   ref,
   useId,
+  watch,
 } from 'vue'
 import { api, state } from '../api'
+import {
+  credentialInput,
+  signInProblem,
+  useDeviceSignIn,
+  verificationLink,
+} from '../device-sign-in'
 import { pluginFormLookup } from '../plugin-form-lookups'
 import {
   pluginFormSecrets,
@@ -51,6 +58,13 @@ const formFailure = ref('')
 const formReady = ref(!props.manifest.instanceForm)
 const expired = ref(props.initial.expiresAt <= Date.now())
 const path = `/plugins/${props.plugin}/setup-drafts/${props.initial.id}`
+const oauth = computed(() => props.manifest.credential?.oauth)
+const signIn = useDeviceSignIn(() => props.plugin, () => {}, 2000, {
+  kind: () => 'oauth',
+  input: () => ({ revision: draft.value.revision }),
+  startPath: () => `${path}/oauth`,
+})
+const signingIn = computed(() => signIn.starting.value || signIn.pending.value)
 let asked = 0
 let timer: ReturnType<typeof setTimeout> | undefined
 let expiryTimer: ReturnType<typeof setTimeout> | undefined
@@ -63,11 +77,27 @@ function canonical(value: Record<string, any>) {
   return JSON.stringify(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)))
 }
 
-const dirty = computed(() => name.value.trim() !== draft.value.name
+const edited = computed(() => name.value.trim() !== draft.value.name
   || canonical(settings()) !== canonical(draft.value.settings)
   || Boolean(token.value.trim()) || Object.keys(pluginSecrets(secrets.value)).length > 0)
+const dirty = computed(() => edited.value || signIn.completed.value)
 const available = computed(() => draft.value.status === 'setup' && !expired.value)
 const eligible = computed(() => state.agents.filter(eligibleAgent))
+const consentBasis = computed(() => {
+  if (!oauth.value)
+    return ''
+  const keys = [oauth.value.clientIdSetting, ...Object.keys(oauth.value.scopeSettings ?? {})]
+  const secret = oauth.value.clientSecretSetting
+  return JSON.stringify([draft.value.revision, keys.map(key => values.value[key] ?? null), secret ? secrets.value[secret] ?? '' : ''])
+})
+watch(consentBasis, () => {
+  if (signIn.flow.value || signIn.starting.value)
+    void signIn.cancel()
+})
+watch(available, (value) => {
+  if (!value)
+    void signIn.cancel()
+})
 
 function formBody() {
   return {
@@ -137,19 +167,21 @@ async function action(operation: () => Promise<void>) {
 }
 
 async function save() {
-  if (completing.value || resourceWork.value)
+  if (completing.value || resourceWork.value || signingIn.value)
     return
   await action(async () => {
-    draft.value = await api<PluginSetupDraft>(path, {
+    const saved = await api<PluginSetupDraft>(path, {
       method: 'PATCH',
       body: JSON.stringify({
         revision: draft.value.revision,
         name: name.value,
         settings: settings(),
         secrets: pluginSecrets(secrets.value),
-        ...(token.value ? { token: token.value } : {}),
+        ...credentialInput(token.value, signIn.flow.value),
       }),
     })
+    signIn.consumed()
+    draft.value = saved
     name.value = draft.value.name
     values.value = pluginFormValues(props.manifest.settings ?? [], draft.value.settings)
     secrets.value = pluginFormSecrets()
@@ -160,7 +192,7 @@ async function save() {
 }
 
 async function activate() {
-  if (dirty.value || completing.value || resourceWork.value)
+  if (dirty.value || completing.value || resourceWork.value || signingIn.value)
     return
   await action(async () => {
     const agent = state.agents.find(agent => agent.id === agentId.value)
@@ -184,6 +216,7 @@ onBeforeUnmount(() => {
   clearTimeout(timer)
   clearTimeout(expiryTimer)
   asked++
+  void signIn.cancel()
   token.value = ''
   secrets.value = pluginFormSecrets()
 })
@@ -204,8 +237,36 @@ onBeforeUnmount(() => {
       <UiAlert v-if="!available">
         This setup expired or its package needs review. Close it and reload the plugin page.
       </UiAlert>
-      <label>Name<input v-model="name" :disabled="busy || resourceWork || !available" maxlength="100"></label>
-      <label v-if="manifest.credential">{{ manifest.credential.label }}<input
+      <label>Name<input v-model="name" :disabled="busy || resourceWork || signingIn || !available" maxlength="100"></label>
+      <section v-if="oauth" class="grid gap-3" :aria-label="`${manifest.name} sign-in`">
+        <p class="text-sm font-semibold">
+          {{ manifest.credential?.label }}
+        </p>
+        <p class="text-xs text-muted">
+          Save your app settings before signing in. The credential stays on the installation.
+        </p>
+        <UiAlert v-if="signIn.error.value || signInProblem(signIn.flow.value)">
+          {{ signIn.error.value || signInProblem(signIn.flow.value) }}
+        </UiAlert>
+        <div class="flex flex-wrap items-center gap-3">
+          <UiButton
+            :disabled="busy || resourceWork || completing || !available || edited || signingIn || signIn.completed.value"
+            @click="signIn.start"
+          >
+            Sign in with {{ manifest.name }}
+          </UiButton>
+          <template v-if="signIn.pending.value && signIn.flow.value">
+            <a :href="verificationLink(signIn.flow.value)" target="_blank" rel="noopener noreferrer">Open sign-in page</a>
+          </template>
+          <UiButton v-if="signIn.flow.value || signIn.starting.value" @click="signIn.cancel">
+            Cancel sign-in
+          </UiButton>
+        </div>
+        <p class="text-xs text-muted" role="status">
+          {{ signIn.completed.value ? 'Sign-in complete. Save setup to keep this account.' : signingIn ? 'Waiting for sign-in…' : draft.credential ? 'An account is saved.' : 'No account connected yet.' }}
+        </p>
+      </section>
+      <label v-if="manifest.credential && !oauth">{{ manifest.credential.label }}<input
         v-model="token"
         type="password"
         autocomplete="new-password"
@@ -230,7 +291,7 @@ onBeforeUnmount(() => {
           :fields="(manifest.settings ?? []).map(field => ({ ...field, required: false }))"
           :lookup="lookup"
           :saved="draft.secretKeys"
-          :disabled="busy || resourceWork || !available"
+          :disabled="busy || resourceWork || signingIn || !available"
           :options="completion?.options"
           :errors="completion?.errors"
           @refresh="typed"
@@ -249,7 +310,7 @@ onBeforeUnmount(() => {
         {{ message }}
       </p>
       <div class="flex flex-wrap items-center gap-3">
-        <UiButton :disabled="busy || completing || resourceWork || !name.trim() || !available" @click="save">
+        <UiButton :disabled="busy || completing || resourceWork || signingIn || !name.trim() || !available" @click="save">
           Save setup
         </UiButton>
         <span class="text-xs text-muted" role="status">{{ completing ? 'Checking settings…' : dirty ? 'Unsaved changes' : 'All changes saved' }}</span>
@@ -263,7 +324,7 @@ onBeforeUnmount(() => {
         :manifest="manifest"
         :instance="draft.id"
         :setup-revision="draft.revision"
-        :disabled="busy || dirty || completing || !available"
+        :disabled="busy || dirty || signingIn || completing || !available"
         @state="resources = $event"
       />
       <section v-if="manifest.agentAccess" class="grid gap-2" aria-label="Instance agent access">
@@ -292,7 +353,7 @@ onBeforeUnmount(() => {
         :disabled="busy || resourceWork || !available"
       >Start immediately</label>
       <div class="flex flex-wrap justify-end gap-2 border-t border-line pt-4">
-        <UiButton :disabled="busy || dirty || completing || resourceWork || !available || !formReady || Object.keys(completion?.errors ?? {}).length > 0 || (delegates(manifest) && !agentId)" variant="primary" @click="activate">
+        <UiButton :disabled="busy || dirty || signingIn || completing || resourceWork || !available || !formReady || Object.keys(completion?.errors ?? {}).length > 0 || (delegates(manifest) && !agentId)" variant="primary" @click="activate">
           Activate instance
         </UiButton>
       </div>

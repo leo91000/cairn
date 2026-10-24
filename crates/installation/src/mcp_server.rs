@@ -773,6 +773,9 @@ pub(crate) async fn invoke(
         "list_skills" | "read_skill" | "save_skill" | "edit_skill_files" => {
             skills_tool(s, name, &args, bearer).await
         }
+        "manage_plugin_setup" => {
+            Box::pin(crate::plugins::management::setup::invoke(s, &args, bearer)).await
+        }
         "list_plugins" | "manage_plugin" => {
             Box::pin(crate::plugins::management::invoke(s, name, &args, bearer)).await
         }

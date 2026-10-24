@@ -1,6 +1,209 @@
 //! Admission fixtures use the real package and native authority; no work is completed synthetically.
 use super::*;
 
+#[tokio::test]
+async fn replacing_the_slack_app_refuses_a_workspace_verified_for_the_previous_app() {
+    app_binding(AppBinding::ActiveReplacement).await;
+}
+
+#[tokio::test]
+async fn replacing_the_app_before_activation_cannot_promote_another_apps_workspace_authority() {
+    app_binding(AppBinding::PreparedReplacement).await;
+}
+
+#[tokio::test]
+async fn a_legacy_workspace_must_be_reverified_before_its_token_can_be_used() {
+    app_binding(AppBinding::Legacy).await;
+}
+
+#[derive(Clone, Copy)]
+enum AppBinding {
+    ActiveReplacement,
+    PreparedReplacement,
+    Legacy,
+}
+
+async fn app_binding(scenario: AppBinding) {
+    let root = TempDir::new().unwrap();
+    let service = Service::new(common::config(root.path())).await.unwrap();
+    common::relay_fixture::claimed(&service).await.unwrap();
+    service
+        .plugins
+        .use_worker(PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+    let slack = Arc::new(Slack::default());
+    let provider = Router::new()
+        .route("/api/{method}", post(api).get(api))
+        .with_state(slack.clone());
+    let (origin, server) = common::serve_locally(provider).await;
+    service.plugins.route_http_to(Some(origin));
+    let app = cairn_installation::http::router(service.clone())
+        .await
+        .unwrap();
+    let replacement_secret = "synthetic-replacement-signature";
+    let (instance, resource) = if matches!(scenario, AppBinding::PreparedReplacement) {
+        let draft = save(&app, "/api/plugins/slack/setup-drafts", json!({
+            "name": "Prepared app", "settings": {"appId": "ATEST", "transport": "http", "sharingAcknowledged": true, "maxRequestAgeMinutes": 15},
+            "secrets": {"signingSecret": SIGNING_SECRET},
+        })).await;
+        let path = format!("/api/plugins/slack/setup-drafts/{}", text(&draft, "id"));
+        let resource = save(&app, &format!("{path}/resources/workspace"), json!({
+            "setupRevision": draft["revision"], "name": "Prepared workspace", "settings": {"channelId": "CTEST"},
+            "secrets": {"botToken": BOT_TOKEN},
+        })).await;
+        let mut settings = draft["settings"].clone();
+        settings["appId"] = json!("AOTHER");
+        let changed = common::send(
+            &app,
+            owner(
+                "PATCH",
+                &path,
+                &json!({
+                    "revision": draft["revision"], "name": draft["name"], "settings": settings,
+                    "secrets": {"signingSecret": replacement_secret},
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(changed.status(), StatusCode::OK);
+        let changed = common::read_json(changed).await;
+        let active = save(
+            &app,
+            &format!("{path}/activate"),
+            json!({"revision": changed["revision"], "enabled": true}),
+        )
+        .await;
+        (active, resource)
+    } else {
+        configure(&app, &service).await
+    };
+    let agent = service.agent(json!({
+        "name": "App binding", "access": {"projects": [], "skills": [], "mcps": [], "installation": false},
+    }), None).await.unwrap();
+    save(&app, &format!("/api/plugins/slack/connections/{}/resources/workspace/{}/routes", text(&instance,"id"), text(&resource,"id")), json!({
+        "name": "Allowed", "enabled": true, "match": {"channel": "CTEST"}, "agentId": agent["id"],
+        "accessMode": "allowlist", "userIds": ["UALICE"], "maxMessagesPerHour": 10, "maxPerPersonPerHour": 5,
+    })).await;
+    let path = format!("/api/plugins/slack/connections/{}", text(&instance, "id"));
+    if matches!(scenario, AppBinding::ActiveReplacement) {
+        let mut settings = instance["settings"].clone();
+        settings["appId"] = json!("AOTHER");
+        let changed = common::send(
+            &app,
+            owner(
+                "PUT",
+                &path,
+                &json!({
+                    "name": instance["name"], "enabled": true, "settings": settings,
+                    "secrets": {"signingSecret": replacement_secret},
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            changed.status(),
+            StatusCode::OK,
+            "{}",
+            common::read_text(changed).await
+        );
+    } else if matches!(scenario, AppBinding::Legacy) {
+        // The prior package persisted this exact resource without an appId.
+        // Keep its encrypted credential/revision; only reproduce that old format.
+        let id = text(&resource, "id").to_owned();
+        service
+            .store
+            .transaction(move |db| {
+                let mut old = db.get("plugin-resources", &id)?.unwrap();
+                old["settings"].as_object_mut().unwrap().remove("appId");
+                db.put("plugin-resources", &old)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+    let before = slack.metadata_attempts.load(Ordering::SeqCst);
+    let envelope = json!({
+        "type": "event_callback", "api_app_id": if matches!(scenario, AppBinding::Legacy) {"ATEST"} else {"AOTHER"}, "team_id": "TTEST",
+        "event": {"type": "app_mention", "user": "UALICE", "channel": "CTEST", "ts": format!("{}.000100", now()/1000),
+            "text": "<@UNEWBOT> ask <@UBOT> to inspect this"},
+    });
+    let secret = if matches!(scenario, AppBinding::Legacy) {
+        SIGNING_SECRET
+    } else {
+        replacement_secret
+    };
+    let refused = ingress(&app, text(&instance, "id"), envelope, secret).await;
+    assert_eq!(refused.0, StatusCode::FORBIDDEN, "{refused:?}");
+    assert_eq!(
+        slack.metadata_attempts.load(Ordering::SeqCst),
+        before,
+        "The former app's token was used before refusal"
+    );
+    assert!(service.store.list(work::EVENTS).await.unwrap().is_empty());
+    assert!(slack.posts.lock().await.is_empty());
+    if matches!(scenario, AppBinding::Legacy) {
+        let resource_path = format!("{path}/resources/workspace/{}", text(&resource, "id"));
+        let current = common::send(&app, owner("GET", &resource_path, &json!({}))).await;
+        assert_eq!(current.status(), StatusCode::OK);
+        let current = common::read_json(current).await;
+        let preview = save(
+            &app,
+            &format!("{path}/resources/workspace/form"),
+            json!({
+                "resource": current["id"], "revision": current["revision"], "settings": current["settings"],
+            }),
+        )
+        .await;
+        assert_eq!(preview["values"]["appId"], "ATEST");
+        let mut settings = current["settings"].clone();
+        for (key, value) in preview["values"].as_object().unwrap() {
+            settings[key] = value.clone();
+        }
+        let checked = common::send(
+            &app,
+            owner(
+                "PUT",
+                &resource_path,
+                &json!({
+                    "revision": current["revision"], "name": current["name"], "enabled": true,
+                    "settings": settings,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            checked.status(),
+            StatusCode::OK,
+            "{}",
+            common::read_text(checked).await
+        );
+    } else {
+        let mut settings = instance["settings"].clone();
+        settings["appId"] = json!("ATEST");
+        let restored = common::send(
+            &app,
+            owner(
+                "PUT",
+                &path,
+                &json!({
+                    "name": instance["name"], "enabled": true, "settings": settings,
+                    "secrets": {"signingSecret": SIGNING_SECRET},
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(restored.status(), StatusCode::OK);
+    }
+    let accepted = ingress(&app, text(&instance,"id"), json!({
+        "type": "event_callback", "api_app_id": "ATEST", "team_id": "TTEST",
+        "event": {"type": "app_mention", "user": "UALICE", "channel": "CTEST", "ts": format!("{}.000101", now()/1000),
+            "text": "<@UBOT> The original app still matches"},
+    }), SIGNING_SECRET).await;
+    assert_eq!(accepted, (StatusCode::OK, "accepted".into()));
+    assert_eq!(service.store.list(work::EVENTS).await.unwrap().len(), 1);
+    service.shutdown.cancel();
+    server.abort();
+}
+
 pub(super) async fn retain_transient_reply(service: &Service, slack: &Slack, before: usize) {
     for index in 0..6 {
         let delivery = common::eventually(

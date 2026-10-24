@@ -538,8 +538,17 @@ approval, retaining the original secret expiry. Uncertain renewal requires new
 consent and cannot be activated or retried with the consumed refresh token.
 Activation rechecks the stored consumed flag in its transaction, so a renewal
 started by another form after preparation cannot be promoted until it finishes.
-This native API does not complete draft sign-in in the web/Android editors or
-equivalent public-MCP/installation-tool mutations; those remain delivery gates.
+Web and Android save the draft before consent, poll or cancel the flow, retire
+late responses after closing, and save the completed flow before activation.
+Tokens remain on the installation. Public owner MCP exposes the same root draft
+operations through `manage_plugin_setup`: list/get/save/delete/form/activate and
+signin/signin_status/signin_cancel. Mutations retain the saved revision; completed
+consent is consumed through `data.credentialFlow` when saving. The installation
+tool exposes that operation with live run/requester checks, but installation
+management does not grant a draft's private credentials or owner consent. Those
+private actions require the owner app or owner MCP. Neither path grants agents
+access during creation or activation. Broader resource, route, grant and personal
+OAuth mutation parity remains a delivery requirement.
 
 Draft lists use `?cursor=…` and return `{ items, nextCursor }`, with a bounded
 encoded response size. Both clients load all pages before displaying the saved
@@ -678,9 +687,12 @@ setup targets also require `setupRevision`. A missing parent can be reported as
 an error before any parent credential is requested.
 
 The event contains `instance`, `app` (the root's nonsecret summary), `resource`
-(`collection`, saved `id` or null, the selected `parent` or null, and secret names),
-`values`, `changed` and `submit`. Parent metadata contains nonsecret settings and
-secret names, never values. The result uses the collection's own fields:
+(`collection`, saved `id` or null, saved nonsecret `settings` or null, the selected
+`parent` or null, and secret names), `values`, `changed` and `submit`. Saved settings
+come from the exact revision retained by the host, independently of submitted
+`values`; forms can use them to prevent replacing an established external
+identity. They never include secret values. Parent metadata contains nonsecret
+settings and secret names, never values. The result uses the collection's own fields:
 `{options, values, errors, view}`. Errors may name its fields, `parentId` or `form`;
 derived values cannot set app fields or secrets. Guidance views display content
 and links; action buttons/forms have no configuration action endpoint and remain
@@ -726,8 +738,8 @@ replay a potentially rotated refresh token. A successful new sign-in replaces th
 consumed state through ordinary revision-checked saving.
 Tokens remain in the host. The same renewal fences apply to inert setup roots,
 including both intent and completion retaining the original setup expiry. Native
-root consent and activation are described above; their client/tool integration
-remains a separate draft-PR delivery requirement.
+root consent, activation and their client/tool authority boundaries are described
+above; broader management mutation parity remains a draft-PR delivery requirement.
 The [local encrypted-record observation](performance/ROOT-FORM-CREDENTIAL-RENEWAL.md)
 records the reused storage shape and its limits.
 
