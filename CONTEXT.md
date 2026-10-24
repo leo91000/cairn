@@ -114,6 +114,10 @@ Le nombre maximal d’exécutions simultanées sur un compte. Le réduire laisse
 **Réinitialisation en réserve** :
 Une remise à zéro de fenêtre d’usage offerte par Codex, utilisée automatiquement quand la capacité restante d’un compte actif tombe à 2 %. Elle n’existe pas pour Claude Code.
 
+**Question à côté** :
+Une question d’explication posée pendant qu’un agent travaille sur une réponse, sur l’une de ses réponses ou un passage choisi. L’agent de code y répond depuis le contexte de la conversation, sans outils ni écriture ; la réponse s’affiche à part, reliée à la réponse concernée. Elle ne dirige pas le travail en cours, n’entre pas dans la file d’attente et ne modifie pas l’historique de la conversation.
+_Avoid_ : steering, message, fork de conversation
+
 **Demandeur d’une mission** :
 La conversation ou la mission dont l’agent a lancé l’exécution d’une mission. Une mission bloquée qui attend son demandeur lui revient plutôt qu’à l’utilisateur, tant que ce demandeur existe.
 _Avoid_ : parent, orchestrateur

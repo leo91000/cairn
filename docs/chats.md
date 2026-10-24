@@ -71,6 +71,47 @@ Codex can ask for input while continuing its work, or wait when an answer is req
 
 The adapter enables Codex's `default_mode_request_user_input` feature for chats. It supports `item/tool/requestUserInput` server requests and questions attached to assistant messages. Live request answers use the native response protocol; if the request expired or the process restarted, an answer can instead steer or start the next turn in the same conversation. Other interactive RPC requests, including approvals, remain unavailable. Answer submissions are idempotent and retained until delivery. Questions and the notification outbox are committed together in SQLite.
 
+## Side questions
+
+While Codex or Claude Code works on a reply, you can ask a quick explanatory question
+without steering it. On the web, use the quote icon in an agent reply's header
+(**Ask about this reply**) or select a passage in the reply and choose **Ask about
+selection**. On Android, use the **Poser une question à côté** icon or **Demander à côté**
+in the text-selection menu. The question opens a side panel (a drawer on desktop, a
+bottom sheet on phones and Android) where the answer appears, linked back to its reply:
+**Show reply** scrolls the conversation to it, and each reply shows how many side
+questions it has. A card above the composer reports a pending or unread answer.
+
+A side question never joins the queue, steers the turn, pauses or resumes it, or
+enters the conversation's history or native session. It is answered beside the
+running turn, from what the engine already knows, without tools or file access:
+explain a decision, a term or a step, not "check this file". Answers that would need
+tools say so and suggest asking in the conversation. Pending questions can be
+withdrawn; withdrawal does not affect the reply. Up to five can wait at once.
+
+| Coding agent | Native mechanism | Context |
+| --- | --- | --- |
+| Claude Code | The streaming CLI's `side_question` control request (the same one as `/btw`), withdrawn with `control_cancel_request`. Claude denies every tool, answers in one response and skips its transcript. | The live conversation, including the running turn; an unfinished tool call is marked as still in progress. |
+| Codex | An ephemeral `thread/fork` of the conversation's thread on the same app-server and account, with a read-only sandbox, shell, web search, MCP servers, apps, plugins, goals and image tools disabled, and a boundary developer item injected with `thread/inject_items`. The fork is unloaded with `thread/unsubscribe` after its answer. | The thread's saved history. Codex closes the running turn as aborted inside the fork only; the boundary tells it the main task continues. |
+| OpenCode | Not supported in Cairn yet. The apps explain this instead of offering the action. | — |
+
+Codex 0.164 keeps a fork's subagent tools whatever its configuration, so Cairn
+interrupts a side question as soon as its fork starts any tool item and reports
+that it tried to use a tool. In measurements with a synthetic model server, the
+interruption arrived before any subagent started, and a subagent spawned without
+this guard inherited the fork's read-only sandbox and no shell. Neither engine
+starts a second coding agent with write access, and the conversation's own rollout
+or transcript never contains the side question.
+
+The adapter of the running turn announces when its native session can answer a
+side question. Before that (while starting) and between replies, the action is
+unavailable and the API returns 409 with the reason. Adapters from earlier
+releases never announce it, so their inbox never contains side questions they
+could mistake for steering. When a turn finishes, it keeps its process for up to
+90 seconds to deliver answers in progress; later or still-pending questions are
+marked unanswered with an explanation. Retried submissions are idempotent by their
+UUID. The answer uses the subscription of the account running the turn.
+
 ## Notifications
 
 Open the bell in **Chats** (on phones, **Chat details → Question notifications**), or **Settings → Question notifications**, then choose **Enable on this device**. Permission is requested only after that click. Web Push can deliver while the app is closed; clicking a notification opens the relevant chat and question. Each device can opt out independently. The notification contains no question or answer text.

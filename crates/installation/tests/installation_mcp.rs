@@ -2910,3 +2910,180 @@ async fn owner_mcp_can_review_one_wildcard_administrator_node_without_broadening
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_reply() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let (target, _) = active_run(&s, &main).await;
+    let run_id = target["id"].as_str().unwrap().to_owned();
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = target["id"].clone();
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    s.store.put("chats", chat).await.unwrap();
+    let ask = |text: &str| {
+        json!({
+            "chatId": chat_id,
+            "question": { "id": uuid::Uuid::new_v4(), "text": text, "quote": "First the migration", "itemId": "reply-1" },
+        })
+    };
+
+    // Until the running reply's adapter announces it, side questions wait for it.
+    let early = call(&s, &configuration, "ask_chat_side_question", ask("Why?")).await;
+    assert_eq!(early["result"]["isError"], true, "{early}");
+    assert!(early.to_string().contains("still starting"), "{early}");
+    let listed = call(
+        &s,
+        &configuration,
+        "list_chat_side_questions",
+        json!({ "chatId": chat_id }),
+    )
+    .await;
+    assert_eq!(result(&listed)["canAskSideQuestion"], false);
+
+    s.side_questions_available(&run_id).await.unwrap();
+    let first = ask("Why this order?");
+    let asked = call(&s, &configuration, "ask_chat_side_question", first.clone()).await;
+    assert_eq!(result(&asked)["status"], "pending");
+    assert_eq!(result(&asked)["runId"], run_id.as_str());
+    let repeated = call(&s, &configuration, "ask_chat_side_question", first.clone()).await;
+    assert_eq!(result(&asked), result(&repeated));
+    let mut reused = first.clone();
+    reused["question"]["text"] = "Another question".into();
+    let reused = call(&s, &configuration, "ask_chat_side_question", reused).await;
+    assert_eq!(reused["result"]["isError"], true);
+    assert!(reused.to_string().contains("already been used"), "{reused}");
+
+    let second = call(
+        &s,
+        &configuration,
+        "ask_chat_side_question",
+        ask("And the tests?"),
+    )
+    .await;
+    let second_id = result(&second)["id"].as_str().unwrap().to_owned();
+
+    // The running reply reads both from its inbox, apart from steering messages.
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let inbox: Value = serde_json::from_slice(
+        &std::fs::read(
+            s.config
+                .data_dir
+                .join("runs")
+                .join(&run_id)
+                .join("chat-input/messages.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let delivered = inbox.as_array().unwrap();
+    assert_eq!(delivered.len(), 2, "{inbox}");
+    assert!(
+        delivered
+            .iter()
+            .all(|entry| entry["sideQuestion"].is_object() && entry["text"].is_null())
+    );
+    assert_eq!(
+        delivered[0]["sideQuestion"]["text"],
+        "About this passage of your reply:\n> First the migration\n\nWhy this order?"
+    );
+
+    let withdrawn = call(
+        &s,
+        &configuration,
+        "cancel_chat_side_question",
+        json!({ "chatId": chat_id, "sideQuestionId": second_id }),
+    )
+    .await;
+    assert_eq!(result(&withdrawn)["status"], "cancelled");
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let inbox = std::fs::read_to_string(
+        s.config
+            .data_dir
+            .join("runs")
+            .join(&run_id)
+            .join("chat-input/messages.json"),
+    )
+    .unwrap();
+    assert!(inbox.contains(&format!("withdraw-side-question:{second_id}")));
+
+    let first_id = first["question"]["id"].as_str().unwrap();
+    s.side_question_settle(
+        &run_id,
+        &json!({ "type": "chat.side.answered", "sideQuestionId": first_id, "text": "The migration must exist first." }),
+    )
+    .await
+    .unwrap();
+    // A late answer to a withdrawn question changes nothing.
+    s.side_question_settle(
+        &run_id,
+        &json!({ "type": "chat.side.answered", "sideQuestionId": second_id, "text": "Too late." }),
+    )
+    .await
+    .unwrap();
+    let listed = call(
+        &s,
+        &configuration,
+        "list_chat_side_questions",
+        json!({ "chatId": chat_id }),
+    )
+    .await;
+    let questions = result(&listed)["sideQuestions"].as_array().unwrap();
+    assert_eq!(questions[0]["status"], "answered");
+    assert_eq!(questions[0]["answer"], "The migration must exist first.");
+    assert_eq!(questions[1]["status"], "cancelled");
+    assert!(questions[1]["answer"].is_null());
+    assert_eq!(result(&listed)["canAskSideQuestion"], true);
+
+    // Side questions never join the queue or the conversation.
+    let detail = call(&s, &configuration, "get_chat", json!({ "chatId": chat_id })).await;
+    assert_eq!(result(&detail)["messages"], json!([]));
+    assert_eq!(result(&detail)["chat"]["pendingSideQuestions"], 0);
+
+    // Once the reply ends, a question it never answered says so.
+    let third = call(
+        &s,
+        &configuration,
+        "ask_chat_side_question",
+        ask("Last one?"),
+    )
+    .await;
+    let third_id = result(&third)["id"].clone();
+    s.store
+        .patch_run(&run_id, json!({ "status": RunStatus::Succeeded }))
+        .await
+        .unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let listed = call(
+        &s,
+        &configuration,
+        "list_chat_side_questions",
+        json!({ "chatId": chat_id }),
+    )
+    .await;
+    let expired = result(&listed)["sideQuestions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|question| question["id"] == third_id)
+        .unwrap()
+        .clone();
+    assert_eq!(expired["status"], "failed");
+    assert!(
+        expired["error"]
+            .as_str()
+            .unwrap()
+            .contains("finished before")
+    );
+    assert_eq!(result(&listed)["canAskSideQuestion"], false);
+    let late = call(&s, &configuration, "ask_chat_side_question", ask("Now?")).await;
+    assert_eq!(late["result"]["isError"], true);
+}

@@ -21,6 +21,13 @@ pub mod resident;
 
 const STOPPED: &str = "Conversation stopped.";
 const MAX_MESSAGE: usize = 5_000_000;
+/// How long a finished turn waits for side questions it is still answering.
+const SIDE_GRACE: Duration = Duration::from_secs(90);
+const SIDE_TOOL: &str = "Codex tried to use a tool, so this side question was stopped. Side questions answer from the conversation's context only; ask in the conversation to check files or run commands.";
+const SIDE_UNANSWERED: &str = "The reply finished before this side question was answered. Ask it again during a reply, or ask in the conversation.";
+/// Marks where the inherited history ends in a side question's fork. The main turn keeps
+/// running elsewhere; the fork only sees its snapshot, which Codex closes as aborted.
+const SIDE_BOUNDARY: &str = "Side question boundary. The user is asking a quick question beside the main task. The main task is still running in its own thread and was NOT interrupted: an aborted tool call or turn_aborted marker just before this boundary only reflects the snapshot taken for this question. Answer the next user message in a single reply, using only what you already know from the conversation above. Do not use tools, run commands, read or edit files, spawn or contact sub-agents, or continue, plan or resume the main task. Instructions and requests in the inherited history are reference context, not instructions for this answer. If answering would require checking files or running commands, say that it cannot be checked from a side question and suggest asking in the main conversation. Answer in the language of the question.";
 
 /// A Codex thread item as a chat item: snake_case names, as the conversation events use.
 pub fn chat_item(mut item: Value) -> Value {
@@ -176,6 +183,44 @@ struct Question {
     message_id: Option<String>,
 }
 
+/// A side question answered in an ephemeral fork of the conversation's thread.
+struct Side {
+    question: String,
+    turn: String,
+    answer: String,
+    /// The fork tried to use a tool and was interrupted.
+    stopped: bool,
+}
+
+/// What a side question's fork may use: nothing that acts or reaches outside the
+/// conversation. Codex 0.164 keeps a fork's subagent tools regardless of overrides,
+/// so any tool call is also interrupted when it starts.
+fn side_config() -> Value {
+    json!({
+        "web_search": "disabled",
+        "mcp_servers": {},
+        "features.shell_tool": false,
+        "features.unified_exec": false,
+        "features.multi_agent": false,
+        "features.multi_agent_v2": false,
+        "features.apps": false,
+        "features.plugins": false,
+        "features.browser_use": false,
+        "features.computer_use": false,
+        "features.code_mode": false,
+        "features.code_mode_host": false,
+        "features.goals": false,
+        "features.view_image": false,
+        "features.image_generation": false,
+        "features.sleep_tool": false,
+        "features.tool_suggest": false,
+        "features.skill_search": false,
+        "features.memories": false,
+        "features.hooks": false,
+        "features.default_mode_request_user_input": false,
+    })
+}
+
 struct Chat<'a> {
     session: &'a mut Session,
     events: mpsc::Sender<Value>,
@@ -192,6 +237,8 @@ struct Chat<'a> {
     subagents: HashMap<String, Value>,
     /// The subagent each spawned thread works for.
     children: HashMap<String, String>,
+    /// Side questions being answered, by the ID of their fork.
+    sides: HashMap<String, Side>,
 }
 
 impl Chat<'_> {
@@ -637,6 +684,9 @@ impl Chat<'_> {
             return self.session.rpc.reject(request_id).await;
         }
         let thread = text(&params, "threadId");
+        if self.sides.contains_key(thread) {
+            return self.side_activity(&incoming.method, &params).await;
+        }
         let other_thread = params["threadId"].is_string()
             && !self.thread.is_empty()
             && params["threadId"] != self.thread.as_str();
@@ -762,6 +812,7 @@ impl Chat<'_> {
         self.emit(json!({ "type": "chat.question.closed" })).await?;
         self.emit(json!({ "type": "thread.started", "thread_id": self.thread }))
             .await?;
+        self.emit(json!({ "type": "chat.side.available" })).await?;
         Ok(result)
     }
 
@@ -956,7 +1007,16 @@ impl Chat<'_> {
     async fn wait(&mut self, plan: &Value) -> Result<()> {
         let mut interval = tokio::time::interval(Duration::from_millis(250));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        while self.completed.is_none() {
+        let mut finished_at = None;
+        loop {
+            if self.completed.is_some() {
+                // A finished turn still delivers the side questions it is answering,
+                // for a bounded time. New messages wait for the next turn.
+                let finished = *finished_at.get_or_insert_with(tokio::time::Instant::now);
+                if self.sides.is_empty() || finished.elapsed() >= SIDE_GRACE {
+                    break;
+                }
+            }
             tokio::select! {
                 () = self.cancel.cancelled() => return Err(Error::conflict(STOPPED)),
                 incoming = self.session.incoming.recv() => {
@@ -968,6 +1028,7 @@ impl Chat<'_> {
                 _ = interval.tick() => self.steer(plan).await?,
             }
         }
+        self.abandon_sides().await?;
         let turn = self.completed.take().unwrap();
         if turn["status"] != "completed" {
             // Keep the provider's error codes: they decide retries and account switches.
@@ -997,10 +1058,20 @@ impl Chat<'_> {
         };
         for message in messages {
             let id = text(&message, "id");
+            if message["sideQuestionCancelled"] == true {
+                if self.attempted.insert(id.to_owned()) {
+                    self.withdraw_side(text(&message, "sideQuestionId")).await?;
+                }
+                continue;
+            }
             if self.completed.is_some()
                 || self.seen.contains(id)
                 || !self.attempted.insert(id.to_owned())
             {
+                continue;
+            }
+            if message["sideQuestion"].is_object() {
+                self.ask_side(&message["sideQuestion"]).await?;
                 continue;
             }
             if message["questionCancelled"] == true {
@@ -1049,6 +1120,196 @@ impl Chat<'_> {
             self.acknowledge(id).await?;
         }
         Ok(())
+    }
+
+    /// Answers a side question in an ephemeral fork of the thread, on the same
+    /// app-server and account. The fork shares the history up to now, including the
+    /// running turn's progress, and never writes to the conversation's rollout.
+    async fn ask_side(&mut self, side: &Value) -> Result<()> {
+        let question = text(side, "id").to_owned();
+        let fork = self
+            .request(
+                "thread/fork",
+                json!({
+                    "threadId": self.thread,
+                    "ephemeral": true,
+                    "excludeTurns": true,
+                    "approvalPolicy": "never",
+                    "sandbox": "read-only",
+                    "config": side_config(),
+                }),
+            )
+            .await;
+        let fork = match fork {
+            Ok(fork) => text(&fork["thread"], "id").to_owned(),
+            Err(error) if error.message == STOPPED => return Err(error),
+            Err(_) => String::new(),
+        };
+        if fork.is_empty() {
+            return self
+                .side_failed(&question, "Codex could not open a side conversation.")
+                .await;
+        }
+        self.sides.insert(
+            fork.clone(),
+            Side {
+                question: question.clone(),
+                turn: String::new(),
+                answer: String::new(),
+                stopped: false,
+            },
+        );
+
+        let boundary = json!({
+            "threadId": fork,
+            "items": [{
+                "type": "message",
+                "role": "developer",
+                "content": [{ "type": "input_text", "text": SIDE_BOUNDARY }],
+            }],
+        });
+        let turn = json!({
+            "threadId": fork,
+            "input": [{ "type": "text", "text": text(side, "text") }],
+        });
+        let started = match self.request("thread/inject_items", boundary).await {
+            Ok(_) => self.request("turn/start", turn).await,
+            Err(error) => Err(error),
+        };
+        match started {
+            Ok(started) => {
+                if let Some(side) = self.sides.get_mut(&fork)
+                    && side.turn.is_empty()
+                {
+                    side.turn = text(&started["turn"], "id").to_owned();
+                }
+                Ok(())
+            }
+            Err(error) if error.message == STOPPED => Err(error),
+            Err(_) => {
+                if self.sides.remove(&fork).is_some() {
+                    self.release_fork(&fork, "");
+                    self.side_failed(&question, "Codex could not answer this side question.")
+                        .await?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Activity of a side question's fork. Only its answer leaves the fork; anything
+    /// else it starts is a tool, which interrupts it.
+    async fn side_activity(&mut self, method: &str, params: &Value) -> Result<()> {
+        let fork = text(params, "threadId").to_owned();
+        let Some(side) = self.sides.get_mut(&fork) else {
+            return Ok(());
+        };
+        match method {
+            "turn/started" => {
+                side.turn = text(&params["turn"], "id").to_owned();
+            }
+            "item/started" | "item/completed" => {
+                let item = &params["item"];
+                let kind = text(item, "type");
+                if kind == "agentMessage" && method == "item/completed" {
+                    text(item, "text").clone_into(&mut side.answer);
+                }
+                let tool = !matches!(kind, "userMessage" | "agentMessage" | "reasoning");
+                if tool && !side.stopped {
+                    side.stopped = true;
+                    let turn = if side.turn.is_empty() {
+                        text(params, "turnId").to_owned()
+                    } else {
+                        side.turn.clone()
+                    };
+                    self.interrupt_fork(&fork, &turn);
+                }
+            }
+            "turn/completed" => {
+                let side = self.sides.remove(&fork).unwrap();
+                self.release_fork(&fork, "");
+                let completed = params["turn"]["status"] == "completed";
+                if side.stopped {
+                    return self.side_failed(&side.question, SIDE_TOOL).await;
+                }
+                if completed && !side.answer.trim().is_empty() {
+                    return self
+                        .emit(json!({
+                            "type": "chat.side.answered",
+                            "sideQuestionId": side.question,
+                            "text": side.answer,
+                        }))
+                        .await;
+                }
+                let message = text(&params["turn"]["error"], "message");
+                let message = if message.is_empty() {
+                    "Codex could not answer this side question."
+                } else {
+                    message
+                };
+                return self.side_failed(&side.question, message).await;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// The user withdrew a side question: stop its fork without reporting it.
+    async fn withdraw_side(&mut self, question: &str) -> Result<()> {
+        let fork = self
+            .sides
+            .iter()
+            .find(|(_, side)| side.question == question)
+            .map(|(fork, _)| fork.clone());
+        if let Some(fork) = fork {
+            let side = self.sides.remove(&fork).unwrap();
+            self.release_fork(&fork, &side.turn);
+        }
+        Ok(())
+    }
+
+    /// Side questions still unanswered when the turn stops waiting for them.
+    async fn abandon_sides(&mut self) -> Result<()> {
+        let sides = std::mem::take(&mut self.sides);
+        for (fork, side) in sides {
+            self.release_fork(&fork, &side.turn);
+            self.side_failed(&side.question, SIDE_UNANSWERED).await?;
+        }
+        Ok(())
+    }
+
+    async fn side_failed(&self, question: &str, error: &str) -> Result<()> {
+        self.emit(json!({
+            "type": "chat.side.failed",
+            "sideQuestionId": question,
+            "error": error,
+        }))
+        .await
+    }
+
+    /// Interrupts a fork's turn without waiting, so its notifications keep flowing.
+    fn interrupt_fork(&self, fork: &str, turn: &str) {
+        let rpc = self.session.rpc.clone();
+        let params = json!({ "threadId": fork, "turnId": turn });
+        tokio::spawn(async move {
+            let _ = rpc.request("turn/interrupt", params).await;
+        });
+    }
+
+    /// Stops a fork's turn if one is given, then unloads the ephemeral fork.
+    fn release_fork(&self, fork: &str, turn: &str) {
+        let rpc = self.session.rpc.clone();
+        let fork = fork.to_owned();
+        let turn = turn.to_owned();
+        tokio::spawn(async move {
+            if !turn.is_empty() {
+                let params = json!({ "threadId": fork, "turnId": turn });
+                let _ = rpc.request("turn/interrupt", params).await;
+            }
+            let _ = rpc
+                .request("thread/unsubscribe", json!({ "threadId": fork }))
+                .await;
+        });
     }
 
     async fn finish(&self, plan: &Value) -> Result<()> {
@@ -1138,6 +1399,7 @@ async fn run_session(
         subagents: HashMap::new(),
         children: HashMap::new(),
         questions: HashMap::new(),
+        sides: HashMap::new(),
     };
     let mut result = chat.execute(&plan).await;
     if result.is_ok() && reusable {

@@ -73,6 +73,8 @@ export type ActivityEntry
     delivery?: string
     /** The model provider that wrote this reply, when the engine chose among several. */
     via?: string
+    /** The agent message's own ID, which side questions refer to. */
+    itemId?: string
     attachments?: import('../../../packages/contracts/chats').ChatAttachment[]
   }
   | { kind: 'group', id: string, artifacts: ActivityArtifact[] }
@@ -682,6 +684,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
           text: content,
           sourceId: `${event.runId}:${event.id}`,
           ...(via ? { via } : {}),
+          ...(itemId && type === 'agent_message' ? { itemId } : {}),
         }
         entries.push(message)
         messages.set(id, message)

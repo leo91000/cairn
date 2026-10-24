@@ -949,6 +949,164 @@ async fn steering_waits_for_both_responses_and_acknowledges_each_message() {
     assert_eq!(delivered, vec![json!("original"), json!("steering")]);
 }
 
+fn side_question(id: &str, text: &str) -> Value {
+    json!({ "id": format!("side-question:{id}"), "sideQuestion": { "id": id, "text": text } })
+}
+
+/// Runs `prompt`, delivering `inbox` once the adapter announces side questions, and
+/// returns every event.
+async fn with_side_questions(
+    prompt: &str,
+    inbox: impl Fn(&TempDir, &Value),
+) -> (TempDir, Config, Vec<Value>) {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let p = plan(&root, prompt);
+    let (tx, mut rx) = mpsc::channel(64);
+    let config = c.clone();
+    let task =
+        tokio::spawn(
+            async move { claude_process::run(&config, p, tx, CancellationToken::new()).await },
+        );
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(event) = rx.recv().await {
+            inbox(&root, &event);
+            events.push(event);
+        }
+    })
+    .await
+    .unwrap();
+    task.await.unwrap().unwrap();
+    (root, c, events)
+}
+
+fn position(events: &[Value], kind: &str) -> usize {
+    events
+        .iter()
+        .position(|event| event["type"] == kind)
+        .unwrap_or_else(|| panic!("missing {kind}"))
+}
+
+#[tokio::test]
+async fn a_side_question_is_answered_natively_while_the_turn_continues() {
+    let (_root, c, events) = with_side_questions("fixture:slow", |root, event| {
+        if event["type"] == "chat.side.available" {
+            deliver(
+                root,
+                &json!([side_question(
+                    "a1b2c3d4-0000-4000-8000-000000000001",
+                    "Why this order?"
+                )]),
+            );
+        }
+    })
+    .await;
+
+    let answered = position(&events, "chat.side.answered");
+    assert!(answered < position(&events, "turn.completed"));
+    assert_eq!(
+        events[answered]["sideQuestionId"],
+        "a1b2c3d4-0000-4000-8000-000000000001"
+    );
+    assert_eq!(events[answered]["text"], "Side answer: Why this order?");
+
+    // The question reached Claude as a control request, never as a user message.
+    let home = c.home.join(".claude");
+    let asked = std::fs::read_to_string(home.join("side-questions.jsonl")).unwrap();
+    assert!(asked.contains("\"subtype\":\"side_question\""));
+    let inputs = std::fs::read_to_string(home.join("inputs.jsonl")).unwrap();
+    assert_eq!(inputs.lines().count(), 1);
+    assert!(!inputs.contains("Why this order?"));
+    // The reply is the main turn's own answer, not the side answer.
+    let reply = events
+        .iter()
+        .rfind(|event| {
+            event["type"] == "item.completed" && event["item"]["type"] == "agent_message"
+        })
+        .unwrap();
+    assert_eq!(reply["item"]["text"], "Claude fixture completed");
+}
+
+#[tokio::test]
+async fn a_finished_turn_waits_for_its_side_question_and_reports_failures() {
+    let receipt_before_answer = std::cell::Cell::new(false);
+    let (_root, _c, events) = with_side_questions("fixture:slow", |root, event| {
+        // The request is saved as finished while the side question is still answered.
+        if event["type"] == "chat.side.answered" {
+            receipt_before_answer.set(root.path().join("result.claude-receipt.json").exists());
+        }
+        if event["type"] == "chat.side.available" {
+            deliver(
+                root,
+                &json!([
+                    side_question(
+                        "a1b2c3d4-0000-4000-8000-000000000002",
+                        "fixture:side-slow explain"
+                    ),
+                    side_question(
+                        "a1b2c3d4-0000-4000-8000-000000000003",
+                        "fixture:side-fail explain"
+                    ),
+                ]),
+            );
+        }
+    })
+    .await;
+
+    let answered = position(&events, "chat.side.answered");
+    assert_eq!(
+        events[answered]["sideQuestionId"],
+        "a1b2c3d4-0000-4000-8000-000000000002"
+    );
+    assert!(answered < position(&events, "turn.completed"));
+    assert!(receipt_before_answer.get());
+    let failed = position(&events, "chat.side.failed");
+    assert_eq!(
+        events[failed]["sideQuestionId"],
+        "a1b2c3d4-0000-4000-8000-000000000003"
+    );
+    assert_eq!(
+        events[failed]["error"],
+        "Claude Code could not answer this side question."
+    );
+}
+
+#[tokio::test]
+async fn a_withdrawn_side_question_cancels_the_native_request_silently() {
+    let (_root, c, events) = with_side_questions("fixture:slow", |root, event| {
+        let id = "a1b2c3d4-0000-4000-8000-000000000004";
+        if event["type"] == "chat.side.available" {
+            deliver(
+                root,
+                &json!([side_question(id, "fixture:side-slow explain")]),
+            );
+            let inbox = root.path().join("inbox/messages.json");
+            tokio::spawn(async move {
+                // After the adapter has read and asked the question.
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                let withdrawal = json!([{
+                    "id": format!("withdraw-side-question:{id}"),
+                    "sideQuestionId": id,
+                    "sideQuestionCancelled": true,
+                }]);
+                std::fs::write(inbox, withdrawal.to_string()).unwrap();
+            });
+        }
+    })
+    .await;
+
+    assert!(completes(&events));
+    assert!(!events.iter().any(|event| {
+        event["type"]
+            .as_str()
+            .is_some_and(|kind| kind.starts_with("chat.side.") && kind != "chat.side.available")
+    }));
+    let cancelled =
+        std::fs::read_to_string(c.home.join(".claude/side-cancellations.jsonl")).unwrap();
+    assert!(cancelled.contains("side-question-a1b2c3d4-0000-4000-8000-000000000004"));
+}
+
 #[tokio::test]
 async fn restored_background_results_cannot_complete_an_undelivered_prompt_or_receipt() {
     let root = TempDir::new().unwrap();

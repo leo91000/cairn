@@ -50,6 +50,26 @@ data class ChatQuestion(
     val createdAt: Long = 0,
 )
 
+/**
+ * A question the running agent answers from its context beside its reply, without tools, steering
+ * or a change to the conversation's history.
+ */
+@Serializable
+data class ChatSideQuestion(
+    val id: String,
+    val chatId: String = "",
+    val runId: String = "",
+    val text: String = "",
+    val quote: String = "",
+    val itemId: String = "",
+    val provider: String? = null,
+    val status: String = "pending",
+    val answer: String? = null,
+    val error: String? = null,
+    val createdAt: Long = 0,
+    val settledAt: Long? = null,
+)
+
 @Serializable
 data class ChatWakeup(
     val id: String,
@@ -96,6 +116,11 @@ data class Chat(
     /** The opening of the agent's final message, while unread. */
     val preview: String? = null,
     val questions: List<ChatQuestion> = emptyList(),
+    /** Explanations asked beside the running reply, oldest first. */
+    val sideQuestions: List<ChatSideQuestion> = emptyList(),
+    /** The running reply's coding agent can answer a side question now. */
+    val canAskSideQuestion: Boolean = false,
+    val pendingSideQuestions: Int = 0,
     val run: Run? = null,
     val messages: List<ChatMessage> = emptyList(),
     val error: String? = null,

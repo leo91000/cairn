@@ -48,6 +48,7 @@ import androidx.compose.ui.window.SecureFlagPolicy
 import build.cairn.app.data.*
 import java.io.File
 import java.util.UUID
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
 
 @Composable
@@ -450,6 +451,29 @@ internal fun ChatPage(
             quotaTimeline(history, live.events).followingDelegations(chats)
         }
     var asking by remember { mutableStateOf<ChatQuestion?>(null) }
+    val side = remember(id) { SideQuestionState() }
+    LaunchedEffect(side, chat?.sideQuestions, side.open) {
+        chat?.let { side.observe(it.sideQuestions) }
+    }
+    val sideCounts =
+        remember(chat?.sideQuestions) {
+            chat
+                ?.sideQuestions
+                .orEmpty()
+                .filter { it.itemId.isNotEmpty() }
+                .groupingBy { it.itemId }
+                .eachCount()
+        }
+    val sideActions =
+        remember(side, sideCounts, chat?.canAskSideQuestion) {
+            SideQuestionActions(
+                canAsk = chat?.canAskSideQuestion == true,
+                counts = sideCounts,
+                ask = side::ask,
+                show = side::show,
+            )
+        }
+    val sideScope = rememberCoroutineScope()
     var stopping by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf<ChatMessage?>(null) }
     val listState = rememberLazyListState()
@@ -1230,6 +1254,7 @@ internal fun ChatPage(
                                     items(timeline, key = { it.key }) {
                                         CompositionLocalProvider(
                                             LocalOpenSubagent provides openSubagent,
+                                            LocalSideQuestions provides sideActions,
                                             LocalLiveWait provides
                                                 chat?.let {
                                                     LiveWait(
@@ -1384,6 +1409,7 @@ internal fun ChatPage(
                                     )
                                 }
                             }
+                        if (chat != null) SideQuestionCard(chat, side)
                         if (!fullscreen)
                             Surface(
                                 Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
@@ -1675,6 +1701,17 @@ internal fun ChatPage(
                 else
                     QuestionDialog(vm, state, current, questions, { asking = it }) { asking = null }
             }
+            if (side.open && chat != null)
+                SideQuestionSheet(vm, state, chat, side) { itemId ->
+                    // Follow a side question back to its reply in the history.
+                    val index = timeline.indexOfFirst { entry ->
+                        entry.message && entry.events.single().item().string("id") == itemId
+                    }
+                    if (index >= 0)
+                        sideScope.launch {
+                            listState.animateScrollToItem(index + if (id == null) 1 else 0)
+                        }
+                }
             if (newSession && chat != null)
                 Confirm(
                     "Nouvelle session agent ?",

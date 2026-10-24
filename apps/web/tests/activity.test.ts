@@ -372,6 +372,27 @@ describe('conversation activity', () => {
   })
 })
 
+it('keeps the agent message ID that side questions refer to', () => {
+  const reply: RunEvent = {
+    id: 1,
+    runId: 'chat',
+    createdAt: 1,
+    type: 'item.completed',
+    text: '',
+    payload: { item: { id: 'reply-1', type: 'agent_message', text: 'Done' } },
+  }
+  const user: RunEvent = {
+    id: 2,
+    runId: 'chat',
+    createdAt: 2,
+    type: 'chat.user',
+    text: 'Thanks',
+    payload: { messageId: 'm', text: 'Thanks' },
+  }
+  const messages = activityEntries([reply, user], true).filter(entry => entry.kind === 'message')
+  expect(messages.map(entry => entry.kind === 'message' && entry.itemId)).toEqual(['reply-1', undefined])
+})
+
 describe('artifact identities', () => {
   it('summarizes historical JSON without copying it into the card heading', () => {
     const output = JSON.stringify([{ id: 123, jobs: [{ name: 'quality', conclusion: 'success' }] }])

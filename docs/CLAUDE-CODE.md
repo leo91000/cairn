@@ -12,7 +12,8 @@ unavailable rather than inventing current model capabilities.
 
 Claude agents support scheduled tasks, chats, streaming text and tool results,
 image/file attachments, queued follow-ups, steering, native questions, cancellation,
-and resumption. Changing a model applies to the next queued turn. The chat composer
+resumption, and [side questions](chats.md#side-questions) answered with the CLI's
+`side_question` control request while a turn runs. Changing a model applies to the next queued turn. The chat composer
 also switches between Codex and Claude Code without creating another visible chat.
 The server waits for the current turn to finish, starts a fresh native session,
 and transfers visible conversation context while retaining the same workspace.

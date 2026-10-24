@@ -294,6 +294,18 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
         ("POST", ["chats", id, "questions", question, "answer"]) => {
             s.question_answer(id, question, input.body.clone()).await?
         }
+        ("POST", ["chats", id, "side-questions"]) => {
+            s.side_question_ask_authorized(id, input.body.clone(), |_| Ok(()))
+                .await?
+        }
+        ("POST", ["chats", id, "side-questions", question, "cancel"]) => {
+            s.side_question_cancel_authorized(
+                id,
+                question,
+                crate::native::policy::chat_authorization(id),
+            )
+            .await?
+        }
         _ => return Ok(None),
     };
     Ok(Some(result))

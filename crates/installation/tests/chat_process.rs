@@ -1003,3 +1003,180 @@ async fn images_and_files_reach_start_and_steer_as_readable_inputs() {
             .any(|i| i["path"] == "/run/cairn-chat/attachments/image-id/design.png")
     );
 }
+
+fn side_question(id: &str, text: &str) -> Value {
+    json!({ "id": format!("side-question:{id}"), "sideQuestion": { "id": id, "text": text } })
+}
+
+/// Runs `text`, delivering `inbox` once the adapter announces side questions, and
+/// returns the Codex home with every event.
+async fn with_side_questions(
+    text: &str,
+    inbox: Value,
+    withdraw: Option<&str>,
+) -> (TempDir, PathBuf, Vec<Value>) {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    let plan = plan(&root, text);
+    let (tx, mut rx) = mpsc::channel(64);
+    let codex = home.clone();
+    let task = tokio::spawn(async move {
+        chat_process::run(&config, &codex, plan, tx, CancellationToken::new()).await
+    });
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(event) = rx.recv().await {
+            if event["type"] == "chat.side.available" {
+                deliver(&root, &inbox).await;
+                if let Some(id) = withdraw {
+                    // After the adapter has read and asked the question.
+                    tokio::time::sleep(Duration::from_millis(600)).await;
+                    let withdrawal = json!([{
+                        "id": format!("withdraw-side-question:{id}"),
+                        "sideQuestionId": id,
+                        "sideQuestionCancelled": true,
+                    }]);
+                    deliver(&root, &withdrawal).await;
+                }
+            }
+            events.push(event);
+        }
+    })
+    .await
+    .unwrap();
+    task.await.unwrap().unwrap();
+    (root, home, events)
+}
+
+fn position(events: &[Value], kind: &str) -> usize {
+    events
+        .iter()
+        .position(|event| event["type"] == kind)
+        .unwrap_or_else(|| panic!("missing {kind}"))
+}
+
+fn side_log(home: &Path, name: &str) -> Vec<Value> {
+    std::fs::read_to_string(home.join(name))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn side_questions_use_an_ephemeral_read_only_fork_while_the_turn_continues() {
+    let id = "a1b2c3d4-0000-4000-8000-000000000001";
+    let (_root, home, events) = with_side_questions(
+        "fixture:slow-finish",
+        json!([side_question(id, "Why this order?")]),
+        None,
+    )
+    .await;
+
+    let answered = position(&events, "chat.side.answered");
+    assert!(answered < position(&events, "turn.completed"));
+    assert_eq!(events[answered]["sideQuestionId"], id);
+    assert_eq!(events[answered]["text"], "Side answer: Why this order?");
+
+    let forks = side_log(&home, "side-forks.jsonl");
+    assert_eq!(forks.len(), 1);
+    assert_eq!(forks[0]["threadId"], "fixture-chat");
+    assert_eq!(forks[0]["ephemeral"], true);
+    assert_eq!(forks[0]["sandbox"], "read-only");
+    assert_eq!(forks[0]["approvalPolicy"], "never");
+    for feature in [
+        "shell_tool",
+        "unified_exec",
+        "apps",
+        "plugins",
+        "goals",
+        "view_image",
+    ] {
+        assert_eq!(forks[0]["config"][format!("features.{feature}")], false);
+    }
+    assert_eq!(forks[0]["config"]["web_search"], "disabled");
+    let turns = side_log(&home, "side-turns.jsonl");
+    assert_eq!(turns[0]["injected"][0]["role"], "developer");
+    assert!(
+        turns[0]["injected"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("NOT interrupted")
+    );
+    assert_eq!(side_log(&home, "side-releases.jsonl").len(), 1);
+
+    // The conversation keeps only its own turn: no side question, no side answer.
+    let thread = conversation(&home);
+    assert_eq!(thread["turns"].as_array().unwrap().len(), 1);
+    let saved = thread.to_string();
+    assert!(!saved.contains("Why this order?"));
+    assert!(!saved.contains("Side answer"));
+    let reply = events
+        .iter()
+        .rfind(|event| {
+            event["type"] == "item.completed" && event["item"]["type"] == "agent_message"
+        })
+        .unwrap();
+    assert!(
+        !reply["item"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Side answer")
+    );
+}
+
+#[tokio::test]
+async fn a_side_question_that_tries_a_tool_is_interrupted_and_reported() {
+    let id = "a1b2c3d4-0000-4000-8000-000000000002";
+    let (_root, home, events) = with_side_questions(
+        "fixture:slow-finish",
+        json!([side_question(id, "fixture:side-tool explain")]),
+        None,
+    )
+    .await;
+
+    let failed = position(&events, "chat.side.failed");
+    assert_eq!(events[failed]["sideQuestionId"], id);
+    assert!(
+        events[failed]["error"]
+            .as_str()
+            .unwrap()
+            .contains("tried to use a tool")
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["type"] == "chat.side.answered")
+    );
+    assert_eq!(side_log(&home, "side-interrupts.jsonl").len(), 1);
+    assert!(events.iter().any(|event| event["type"] == "turn.completed"));
+}
+
+#[tokio::test]
+async fn a_finished_turn_waits_for_a_side_question_answer_and_withdrawals_stay_silent() {
+    let slow = "a1b2c3d4-0000-4000-8000-000000000003";
+    let (_root, _home, events) = with_side_questions(
+        "Check the workspace",
+        json!([side_question(slow, "fixture:side-slow explain")]),
+        None,
+    )
+    .await;
+    assert!(position(&events, "chat.side.answered") < position(&events, "turn.completed"));
+
+    let withdrawn = "a1b2c3d4-0000-4000-8000-000000000004";
+    let (_root, home, events) = with_side_questions(
+        "fixture:slow-finish",
+        json!([side_question(withdrawn, "fixture:side-slow explain")]),
+        Some(withdrawn),
+    )
+    .await;
+    assert!(events.iter().any(|event| event["type"] == "turn.completed"));
+    assert!(!events.iter().any(|event| {
+        matches!(
+            event["type"].as_str(),
+            Some("chat.side.answered" | "chat.side.failed")
+        )
+    }));
+    assert_eq!(side_log(&home, "side-releases.jsonl").len(), 1);
+}

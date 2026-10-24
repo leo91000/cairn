@@ -1360,10 +1360,13 @@ fun EventRow(vm: CairnViewModel, event: RunEvent, agent: String = "Cairn") {
                             ),
                             verticalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
+                            val side = if (user) null else LocalSideQuestions.current
+                            val itemId = if (event.type == "chat.user") "" else item.string("id")
                             if (!user)
                                 Row(
                                     Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Text(
                                         agent,
@@ -1371,6 +1374,30 @@ fun EventRow(vm: CairnViewModel, event: RunEvent, agent: String = "Cairn") {
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
+                                    val asked = side?.counts?.get(itemId) ?: 0
+                                    if (side != null && itemId.isNotEmpty() && asked > 0)
+                                        TextButton(
+                                            onClick = { side.show(itemId) },
+                                            contentPadding = PaddingValues(horizontal = 8.dp),
+                                        ) {
+                                            Icon(
+                                                CairnIcons.SideQuestion,
+                                                null,
+                                                Modifier.size(14.dp),
+                                            )
+                                            Spacer(Modifier.width(4.dp))
+                                            Text(
+                                                "$asked",
+                                                style = MaterialTheme.typography.labelSmall,
+                                            )
+                                        }
+                                    if (side?.canAsk == true && itemId.isNotEmpty())
+                                        ActionIcon(
+                                            "Poser une question à côté",
+                                            CairnIcons.SideQuestion,
+                                        ) {
+                                            side.ask(itemId, "")
+                                        }
                                     Text(
                                         time,
                                         style = MaterialTheme.typography.labelSmall,
@@ -1388,7 +1415,17 @@ fun EventRow(vm: CairnViewModel, event: RunEvent, agent: String = "Cairn") {
                                         style = MaterialTheme.typography.bodyLarge,
                                     )
                                 }
-                            else Markdown(content)
+                            else
+                                CompositionLocalProvider(
+                                    LocalSideQuestionAsk provides
+                                        side
+                                            ?.takeIf { it.canAsk && itemId.isNotEmpty() }
+                                            ?.let { actions ->
+                                                { quote -> actions.ask(itemId, quote) }
+                                            }
+                                ) {
+                                    Markdown(content)
+                                }
                             if (user)
                                 Text(
                                     time,

@@ -602,3 +602,8 @@
     animation: none;
   }
 }
+
+/* A reply followed back from one of its side questions. */
+.activity-message.side-question-target {
+  background: color-mix(in oklab, var(--color-accent) 10%, transparent);
+}

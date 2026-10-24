@@ -5,6 +5,7 @@ import {
   chatMessageInput,
   questionAnswerInput,
   questionFields,
+  sideQuestionInput,
 } from '../packages/contracts/chats.ts'
 import {
   agentInput,
@@ -22,6 +23,7 @@ const schemas = {
   message: chatMessageInput,
   answer: questionAnswerInput,
   questions: questionFields,
+  sideQuestion: sideQuestionInput,
   mcp: mcpInput,
 }
 await writeFile('crates/installation/schemas/inputs.json', `${JSON.stringify(Object.fromEntries(Object.entries(schemas).map(([name, schema]) => [name, z.toJSONSchema(schema, { unrepresentable: 'any' })])), null, 2)}\n`)
@@ -64,6 +66,8 @@ for (const tool of tools) {
 
   if (tool.name === 'answer_chat_question')
     tool.inputSchema.properties.answer = z.toJSONSchema(questionAnswerInput)
+  if (tool.name === 'ask_chat_side_question')
+    tool.inputSchema.properties.question = z.toJSONSchema(sideQuestionInput)
 }
 
 await writeFile('crates/installation/schemas/mcp-operations.json', `${JSON.stringify(tools, null, 2)}\n`)

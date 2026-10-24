@@ -117,11 +117,17 @@ export interface ChatView extends Chat {
   preview?: string | null
   /** The conversation that delegated this one, while it still exists. */
   requester?: { chatId: string, title: string } | null
+  /** Side questions still waiting for an answer. */
+  pendingSideQuestions?: number
 }
 export interface ChatDetail extends ChatView {
   questions: ChatQuestion[]
   run: Run | null
   messages: ChatMessage[]
+  /** Explanations asked beside the running reply, oldest first. */
+  sideQuestions?: ChatSideQuestion[]
+  /** The running reply's coding agent can answer a side question now. */
+  canAskSideQuestion?: boolean
 }
 export const questionFields = z.array(z.object({
   id: z.string().min(1).max(200),
@@ -148,4 +154,30 @@ export interface ChatExecution {
   messageId: string
   text: string
   recovery: boolean
+}
+/**
+ * A question about the conversation that the running agent answers from its context,
+ * without tools, without changing its work or the conversation's history.
+ */
+export const sideQuestionInput = z.object({
+  id: z.string().uuid(),
+  text: z.string().trim().min(1).max(4000),
+  /** The passage of a reply the question is about. */
+  quote: z.string().trim().max(4000).default(''),
+  /** The agent message the question refers to. */
+  itemId: z.string().max(200).default(''),
+})
+export interface ChatSideQuestion {
+  id: string
+  chatId: string
+  runId: string
+  text: string
+  quote?: string
+  itemId?: string
+  provider?: Provider | null
+  status: 'pending' | 'answered' | 'failed' | 'cancelled'
+  answer?: string
+  error?: string
+  createdAt: number
+  settledAt?: number
 }
