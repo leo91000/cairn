@@ -205,6 +205,8 @@ pub(crate) async fn view(state: &Path, run: &str) -> Result<View> {
     }
 }
 
+pub(crate) const DISK_BUSY: &str = "Native disk is active.";
+
 pub fn exists(state: &Path, run: &str) -> Result<bool> {
     Ok(storage::runtime::exists(&environment::directory(
         state, run,
@@ -477,7 +479,7 @@ pub async fn mount(
     stop: &CancellationToken,
 ) -> Result<Mounted> {
     {
-        let owner = environment::ownership(state, run, "Native disk is active.").await?;
+        let owner = environment::ownership(state, run, DISK_BUSY).await?;
         let directory = &owner.directory;
         let root = workspace::directory(state, run)?;
         private_dir(&root).await?;
@@ -504,9 +506,15 @@ pub async fn mount(
             &plan["storage"],
             stop,
         )
-        .await?;
-        let physical =
-            crate::file_lock::exclusive(&directory.join("lock"), "Native disk is active.")?;
+        .await
+        .map_err(|error| {
+            if error.is_conflict() && error.message == storage::bootstrap::DISK_BUSY {
+                Error::conflict(DISK_BUSY)
+            } else {
+                error
+            }
+        })?;
+        let physical = crate::file_lock::exclusive(&directory.join("lock"), DISK_BUSY)?;
         let runtime = json!({
             "backend": "native", "storage": "ublk", "os": "linux", "arch": "x86_64",
             "runtimeId": plan["runtimeId"],
@@ -1056,7 +1064,7 @@ pub async fn evict(data: &Path, state: &Path, run: &str, expected: &Value) -> Re
     let root = workspace::directory(state, run)?;
     let _owner =
         crate::file_lock::exclusive(&root.join("owner.lock"), "Native workspace is active.")?;
-    let lease = environment::lock(state, run, "Native disk is active.").await?;
+    let lease = environment::lock(state, run, DISK_BUSY).await?;
     if root.join("block-restore.pending.json").exists()
         || root.join("restore.pending.json").exists()
         || root.join("legacy-block-restore.pending.json").exists()
@@ -1154,7 +1162,7 @@ async fn cleanup_attempt_files(data: &Path, state: &Path, run: &str) -> Result<(
 }
 
 pub async fn action(state: &Path, run: &str, delete: bool) -> Result<Vec<String>> {
-    let lease = environment::lock(state, run, "Native disk is active.").await?;
+    let lease = environment::lock(state, run, DISK_BUSY).await?;
     let directory = &lease.directory;
     let _replacement = storage::runtime::replacement(directory).await?;
     let mut grants = Vec::new();
@@ -1233,7 +1241,7 @@ pub async fn restore_files(
             )
             .await?;
         }
-        let lease = environment::lock(state, run, "Native disk is active.").await?;
+        let lease = environment::lock(state, run, DISK_BUSY).await?;
         let _replacement = storage::runtime::replacement(&lease.directory).await?;
         if lease.directory.join("restore.pending").exists() {
             return Err(Error::conflict(

@@ -49,6 +49,7 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
     var saved by remember(run.id) { mutableStateOf<String?>(null) }
     var migration by remember(run.id) { mutableStateOf<BackendMigrationState?>(null) }
     var conversions by remember(run.id) { mutableIntStateOf(0) }
+    var privilegeError by remember(run.id) { mutableStateOf(false) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(run.id) {
         try {
@@ -63,6 +64,22 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
             destination = placement.nodes.firstOrNull { it.id != run.nodeId }?.id.orEmpty()
         } catch (e: Exception) {
             error = e.message
+        }
+    }
+    LaunchedEffect(run.id, expanded, run.executionBackend) {
+        if (!expanded || run.executionBackend != "native") return@LaunchedEffect
+        while (true) {
+            try {
+                val current = vm.api.get<Placement>("/nodes/placement/${run.id}")
+                // Keep unsaved placement choices while refreshing observed privileges.
+                placement = placement.copy(nodes = current.nodes)
+                privilegeError = false
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                privilegeError = true
+            }
+            delay(3000)
         }
     }
     // Recovery ages are shown to the minute, so a slow clock is enough.
@@ -86,8 +103,9 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
             exclusive != null ||
             error != null
     if (!relevant) return
+    val currentNode = placement.nodes.find { it.id == run.nodeId }
     val current =
-        placement.nodes.find { it.id == run.nodeId }?.name
+        currentNode?.name
             ?: if (run.nodeId == LOCAL_NODE_ID) "Runner du master" else "Node inconnue"
     fun request(block: suspend CairnViewModel.() -> Unit, done: String) {
         busy = true
@@ -153,7 +171,25 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
         DetailSheet("Node d’exécution", { expanded = false }) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(current, style = MaterialTheme.typography.titleMedium)
-                if (run.executionBackend == "native") Text("Processus natif · GPU partagé")
+                if (run.executionBackend == "native")
+                    Text(
+                        "Dernière exécution : ${nativeModeLabel(run.nativeMode?.mode ?: "protected")} · GPU partagé"
+                    )
+                if (run.executionBackend == "native") {
+                    val notice =
+                        when {
+                            privilegeError ->
+                                "Impossible de confirmer les privilèges actuels de la node."
+                            currentNode?.nativeModeStatus == "failed" ->
+                                "Échec du basculement ; les privilèges actuels ne sont pas confirmés. Les nouveaux placements sont bloqués."
+                            currentNode?.nativeModeStatus == "pending" ->
+                                "Basculement en cours ; les privilèges actuels ne sont pas confirmés. Les nouveaux placements sont bloqués."
+                            currentNode?.nativeModeStatus == "applied" ->
+                                "Mode de node confirmé : ${nativeModeLabel(currentNode.nativeModeObserved?.mode ?: currentNode.nativeModeRequest?.mode ?: "protected")}"
+                            else -> null
+                        }
+                    if (notice != null) Text(notice)
+                }
                 if (run.executionBackend == "native" && run.storage?.mode == "native")
                     Text(
                         "Sauvegarde entre les tours",

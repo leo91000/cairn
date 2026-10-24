@@ -53,6 +53,7 @@ struct HeartbeatRequest<'a> {
     exclusive_reservations: bool,
     backend: &'a Value,
     node_protocol: &'a Value,
+    native_mode: &'a Value,
 }
 
 pub(crate) fn master(input: &str) -> Result<url::Url> {
@@ -234,6 +235,7 @@ pub fn capabilities(path: &Path) -> Result<Value> {
         fuse: device_opens("/dev/fuse").is_some(),
         ublk: device_opens("/dev/ublk-control").is_some(),
         vm_disks: crate::native::enabled() && crate::native::idmap::supported(),
+        native_mode_protocol: u32::from(crate::native::enabled()),
         cpu: u32::try_from(cpu).unwrap_or(u32::MAX),
         memory_mi_b: memory,
         disk_mi_b: mi_b(stat.f_bavail, stat.f_frsize),
@@ -444,6 +446,7 @@ async fn heartbeat(
             exclusive_reservations: health["exclusiveReservations"] == true,
             backend: &health["backend"],
             node_protocol: &health["nodeProtocol"],
+            native_mode: &health["nativeMode"],
         };
         let request = client
             .post(
@@ -469,6 +472,18 @@ async fn heartbeat(
                     .json()
                     .await
                     .map_err(|_| Error::bad("Invalid master heartbeat."))?;
+                if health["backend"] == "native"
+                    && value["nativeMode"].is_object()
+                    && !crate::native::mode_matches(&health["nativeMode"], &value["nativeMode"])
+                {
+                    let _ = controller
+                        .post(format!("{}/native-mode", runner.trim_end_matches('/')))
+                        .bearer_auth(runner_credential().await?)
+                        .json(&value["nativeMode"])
+                        .timeout(Duration::from_secs(290))
+                        .send()
+                        .await;
+                }
                 if ready {
                     if let Ok(guard) = archive_warmer.clone().try_lock_owned()
                         && let Some(descriptors) = archive_catalog(&health, &value)?

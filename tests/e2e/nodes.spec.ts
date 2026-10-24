@@ -110,6 +110,7 @@ test('registers, configures and revokes a node through the owner interface', asy
 
 test('conversation placement distinguishes a preference from a strict pin and shows synchronization age', async ({ page, workspace }) => {
   test.setTimeout(60000)
+  await useRelayForHttpMocks(page)
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Inspect the fixture' })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
@@ -205,10 +206,37 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await heartbeat()
   await expect(header).not.toContainText('saved when execution stops', { timeout: 15000 })
   await expect(header).toContainText('Synced 2 min ago')
+  const nativePlacement = await workspace.api(`/api/nodes/placement/${detail.run.id}`)
+  let privilegeStatus = 'pending'
+  const privilegeGeneration = randomUUID()
+  await page.route(`**/nodes/placement/${detail.run.id}`, route => route.fulfill({
+    json: {
+      ...nativePlacement,
+      nodes: nativePlacement.nodes.map((candidate: { id: string }) => candidate.id !== node.nodeId
+        ? candidate
+        : {
+            ...candidate,
+            nativeModeStatus: privilegeStatus,
+            nativeModeRequest: { mode: 'administrator', generation: privilegeGeneration },
+            nativeModeObserved: {
+              mode: privilegeStatus === 'applied' ? 'administrator' : 'protected',
+              generation: privilegeStatus === 'applied' ? privilegeGeneration : null,
+              status: privilegeStatus,
+            },
+          }),
+    },
+  }))
   await header.click()
-  await expect(panel).toContainText('Native process · shared host GPU · files load on demand')
+  await expect(panel).toContainText('Last execution: Native protected · shared host GPU · files load on demand')
+  await expect(panel).toContainText('Node privilege change in progress; current privileges are unconfirmed. New placements are blocked.')
+  privilegeStatus = 'failed'
+  await expect(panel).toContainText('Node privilege change failed; current privileges are unconfirmed. New placements are blocked.')
+  privilegeStatus = 'applied'
+  await expect(panel).toContainText('Confirmed node mode: Native administrator')
+  await expect(panel).toContainText('Last execution: Native protected')
   await page.keyboard.press('Escape')
   await expect(panel).toHaveCount(0)
+  await page.unroute(`**/nodes/placement/${detail.run.id}`)
   workspace.service.store.updateRun(detail.run.id, { status: 'succeeded', executionBackend: null } as any)
   workspace.service.store.updateRun(detail.run.id, {
     storage: {
@@ -694,4 +722,87 @@ test('moving a conversation to the other backend remounts its files or converts 
   phase = 'complete'
   await expect(page.getByRole('status').filter({ hasText: 'Conversion complete' })).toBeVisible()
   await expect(page).toHaveURL(/\/chats\//)
+})
+
+test('previews node administrator powers and keeps failed transitions visibly blocked', async ({ page, workspace: _workspace }) => {
+  await useRelayForHttpMocks(page)
+  const node: any = {
+    id: randomUUID(),
+    name: 'Disposable administrator',
+    local: false,
+    accepting: true,
+    status: 'online',
+    revoked: false,
+    nativeEnabled: true,
+    nativeAccounts: ['trusted'],
+    tags: [],
+    slots: 2,
+    occupiedSlots: 2,
+    agents: [{ id: 'builder', name: 'Builder', allNodes: true }],
+    capabilities: {
+      os: 'linux',
+      arch: 'x86_64',
+      backend: 'native',
+      ublk: true,
+      nativeModeProtocol: 1,
+      kvm: false,
+      cpu: 4,
+      memoryMiB: 8192,
+      diskMiB: 65536,
+    },
+    limits: { cpu: 2, memoryMiB: 4096, diskMiB: 32768 },
+    nativeModeObserved: { mode: 'protected', generation: null, status: 'applied' },
+  }
+  const requests: any[] = []
+  await page.route('**/api/nodes', route => route.fulfill({ json: [node] }))
+  await page.route(`**/nodes/${node.id}/native-mode`, async (route) => {
+    const change = route.request().postDataJSON()
+    requests.push(change)
+    if (change.confirm) {
+      node.nativeModeRequest = { mode: change.mode, generation: 'g1' }
+      node.nativeModeStatus = 'failed'
+      node.nativeModeObserved = {
+        mode: 'protected',
+        generation: null,
+        status: 'failed',
+        error: 'Stop confirmation unavailable',
+      }
+      return route.fulfill({ json: node })
+    }
+
+    return route.fulfill({
+      json: {
+        previewId: 'preview-one',
+        preview: {
+          mode: change.mode,
+          warning: 'Unrestricted passwordless sudo on the real host. Root can read local credentials and alter Cairn. Returning to protected does not clean or restore this machine.',
+          interruptions: 'Two conversations and their process descendants stop before restart. Files and history remain.',
+          trustedAccounts: ['trusted'],
+          agents: [{ id: 'builder', name: 'Builder' }],
+          conversations: [{ id: 'c1', name: 'First conversation', status: 'running' }, { id: 'c2', name: 'Second conversation', status: 'running' }],
+          tasks: [{ id: 't1', name: 'Nightly build' }],
+        },
+      },
+    })
+  })
+  await page.goto(workspacePath('/nodes'))
+  await authenticateWorkspace(page)
+  const card = page.getByRole('article').filter({ hasText: 'Disposable administrator' })
+  await expect(card).toContainText('Native protected')
+  await card.getByRole('button', { name: 'Switch to Native administrator', exact: true }).click()
+  const review = page.getByRole('dialog', { name: 'Switch Disposable administrator to Native administrator?' })
+  await expect(review).toContainText('real host')
+  await expect(review).toContainText('First conversation')
+  await expect(review).toContainText('Second conversation')
+  await expect(review).toContainText('Nightly build')
+  expect(requests).toEqual([{ mode: 'administrator' }])
+  await review.getByRole('button', { name: 'Confirm access and restart managed executions' }).click()
+  await expect(review).toHaveCount(0)
+  await expect(card).toContainText('Change failed; new placements are blocked')
+  await expect(card).toContainText('Last confirmed: Native protected')
+  await expect(card).toContainText('Current privileges are unconfirmed')
+  await expect(card).toContainText('Native protected')
+  expect(requests[1]).toEqual({ mode: 'administrator', previewId: 'preview-one', confirm: true })
+  await card.getByRole('button', { name: 'Switch to Native administrator', exact: true }).click()
+  expect(requests.at(-1)).toEqual({ mode: 'administrator' })
 })

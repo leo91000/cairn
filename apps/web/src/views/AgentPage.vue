@@ -34,6 +34,7 @@ import {
   grantablePackages,
   isolationNote,
   mainLockedSections,
+  nativeReviewNodes,
   needsReview,
   newAgentDraft,
   nodeBackend,
@@ -138,7 +139,7 @@ const serverError = ref('')
 const conflict = ref(false)
 const attempted = ref(false)
 const fieldErrors = ref<Partial<Record<SectionId, string>>>({})
-const review = ref<{ lines: ReviewLine[], delegations: DelegationEffect[] } | null>(null)
+const review = ref<{ lines: ReviewLine[], delegations: DelegationEffect[], nativeNodes: string[] } | null>(null)
 const reviewError = ref('')
 const leaving = ref(false)
 const pendingLeave = ref<string | null>(null)
@@ -146,6 +147,7 @@ const deleting = ref(false)
 const heading = ref<HTMLElement>()
 
 const context = computed<Context>(() => ({
+  agentId: agent.value?.id,
   projects: state.projects,
   skills: state.skills,
   mcps: state.mcps,
@@ -518,7 +520,7 @@ watch(draft, () => {
     validate()
 }, { deep: true })
 
-function body(reapprove: string[] = []) {
+function body(reapprove: string[] = [], nativeNodes: string[] = []) {
   // Also set once a new agent exists: a recovery update must not overwrite another client's change.
   const revision = agent.value?.revision
   // Only a loaded connection list says which ones were deleted.
@@ -528,6 +530,7 @@ function body(reapprove: string[] = []) {
     ...(legacy.value ? profile : { ...profile, exclusiveNodes: draft.value.exclusiveNodes, plugins: draft.value.plugins }),
     ...(revision && !legacy.value ? { revision } : {}),
     ...(reapprove.length ? { reapproveDelegations: reapprove } : {}),
+    ...(nativeNodes.length ? { nativeNodeReviews: nativeNodes } : {}),
   }
 }
 
@@ -572,7 +575,7 @@ async function requestSave() {
   // else saves directly.
   if (needsReview(lines, current)) {
     reviewError.value = ''
-    review.value = { lines, delegations: effects }
+    review.value = { lines, delegations: effects, nativeNodes: nativeReviewNodes(draft.value, context.value) }
     return
   }
 
@@ -596,6 +599,7 @@ function failed(e: unknown) {
 }
 
 async function commit(reapprove: string[]) {
+  const nativeNodes = review.value?.nativeNodes ?? []
   busy.value = true
   serverError.value = ''
   reviewError.value = ''
@@ -605,7 +609,7 @@ async function commit(reapprove: string[]) {
   try {
     if (isNew.value) {
       result = await creation.save<Agent>('/agents', {
-        body: () => body(reapprove),
+        body: () => body(reapprove, nativeNodes),
         // A replayed creation updates the agent it created, at that agent's revision.
         onCreated: (created) => { agent.value = created },
       })
@@ -613,7 +617,7 @@ async function commit(reapprove: string[]) {
     else if (profileChanged) {
       result = await api<Agent>(`/agents/${id.value}`, {
         method: 'PUT',
-        body: JSON.stringify(body(reapprove)),
+        body: JSON.stringify(body(reapprove, nativeNodes)),
       })
     }
     else {
@@ -1133,6 +1137,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               v-model:access="draft.access"
               v-model:exclusive-nodes="draft.exclusiveNodes"
               :nodes="nodes"
+              :agent-id="agent?.id"
               :read-only-grants="legacy ? updateForGrants : ''"
             />
           </template>

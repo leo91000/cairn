@@ -24,7 +24,7 @@ import UiSwitch from './UiSwitch.vue'
 
 // Per node: may the agent run there, and may it reserve the node exclusively.
 // `readOnlyGrants` says why exclusive reservations cannot be changed here (an older installation).
-const props = defineProps<{ nodes: ExecutionNode[], readOnlyGrants?: string }>()
+const props = defineProps<{ nodes: ExecutionNode[], agentId?: string, readOnlyGrants?: string }>()
 const access = defineModel<AgentAccess>('access', { required: true })
 // Nodes the agent may reserve exclusively, a live grant kept beside `access`.
 const exclusiveNodes = defineModel<string[]>('exclusiveNodes', { required: true })
@@ -56,7 +56,7 @@ const allNodes = computed({
   get: () => access.value.nodes === null,
   // "Choose" starts from the nodes it can use today, so turning "All" off only stops future nodes.
   set: (value: boolean) => {
-    access.value.nodes = value ? null : available.value.map(node => node.id)
+    access.value.nodes = value ? null : available.value.filter(node => node.nativeModeRequest?.mode !== 'administrator' || node.nativeReviewedAgents?.includes(props.agentId ?? '')).map(node => node.id)
   },
 })
 
@@ -65,6 +65,7 @@ function details(node: ExecutionNode) {
     return 'local'
   return [
     node.local ? 'local' : '',
+    node.nativeModeRequest?.mode === 'administrator' ? 'Native administrator · unrestricted host sudo; owner review required' : '',
     [...node.tags, ...(node.systemTags ?? [])].join(', '),
     `${node.capabilities.cpu} CPU`,
     formatMiB(node.capabilities.memoryMiB),
@@ -102,7 +103,7 @@ function exclusiveBlocked(node: ExecutionNode) {
           All nodes, including future
         </p>
         <p class="text-xs text-muted">
-          New VM machines become usable as soon as they are enrolled; native machines must also enable execution and trust everyone directing the conversation.
+          New VM machines become usable as soon as they are enrolled; native machines must also enable execution and trust everyone directing the conversation. Administrator nodes require explicit owner review on that node; all-node grants never silently grant host root.
         </p>
       </div>
       <UiSwitch v-model="allNodes" label="All nodes, including future" />
@@ -164,7 +165,7 @@ function exclusiveBlocked(node: ExecutionNode) {
         </div>
         <div class="flex items-center gap-3 compact:col-span-2 compact:justify-between compact:border-t compact:border-line/60 compact:pt-2">
           <span class="hidden text-sm compact:inline">Can run its conversations</span>
-          <span v-if="access.nodes === null" class="text-xs text-muted">Included · all nodes</span>
+          <span v-if="access.nodes === null" class="text-xs text-muted">{{ node.nativeModeRequest?.mode === 'administrator' ? 'Requires owner review on this node' : 'Included · all nodes' }}</span>
           <UiSwitch
             v-else
             :model-value="runsOn(access, node.id)"

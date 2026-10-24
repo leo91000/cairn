@@ -11,6 +11,7 @@ pub mod executor;
 pub mod files;
 pub mod maintenance;
 pub mod moves;
+pub mod native_mode;
 pub mod placement;
 pub mod publication;
 pub mod relay;
@@ -259,6 +260,8 @@ struct Capabilities {
     /// Native nodes able to mount VM disks in place through idmapped mounts.
     #[serde(default)]
     vm_disks: bool,
+    #[serde(default)]
+    native_mode_protocol: u32,
     cpu: u32,
     memory_mi_b: u64,
     disk_mi_b: u64,
@@ -434,7 +437,7 @@ impl Usage<'_> {
         let id = text(node, "id");
         self.agents
             .iter()
-            .filter(|agent| agent_allows(agent, id))
+            .filter(|agent| agent_allows(agent, id) && native_mode::reviewed(node, agent))
             .map(|agent| AgentGrant {
                 id: &agent["id"],
                 name: &agent["name"],
@@ -529,6 +532,9 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
             }
             args["runId"] = (*run).into();
             s.migrate_chat_backend(args, |_| Ok(())).await
+        }
+        ("POST", ["nodes", node, "native-mode"]) => {
+            native_mode::change(s, node, input.body.clone(), |_| Ok(())).await
         }
         ("GET", ["nodes", "native-callers"]) => native_callers(s, |_| Ok(())).await,
         ("GET", ["nodes", "alerts"]) => alerts::recent(s).await,
@@ -654,6 +660,8 @@ struct Configuration {
     native_enabled: Option<bool>,
     #[serde(default, rename = "nativeAccounts")]
     native_accounts: Option<Vec<String>>,
+    #[serde(default, rename = "confirmNativeAdministration")]
+    confirm_native_administration: bool,
 }
 
 pub(crate) async fn configure_node(
@@ -663,6 +671,7 @@ pub(crate) async fn configure_node(
     authorize: impl FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
 ) -> Result<Value> {
     let request: Configuration = decode(body)?;
+    let owner_review = native_mode::owner().is_some();
     if let Some(accounts) = &request.native_accounts {
         let existing = s.get("nodes", node).await?;
         if accounts.iter().any(|account| {
@@ -748,6 +757,11 @@ pub(crate) async fn configure_node(
                     let retained = record["nativeAccounts"]
                         .as_array()
                         .is_some_and(|values| values.iter().any(|value| value == account));
+                    if !retained && native_mode::administrator(&record)
+                        && (!owner_review || !request.confirm_native_administration)
+                    {
+                        return Err(Error::forbidden("The owner must confirm that new trusted people may administer this host."));
+                    }
                     if !retained && authority["accounts"].get(account).is_none() {
                         return Err(Error::bad(
                             "Select a current installation owner or member for native access.",
@@ -866,6 +880,8 @@ async fn delete_stale_disks(s: &Service, node: &str) -> Result<Value> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Grants {
     agent_ids: Vec<String>,
+    #[serde(default)]
+    confirm_native_administration: bool,
     /// Only grants the listed agents and never revokes, for example after adding a
     /// machine while an agent page grants it at the same time.
     #[serde(default)]
@@ -878,9 +894,10 @@ async fn grant_agents(s: &Service, node: &str, body: Value) -> Result<Value> {
         crate::validation::uuid(agent)?;
     }
     let node = node.to_owned();
+    let owner_review = native_mode::owner().is_some();
     s.store
         .transaction(move |db| {
-            let record = db
+            let mut record = db
                 .get("nodes", &node)?
                 .ok_or_else(|| Error::not_found("Node not found."))?;
             if record["revoked"] == true {
@@ -891,7 +908,33 @@ async fn grant_agents(s: &Service, node: &str, body: Value) -> Result<Value> {
                 if request.add && !granted {
                     continue;
                 }
+                if native_mode::administrator(&record) {
+                    let mut reviewed = record["nativeReviewedAgents"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
+                    if !granted {
+                        reviewed.retain(|id| id != &agent["id"]);
+                    } else if owner_review
+                        && request.confirm_native_administration
+                        && !reviewed.contains(&agent["id"])
+                    {
+                        reviewed.push(agent["id"].clone());
+                    } else if !native_mode::reviewed(&record, &agent) {
+                        return Err(Error::forbidden(
+                            "The owner must explicitly review access to this administrative node.",
+                        ));
+                    }
+                    record["nativeReviewedAgents"] = reviewed.into();
+                }
                 set_node_grant(db, agent, &node, granted)?;
+            }
+            // Revoking placement can also release exclusive reservations on
+            // this record. Persist only our admission field onto that new copy.
+            let mut current = db.get("nodes", &node)?.unwrap();
+            if current["nativeReviewedAgents"] != record["nativeReviewedAgents"] {
+                current["nativeReviewedAgents"] = record["nativeReviewedAgents"].clone();
+                db.put("nodes", &current)?;
             }
             db.audit(
                 "node.agents.configured",
@@ -1157,6 +1200,7 @@ struct HeartbeatReply {
     slots: u64,
     limits: Value,
     leases: Vec<Lease>,
+    native_mode: Value,
     heartbeat_interval_ms: i64,
     disconnect_timeout_ms: i64,
 }
@@ -1245,10 +1289,26 @@ fn record_heartbeat(
     }
     node["storage"] = serde_json::to_value(Policy::for_node(&node["storage"])?)?;
     node["imageDigest"] = body["imageDigest"].clone();
+    node["nativeModeObserved"] = body["nativeMode"].clone();
+    if node["capabilities"]["backend"] == "native" {
+        node["nativeModeStatus"] = if native_mode::applied(&node) {
+            "applied"
+        } else if body["nativeMode"]["status"] == "failed"
+            && (body["nativeMode"]["generation"] == node["nativeModeRequest"]["generation"]
+                || body["nativeMode"]["target"]["generation"]
+                    == node["nativeModeRequest"]["generation"])
+        {
+            "failed"
+        } else {
+            "pending"
+        }
+        .into();
+    }
     node["executionReady"] = execution_ready(&node, body, expected).into();
     db.put("nodes", &node)?;
     let leases = renew_leases(db, &node_id, expected.lease_ms)?;
     Ok(HeartbeatReply {
+        native_mode: native_mode::requested(&node),
         node_id,
         accepting: node["accepting"].clone(),
         slots: slots(&node),
@@ -1266,7 +1326,8 @@ fn execution_ready(node: &Value, body: &Value, expected: &Expectations) -> bool 
         .as_ref()
         .is_none_or(|image| node["imageDigest"] == *image || node["updateError"].is_string());
     if crate::native::policy::node_native(node) {
-        return body["executionReady"] == true
+        return native_mode::applied(node)
+            && body["executionReady"] == true
             && body["backend"] == "native"
             && body["nodeProtocol"] == 2
             && body["dataRoot"]

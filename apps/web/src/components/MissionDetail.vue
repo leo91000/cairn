@@ -262,6 +262,9 @@ const statusLabels: Record<RunListItem['status'], string> = {
     <p v-if="task.scheduleWaitReason && task.cron && task.enabled && !task.archived" role="status" class="m-0! text-sm text-muted">
       Schedule waiting: {{ task.scheduleWaitReason }}
     </p>
+    <p v-if="task.scheduleFailure && task.cron && task.enabled && !task.archived" role="alert" class="m-0! text-sm text-danger">
+      The run scheduled for {{ date(task.scheduleFailure.scheduledFor) }} did not start: {{ task.scheduleFailure.message }}
+    </p>
     <p v-if="!canEdit" class="m-0! text-sm text-muted">
       Only the author or installation owner can edit or resume this mission. Duplicate it to make your own commitment.
     </p>

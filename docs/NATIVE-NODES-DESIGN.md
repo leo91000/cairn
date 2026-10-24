@@ -155,3 +155,12 @@ or file manifests. The [automatic epoch-9 transition](AUTOMATIC-MIGRATIONS.md) n
 qualifies this boundary and prevents an older manager from reopening migrated data.
 After a failed migration, retain the candidate and use a forward fix; no automatic
 rollback restores installation data.
+
+## Owner-selected node privileges
+
+[Native administrator](NATIVE-ADMINISTRATOR.md) extends this design with a node-only
+privilege choice, explicit owner-reviewed admission and a durable generation
+handshake that stops managed executions before applying. Protected remains the
+default. Administrator uses an ordinary UID with host sudo and a real host root;
+it carries no isolation or tamper-proof fencing claim against root. The existing
+protected and Firecracker implementations retain their guarantees.

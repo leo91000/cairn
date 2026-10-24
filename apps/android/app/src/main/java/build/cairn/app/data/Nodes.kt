@@ -27,6 +27,7 @@ data class NodeCapabilities(
     val ublk: Boolean = false,
     /** A native node able to run a VM conversation's disk in place. */
     val vmDisks: Boolean = false,
+    val nativeModeProtocol: Int = 0,
 )
 
 @Serializable
@@ -35,6 +36,11 @@ data class ExecutionNode(
     val name: String,
     val local: Boolean = false,
     val accepting: Boolean = false,
+    val nativeModeRequest: NativeModeState? = null,
+    val nativeModeObserved: NativeModeState? = null,
+    val nativeModeStatus: String? = null,
+    val nativeModeProposal: NativeModeState? = null,
+    val nativeReviewedAgents: List<String> = emptyList(),
     val nativeEnabled: Boolean = false,
     val nativeAccounts: List<String> = emptyList(),
     val exclusiveAgents: List<String> = emptyList(),
@@ -64,6 +70,17 @@ data class ExecutionNode(
     val storage: NodeStoragePolicy? = null,
 )
 
+@Serializable
+data class NativeModeState(
+    val mode: String = "protected",
+    val generation: String? = null,
+    val status: String = "",
+    val error: String? = null,
+)
+
+fun nativeModeLabel(mode: String) =
+    if (mode == "administrator") "Natif administrateur" else "Natif protégé"
+
 /** The execution backend of native nodes and conversations; the other one is "firecracker". */
 const val NATIVE_BACKEND = "native"
 
@@ -83,8 +100,10 @@ fun backendLabel(backend: String?) =
  * itself or from each agent's page. They are shown locked: granting more agents never revokes them.
  */
 fun ExecutionNode.grantedAgents(agents: List<Agent> = emptyList()): Set<String> =
-    this.agents.filter { !it.allNodes }.map { it.id }.toSet() +
-        agents.filter { it.access.nodes?.contains(id) == true }.map { it.id }
+    if (nativeModeRequest?.mode == "administrator") nativeReviewedAgents.toSet()
+    else
+        this.agents.filter { !it.allNodes }.map { it.id }.toSet() +
+            agents.filter { it.access.nodes?.contains(id) == true }.map { it.id }
 
 /**
  * Grants a node to the agents newly [chosen] (already allowed ones in [granted] are skipped) with
@@ -96,6 +115,7 @@ fun ExecutionNode.grantedAgents(agents: List<Agent> = emptyList()): Set<String> 
 suspend fun grantNodeAgents(
     chosen: List<String>,
     granted: Set<String>,
+    confirmNativeAdministration: Boolean = false,
     send: suspend (JsonObject) -> Unit,
 ) {
     val added = chosen.distinct().filter { it !in granted }
@@ -104,6 +124,7 @@ suspend fun grantNodeAgents(
     fun body(ids: List<String>, grantOnly: Boolean) = buildJsonObject {
         put("agentIds", buildJsonArray { ids.forEach { add(JsonPrimitive(it)) } })
         if (grantOnly) put("add", true)
+        if (confirmNativeAdministration) put("confirmNativeAdministration", true)
     }
     try {
         send(body(added, grantOnly = true))
@@ -211,6 +232,7 @@ data class NodeConfiguration(
     // keeps them when the key is omitted.
     val nativeEnabled: Boolean? = null,
     val nativeAccounts: List<String>? = null,
+    val confirmNativeAdministration: Boolean = false,
 )
 
 @Serializable

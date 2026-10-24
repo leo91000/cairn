@@ -16,6 +16,7 @@ import {
   issues,
   keptAgentIds,
   mergeList,
+  nativeReviewNodes,
   needsReview,
   newAgentDraft,
   nodesFor,
@@ -553,7 +554,7 @@ it('flags run permissions on removed nodes only', () => {
 })
 
 it('describes execution modes for both backends', () => {
-  expect(sandboxOptions[0]!.description).toBe('Private VM with sudo and Docker; on a native node, a managed host account with GPU and system tools, no sudo or Docker. Default.')
+  expect(sandboxOptions[0]!.description).toBe('Private VM with sudo and Docker; on a native node, a managed host account with GPU and system tools. Host privileges follow the node’s confirmed mode. Default.')
 })
 
 it('never sends tool choices of deleted MCP connections', () => {
@@ -669,4 +670,24 @@ it('keeps read-only exclusive reservations when run permissions change', () => {
   // An older installation keeps them on its nodes and never receives them: nothing to remove.
   expect(withRun(access, ['gpu'], 'gpu', false, true)).toEqual({ nodes: ['box'], exclusiveNodes: ['gpu'] })
   expect(withRun(access, ['gpu'], 'other', true)).toEqual({ nodes: ['gpu', 'box', 'other'], exclusiveNodes: ['gpu'] })
+})
+
+it('reviews administrator node admission as a power even after converting a wildcard grant', () => {
+  const administrator: ExecutionNode = {
+    ...gpu,
+    nativeModeRequest: { mode: 'administrator', generation: 'generation' },
+    nativeReviewedAgents: [],
+    capabilities: { ...gpu.capabilities, backend: 'native' },
+  }
+  const ownContext = { ...context, agentId: 'future', nodes: [administrator] }
+  const before = newAgentDraft()
+  before.access.nodes = null
+  const draft = structuredClone(before)
+  draft.access.nodes = [administrator.id]
+  expect(nativeReviewNodes(draft, ownContext)).toEqual([administrator.id])
+  const lines = reviewLines(before, draft, ownContext)
+  expect(lines.some(line => line.kind === 'power' && line.text.includes('unrestricted passwordless sudo'))).toBe(true)
+  expect(needsReview(lines, null)).toBe(true)
+  administrator.nativeReviewedAgents = ['future']
+  expect(nativeReviewNodes(draft, ownContext)).toEqual([])
 })

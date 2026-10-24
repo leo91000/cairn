@@ -332,6 +332,7 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
         format!("--unit={}", unit(launch.id)?),
         format!("--uid={}", launch.identity.user),
     ];
+    let administrator = launch.plan["nativeMode"]["mode"] == "administrator";
     let mut property = |value: String| args.push(format!("--property={value}"));
     for value in [
         "KillMode=control-group",
@@ -357,7 +358,15 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
         "IOWeight=10",
         "Nice=10",
     ] {
-        property(value.into());
+        let restriction = value.starts_with("Protect")
+            || value.starts_with("Restrict")
+            || value.starts_with("NoNewPrivileges=")
+            || value.starts_with("CapabilityBoundingSet=")
+            || value.starts_with("DevicePolicy=")
+            || value == "MountAPIVFS=yes";
+        if !administrator || !restriction {
+            property(value.into());
+        }
     }
     property(format!(
         "BindsTo={} {}",
@@ -372,11 +381,30 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
     property(format!("CPUQuota={}%", cpu * 100));
     property(format!("MemoryMax={}M", memory));
     property(format!("Slice={}", workload_slice()?));
-    property(format!("RootDirectory={}", path_property(launch.root)?));
-    property(format!(
-        "WorkingDirectory={}",
-        path_property(Path::new(text(launch.plan, "cwd")))?
-    ));
+    if !administrator {
+        property(format!("RootDirectory={}", path_property(launch.root)?));
+    } else {
+        // The entrypoint exists only after BindReadOnlyPaths is applied. Tell
+        // systemd-run to leave executable resolution to the service manager,
+        // as it already does for protected units with RootDirectory.
+        property("ExecSearchPath=/run/cairn-entrypoint".into());
+        // Keep the same logical workspace/session paths even when their host
+        // ancestors are owner-private. Administrator already grants full host
+        // access; read/search capability avoids changing those directories or
+        // replacing them with a namespace scaffold. Writes still use sudo.
+        property("AmbientCapabilities=CAP_DAC_READ_SEARCH".into());
+    }
+    if administrator {
+        // Ambient capabilities become effective at execve, after systemd's
+        // own chdir. runner-entry then uses the unchanged plan.cwd when it
+        // starts the engine, with read/search capability already effective.
+        property("WorkingDirectory=/".into());
+    } else {
+        property(format!(
+            "WorkingDirectory={}",
+            path_property(Path::new(text(launch.plan, "cwd")))?
+        ));
+    }
     for source in [
         "/usr",
         "/bin",
@@ -397,7 +425,7 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
         "/etc/OpenCL",
         "/etc/nvidia",
     ] {
-        if Path::new(source).exists() {
+        if !administrator && Path::new(source).exists() {
             property(format!("BindReadOnlyPaths={source}"));
         }
     }
@@ -525,7 +553,7 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
             }
         }
     }
-    for device in devices {
+    for device in devices.into_iter().filter(|_| !administrator) {
         property(format!("BindPaths={}", path_property(&device)?));
         if device.is_dir() {
             for entry in std::fs::read_dir(&device)?.flatten() {

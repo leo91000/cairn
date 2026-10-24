@@ -14,11 +14,38 @@ export function diskCapacity(node: ExecutionNode): number {
   return node.capabilities.diskMiB
 }
 
+export type NativeMode = 'protected' | 'administrator'
+
+export function nativeModeLabel(mode: NativeMode) {
+  return mode === 'administrator' ? 'Native administrator' : 'Native protected'
+}
+
+export interface NativeModeRequest { mode: NativeMode, generation: string | null }
+export interface NativeModeObserved extends NativeModeRequest { status: 'pending' | 'applied' | 'failed', error?: string | null }
+export interface NativeModePreview {
+  previewId: string
+  preview: {
+    mode: NativeMode
+    warning: string
+    interruptions: string
+    trustedAccounts: string[]
+    trustedPeople?: Array<{ id: string, email?: string | null }>
+    agents: Array<{ id: string, name: string }>
+    conversations: Array<{ id: string, name?: string, status: string }>
+    tasks: Array<{ id: string, name: string }>
+  }
+}
+
 export interface ExecutionNode {
   id: string
   name: string
   local: boolean
   accepting: boolean
+  nativeModeRequest?: NativeModeRequest | null
+  nativeModeObserved?: NativeModeObserved | null
+  nativeModeStatus?: string | null
+  nativeModeProposal?: { mode: NativeMode, status: string } | null
+  nativeReviewedAgents?: string[]
   nativeEnabled?: boolean
   nativeAccounts?: string[]
   exclusiveAgents?: string[]
@@ -34,6 +61,7 @@ export interface ExecutionNode {
     ublk?: boolean
     /** Native node able to run a VM conversation's disk in place. */
     vmDisks?: boolean
+    nativeModeProtocol?: number
     os: string
     arch: string
     kvm: boolean

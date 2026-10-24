@@ -1,4 +1,5 @@
 import type { Route } from '@playwright/test'
+import type { PluginConnection } from '../../apps/web/src/plugins'
 import { Buffer } from 'node:buffer'
 import {
   expect,
@@ -126,15 +127,18 @@ test('Discord bots are set up through the package’s own form and keep the toke
 
   await expect(dialog.getByRole('heading', { name: 'Who can talk to it' })).toBeVisible()
   await expect(dialog.getByRole('radio', { name: /Approve people as they ask/ })).toBeChecked()
-  // Anyone may only reach a read-only agent; this one isn't.
+  // Any agent can answer anyone; the owner is warned of what a writing agent allows.
   await dialog.getByRole('radio', { name: /^Anyone/ }).check()
-  await expect(dialog.getByRole('radio', { name: /Discord helper/ })).toBeDisabled()
-  await expect(dialog.getByText('Not read-only').first()).toBeVisible()
+  await dialog.getByRole('radio', { name: /Discord helper/ }).check()
+  await expect(dialog.getByText('Anyone in the channel can use everything Discord helper can do')).toBeVisible()
+  await expect(dialog.getByText(/they can change files and run commands/)).toBeVisible()
   await dialog.getByRole('radio', { name: /Approve people as they ask/ }).check()
+  await expect(dialog.getByText(/can use everything Discord helper can do/)).toBeHidden()
   await dialog.getByLabel('Person’s ID').fill('300')
   await dialog.getByRole('button', { name: 'Add', exact: true }).click()
   await expect(dialog.getByText('300', { exact: true })).toBeVisible()
-  await expect(dialog.getByRole('radio', { name: /Release helper/ })).toBeDisabled()
+  await dialog.getByRole('radio', { name: /Release helper/ }).check()
+  await expect(dialog.getByText('The people you allow can use everything Release helper can do')).toBeVisible()
   await dialog.getByRole('radio', { name: /Discord helper/ }).check()
   await dialog.getByLabel('Name', { exact: true }).fill('#support on Acme')
   await dialog.getByRole('button', { name: 'Save bot' }).click()
@@ -739,6 +743,83 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
     region: ' eu ',
   })
   expect(saves[0].secrets).toEqual({})
+})
+
+test('bot warnings include the current instance and new draft plugin grants', async ({ page, workspace }) => {
+  const helper = await workspace.api('/api/agents', 'POST', {
+    name: 'Plugin helper',
+    access: {
+      projects: [],
+      mcps: [],
+      installation: false,
+      sandbox: 'read-only',
+    },
+  })
+  await useRelayForHttpMocks(page)
+  const manifest = {
+    id: 'hybrid',
+    name: 'Hybrid',
+    version: '1.0.0',
+    apiVersion: 2,
+    description: 'A plugin that both answers people and offers tools to agents.',
+    capabilities: ['conversations.submit'],
+    instances: { singular: 'Bot', plural: 'Bots' },
+    agentAccess: { description: 'Agents can use this bot’s tools.' },
+    settings: [],
+  }
+  const connection: PluginConnection = {
+    id: 'hybrid-bot',
+    pluginId: 'hybrid',
+    name: 'Hybrid bot',
+    settings: {},
+    agentIds: [helper.id],
+    agentId: helper.id,
+    projectId: null,
+    accessMode: 'everyone',
+    userIds: [],
+    people: [],
+    requests: [],
+    enabled: false,
+    status: { state: 'paused' },
+    usage: { hour: 0 },
+    activity: [],
+    maxMessagesPerHour: 20,
+    maxPerPersonPerHour: 5,
+  }
+  await page.route('**/api/plugins', route => route.fulfill({
+    json: {
+      packages: [{
+        id: 'hybrid',
+        builtin: false,
+        status: 'active',
+        active: '1.0.0',
+        manifest,
+        versions: [],
+      }],
+      capabilities: [],
+      connections: [connection],
+    },
+  }))
+  await page.goto(workspacePath('/plugins/hybrid'))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Edit Hybrid bot', exact: true }).click()
+  const edited = page.getByRole('dialog', { name: 'Edit Hybrid bot' })
+  await expect(edited.getByRole('status').filter({ hasText: 'they can use its plugins' })).toBeVisible()
+  await edited.getByRole('button', { name: 'Cancel', exact: true }).click()
+
+  // Another instance has no grant: only the new draft can provide plugin access.
+  connection.agentIds = []
+  await page.reload()
+  await page.getByRole('button', { name: 'Add bot', exact: true }).click()
+  const draft = page.getByRole('dialog', { name: 'New bot' })
+  await draft.getByRole('radio', { name: /^Anyone/ }).check()
+  await draft.getByRole('radio', { name: /Plugin helper/ }).check()
+  await expect(draft.getByText(/can use everything Plugin helper can do/)).toBeHidden()
+  await draft.getByRole('button', { name: 'Continue', exact: true }).click()
+  await draft.getByRole('checkbox', { name: /Plugin helper/ }).check()
+  await expect(draft.getByRole('status').filter({ hasText: 'they can use its plugins' })).toBeVisible()
+  await draft.getByRole('checkbox', { name: /Plugin helper/ }).uncheck()
+  await expect(draft.getByText(/can use everything Plugin helper can do/)).toBeHidden()
 })
 
 test('a package with device sign-in saves an account without the token reaching the browser', async ({ page }) => {

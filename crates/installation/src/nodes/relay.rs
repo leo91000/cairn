@@ -236,6 +236,7 @@ fn route(method: &str, path: &str) -> Result<()> {
                     "snapshot-completed",
                     "published",
                     "storage-status",
+                    "evict",
                 ]
                 .contains(operation)
         }
@@ -255,7 +256,8 @@ fn controller_timeout(method: &str, path: &str, native: bool) -> Duration {
         // Match the manager's acknowledgement window: suspension and memory
         // reclamation can legitimately exceed the ordinary control deadline.
         150
-    } else if path.ends_with("snapshot")
+    } else if path.ends_with("/evict")
+        || path.ends_with("snapshot")
         || path.ends_with("snapshot-completed")
         || native
             && method == "DELETE"
@@ -494,6 +496,22 @@ async fn progressing_upload<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_cache_eviction_reaches_the_controller_only_with_a_canonical_run_and_post() {
+        let path = format!("/disks/{}/evict", crate::config::id());
+        route("POST", &path).unwrap();
+        assert_eq!(
+            controller_timeout("POST", &path, true),
+            Duration::from_secs(300)
+        );
+        for method in ["GET", "PUT", "DELETE"] {
+            assert!(route(method, &path).is_err());
+        }
+        for path in ["/disks/not-a-run/evict", "/disks/../evict", "/disks/evict"] {
+            assert!(route("POST", path).is_err());
+        }
+    }
 
     #[test]
     fn exclusive_commands_cross_the_outbound_relay_with_their_acknowledgement_deadline() {

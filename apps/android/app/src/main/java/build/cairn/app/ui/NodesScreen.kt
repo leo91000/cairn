@@ -17,7 +17,7 @@ private const val UNINSTALL_COMMAND =
     "sudo systemctl disable --now cairn-node; sudo docker rm -f cairn-execution-node; sudo rm -rf /etc/systemd/system/cairn-node.service /opt/cairn-node /var/lib/cairn-node"
 
 private const val NATIVE_UNINSTALL_COMMAND =
-    "sudo sh -c 'if [ -e /etc/systemd/system/cairn-native-node.service ]; then systemctl disable --now cairn-native-node || exit; fi; mounts=\$(findmnt -rno TARGET) || { echo \"findmnt could not list mounts.\" >&2; exit 1; }; printf \"%s\\n\" \"\$mounts\" | grep ^/var/lib/cairn-native/; match=\$?; if [ \"\$match\" -ne 1 ]; then echo \"Mount safety could not be confirmed. Run sudo systemctl start cairn-native-node to release owned conversation disks, then retry.\" >&2; exit 1; fi; rm -rf /opt/cairn-native /var/lib/cairn-native && { userdel cairn-workload || ! id cairn-workload >/dev/null 2>&1; } && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload'"
+    "sudo sh -c 'if [ -e /etc/systemd/system/cairn-native-node.service ]; then systemctl disable --now cairn-native-node || exit; fi; mounts=\$(findmnt -rno TARGET) || { echo \"findmnt could not list mounts.\" >&2; exit 1; }; printf \"%s\\n\" \"\$mounts\" | grep ^/var/lib/cairn-native/; match=\$?; if [ \"\$match\" -ne 1 ]; then echo \"Mount safety could not be confirmed. Run sudo systemctl start cairn-native-node to release owned conversation disks, then retry.\" >&2; exit 1; fi; cairn_policy() { grep -Fqx \"# Cairn native administrator; protected units retain NoNewPrivileges.\" \"\$1\" || return \$?; grep -Fqx \"cairn-workload ALL=(ALL:ALL) NOPASSWD: ALL\" \"\$1\"; }; for policy in /etc/sudoers.d/cairn-native-*; do [ -e \"\$policy\" ] || [ -L \"\$policy\" ] || continue; case \"\$policy\" in */cairn-native-*[!0-9]*|*/cairn-native-) continue ;; esac; if [ -L \"\$policy\" ] || [ ! -f \"\$policy\" ]; then echo \"Unrecognized native sudo policy: host-owner review required.\" >&2; exit 1; fi; if cairn_policy \"\$policy\"; then rm -f -- \"\$policy\" || exit; else policy_status=\$?; [ \"\$policy_status\" -eq 1 ] || exit \"\$policy_status\"; fi; done; rm -rf /opt/cairn-native /var/lib/cairn-native && { userdel cairn-workload || ! id cairn-workload >/dev/null 2>&1; } && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload'"
 
 private fun uninstallCommand(node: ExecutionNode) =
     if (node.capabilities.backend == NATIVE_BACKEND) NATIVE_UNINSTALL_COMMAND else UNINSTALL_COMMAND
@@ -276,9 +276,15 @@ fun NodesScreen(
                             Text("Version : $it", style = MaterialTheme.typography.bodySmall)
                         }
                     }
+                    if (node.capabilities.backend == NATIVE_BACKEND)
+                        NativeNodeMode(vm, node) { load() }
                     HorizontalDivider()
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(onClick = { editing = node }) { Text("Configurer") }
+                        if (node.nativeModeRequest?.mode == "administrator")
+                            TextButton(onClick = { granting = node }) {
+                                Text("Examiner l’accès administrateur des agents")
+                            }
                         TextButton(onClick = { storage = node }) { Text("Stockage") }
                         if (!node.local)
                             TextButton(
@@ -474,7 +480,11 @@ fun NodesScreen(
             vm.perform {
                 // Only grants the chosen agents: finishing never revokes one, including an agent
                 // allowed meanwhile from another window.
-                grantNodeAgents(chosen, node.grantedAgents(state.agents)) { body ->
+                grantNodeAgents(
+                    chosen,
+                    node.grantedAgents(state.agents),
+                    confirmNativeAdministration = node.nativeModeRequest?.mode == "administrator",
+                ) { body ->
                     api.request("PUT", "/nodes/${node.id}/agents", body)
                 }
                 granting = null
@@ -676,10 +686,14 @@ private fun FirstAgents(
             "Les agents choisis pourront exécuter leurs conversations sur cette machine. Un tag ou une capacité ne donne jamais d’accès à lui seul.",
             style = MaterialTheme.typography.bodyMedium,
         )
+        if (node.nativeModeRequest?.mode == "administrator") Text(NATIVE_ADMIN_WARNING)
         val granted = node.grantedAgents(state.agents)
         state.agents.forEach { agent ->
-            // Any agent may be granted any machine: each conversation keeps its own backend.
-            val everywhere = agent.access.nodes == null
+            // Any agent may use this node; host administration needs its own review.
+            val everywhere =
+                agent.access.nodes == null &&
+                    (node.nativeModeRequest?.mode != "administrator" ||
+                        agent.id in node.nativeReviewedAgents)
             val already = !everywhere && agent.id in granted
             val locked = everywhere || already
             val checked = locked || agent.id in selected
@@ -775,6 +789,7 @@ internal fun NodeEditor(
                     tags.split(',').map(String::trim).filter(String::isNotEmpty),
                     NodeResources(cpu.toInt(), memoryMiB!!, diskMiB!!),
                     slots.toInt(),
+                    confirmNativeAdministration = node.nativeModeRequest?.mode == "administrator",
                     nativeEnabled =
                         if (node.capabilities.backend == NATIVE_BACKEND) nativeEnabled else null,
                     nativeAccounts =
@@ -816,6 +831,10 @@ internal fun NodeEditor(
                 Text(
                     "Seuls les agents natifs et les personnes sélectionnées peuvent travailler ici. Retirer une autorisation arrête les travaux concernés à l’expiration de leur bail."
                 )
+                if (node.nativeModeRequest?.mode == "administrator")
+                    Text(
+                        "Chaque personne sélectionnée pourra diriger l’administration complète de cet hôte via les agents admis. Enregistrer confirme cet accès."
+                    )
                 Toggle("Activer l’exécution native", nativeEnabled) { nativeEnabled = it }
                 if (nativeCallers.isNotEmpty())
                     Text("Personnes de confiance", style = MaterialTheme.typography.labelLarge)

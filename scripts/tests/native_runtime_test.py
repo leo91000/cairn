@@ -171,6 +171,8 @@ def main():
         contexts = {}
         vm_layouts = {}
         started_runs = set()
+        current_mode = dict(mode="protected", generation=None)
+        host_marker = Path("/etc/cairn-native-qualification-" + identifier)
         base_projects, base_archives, base_keys = {}, {}, {}
 
         def seed(run, legacy=False):
@@ -256,8 +258,21 @@ def main():
             attempts.append(attempt)
             workspace = data / 'runs' / run / 'workspace'
             script = '#!/bin/sh\nset -eux\n'
-            script += 'test "$(id -u)" -ne 0\ntest ! -e ' + str(private) + '\n'
-            script += 'test ! -e /run/docker.sock\nif touch /usr/cairn-should-be-readonly 2>/dev/null; then exit 81; fi\n'
+            script += 'test "$(id -u)" -ne 0\n'
+            administrator = current_mode['mode'] == 'administrator'
+            script += "/usr/bin/python3 - <<'CAPS'\nfrom pathlib import Path\ns=dict(line.split(':',1) for line in Path('/proc/self/status').read_text().splitlines() if ':' in line)\n"
+            script += 'for k in ("CapEff", "CapAmb"): assert bool(int(s[k].strip(),16) & 4) == ' + str(administrator) + '\nCAPS\n'
+            if administrator:
+                script += 'test "$(sudo -n id -u)" = 0\n'
+                # Admin's read/search capability preserves private logical
+                # workspace ancestors without chmod or path/session remapping.
+                script += 'test "$(cat ' + str(private) + ')" = "synthetic owner data"\n'
+                script += 'test "$(sudo -n cat ' + str(private) + ')" = "synthetic owner data"\n'
+                script += 'sudo -n sh -c "printf administrative-change > ' + str(host_marker) + '"\n'
+            else:
+                script += 'test ! -e ' + str(private) + '\n'
+                script += 'if sudo -n true 2>/dev/null; then exit 80; fi\n'
+                script += 'test ! -e /run/docker.sock\nif touch /usr/cairn-should-be-readonly 2>/dev/null; then exit 81; fi\n'
             script += "test \"$(cat /home/node/.codex/auth.json)\" = '" + SECRET + "'\n"
             script += 'if echo bad > /home/node/.codex/auth.json 2>/dev/null; then exit 82; fi\n'
             # Exercise the same atomic credential replacement as the real Claude
@@ -283,10 +298,10 @@ def main():
                 script += "while ! test -e measure-go; do sleep 0.05; done\n/usr/bin/python3 - <<'MEASURE' > measure.json\n" + MEASURE + '\nMEASURE\n'
                 script += 'printf measured > measure-ready\n'
             if long:
-                script += "setsid sh -c 'while :; do printf x >> descendant; sleep 0.1; done' &\nwait\n"
+                script += ("sudo -n " if administrator else "") + "setsid sh -c 'while :; do printf x >> descendant; sleep 0.1; done' &\nwait\n"
             (tools / 'bin/codex').write_text(script)
             (tools / 'bin/codex').chmod(0o555)
-            plan = dict(id=attempt, runId=run, backend='native', runtimeId='synthetic', nodeLeaseRequired=True,
+            plan = dict(id=attempt, runId=run, backend='native', runtimeId='synthetic', nodeLeaseRequired=True, nativeMode=current_mode.copy(),
                 expires=None, cwd=str(workspace / base_projects[run] if run in base_projects else workspace), projectRoot=str(workspace), sandbox='workspace-write',
                 resources=dict(cpu=1, memoryMiB=512, diskMiB=256), args=[], prompt='synthetic input', storage=contexts[run],
                 imports=[dict(source=str(workspace), target=str(workspace)), dict(source=str(data / 'runs' / run / 'home'), target='/home/node')])
@@ -517,6 +532,60 @@ def main():
                 assert error.code == 409
             else:
                 raise AssertionError('Completed attempt restarted.')
+            # Real host administration and both directions of a multi-conversation
+            # transition. This runs only on the disposable CI VM guarded above.
+            api('/node-budget', dict(limits=dict(diskMiB=4096, cpu=2, memoryMiB=1024), slots=2))
+            first_protected, second_protected = start(run), start(other)
+            target = dict(mode='administrator', generation=str(uuid.uuid4()))
+            applied = api('/native-mode', target)
+            assert applied['status'] == 'applied', applied
+            current_mode.update(target)
+            fenced(run, first_protected)
+            fenced(other, second_protected)
+            admin_first, admin_second = start(run), start(other)
+            assert stat.S_IMODE(root.stat().st_mode) == 0o700, 'Administrator changed private ancestor permissions.'
+            assert host_marker.read_text() == 'administrative-change', 'sudo did not administer the actual host.'
+            target = dict(mode='protected', generation=str(uuid.uuid4()))
+            applied = api('/native-mode', target)
+            assert applied['status'] == 'applied', applied
+            current_mode.update(target)
+            fenced(run, admin_first)
+            fenced(other, admin_second)
+            assert host_marker.read_text() == 'administrative-change', 'Returning to protected must not claim to restore the host.'
+            protected_again = start(run, long=False)
+            fenced(run, protected_again)
+            assert int((state / (protected_again + '.exit')).read_text()) == 0
+            assert api('/native-mode', target) == applied, 'Retry of the applied generation must be idempotent.'
+            assert api('/health', method='GET')['nativeMode'] == applied
+            # A crash after persisting intent must never reopen admission on an
+            # unconfirmed protected claim. Resume the durable request explicitly.
+            command('systemctl', 'stop', supervisor)
+            pending_generation = dict(mode='protected', generation=str(uuid.uuid4()))
+            (state / 'native-mode.json').write_text(json.dumps(dict(applied, status='pending', target=pending_generation)))
+            start_controller()
+            assert api('/health', method='GET')['nativeMode']['status'] == 'pending'
+            stale_attempt = str(uuid.uuid4())
+            stale_plan = json.loads((data / 'runner-plans' / (protected_again + '.json')).read_text())
+            stale_plan['id'] = stale_attempt
+            attempts.append(stale_attempt)
+            (data / 'runner-plans' / (stale_attempt + '.json')).write_text(json.dumps(stale_plan))
+            api('/runs/' + stale_attempt + '/lease', {'remainingMs': 60000})
+            try:
+                api('/runs/' + stale_attempt)
+            except urllib.error.HTTPError as error:
+                assert error.code == 409
+            else:
+                raise AssertionError('Unconfirmed privilege generation admitted an execution.')
+            applied = api('/native-mode', pending_generation)
+            assert applied['status'] == 'applied', applied
+            current_mode.update(pending_generation)
+            after_crash = start(run, long=False)
+            fenced(run, after_crash)
+            assert int((state / (after_crash + '.exit')).read_text()) == 0
+            metrics['nativeAdministrator'] = dict(realHostSudo=True, ordinaryUser=True,
+                concurrentConversations=2, rootDescendantsStopped=True,
+                protectedAfterAdministrator=True, filesPreserved=True, hostChangesRetained=True,
+                pendingCrashFailsClosed=True, generationRetry=True)
             manager('publish', run=run)
             # Publication checks every decoded S3 block for generated secrets.
             s3 = boto3.client('s3', endpoint_url=os.environ['CAIRN_NODE_TEST_S3_ENDPOINT'])
@@ -633,6 +702,8 @@ def main():
             bridge.shutdown()
             for unit in [supervisor] + ['cairn-native-' + attempt + '.service' for attempt in attempts] + ['cairn-native-guardian-' + attempt + '.service' for attempt in attempts]:
                 subprocess.run(['systemctl', 'stop', unit], capture_output=True, timeout=30)
+            Path('/etc/sudoers.d/cairn-native-' + str(__import__('pwd').getpwnam(user).pw_uid)).unlink(missing_ok=True)
+            host_marker.unlink(missing_ok=True)
             subprocess.run(['userdel', user], check=True, capture_output=True)
 
 

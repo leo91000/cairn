@@ -52,7 +52,7 @@ export interface SelectionItem {
 export const mainLockedSections: SectionId[] = ['projects', 'skills', 'mcps']
 
 export const sandboxOptions = [
-  { value: 'yolo', label: 'YOLO', description: 'Private VM with sudo and Docker; on a native node, a managed host account with GPU and system tools, no sudo or Docker. Default.' },
+  { value: 'yolo', label: 'YOLO', description: 'Private VM with sudo and Docker; on a native node, a managed host account with GPU and system tools. Host privileges follow the node’s confirmed mode. Default.' },
   { value: 'workspace-write', label: 'Workspace write', description: 'Writes limited to task workspaces, no sudo.' },
   { value: 'read-only', label: 'Read only', description: 'Project files are read-only; nothing can be changed.' },
 ] as const
@@ -415,6 +415,7 @@ export function instanceState(connection: PluginConnection): { tone: 'granted' |
 }
 
 export interface Context {
+  agentId?: string
   projects: Pick<Project, 'id' | 'name'>[]
   skills: Skill[]
   mcps: McpView[]
@@ -510,9 +511,18 @@ function restrictedTools(saved: AgentAccess, draft: AgentAccess) {
  * What saving would grant or take away that deserves a look first: new powers and
  * secrets, and removed access when `runs` says work is affected.
  */
+export function nativeReviewNodes(draft: AgentDraft, context: Context) {
+  if (draft.access.nodes === null)
+    return []
+  return context.nodes.filter(node => node.nativeModeRequest?.mode === 'administrator'
+    && draft.access.nodes!.includes(node.id) && !node.nativeReviewedAgents?.includes(context.agentId ?? '')).map(node => node.id)
+}
+
 export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Context, runs = { queued: 0, running: 0 }) {
   const lines: ReviewLine[] = []
   const node = (id: string) => nodeName(context.nodes.find(item => item.id === id), id)
+  for (const id of nativeReviewNodes(draft, context))
+    lines.push({ kind: 'power', section: 'nodes', text: `Added: administrator access to ${node(id)}. Every admitted conversation receives unrestricted passwordless sudo on the real host. Root can read local files and credentials, change services and defeat cooperative limits. Returning to protected does not clean or restore the machine.` })
 
   for (const id of listChanges(saved.exclusiveNodes ?? [], draft.exclusiveNodes ?? []).added)
     lines.push({ kind: 'power', section: 'nodes', text: `Added: exclusive reservation on ${node(id)}. This agent will be able to suspend other agents’ conversations on this machine.` })

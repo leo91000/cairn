@@ -33,8 +33,8 @@ pub enum AccessMode {
     Allowlist,
     /// Unknown people who reach the plugin create a request the owner can approve.
     Requests,
-    /// Anyone who reaches the plugin, e.g. everyone in a public support channel. Only
-    /// with a strictly limited agent (see `public_safe`) and a per-person limit.
+    /// Anyone who reaches the plugin, e.g. everyone in a public support channel, with a
+    /// per-person limit.
     Everyone,
 }
 
@@ -117,37 +117,6 @@ impl Connection {
     }
 }
 
-/// An agent anyone may reach: read-only sandbox, one project at most, and no
-/// installation, MCP or plugin grants (such as GitHub or 1Password). Checked on save
-/// and on every effect.
-pub(crate) fn public_safe(db: &Db<'_>, agent_id: &str, access: &Value) -> Result<()> {
-    public_access(access, plugin_granted(db, agent_id)?)
-}
-
-/// Whether any plugin instance is granted to the agent.
-fn plugin_granted(db: &Db<'_>, agent_id: &str) -> Result<bool> {
-    Ok(db.list(KIND)?.iter().any(|connection| {
-        connection["agentIds"]
-            .as_array()
-            .is_some_and(|ids| ids.iter().any(|id| id == agent_id))
-    }))
-}
-
-fn public_access(access: &Value, secrets: bool) -> Result<()> {
-    let projects = access["projects"].as_array().map_or(usize::MAX, Vec::len);
-    if access["sandbox"] != "read-only"
-        || access["installation"] == true
-        || access["mcps"] != json!([])
-        || projects > 1
-        || secrets
-    {
-        return Err(Error::bad(
-            "For anyone in the channel, choose an agent with a read-only sandbox, at most one project, and no installation, MCP or plugin access such as GitHub or 1Password.",
-        ));
-    }
-    Ok(())
-}
-
 pub fn label(value: &str) -> String {
     value
         .chars()
@@ -201,12 +170,6 @@ pub(crate) fn authorize(db: &Db<'_>, expected: &Connection) -> Result<Connection
     if !current.agent_id.is_empty() {
         let agent = db.get("agents", &current.agent_id)?.ok_or_else(denied)?;
         if policy(&agent) != current.granted_access {
-            return Err(denied());
-        }
-        // Plugin grants can change without changing the agent's policy.
-        if current.access_mode == AccessMode::Everyone
-            && public_safe(db, &current.agent_id, &current.granted_access).is_err()
-        {
             return Err(denied());
         }
     }
@@ -900,8 +863,7 @@ where
                     .get("agents", &connection.agent_id)?
                     .ok_or_else(|| Error::bad("Agent not found."))?;
                 let access = policy(&agent);
-                let plugins = plugin_granted(db, &connection.agent_id)?;
-                delegation_rules(db, &connection, &access, plugins)?;
+                delegation_rules(db, &connection, &access)?;
                 connection.granted_access = access;
             }
             if connection.access_mode != AccessMode::Requests {
@@ -959,31 +921,20 @@ where
     Ok(result)
 }
 
-/// What external people may reach through a delegation: one project at most, never
-/// installation access, and a read-only agent without grants when anyone may write.
-fn delegation_rules(
-    db: &Db<'_>,
-    connection: &Connection,
-    access: &Value,
-    plugin_grants: bool,
-) -> Result<()> {
-    let projects = connection
-        .project_id
-        .as_ref()
-        .map_or_else(|| json!([]), |id| json!([id]));
-    // External people never receive an installation-wide agent or project scope.
-    if access["projects"] != projects || access["installation"] == true {
-        return Err(Error::bad(
-            "Choose a dedicated agent restricted to the selected project (or no projects), with installation access disabled.",
-        ));
-    }
-    if let Some(project) = &connection.project_id
-        && db.get("projects", project)?.is_none()
-    {
+/// Whether the delegation's project exists and its agent can open it. The owner chooses
+/// how much the agent may do: any agent can answer, whoever it is delegated to.
+fn delegation_rules(db: &Db<'_>, connection: &Connection, access: &Value) -> Result<()> {
+    let Some(project) = &connection.project_id else {
+        return Ok(());
+    };
+    if db.get("projects", project)?.is_none() {
         return Err(Error::bad("Project not found."));
     }
-    if connection.access_mode == AccessMode::Everyone {
-        public_access(access, plugin_grants)?;
+    let reachable = access["projects"]
+        .as_array()
+        .is_none_or(|projects| projects.iter().any(|id| id == project.as_str()));
+    if !reachable {
+        return Err(Error::bad("This agent can’t open the selected project."));
     }
     Ok(())
 }
@@ -1055,8 +1006,7 @@ pub(crate) fn reapprove(db: &Db<'_>, connection_id: &str, agent: &Value) -> Resu
         ));
     }
     let access = policy(agent);
-    let plugins = !crate::agent_grants::plugins(agent).is_empty();
-    delegation_rules(db, &connection, &access, plugins).map_err(|error| {
+    delegation_rules(db, &connection, &access).map_err(|error| {
         Error::bad(format!(
             "{} cannot answer as this agent with the new access: {error}",
             connection.name
@@ -1075,10 +1025,10 @@ pub(crate) fn reapprove(db: &Db<'_>, connection_id: &str, agent: &Value) -> Resu
 /// Delegations answering as an agent and how an edited agent would affect them,
 /// including `alreadySuspended` when the saved agent no longer matches the approval:
 /// `suspended` when its access no longer matches the approved one or no longer meets
-/// the delegation's rules, such as a plugin grant for an agent anyone may reach, and
-/// the reason it could not be reapproved, if any. A delegation bound to a previous
-/// installation owner already stopped answering and only its instance screen can
-/// rebind it, so it counts as already suspended and cannot be reapproved here.
+/// the delegation's rules, such as reaching its project, and the reason it could not
+/// be reapproved, if any. A delegation bound to a previous installation owner already
+/// stopped answering and only its instance screen can rebind it, so it counts as
+/// already suspended and cannot be reapproved here.
 pub(crate) fn delegation_effects(
     db: &Db<'_>,
     agent_id: &str,
@@ -1086,7 +1036,6 @@ pub(crate) fn delegation_effects(
     owner: Option<&str>,
 ) -> Result<Value> {
     let access = policy(agent);
-    let plugins = !crate::agent_grants::plugins(agent).is_empty();
     let saved = db.get("agents", agent_id)?;
     let mut effects = Vec::new();
     for value in db.list(KIND)? {
@@ -1094,17 +1043,15 @@ pub(crate) fn delegation_effects(
             continue;
         }
         let connection: Connection = serde_json::from_value(value)?;
-        let rules = delegation_rules(db, &connection, &access, plugins)
+        let rules = delegation_rules(db, &connection, &access)
             .err()
             .map(|error| error.to_string());
         let previous_owner = connection.owner_access_id.as_deref() != owner;
         // Suspended before this edit, so reapproving would also approve earlier changes.
         let already_suspended = previous_owner
-            || saved.as_ref().is_none_or(|saved| {
-                policy(saved) != connection.granted_access
-                    || (connection.access_mode == AccessMode::Everyone
-                        && public_safe(db, agent_id, &connection.granted_access).is_err())
-            });
+            || saved
+                .as_ref()
+                .is_none_or(|saved| policy(saved) != connection.granted_access);
         effects.push(json!({
             "id": connection.id,
             "pluginId": connection.plugin_id,

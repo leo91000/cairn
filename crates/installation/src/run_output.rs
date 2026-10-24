@@ -391,7 +391,19 @@ pub fn prompt(run: &Value, chat: bool) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     let skills = skill_index(&run["snapshot"]["skills"]);
-    let tooling = if crate::execution::runs_natively(run) {
+    let storage = if crate::execution::runs_natively(run) {
+        "The managed /tmp is cleared on every execution attempt. Keep SDKs and build caches \
+            (including Cargo target directories) in the managed home or workspace, never in /tmp. \
+            Moving a large directory across filesystems copies it before removing the source \
+            and can temporarily exceed the disk budget; managed /tmp and workspace share that budget."
+    } else {
+        ""
+    };
+    let tooling = if crate::execution::runs_natively(run)
+        && run["nativeMode"]["mode"] == "administrator"
+    {
+        "Tooling: This execution uses Native administrator on the real Linux host as an ordinary user with unrestricted passwordless sudo. The owner entrusted this machine to admitted conversations. Keep the managed HOME/workspace for durable work. System changes persist on this node and may affect other work. Respect the user's scope; this mode does not grant new remote Cairn accounts or resources. Root can read credentials present on this host and alter or escape its supervisor, cooperative budgets, leases and cancellation. Do not expose credentials. Returning to protected does not clean or restore this machine."
+    } else if crate::execution::runs_natively(run) {
         "Tooling: This execution runs on a native Linux node using its installed GPU driver. \
             Cairn supplies the pinned coding engines, Node.js and GitHub CLI. Other tools and \
             project SDKs depend on this node; check availability before using them. Respect \
@@ -424,7 +436,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
     };
     let mut prompt = format!(
         "{}\n\n{}\n\nAuthorized projects (open only those needed for the task; \
-            unopened repositories are not on disk):\n{}\n\n{tooling}\n\nSelected skills (read a skill's SKILL.md before using it; its \
+            unopened repositories are not on disk):\n{}\n\n{tooling}\n{storage}\n\nSelected skills (read a skill's SKILL.md before using it; its \
             scripts and references sit beside it):\n{skills}\n\n{plugins}\n\nRun this task to completion within \
             its stated scope. Preserve unrelated files. Do not expose credentials. \
             {interaction}\n{deliverables}{requested}\n{waiting} All task-authorized effects such as creating \
@@ -560,8 +572,81 @@ fn skill_index(skills: &Value) -> String {
         .join("\n")
 }
 
+/// Chat runners consume their chat payload instead of RunnerPlan.prompt. Both
+/// fresh instructions and the actual turn carry the confirmed mode on resumption.
+pub(crate) fn native_chat_privileges(chat: &mut Value, run: &Value, mode: &Value) {
+    let mut context = run.clone();
+    context["nativeMode"] = mode.clone();
+    context["snapshot"]["task"]["prompt"] = "".into();
+    let notice = native_privileges(mode);
+    chat["instructions"] = format!("{notice}\n\n{}", prompt(&context, true)).into();
+    chat["execution"]["text"] = format!("{notice}\n\n{}", text(&chat["execution"], "text")).into();
+}
+
+/// Always delivered on a native attempt, including an engine session resumed after a switch.
+pub(crate) fn native_privileges(mode: &Value) -> &'static str {
+    if mode["mode"] == "administrator" {
+        "Effective node mode: Native administrator. You run as an ordinary user with unrestricted passwordless sudo on the real host. The owner confirmed this access. Root can alter the supervisor and local credentials; budgets, leases and cancellation are cooperative. Existing remote Cairn authorizations remain unchanged. Stay within the user's instructions."
+    } else {
+        "Effective node mode: Native protected. Host sudo and personal host paths are unavailable. Use the managed HOME/workspace. Previous administrator changes, if any, persist: this mode change did not clean or restore the machine."
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn native_chat_turns_and_resumed_instructions_use_the_confirmed_mode() {
+        for provider in ["codex", "claude", "opencode"] {
+            let run = serde_json::json!({
+                "id": "chat", "trigger": "chat", "isolated": true,
+                "nativeMode": { "mode": "administrator" },
+                "snapshot": { "agent": { "provider": provider, "access": { "backend": "native" } }, "task": {} },
+            });
+            for mode in ["protected", "administrator"] {
+                let mut chat = serde_json::json!({ "instructions": "stale mode instructions", "execution": { "text": "continue the task", "recovery": true } });
+                super::native_chat_privileges(
+                    &mut chat,
+                    &run,
+                    &serde_json::json!({ "mode": mode }),
+                );
+                let expected = if mode == "administrator" {
+                    "Effective node mode: Native administrator."
+                } else {
+                    "Effective node mode: Native protected."
+                };
+                assert!(chat["instructions"].as_str().unwrap().starts_with(expected));
+                assert!(
+                    chat["execution"]["text"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with(expected)
+                );
+                assert!(
+                    chat["execution"]["text"]
+                        .as_str()
+                        .unwrap()
+                        .ends_with("continue the task")
+                );
+                assert!(
+                    !chat["instructions"]
+                        .as_str()
+                        .unwrap()
+                        .contains("stale mode instructions")
+                );
+                assert_eq!(chat["execution"]["recovery"], true);
+                if mode == "administrator" {
+                    assert!(
+                        !chat["instructions"]
+                            .as_str()
+                            .unwrap()
+                            .contains("system directories and the owner's desktop are unavailable")
+                    );
+                }
+            }
+        }
+    }
+
     use super::*;
 
     #[test]
