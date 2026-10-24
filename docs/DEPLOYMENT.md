@@ -202,10 +202,10 @@ For a local build, resolve the agent tool versions CI would choose and pass them
 (see [tool versions](CLI-UPDATES.md)):
 
 ```sh
-node scripts/cli-updates.mjs build-versions \
-  | node -e 'for (const [tool, version] of Object.entries(JSON.parse(require("node:fs").readFileSync(0, "utf8")))) console.log(`--build-arg=${tool.toUpperCase()}_VERSION=${version}`)' \
-  | xargs -r docker compose build
-docker compose up -d
+versions=$(node scripts/cli-updates.mjs build-versions) \
+  && node -e 'for (const [tool, version] of Object.entries(JSON.parse(process.argv[1]))) console.log(`--build-arg=${tool.toUpperCase()}_VERSION=${version}`)' "$versions" \
+  | xargs docker compose build \
+  && docker compose up -d
 ```
 
 For published images, use

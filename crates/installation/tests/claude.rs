@@ -248,6 +248,42 @@ async fn default_model_labels_survive_missing_metadata_without_pinning() {
     }
 }
 
+/// Optional native qualification: the real Claude Code release answers the control
+/// protocol Cairn's model discovery uses, with synthetic credentials and no inference.
+/// Run with CLAUDE_NATIVE_BIN set via the credential-isolated backend launcher.
+#[tokio::test]
+#[ignore = "requires a native Claude Code binary"]
+async fn native_cli_lists_its_model_catalog_without_inference() {
+    let binary = std::env::var("CLAUDE_NATIVE_BIN").expect("set CLAUDE_NATIVE_BIN");
+    let root = TempDir::new().unwrap();
+    let s = Service::new(Config {
+        claude_bin: binary,
+        ..config(&root)
+    })
+    .await
+    .unwrap();
+    connected(&s).await;
+    let catalog = claude::model_catalog(&s).await.unwrap();
+    assert_eq!(catalog["stale"], false, "{catalog}");
+    let models = catalog["models"].as_array().unwrap();
+    // Agents without a chosen model run the CLI's default alias.
+    assert!(
+        models
+            .iter()
+            .any(|model| model["model"] == "default" && model["isDefault"] == true),
+        "{catalog}"
+    );
+    assert!(
+        models.iter().all(|model| {
+            !model["model"].as_str().unwrap().is_empty()
+                && model["displayName"]
+                    .as_str()
+                    .is_some_and(|name| !name.is_empty())
+        }),
+        "{catalog}"
+    );
+}
+
 #[tokio::test]
 async fn sign_in_cancellation_failure_retry_identity_and_removal() {
     let root = TempDir::new().unwrap();

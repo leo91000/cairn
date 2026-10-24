@@ -127,7 +127,7 @@ describe('application image tool versions', () => {
 
   it.each([
     ['a prerelease', { version: '2.2.0-beta.1' }, 'Claude Code stable channel is not a stable release.'],
-    ['missing', new Error('Request failed (HTTP 404).'), 'Request failed (HTTP 404).'],
+    ['missing', new Error('Request to https://registry.npmjs.org/@anthropic-ai/claude-code/stable failed (HTTP 404).'), 'failed (HTTP 404).'],
     ['malformed', { name: '@anthropic-ai/claude-code' }, 'Claude Code stable channel is not a stable release.'],
     ['deprecated', { version: '2.1.308', deprecated: 'Use 2.1.309' }, 'Claude Code 2.1.308 on the stable channel is deprecated.'],
   ])('fails when the Claude Code stable channel is %s', async (_, response, message) => {
@@ -160,10 +160,22 @@ describe('application image tool versions', () => {
   it('fails instead of guessing when the qualified series has no stable release', async () => {
     await expect(buildVersions({
       request: fixture({
-        'https://registry.npmjs.org/@anthropic-ai/claude-code/stable': { version: '3.0.0' },
-        'https://registry.npmjs.org/@anthropic-ai/claude-code': { versions: { '3.0.0': {}, '2.2.0-rc.1': {} } },
+        'https://registry.npmjs.org/opencode-ai/latest': { version: '2.0.0' },
+        'https://registry.npmjs.org/opencode-ai': { versions: { '2.0.0': {}, '1.19.5-beta.1': {}, '1.19.3': { deprecated: 'Broken release' } } },
       }),
-    })).rejects.toThrow('Claude Code 3.0.0 is outside the qualified 2 series, which has no stable release.')
+    })).rejects.toThrow('OpenCode 2.0.0 is outside the qualified 1.19 series, which has no stable release.')
+  })
+
+  it('follows Claude Code\'s stable channel into a new major release like Codex', async () => {
+    const notices = []
+    const versions = await buildVersions({
+      notice: message => notices.push(message),
+      request: fixture({ 'https://registry.npmjs.org/@anthropic-ai/claude-code/stable': { version: '3.0.0' } }),
+    })
+    // The package list is never consulted: only releases the stable channel serves are built.
+    expect(versions.claude).toBe('3.0.0')
+    expect(engines.claude.series).toBeUndefined()
+    expect(notices).toEqual([])
   })
 })
 
@@ -197,11 +209,18 @@ describe('build-versions command', () => {
     try {
       const output = path.join(directory, 'outputs')
       writeFileSync(output, 'existing=value\n')
-      const result = run(['build-versions'], { GITHUB_OUTPUT: output }, 'globalThis.fetch = async () => new Response("unavailable", { status: 503 });')
-      expect(result.status).toBe(1)
-      expect(result.stdout).toBe('')
-      expect(result.stderr.trim()).toBe('Request failed (HTTP 503).')
-      expect(readFileSync(output, 'utf8')).toBe('existing=value\n')
+      const stable = 'https://registry.npmjs.org/@anthropic-ai/claude-code/stable'
+      for (const [failure, message] of [
+        ['new Response("unavailable", { status: 503 })', `Request to ${stable} failed (HTTP 503).`],
+        ['Promise.reject(new TypeError("fetch failed"))', `Request to ${stable} failed: fetch failed`],
+      ]) {
+        const result = run(['build-versions'], { GITHUB_OUTPUT: output }, `globalThis.fetch = async (url) => url === ${JSON.stringify(stable)} ? ${failure} : Response.json(${JSON.stringify(registry)}[url]);`)
+        expect(result.status).toBe(1)
+        expect(result.stdout).toBe('')
+        // The failing source is named so an operator knows which registry to check.
+        expect(result.stderr.trim()).toBe(message)
+        expect(readFileSync(output, 'utf8')).toBe('existing=value\n')
+      }
     }
     finally {
       rmSync(directory, { recursive: true, force: true })

@@ -6,19 +6,14 @@ const registry = 'https://registry.npmjs.org'
 
 // Coding engines installed from their official npm packages. Each build takes the
 // version currently published on the vendor's named release channel (an npm
-// dist-tag). A series bounds that choice to releases Cairn's adapter qualified:
-// leaving it requires a reviewed change here and in the adapter, never a silent
-// upgrade. See docs/CLI-UPDATES.md.
+// dist-tag). A series bounds an engine whose adapter only accepts the releases it
+// was qualified against: leaving it requires a reviewed change here and in the
+// adapter, never a silent upgrade. See docs/CLI-UPDATES.md.
 export const engines = {
   codex: { name: 'Codex', package: '@openai/codex', channel: 'latest' },
   // Anthropic's documented stable channel: about a week old, skipping releases
   // with major regressions. Its `latest` channel is not used.
-  claude: {
-    name: 'Claude Code',
-    package: '@anthropic-ai/claude-code',
-    channel: 'stable',
-    series: '2',
-  },
+  claude: { name: 'Claude Code', package: '@anthropic-ai/claude-code', channel: 'stable' },
   // crates/installation/src/opencode/mod.rs accepts only this series.
   opencode: {
     name: 'OpenCode',
@@ -29,10 +24,17 @@ export const engines = {
 }
 
 async function json(url, options = {}) {
-  const response = await fetch(url, { ...options, redirect: 'error', signal: AbortSignal.timeout(15000) })
+  let response
+  try {
+    response = await fetch(url, { ...options, redirect: 'error', signal: AbortSignal.timeout(15000) })
+  }
+  catch (error) {
+    throw new Error(`Request to ${url} failed: ${error.message}`)
+  }
+
   if (!response.ok) {
     await response.body?.cancel()
-    throw new Error(`Request failed (HTTP ${response.status}).`)
+    throw new Error(`Request to ${url} failed (HTTP ${response.status}).`)
   }
 
   return response.json()

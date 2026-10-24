@@ -179,17 +179,30 @@ jobs:
         env:
           OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
         run: |
-          # Sessions created by the series' first release must resume on the resolved one.
+          # Sessions resume in both directions between the series' first release and the
+          # resolved one: an update takes over existing sessions, a rollback reads newer ones.
           series=$(node --input-type=module -e "import { engines } from './scripts/cli-updates.mjs'; console.log(engines.opencode.series)")
-          npm install --global --prefix "$RUNNER_TEMP/opencode-first" "opencode-ai@${series}.0"
-          npm install --global --prefix "$RUNNER_TEMP/opencode" "opencode-ai@${OPENCODE_VERSION}"
-          test "$("$RUNNER_TEMP/opencode-first/bin/opencode" --version)" = "${series}.0"
-          test "$("$RUNNER_TEMP/opencode/bin/opencode" --version)" = "$OPENCODE_VERSION"
+          npm install --global --prefix "$RUNNER_TEMP/opencode-first" --allow-scripts=opencode-ai "opencode-ai@${series}.0"
+          npm install --global --prefix "$RUNNER_TEMP/opencode" --allow-scripts=opencode-ai "opencode-ai@${OPENCODE_VERSION}"
+          first="$RUNNER_TEMP/opencode-first/bin/opencode"
+          resolved="$RUNNER_TEMP/opencode/bin/opencode"
+          test "$("$first" --version)" = "${series}.0"
+          test "$("$resolved" --version)" = "$OPENCODE_VERSION"
           test=pinned_native_cli_executes_and_resumes_without_global_plugins
-          OPENCODE_NATIVE_BIN="$RUNNER_TEMP/opencode/bin/opencode" \
+          OPENCODE_NATIVE_BIN="$resolved" \
             node scripts/test-backend.mjs -p cairn-installation --features ublk-prototype --test opencode -- --ignored --exact "$test"
-          OPENCODE_NATIVE_BIN="$RUNNER_TEMP/opencode-first/bin/opencode" OPENCODE_NATIVE_RESUME_BIN="$RUNNER_TEMP/opencode/bin/opencode" \
+          OPENCODE_NATIVE_BIN="$first" OPENCODE_NATIVE_RESUME_BIN="$resolved" \
             node scripts/test-backend.mjs -p cairn-installation --features ublk-prototype --test opencode -- --ignored --exact "$test"
+          OPENCODE_NATIVE_BIN="$resolved" OPENCODE_NATIVE_RESUME_BIN="$first" \
+            node scripts/test-backend.mjs -p cairn-installation --features ublk-prototype --test opencode -- --ignored --exact "$test"
+      - name: Qualify the resolved Claude Code release against its native adapter
+        env:
+          CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
+        run: |
+          npm install --global --prefix "$RUNNER_TEMP/claude" --allow-scripts=@anthropic-ai/claude-code "@anthropic-ai/claude-code@${CLAUDE_VERSION}"
+          test "$("$RUNNER_TEMP/claude/bin/claude" --version)" = "${CLAUDE_VERSION} (Claude Code)"
+          CLAUDE_NATIVE_BIN="$RUNNER_TEMP/claude/bin/claude" \
+            node scripts/test-backend.mjs -p cairn-installation --features ublk-prototype --test claude -- --ignored --exact native_cli_lists_its_model_catalog_without_inference
   node-checks:
     services:
       postgres:

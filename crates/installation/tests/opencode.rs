@@ -497,8 +497,9 @@ async fn cancellation_stops_a_busy_native_turn() {
 
 /// Optional pinned-native smoke: real OpenCode, a local model server, synthetic auth.
 /// Run with OPENCODE_NATIVE_BIN set via the credential-isolated backend launcher.
-/// OPENCODE_NATIVE_RESUME_BIN resumes the session with another release, such as
-/// a newer one taking over sessions an installation already holds.
+/// OPENCODE_NATIVE_RESUME_BIN resumes the session with another release: a newer
+/// one taking over sessions an installation already holds, or an older one after
+/// a rollback.
 #[tokio::test]
 #[ignore = "requires a native OpenCode 1.19 binary"]
 async fn pinned_native_cli_executes_and_resumes_without_global_plugins() {
@@ -526,8 +527,12 @@ async fn pinned_native_cli_executes_and_resumes_without_global_plugins() {
         .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let router = Router::new().route("/v1/chat/completions", post(|headers: HeaderMap| async move {
+    // Model requests, to check that a resumed session sends its earlier turns.
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let recorded = requests.clone();
+    let router = Router::new().route("/v1/chat/completions", post(move |headers: HeaderMap, body: axum::body::Bytes| async move {
         assert_eq!(headers["authorization"], format!("Bearer {KEY}"));
+        recorded.lock().unwrap().push(serde_json::from_slice(&body).unwrap());
         let chunks = [
             json!({
                 "id": "local",
@@ -621,6 +626,7 @@ async fn pinned_native_cli_executes_and_resumes_without_global_plugins() {
     if let Ok(binary) = std::env::var("OPENCODE_NATIVE_RESUME_BIN") {
         config.opencode_bin = binary;
     }
+    let first_turn = requests.lock().unwrap().len();
     input["sessionId"] = session.clone().into();
     input["execution"]["messageId"] = "follow-up".into();
     input["execution"]["text"] = "Continue in the same session. Do not call tools.".into();
@@ -657,6 +663,18 @@ async fn pinned_native_cli_executes_and_resumes_without_global_plugins() {
             .await
             .unwrap(),
         "Native OpenCode local model passed."
+    );
+    // The resuming release loaded the stored history rather than starting over.
+    assert!(
+        requests.lock().unwrap()[first_turn..]
+            .iter()
+            .any(|request| {
+                let messages = request["messages"].to_string();
+                messages.contains("Reply with the local model result")
+                    && messages.contains("Native OpenCode local model passed.")
+                    && messages.contains("Continue in the same session")
+            }),
+        "The follow-up request did not include the first turn"
     );
 }
 
