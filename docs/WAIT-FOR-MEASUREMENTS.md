@@ -144,3 +144,68 @@ including the message-revision checks used by external conditions. This adds
 about 0.56 ms to the local duration median in this sample. Warm read medians are
 about 0.04 ms in both versions. These samples establish local costs for this
 workload; they provide no production latency or physical-disk performance claim.
+
+## Grouped waits (2026-10-24)
+
+Compared one `run_finished` condition with `all` groups of 2 and 8 distinct run
+conditions at the same source tree. The [raw measurements](measurements/grouped-wait-for.json)
+record the implementation tree, host conditions and all samples' summaries.
+
+```sh
+CARGO_INCREMENTAL=0 pnpm test:backend -p cairn-installation --test wait_for \
+  groups::measure_group_metadata -- --ignored --exact --nocapture
+```
+
+Each fixture has one caller conversation and 1, 2 or 8 target runs. The workload
+records 100 distinct registrations/replacements, reads the pending conversation
+500 times with its warm pool, and opens 20 new pools for their first reads. Pool
+creation is timed separately. It then measures 100 idle `tick_groups` scans and
+20 progress sequences, completing one target before each scan (20, 40 and 160
+progress samples). Setup, target-state writes and registration of each progress
+sequence stay outside progress timing. Group progress ticks include both the scan
+and its transaction; the last result also writes the ready event. Encoded sizes
+cover the persisted pending, first-progress and final wakeup.
+
+Host: shared native Linux 7.2.9-arch1-1 x86_64, Intel Core i9-14900K, 32 logical
+CPUs and about 94 GiB RAM; temporary SQLite databases under `/tmp` on ext4. Rust
+1.97.1, dev/test profile with debug info enabled and incremental compilation
+disabled. Compilation and this task's other tests finished before timing; other
+host workloads were not controlled (starting load averages 10.91 / 12.05 / 16.07).
+Fresh pools reset SQLite connection/statement/page caches; OS caches stay warm.
+Process CPU uses `CLOCK_PROCESS_CPUTIME_ID` across all manager threads. The native
+run workloads make no external queries or child processes during timing.
+
+| Metric | Single run reference | `all`, 2 runs | `all`, 8 runs |
+| --- | ---: | ---: | ---: |
+| Pending wakeup JSON bytes | 276 | 410 | 854 |
+| Pending conversation JSON bytes | 795 | 930 | 1,373 |
+| Wakeup bytes after first progress tick | 276 | 600 | 1,044 |
+| Wakeup bytes after final progress tick | 277 | 1,409 | 4,619 |
+| Registration/write median / p95, ms | 5.913 / 6.980 | 6.568 / 7.780 | 12.173 / 16.491 |
+| Process CPU for 100 registrations, ms | 289.417 | 332.688 | 852.993 |
+| Warm read median / p95, ms | 0.048 / 0.067 | 0.065 / 0.080 | 0.085 / 0.114 |
+| First read, fresh pool median / p95, ms | 0.546 / 0.589 | 0.515 / 0.584 | 0.631 / 0.690 |
+| Fresh pool open median, ms | 4.482 | 4.517 | 168.489 |
+| Idle group scan median / p95, ms | 0.189 / 0.271 | 0.583 / 0.884 | 1.679 / 2.744 |
+| Process CPU for 100 idle scans, ms | 19.585 | 66.785 | 194.471 |
+| Progress group tick median / p95, ms | 0.264 / 0.329 | 5.074 / 6.646 | 7.381 / 87.214 |
+| Process CPU per progress tick, ms | 0.279 | 1.668 | 3.616 |
+
+The reference progress tick only scans: single conditions keep their previous
+storage contract, so this new observer does not write their results. Its actual
+scheduler resumption is excluded. The reference's final wakeup differs by one
+byte because the measured reason has a longer sequence number. Group sizes after
+completion include the per-member results and the complete group observation;
+the 8-run wakeup remains below 5 KiB in this workload. Conversation sizes also
+include variable-length generated slugs.
+
+The 8-run phase has much larger pool-open and progress-tail latency. This single
+shared-host sequence does not isolate workload costs from host contention; the
+observed samples are retained, and no controlled performance conclusion follows
+from that spike.
+
+These are local metadata costs against an in-build single-condition reference,
+not a comparison with the different hosts used in the earlier sections. They do
+not measure cold physical-disk reads, production network latency, plugin response
+sizes, or scans across a large installation. No codec, compression, SQLite schema,
+journal policy or compatibility epoch changes are involved.

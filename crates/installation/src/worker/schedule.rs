@@ -58,6 +58,7 @@ impl Worker {
                 recover_or_wait(s, &run).await?;
             }
         }
+        crate::waits::tick_groups(s, &active).await?;
         s.chat_tick(&active).await?;
         crate::waits::tick_missions(s, &active).await?;
         if s.shutdown.is_cancelled() || s.store.kv("deployment-lease").await?.is_some() {

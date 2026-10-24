@@ -76,7 +76,7 @@ impl Fixture {
         wait_for::schedule(
             &self.service,
             &self.token,
-            &json!({ "condition": { "type": "delay", "seconds": 420 }, "reason": "Wait for CI" }),
+            &json!({ "conditions": [{ "type": "delay", "seconds": 420 }], "reason": "Wait for CI" }),
         )
         .await
         .unwrap()["wakeup"]
@@ -164,7 +164,7 @@ async fn delay_is_idempotent_durable_and_resumes_same_workspace_once_without_use
         wait_for::schedule(
             &restarted,
             &f.token,
-            &json!({ "condition": { "type": "delay", "seconds": 1 }, "reason": "stale" })
+            &json!({ "conditions": [{ "type": "delay", "seconds": 1 }], "reason": "stale" })
         )
         .await
         .is_err()
@@ -193,7 +193,7 @@ async fn replacing_waits_and_expired_turn_grants_cannot_reschedule_the_next_turn
     let integral_float = wait_for::schedule(
         &f.service,
         &f.token,
-        &json!({ "condition": { "type": "delay", "seconds": 420.0 }, "reason": "Wait for CI" }),
+        &json!({ "conditions": [{ "type": "delay", "seconds": 420.0 }], "reason": "Wait for CI" }),
     )
     .await
     .unwrap()["wakeup"]
@@ -202,7 +202,7 @@ async fn replacing_waits_and_expired_turn_grants_cannot_reschedule_the_next_turn
     let replacement = wait_for::schedule(
         &f.service,
         &f.token,
-        &json!({ "condition": { "type": "delay", "seconds": 1 }, "reason": "Wait for review" }),
+        &json!({ "conditions": [{ "type": "delay", "seconds": 1 }], "reason": "Wait for review" }),
     )
     .await
     .unwrap()["wakeup"]
@@ -230,7 +230,7 @@ async fn replacing_waits_and_expired_turn_grants_cannot_reschedule_the_next_turn
     let next = wait_for::schedule(
         &f.service,
         token,
-        &json!({ "condition": { "type": "delay", "seconds": 420 }, "reason": "Next wait" }),
+        &json!({ "conditions": [{ "type": "delay", "seconds": 420 }], "reason": "Next wait" }),
     )
     .await
     .unwrap()["wakeup"]
@@ -239,7 +239,7 @@ async fn replacing_waits_and_expired_turn_grants_cannot_reschedule_the_next_turn
         wait_for::schedule(
             &f.service,
             &f.token,
-            &json!({ "condition": { "type": "delay", "seconds": 1 }, "reason": "Old turn" })
+            &json!({ "conditions": [{ "type": "delay", "seconds": 1 }], "reason": "Old turn" })
         )
         .await
         .is_err()
@@ -442,11 +442,11 @@ async fn queued_follow_ups_are_not_held_by_a_wakeup_that_cannot_resume() {
 async fn delay_rejects_invalid_inputs_and_pending_steering_but_accepts_missions() {
     let f = Fixture::new().await;
     for input in [
-        json!({ "condition": { "type": "delay", "seconds": 0 }, "reason": "CI" }),
-        json!({ "condition": { "type": "delay", "seconds": 86401 }, "reason": "CI" }),
-        json!({ "condition": { "type": "delay", "seconds": 1.5 }, "reason": "CI" }),
-        json!({ "condition": { "type": "delay", "seconds": 1 }, "reason": " " }),
-        json!({ "condition": { "type": "delay", "seconds": 1 }, "reason": "CI", "extra": true }),
+        json!({ "conditions": [{ "type": "delay", "seconds": 0 }], "reason": "CI" }),
+        json!({ "conditions": [{ "type": "delay", "seconds": 86401 }], "reason": "CI" }),
+        json!({ "conditions": [{ "type": "delay", "seconds": 1.5 }], "reason": "CI" }),
+        json!({ "conditions": [{ "type": "delay", "seconds": 1 }], "reason": " " }),
+        json!({ "conditions": [{ "type": "delay", "seconds": 1 }], "reason": "CI", "extra": true }),
     ] {
         assert!(
             wait_for::schedule(&f.service, &f.token, &input)
@@ -466,7 +466,7 @@ async fn delay_rejects_invalid_inputs_and_pending_steering_but_accepts_missions(
         wait_for::schedule(
             &f.service,
             &f.token,
-            &json!({ "condition": { "type": "delay", "seconds": 1 }, "reason": "CI" })
+            &json!({ "conditions": [{ "type": "delay", "seconds": 1 }], "reason": "CI" })
         )
         .await
         .is_err()
@@ -500,7 +500,7 @@ async fn delay_rejects_invalid_inputs_and_pending_steering_but_accepts_missions(
         &f.service,
         token,
         &json!({
-            "condition": { "type": "delay", "seconds": 1 }, "reason": "CI",
+            "conditions": [{ "type": "delay", "seconds": 1 }], "reason": "CI",
         }),
     )
     .await
@@ -636,7 +636,7 @@ async fn time_conditions_are_available_without_plugin_or_installation_access() {
         json!({ "type": "delay", "seconds": 60 }),
         json!({ "type": "at", "date": "2026-01-01T00:00:00Z" }),
     ] {
-        let input = json!({ "condition": condition, "reason": "Resume later" });
+        let input = json!({ "conditions": [condition], "reason": "Resume later" });
         assert!(jsonschema::is_valid(schema, &input));
         let result = project_workspaces::rpc(
             &f.service,
@@ -649,8 +649,8 @@ async fn time_conditions_are_available_without_plugin_or_installation_access() {
         assert_ne!(result["isError"], true, "{result}");
     }
     for input in [
-        json!({ "condition": { "type": "delay", "seconds": 60 }, "reason": "Wait", "timeoutSeconds": 100 }),
-        json!({ "condition": { "type": "run_finished", "runId": id() }, "reason": "Wait" }),
+        json!({ "conditions": [{ "type": "delay", "seconds": 60 }], "reason": "Wait", "timeoutSeconds": 100 }),
+        json!({ "conditions": [{ "type": "run_finished", "runId": id() }], "reason": "Wait" }),
     ] {
         assert!(!jsonschema::is_valid(schema, &input));
         assert!(
@@ -666,7 +666,7 @@ async fn dates_are_absolute_timezone_aware_and_repeated_calls_keep_the_deadline(
     let f = Fixture::new().await;
     let deadline = now() + 3_600_000;
     let date = chrono::DateTime::from_timestamp_millis(deadline).unwrap();
-    let request = json!({ "condition": { "type": "at", "date": date.to_rfc3339() }, "reason": "Wait until date" });
+    let request = json!({ "conditions": [{ "type": "at", "date": date.to_rfc3339() }], "reason": "Wait until date" });
     let result = wait_for::schedule(&f.service, &f.token, &request)
         .await
         .unwrap();
@@ -678,7 +678,7 @@ async fn dates_are_absolute_timezone_aware_and_repeated_calls_keep_the_deadline(
         "Keep the legacy timer shape for older binaries"
     );
     let offset = chrono::FixedOffset::east_opt(7200).unwrap();
-    let equivalent = json!({ "condition": { "type": "at", "date": date.with_timezone(&offset).to_rfc3339() }, "reason": "Wait until date" });
+    let equivalent = json!({ "conditions": [{ "type": "at", "date": date.with_timezone(&offset).to_rfc3339() }], "reason": "Wait until date" });
     assert_eq!(
         wait_for::schedule(&f.service, &f.token, &equivalent)
             .await
@@ -702,7 +702,7 @@ async fn dates_are_absolute_timezone_aware_and_repeated_calls_keep_the_deadline(
             wait_for::schedule(
                 &f.service,
                 &f.token,
-                &json!({ "condition": condition, "reason": "Wait" })
+                &json!({ "conditions": [condition], "reason": "Wait" })
             )
             .await
             .is_err()
@@ -716,7 +716,7 @@ async fn past_dates_complete_immediately_and_replace_pending_waits() {
     f.schedule().await;
     let deadline = now() - 1000;
     let result = wait_for::schedule(&f.service, &f.token, &json!({
-        "condition": { "type": "at", "date": chrono::DateTime::from_timestamp_millis(deadline).unwrap().to_rfc3339() },
+        "conditions": [{ "type": "at", "date": chrono::DateTime::from_timestamp_millis(deadline).unwrap().to_rfc3339() }],
         "reason": "Time already reached",
     })).await.unwrap();
     assert_eq!(
@@ -767,7 +767,7 @@ async fn fractional_dates_never_schedule_before_the_requested_instant() {
     let millis = now() + 60_000;
     let date =
         chrono::DateTime::from_timestamp_millis(millis).unwrap() + chrono::Duration::nanoseconds(1);
-    let result = wait_for::schedule(&f.service, &f.token, &json!({ "condition": { "type": "at", "date": date.to_rfc3339() }, "reason": "Precise date" })).await.unwrap();
+    let result = wait_for::schedule(&f.service, &f.token, &json!({ "conditions": [{ "type": "at", "date": date.to_rfc3339() }], "reason": "Precise date" })).await.unwrap();
     assert_eq!(result["wakeup"]["wakeAt"], millis + 1);
 }
 
@@ -779,7 +779,7 @@ async fn switching_between_a_date_and_duration_replaces_the_request() {
         &f.service,
         &f.token,
         &json!({
-            "condition": { "type": "at", "date": date.to_rfc3339() }, "reason": "Wait for CI",
+            "conditions": [{ "type": "at", "date": date.to_rfc3339() }], "reason": "Wait for CI",
         }),
     )
     .await
@@ -793,7 +793,7 @@ async fn switching_between_a_date_and_duration_replaces_the_request() {
     let same_instant =
         chrono::DateTime::from_timestamp_millis(delay["wakeAt"].as_i64().unwrap()).unwrap();
     let at = wait_for::schedule(&f.service, &f.token, &json!({
-        "condition": { "type": "at", "date": same_instant.to_rfc3339() }, "reason": "Wait for CI",
+        "conditions": [{ "type": "at", "date": same_instant.to_rfc3339() }], "reason": "Wait for CI",
     })).await.unwrap();
     assert_ne!(at["wakeup"]["id"], delay["id"]);
 }

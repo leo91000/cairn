@@ -4332,7 +4332,7 @@ async fn mission_wait_and_node_move_exclude_each_other_without_leaking_destinati
             .await
             .unwrap();
         let input = json!({
-            "condition": { "type": "delay", "seconds": 3600 }, "reason": "Wait for CI",
+            "conditions": [{ "type": "delay", "seconds": 3600 }], "reason": "Wait for CI",
         });
         let args = json!({ "nodeId": node });
         let register_wait = || cairn_installation::waits::schedule(&owner.service, token, &input);
