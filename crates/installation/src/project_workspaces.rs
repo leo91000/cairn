@@ -205,8 +205,26 @@ fn open_project_tool() -> Value {
     })
 }
 
+/// Workspace tools of a plan turn: reading Cairn's state and opening authorized projects
+/// in the private workspace. Every other tool, including plugin tools, has effects
+/// beyond the turn.
+const PLAN_TOOLS: [&str; 4] = [
+    "open_project",
+    "list_nodes",
+    "exclusive_status",
+    "pending_questions",
+];
+
+const PLAN_DENIED: &str = "This tool is unavailable during a plan turn because it has effects beyond exploring. Include the step in your plan; the user starts implementation explicitly.";
+
 async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Result<Value> {
     let summary = Value::to_string;
+    let planning = authorize(s, bearer)
+        .await
+        .is_ok_and(|run| crate::chats::planning(&run));
+    if planning && !PLAN_TOOLS.contains(&name) {
+        return ToolResult::from_result(Err(Error::forbidden(PLAN_DENIED)), summary);
+    }
     match name {
         "acquire_exclusive" => ToolResult::from_result(
             crate::nodes::exclusive::acquire(s, bearer, args).await,
@@ -304,14 +322,15 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         return Err(Error::not_found("Unknown workspace operation."));
     }
     // Conditions of granted plugins; listing without a live run offers Cairn's own.
-    let conditions = match authorize(s, bearer).await {
+    let (conditions, planning) = match authorize(s, bearer).await {
         Ok(run) => {
             let agent_id = text(&run["snapshot"]["agent"], "id");
-            crate::plugins::conditions::schemas(s, agent_id)
+            let conditions = crate::plugins::conditions::schemas(s, agent_id)
                 .await
-                .unwrap_or_default()
+                .unwrap_or_default();
+            (conditions, crate::chats::planning(&run))
         }
-        Err(_) => Vec::new(),
+        Err(_) => (Vec::new(), false),
     };
     let mut tools = vec![
         open_project_tool(),
@@ -328,6 +347,10 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         crate::nodes::exclusive::status_tool(),
         crate::nodes::exclusive::renew_tool(),
     ];
+    if planning {
+        tools.retain(|tool| PLAN_TOOLS.contains(&text(tool, "name")));
+        return Ok(json!({ "tools": tools }));
+    }
     // Package tools never shadow Cairn's own.
     // Listing stays available without a live run; calls authorize on their own.
     let granted = crate::plugins::agents::tools(s, bearer)

@@ -375,6 +375,7 @@ internal fun ChatPage(
     var provider by rememberSaveable(id) { mutableStateOf(savedDraft.provider) }
     var model by rememberSaveable(id) { mutableStateOf(savedDraft.model) }
     var reasoning by rememberSaveable(id) { mutableStateOf(savedDraft.reasoning) }
+    var planning by rememberSaveable(id) { mutableStateOf(savedDraft.plan) }
     var attachments by rememberForm(savedDraft.attachments)
     // Per-file states of the composer: refused before upload, uploading, or failed to upload.
     var rejected by rememberForm(savedDraft.rejected)
@@ -409,6 +410,7 @@ internal fun ChatPage(
                     submissionKey,
                     provider,
                     rejected,
+                    planning,
                 )
     }
     SideEffect { persistDraft() }
@@ -445,6 +447,19 @@ internal fun ChatPage(
             )
         }
     val timeline = remember(history, live.events) { quotaTimeline(history, live.events) }
+    // Only the latest proposal, before any later request, offers to implement it.
+    val implementable =
+        remember(timeline) {
+            val index = timeline.indexOfLast { it.proposal }
+            timeline
+                .getOrNull(index)
+                ?.takeIf {
+                    timeline.drop(index + 1).none { entry ->
+                        entry.events.any { event -> event.type == "chat.user" }
+                    }
+                }
+                ?.key
+        }
     var asking by remember { mutableStateOf<ChatQuestion?>(null) }
     var stopping by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf<ChatMessage?>(null) }
@@ -527,6 +542,10 @@ internal fun ChatPage(
         model = ""
         reasoning = ""
     }
+    val planAvailable = codingAgent(chosenProvider).planTurns
+    val planRequested = planning && planAvailable
+    // A plan request cannot join a turn that can already change files.
+    val steerBlocked = planRequested && chat?.run?.chatExecution?.plan != true
     val skillOptions =
         remember(state.skills, selectedAgent, chat?.projectId, project, chat == null) {
             chatSkills(state.skills, selectedAgent, if (chat != null) chat.projectId else project)
@@ -616,7 +635,7 @@ internal fun ChatPage(
         submissionKey = ""
         submissionId = ""
     }
-    fun send(mode: String) {
+    fun send(mode: String, plan: Boolean = planRequested) {
         vm.perform {
             val chatId =
                 id
@@ -666,6 +685,7 @@ internal fun ChatPage(
                 put("provider", chosenProvider)
                 put("model", selectedModel)
                 put("reasoning", selectedReasoning)
+                put("plan", plan)
                 put(
                     "attachmentIds",
                     wireJson.encodeToJsonElement(attachments.map { it.attachment.id }),
@@ -690,6 +710,7 @@ internal fun ChatPage(
                         System.currentTimeMillis(),
                         attachments.map { it.attachment },
                         provider = chosenProvider,
+                        plan = plan,
                     )
             try {
                 api.request(
@@ -703,7 +724,11 @@ internal fun ChatPage(
                 throw e
             }
             clearDraft()
-            if (id == null) openChat(chatId)
+            if (id == null) {
+                // Plan mode follows the first message into the conversation it created.
+                if (plan) vm.chatDrafts[chatId] = ChatDraft(plan = true)
+                openChat(chatId)
+            }
         }
     }
     fun edit(message: ChatMessage) {
@@ -720,7 +745,16 @@ internal fun ChatPage(
         provider = message.provider.ifBlank { currentProvider }
         model = message.model
         reasoning = message.reasoning
+        planning = message.plan
         attachments = message.attachments.map { DraftAttachment(it) }
+    }
+    // Leaving plan mode is explicit: this queues an ordinary turn in the same conversation, with
+    // the agent's usual permissions.
+    fun implementPlan() {
+        if (draft.isNotBlank() || attachments.isNotEmpty() || editing != null) return
+        planning = false
+        composer.setTextAndPlaceCursorAtEnd("Implémente le plan que tu as proposé.")
+        send("queue", plan = false)
     }
     fun steerQueued(message: ChatMessage) {
         vm.perform {
@@ -734,6 +768,7 @@ internal fun ChatPage(
                     put("provider", message.provider)
                     put("model", message.model)
                     put("reasoning", message.reasoning)
+                    put("plan", message.plan)
                     put(
                         "attachmentIds",
                         wireJson.encodeToJsonElement(message.attachments.map { it.id }),
@@ -1230,6 +1265,14 @@ internal fun ChatPage(
                                                 hideRunning = chat?.run?.status == "running",
                                                 active = active,
                                                 livePlan = livePlan,
+                                                implement =
+                                                    if (it.key == implementable) ::implementPlan
+                                                    else null,
+                                                canImplement =
+                                                    !state.busy &&
+                                                        editing == null &&
+                                                        draft.isBlank() &&
+                                                        attachments.isEmpty(),
                                             )
                                         }
                                     }
@@ -1287,6 +1330,8 @@ internal fun ChatPage(
                                                             wireJson.encodeToJsonElement(
                                                                 sending.message.attachments
                                                             ),
+                                                        "plan" to
+                                                            JsonPrimitive(sending.message.plan),
                                                     ),
                                                 ),
                                                 chat?.agentName ?: "Cairn",
@@ -1498,7 +1543,9 @@ internal fun ChatPage(
                                                     Text(
                                                         // Any message cancels a pending wait,
                                                         // paused or not.
-                                                        if (chat?.paused == true)
+                                                        if (planRequested)
+                                                            "Que faut-il planifier ? Rien ne sera modifié"
+                                                        else if (chat?.paused == true)
                                                             if (liveWakeup(chat) != null)
                                                                 "Ajouter à la file — annule l’attente"
                                                             else "Ajouter à la file…"
@@ -1557,6 +1604,21 @@ internal fun ChatPage(
                                                 reasoning = r
                                             }
                                         }
+                                        FilterChip(
+                                            planRequested,
+                                            { planning = !planning },
+                                            label = { Text("Plan") },
+                                            modifier =
+                                                Modifier.padding(end = 4.dp).testTag("plan-toggle"),
+                                            enabled = !state.busy && planAvailable,
+                                            leadingIcon = {
+                                                Icon(
+                                                    CairnIcons.Tasks,
+                                                    null,
+                                                    Modifier.size(16.dp),
+                                                )
+                                            },
+                                        )
                                         val canSend =
                                             !state.busy &&
                                                 rejected.isEmpty() &&
@@ -1578,7 +1640,8 @@ internal fun ChatPage(
                                                     MaterialTheme.colorScheme.onPrimaryContainer,
                                                 outlined = false,
                                                 size = 40.dp,
-                                                enabled = canSend && !switchingProvider,
+                                                enabled =
+                                                    canSend && !switchingProvider && !steerBlocked,
                                             ) {
                                                 send(if (switchingProvider) "queue" else "steer")
                                             }

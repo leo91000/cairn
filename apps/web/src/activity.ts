@@ -72,6 +72,16 @@ export type ActivityEntry
     /** The model provider that wrote this reply, when the engine chose among several. */
     via?: string
     attachments?: import('../../../packages/contracts/chats').ChatAttachment[]
+    /** A user request for a plan turn, which explores without changing anything. */
+    plan?: boolean
+  }
+  /** The approach a plan turn proposed; the user decides whether to implement it. */
+  | {
+    kind: 'proposal'
+    id: string
+    time: number
+    text: string
+    sourceId: string
   }
   | { kind: 'group', id: string, artifacts: ActivityArtifact[] }
   | { kind: 'team', id: string, agents: ActivityArtifact[] }
@@ -240,6 +250,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
   const entries: ActivityEntry[] = []
   const artifacts = new Map<string, ActivityArtifact>()
   const messages = new Map<string, Extract<ActivityEntry, { kind: 'message' }>>()
+  const proposals = new Map<string, Extract<ActivityEntry, { kind: 'proposal' }>>()
   // By the agent's own item ID: a subagent's steps can arrive after the turn that started it.
   const subagents = new Map<string, ActivityArtifact>()
   const aliases = new Map<string, string>()
@@ -426,6 +437,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
         time: typeof event.payload?.createdAt === 'number' && Number.isFinite(event.payload.createdAt) && event.payload.createdAt > 0 && event.payload.createdAt <= event.createdAt ? event.payload.createdAt : event.createdAt,
         text: typeof event.payload?.text === 'string' ? event.payload.text : event.text,
         attachments: Array.isArray(event.payload?.attachments) ? event.payload.attachments : [],
+        ...(event.payload?.plan === true ? { plan: true } : {}),
       })
       continue
     }
@@ -609,6 +621,28 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
           change,
           progress: planProgress(steps),
         })
+      }
+
+      continue
+    }
+
+    if (type === 'proposed_plan') {
+      const content = text(item.text)
+      const existing = proposals.get(id)
+      if (existing) {
+        existing.text = content || existing.text
+        existing.sourceId = `${event.runId}:${event.id}`
+      }
+      else if (content) {
+        const proposal = {
+          kind: 'proposal' as const,
+          id,
+          time: event.createdAt,
+          text: content,
+          sourceId: `${event.runId}:${event.id}`,
+        }
+        entries.push(proposal)
+        proposals.set(id, proposal)
       }
 
       continue

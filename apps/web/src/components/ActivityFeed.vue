@@ -23,7 +23,13 @@ import { activityEntries, ActivityGroups } from '../activity'
 import { currentPlan } from '../agent-plan'
 import { quotaEntries } from '../chat-quota'
 import { deliveryEntries } from '../deliverables'
-import { ArrowDown, Maximize2, Minimize2 } from '../icons'
+import {
+  ArrowDown,
+  Hammer,
+  Maximize2,
+  Minimize2,
+  NotebookPen,
+} from '../icons'
 import { MessageTimes } from '../message-times'
 import { exclusiveSuspensionLabel } from '../run-status'
 import { backgroundWait, waitingStep, workingStep } from '../signal'
@@ -73,12 +79,15 @@ const props = defineProps<{
   quota?: ChatQuota | null
   canManageAccounts?: boolean
   busy?: boolean
+  /** The composer can send an implementation request now. */
+  canImplement?: boolean
 }>()
 const emit = defineEmits<{
   load: []
   position: [value: ReadingPosition, key?: string]
   pauseWait: []
   resumeQuota: []
+  implement: []
 }>()
 const skillNames = computed(() => new Set(props.skills ?? []))
 const messageTimes = new MessageTimes()
@@ -108,6 +117,7 @@ const entries = computed(() => {
         text: message.text,
         attachments: message.attachments,
         delivery: label,
+        ...(message.plan ? { plan: true } : {}),
       })
     }
   }
@@ -125,6 +135,14 @@ const working = computed(() => {
   if (wait)
     return { ...waitingStep(wait), subagents: waitingForSubagents(props.events, subagents.value) }
   return workingStep(activity.value, props.agent, props.events[0]?.createdAt ?? null)
+})
+// Only the latest proposal, before any later request, offers to implement it.
+const implementable = computed(() => {
+  const items = activity.value
+  const index = items.findLastIndex(entry => entry.kind === 'proposal')
+  if (index < 0 || items.slice(index + 1).some(entry => entry.kind === 'message' && entry.role === 'user'))
+    return null
+  return items[index]!.id
 })
 const visibleOutcome = computed(() => !props.active && !props.sending?.length && !props.loading ? props.outcome : null)
 const outcomeEntryId = computed(() => {
@@ -423,6 +441,7 @@ defineExpose({
                       </template>
                     </p>
                     <p class="mt-1.5! mb-0! flex justify-end gap-2 text-2xs text-muted">
+                      <span v-if="entry.plan" class="inline-flex items-center gap-1 font-semibold text-accent" title="Plan turn: the agent explores and proposes without changing anything"><Icon :name="NotebookPen" :size="12" />Plan</span>
                       <span v-if="entry.delivery" role="status">{{ entry.delivery }}</span>
                       <time :datetime="messageTimes.format(entry.time).datetime" :title="messageTimes.format(entry.time).title">{{ messageTimes.format(entry.time).label }}</time>
                     </p>
@@ -438,6 +457,24 @@ defineExpose({
                     <time :datetime="messageTimes.format(entry.time).datetime" :title="messageTimes.format(entry.time).title">{{ messageTimes.format(entry.time).label }}</time>
                   </p>
                   <ActivityContent :content="entry.text" />
+                </article>
+                <article v-else-if="entry.kind === 'proposal'" class="activity-proposal my-3 rounded-2xl border border-line px-4 py-3" data-testid="proposed-plan">
+                  <p class="mb-1.5! flex items-center justify-between gap-3 text-2xs text-muted">
+                    <span class="inline-flex items-center gap-1.5 font-semibold text-accent"><Icon :name="NotebookPen" :size="14" />Proposed plan</span>
+                    <time :datetime="messageTimes.format(entry.time).datetime" :title="messageTimes.format(entry.time).title">{{ messageTimes.format(entry.time).label }}</time>
+                  </p>
+                  <ActivityContent :content="entry.text" />
+                  <div v-if="entry.id === implementable" class="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3">
+                    <span class="text-2xs text-muted">Nothing was changed. Implementing starts a turn with the agent’s usual permissions.</span>
+                    <UiButton
+                      class="text-sm"
+                      :disabled="!canImplement"
+                      title="Queue an implementation request in this conversation"
+                      @click="emit('implement')"
+                    >
+                      <Icon :name="Hammer" :size="14" />Implement
+                    </UiButton>
+                  </div>
                 </article>
                 <ChatNotice v-else-if="entry.kind === 'notice'" :notice="entry.artifact" />
                 <SubagentTeam v-else-if="entry.kind === 'team'" :agents="entry.agents" :active="active" />

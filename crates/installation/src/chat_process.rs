@@ -29,7 +29,9 @@ pub fn chat_item(mut item: Value) -> Value {
         "commandExecution" => "command_execution",
         "fileChange" => "file_change",
         "mcpToolCall" => "mcp_tool_call",
-        "reasoning" | "plan" => "reasoning",
+        "reasoning" => "reasoning",
+        // The approach a plan turn proposes, distinct from the progress checklist.
+        "plan" => "proposed_plan",
         "webSearch" => "web_search",
         "collabAgentToolCall" => "collab_tool_call",
         kind => kind,
@@ -121,6 +123,13 @@ struct ThreadConfig<'a> {
     sandbox_workspace_write: WorkspaceWrite<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model_reasoning_effort: Option<&'a str>,
+    /// Off during a plan turn: Cairn has not verified that sub-agent threads keep
+    /// the turn's read-only sandbox.
+    #[serde(
+        rename = "features.multi_agent",
+        skip_serializing_if = "Option::is_none"
+    )]
+    multi_agent: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -141,6 +150,25 @@ struct TurnParams<'a> {
     client_user_message_id: Option<&'a Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<&'a Value>,
+    /// Codex keeps a turn's sandbox for later turns of the thread.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sandbox_policy: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    collaboration_mode: Option<Value>,
+}
+
+/// The turn's sandbox as a `turn/start` override. A plan turn is read-only without
+/// network, whatever the agent's access.
+fn sandbox_policy(plan: &Value) -> Value {
+    match text(plan, "sandbox") {
+        "yolo" => json!({ "type": "dangerFullAccess" }),
+        "workspace-write" => json!({
+            "type": "workspaceWrite",
+            "writableRoots": plan["writableRoots"],
+            "networkAccess": true,
+        }),
+        _ => json!({ "type": "readOnly", "networkAccess": false }),
+    }
 }
 
 /// The plan's model, unless it leaves the choice to Codex.
@@ -251,6 +279,9 @@ impl Chat<'_> {
                 self.acknowledge(id).await?;
             }
             return Ok(());
+        }
+        if item["type"] == "plan" && !text(&item, "text").is_empty() {
+            self.last_message = text(&item, "text").to_owned();
         }
         if item["type"] == "agentMessage" {
             if !text(&item, "text").is_empty() {
@@ -742,6 +773,7 @@ impl Chat<'_> {
                     writable_roots: &plan["writableRoots"],
                 },
                 model_reasoning_effort: (!effort.is_empty()).then_some(effort),
+                multi_agent: (plan["planning"] == true).then_some(false),
             },
             model: model(plan),
             thread_id: resume.then(|| &plan["sessionId"]),
@@ -927,23 +959,73 @@ impl Chat<'_> {
         self.wait(plan).await
     }
 
+    /// Codex's preset for a plan turn, or its default preset for the turn after one:
+    /// a thread keeps its collaboration mode for later turns. `None` when this Codex
+    /// lists no such preset or the model is unknown; the turn's sandbox applies anyway.
+    async fn collaboration_mode(&mut self, plan: &Value, effort: &str) -> Option<Value> {
+        let kind = if plan["planning"] == true {
+            "plan"
+        } else if plan["afterPlan"] == true {
+            "default"
+        } else {
+            return None;
+        };
+        let presets = self
+            .request("collaborationMode/list", json!({}))
+            .await
+            .ok()?;
+        let preset = presets["data"]
+            .as_array()?
+            .iter()
+            .find(|preset| preset["mode"] == kind)?
+            .clone();
+        let model = match model(plan) {
+            Some(model) => model.clone(),
+            None => {
+                let models = crate::models::discover(self.session).await.ok()?;
+                let default = models.as_array()?.iter().find(|m| m["isDefault"] == true)?;
+                default["model"].clone()
+            }
+        };
+        let effort = if effort.is_empty() {
+            preset["reasoning_effort"].clone()
+        } else {
+            effort.into()
+        };
+        Some(json!({
+            "mode": kind,
+            "settings": {
+                "model": model,
+                "reasoning_effort": effort,
+                "developer_instructions": null,
+            },
+        }))
+    }
+
     async fn start_turn(&mut self, plan: &Value, effort: &str, continuing: bool) -> Result<()> {
         let message = if continuing {
+            let mut pending = text(&plan["execution"], "text").to_owned();
+            if plan["planning"] == true {
+                pending = format!("{}\n\n{pending}", crate::chats::PLAN_TURN);
+            }
             format!(
-                "Continue the interrupted conversation from its last completed step. Preserve completed work and verify external effects before repeating any action. The pending user request is:\n{}",
-                text(&plan["execution"], "text")
+                "Continue the interrupted conversation from its last completed step. Preserve completed work and verify external effects before repeating any action. The pending user request is:\n{pending}"
             )
         } else {
             crate::chats::execution_text(plan)
         };
         let input =
             crate::attachments::input(&message, &plan["execution"]["attachments"], inbox(plan));
+        let collaboration_mode = self.collaboration_mode(plan, effort).await;
         let params = TurnParams {
             thread_id: &self.thread,
             input,
             effort: (!effort.is_empty()).then_some(effort),
             client_user_message_id: (!continuing).then(|| &plan["execution"]["messageId"]),
             model: model(plan),
+            sandbox_policy: (plan["planning"] == true || plan["afterPlan"] == true)
+                .then(|| sandbox_policy(plan)),
+            collaboration_mode,
         };
         let params = serde_json::to_value(params)?;
         let started = self.request("turn/start", params).await?;

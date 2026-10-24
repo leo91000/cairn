@@ -27,6 +27,8 @@ data class ChatMessage(
     val attachments: List<ChatAttachment> = emptyList(),
     val questionId: String? = null,
     val provider: String = "",
+    /** A plan turn, which explores and proposes without changing anything. */
+    val plan: Boolean = false,
 )
 
 @Serializable data class QuestionOption(val label: String, val description: String = "")

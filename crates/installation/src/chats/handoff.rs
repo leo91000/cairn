@@ -144,7 +144,17 @@ pub(super) fn handoff_context(db: &Db<'_>, run: &str) -> Result<String> {
     Ok(parts.join("\n\n"))
 }
 
+pub const PLAN_TURN: &str = "Plan turn: explore and propose an approach for the request below, without implementing it. Cairn blocks file changes, shell network access and tools with external effects during this turn. The user will start implementation explicitly.";
+
 pub fn execution_text(plan: &Value) -> String {
+    let request = request_text(plan);
+    if plan["planning"] == true {
+        return format!("{PLAN_TURN}\n\n{request}");
+    }
+    request
+}
+
+fn request_text(plan: &Value) -> String {
     let current = text(&plan["execution"], "text");
     let context = text(&plan["execution"], "context");
     if context.is_empty() {

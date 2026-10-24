@@ -54,6 +54,10 @@ impl ExecutionAdapter for Claude {
         true
     }
 
+    fn plan_turns(&self) -> bool {
+        true
+    }
+
     fn legacy_args(
         &self,
         _run: &Value,
@@ -148,19 +152,26 @@ impl ExecutionAdapter for Claude {
             "args": mcp["args"],
             "claudeMcps": mcp["claudeMcps"],
             "claudeDeniedTools": mcp["claudeDeniedTools"],
+            "claudePlanTools": mcp["claudePlanTools"],
         })
     }
 
     fn mcp_configuration(&self, configuration: &Configuration) -> Result<Value> {
         let mut servers = BTreeMap::new();
         let mut denied_tools = Vec::new();
+        // A plan turn allows only these MCP tool names, or prefixes of HTTP servers
+        // whose tools Cairn's gateway already restricts.
+        let mut plan_tools = Vec::new();
         for (name, server) in &configuration.servers {
             let value = match server {
-                Server::Http { url, .. } => json!({
-                    "type": "http",
-                    "url": url,
-                    "headers": configuration.bearer_headers(),
-                }),
+                Server::Http { url, .. } => {
+                    plan_tools.push(format!("mcp__{name}__*"));
+                    json!({
+                        "type": "http",
+                        "url": url,
+                        "headers": configuration.bearer_headers(),
+                    })
+                }
                 Server::Stdio {
                     command,
                     args,
@@ -174,6 +185,8 @@ impl ExecutionAdapter for Claude {
                                 denied_tools.push(format!("mcp__{name}__{tool}"));
                             }
                         }
+                        plan_tools
+                            .extend(selected.iter().map(|tool| format!("mcp__{name}__{tool}")));
                     }
                     json!({
                         "type": "stdio",
@@ -185,10 +198,14 @@ impl ExecutionAdapter for Claude {
             };
             servers.insert(name, value);
         }
-        Ok(json!({
+        let mut rendered = json!({
             "args": [],
             "claudeMcps": { "mcpServers": servers },
             "claudeDeniedTools": denied_tools,
-        }))
+        });
+        if configuration.planning {
+            rendered["claudePlanTools"] = json!(plan_tools);
+        }
+        Ok(rendered)
     }
 }

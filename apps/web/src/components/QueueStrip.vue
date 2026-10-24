@@ -32,7 +32,8 @@ const expanded = ref(false)
 const selected = ref<string | null>(null)
 const headline = computed(() => props.paused ? 'Queue paused · nothing is sent' : props.working ? 'Sent when the agent finishes' : 'Waiting to send')
 const chosen = computed(() => props.pending.find(message => message.id === selected.value))
-const steerable = (message: ChatMessage) => props.working && message.status === 'queued' && !message.questionId && message.mode !== 'steer'
+// A plan request waits for its own turn: it cannot restrict a turn already running.
+const steerable = (message: ChatMessage) => props.working && message.status === 'queued' && !message.questionId && message.mode !== 'steer' && !message.plan
 const preview = (message: ChatMessage) => message.text || message.attachments?.map(file => file.name).join(', ') || 'Attachments'
 
 function note(message: ChatMessage) {
@@ -41,7 +42,8 @@ function note(message: ChatMessage) {
   if (message.mode === 'steer')
     return 'Delivered as soon as possible'
   const files = message.attachments?.length ?? 0
-  return files ? `${files} attachment${files > 1 ? 's' : ''}` : ''
+  const attached = files ? `${files} attachment${files > 1 ? 's' : ''}` : ''
+  return message.plan ? ['Plan · no changes', attached].filter(Boolean).join(' · ') : attached
 }
 
 // Close the sheet, then act on the message it showed.

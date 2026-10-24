@@ -54,6 +54,30 @@ export function chatFixture() {
       return true
     }
 
+    if (method === 'collaborationMode/list') {
+      // Presets listed by Codex 0.164.0.
+      emit({
+        id: request.id,
+        result: {
+          data: [
+            {
+              name: 'Plan',
+              mode: 'plan',
+              model: null,
+              reasoning_effort: 'medium',
+            },
+            {
+              name: 'Default',
+              mode: 'default',
+              model: null,
+              reasoning_effort: null,
+            },
+          ],
+        },
+      })
+      return true
+    }
+
     if (method === 'thread/unsubscribe') {
       if (active)
         throw new Error('Cannot release an active thread')
@@ -117,9 +141,17 @@ export function chatFixture() {
           items: [],
           model: params.model,
           effort: params.effort,
+          sandboxPolicy: params.sandboxPolicy,
+          collaborationMode: params.collaborationMode,
+          threadConfig: thread.fixtureConfig,
         }
         thread.turns.push(active)
         notify('turn/started', { threadId: thread.id, turn: active })
+        if (params.collaborationMode?.mode === 'plan') {
+          const plan = { id: `plan-${active.id}`, type: 'plan', text: '1. Read the composer.\n2. Add the toggle.' }
+          active.items.push(plan)
+          notify('item/completed', { threadId: thread.id, item: plan })
+        }
       }
 
       const item = {

@@ -310,4 +310,5 @@ data class ChatExecution(
     val messageId: String,
     val text: String = "",
     val recovery: Boolean = false,
+    val plan: Boolean = false,
 )

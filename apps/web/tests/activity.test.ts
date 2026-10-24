@@ -295,6 +295,37 @@ describe('conversation activity', () => {
     }], true)).toEqual([])
     expect(activityEntries([{ ...connection, type: 'thread.started', text: '' }], true)).toEqual([])
   })
+  it('marks plan requests and shows each proposed plan once, apart from replies', () => {
+    let id = 0
+    const event = (type: string, payload: Record<string, unknown>): RunEvent => ({
+      id: ++id,
+      runId: 'chat',
+      createdAt: id,
+      type,
+      text: '',
+      payload,
+    })
+    const proposal = (type: string, text: string) => event(type, {
+      item: {
+        id: 'exit-plan-tool',
+        type: 'proposed_plan',
+        text,
+        status: type === 'item.started' ? 'in_progress' : 'completed',
+      },
+    })
+    const entries = activityEntries([
+      event('chat.user', { messageId: 'plan', text: 'Plan the composer change', plan: true }),
+      proposal('item.started', '1. Read'),
+      proposal('item.completed', '1. Read\n2. Change'),
+      event('item.completed', { item: { id: 'reply', type: 'agent_message', text: 'Plan ready for review' } }),
+      event('chat.user', { messageId: 'implement', text: 'Implement the plan you proposed.' }),
+    ], true)
+    expect(entries.map(entry => entry.kind)).toEqual(['message', 'proposal', 'message', 'message'])
+    expect(entries[0]).toMatchObject({ role: 'user', plan: true })
+    expect(entries[1]).toMatchObject({ kind: 'proposal', text: '1. Read\n2. Change' })
+    // Older events and ordinary requests carry no plan marker.
+    expect(entries[3]).not.toHaveProperty('plan')
+  })
   it('shows the message submission time with a fallback for older events', () => {
     const message = {
       id: 1,

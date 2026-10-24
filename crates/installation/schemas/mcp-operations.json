@@ -1584,6 +1584,11 @@
               "type": "string",
               "maxLength": 40,
               "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
+            },
+            "plan": {
+              "default": false,
+              "description": "Plan turn: the agent explores and proposes an approach without changing files, using shell network access or calling tools with external effects. Send a later message without plan to implement it. Unavailable with OpenCode.",
+              "type": "boolean"
             }
           },
           "required": [
@@ -1593,7 +1598,8 @@
             "mode",
             "provider",
             "model",
-            "reasoning"
+            "reasoning",
+            "plan"
           ],
           "additionalProperties": false
         }
@@ -1670,6 +1676,11 @@
               "type": "string",
               "maxLength": 40,
               "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
+            },
+            "plan": {
+              "default": false,
+              "description": "Plan turn: the agent explores and proposes an approach without changing files, using shell network access or calling tools with external effects. Send a later message without plan to implement it. Unavailable with OpenCode.",
+              "type": "boolean"
             }
           },
           "required": [
@@ -1678,7 +1689,8 @@
             "mode",
             "provider",
             "model",
-            "reasoning"
+            "reasoning",
+            "plan"
           ],
           "additionalProperties": false
         }

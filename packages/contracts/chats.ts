@@ -18,6 +18,7 @@ export const chatMessageInput = z.object({
   // eslint-disable-next-line regexp/no-useless-escape
   model: z.string().trim().max(120).regex(/^[\w./:\[\]-]*$/).default(''),
   reasoning: reasoningEffort.default(''),
+  plan: z.boolean().default(false).describe('Plan turn: the agent explores and proposes an approach without changing files, using shell network access or calling tools with external effects. Send a later message without plan to implement it. Unavailable with OpenCode.'),
 }).refine(message => message.text.length > 0 || message.attachmentIds.length > 0, 'Write a message or attach a file')
 export interface ChatAttachment {
   id: string
@@ -95,6 +96,8 @@ export interface ChatMessage {
   provider?: '' | 'codex' | 'claude' | 'opencode'
   model: string
   reasoning?: string
+  /** Absent on messages saved before plan turns, which were never plan turns. */
+  plan?: boolean
   mode: 'queue' | 'steer'
   status: 'queued' | 'sending' | 'delivered' | 'cancelled'
   createdAt: number
@@ -144,4 +147,6 @@ export interface ChatExecution {
   messageId: string
   text: string
   recovery: boolean
+  /** A plan turn, which explores and proposes without changing anything. */
+  plan?: boolean
 }

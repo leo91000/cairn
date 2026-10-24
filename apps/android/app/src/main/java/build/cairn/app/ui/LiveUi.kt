@@ -611,6 +611,8 @@ internal data class TimelineEntry(
     val agents: List<Subagent> = emptyList(),
     /** A scheduled wait, shown as one card from its scheduling to its resumption. */
     val wait: ActivityWait? = null,
+    /** The approach a plan turn proposed. */
+    val proposal: Boolean = false,
     /** The agent's plan, kept up to date by its later updates. */
     val plan: AgentPlan? = null,
     /** Where an update changed the plan. */
@@ -1060,6 +1062,13 @@ internal fun timelineEntries(
                 }
                 continue
             }
+            if (event.item().string("type") == "proposed_plan") {
+                flushActivity()
+                result.add(
+                    TimelineEntry("proposal:${event.id}", listOf(event), false, proposal = true)
+                )
+                continue
+            }
             if (event.isMessage()) {
                 flushActivity()
                 result.add(
@@ -1268,6 +1277,9 @@ internal fun TimelineRow(
     active: Boolean = false,
     /** The plan the agent still follows, if any. */
     livePlan: String? = null,
+    /** Queues the implementation of this proposed plan, when it is the latest one. */
+    implement: (() -> Unit)? = null,
+    canImplement: Boolean = false,
 ) {
     if (entry.files.isNotEmpty()) ArtifactStrip(vm, entry.files)
     else if (entry.agents.isNotEmpty()) SubagentTeam(entry.agents, active, identity = entry.key)
@@ -1279,6 +1291,7 @@ internal fun TimelineRow(
                 if (entry.via.isBlank()) agent else "$agent · via ${entry.via}",
             )
         }
+    else if (entry.proposal) ProposedPlanCard(entry.events.single(), implement, canImplement)
     else if (entry.wait != null) WaitCard(entry.wait)
     else if (entry.plan != null) PlanCard(entry.plan, live = active && livePlan == entry.key)
     else if (entry.planUpdate != null) PlanUpdateRow(entry.planUpdate)
@@ -1306,6 +1319,9 @@ fun EventRow(vm: CairnViewModel, event: RunEvent, agent: String = "Cairn") {
         val content =
             if (user) (event.payload?.get("text") as? JsonPrimitive)?.contentOrNull ?: event.text
             else item.string("text").ifEmpty { event.text }
+        // A plan turn explores and proposes without changing anything.
+        val planRequest =
+            user && (event.payload?.get("plan") as? JsonPrimitive)?.booleanOrNull == true
         val attachments =
             if (!user) emptyList()
             else
@@ -1388,10 +1404,12 @@ fun EventRow(vm: CairnViewModel, event: RunEvent, agent: String = "Cairn") {
                             else Markdown(content)
                             if (user)
                                 Text(
-                                    time,
+                                    if (planRequest) "Plan · $time" else time,
                                     Modifier.align(Alignment.End),
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    color =
+                                        if (planRequest) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                         }
                     }

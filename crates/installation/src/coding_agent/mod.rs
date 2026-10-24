@@ -37,6 +37,12 @@ pub trait ExecutionAdapter: Send + Sync {
 
     fn uses_chat(&self, chat_execution: bool, managed_account: bool) -> bool;
 
+    /// Whether plan turns can run on this engine: Cairn must be able to enforce
+    /// their read-only boundary, not only ask the model to respect it.
+    fn plan_turns(&self) -> bool {
+        false
+    }
+
     fn legacy_args(
         &self,
         run: &Value,

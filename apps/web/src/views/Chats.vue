@@ -76,6 +76,7 @@ import {
   Maximize2,
   Menu,
   MoreHorizontal,
+  NotebookPen,
   Paperclip,
   Plug,
   Plus,
@@ -158,6 +159,8 @@ const draft = ref('')
 const model = ref('')
 const reasoning = ref('')
 const provider = ref<'' | Provider>('')
+// The next messages are plan turns until the user turns it off or implements a plan.
+const planning = ref(false)
 const history = ref(false)
 const deletingConversation = ref<ChatDetail>()
 const detailsOpen = ref(false)
@@ -431,6 +434,10 @@ const chosenProvider = computed({
   },
 })
 const switchingProvider = computed(() => !!detail.value?.run && chosenProvider.value !== currentProvider.value)
+const planAvailable = computed(() => providers[chosenProvider.value].planTurns)
+const planRequested = computed(() => planning.value && planAvailable.value)
+// A plan request cannot join a turn that can already change files.
+const steerBlocked = computed(() => planRequested.value && !detail.value?.run?.chatExecution?.plan)
 const conversationAssistant = computed(() => detail.value?.run?.snapshot.agent)
 const inheritConversation = computed(() => chosenProvider.value === conversationAssistant.value?.provider)
 const inheritedAssistant = computed(() => {
@@ -496,6 +503,7 @@ let submission: {
     provider: Provider
     model: string
     reasoning: string
+    plan: boolean
     attachmentIds: string[]
   }
 } | undefined
@@ -510,6 +518,7 @@ function newConversation() {
   provider.value = ''
   model.value = ''
   reasoning.value = ''
+  planning.value = false
   agentId.value = MAIN_AGENT_ID
   projectId.value = ''
   createdChat = undefined
@@ -572,6 +581,7 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
       provider: chosenProvider.value,
       model: selectedModel,
       reasoning: selectedReasoning,
+      plan: planRequested.value,
       attachmentIds,
     }
     const submissionKey = JSON.stringify({ chatId: chat.id, editing: editing.value, ...content })
@@ -678,7 +688,18 @@ function edit(message: ChatMessage) {
   provider.value = message.provider || currentProvider.value
   model.value = message.model
   reasoning.value = message.reasoning || ''
+  planning.value = message.plan === true
   textarea.value?.focus()
+}
+
+// Leaving plan mode is explicit: this queues an ordinary turn in the same conversation,
+// with the agent's usual permissions.
+async function implementPlan() {
+  if (hasDraft.value || editing.value)
+    return
+  planning.value = false
+  draft.value = 'Implement the plan you proposed.'
+  await send()
 }
 
 // The view stays mounted across conversations: reset what belongs to the previous one.
@@ -694,8 +715,12 @@ watch(chatId, (id) => {
   provider.value = ''
   model.value = ''
   reasoning.value = ''
+  const opening = !!createdChat && createdChat.slug === id
+  // Plan mode follows the first message into the conversation it created.
+  if (!opening)
+    planning.value = false
   submission = undefined
-  const destinationId = createdChat && createdChat.slug === id ? createdChat.id : selectedChatId.value
+  const destinationId = opening ? createdChat!.id : selectedChatId.value
   createdChat = undefined
   // A first message keeps its optimistic bubble while the new chat opens.
   if (outgoing.value?.chatId !== destinationId)
@@ -1031,9 +1056,11 @@ function key(event: KeyboardEvent) {
             :subagent-bar="subagentBar"
             compact-toolbar
             chat
+            :can-implement="!hasDraft && !editing && !busy && !inactive"
             @resume-quota="resumeQuota"
             @load="live.loadOlder"
             @position="live.savePosition"
+            @implement="implementPlan"
             @pause-wait="busy || action('pause', { paused: true })"
           />
           <div v-if="!inactive" class="mx-auto w-full max-w-205 shrink-0 px-5 pb-1 pt-3 phone:px-0 phone:pt-2">
@@ -1221,7 +1248,7 @@ function key(event: KeyboardEvent) {
                   v-model="draft"
                   :skills="skills"
                   aria-label="Message"
-                  :placeholder="liveWait?.wakeup ? (detail?.paused ? 'Add to the queue — this cancels the wait' : 'Reply now — this cancels the wait') : responding ? 'Add a follow-up…' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'"
+                  :placeholder="planRequested ? 'Describe what to plan… The agent proposes without changing anything' : liveWait?.wakeup ? (detail?.paused ? 'Add to the queue — this cancels the wait' : 'Reply now — this cancels the wait') : responding ? 'Add a follow-up…' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'"
                   rows="2"
                   maxlength="50000"
                   @keydown="key"
@@ -1244,6 +1271,19 @@ function key(event: KeyboardEvent) {
                       :switching="switchingProvider"
                       :disabled="busy"
                     />
+                    <button
+                      type="button"
+                      class="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full px-3 text-sm font-medium disabled:opacity-50"
+                      :class="planRequested ? 'bg-soft text-accent' : 'text-muted hover:bg-hover'"
+                      :aria-pressed="planRequested"
+                      aria-label="Plan first"
+                      :title="planAvailable ? 'Plan first: the agent explores and proposes an approach without changing files, using the network from its shell or calling tools with external effects. Implement it afterwards in this conversation.' : `${providers[chosenProvider].label} cannot run plan turns: Cairn cannot enforce a read-only boundary for it.`"
+                      :disabled="busy || !planAvailable"
+                      data-testid="plan-toggle"
+                      @click="planning = !planning"
+                    >
+                      <Icon :name="NotebookPen" :size="15" />Plan
+                    </button>
                   </div>
                   <!-- As on Android: steer while typing during a reply, stop when the field is empty, otherwise send. -->
                   <div class="flex shrink-0 items-center gap-1">
@@ -1253,7 +1293,7 @@ function key(event: KeyboardEvent) {
                       class="round-action bg-soft text-accent"
                       aria-label="Steer now"
                       title="Send into the current turn (Alt + Enter)"
-                      :disabled="busy || !canSend || switchingProvider"
+                      :disabled="busy || !canSend || switchingProvider || steerBlocked"
                       @click="send('steer')"
                     >
                       <Icon :name="Zap" :size="16" />

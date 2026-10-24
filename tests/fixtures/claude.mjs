@@ -98,6 +98,8 @@ else {
   })}\n`)
   out({ type: 'system', subtype: 'init', session_id: session })
   let question
+  let planRequests
+  let planCorrelation
   let serial = 0
   const complete = (text = 'Claude fixture completed', thinking = false, correlation = {}) => {
     const id = `assistant-${process.pid}-${++serial}`
@@ -198,6 +200,30 @@ else {
     }
 
     if (value.type === 'control_response') {
+      const requestId = value.response.request_id
+      if (planRequests?.has(requestId)) {
+        appendFileSync(path.join(home, 'plan-responses.jsonl'), `${JSON.stringify({ id: requestId, ...value.response.response })}\n`)
+        planRequests.delete(requestId)
+        if (planRequests.size === 0) {
+          const response = JSON.parse(readFileSync(path.join(home, 'plan-responses.jsonl'), 'utf8').trim().split('\n').find(line => line.includes('"exit-plan"')))
+          out({
+            type: 'user',
+            message: {
+              role: 'user',
+              content: [{
+                type: 'tool_result',
+                tool_use_id: 'exit-plan-tool',
+                content: response.message,
+                is_error: true,
+              }],
+            },
+          })
+          complete('Plan ready for review', false, planCorrelation)
+        }
+
+        return
+      }
+
       if (question) {
         writeFileSync(path.join(home, 'question-response.json'), JSON.stringify(value))
         complete('Question answered')
@@ -220,6 +246,48 @@ else {
     appendFileSync(path.join(home, 'inputs.jsonl'), `${JSON.stringify(value)}\n`)
     const prompt = value.message.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
     const correlation = { user_message_uuid: value.uuid }
+    if (prompt.includes('fixture:plan-turn')) {
+      // Permission requests Claude Code sends in plan mode, including writes the model
+      // should not attempt: the adapter's callback must decide each one.
+      out(value)
+      const plans = path.join(home, 'plans')
+      mkdirSync(plans, { recursive: true })
+      const file = path.join(process.cwd(), 'main.rs')
+      const requests = [
+        ['workspace-write', 'Write', { file_path: file, content: 'changed' }],
+        ['workspace-edit', 'Edit', { file_path: file, old_string: 'a', new_string: 'b' }],
+        ['notebook-edit', 'NotebookEdit', { notebook_path: path.join(process.cwd(), 'notes.ipynb'), new_source: 'x' }],
+        ['home-write', 'Write', { file_path: path.join(home, 'settings.json'), content: '{}' }],
+        ['plan-file', 'Write', { file_path: path.join(plans, 'fixture-plan.md'), content: '# Plan' }],
+        ['escaping-plan-file', 'Write', { file_path: path.join(plans, '..', 'escaped.md'), content: 'x' }],
+        ['sandboxed-shell', 'Bash', { command: 'git status' }],
+        ['unsandboxed-shell', 'Bash', { command: 'git push', dangerouslyDisableSandbox: true }],
+        ['read', 'Read', { file_path: file }],
+        ['read-only-mcp', 'mcp__cairn_fixture__search', {}],
+        ['excluded-mcp', 'mcp__cairn_fixture__delete', {}],
+        ['gateway-mcp', 'mcp__cairn_workspace__publish_artifact', {}],
+        ['scheduler', 'CronCreate', {}],
+        ['exit-plan', 'ExitPlanMode', { plan: '1. Change main.rs\n2. Run the tests' }],
+      ]
+      planRequests = new Set(requests.map(([id]) => id))
+      planCorrelation = correlation
+      out({
+        type: 'assistant',
+        message: {
+          id: 'plan-message',
+          content: [{
+            type: 'tool_use',
+            id: 'exit-plan-tool',
+            name: 'ExitPlanMode',
+            input: { plan: '1. Change main.rs\n2. Run the tests' },
+          }],
+        },
+      })
+      for (const [id, tool, input] of requests)
+        out({ type: 'control_request', request_id: id, request: { subtype: 'can_use_tool', tool_name: tool, input } })
+      return
+    }
+
     if (prompt.includes('fixture:spend-limit') || prompt.includes('Corrige le dialogue de révocation.')) {
       const message = 'You\'ve hit your individual spend limit · run /usage-credits to ask your admin for a higher limit · your weekly limit resets 3pm (UTC)'
       out(value)
