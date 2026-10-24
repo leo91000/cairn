@@ -48,17 +48,21 @@ Le plugin GitHub livré en ajoute deux :
 
 ```json
 {
-  "condition": { "type": "delay", "seconds": 300 },
+  "conditions": [{ "type": "delay", "seconds": 300 }],
   "reason": "Revérifier le déploiement après cinq minutes"
 }
 ```
 
 ```json
 {
-  "condition": { "type": "at", "date": "2026-10-23T09:00:00+02:00" },
+  "conditions": [{ "type": "at", "date": "2026-10-23T09:00:00+02:00" }],
   "reason": "Reprendre à neuf heures"
 }
 ```
+
+L’entrée `conditions` remplace l’ancien champ `condition` : une liste d’une
+condition, ou de plusieurs conditions externes groupées (voir
+[Attendre plusieurs résultats](#attendre-plusieurs-résultats)).
 
 Les conditions temporelles ne prennent pas de `timeoutSeconds`. Atteindre l’heure
 produit `{ "state": "completed", "type": "time", "wakeAt": … }`, tandis qu’un
@@ -80,10 +84,10 @@ Exemple pour une dépendance Cairn :
 
 ```json
 {
-  "condition": {
+  "conditions": [{
     "type": "run_finished",
     "runId": "11111111-1111-4111-8111-111111111111"
-  },
+  }],
   "timeoutSeconds": 1800,
   "reason": "Reprendre après la vérification déléguée"
 }
@@ -93,12 +97,12 @@ Exemple pour un workflow GitHub ; les identifiants sont illustratifs :
 
 ```json
 {
-  "condition": {
+  "conditions": [{
     "type": "github_workflow",
     "projectId": "22222222-2222-4222-8222-222222222222",
     "runId": 123456789,
     "headSha": "1111111111111111111111111111111111111111"
-  },
+  }],
   "timeoutSeconds": 1800,
   "reason": "Vérifier le résultat de la CI du commit poussé"
 }
@@ -114,12 +118,12 @@ Exemple pour les checks requis d’une PR :
 
 ```json
 {
-  "condition": {
+  "conditions": [{
     "type": "github_pr_checks",
     "projectId": "22222222-2222-4222-8222-222222222222",
     "prNumber": 193,
     "headSha": "1111111111111111111111111111111111111111"
-  },
+  }],
   "timeoutSeconds": 1800,
   "reason": "Reprendre après les checks requis du commit à relire"
 }
@@ -146,6 +150,95 @@ signale aussi une indisponibilité et demande une vérification directe de la PR
 Une conclusion `failure`, `cancelled` ou `timed_out` est aussi un résultat utile :
 elle réveille l’agent pour qu’il puisse diagnostiquer le problème. Attendre
 uniquement un succès masquerait les échecs jusqu’à l’expiration du délai.
+
+## Attendre plusieurs résultats
+
+Il n’y a pas de plafond fonctionnel sur le nombre de conditions. Les groupes restent
+plats et chaque condition doit être distincte après normalisation. La taille des
+requêtes, la mémoire et le temps de traitement restent des contraintes physiques ;
+les résultats ne sont pas tronqués pour l’agent.
+
+L’enregistrement vérifie au plus quatre conditions de plugin en parallèle, puis
+rend la main. Les autres sont enregistrées immédiatement comme en attente et
+vérifiées par l’observateur durable : au plus 16 cibles distinctes par passage,
+quatre en parallèle, avec déduplication et nouvelle vérification des autorisations.
+Un grand groupe peut donc rendre `deferred: true` même si des résultats distants
+sont déjà disponibles mais pas encore observés. Le délai du groupe reste global.
+Les cartes web et Android affichent dix conditions par page, un compteur global
+et une jauge agrégée par état au-delà de dix conditions.
+
+Avec plusieurs conditions externes différentes, `mode` choisit quand reprendre :
+
+- `all` : quand chaque condition a un résultat ;
+- `any` : au premier résultat.
+
+Les groupes acceptent `run_finished`, `task_finished` et les conditions des
+plugins accordés. Chaque membre conserve ses contrôles d’accès : les tâches
+déléguées restent réservées à leur conversation demandeuse, sans exiger
+l’accès installation. Les résultats déjà enregistrés sont revérifiés au réveil
+si les permissions ou l’origine du projet ont changé.
+
+```json
+{
+  "conditions": [
+    { "type": "run_finished", "runId": "11111111-1111-4111-8111-111111111111" },
+    { "type": "run_finished", "runId": "33333333-3333-4333-8333-333333333333" },
+    {
+      "type": "github_pr_checks",
+      "projectId": "22222222-2222-4222-8222-222222222222",
+      "prNumber": 193,
+      "headSha": "1111111111111111111111111111111111111111"
+    }
+  ],
+  "mode": "all",
+  "timeoutSeconds": 3600,
+  "reason": "Fusionner une fois la doc, la migration et la CI terminées"
+}
+```
+
+Un résultat n’est pas une réussite : un échec, une annulation ou une
+indisponibilité comptent comme résultat. `all` attend donc toutes les conditions,
+même après un échec, et l’agent examine ensuite chaque résultat. `timeoutSeconds`
+est l’échéance du groupe, pas celle des tâches attendues : à l’expiration, l’agent
+reprend avec les résultats déjà arrivés et les tâches continuent. Les conditions
+temporelles restent seules ; le délai du groupe joue leur rôle.
+
+Le résultat liste chaque condition avec le sien, ou `null` s’il n’est pas arrivé.
+Exemple abrégé d’un groupe `any` repris au premier résultat :
+
+```json
+{
+  "state": "completed",
+  "type": "group",
+  "mode": "any",
+  "members": [
+    {
+      "condition": { "type": "run_finished", "runId": "11111111-1111-4111-8111-111111111111" },
+      "result": { "state": "completed", "type": "run_finished", "status": "failed" }
+    },
+    {
+      "condition": { "type": "run_finished", "runId": "33333333-3333-4333-8333-333333333333" },
+      "result": null
+    }
+  ]
+}
+```
+
+Chaque condition de plugin du groupe est observée, dédupliquée et planifiée
+séparément. Les résultats sont enregistrés sur le réveil au fur et à mesure
+(`members`), ce qui permet au web et à Android d’afficher la progression : une
+carte par attente, avec le mode, une jauge segmentée et une ligne par condition
+(résultat, prochaine vérification ou exécution à ouvrir). Une fois la
+conversation reprise, la liste se replie derrière sa jauge. Le groupe reçoit son
+résultat et un événement `wait_ready` dès qu’il peut reprendre. La détection des
+cycles parcourt toutes les exécutions accessibles, sans plafond sur leur nombre.
+
+Une condition seule garde exactement l’enregistrement précédent. Un groupe est
+stocké comme `condition: { type: "group", mode, conditions }` avec un tableau
+additionnel `members`. La version précédente le lit comme une condition non prise
+en charge et reprend l’agent avec une observation `unavailable`, sans perdre ni
+mal interpréter l’attente : l’epoch de compatibilité des données reste inchangée.
+Voir [la décision](adr/0060-grouped-wait-conditions.md).
 
 ## Gain par rapport à une boucle de vérification
 
@@ -181,8 +274,8 @@ des VM suivent la politique existante des réveils durables.
 | Nouveau commit sur une PR | Abandonner une attente devenue obsolète et vérifier le nouveau commit | Disponible pour `github_pr_checks`, avec résultat `superseded` explicite |
 | Review GitHub humaine | Reprendre après une décision de review sur le commit attendu | Définir les reviewers requis et traiter les approbations périmées ou révoquées |
 | Review d’un agent indépendant | Reprendre après la fin de la review et lire les findings | Ajouter une source durable de fin de sous-agent et sa délégation d’accès ; les outils natifs de collaboration ne sont pas des runs Cairn |
-| Plusieurs dépendances | Attendre tout un groupe ou la première réponse utile | Ajouter des conditions `all`/`any`, des limites de taille et une politique sur les échecs |
-| Chaîne de tâches | Construire, vérifier puis publier dans des exécutions distinctes | Les dépendances simples sont disponibles ; les cycles sont rejetés et les chaînes sont bornées à 32 runs |
+| Plusieurs dépendances | Attendre tout un groupe ou la première réponse utile | Disponible avec `mode: all` / `any`, plusieurs conditions externes ; les échecs comptent comme résultats |
+| Chaîne de tâches | Construire, vérifier puis publier dans des exécutions distinctes | Les dépendances simples sont disponibles ; les cycles sont rejetés, sans plafond de longueur |
 | Réponse utilisateur | Suspendre la conversation jusqu’à une réponse, sans garder sa VM active | Prolonger les questions durables existantes et conserver leur état à la fin du tour |
 | Approbation explicite | Reprendre lorsqu’une action préparée est autorisée | Lier la réponse à l’action exacte et à sa version ; le réveil doit transporter la décision vérifiée |
 | Build ou commande longue | Attendre un job qui continue indépendamment du tour | Créer d’abord des jobs gérés avec identifiants, résultat et annulation ; ils gardent leurs propres ressources |
@@ -204,8 +297,8 @@ périmètre de la demande initiale et des permissions courantes.
 
 - Un seul réveil par conversation ou exécution de mission. Une répétition identique conserve l’échéance ;
   une autre demande remplace la précédente, y compris entre durée, date et résultat.
-- Le timeout est obligatoire pour une condition externe, entre 1 seconde et
-  24 heures, et interdit pour les conditions temporelles. Dans une attente
+- Le timeout est obligatoire pour une condition externe ou un groupe, entre
+  1 seconde et 24 heures, et interdit pour les conditions temporelles. Dans une attente
   conditionnelle, `wakeAt` représente l’échéance de secours, pas l’heure minimale
   de reprise. Un résultat disponible peut provoquer une reprise plus tôt.
 - Les résultats indiquent `completed`, `timed_out`, `unavailable`, `superseded`
@@ -265,7 +358,7 @@ Les [mesures reproductibles](WAIT-FOR-MEASUREMENTS.md) comparent les métadonné
 et les lectures/écritures à la référence `sleep`. Les latences réseau GitHub et
 la capacité de production sont distinctes de ces mesures locales.
 
-La suite proposée est maintenant les groupes de dépendances. Les autres sources peuvent suivre
+Les groupes de dépendances sont disponibles. Les autres sources peuvent suivre
 les usages observés, avec un identifiant stable, une lecture autorisée, un
 résultat explicite et un timeout. Le Fil distingue désormais une conversation
 différée dans sa section « Waiting » (« Reprise prévue » sur Android), avec une

@@ -1,6 +1,7 @@
 package build.cairn.app.data
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
@@ -59,6 +60,11 @@ data class ChatWakeup(
     val createdAt: Long,
     val wakeAt: Long,
     val condition: JsonObject? = null,
+    /**
+     * A group's progress, in the order of its conditions: `{ observation, display, nextCheckAt,
+     * lastError }` each. Kept as JSON, like [display].
+     */
+    val members: JsonArray? = null,
     val observation: JsonObject? = null,
     /** Plugin conditions: when Cairn checks again, and why its last check failed. */
     val nextCheckAt: Long? = null,

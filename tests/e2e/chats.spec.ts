@@ -310,6 +310,77 @@ test('a durable condition wait follows a dependency across restart and queue pau
   }
 })
 
+test('a large grouped wait pages through every condition and resumes once all are in', async ({ page, workspace }) => {
+  test.setTimeout(90000)
+  const agent = workspace.service.store.get('agents', '00000000-0000-4000-8000-000000000001')!
+  workspace.service.store.put('agents', { ...agent, access: { ...agent.access, installation: true } })
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Finish after all dependencies' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
+  const detail = await workspace.api(`/api/chats/${chat.id}`)
+  workspace.service.store.set('deployment-lease', 'grouped-wait-fixture', Date.now() + 120000)
+  try {
+    const targets = await Promise.all(Array.from({ length: 23 }, (_, index) => `Grouped dependency ${index + 1}`).map(async (name) => {
+      const task = await workspace.api('/api/tasks', 'POST', {
+        name,
+        prompt: 'Other work',
+        agentId: agent.id,
+        worktree: false,
+      })
+      return workspace.api(`/api/tasks/${task.id}/run`, 'POST', {})
+    }))
+    const first = targets[0]
+    const last = targets.at(-1)!
+    workspace.service.store.updateRun(first.id, { status: 'failed', finishedAt: Date.now() })
+    const conditions = targets.map(target => ({ type: 'run_finished' as const, runId: target.id }))
+    const wakeup = {
+      id: randomUUID(),
+      messageId: detail.run.chatExecution.messageId,
+      reason: 'Join all dependencies',
+      seconds: 420,
+      createdAt: Date.now(),
+      wakeAt: Date.now() + 420000,
+      condition: { type: 'group' as const, mode: 'all' as const, conditions },
+      members: targets.map(() => ({})),
+    }
+    workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, wakeup })
+    workspace.service.store.event(detail.run.id, 'chat.wait', wakeup.reason, wakeup)
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+    const card = page.locator('.chat-wait')
+    await expect(card).toContainText('Waiting for 23 results')
+    // The failure already counts as a result: Cairn records it while the other run is pending.
+    await expect(card.getByTestId('wait-member')).toHaveCount(10)
+    await expect(card.getByTestId('wait-member').first()).toContainText('The run failed')
+    await expect(card.getByTestId('wait-member').last()).toContainText('Waiting for it to finish')
+    await expect(card).toContainText('1/23')
+    await expect(page.getByRole('region', { name: 'Waiting', exact: true }).locator(`[data-fil-key="chat:${chat.id}"]`)).toContainText('1 of 23 results')
+    await expect(card.getByRole('link', { name: `Open run ${first.id.slice(0, 8)}` })).toHaveAttribute('href', new RegExp(`/runs/${first.id}$`))
+    await expect(card.getByRole('button', { name: 'Previous conditions' })).toBeDisabled()
+    await card.getByRole('button', { name: 'Next conditions' }).click()
+    await expect(card).toContainText('11–20 of 23')
+    await card.getByRole('button', { name: 'Next conditions' }).click()
+    await expect(card.getByTestId('wait-member')).toHaveCount(3)
+    await expect(card).toContainText('21–23 of 23')
+    await expect(card.getByRole('button', { name: 'Next conditions' })).toBeDisabled()
+    await expect(card.getByRole('link', { name: `Open run ${last.id.slice(0, 8)}` })).toHaveAttribute('href', new RegExp(`/runs/${last.id}$`))
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 844 })
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+    }
+
+    for (const target of targets.slice(1))
+      workspace.service.store.updateRun(target.id, { status: 'succeeded', finishedAt: Date.now() })
+    workspace.service.store.delete('deployment-lease')
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.summary, { timeout: 30000 }).toContain('Cairn resumed this conversation')
+    await expect(card).toContainText('All 23 results in')
+    await expect(card).toContainText('1 failed · 22 succeeded')
+  }
+  finally {
+    workspace.service.store.delete('deployment-lease')
+  }
+})
+
 test('verbose tool calls keep their action steps with abbreviated details', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {

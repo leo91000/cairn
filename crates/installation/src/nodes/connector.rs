@@ -353,6 +353,49 @@ pub async fn connect(directory: &Path, stop: CancellationToken) -> Result<()> {
     result
 }
 
+/// Binds this node's loopback origin when it reaches the manager through the
+/// host's gateway to Beacon. A Firecracker container has its own loopback, so
+/// [`serve_gateway`] forwards it to the gateway's socket mounted from the host.
+/// Returns `None` for a node with a direct manager address.
+pub async fn bind_gateway(directory: &Path) -> Result<Option<tokio::net::TcpListener>> {
+    let identity: Identity =
+        serde_json::from_slice(&tokio::fs::read(directory.join("identity.json")).await?)?;
+    let origin = master(&identity.master)?;
+    let loopback = origin.host_str().is_some_and(|host| {
+        host.parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+    });
+    if origin.scheme() != "http" || !loopback {
+        return Ok(None);
+    }
+    let address = origin
+        .socket_addrs(|| None)
+        .map_err(Error::internal)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::bad("Invalid gateway origin."))?;
+    Ok(Some(tokio::net::TcpListener::bind(address).await?))
+}
+
+pub async fn serve_gateway(
+    listener: tokio::net::TcpListener,
+    socket: std::path::PathBuf,
+    stop: CancellationToken,
+) -> Result<()> {
+    loop {
+        let (mut connection, _) = tokio::select! {
+            () = stop.cancelled() => return Ok(()),
+            accepted = listener.accept() => accepted?,
+        };
+        let socket = socket.clone();
+        tokio::spawn(async move {
+            if let Ok(mut gateway) = tokio::net::UnixStream::connect(&socket).await {
+                let _ = tokio::io::copy_bidirectional(&mut connection, &mut gateway).await;
+            }
+        });
+    }
+}
+
 /// The local controller's health report, or `null` when it is unreachable.
 async fn local_health(client: &reqwest::Client, runner: &str) -> Value {
     if runner.is_empty() {

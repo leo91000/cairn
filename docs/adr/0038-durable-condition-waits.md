@@ -26,7 +26,8 @@ never hold the launch tick or an execution/account lease.
 
 A successful interactive turn with another continuation or pending input is not
 a finished dependency. Reject self-dependencies, cycles and chains exceeding
-32 runs. A completion observation includes unsuccessful terminal states so an
+32 runs (superseded by the unlimited visited-set traversal in
+[ADR 0060](0060-grouped-wait-conditions.md)). A completion observation includes unsuccessful terminal states so an
 agent can diagnose them without waiting for the deadline.
 
 Registration captures its initial live grant, conversation checks and user-input

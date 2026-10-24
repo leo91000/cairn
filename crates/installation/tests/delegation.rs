@@ -114,7 +114,7 @@ impl Fixture {
             .find(|tool| tool["name"] == "wait_for")
             .unwrap()
             .clone();
-        wait["inputSchema"]["properties"]["condition"]["oneOf"]
+        wait["inputSchema"]["properties"]["conditions"]["items"]["oneOf"]
             .as_array()
             .unwrap()
             .iter()
@@ -426,7 +426,7 @@ async fn deleted_tasks_are_finished_in_status_and_waits() {
         &f.s,
         &turn.token,
         &json!({
-            "condition": { "type": "task_finished", "chatId": child },
+            "conditions": [{ "type": "task_finished", "chatId": child }],
             "reason": "Observe the deleted task",
             "timeoutSeconds": 60,
         }),
@@ -450,7 +450,7 @@ async fn the_requester_waits_for_its_task_and_reads_the_report() {
     let wait = wait_for::schedule(
         &f.s,
         &turn.token,
-        &json!({ "condition": condition, "reason": "Wait for the review", "timeoutSeconds": 3600 }),
+        &json!({ "conditions": [condition], "reason": "Wait for the review", "timeoutSeconds": 3600 }),
     )
     .await
     .unwrap();
@@ -497,6 +497,75 @@ async fn the_requester_waits_for_its_task_and_reads_the_report() {
 }
 
 #[tokio::test]
+async fn delegated_tasks_can_be_waited_on_as_all_or_any_without_installation_access() {
+    for mode in ["all", "any"] {
+        let f = Fixture::new(true).await;
+        let turn = f.conversation(MAIN_AGENT_ID).await;
+        let first = f
+            .delegate(&turn, json!({ "task": "Review the backend" }))
+            .await
+            .unwrap();
+        let second = f
+            .delegate(&turn, json!({ "task": "Review the UI" }))
+            .await
+            .unwrap();
+        let first_chat = text(&first, "chatId");
+        let second_chat = text(&second, "chatId");
+        let wait = wait_for::schedule(
+            &f.s,
+            &turn.token,
+            &json!({
+                "conditions": [
+                    { "type": "task_finished", "chatId": first_chat },
+                    { "type": "task_finished", "chatId": second_chat },
+                ],
+                "mode": mode,
+                "reason": "Wait for independent reviews",
+                "timeoutSeconds": 3600,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(wait["deferred"], true);
+        f.finish(&turn).await;
+        let first_turn = f.running(first_chat).await;
+        let second_turn = f.running(second_chat).await;
+        f.s.store
+            .patch_run(&first_turn.run, json!({ "status": "failed" }))
+            .await
+            .unwrap();
+        wait_for::tick_groups(&f.s, &HashSet::new()).await.unwrap();
+        let partial = f.s.chat_detail(&turn.chat).await.unwrap();
+        assert_eq!(
+            partial["wakeup"]["members"][0]["observation"]["status"],
+            "failed"
+        );
+        assert!(partial["wakeup"]["members"][1]["observation"].is_null());
+        f.s.chat_tick(&HashSet::new()).await.unwrap();
+        if mode == "all" {
+            assert_eq!(
+                f.s.chat_detail(&turn.chat).await.unwrap()["run"]["status"],
+                "succeeded"
+            );
+            f.finish(&second_turn).await;
+            f.s.chat_tick(&HashSet::new()).await.unwrap();
+        }
+        let resumed = f.s.chat_detail(&turn.chat).await.unwrap();
+        assert_eq!(resumed["run"]["status"], "queued");
+        let execution = text(&resumed["run"]["chatExecution"], "text");
+        assert!(execution.contains(first_chat) && execution.contains(second_chat));
+        assert!(execution.contains(r#""status":"failed""#));
+        if mode == "any" {
+            assert!(execution.contains(r#""result":null"#));
+            assert_eq!(
+                f.s.store.run(&second_turn.run).await.unwrap()["status"],
+                "running"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn tasks_belong_to_the_conversation_that_delegated_them() {
     let f = Fixture::new(true).await;
     let first = f.conversation(MAIN_AGENT_ID).await;
@@ -518,7 +587,7 @@ async fn tasks_belong_to_the_conversation_that_delegated_them() {
         &f.s,
         &second.token,
         &json!({
-            "condition": { "type": "task_finished", "chatId": child },
+            "conditions": [{ "type": "task_finished", "chatId": child }],
             "reason": "Not mine",
             "timeoutSeconds": 60,
         }),
@@ -578,7 +647,7 @@ async fn withdrawing_the_first_message_finishes_an_unstarted_task_and_releases_i
         &f.s,
         &turn.token,
         &json!({
-            "condition": { "type": "task_finished", "chatId": child },
+            "conditions": [{ "type": "task_finished", "chatId": child }],
             "reason": "Observe the withdrawn task",
             "timeoutSeconds": 60,
         }),
@@ -649,7 +718,7 @@ async fn preparation_failures_reach_the_requester_and_are_redacted_after_deletio
     assert_eq!(listed["tasks"][0]["error"], error);
 
     let wait_input = json!({
-        "condition": { "type": "task_finished", "chatId": child },
+        "conditions": [{ "type": "task_finished", "chatId": child }],
         "reason": "Observe the preparation failure",
         "timeoutSeconds": 60,
     });
@@ -699,7 +768,7 @@ async fn run_failures_include_their_error_in_status_and_wait_results() {
         &f.s,
         &turn.token,
         &json!({
-            "condition": { "type": "task_finished", "chatId": child },
+            "conditions": [{ "type": "task_finished", "chatId": child }],
             "reason": "Observe the failure",
             "timeoutSeconds": 60,
         }),
@@ -741,4 +810,71 @@ async fn older_profile_updates_keep_delegation() {
         .await
         .unwrap();
     assert_eq!(saved["access"]["delegation"], true);
+}
+
+#[tokio::test]
+async fn deleting_a_task_redacts_recorded_group_progress_and_final_results() {
+    for finalized in [false, true] {
+        let f = Fixture::new(true).await;
+        let parent = f.conversation(MAIN_AGENT_ID).await;
+        let first = f
+            .delegate(&parent, json!({ "task": "Review backend" }))
+            .await
+            .unwrap();
+        let second = f
+            .delegate(&parent, json!({ "task": "Review UI" }))
+            .await
+            .unwrap();
+        let first_chat = text(&first, "chatId");
+        let second_chat = text(&second, "chatId");
+        wait_for::schedule(
+            &f.s,
+            &parent.token,
+            &json!({
+                "conditions": [
+                    { "type": "task_finished", "chatId": first_chat },
+                    { "type": "task_finished", "chatId": second_chat },
+                ],
+                "mode": "all", "reason": "Collect reviews", "timeoutSeconds": 3600,
+            }),
+        )
+        .await
+        .unwrap();
+        f.finish(&parent).await;
+        let first_turn = f.running(first_chat).await;
+        let second_turn = f.running(second_chat).await;
+        let diagnostic = "Private diagnostic from a deleted task";
+        f.s.store
+            .patch_run(
+                &first_turn.run,
+                json!({ "status": "failed", "error": diagnostic }),
+            )
+            .await
+            .unwrap();
+        wait_for::tick_groups(&f.s, &HashSet::new()).await.unwrap();
+        let partial = f.s.chat_detail(&parent.chat).await.unwrap();
+        assert_eq!(
+            partial["wakeup"]["members"][0]["observation"]["error"],
+            diagnostic
+        );
+        if finalized {
+            f.finish(&second_turn).await;
+            wait_for::tick_groups(&f.s, &HashSet::new()).await.unwrap();
+            assert_eq!(
+                f.s.chat_detail(&parent.chat).await.unwrap()["wakeup"]["observation"]["state"],
+                "completed"
+            );
+        }
+        f.s.chat_trash(first_chat, true).await.unwrap();
+        if !finalized {
+            f.finish(&second_turn).await;
+        }
+        f.s.chat_tick(&HashSet::new()).await.unwrap();
+        let resumed = f.s.chat_detail(&parent.chat).await.unwrap();
+        assert_eq!(resumed["run"]["status"], "queued");
+        let prompt = text(&resumed["run"]["chatExecution"], "text");
+        assert!(prompt.contains(r#""status":"deleted""#));
+        assert!(prompt.contains(r#""error":null"#));
+        assert!(!prompt.contains(diagnostic));
+    }
 }
