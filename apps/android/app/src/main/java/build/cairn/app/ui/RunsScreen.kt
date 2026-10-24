@@ -337,30 +337,25 @@ fun RunScreen(
                             fullscreen = false
                         }
                     }
-                current.error
-                    ?.takeIf { it.isNotBlank() }
-                    ?.let {
-                        Text(
-                            it,
-                            Modifier.padding(horizontal = 16.dp),
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    }
-                if (current.status in listOf("failed", "interrupted", "cancelled"))
-                    Text(
-                        statusLabel(current.status),
-                        Modifier.padding(horizontal = 16.dp),
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.labelMedium,
+                val ended = current.status in listOf("failed", "interrupted", "cancelled")
+                val error = current.error?.takeIf { it.isNotBlank() }
+                if (error != null || ended)
+                    Notice(
+                        error ?: statusLabel(current.status),
+                        Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                        NoticeTone.ERROR,
+                        title = if (error != null && ended) statusLabel(current.status) else null,
+                        maxLines = 4,
                     )
                 RunWaitingReason(current)
                 if (current.status == "waiting")
                     current.wakeup?.let { wakeup ->
-                        Text(
-                            "${wakeup.reason} · Reprise ${date(wakeup.wakeAt)}",
-                            Modifier.padding(horizontal = 20.dp),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = signal.warning,
+                        Notice(
+                            wakeup.reason,
+                            Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                            title = recordedTitle(wakeup),
+                            icon = CairnIcons.Hourglass,
+                            maxLines = 1,
                         )
                     }
                 if (current.recoveryPending)
