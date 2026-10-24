@@ -9,8 +9,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
@@ -102,7 +104,7 @@ abstract class RetryNoticeCases {
                 CompositionLocalProvider(
                     LocalDensity provides Density(LocalDensity.current.density, 1.5f)
                 ) {
-                    Surface(Modifier.width(320.dp)) {
+                    Surface(Modifier.width(320.dp).safeDrawingPadding()) {
                         ChatRunWaitingNotice(
                             current,
                             {},
@@ -113,6 +115,16 @@ abstract class RetryNoticeCases {
                 }
             }
         }
+        val titleLayouts = mutableListOf<TextLayoutResult>()
+        compose.onNodeWithText("Nouvelle tentative automatique").performSemanticsAction(
+            SemanticsActions.GetTextLayoutResult
+        ) {
+            it(titleLayouts)
+        }
+        assertTrue(
+            "Large text must remain readable on a narrow screen",
+            titleLayouts.single().lineCount <= 3,
+        )
         compose.onNodeWithText("Annuler la reprise").assertIsDisplayed().performClick()
         assertEquals(1, cancelled)
         compose.onNodeWithText("Voir le détail").performClick()

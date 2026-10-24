@@ -89,39 +89,50 @@ internal fun RecoveryNotice(run: Run, now: Long, busy: Boolean, cancelRetry: (()
         border = BorderStroke(1.dp, accent.copy(alpha = 0.28f)),
     ) {
         Column {
-            Row(
-                Modifier.fillMaxWidth().background(accent.copy(alpha = 0.06f)).padding(14.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.Top,
-            ) {
-                Surface(color = accent.copy(alpha = 0.12f), shape = RoundedCornerShape(10.dp)) {
-                    Icon(CairnIcons.Clock, null, Modifier.padding(9.dp).size(18.dp), tint = accent)
+            Column(Modifier.fillMaxWidth().background(accent.copy(alpha = 0.06f)).padding(14.dp)) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    Surface(color = accent.copy(alpha = 0.12f), shape = RoundedCornerShape(10.dp)) {
+                        Icon(
+                            CairnIcons.Clock,
+                            null,
+                            Modifier.padding(9.dp).size(18.dp),
+                            tint = accent,
+                        )
+                    }
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            if (retry.cause.startup) "Reconnexion automatique"
+                            else "Nouvelle tentative automatique",
+                            Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                            style = MaterialTheme.typography.titleSmall,
+                        )
+                        Text(
+                            "Votre conversation et vos fichiers sont conservés.",
+                            Modifier.padding(top = 4.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
-                Column(Modifier.weight(1f)) {
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
                     Text(
-                        if (retry.cause.startup) "Reconnexion automatique"
-                        else "Nouvelle tentative automatique",
-                        Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-                        style = MaterialTheme.typography.titleSmall,
-                    )
-                    Text(
-                        "Votre conversation et vos fichiers sont conservés.",
-                        Modifier.padding(top = 4.dp),
-                        style = MaterialTheme.typography.bodySmall,
+                        if (seconds > 0) "Reprise dans" else "Préparation de la reprise",
+                        Modifier.weight(1f),
+                        style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                }
-                Column(horizontalAlignment = Alignment.End) {
                     Text(
                         if (seconds > 0) countdown else "Bientôt",
                         color = accent,
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.SemiBold,
-                    )
-                    Text(
-                        if (seconds > 0) "avant reprise" else "préparation",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }

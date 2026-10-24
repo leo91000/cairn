@@ -1232,7 +1232,10 @@ mod tests {
             public_url: "http://localhost:4310".into(),
             host: "127.0.0.1".into(),
             port: 0,
-            codex_bin: "/bin/false".into(),
+            codex_bin: Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/codex.mjs")
+                .to_string_lossy()
+                .into_owned(),
             claude_bin: "/bin/false".into(),
             opencode_bin: "/bin/false".into(),
             opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
