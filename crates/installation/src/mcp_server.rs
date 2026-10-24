@@ -714,6 +714,12 @@ pub(crate) async fn invoke(
         | "stop_chat"
         | "delete_chat" => chat_tools::invoke(s, name, args, bearer).await,
         "list_agents" => Ok(s.store.list("agents").await?.into()),
+        "list_models" => {
+            crate::provider::Provider::parse(text(&args, "provider"))?
+                .adapter()
+                .model_catalog(s)
+                .await
+        }
         "list_projects" => Ok(s.store.list("projects").await?.into()),
         "list_tasks" => Ok(s.store.list("tasks").await?.into()),
         "save_agent" => {
@@ -725,7 +731,15 @@ pub(crate) async fn invoke(
         "update_agent" => {
             let id = text(&args, "id");
             let mut agent = s.get("agents", id).await?;
-            crate::store::merge(&mut agent, &args["agent"]);
+            let patch = &args["agent"];
+            crate::store::merge(&mut agent, patch);
+            // Moving to a coding agent without speeds drops Codex's unless one is sent.
+            if patch.get("provider").is_some()
+                && patch.get("speed").is_none()
+                && text(&agent, "provider") != "codex"
+            {
+                agent["speed"] = "".into();
+            }
             s.agent_authorized(agent, Some(id), AgentEditor::Installation, authorize)
                 .await
         }

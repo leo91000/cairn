@@ -94,7 +94,7 @@ fn prospective(db: &Db<'_>, run: &Value, agent: &Value, origin: &Origin) -> Resu
     check_access(run, agent)?;
     let mut proposed = run.clone();
     proposed["snapshot"]["agent"] = agent.clone();
-    for key in ["provider", "model", "reasoning"] {
+    for key in ["provider", "model", "reasoning", "speed"] {
         proposed["snapshot"]["agent"][key] = run["snapshot"]["agent"][key].clone();
     }
     // An explicit authenticated owner adopts the existing work. Installation

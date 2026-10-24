@@ -24,6 +24,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.ChatAttachment
 import build.cairn.app.data.ChatMessage
+import build.cairn.app.data.ServiceTier
+import build.cairn.app.data.speedLabel
 
 /**
  * Follow-ups waiting for the agent, shown at the top of the composer. Each message keeps the full
@@ -43,6 +45,8 @@ internal fun QueueStrip(
     steer: (ChatMessage) -> Unit,
     remove: (ChatMessage) -> Unit,
     togglePause: () -> Unit,
+    /** Codex speeds, to name a queued message's speed. */
+    tiers: List<ServiceTier> = emptyList(),
     attachments: @Composable (List<ChatAttachment>) -> Unit,
 ) {
     var selected by rememberSaveable { mutableStateOf<String?>(null) }
@@ -109,13 +113,22 @@ internal fun QueueStrip(
                                     maxLines = 2,
                                     overflow = TextOverflow.Ellipsis,
                                 )
+                                // Each queued message keeps the speed chosen when it was written.
+                                val speed =
+                                    message.speed
+                                        .ifBlank { null }
+                                        ?.let { "vitesse ${speedLabel(it, tiers).lowercase()}" }
                                 val note =
                                     when {
                                         message.status == "sending" -> "Envoi en cours…"
                                         message.mode == "steer" -> "Transmis dès que possible"
                                         message.attachments.isNotEmpty() ->
-                                            "${message.attachments.size} pièce${if (message.attachments.size > 1) "s" else ""} jointe${if (message.attachments.size > 1) "s" else ""}"
-                                        else -> null
+                                            listOfNotNull(
+                                                    "${message.attachments.size} pièce${if (message.attachments.size > 1) "s" else ""} jointe${if (message.attachments.size > 1) "s" else ""}",
+                                                    speed,
+                                                )
+                                                .joinToString(" · ")
+                                        else -> speed?.replaceFirstChar { it.uppercase() }
                                     }
                                 if (note != null)
                                     Text(

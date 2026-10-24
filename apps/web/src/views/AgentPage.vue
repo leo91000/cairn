@@ -971,6 +971,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               v-model:provider="draft.provider"
               v-model:model="draft.model"
               v-model:reasoning="draft.reasoning"
+              v-model:speed="draft.speed"
               variant="field"
               :disabled="busy"
             />

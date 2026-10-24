@@ -103,7 +103,8 @@ pub trait Driver: Send + Sync {
     /// Codex never schedules on unknown usage; Claude Code's usage may be unavailable.
     fn requires_usage(&self) -> bool;
 
-    async fn supports(&self, s: &Service, id: &str, model: &str) -> Result<bool>;
+    /// Whether the account can run `model` at `speed`, a Codex service tier or empty.
+    async fn supports(&self, s: &Service, id: &str, model: &str, speed: &str) -> Result<bool>;
 
     /// Loads what [`Driver::supports`] needs for `model` before selection takes its locks.
     async fn warm(&self, _s: &Service, _model: &str) -> Result<()> {
@@ -464,13 +465,14 @@ impl Accounts {
         Ok(self.connecting.lock().await.as_deref() == Some(id) || self.recovering(s, id).await?)
     }
 
-    /// Accounts able to take a new `model` run now, best first: the most remaining capacity,
-    /// then the least recently used.
+    /// Accounts able to take a new `model` run at `speed` now, best first: the most remaining
+    /// capacity, then the least recently used.
     async fn eligible(
         &self,
         s: &Service,
         provider: Provider,
         model: &str,
+        speed: &str,
         leases: &HashMap<String, Lease>,
     ) -> Result<Vec<Account>> {
         let driver = provider.driver();
@@ -482,7 +484,7 @@ impl Accounts {
                 && running(leases, id) < account.parallel_runs()
                 && connecting.as_deref() != Some(id)
                 && !self.recovering(s, id).await?
-                && driver.supports(s, id, model).await?
+                && driver.supports(s, id, model, speed).await?
             {
                 candidates.push(account);
             }
@@ -511,6 +513,18 @@ impl Accounts {
         provider: Provider,
         model: &str,
     ) -> Result<Option<Lease>> {
+        self.acquire_for(s, run_id, provider, model, "").await
+    }
+
+    /// Leases an account able to run `model` at `speed`, the run's chosen Codex speed.
+    pub async fn acquire_for(
+        &self,
+        s: &Service,
+        run_id: &str,
+        provider: Provider,
+        model: &str,
+        speed: &str,
+    ) -> Result<Option<Lease>> {
         let mut timing =
             crate::performance::Operation::new("account_admission", run_id, "initialize");
         self.initialize(s).await?;
@@ -526,7 +540,10 @@ impl Accounts {
             if leases.contains_key(run_id) {
                 return Err(Error::conflict("This run already holds an account."));
             }
-            !self.eligible(s, provider, model, &leases).await?.is_empty()
+            !self
+                .eligible(s, provider, model, speed, &leases)
+                .await?
+                .is_empty()
         };
         // Background polling continues normally. Refresh synchronously only
         // when no account satisfies the existing usage validity and slot rules.
@@ -541,7 +558,7 @@ impl Accounts {
         if leases.contains_key(run_id) {
             return Err(Error::conflict("This run already holds an account."));
         }
-        let candidates = self.eligible(s, provider, model, &leases).await?;
+        let candidates = self.eligible(s, provider, model, speed, &leases).await?;
         drop(leases);
         for candidate in candidates {
             let _guard = self.lock(&candidate.id).await;
@@ -556,7 +573,7 @@ impl Accounts {
             drop(leases);
             if !available
                 || self.busy(s, &account.id).await?
-                || !driver.supports(s, &account.id, model).await?
+                || !driver.supports(s, &account.id, model, speed).await?
             {
                 continue;
             }
@@ -773,7 +790,7 @@ impl Accounts {
         let leases = self.leases.lock().await.clone();
         let mut next = Vec::new();
         for provider in Provider::ALL {
-            if let Some(first) = self.eligible(s, provider, "", &leases).await?.first() {
+            if let Some(first) = self.eligible(s, provider, "", "", &leases).await?.first() {
                 next.push(first.id.clone());
             }
         }

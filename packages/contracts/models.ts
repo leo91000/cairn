@@ -14,6 +14,14 @@ export interface ModelRoute {
   hidden: boolean
   supportedReasoningEfforts: { reasoningEffort: string, description: string }[]
 }
+/** A speed Codex offers for a model. `description` is Codex's own wording of its usage. */
+export interface ServiceTier {
+  id: string
+  name: string
+  description: string
+  /** Offered by some enabled accounts only; runs asking for it use one of those. */
+  limited?: boolean
+}
 export interface CodingAgentModel {
   model: string
   /** Models offered by several providers. `model` then runs on the first available route. */
@@ -24,6 +32,10 @@ export interface CodingAgentModel {
   isDefault: boolean
   defaultReasoningEffort: string
   supportedReasoningEfforts: { reasoningEffort: string, description: string }[]
+  /** Codex speeds besides standard. Absent from catalogs cached before speeds were listed. */
+  serviceTiers?: ServiceTier[]
+  /** The tier Codex uses when no speed is chosen, when its catalog names one. */
+  defaultServiceTier?: string | null
 }
 export interface ModelCatalog {
   models: CodingAgentModel[]
@@ -35,4 +47,14 @@ export function effortLabel(value: string) {
   if (value === 'xhigh')
     return 'Extra high'
   return value ? value[0].toUpperCase() + value.slice(1).replaceAll('_', ' ') : 'Default'
+}
+
+/** Codex's standard speed, chosen explicitly. An empty speed inherits. */
+export const STANDARD_SPEED = 'standard'
+/** Where OpenAI documents how each speed uses plan limits and credits. */
+export const speedUsageUrl = 'https://learn.chatgpt.com/docs/agent-configuration/speed'
+export function speedLabel(value: string, tiers: ServiceTier[] = []) {
+  if (value === STANDARD_SPEED)
+    return 'Standard'
+  return tiers.find(tier => tier.id === value)?.name || (value ? value[0].toUpperCase() + value.slice(1).replaceAll('_', ' ') : 'Default')
 }

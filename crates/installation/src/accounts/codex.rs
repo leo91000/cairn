@@ -828,8 +828,8 @@ impl Driver for Codex {
         true
     }
 
-    async fn supports(&self, s: &Service, id: &str, model: &str) -> Result<bool> {
-        crate::models::account_supports(s, id, model).await
+    async fn supports(&self, s: &Service, id: &str, model: &str, speed: &str) -> Result<bool> {
+        crate::models::account_supports(s, id, model, speed).await
     }
 
     fn home(&self, s: &Service, run_id: &str) -> PathBuf {

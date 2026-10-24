@@ -80,6 +80,7 @@ export const Workflow = 'i-lucide-workflow' as const
 export const Wrench = 'i-lucide-wrench' as const
 export const X = 'i-lucide-x' as const
 export const Zap = 'i-lucide-zap' as const
+export const Gauge = 'i-lucide-gauge' as const
 export const ArrowRight = 'i-lucide-arrow-right' as const
 export const CalendarClock = 'i-lucide-calendar-clock' as const
 export const CheckCheck = 'i-lucide-check-check' as const

@@ -1022,7 +1022,12 @@ impl Execution<'_> {
     async fn wait_for_account(&mut self, model: &str) -> Result<()> {
         let s = self.s;
         while self.account.is_none() && !self.stopping() && !self.checkpoint.expired() {
-            match s.accounts.acquire(s, &self.id, self.provider, model).await {
+            let speed = text(&self.run["snapshot"]["agent"], "speed");
+            match s
+                .accounts
+                .acquire_for(s, &self.id, self.provider, model, speed)
+                .await
+            {
                 Ok(account) => *self.account = account,
                 Err(error) if error.is_conflict() => {
                     tokio::select! {

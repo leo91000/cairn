@@ -5,6 +5,9 @@ export const name = z.string().trim().min(1).max(100)
 export const id = z.string().uuid()
 // Codex exposes effort names as strings, so new catalog levels need no app release.
 export const reasoningEffort = z.string().max(40).regex(/^(?:[a-z][a-z0-9_-]*)?$/)
+// A Codex service tier id from the model catalog, `standard`, or empty to inherit.
+// Tiers are catalog strings too, so a new speed needs no app release.
+export const serviceSpeed = z.string().max(40).regex(/^(?:[a-z][a-z0-9_-]*)?$/)
 export { MAIN_AGENT_ID } from './constants'
 export const accessPolicy = z.object({
   backend: z.enum(['firecracker', 'native']).default('firecracker'),
@@ -22,6 +25,7 @@ export const agentInput = z.object({
   description: z.string().max(500).default(''),
   model: z.string().max(100).default(''),
   reasoning: reasoningEffort.default('high'),
+  speed: serviceSpeed.default(''),
   instructions: z.string().max(20000).default(''),
   // Zero means no time limit; positive values are an optional execution budget.
   timeoutMinutes: z.number().int().min(0).max(720).default(0),
@@ -41,6 +45,7 @@ export const agentUpdate = z.object({
   description: agentInput.shape.description.removeDefault().optional(),
   model: agentInput.shape.model.removeDefault().optional(),
   reasoning: agentInput.shape.reasoning.removeDefault().optional(),
+  speed: agentInput.shape.speed.removeDefault().optional(),
   instructions: agentInput.shape.instructions.removeDefault().optional(),
   timeoutMinutes: agentInput.shape.timeoutMinutes.removeDefault().optional(),
   access: accessPolicy.extend({

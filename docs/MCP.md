@@ -236,9 +236,11 @@ hour, and refresh tokens after 30 days. Browser sessions are separate credential
 
 | Scope | Operations |
 | --- | --- |
-| `read` | `list_agents`, `list_projects`, `list_tasks`, `list_runs`, `get_run`, `read_run_content`, `list_skills`, `read_skill`, `list_mcps` |
+| `read` | `list_agents`, `list_models`, `list_projects`, `list_tasks`, `list_runs`, `get_run`, `read_run_content`, `list_skills`, `read_skill`, `list_mcps` |
 | `manage` | `save_agent`, `update_agent`, `save_project`, `create_task`, `update_task`, `save_skill`, `edit_skill_files`, `create_mcp`, `update_mcp`, `test_mcp`, `disconnect_mcp`, `delete_mcp` |
 | `run` | `run_task`, `cancel_run` |
+
+`list_models` returns a coding agent's catalog as the app's picker shows it, including each Codex model's `serviceTiers` (speed id, Codex's name and usage description, `limited` when some enabled accounts lack it) and `defaultServiceTier`. Agents (`save_agent`, `update_agent`) and messages (`send_chat_message`, `edit_chat_message`) accept `speed`: a tier id, `standard`, or empty to inherit. A speed is rejected for Claude Code and OpenCode; `update_agent` that switches to one of them without sending `speed` clears it.
 
 `save_agent` and `save_project` create new records. `update_task` replaces the
 existing task configuration; `save_skill` creates or replaces its SKILL.md;

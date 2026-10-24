@@ -11,11 +11,18 @@ import {
   watch,
 } from 'vue'
 import { providers as codingAgents } from '../../../../packages/contracts/accounts'
-import { billingLabels, effortLabel } from '../../../../packages/contracts/models'
+import {
+  billingLabels,
+  effortLabel,
+  speedLabel,
+  speedUsageUrl,
+  STANDARD_SPEED,
+} from '../../../../packages/contracts/models'
 import { brands } from '../accounts'
 import {
   Check,
   ChevronDown,
+  Gauge,
   Info,
   LoaderCircle,
   RefreshCw,
@@ -23,15 +30,22 @@ import {
   X,
 } from '../icons'
 import { modelCatalogs } from '../models'
+import {
+  effectiveSpeed,
+  offersSpeed,
+  showsSpeed,
+  speedTier,
+} from '../speeds'
 import { iconButton } from '../ui'
 import Icon from './Icon.vue'
 
-// One menu for the coding agent, its model and the reasoning effort. Empty model and reasoning
-// values keep inheriting the agent's (or provider's) defaults.
+// One menu for the coding agent, its model, the reasoning effort and Codex's speed. Empty values
+// keep inheriting the agent's (or provider's) defaults. The speed is kept across model changes.
 const props = withDefaults(defineProps<{
   inherit?: boolean
   defaultModel?: string
   defaultReasoning?: string
+  defaultSpeed?: string
   defaultSource?: 'agent' | 'conversation'
   disabled?: boolean
   switching?: boolean
@@ -39,12 +53,14 @@ const props = withDefaults(defineProps<{
 }>(), {
   defaultModel: '',
   defaultReasoning: '',
+  defaultSpeed: '',
   defaultSource: 'agent',
   variant: 'pill',
 })
 const provider = defineModel<Provider>('provider', { default: 'codex' })
 const model = defineModel<string>('model', { default: '' })
 const reasoning = defineModel<string>('reasoning', { default: '' })
+const speed = defineModel<string>('speed', { default: '' })
 
 const providers = (Object.keys(codingAgents) as Provider[]).map(value => ({ value, ...codingAgents[value], ...brands[value] }))
 const order = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']
@@ -72,7 +88,20 @@ const fallback = computed(() => {
 const modelLabel = computed(() => [selected.value?.displayName || selected.value?.model || effectiveModel.value || 'Default model', route.value?.providerName].filter(Boolean).join(' · '))
 const defaultEffort = computed(() => (props.inherit && !model.value ? props.defaultReasoning || selected.value?.defaultReasoningEffort : selected.value?.defaultReasoningEffort) || '')
 const effectiveEffort = computed(() => reasoning.value || defaultEffort.value)
-const summary = computed(() => [current.value.label, modelLabel.value, effectiveEffort.value && `${effortLabel(effectiveEffort.value)} reasoning`].filter(Boolean).join(' · '))
+// Speeds Codex names in this catalog, to label a saved speed the selected model lacks.
+const knownTiers = computed(() => catalog.value.models.flatMap(item => item.serviceTiers ?? []))
+const tiers = computed(() => selected.value?.serviceTiers ?? [])
+const inheritedSpeed = computed(() => props.inherit ? props.defaultSpeed : '')
+const currentSpeed = computed(() => effectiveSpeed(speed.value, inheritedSpeed.value, selected.value))
+const speedShown = computed(() => showsSpeed(provider.value, selected.value, speed.value || inheritedSpeed.value))
+const speedOffered = computed(() => offersSpeed(selected.value, currentSpeed.value))
+// A speed the model lacks runs at standard speed, so the trigger never claims it.
+const appliedSpeed = computed(() => speedShown.value && speedOffered.value ? currentSpeed.value : STANDARD_SPEED)
+const appliedTier = computed(() => speedTier(selected.value, appliedSpeed.value))
+const speedOwner = computed(() => inheritedSpeed.value ? props.defaultSource === 'conversation' ? 'Conversation' : 'Agent' : 'Codex')
+const defaultSpeedLabel = computed(() => speedLabel(effectiveSpeed('', inheritedSpeed.value, selected.value), knownTiers.value))
+const unsupportedSpeed = computed(() => !!speed.value && speed.value !== STANDARD_SPEED && !tiers.value.some(tier => tier.id === speed.value))
+const summary = computed(() => [current.value.label, modelLabel.value, effectiveEffort.value && `${effortLabel(effectiveEffort.value)} reasoning`, appliedSpeed.value !== STANDARD_SPEED && `${speedLabel(appliedSpeed.value, knownTiers.value)} speed`].filter(Boolean).join(' · '))
 // Claude lists its own "default" alias. When the default row already resolves to it,
 // show one row instead of two equivalent choices.
 const alias = computed(() => !props.inherit || !props.defaultModel ? catalog.value.models.find(item => item.model === 'default') : undefined)
@@ -138,6 +167,7 @@ function chooseProvider(value: Provider) {
   provider.value = value
   model.value = ''
   reasoning.value = ''
+  speed.value = ''
   query.value = ''
 }
 
@@ -147,6 +177,8 @@ function chooseModel(option: { value: string, chosen: boolean }) {
   model.value = option.value
   reasoning.value = ''
 }
+
+// The speed is independent of the model: changing model keeps it, as `chooseRoute` does.
 
 // Switching between routes of one model keeps a reasoning level they share.
 function chooseRoute(value: string) {
@@ -220,7 +252,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
     :disabled="disabled"
     aria-haspopup="dialog"
     :aria-expanded="open"
-    :aria-label="`Agent, model and reasoning: ${summary}`"
+    :aria-label="`Agent, model, reasoning and speed: ${summary}`"
     :title="summary"
     @click="show"
   >
@@ -231,12 +263,16 @@ onBeforeUnmount(() => removeEventListener('resize', place))
       <span class="flex min-w-0 flex-1 flex-col">
         <span class="text-3xs font-semibold tracking-wide text-muted uppercase">{{ current.label }}</span>
         <span class="truncate text-sm font-semibold text-ink">{{ modelLabel }}</span>
-        <span v-if="effectiveEffort" class="text-2xs text-muted">{{ effortLabel(effectiveEffort) }} reasoning</span>
+        <span v-if="effectiveEffort || appliedSpeed !== STANDARD_SPEED" class="flex items-center gap-1 text-2xs text-muted">
+          <template v-if="effectiveEffort">{{ effortLabel(effectiveEffort) }} reasoning</template>
+          <template v-if="appliedSpeed !== STANDARD_SPEED"><span v-if="effectiveEffort" aria-hidden="true">·</span><Icon :name="Gauge" :size="11" />{{ speedLabel(appliedSpeed, knownTiers) }}</template>
+        </span>
       </span>
     </template>
     <template v-else>
       <span class="min-w-0 truncate font-semibold text-ink">{{ modelLabel }}</span>
       <span v-if="effectiveEffort" class="flex shrink-0 items-center gap-1.5 text-muted phone:hidden"><span class="size-[3px] rounded-full bg-current" />{{ effortLabel(effectiveEffort) }}</span>
+      <span v-if="appliedSpeed !== STANDARD_SPEED" class="flex shrink-0 items-center gap-0.5 text-accent" :title="`${speedLabel(appliedSpeed, knownTiers)} speed`"><Icon :name="Gauge" :size="12" /><span class="phone:hidden">{{ speedLabel(appliedSpeed, knownTiers) }}</span></span>
     </template>
     <Icon
       :name="ChevronDown"
@@ -467,6 +503,76 @@ onBeforeUnmount(() => removeEventListener('resize', place))
                   </p>
                   <p v-else-if="effortDescription" class="text-2xs text-muted">
                     {{ effortDescription }}
+                  </p>
+                  <template v-if="speedShown">
+                    <hr class="my-0.5 border-line">
+                    <div class="flex items-baseline justify-between gap-2">
+                      <span class="text-2xs font-medium text-muted">Speed</span>
+                      <strong class="text-sm text-accent">{{ speedLabel(appliedSpeed, knownTiers) }}</strong>
+                    </div>
+                    <div class="flex flex-wrap gap-1.5" role="radiogroup" aria-label="Speed">
+                      <button
+                        type="button"
+                        role="radio"
+                        :aria-checked="!speed"
+                        class="effort-chip"
+                        :disabled="disabled"
+                        @click="speed = ''"
+                      >
+                        <Icon v-if="!speed" :name="Check" :size="12" />{{ speedOwner }} default · {{ defaultSpeedLabel }}
+                      </button>
+                      <button
+                        type="button"
+                        role="radio"
+                        :aria-checked="speed === STANDARD_SPEED"
+                        class="effort-chip"
+                        :disabled="disabled"
+                        @click="speed = STANDARD_SPEED"
+                      >
+                        Standard
+                      </button>
+                      <button
+                        v-for="tier in tiers"
+                        :key="tier.id"
+                        type="button"
+                        role="radio"
+                        :aria-checked="speed === tier.id"
+                        class="effort-chip"
+                        :disabled="disabled"
+                        @click="speed = tier.id"
+                      >
+                        <Icon :name="Gauge" :size="12" />{{ tier.name }}
+                      </button>
+                      <button
+                        v-if="unsupportedSpeed"
+                        type="button"
+                        role="radio"
+                        aria-checked="true"
+                        class="effort-chip"
+                        disabled
+                      >
+                        {{ speedLabel(speed, knownTiers) }}
+                      </button>
+                    </div>
+                    <p v-if="!speedOffered" class="text-2xs text-warning" role="status">
+                      This model doesn’t offer {{ speedLabel(currentSpeed, knownTiers) }}. Its runs use Standard speed until you choose a model that does.
+                    </p>
+                    <p v-else-if="appliedTier" class="text-2xs text-muted">
+                      {{ appliedTier.description || `${appliedTier.name} speed` }}<template v-if="appliedTier.limited">
+                        · Not every Codex account offers it; runs use one that does.
+                      </template> · <a
+                        :href="speedUsageUrl"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="text-accent underline"
+                      >How speed uses your plan</a>
+                    </p>
+                    <p v-else class="text-2xs text-muted">
+                      Codex’s standard speed and usage.
+                    </p>
+                  </template>
+                  <p v-else-if="provider !== 'codex'" class="text-2xs text-muted">
+                    {{ current.label }} has no speed setting.
                   </p>
                 </div>
               </div>
