@@ -320,23 +320,31 @@ export function personName(connection: PluginConnection, id: string) {
   return connection.people.find(person => person.id === id)?.name || `User ${id.slice(-4)}`
 }
 
-/** External people may only reach a dedicated agent: one project at most, no installation access. */
-export function eligibleAgent(agent: Agent) {
-  return agent.access.installation !== true && Array.isArray(agent.access.projects) && agent.access.projects.length <= 1
+/**
+ * What the people reaching an agent through a bot could do with its access, for the
+ * owner's warning. Nothing is refused: the owner chooses who may reach which agent.
+ * For anyone in a channel, writing, MCP and plugin access matter as well.
+ */
+export function delegationRisks(agent: Agent, connections: Pick<PluginConnection, 'agentIds'>[], everyone: boolean, draftGrants: string[] = []) {
+  const risks: string[] = []
+  if (agent.access.installation === true)
+    risks.push('manage your whole installation')
+  if (!Array.isArray(agent.access.projects))
+    risks.push('open every project')
+  else if (agent.access.projects.length > 1)
+    risks.push(`open ${agent.access.projects.length} projects`)
+  if (!everyone)
+    return risks
+  if (agent.access.sandbox !== 'read-only')
+    risks.push('change files and run commands')
+  if (!Array.isArray(agent.access.mcps) || agent.access.mcps.length)
+    risks.push('use its MCP connections')
+  if (draftGrants.includes(agent.id) || connections.some(connection => connection.agentIds?.includes(agent.id)))
+    risks.push('use its plugins, such as GitHub or 1Password')
+  return risks
 }
 
-/**
- * Why an agent can't serve anyone in a channel, or '' when it can. Mirrors the server:
- * read-only sandbox, one project at most, no installation, MCP or plugin grants.
- */
-export function publicProblem(agent: Agent, connections: Pick<PluginConnection, 'agentIds'>[]) {
-  if (!eligibleAgent(agent))
-    return 'Too broad'
-  if (agent.access.sandbox !== 'read-only')
-    return 'Not read-only'
-  if (!Array.isArray(agent.access.mcps) || agent.access.mcps.length)
-    return 'Has MCPs'
-  if (connections.some(connection => connection.agentIds?.includes(agent.id)))
-    return 'Has plugin access'
-  return ''
+/** `a, b and c`. */
+export function listed(items: string[]) {
+  return items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items.at(-1)}` : items[0] ?? ''
 }
