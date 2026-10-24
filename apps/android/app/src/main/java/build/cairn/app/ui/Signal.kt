@@ -78,7 +78,14 @@ internal fun AgentAvatar(
     key: String = name,
     size: Dp = 44.dp,
     badge: AvatarBadge? = null,
+    /**
+     * A conversation header's coding agent: its brand takes the corner the badge would use, which
+     * then moves to the top.
+     */
+    harness: String? = null,
 ) {
+    val badgeCorner = if (harness != null) Alignment.TopEnd else Alignment.BottomEnd
+    val badgeOffset = if (harness != null) (-3).dp else 3.dp
     Box(Modifier.clearAndSetSemantics {}) {
         Box(
             Modifier.size(size)
@@ -96,10 +103,22 @@ internal fun AgentAvatar(
                 )
             }
         }
-        if (badge == AvatarBadge.WAITING)
+        if (harness != null)
             Box(
                 Modifier.align(Alignment.BottomEnd)
-                    .offset(3.dp, 3.dp)
+                    .offset(4.dp, 4.dp)
+                    .background(
+                        MaterialTheme.colorScheme.background,
+                        RoundedCornerShape(size * 0.15f),
+                    )
+                    .padding(2.dp)
+            ) {
+                ProviderBrand(harness, maxOf(14.dp, size * 0.44f))
+            }
+        if (badge == AvatarBadge.WAITING)
+            Box(
+                Modifier.align(badgeCorner)
+                    .offset(3.dp, badgeOffset)
                     .size(17.dp)
                     .clip(CircleShape)
                     .background(MaterialTheme.colorScheme.background)
@@ -117,8 +136,8 @@ internal fun AgentAvatar(
             }
         else if (badge != null)
             Box(
-                Modifier.align(Alignment.BottomEnd)
-                    .offset(3.dp, 3.dp)
+                Modifier.align(badgeCorner)
+                    .offset(3.dp, badgeOffset)
                     .size(15.dp)
                     .clip(CircleShape)
                     .background(MaterialTheme.colorScheme.background)
