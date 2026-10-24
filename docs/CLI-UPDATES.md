@@ -47,8 +47,8 @@ an unreachable registry, malformed metadata, a prerelease, or a deprecated chann
 release fails the `resolve` job before any build, and its error names the source
 that failed. No fallback version is guessed. When a vendor moves a channel back to
 an older release, builds follow it, because the vendor withdrew the newer one.
-For OpenCode, CI also tests resuming sessions from the newer release on the older
-one.
+For OpenCode, CI also tests that sessions of the release production serves resume
+on the older resolved one, and back.
 
 There are no default agent tool versions in the Dockerfile. CI passes the resolved
 `CODEX_VERSION`, `GH_VERSION`, `CLAUDE_VERSION` and `OPENCODE_VERSION` build
@@ -66,8 +66,13 @@ adapters, without credentials or inference against a vendor:
 - OpenCode executes a turn against a local model server, without loading global
   config. Its session then resumes with the history it stored. Sessions created
   by the oldest supported release resume on the resolved one. Sessions also move
-  both ways between the resolved release and the previous supported release
-  (`cli-updates.mjs previous-release`), as after an update or a rollback.
+  both ways between the resolved release and the release production serves, as
+  after an update or a rollback. The `resolve` job reads the served release's
+  versions from that release's own validation evidence
+  (`resolve-release.mjs served-tools`, from `CAIRN_BEACON_ORIGIN/health`). Evidence
+  recorded before OpenCode was resolved names no version; those images shipped
+  1.19.0, the oldest supported release. The same fallback applies when production
+  or its evidence is unavailable, and the job log says so.
 - Claude Code answers the `initialize` control request that model discovery uses,
   with synthetic credentials, and lists a catalog with its `default` alias.
 

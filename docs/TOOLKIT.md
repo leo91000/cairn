@@ -23,7 +23,7 @@ command, including after changing directories in a noninteractive shell.
 `deploy/toolkit/tools.json` defines the global update channels. Its sibling
 `versions.json` pins the initial build. The installer generates the global mise
 config from those exact versions and installs shared tools into the image.
-Codex and gh use their dedicated, versioned image installers.
+Codex, Claude Code, OpenCode and gh use their dedicated, versioned image installers.
 OS utilities come from Debian's supported package repositories.
 
 ## Project versions

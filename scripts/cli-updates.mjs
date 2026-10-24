@@ -59,20 +59,6 @@ async function engineVersion(engine, { request }) {
   return version
 }
 
-// The newest stable, non-deprecated release older than `version` that the
-// engine's adapter supports, such as the one an installation rolls back to.
-export async function previousRelease(tool, version, { request = json } = {}) {
-  const engine = engines[tool]
-  if (!engine || !stable.test(version ?? ''))
-    throw new Error('Usage: cli-updates.mjs previous-release <codex|claude|opencode> <version>')
-  const { versions } = await request(`${registry}/${engine.package}`, { headers: { Accept: 'application/vnd.npm.install-v1+json' } })
-  return Object.entries(versions ?? {})
-    .filter(([candidate, metadata]) => stable.test(candidate) && !metadata?.deprecated && newer(version, candidate)
-      && !(engine.minimum && newer(engine.minimum, candidate)))
-    .map(([candidate]) => candidate)
-    .reduce((best, candidate) => !best || newer(candidate, best) ? candidate : best, null)
-}
-
 export async function buildVersions({ request = json, githubToken } = {}) {
   const githubRelease = request('https://api.github.com/repos/cli/cli/releases/latest', { headers: { Accept: 'application/vnd.github+json', ...(githubToken ? { authorization: `Bearer ${githubToken}` } : {}) } })
   const [codex, claude, opencode, github] = await Promise.all([
@@ -100,18 +86,13 @@ export async function buildVersions({ request = json, githubToken } = {}) {
 
 if (import.meta.main) {
   try {
-    if (process.argv[2] === 'previous-release') {
-      console.log(await previousRelease(process.argv[3], process.argv[4]) ?? '')
-    }
-    else if (process.argv[2] === 'build-versions') {
-      const versions = await buildVersions({ githubToken: process.env.GH_TOKEN })
-      if (process.env.GITHUB_OUTPUT)
-        await appendFile(process.env.GITHUB_OUTPUT, Object.entries(versions).map(([tool, version]) => `${tool}=${version}\n`).join(''))
-      console.log(JSON.stringify(versions))
-    }
-    else {
+    if (process.argv[2] !== 'build-versions')
       throw new Error('Usage: cli-updates.mjs build-versions')
-    }
+
+    const versions = await buildVersions({ githubToken: process.env.GH_TOKEN })
+    if (process.env.GITHUB_OUTPUT)
+      await appendFile(process.env.GITHUB_OUTPUT, Object.entries(versions).map(([tool, version]) => `${tool}=${version}\n`).join(''))
+    console.log(JSON.stringify(versions))
   }
   catch (error) {
     console.error(error.message)

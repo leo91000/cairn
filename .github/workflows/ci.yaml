@@ -38,6 +38,7 @@ jobs:
       gh: ${{ steps.tools.outputs.gh }}
       claude: ${{ steps.tools.outputs.claude }}
       opencode: ${{ steps.tools.outputs.opencode }}
+      served-opencode: ${{ steps.served.outputs.opencode }}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: ./.github/actions/setup-pnpm
@@ -56,6 +57,12 @@ jobs:
           CLAUDE_VERSION: ${{ steps.tools.outputs.claude }}
           OPENCODE_VERSION: ${{ steps.tools.outputs.opencode }}
         run: GIT_TREE="$(git rev-parse 'HEAD^{tree}')" node scripts/resolve-release.mjs
+      - name: Find the agent tools of the served release
+        id: served
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CAIRN_BEACON_ORIGIN: ${{ vars.CAIRN_BEACON_ORIGIN }}
+        run: node scripts/resolve-release.mjs served-tools
   build:
     # Browser tests need only these binaries and the frontend, not the whole quality job.
     needs: resolve
@@ -178,12 +185,14 @@ jobs:
       - name: Qualify the resolved OpenCode release against its native adapter
         env:
           OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
+          SERVED_OPENCODE: ${{ needs.resolve.outputs.served-opencode }}
         run: |
           # The resolved release runs a turn, then resumes sessions an installation can hold:
-          # from the oldest supported release, and both ways with the previous release, as
-          # after an update or a rollback.
+          # from the oldest supported release, and both ways with the served release, as
+          # after an update or a rollback. Evidence from before OpenCode was resolved
+          # records no version; those images shipped the oldest supported release.
           minimum=$(node --input-type=module -e "import { engines } from './scripts/cli-updates.mjs'; console.log(engines.opencode.minimum)")
-          previous=$(node scripts/cli-updates.mjs previous-release opencode "$OPENCODE_VERSION")
+          served=${SERVED_OPENCODE:-$minimum}
           # Command substitutions do not inherit errexit, so installation failures return explicitly.
           install() {
             npm install --global --prefix "$RUNNER_TEMP/opencode-$1" --allow-scripts=opencode-ai "opencode-ai@$1" >&2 || return 1
@@ -196,14 +205,14 @@ jobs:
           }
           resolved=$(install "$OPENCODE_VERSION")
           qualify "$resolved" "$resolved"
-          if test "$minimum" != "$OPENCODE_VERSION"; then
+          if test "$minimum" != "$OPENCODE_VERSION" && test "$minimum" != "$served"; then
             oldest=$(install "$minimum")
             qualify "$oldest" "$resolved"
           fi
-          if test -n "$previous"; then
-            previous=$(install "$previous")
-            qualify "$previous" "$resolved"
-            qualify "$resolved" "$previous"
+          if test "$served" != "$OPENCODE_VERSION"; then
+            served=$(install "$served")
+            qualify "$served" "$resolved"
+            qualify "$resolved" "$served"
           fi
       - name: Qualify the resolved Claude Code release against its native adapter
         env:

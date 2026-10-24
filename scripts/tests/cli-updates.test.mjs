@@ -10,7 +10,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
-import { buildVersions, engines, previousRelease } from '../cli-updates.mjs'
+import { buildVersions, engines } from '../cli-updates.mjs'
 
 // Registry responses as observed on 2026-10-24: Claude Code's stable channel
 // trails its latest channel, and OpenCode publishes dev snapshots between releases.
@@ -91,6 +91,25 @@ describe('application image tool versions', () => {
     }
   })
 
+  it('qualifies the native engines that CI resolved, and a rollback to the served release', () => {
+    const jobs = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8')).jobs
+    const expression = value => `\${{ ${value} }}`
+    const served = jobs.resolve.steps.find(step => step.id === 'served')
+    expect(served.run).toBe('node scripts/resolve-release.mjs served-tools')
+    expect(served.env.CAIRN_BEACON_ORIGIN).toBe(expression('vars.CAIRN_BEACON_ORIGIN'))
+    expect(jobs.resolve.outputs['served-opencode']).toBe(expression('steps.served.outputs.opencode'))
+    const opencode = jobs.backend.steps.find(step => step.name === 'Qualify the resolved OpenCode release against its native adapter')
+    expect(opencode.env).toEqual({
+      OPENCODE_VERSION: expression('needs.resolve.outputs.opencode'),
+      SERVED_OPENCODE: expression('needs.resolve.outputs.served-opencode'),
+    })
+    const claude = jobs.backend.steps.find(step => step.name === 'Qualify the resolved Claude Code release against its native adapter')
+    expect(claude.env).toEqual({ CLAUDE_VERSION: expression('needs.resolve.outputs.claude') })
+    expect(claude.run).toContain('native_cli_lists_its_model_catalog_without_inference')
+    // Images cannot be published unless both qualifications passed.
+    expect(jobs.publish.needs).toContain('backend')
+  })
+
   it('authenticates only GitHub discovery and keeps npm requests public', async () => {
     const requests = []
     const request = fixture()
@@ -150,30 +169,6 @@ describe('application image tool versions', () => {
       .rejects
       .toThrow('OpenCode 1.18.35 on the latest channel is older than 1.19.0, the oldest release its adapter supports.')
   })
-
-  it('finds the supported release an installation rolls back to', async () => {
-    const packages = fixture({
-      'https://registry.npmjs.org/opencode-ai': {
-        versions: {
-          '1.18.35': {},
-          '1.19.0': {},
-          '1.19.3': {},
-          '1.19.4': {},
-          '1.19.5-beta.1': {},
-          '1.19.6': { deprecated: 'Broken release' },
-          '1.20.0': {},
-          '1.190.0': {},
-          '0.0.0-dev-202610221304': {},
-        },
-      },
-    })
-    expect(await previousRelease('opencode', '1.20.0', { request: packages })).toBe('1.19.4')
-    expect(await previousRelease('opencode', '1.19.4', { request: packages })).toBe('1.19.3')
-    // Nothing older is supported by the adapter.
-    expect(await previousRelease('opencode', '1.19.0', { request: packages })).toBeNull()
-    await expect(previousRelease('opencode', '1.19.4-beta', { request: packages })).rejects.toThrow('Usage')
-    await expect(previousRelease('gh', '2.0.0', { request: packages })).rejects.toThrow('Usage')
-  })
 })
 
 describe('build-versions command', () => {
@@ -222,17 +217,6 @@ describe('build-versions command', () => {
     }
     finally {
       rmSync(directory, { recursive: true, force: true })
-    }
-  })
-
-  it('prints the previous supported release, or nothing', () => {
-    const packages = { 'https://registry.npmjs.org/opencode-ai': { versions: { '1.19.0': {}, '1.19.3': {}, '1.19.4': {} } } }
-    const setup = `globalThis.fetch = async (url) => Response.json(${JSON.stringify(packages)}[url]);`
-    for (const [version, output] of [['1.19.4', '1.19.3\n'], ['1.19.0', '\n']]) {
-      const result = run(['previous-release', 'opencode', version], {}, setup)
-      expect(result.stderr).toBe('')
-      expect(result.status).toBe(0)
-      expect(result.stdout).toBe(output)
     }
   })
 

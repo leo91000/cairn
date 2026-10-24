@@ -207,7 +207,7 @@ took **8m53s** (528 aggregate runner seconds), without deployment.
   must have that tree too. The validating workflow is then part of the released
   code, and a pull request qualifies only if its branch contained main's tip. The
   `validated-image-<tree>` artifact must match the repository, tree, run ID,
-  schema (now 3), both SHA-256 digests, and Codex/GitHub CLI versions freshly resolved for main
+  schema (now 3), both SHA-256 digests, and the Codex, GitHub CLI, Claude Code and OpenCode versions freshly resolved for main
   or the release. Fork pull requests and manual runs cannot supply release proof.
   Missing proof, an outdated branch or older tool versions runs full CI with a new
   image.

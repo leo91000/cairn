@@ -436,8 +436,8 @@ The historical standalone CLI updater has been removed; see
 [tool versions and retired standalone updates](CLI-UPDATES.md) for old timer
 retirement instructions. Installations update tools through fully validated
 paired image releases and their host timer, with runtime verification and rollback. CI
-application images also resolve current stable
-Codex/GitHub CLI versions before building and validating them.
+application images also resolve the current Codex, GitHub CLI, Claude Code and
+OpenCode releases before building and validating them.
 
 Codex `initialize` and retained-session `thread/resume` get separate, bounded
 two-minute deadlines for cold executable loading and native context recovery.

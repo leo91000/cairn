@@ -79,7 +79,7 @@ OpenCode has no implementation of Cairn's read-only or workspace-write operating
 system sandbox. Initial OpenCode agents therefore require YOLO access; the adapter
 rejects restricted policies. Production executions use the existing isolated runner
 requirements. The native CLI version is checked at startup, including catalog
-discovery; operators must install the pinned release on the manager and runners.
+discovery; operators must install a supported release on the manager and runners.
 
 ## References and validation
 

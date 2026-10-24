@@ -210,9 +210,9 @@ impl Server {
             .build()
             .map_err(Error::internal)?;
         let mut child = cmd.spawn().map_err(|_| {
-            Error::unavailable(
-                "Unable to start OpenCode. Install OpenCode 1.19.0 or newer on the server.",
-            )
+            Error::unavailable(format!(
+                "Unable to start OpenCode. Install OpenCode {MINIMUM} or newer on the server."
+            ))
         })?;
         let stdout = child.stdout.take().unwrap();
         let mut stderr = child.stderr.take().unwrap();
@@ -234,9 +234,9 @@ impl Server {
         }));
         let health = server.get("/global/health").await?;
         if !supported_version(health["version"].as_str().unwrap_or_default()) {
-            return Err(Error::bad(
-                "This integration requires OpenCode 1.19.0 or newer. Update OPENCODE_BIN or the runner image.",
-            ));
+            return Err(Error::bad(format!(
+                "This integration requires OpenCode {MINIMUM} or newer. Update OPENCODE_BIN or the runner image."
+            )));
         }
         Ok(server)
     }
