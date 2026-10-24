@@ -162,38 +162,42 @@ forward fix. Never lower SQLite `user_version`, the epoch or the legacy tree, or
 start an older manager against the migrated installation. Merging does not
 release or deploy an installation.
 
-## Current transition: epochs 3–12 to 13
+## Retained transition: epochs 3–12 to 13
 
-Epoch 13 stores native conversation ownership mappings inside the encrypted ext4
-filesystem and allocates a distinct host account and subordinate UID/GID range to
-each conversation. Docker metadata retains container owners and modes. Old native
-controllers flatten file ownership and cannot safely write this state. SQLite
-advances from 11 to 12 before manager admission, fencing previous managers. The
-block object, encryption, manifest and legacy formats remain unchanged.
+Epoch 13 adds owner-reviewed native administrator admission and SQLite 12.
+Absent mode remains protected; existing reviews and generation handshakes are
+preserved. The strict native budget marker fences older controllers. See
+[native administrator](NATIVE-ADMINISTRATOR.md) and its retained regressions.
 
-Existing native files are assigned to namespace UID 1000 once, under exclusive
-physical ownership. Subsequent same-node resumes compare one mapping record;
-cross-node recovery translates only the previous account/range while retaining
-container users. The mapping is published with the data. Interrupted translation
-records both mappings and journals original modes/ACLs/file capabilities before
-each ownership batch. Recovery replays pending metadata even when chown already
-completed, finishes that mapping, then applies a new destination mapping if needed;
-neither source work nor the local journal is discarded. Retain the identity registry with the environment, including
-after cache eviction, together with its durable root-ID allocation sequence. Host
-root UID/GID reservations use a managed high-ID pool rather than the finite system
-service account range. Do not recycle accounts into another conversation.
+## Current transition: epochs 3–13 to 14
 
-Before activating this runtime on native hosts, refresh the reviewed supervisor,
-provision its managed Docker tools and mapping prerequisites, drain and stop the
-previous native runtime. The supervisor's existing epoch gate deliberately refuses
-a routine in-place upgrade from epoch 12. An operator must perform the reviewed
-native transition; this PR neither releases nor deploys it. Never start an old
-native controller against a disk written by this runtime. Rollback needs matching
-pre-transition data and binaries; prefer a forward fix. Keep the existing legacy
-Git tree and every earlier transition qualification.
+Epoch 14 stores native conversation ownership mappings inside encrypted ext4 and
+allocates distinct host accounts and subordinate UID/GID ranges for protected
+execution. Old controllers flatten ownership and cannot safely write Docker
+state. SQLite advances from 12 to 13 before manager admission. The block objects,
+encryption, manifests, administrator reviews and existing records are unchanged.
 
-Qualification includes disjoint ID allocation, ownership translation, mandatory
-Docker API authorization, existing native storage recovery, and the disposable
-native-runtime job. Images, cache and volumes follow the same publication and
-clean eviction rules as other native disk bytes. Native-to-VM conversion refuses
-an initialized Docker store rather than silently losing it; see NATIVE-DOCKER.md.
+Under exclusive physical ownership, existing files are assigned to the engine
+identity once. Same-node resumes compare one mapping record. A destination
+translates the previous reserved IDs while preserving container users, volume
+modes, ACLs and file capabilities. Durable transition and per-batch journals replay
+pending inode metadata before home refresh, complete that mapping, then apply a
+new destination if needed. Interrupted transitions retain source work and journals.
+Administrator mode keeps its existing shared host account and sudo contract: only
+the engine owner is translated when switching modes; container identities and the
+private Docker store remain reserved. Returning to protected translates that
+engine owner back before admission. Rootless Docker is provided in protected mode.
+
+Retain the identity registry and durable high root-ID sequence with the environment,
+including cache eviction. Never recycle accounts into another conversation.
+Before activation refresh the reviewed supervisor and managed Docker prerequisites,
+drain and stop the previous native runtime. The supervisor epoch gate refuses a
+routine in-place cross-epoch update; use the reviewed native transition. This PR
+neither releases nor deploys it. Never start old controllers against new disks or
+lower markers. Rollback requires matching pre-transition data and binaries; prefer
+a forward fix. Keep every earlier transition regression and legacy Git tree.
+
+Qualification includes ID isolation, ownership/admin transitions, authorization,
+existing storage recovery and disposable native-runtime tests. Docker images,
+cache and volumes use normal publication/eviction. Native-to-VM conversion refuses
+a nonempty Docker store with source retained; see [native Docker](NATIVE-DOCKER.md).

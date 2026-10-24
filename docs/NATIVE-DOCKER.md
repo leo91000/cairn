@@ -1,6 +1,6 @@
 # Docker in native conversations
 
-Native Linux conversations have a private rootless Docker engine. Use `docker
+Protected native Linux conversations have a private rootless Docker engine. Use `docker
 build`, the default Buildx builder, `docker run` and `docker compose` from the
 conversation's shell. The daemon starts on the first command requiring a server;
 client version/help commands do not start it. Images are pulled only when needed.
@@ -111,12 +111,19 @@ daemon shutdown; ordinary workspace/home/output files remain. Native
 conversations without Docker keep their existing conversion path. VM Docker state
 is not imported into the rootless daemon during VM-to-native conversion.
 
-This is installation data epoch 13 / SQLite version 12. The native runtime identity
+This is installation data epoch 14 / SQLite version 13. The native runtime identity
 also records `nativeIsolation: rootless-v1`, so previous controllers' complete
 identity comparison rejects the disk before changing its file owners, including
 after cross-node restore. See the [forward transition](AUTOMATIC-MIGRATIONS.md).
 Do not roll back to an old controller or lower compatibility markers. This change
 does not release or deploy any runtime.
+
+Administrator mode retains its existing owner-reviewed host execution and sudo
+contract; it does not receive this managed rootless daemon or socket. Switching
+modes translates only the engine owner, preserving Docker container identities,
+volume permissions and recovery journals. Rootless services stop with the turn
+and can be recreated after returning to protected. Administrator root can alter
+host state and does not claim the protected conversation isolation boundary.
 
 ## Requirements and limitations
 
@@ -165,7 +172,7 @@ Startup samples include CPU charged to the fresh workload cgroup at readiness;
 short executions may already be collected and report unavailable CPU as null.
 Docker timings include matching cgroup CPU deltas and observed host load. These
 are aggregate client/daemon/helper/service costs, not exclusive daemon CPU.
-Compare no-Docker startup samples separately: Docker-marked readiness includes
+Compare protected-mode no-Docker startup samples separately (`nativeMode` is recorded): Docker-marked readiness includes
 the complete qualification workload, while `firstDaemonMs` measures only the
 first server command before image pulls. Cold here means a new conversation
 store and daemon, without forcing the host's executable page cache cold.

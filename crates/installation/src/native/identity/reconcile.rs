@@ -72,6 +72,8 @@ fn attribute(path: &Path, name: &str) -> Result<Option<Vec<u8>>> {
 
 fn mapped(id: u32, group: bool, previous: Option<&Identity>, target: &Identity) -> u32 {
     match previous {
+        Some(old) if group && id == old.gid() => target.gid(),
+        Some(old) if !group && id == old.uid() => target.uid(),
         Some(old) if group => {
             translate(id, old.root_gid, old.subgid, target.root_gid, target.subgid)
         }
@@ -323,6 +325,7 @@ mod tests {
             root_gid: 901,
             subuid: 100000,
             subgid: 200000,
+            host_engine: None,
         };
         let target = Identity {
             user: "new".into(),
@@ -330,6 +333,7 @@ mod tests {
             root_gid: 903,
             subuid: 300000,
             subgid: 400000,
+            host_engine: None,
         };
         let mut capability = vec![0; 24];
         capability[..4].copy_from_slice(&0x03000001u32.to_le_bytes());
@@ -352,6 +356,7 @@ mod tests {
             root_gid: 903,
             subuid: 300000,
             subgid: 400000,
+            host_engine: None,
         };
         let mut acl = vec![0; 20];
         acl[..4].copy_from_slice(&2u32.to_le_bytes());
@@ -362,6 +367,79 @@ mod tests {
         let original = acl.clone();
         remap_attribute("system.posix_acl_access", &mut acl, None, &target).unwrap();
         assert_eq!(acl, original);
+    }
+
+    #[test]
+    fn administrator_engine_mapping_preserves_namespace_volume_users() {
+        let protected = Identity {
+            user: "fixture".into(),
+            root_uid: 500000000,
+            root_gid: 500000001,
+            subuid: 100000,
+            subgid: 200000,
+            host_engine: None,
+        };
+        let administrator = Identity {
+            host_engine: Some((998, 997)),
+            ..protected.clone()
+        };
+        for (group, engine, root, start, host_engine) in [
+            (
+                false,
+                protected.uid(),
+                protected.root_uid,
+                protected.subuid,
+                administrator.uid(),
+            ),
+            (
+                true,
+                protected.gid(),
+                protected.root_gid,
+                protected.subgid,
+                administrator.gid(),
+            ),
+        ] {
+            assert_eq!(
+                mapped(engine, group, Some(&protected), &administrator),
+                host_engine
+            );
+            assert_eq!(
+                mapped(host_engine, group, Some(&administrator), &protected),
+                engine
+            );
+            for owner in [root, start, start + 998, start + 1000, start + 65535] {
+                assert_eq!(
+                    mapped(owner, group, Some(&protected), &administrator),
+                    owner
+                );
+                assert_eq!(
+                    mapped(owner, group, Some(&administrator), &protected),
+                    owner
+                );
+            }
+        }
+        let mut acl = vec![0; 12];
+        acl[..4].copy_from_slice(&2u32.to_le_bytes());
+        acl[4..6].copy_from_slice(&2u16.to_le_bytes());
+        acl[8..12].copy_from_slice(&protected.uid().to_le_bytes());
+        let original = acl.clone();
+        remap_attribute(
+            "system.posix_acl_access",
+            &mut acl,
+            Some(&protected),
+            &administrator,
+        )
+        .unwrap();
+        assert_eq!(&acl[8..12], &administrator.uid().to_le_bytes());
+        remap_attribute(
+            "system.posix_acl_access",
+            &mut acl,
+            Some(&administrator),
+            &protected,
+        )
+        .unwrap();
+        assert_eq!(acl, original);
+        assert!(administrator.verify_maps("", "").is_err());
     }
 
     #[tokio::test]
@@ -405,6 +483,7 @@ mod tests {
             root_gid: metadata.gid() + 131072,
             subuid: metadata.uid().saturating_sub(999),
             subgid: metadata.gid().saturating_sub(999),
+            host_engine: None,
         };
         let transition = Transition {
             previous: Some(identity.clone()),
@@ -465,6 +544,7 @@ mod tests {
             root_gid: metadata.gid(),
             subuid: 100000,
             subgid: 200000,
+            host_engine: None,
         };
         let entry = capture(
             data,

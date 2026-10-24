@@ -244,3 +244,15 @@ root-level instructions/settings, arbitrary tool state, projects, sessions and
 installed plugins. Cairn-generated account metadata and configuration are bound
 from staging; generated Codex configuration and frozen Cairn skills retain read-only
 bindings. Other user tools and model caches in the private home remain durable.
+
+## Node privilege mode
+
+Native protected remains the default. Node details on web and Android can switch
+to Native administrator, with an informed owner preview and confirmation, then
+back to protected without enrollment or loss of conversation files/history.
+Administrator is real host access through unrestricted passwordless sudo, for an
+already isolated machine/VM. Transitions stop managed executions before restart;
+pending or unconfirmed failure blocks new placements. Returning to protected does
+not clean/restore the machine, undo changes or establish a new trust boundary.
+Root can read local credentials and defeat its own supervisor and cooperative
+limits. See [privilege admission, APIs, recovery and limitations](NATIVE-ADMINISTRATOR.md).

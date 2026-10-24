@@ -61,7 +61,7 @@ async fn upgrades_version_ten_preserving_plugin_packages_and_fences_older_binari
     let version: i64 = db
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
     // Epoch-11 managers reject anything above ten before reading installed manifests.
     assert!(version > 10);
     drop(upgraded);
@@ -204,4 +204,84 @@ async fn upgrades_version_nine_preserving_native_nodes_and_fences_older_binaries
             .unwrap(),
         version + 1
     );
+}
+
+#[tokio::test]
+async fn upgrades_version_eleven_preserving_protected_native_defaults() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    let node = json!({ "id": "native", "nativeEnabled": true, "capabilities": { "backend": "native" }, "nativeAccounts": ["trusted"] });
+    let agent = json!({ "id": "agent", "access": { "backend": "native", "nodes": null } });
+    store.put("nodes", node.clone()).await.unwrap();
+    store.put("agents", agent.clone()).await.unwrap();
+    store
+        .transaction(|db| {
+            db.0.execute_batch("PRAGMA user_version=11;")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    drop(store);
+    let upgraded = Store::open(root.path()).unwrap();
+    assert_eq!(
+        upgraded.get("nodes", "native").await.unwrap(),
+        Some(node.clone())
+    );
+    assert_eq!(
+        upgraded.get("agents", "agent").await.unwrap(),
+        Some(agent.clone())
+    );
+    assert_eq!(
+        cairn_installation::nodes::native_mode::requested(&node),
+        json!({ "mode": "protected", "generation": null })
+    );
+    assert!(cairn_installation::nodes::native_mode::applied(&node));
+    let db = Connection::open(root.path().join("manager.db")).unwrap();
+    assert_eq!(
+        db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        13
+    );
+    // An epoch-12 manager rejects SQLite versions above eleven before mutations.
+    assert!(
+        db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap()
+            > 11
+    );
+}
+
+#[tokio::test]
+async fn upgrades_version_twelve_preserving_native_administrator_reviews() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    let node = json!({ "id": "native", "nativeModeRequest": { "mode": "administrator", "generation": "reviewed" }, "nativeModeObserved": { "mode": "administrator", "generation": "reviewed", "status": "applied" }, "nativeReviewedAgents": ["agent"] });
+    store.put("nodes", node.clone()).await.unwrap();
+    store
+        .transaction(|db| {
+            db.0.execute_batch("PRAGMA user_version=12;")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    drop(store);
+    let upgraded = Store::open(root.path()).unwrap();
+    assert_eq!(
+        upgraded.get("nodes", "native").await.unwrap(),
+        Some(node.clone())
+    );
+    assert!(cairn_installation::nodes::native_mode::reviewed(
+        &node,
+        &json!({ "id": "agent" })
+    ));
+    assert!(!cairn_installation::nodes::native_mode::reviewed(
+        &node,
+        &json!({ "id": "unreviewed" })
+    ));
+    let db = Connection::open(root.path().join("manager.db")).unwrap();
+    let version: i64 = db
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 13);
+    // Epoch-13 managers refuse this database before reading native disk state.
+    assert!(version > 12);
 }

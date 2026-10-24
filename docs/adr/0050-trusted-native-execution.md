@@ -44,7 +44,7 @@ Rollback to epoch 5 requires its matching prepared data backup and binary; autom
 updates do not cross epochs or restore data. Windows/macOS and desktop-session
 access remain separate future work.
 
-Update, 2026-10-23: native conversations use distinct host accounts and disjoint
+Update, 2026-10-23: protected native conversations use distinct host accounts and disjoint
 subordinate UID/GID ranges. A RootlessKit enclave separates their network, PID and
 user namespaces; its immutable supervisor starts rootless Docker on demand.
 Only the outer identity-mapping bootstrap permits the mapping helpers' privilege
@@ -53,5 +53,16 @@ the engine has an empty capability bounding set. Existing managed mounts, device
 filters, shared budgets, leases, guardians and cgroup fencing remain. Docker's
 mandatory authorization plugin preserves restricted filesystem rights. The host
 Docker daemon and desktop sockets remain unavailable. See [native Docker](../NATIVE-DOCKER.md)
-for storage, conversion, networking and compatibility limits. Epoch 13, SQLite
-12 and the complete native runtime identity fence previous writers.
+for storage, conversion, networking and compatibility limits. Epoch 14, SQLite
+13 and the complete native runtime identity fence previous writers.
+
+Update, 2026-10-23: a native node may use the explicitly owner-confirmed
+[administrator mode](../NATIVE-ADMINISTRATOR.md). This deliberately extends the
+original no-sudo boundary for that node only, using an ordinary workload identity
+with unrestricted passwordless host sudo. Protected remains the default; VM
+semantics remain unchanged. Admission requires a node-specific owner review,
+including existing global grants; future grants never silently grant root. A
+durable generation handshake stops managed workloads before changing mode.
+Returning to protected restricts new runs but does not restore the host or defend
+against root that altered its supervisor. Epoch 13 / SQLite 12 and a strict native
+budget marker fence older readers; unknown/unconfirmed modes fail closed.

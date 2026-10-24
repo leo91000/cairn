@@ -1,7 +1,7 @@
 {
   "schema": 2,
-  "epoch": 13,
-  "databaseVersion": 12,
+  "epoch": 14,
+  "databaseVersion": 13,
   "legacyTree": "a6aae371f1d76cceb2f510180531f0ef17ec3e60",
   "automaticMigration": {
     "fromEpochs": [
@@ -14,9 +14,10 @@
       9,
       10,
       11,
-      12
+      12,
+      13
     ],
-    "previousDatabaseVersion": 11,
+    "previousDatabaseVersion": 12,
     "plan": "docs/AUTOMATIC-MIGRATIONS.md",
     "tests": [
       "settings::tests::length_limits_are_positive_integers_with_type_specific_caps",
@@ -50,7 +51,13 @@
       "native::identity::tests::reserved_root_ids_are_not_recycled_after_interrupted_account_creation",
       "native::identity::tests::namespace_maps_must_match_the_reserved_identity_exactly",
       "native::docker::tests::plugin_rpc_without_json_media_type_still_enforces_authorization",
-      "native::docker::tests::unversioned_version_and_volume_routes_are_not_misread_as_api_versions"
+      "native::docker::tests::unversioned_version_and_volume_routes_are_not_misread_as_api_versions",
+      "upgrades_version_eleven_preserving_protected_native_defaults",
+      "native_administrator_requires_owner_review_verified_generation_and_explicit_admission",
+      "native_mode_preview_detects_concurrent_access_changes_and_agent_requests_need_owner",
+      "native::mode::tests::unknown_modes_and_stale_or_unconfirmed_plans_fail_closed",
+      "upgrades_version_twelve_preserving_native_administrator_reviews",
+      "native::identity::reconcile::tests::administrator_engine_mapping_preserves_namespace_volume_users"
     ]
   }
 }

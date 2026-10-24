@@ -1,5 +1,5 @@
 //! Native implementation of the existing authenticated node controller protocol.
-use super::{atomic_write, block, disk, systemd, workspace};
+use super::{atomic_write, block, disk, mode, systemd, workspace};
 use crate::{
     error::{Error, Result},
     microvm::{plan::Plan, protocol::Event, wire},
@@ -34,13 +34,27 @@ use tokio_util::sync::CancellationToken;
 const MAX_PLAN: u64 = 8_000_000;
 const MAX_LOG: u64 = 64 * 1024 * 1024;
 
-fn native_budget(value: &Value) -> Result<crate::microvm::budget::Budget> {
-    let budget: crate::microvm::budget::Budget = serde_json::from_value(value.clone())?;
+pub(crate) fn native_budget(value: &Value) -> Result<crate::microvm::budget::Budget> {
+    let mut value = value.clone();
+    if let Some(protocol) = value
+        .as_object_mut()
+        .and_then(|value| value.remove("nativeModeProtocol"))
+        && protocol != 1
+    {
+        return Err(Error::bad("Unknown native mode storage protocol."));
+    }
+    let budget: crate::microvm::budget::Budget = serde_json::from_value(value)?;
     budget.limits.validate()?;
     if !(1..=4096).contains(&budget.slots) {
         return Err(Error::bad("Use between 1 and 4096 execution slots."));
     }
     Ok(budget)
+}
+
+fn budget_record(budget: &Value) -> Value {
+    let mut record = budget.clone();
+    record["nativeModeProtocol"] = 1.into();
+    record
 }
 
 struct Attempt {
@@ -60,6 +74,7 @@ struct Controller {
     admission: Arc<Mutex<()>>,
     base_warmer: Arc<super::bases_warmer::Warmer>,
     budget: Arc<Mutex<Value>>,
+    mode: Arc<Mutex<Value>>,
     changed: Arc<Notify>,
     log_lock: Arc<Mutex<()>>,
     stop: CancellationToken,
@@ -135,6 +150,82 @@ impl Controller {
             .is_some_and(|until| *until > crate::nodes::boot_ms())
     }
 
+    async fn persist_mode(&self, state: &Value) -> Result<()> {
+        let bytes = serde_json::to_vec(state)?;
+        if let Err(error) = atomic_write(&self.state.join(mode::FILE), &bytes).await {
+            // Keep the last confirmed mode and target, but report the actual
+            // failure through health even when the disk cannot record it.
+            let mut observed = self.mode.lock().await;
+            observed["status"] = "failed".into();
+            observed["error"] = error.message.clone().into();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn change_mode(&self, value: Value) -> Result<Value> {
+        let request = mode::request(value)?;
+        let expected = serde_json::to_value(&request)?;
+        let _admission = self.admission.lock().await;
+        let previous = self.mode.lock().await.clone();
+        if mode::matches(&previous, &expected) {
+            return Ok(previous);
+        }
+        let mut pending = previous.clone();
+        pending["status"] = "pending".into();
+        pending["target"] = expected.clone();
+        pending["error"] = Value::Null;
+        // Refuse old leased plans even if persisting intent fails. No sudo
+        // mutation or applied acknowledgement may precede durable intent.
+        *self.mode.lock().await = pending.clone();
+        self.persist_mode(&pending).await?;
+        let result = tokio::time::timeout(Duration::from_secs(270), async {
+            // Signal every preparation/workload first; all process descendants
+            // belong to the managed cgroup. Root can escape it: this is cooperative.
+            let active: Vec<_> = self
+                .active
+                .lock()
+                .await
+                .iter()
+                .map(|(id, attempt)| {
+                    attempt.stop.cancel();
+                    id.clone()
+                })
+                .collect();
+            for id in active {
+                self.stop_admitted(&id).await?;
+            }
+            if !self.active.lock().await.is_empty() {
+                return Err(Error::conflict(
+                    "Native executions have not finished stopping.",
+                ));
+            }
+            mode::sudo(
+                &self.identity,
+                request.mode == crate::nodes::native_mode::Mode::Administrator,
+            )
+            .await
+        })
+        .await;
+        let state = match result {
+            Ok(Ok(())) => {
+                json!({ "mode": request.mode, "generation": request.generation, "status": "applied" })
+            }
+            result => {
+                pending["status"] = "failed".into();
+                pending["error"] = match result {
+                    Ok(Err(error)) => error.message,
+                    _ => "Native privilege transition stop confirmation timed out.".into(),
+                }
+                .into();
+                pending
+            }
+        };
+        self.persist_mode(&state).await?;
+        *self.mode.lock().await = state.clone();
+        Ok(state)
+    }
+
     async fn start(&self, id: &str) -> Result<()> {
         let _admission = self.admission.lock().await;
         if self.active.lock().await.contains_key(id) {
@@ -154,6 +245,7 @@ impl Controller {
             return Err(Error::unavailable("The native execution slot is occupied."));
         }
         let plan = self.plan(id).await?;
+        mode::check_plan(&*self.mode.lock().await, &plan)?;
         let resources: crate::nodes::Resources = serde_json::from_value(plan["resources"].clone())?;
         resources.validate()?;
         let budget: crate::nodes::Resources =
@@ -356,7 +448,11 @@ impl Controller {
 
     async fn execute(&self, id: &str, plan: &Value, stop: CancellationToken) -> Result<i32> {
         let disk_owner = disk::lock(&self.state).await?;
-        let identity = super::identity::provision(&self.state, text(plan, "runId")).await?;
+        let administrator = plan["nativeMode"]["mode"] == "administrator";
+        let mut identity = super::identity::provision(&self.state, text(plan, "runId")).await?;
+        if administrator {
+            identity.host_engine = Some((self.identity.uid, self.identity.gid));
+        }
         self.check_preparation_space(plan).await?;
         let root = workspace::directory(&self.state, text(plan, "runId"))?;
         atomic_write(&root.join("attempt"), id.as_bytes()).await?;
@@ -460,13 +556,37 @@ impl Controller {
             .to_string_lossy()
             .into_owned()
             .into();
-        plan["nativeIdentity"] = serde_json::to_value(&identity)?;
+        if !administrator {
+            plan["nativeIdentity"] = serde_json::to_value(&identity)?;
+        }
         plan["nativeHomeBindings"] = serde_json::to_value(bindings)?;
         if plan["chat"]["provider"] == "claude" {
             plan["chat"]["claudeCredentialsDirectory"] = super::home::CLAUDE_AUTH_DIRECTORY.into();
         }
-        // The plugin CLI uses the same conversation-local relay as MCP servers.
-        plan["mcpEnv"][crate::plugins::cli::ORIGIN_ENV] = crate::microvm::mcp::ORIGIN.into();
+        let mcp_stop = stop.child_token();
+        let _mcp_guard = mcp_stop.clone().drop_guard();
+        if administrator {
+            // Preserve administrator's host execution and existing local relay;
+            // it does not enter the protected Docker namespace or receive its socket.
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let origin = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
+            for field in ["codexConfig", "claudeMcps", "opencodeConfig", "args"] {
+                if let Some(value) = plan["chat"].get_mut(field) {
+                    replace_origin(value, &origin);
+                }
+            }
+            if let Some(value) = plan.get_mut("args") {
+                replace_origin(value, &origin);
+            }
+            plan["mcpEnv"][crate::plugins::cli::ORIGIN_ENV] = origin.into();
+            tokio::spawn(relay(
+                listener,
+                stage.join("home").join(crate::microvm::mcp::SOCKET),
+                mcp_stop,
+            ));
+        } else {
+            plan["mcpEnv"][crate::plugins::cli::ORIGIN_ENV] = crate::microvm::mcp::ORIGIN.into();
+        }
         let auth = stage
             .join("home")
             .join(crate::nodes::workspace::provider_home(&plan))
@@ -480,7 +600,7 @@ impl Controller {
             })
             .await;
         }
-        if channel.exists() {
+        if !administrator && channel.exists() {
             use std::os::unix::fs::FileTypeExt;
             if !tokio::fs::symlink_metadata(&channel)
                 .await?
@@ -492,7 +612,7 @@ impl Controller {
                 ));
             }
             std::os::unix::fs::lchown(&channel, Some(identity.root_uid), Some(identity.root_gid))?;
-        } else if plan["chat"].is_object() {
+        } else if !administrator && plan["chat"].is_object() {
             return Err(Error::unavailable(
                 "Native conversation MCP channel did not become available.",
             ));
@@ -524,9 +644,9 @@ impl Controller {
             workspace: &data.join("workspaces"),
             output: &data.join("output"),
             identity: &self.identity,
-            conversation: Some(&identity),
-            docker_data: Some(&docker_data),
-            docker_runtime: Some(&runtime),
+            conversation: (!administrator).then_some(&identity),
+            docker_data: (!administrator).then_some(docker_data.as_path()),
+            docker_runtime: (!administrator).then_some(runtime.as_path()),
             temporary: &temporary,
             auth: auth.as_deref(),
         };
@@ -803,6 +923,10 @@ impl Controller {
     async fn stop_attempt(&self, id: &str) -> Result<()> {
         uuid(id)?;
         let _admission = self.admission.lock().await;
+        self.stop_admitted(id).await
+    }
+
+    async fn stop_admitted(&self, id: &str) -> Result<()> {
         atomic_write(&self.file(id, "stopped"), b"1").await?;
         if let Some(attempt) = self.active.lock().await.get(id) {
             attempt.stop.cancel();
@@ -878,6 +1002,36 @@ fn guest_data(plan: &Value, data: &Path) -> PathBuf {
     plan["guestDataRoot"]
         .as_str()
         .map_or_else(|| data.to_owned(), PathBuf::from)
+}
+
+fn replace_origin(value: &mut Value, origin: &str) {
+    match value {
+        Value::String(text) => *text = text.replace(crate::microvm::mcp::ORIGIN, origin),
+        Value::Array(values) => values
+            .iter_mut()
+            .for_each(|value| replace_origin(value, origin)),
+        Value::Object(values) => values
+            .values_mut()
+            .for_each(|value| replace_origin(value, origin)),
+        _ => {}
+    }
+}
+
+async fn relay(listener: tokio::net::TcpListener, channel: PathBuf, stop: CancellationToken) {
+    let _ = crate::microvm::listener::serve(
+        || listener.accept(),
+        |(mut client, _)| {
+            let channel = channel.clone();
+            async move {
+                if let Ok(mut server) = tokio::net::UnixStream::connect(channel).await {
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                }
+            }
+        },
+        32,
+        stop,
+    )
+    .await;
 }
 
 #[cfg(test)]
@@ -969,6 +1123,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             "status": "ok", "backend": "native", "nodeProtocol": 2, "projectArchives": 1, "nativeProjectBases": 1,
             "runtimeId": std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into()),
             "dataRoot": controller.data, "capabilities": capabilities,
+            "nativeMode": controller.mode.lock().await.clone(),
             "runtimes": systemd::runtimes()?,
             "pool": { "capacity": budget["slots"] }, "activeRuns": controller.active.lock().await.len(),
             "sharedResources": true, "exclusiveReservations": false, "budget": budget,
@@ -1004,6 +1159,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 .await?;
             json!({ "queued": true })
         }
+        ("POST", ["native-mode"]) => controller.change_mode(input(request, 16384).await?).await?,
         ("POST", ["node-budget"]) => {
             let value = input(request, 16384).await?;
             let budget = native_budget(&value)?;
@@ -1034,7 +1190,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 }
                 atomic_write(
                     &controller.state.join(crate::microvm::budget::FILE),
-                    &serde_json::to_vec(&value)?,
+                    &serde_json::to_vec(&budget_record(&value))?,
                 )
                 .await?;
                 *controller.budget.lock().await = value;
@@ -1523,7 +1679,11 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                     remaining.min(controller.disk_growth().await?),
                 )
                 .await?;
-                let identity = super::identity::provision(&controller.state, &attempt.run).await?;
+                let mut identity =
+                    super::identity::provision(&controller.state, &attempt.run).await?;
+                if plan["nativeMode"]["mode"] == "administrator" {
+                    identity.host_engine = Some((controller.identity.uid, controller.identity.gid));
+                }
                 workspace::own_tree(&received, identity.uid(), identity.gid()).await?;
                 tokio::fs::rename(received, &target).await?;
             }
@@ -1634,8 +1794,17 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         Err(error) => return Err(error.into()),
     };
     let checked = native_budget(&budget)?;
+    let budget = serde_json::to_value(&checked)?;
     systemd::apply_budget(&checked).await?;
-    atomic_write(&budget_path, &serde_json::to_vec(&budget)?).await?;
+    atomic_write(&budget_path, &serde_json::to_vec(&budget_record(&budget))?).await?;
+    let mut mode = mode::load(&state).await?;
+    if mode["status"] == "applied"
+        && let Err(error) = mode::sudo(&identity, mode["mode"] == "administrator").await
+    {
+        mode["status"] = "failed".into();
+        mode["error"] = error.message.into();
+        atomic_write(&state.join(mode::FILE), &serde_json::to_vec(&mode)?).await?;
+    }
     let controller = Controller {
         data,
         state,
@@ -1645,6 +1814,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         admission: Arc::default(),
         base_warmer: Arc::default(),
         budget: Arc::new(Mutex::new(budget)),
+        mode: Arc::new(Mutex::new(mode)),
         changed: Arc::default(),
         log_lock: Arc::default(),
         stop: stop.clone(),
@@ -1817,6 +1987,9 @@ mod tests {
             leases: Arc::default(),
             admission: Arc::default(),
             base_warmer: Arc::default(),
+            mode: Arc::new(Mutex::new(
+                json!({ "mode": "protected", "generation": null, "status": "applied" }),
+            )),
             budget: Arc::new(Mutex::new(
                 json!({ "slots": 1, "limits": { "cpu": 1, "memoryMiB": 1024, "diskMiB": 1024 } }),
             )),
@@ -2350,6 +2523,89 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(response.status, 401);
+    }
+
+    #[tokio::test]
+    async fn native_mode_final_write_failure_reports_unconfirmed_privileges() {
+        let (_root, controller) = fixture().await;
+        let target = json!({ "mode": "administrator", "generation": crate::config::id() });
+        {
+            let mut pending = controller.mode.lock().await;
+            pending["status"] = "pending".into();
+            pending["target"] = target.clone();
+        }
+        private_dir(&controller.state.join(mode::FILE))
+            .await
+            .unwrap();
+        let applied = json!({ "mode": target["mode"], "generation": target["generation"], "status": "applied" });
+        // Exercise final acknowledgement persistence without invoking host sudo.
+        assert!(controller.persist_mode(&applied).await.is_err());
+        let observed = controller.mode.lock().await.clone();
+        assert_eq!(observed["status"], "failed");
+        assert_eq!(
+            observed["mode"], "protected",
+            "Never publish an undurable applied mode"
+        );
+        assert_eq!(observed["target"], target);
+        assert!(!text(&observed, "error").is_empty());
+        assert!(mode::check_plan(&observed, &json!({})).is_err());
+        assert!(mode::check_plan(&observed, &json!({ "nativeMode": target })).is_err());
+    }
+
+    #[tokio::test]
+    async fn native_mode_persistence_failure_blocks_previously_leased_plans() {
+        let (_root, controller) = fixture().await;
+        let run = crate::config::id();
+        let attempt = crate::config::id();
+        let stage = controller.data.join("runs").join(&run);
+        for directory in [
+            stage.join("workspace"),
+            stage.join("home"),
+            controller.data.join("runner-plans"),
+        ] {
+            private_dir(&directory).await.unwrap();
+        }
+        let plan = json!({
+            "id": attempt, "runId": run, "backend": "native", "nodeLeaseRequired": true, "expires": null,
+            "cwd": stage.join("workspace"), "projectRoot": stage.join("workspace"),
+            "sandbox": "workspace-write", "args": [], "prompt": "fixture",
+            "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
+            "imports": [
+                { "source": stage.join("workspace"), "target": stage.join("workspace") },
+                { "source": stage.join("home"), "target": "/home/node" }
+            ]
+        });
+        atomic_write(
+            &controller
+                .data
+                .join("runner-plans")
+                .join(format!("{attempt}.json")),
+            &serde_json::to_vec(&plan).unwrap(),
+        )
+        .await
+        .unwrap();
+        controller
+            .leases
+            .lock()
+            .await
+            .insert(attempt.clone(), crate::nodes::boot_ms() + 60000);
+        controller.plan(&attempt).await.unwrap();
+        mode::check_plan(&*controller.mode.lock().await, &plan).unwrap();
+        // A directory at the state-file destination guarantees an atomic rename
+        // failure on this disposable fixture, before any host sudo operation.
+        private_dir(&controller.state.join(mode::FILE))
+            .await
+            .unwrap();
+        let request = json!({ "mode": "administrator", "generation": crate::config::id() });
+        assert!(controller.change_mode(request.clone()).await.is_err());
+        let state = controller.mode.lock().await.clone();
+        assert_eq!(state["status"], "failed");
+        assert!(!text(&state, "error").is_empty());
+        assert_eq!(state["target"], request);
+        let error = controller.start(&attempt).await.unwrap_err();
+        assert_eq!(error.status, 409);
+        assert!(error.message.contains("privilege generation"), "{error:?}");
+        assert!(controller.active.lock().await.is_empty());
     }
 
     #[tokio::test]

@@ -8,6 +8,7 @@ pub(crate) mod disk;
 pub mod docker;
 mod home;
 mod identity;
+mod mode;
 pub mod policy;
 mod protection;
 pub mod releases;
@@ -16,6 +17,8 @@ mod systemd;
 mod watchdog;
 mod workspace;
 
+pub(crate) use mode::matches as mode_matches;
+pub(crate) use service::native_budget;
 pub use service::serve;
 pub use watchdog::serve as watchdog;
 

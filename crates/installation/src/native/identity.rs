@@ -22,18 +22,28 @@ pub(super) struct Identity {
     pub root_gid: u32,
     pub subuid: u32,
     pub subgid: u32,
+    // Administrator execution retains the existing host workload account.
+    // Only the engine owner changes; namespace-root and volume users remain
+    // in the reserved ranges so protected/admin transitions do not flatten them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_engine: Option<(u32, u32)>,
 }
 
 impl Identity {
     pub fn uid(&self) -> u32 {
-        self.subuid + 999
+        self.host_engine.map_or(self.subuid + 999, |ids| ids.0)
     }
 
     pub fn gid(&self) -> u32 {
-        self.subgid + 999
+        self.host_engine.map_or(self.subgid + 999, |ids| ids.1)
     }
 
     pub(super) fn verify_maps(&self, uid_map: &str, gid_map: &str) -> Result<()> {
+        if self.host_engine.is_some() {
+            return Err(Error::forbidden(
+                "Administrator ownership cannot enter a rootless enclave.",
+            ));
+        }
         for (actual, root, start) in [
             (uid_map, self.root_uid, self.subuid),
             (gid_map, self.root_gid, self.subgid),
@@ -386,6 +396,7 @@ pub(super) async fn provision(state: &Path, run_id: &str) -> Result<Identity> {
         root_gid,
         subuid,
         subgid,
+        host_engine: None,
     })
 }
 
@@ -411,6 +422,7 @@ mod tests {
             root_gid: ROOT_FIRST + 1,
             subuid: 100000,
             subgid: 200000,
+            host_engine: None,
         };
         let uid_map = format!("0 {} 1\n1 100000 65536\n", identity.root_uid);
         let gid_map = format!("0 {} 1\n1 200000 65536\n", identity.root_gid);

@@ -98,6 +98,29 @@ async fn execute_inner(
     }
 }
 
+/// A controller may have accepted a first attempt before its engine created a
+/// session. Prefer any recoverable session; only that controlled native restart
+/// can start afresh when none was recorded. Ordinary and VM recovery stay strict.
+async fn saved_session(
+    s: &Service,
+    run: &Value,
+    home: &Path,
+    cwd: &Path,
+) -> Result<Option<String>> {
+    match recovery::session(s, run, home, cwd).await {
+        Ok(session) => Ok(Some(session)),
+        Err(error)
+            if error.status == 409
+                && crate::native::policy::native(&run["snapshot"]["agent"])
+                && run["nativeModeInterruption"].is_string()
+                && text(run, "sessionId").is_empty() =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 struct Execution<'a> {
     s: &'a Arc<Service>,
     id: String,
@@ -169,6 +192,7 @@ struct RunnerPlan<'a> {
     mcp_env: &'a Value,
     resources: &'a Value,
     node_lease_required: bool,
+    native_mode: Value,
     backend: &'a Value,
     runtime_id: &'a Value,
     storage: RunnerStorage<'a>,
@@ -373,8 +397,17 @@ impl Execution<'_> {
         if !self.checkpoint.read(RunCheckpoint::launched).await {
             return Ok(None);
         }
-        let session =
-            recovery::session(s, self.run, &workspace.state_home, workspace.cwd()).await?;
+        let Some(session) =
+            saved_session(s, self.run, &workspace.state_home, workspace.cwd()).await?
+        else {
+            s.store.event(
+                &self.id,
+                "status",
+                "Restarting with preserved files after the node mode change; no resumable engine session was recorded.",
+                None,
+            ).await?;
+            return Ok(None);
+        };
         let patch = json!({
             "sessionId": session,
             "resumeCount": self.run["resumeCount"].as_u64().unwrap_or(0) + 1,
@@ -465,6 +498,14 @@ impl Execution<'_> {
             workspace.prepared["backend"].as_str(),
             Some("firecracker" | "native")
         );
+        if managed
+            && stopped_by_controller
+            && s.store.run(&self.id).await?["nativeModeInterruption"].is_string()
+        {
+            return Err(Error::unavailable(
+                "Native node mode changed. Managed executions stopped; saved files and conversation history are retained for restart.",
+            ));
+        }
         let interrupted = exit.code == Some(crate::runner::CONTROLLER_INTERRUPTED);
         if managed && stopped_by_controller && interrupted {
             if saved.start_rejected == Some(true) {
@@ -652,7 +693,7 @@ impl Execution<'_> {
         runner: &str,
         placement: &Value,
         resume: Option<&str>,
-        chat: Option<Value>,
+        mut chat: Option<Value>,
         launch: &Launch,
     ) -> Result<()> {
         let s = self.s;
@@ -667,20 +708,42 @@ impl Execution<'_> {
                 "readOnly": true,
             }));
         }
+        let mut context = crate::plugins::agents::with_instructions(s, self.run).await;
+        context["snapshot"]["skills"] = prepared["skills"].clone();
+        context["nativeMode"] = placement["nativeMode"].clone();
+        if prepared["backend"] == "native"
+            && let Some(chat) = &mut chat
+        {
+            run_output::native_chat_privileges(chat, &context, &placement["nativeMode"]);
+        }
         let prompt = if resume.is_some() {
             launch.prompt.clone()
         } else {
-            let mut context = crate::plugins::agents::with_instructions(s, self.run).await;
-            context["snapshot"]["skills"] = prepared["skills"].clone();
             run_output::prompt(&context, false)
         };
+        let prompt = if prepared["backend"] == "native" {
+            format!(
+                "{}\n\n{prompt}",
+                run_output::native_privileges(&placement["nativeMode"])
+            )
+        } else {
+            prompt
+        };
         let storage_node = text(placement, "nodeId");
-        let node_storage = s
-            .store
-            .get("nodes", storage_node)
-            .await?
-            .unwrap_or_default()["storage"]
-            .clone();
+        let node_storage = if prepared["backend"] == "native" {
+            let (run, attempt, placement) = (self.id.clone(), runner.to_owned(), placement.clone());
+            s.store
+                .transaction(move |db| {
+                    nodes::native_mode::acknowledge_plan(db, &run, &attempt, &placement)
+                })
+                .await?
+        } else {
+            s.store
+                .get("nodes", storage_node)
+                .await?
+                .unwrap_or_default()["storage"]
+                .clone()
+        };
         let storage_policy = Policy::for_node(&node_storage)?;
         let grant = nodes::disk_grants::new_disk(s, self.run, storage_node).await?;
         s.store
@@ -706,6 +769,7 @@ impl Execution<'_> {
             mcp_env: &workspace.mcp["env"],
             resources: &placement["resources"],
             node_lease_required: true,
+            native_mode: placement["nativeMode"].clone(),
             backend: &prepared["backend"],
             runtime_id: &placement["runtimeId"],
             storage: RunnerStorage {
@@ -1082,4 +1146,76 @@ impl Execution<'_> {
 
 fn current_exe() -> Result<String> {
     Ok(std::env::current_exe()?.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn mode_restart_before_first_session_preserves_available_sessions_and_other_recovery_rules()
+     {
+        let root = tempfile::tempdir().unwrap();
+        let s = Service::new(crate::config::Config {
+            data_dir: root.path().join("data"),
+            home: root.path().join("home"),
+            workspace_roots: vec![root.path().into()],
+            public_url: "http://localhost:4310".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            codex_bin: "/bin/false".into(),
+            claude_bin: "/bin/false".into(),
+            opencode_bin: "/bin/false".into(),
+            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            concurrency: 1,
+            logger: false,
+            worker_enabled: false,
+            runner_url: String::new(),
+        })
+        .await
+        .unwrap();
+        for provider in ["codex", "claude", "opencode"] {
+            let mut run = json!({
+                "isolated": true, "nativeModeInterruption": crate::config::id(),
+                "snapshot": { "agent": { "provider": provider, "access": { "backend": "native" } } },
+            });
+            assert!(
+                saved_session(&s, &run, root.path(), root.path())
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{provider}"
+            );
+            run["sessionId"] = if provider == "opencode" {
+                "ses_saved"
+            } else {
+                "saved-session"
+            }
+            .into();
+            assert_eq!(
+                saved_session(&s, &run, root.path(), root.path())
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                run["sessionId"].as_str(),
+                "{provider}"
+            );
+            run["sessionId"] = Value::Null;
+            run["nativeModeInterruption"] = Value::Null;
+            assert!(
+                saved_session(&s, &run, root.path(), root.path())
+                    .await
+                    .is_err(),
+                "{provider}"
+            );
+            run["nativeModeInterruption"] = crate::config::id().into();
+            run["snapshot"]["agent"]["access"]["backend"] = "firecracker".into();
+            assert!(
+                saved_session(&s, &run, root.path(), root.path())
+                    .await
+                    .is_err(),
+                "{provider}"
+            );
+        }
+    }
 }
