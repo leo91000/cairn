@@ -156,6 +156,9 @@ impl Worker {
         {
             return Ok(());
         }
+        if super::retry::expire(s, &run_id).await? {
+            return Ok(());
+        }
         // Serialize only the preparation window, until placement has reserved
         // the node slot. Running VMs use node slots without a global ceiling.
         let preparation = if execution::uses_vm(&run, &s.config) {

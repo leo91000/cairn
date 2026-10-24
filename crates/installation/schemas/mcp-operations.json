@@ -1135,7 +1135,7 @@
   },
   {
     "name": "cancel_run",
-    "description": "Cancel queued or running work. Already completed external effects are preserved.",
+    "description": "Cancel queued or running work, including a pending automatic retry. Already completed external effects are preserved.",
     "scope": "run",
     "destructive": true,
     "inputSchema": {
@@ -1188,7 +1188,7 @@
   },
   {
     "name": "get_run",
-    "description": "Get a run and a byte-bounded page of its event log. Continue with nextAfter while hasMore is true, even when a page has fewer than 100 events. A run or event marked truncated remains available in full through read_run_content.",
+    "description": "Get a run, including retry attempt, limit, nextAttemptAt, deadlineAt and cause when recovering, and a byte-bounded page of its event log. Continue with nextAfter while hasMore is true, even when a page has fewer than 100 events. A run or event marked truncated remains available in full through read_run_content.",
     "scope": "read",
     "destructive": false,
     "inputSchema": {
@@ -1788,7 +1788,7 @@
   },
   {
     "name": "stop_chat",
-    "description": "Stop the current turn, cancel a scheduled wakeup and pause follow-ups. Queued messages remain available for later resumption.",
+    "description": "Stop the current turn or pending automatic retry, cancel a scheduled wakeup and pause follow-ups. Queued messages remain available for later resumption.",
     "scope": "run",
     "destructive": true,
     "inputSchema": {

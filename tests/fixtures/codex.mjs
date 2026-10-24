@@ -35,6 +35,17 @@ async function main() {
         appendFileSync(lifecycle, `${JSON.stringify({ pid: process.pid, method: request.method })}\n`)
       if (request.id === undefined)
         continue
+      const startupFailure = path.join(process.env.CODEX_HOME, 'fixture-startup-failures.json')
+      if (existsSync(startupFailure)) {
+        const failure = JSON.parse(readFileSync(startupFailure, 'utf8'))
+        if (request.method === failure.method && failure.remaining > 0) {
+          failure.remaining--
+          failure.pids = [...(failure.pids ?? []), process.pid]
+          writeFileSync(startupFailure, JSON.stringify(failure))
+          process.exit(0)
+        }
+      }
+
       const initializationFailure = path.join(process.env.CODEX_HOME, 'fixture-initialize-error')
       const initializationWait = path.join(process.env.CODEX_HOME, 'fixture-initialize-wait')
       if (request.method === 'initialize' && existsSync(initializationWait)) {

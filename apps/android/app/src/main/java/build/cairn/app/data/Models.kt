@@ -152,7 +152,8 @@ data class Snapshot(
     val skills: List<SnapshotSkill> = emptyList(),
 )
 
-@Serializable data class RunRetryCause(val kind: String, val message: String)
+@Serializable
+data class RunRetryCause(val kind: String, val message: String, val startup: Boolean = false)
 
 @Serializable
 data class RunRetry(
@@ -160,6 +161,8 @@ data class RunRetry(
     val limit: Int,
     val nextAttemptAt: Long? = null,
     val cause: RunRetryCause,
+    val startedAt: Long? = null,
+    val deadlineAt: Long? = null,
 )
 
 @Serializable

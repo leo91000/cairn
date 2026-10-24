@@ -34,7 +34,7 @@ pub(super) async fn schedule(
                 .run(&id)?
                 .ok_or_else(|| Error::not_found("Run not found"))?;
             if !run["cancelRequestedAt"].is_null()
-                || !run["sessionId"].is_string()
+                || (!run["sessionId"].is_string() && !cause.startup)
                 || !RunStatus::of(&run).is_some_and(RunStatus::is_active)
             {
                 return Ok(false);
@@ -70,4 +70,36 @@ pub(super) async fn schedule(
             Ok(true)
         })
         .await
+}
+
+/// Expire a delayed recovery only after its old execution has been fenced.
+pub(super) async fn expire(s: &Service, id: &str) -> Result<bool> {
+    let id = id.to_owned();
+    s.store.transaction(move |db| {
+        let run = db.run(&id)?.ok_or_else(|| Error::not_found("Run not found"))?;
+        if run["status"] != RunStatus::Queued || !run["cancelRequestedAt"].is_null()
+            || !Retry::expired(&run, now())
+        {
+            return Ok(false);
+        }
+        match crate::conversation_lifecycle::require_active_run(db, &id) {
+            Ok(()) => {},
+            Err(error) if error.is_conflict() => return Ok(false),
+            Err(error) => return Err(error),
+        }
+        let message = "Automatic recovery reached its 10-minute limit. Your conversation and files are preserved; resume when ready.";
+        let mut retry = run["retry"].clone();
+        retry["nextAttemptAt"] = serde_json::Value::Null;
+        db.patch_run(&id, &json!({
+            "status": RunStatus::Failed,
+            "finishedAt": now(),
+            "error": message,
+            "summary": message,
+            "accountWaitReason": null,
+            "recoveryPending": false,
+            "retry": retry,
+        }))?;
+        db.event(&id, "status", RunStatus::Failed.as_str(), None)?;
+        Ok(true)
+    }).await
 }

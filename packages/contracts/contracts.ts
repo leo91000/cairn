@@ -125,7 +125,10 @@ export interface Run {
     attempt: number
     limit: number
     nextAttemptAt: number | null
-    cause: { kind: 'connection' | 'timeout' | 'rate-limit' | 'server', message: string }
+    /** Optional on retained records written by older installations. */
+    startedAt?: number | null
+    deadlineAt?: number | null
+    cause: { kind: 'connection' | 'timeout' | 'rate-limit' | 'server', message: string, startup?: boolean }
   } | null
   nodeId?: string | null
   storage?: {
