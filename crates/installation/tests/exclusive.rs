@@ -200,7 +200,7 @@ async fn manager_acquisition_is_idempotent_fenced_and_released_before_waiting() 
     cairn_installation::chats::wait_for::schedule(
         &f.s,
         &f.token,
-        &json!({ "condition": { "type": "delay", "seconds": 30 }, "reason": "Remote result" }),
+        &json!({ "conditions": [{ "type": "delay", "seconds": 30 }], "reason": "Remote result" }),
     )
     .await
     .unwrap();

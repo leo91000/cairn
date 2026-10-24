@@ -1219,6 +1219,7 @@ internal fun ChatPage(
                                                         pauseWait,
                                                         settled = it.run?.status == "succeeded",
                                                         busy = state.busy,
+                                                        openRun = openRun,
                                                     )
                                                 },
                                         ) {

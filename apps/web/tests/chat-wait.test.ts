@@ -10,6 +10,7 @@ import {
   timeLeft,
   waitCountdown,
   waitLeft,
+  waitMembers,
   waitOutcome,
   waitProgress,
   waitStatus,
@@ -509,4 +510,90 @@ it('keeps mission wait events in one live card and resumes without a conversatio
     settled: true,
     canPause: false,
   })).toMatchObject({ current: true, pending: true, pausable: false })
+})
+
+describe('grouped waits', () => {
+  const runId = '11111111-2222-4333-8444-555555555555'
+  const group = {
+    type: 'group' as const,
+    mode: 'all' as const,
+    conditions: [{ type: 'run_finished' as const, runId }, checks],
+  }
+  const failed = {
+    state: 'completed',
+    type: 'run_finished',
+    runId,
+    status: 'failed',
+  }
+  const passed = {
+    state: 'completed',
+    type: 'github_pr_checks',
+    pluginId: 'github',
+    display: { tone: 'ok', title: 'Required checks passed', detail: '' },
+  }
+
+  it('names the group by its size and how many results arrived', () => {
+    const pending = wakeup({ condition: group, members: [{ observation: failed }, { display, nextCheckAt: 30_000 }] })
+    expect(waitTarget(pending)).toEqual({
+      kind: 'group',
+      title: 'Waiting for 2 results',
+      short: '1 of 2 results',
+      details: [],
+    })
+    expect(waitTarget(wakeup({ condition: group, members: [{}, {}] })).short).toBe('2 results')
+    const any = wakeup({ condition: { ...group, mode: 'any' }, members: [{}, {}] })
+    expect(waitTarget(any)).toMatchObject({ title: 'Waiting for the first of 2 results', short: 'First of 2 results' })
+    expect(waitCountdown(pending, 0)).toBe('up to 30 min')
+  })
+
+  it('lists each condition with its own progress', () => {
+    const members = waitMembers(wakeup({ condition: group, members: [{ observation: failed }, { display, nextCheckAt: 30_000, lastError: 'Temporarily unavailable' }] }))
+    expect(members).toEqual([
+      {
+        kind: 'run',
+        title: 'Cairn run',
+        details: ['11111111'],
+        runId,
+        outcome: { tone: 'error', title: 'The run failed', detail: '' },
+      },
+      {
+        kind: 'condition',
+        title: 'PR #193 checks',
+        details: ['0b2ddce'],
+        outcome: null,
+        nextCheckAt: 30_000,
+        lastError: 'Temporarily unavailable',
+      },
+    ])
+    // Without its plugin's words, a condition reads as its type.
+    expect(waitMembers(wakeup({ condition: group, members: [] }))[1]!.title).toBe('Github pr checks')
+  })
+
+  it('reads the final results from the observation, also without a wakeup', () => {
+    const observation = {
+      state: 'completed',
+      type: 'group',
+      mode: 'all',
+      members: [{ condition: group.conditions[0], result: failed }, { condition: checks, result: passed }],
+    }
+    const members = waitMembers(wakeup({ condition: group, members: [{}, { display }] }), observation)
+    expect(members.map(member => member.outcome?.title)).toEqual(['The run failed', 'Required checks passed'])
+    expect(waitMembers(null, observation).map(member => member.title)).toEqual(['Cairn run', 'Github pr checks'])
+    expect(observedTarget(observation)).toBe('2 results')
+    expect(observedTarget({ ...observation, mode: 'any' })).toBe('First of 2 results')
+  })
+
+  it('sums up a group by its most serious result, and never assumes missing ones', () => {
+    const observation = (state: string, mode: string, results: unknown[]) => ({
+      state,
+      type: 'group',
+      mode,
+      members: results.map(result => ({ condition: checks, result })),
+    })
+    expect(waitOutcome(observation('completed', 'all', [failed, passed]))).toEqual({ tone: 'error', title: 'All 2 results in', detail: '1 failed · 1 succeeded' })
+    expect(waitOutcome(observation('completed', 'all', [passed, passed]))).toEqual({ tone: 'ok', title: 'All 2 results in', detail: '' })
+    expect(waitOutcome(observation('completed', 'any', [null, passed]))).toEqual({ tone: 'ok', title: 'First result · Required checks passed', detail: '' })
+    expect(waitOutcome(observation('timed_out', 'all', [passed, null]))).toEqual({ tone: 'warning', title: 'Deadline reached', detail: '1 of 2 results' })
+    expect(waitOutcome(observation('timed_out', 'any', [null, null]))).toEqual({ tone: 'warning', title: 'Deadline reached', detail: 'No results yet' })
+  })
 })

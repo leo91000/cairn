@@ -11,6 +11,7 @@ import {
   it,
 } from 'vitest'
 import { createSSRApp, h } from 'vue'
+import { createMemoryHistory, createRouter } from 'vue-router'
 import { renderToString } from 'vue/server-renderer'
 
 const server = await createServer({
@@ -52,7 +53,10 @@ const observation = {
 const resolved: ActivityWait = { wakeup, observation }
 
 function render(wait: ActivityWait, live: Omit<LiveWait, 'settled'>) {
-  return renderToString(createSSRApp({ render: () => h(card, { wait, live: { settled: true, ...live } }) }))
+  const app = createSSRApp({ render: () => h(card, { wait, live: { settled: true, ...live } }) })
+  // Grouped runs link to their pages.
+  app.use(createRouter({ history: createMemoryHistory(), routes: [{ path: '/:path(.*)*', component: { render: () => null } }] }))
+  return renderToString(app)
 }
 
 it('an observed result only promises resumption while the wakeup is active', async () => {
@@ -82,4 +86,50 @@ it('names a plugin condition with its latest words, and falls back without them'
   const bare = { ...wakeup, display: null }
   expect(await render({ wakeup: bare }, { wakeup: bare, paused: false })).toContain('Waiting for a condition')
   expect(await render({ wakeup: null, observation: { state: 'completed', type: 'custom', pluginId: 'ci' } }, { wakeup: null, paused: false })).toContain('A condition')
+})
+
+it('lists the conditions of a group with their results as they arrive', async () => {
+  const runId = '11111111-2222-4333-8444-555555555555'
+  const group: ChatWakeup = {
+    ...wakeup,
+    wakeAt: Date.now() + 600_000,
+    condition: { type: 'group', mode: 'all', conditions: [{ type: 'run_finished', runId }, wakeup.condition as never] },
+    display: undefined,
+    members: [
+      {
+        observation: {
+          state: 'completed',
+          type: 'run_finished',
+          runId,
+          status: 'failed',
+        },
+      },
+      { display: wakeup.display, nextCheckAt: Date.now() + 20_000 },
+    ],
+  }
+  const live = await render({ wakeup: group }, { wakeup: group, paused: false })
+  expect(live).toContain('Waiting for 2 results')
+  expect(live).toContain('>All<')
+  expect(live).toContain('1/2')
+  expect(live).toContain('The run failed')
+  expect(live).toContain('PR #1 checks')
+  expect(live).toContain('Next check in 20 s')
+  expect(live).toContain(`/runs/${runId}`)
+
+  const first = {
+    state: 'completed',
+    type: 'group',
+    mode: 'any',
+    members: [
+      { condition: { type: 'run_finished', runId }, result: null },
+      { condition: wakeup.condition, result: observation },
+    ],
+  }
+  const any = { ...group, condition: { ...group.condition!, mode: 'any' } } as ChatWakeup
+  const resumed = await render({ wakeup: any, observation: first, resumedAt: 2000 }, { wakeup: null, paused: false })
+  expect(resumed).toContain('First result · Required checks passed')
+  expect(resumed).toContain('>Any<')
+  // The conversation moved on: the list folds behind its meter.
+  expect(resumed).toContain('aria-expanded="false"')
+  expect(resumed).not.toContain('data-testid="wait-member"')
 })

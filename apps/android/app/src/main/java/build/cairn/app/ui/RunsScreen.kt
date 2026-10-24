@@ -443,6 +443,7 @@ fun RunScreen(
                                                 paused = false,
                                                 settled = current.status == "waiting",
                                                 canPause = false,
+                                                openRun = openRun,
                                             )
                                     ) {
                                         TimelineRow(

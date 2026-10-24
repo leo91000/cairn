@@ -1,8 +1,13 @@
-import type { ChatView, ChatWakeup } from '../../../packages/contracts/chats'
+import type {
+  ChatView,
+  ChatWakeup,
+  WaitCondition,
+  WaitGroup,
+} from '../../../packages/contracts/chats'
 import type { ActivityWait } from './activity'
 
-/** What a conversation waits for: a timer, a plugin's condition or another Cairn run. */
-export type WaitKind = 'timer' | 'condition' | 'run'
+/** What a conversation waits for: a timer, a plugin's condition, another Cairn run, or several of them. */
+export type WaitKind = 'timer' | 'condition' | 'run' | 'group'
 export type WaitTone = 'ok' | 'error' | 'warning' | 'neutral'
 
 export interface WaitTarget {
@@ -59,8 +64,98 @@ export function waited(ms: number) {
   return minutes < 1 ? 'under a minute' : timeLeft(minutes * 60000)
 }
 
-export function waitTarget(wakeup: Pick<ChatWakeup, 'condition' | 'display' | 'wakeAt'>, now = Date.now()): WaitTarget {
+/** One condition of a group, as its card lists it. */
+export interface WaitMember {
+  kind: 'condition' | 'run'
+  title: string
+  details: string[]
+  /** The run it waits for, which its row links to. */
+  runId?: string
+  /** Its result, once it has one; failures included. */
+  outcome: WaitOutcome | null
+  /** A plugin condition Cairn still checks: when it checks again, and why its last check failed. */
+  nextCheckAt?: number
+  lastError?: string
+}
+
+type Observation = Record<string, unknown> | null | undefined
+
+export function waitGroup(condition: ChatWakeup['condition'] | null | undefined): WaitGroup | null {
+  return condition?.type === 'group' && Array.isArray((condition as WaitGroup).conditions) ? condition as WaitGroup : null
+}
+
+function groupObservation(observation: Observation) {
+  return observation?.type === 'group' && Array.isArray(observation.members)
+    ? observation.members as { condition?: WaitCondition, result?: Observation }[]
+    : null
+}
+
+function capitalized(value: string) {
+  return value ? value[0]!.toUpperCase() + value.slice(1) : value
+}
+
+/**
+ * The conditions of a group, each with its result as soon as it has one: from the final result
+ * when the wait ended, otherwise from the progress Cairn records on the pending wakeup.
+ */
+export function waitMembers(wakeup: Pick<ChatWakeup, 'condition' | 'members'> | null | undefined, observation?: Observation): WaitMember[] {
+  const final = groupObservation(observation)
+  const conditions = waitGroup(wakeup?.condition)?.conditions ?? final?.map(member => member?.condition) ?? []
+  return conditions.map((condition, index) => {
+    const progress = wakeup?.members?.[index]
+    const result = final ? final[index]?.result : progress?.observation
+    const outcome = result && typeof result === 'object' && result.state ? waitOutcome(result) : null
+    if (condition?.type === 'run_finished') {
+      const runId = String((condition as { runId: string }).runId ?? '')
+      return {
+        kind: 'run',
+        title: 'Cairn run',
+        details: runId ? [runId.slice(0, 8)] : [],
+        runId: runId || undefined,
+        outcome,
+      }
+    }
+
+    // A plugin condition reads as its plugin words it, or by its type.
+    const display = progress?.display
+    const title = display?.short || display?.title || capitalized(words(String(condition?.type ?? 'condition')))
+    return {
+      kind: 'condition',
+      title,
+      details: display?.details ?? [],
+      outcome,
+      ...(outcome || !progress?.nextCheckAt ? {} : { nextCheckAt: progress.nextCheckAt }),
+      ...(outcome || !progress?.lastError ? {} : { lastError: progress.lastError }),
+    }
+  })
+}
+
+/** A group's words: how many conditions, and whether it waits for each of them or for the first. */
+function groupTarget(group: WaitGroup, members: WaitMember[]): WaitTarget {
+  const count = group.conditions.length
+  const received = members.filter(member => member.outcome).length
+  if (group.mode === 'any') {
+    return {
+      kind: 'group',
+      title: `Waiting for the first of ${count} results`,
+      short: `First of ${count} results`,
+      details: [],
+    }
+  }
+
+  return {
+    kind: 'group',
+    title: `Waiting for ${count} results`,
+    short: received ? `${received} of ${count} results` : `${count} results`,
+    details: [],
+  }
+}
+
+export function waitTarget(wakeup: Pick<ChatWakeup, 'condition' | 'display' | 'wakeAt'> & Partial<Pick<ChatWakeup, 'members'>>, now = Date.now()): WaitTarget {
   const condition = wakeup.condition
+  const group = waitGroup(condition)
+  if (group)
+    return groupTarget(group, waitMembers(wakeup))
   if (condition?.type === 'run_finished') {
     return {
       kind: 'run',
@@ -210,6 +305,9 @@ function resultDisplay(observation: Record<string, unknown>) {
 export function observedTarget(observation: Record<string, unknown> | null | undefined) {
   if (!observation)
     return ''
+  const members = groupObservation(observation)
+  if (members)
+    return observation.mode === 'any' ? `First of ${members.length} results` : `${members.length} results`
   if (observation.type === 'run_finished')
     return 'Another run'
   if (observation.type === 'time')
@@ -234,6 +332,9 @@ export function waitOutcome(observation: Record<string, unknown> | null | undefi
     return display
   if (state === 'completed' && observation.type === 'time')
     return { tone: 'neutral', title: 'Scheduled time reached', detail: '' }
+  const members = groupObservation(observation)
+  if (members)
+    return groupOutcome(observation, members)
   if (state === 'timed_out')
     return { tone: 'warning', title: 'Deadline reached without a result', detail: '' }
   if (state === 'unavailable')
@@ -257,4 +358,37 @@ export function waitOutcome(observation: Record<string, unknown> | null | undefi
   }
 
   return { tone: 'neutral', title: 'Wait finished', detail: '' }
+}
+
+/**
+ * A group's result: the first result for `any`, every result for `all`, with the most serious tone
+ * among them. Results that did not arrive before the deadline are counted, never assumed.
+ */
+function groupOutcome(observation: Record<string, unknown>, members: { result?: Observation }[]): WaitOutcome {
+  const outcomes = members.map(member => member?.result && typeof member.result === 'object' && member.result.state ? waitOutcome(member.result) : null)
+  const received = outcomes.filter(outcome => outcome !== null)
+  const count = members.length
+  if (observation.state === 'timed_out') {
+    return {
+      tone: 'warning',
+      title: 'Deadline reached',
+      detail: received.length ? `${received.length} of ${count} results` : 'No results yet',
+    }
+  }
+
+  if (observation.mode === 'any') {
+    const first = received[0]
+    return first ? { tone: first.tone, title: `First result · ${first.title}`, detail: '' } : { tone: 'neutral', title: 'Wait finished', detail: '' }
+  }
+
+  const failed = received.filter(outcome => outcome.tone === 'error').length
+  const warned = received.filter(outcome => outcome.tone === 'warning').length
+  const succeeded = received.filter(outcome => outcome.tone === 'ok').length
+  const tone: WaitTone = failed ? 'error' : warned ? 'warning' : succeeded === count ? 'ok' : 'neutral'
+  const parts = [
+    failed ? `${failed} failed` : '',
+    warned ? `${warned} to check` : '',
+    failed || warned ? `${succeeded} succeeded` : '',
+  ]
+  return { tone, title: `All ${count} results in`, detail: parts.filter(Boolean).join(' · ') }
 }

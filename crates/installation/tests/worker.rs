@@ -1077,7 +1077,7 @@ async fn sleeping_chat_survives_worker_restart_and_releases_capacity_before_waki
     let wake = cairn_installation::chats::wait_for::schedule(
         &s,
         token,
-        &json!({ "condition": { "type": "delay", "seconds": 15 }, "reason": "Wait for CI" }),
+        &json!({ "conditions": [{ "type": "delay", "seconds": 15 }], "reason": "Wait for CI" }),
     )
     .await
     .unwrap()["wakeup"]
@@ -1186,7 +1186,7 @@ async fn waiting_mission_survives_restart_and_releases_capacity_without_finishin
         &s,
         token,
         &json!({
-            "condition": { "type": "delay", "seconds": 15 }, "reason": "Wait for mission CI",
+            "conditions": [{ "type": "delay", "seconds": 15 }], "reason": "Wait for mission CI",
         }),
     )
     .await
@@ -1300,7 +1300,7 @@ async fn stopped_waiting_mission_manual_resume_starts_a_new_provider_turn() {
         .await
         .unwrap();
     cairn_installation::waits::schedule(&s, token, &json!({
-        "condition": { "type": "delay", "seconds": 600 }, "reason": "Wait for the remote result",
+        "conditions": [{ "type": "delay", "seconds": 600 }], "reason": "Wait for the remote result",
     })).await.unwrap();
     let waiting = fixture
         .until(run_id, |run| run["status"] == "waiting")
@@ -1386,7 +1386,7 @@ async fn condition_wait_yields_the_only_slot_to_its_dependency_and_resumes_the_s
         &s,
         token,
         &json!({
-            "condition": { "type": "run_finished", "runId": other["id"] },
+            "conditions": [{ "type": "run_finished", "runId": other["id"] }],
             "reason": "Join the dependency",
             "timeoutSeconds": 60,
         }),
