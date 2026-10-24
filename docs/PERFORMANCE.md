@@ -5,8 +5,7 @@ Measured on 2026-09-09 with Node 26.8.1, local SQLite WAL, 5,001 stored runs,
 Each endpoint had five warm-up requests and 50 measured requests through Fastify
 `inject`. This measures application/database work, not network or TLS latency.
 
-Reproduce with `pnpm exec tsx tests/performance.ts`. The script creates and removes
-an isolated temporary database and never uses real Codex credentials.
+Historical Node measurements; the obsolete benchmark harness has been removed.
 
 | Endpoint | Before median / p95 | After median / p95 | Before → after response |
 | --- | --- | --- | --- |

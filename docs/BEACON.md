@@ -42,8 +42,7 @@ Postgres database and build both binaries plus the web output before
 `pnpm test:e2e`. Handler and worker integration tests retain a test-only relay
 transport and task-author authority (`relay_fixture` / `worker_fixture`); these
 add no local browser login, OAuth issuer or application hosting. Historical
-Node modules under `tests/fixtures/legacy/` remain reference and SQLite seeding code,
-never a shipped server.
+Browser fixtures run the native installation and Beacon binaries, with synthetic email delivery.
 
 ## Production
 

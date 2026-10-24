@@ -8,9 +8,8 @@ small explicit fixture. Actual Codex/GitHub checks are recorded separately below
 ## Automated coverage
 
 This section records the original Node validation. The retired local-auth suite
-was removed during [F15's oracle inventory](LEGACY-ORACLE.md); the table below
-points to current authentication coverage. Retained Node suites are historical
-contract references, not evidence that the native implementation passed them.
+and all other Node oracle suites have been removed; the table below records
+historical evidence, with current native authentication coverage noted separately.
 
 `pnpm check` runs Antfu ESLint, TypeScript checks, 48 unit/integration tests, and the
 production Vue build. `pnpm test:e2e` runs three complete Chromium journeys plus
@@ -20,14 +19,14 @@ mobile layout/navigation passes in Chromium and WebKit.
 | --- | --- |
 | Rejection of removed installation login/setup, trusted identity, Origin/Host checks | `crates/installation/tests/http.rs` |
 | Beacon OAuth client/redirect/PKCE/resource binding, expired/replayed codes, refresh rotation/reuse, scope checks, revocation | `crates/beacon/tests/public_mcp.rs` |
-| Immutable snapshots, concurrent enqueue, task reference protection, sanitized Git origin metadata | `scripts/tests/service.test.ts` |
-| Cron validation, pause, catch-up once, overlap, spring/autumn DST | `scripts/tests/service.test.ts` |
-| Actual global/project skill files, frontmatter validation, nested supporting files, traversal and symlink escapes | `scripts/tests/service.test.ts` |
-| Actual subprocess output, malformed JSON, usage/session capture, redaction, failures, cancellation, timeout, legacy restart interruption | `scripts/tests/worker.test.ts` |
-| Project execution serialization, isolated Git worktree, dirty primary preservation, guarded cleanup | `scripts/tests/worker.test.ts` |
-| Device-code parsing and process completion | `scripts/tests/worker.test.ts` |
-| Official MCP v2 client over TCP, independent requests, no session ID, tools, scopes, stateless 2025-06-18/2025-11-25 compatibility, revoked access | `scripts/tests/mcp.test.ts` |
-| Durable reopen, transaction rollback, expired records, schema downgrade refusal, compact pagination, archival restrictions | `scripts/tests/store.test.ts` |
+| Immutable snapshots, concurrent enqueue, task reference protection, sanitized Git origin metadata | Historical Node `service` suite (removed) |
+| Cron validation, pause, catch-up once, overlap, spring/autumn DST | Historical Node `service` suite (removed) |
+| Actual global/project skill files, frontmatter validation, nested supporting files, traversal and symlink escapes | Historical Node `service` suite (removed) |
+| Actual subprocess output, malformed JSON, usage/session capture, redaction, failures, cancellation, timeout, legacy restart interruption | Historical Node `worker` suite (removed) |
+| Project execution serialization, isolated Git worktree, dirty primary preservation, guarded cleanup | Historical Node `worker` suite (removed) |
+| Device-code parsing and process completion | Historical Node `worker` suite (removed) |
+| Official MCP v2 client over TCP, independent requests, no session ID, tools, scopes, stateless 2025-06-18/2025-11-25 compatibility, revoked access | Historical Node `mcp` suite (removed) |
+| Durable reopen, transaction rollback, expired records, schema downgrade refusal, compact pagination, archival restrictions | Historical Node `store` suite (removed) |
 | Setup → profile → project → skill → scheduled task → real fixture run → result → reload → pause → mobile navigation → logout | Browser journey 1 |
 | Supporting-file write/read/preview, running cancellation, archive/restore, retained history | Browser journey 2 |
 | OAuth consent through login, redirect callback, code exchange, settings revocation, denied MCP access | Browser journey 3 |
@@ -230,4 +229,4 @@ Live ChatGPT/Claude linking, marketplace listing, and Coolify deployment require
 final reachable deployment/account configuration and are not established by local
 SDK/browser tests. Platform submission requirements are documented in [MCP.md](MCP.md).
 
-Restart recovery is covered by `scripts/tests/restart.test.ts` (real SIGTERM/SIGKILL process loss, session retention/discovery, cancellation, timeout, policy changes, account selection, runner fencing, and the real isolated-run client with a controlled broker outage) and `scripts/tests/runner-lifecycle.test.ts` (in-flight/delayed container starts). `tests/e2e/task-focus.spec.ts` checks automatic browser reconnection and manual conversation resume, with mobile dark and desktop light screenshots.
+The historical Node restart and runner-lifecycle suites have been removed. Current native process recovery is covered by `crates/installation/tests/worker.rs`; native runner fencing is tested in `crates/installation/src/runner/broker.rs`. `tests/e2e/task-focus.spec.ts` checks automatic browser reconnection and manual conversation resume, with mobile dark and desktop light screenshots.

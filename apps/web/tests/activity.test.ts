@@ -1,7 +1,6 @@
 import type { RunEvent } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
 import sample from '../../../tests/fixtures/activity-events.json'
-import { redactPayload } from '../../../tests/fixtures/legacy/server/worker.ts'
 import {
   activityEntries,
   ActivityGroups,
@@ -366,9 +365,6 @@ describe('conversation activity', () => {
     if (entries[1].kind !== 'group')
       throw new Error('Expected a group')
     expect(entries[1].artifacts[0].blocks[0].code).toBe('8 tests passed')
-  })
-  it('redacts structured tool arguments and nested text before persistence', () => {
-    expect(redactPayload({ arguments: { access_token: 'private-value' }, result: { text: 'Bearer private-token' } })).toEqual({ arguments: { access_token: '[redacted]' }, result: { text: 'Bearer [redacted]' } })
   })
 })
 

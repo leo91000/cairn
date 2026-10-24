@@ -1065,3 +1065,19 @@ async fn images_and_files_reach_start_and_steer_as_readable_inputs() {
             .any(|i| i["path"] == "/run/cairn-chat/attachments/image-id/design.png")
     );
 }
+
+#[test]
+fn structured_tool_payloads_redact_credentials_and_nested_output() {
+    let event = json!({
+        "arguments": { "access_token": "private-value", "query": "public query" },
+        "result": [{ "text": "Bearer private-token" }, { "nested": ["a configured-secret value"] }],
+    });
+    let redacted = cairn_installation::run_output::payload(&event, &["configured-secret".into()]);
+    assert_eq!(
+        redacted,
+        json!({
+            "arguments": { "access_token": "[redacted]", "query": "public query" },
+            "result": [{ "text": "Bearer [redacted]" }, { "nested": ["a [redacted] value"] }],
+        })
+    );
+}

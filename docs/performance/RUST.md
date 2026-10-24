@@ -6,9 +6,7 @@ below remain slightly slower. These are local measurements, not production SLAs.
 
 ## Method
 
-Run `cargo build --locked --release --bin cairn`, then
-`node --import tsx scripts/benchmark-backend.mjs`. Set `TMPDIR` to a directory on a
-real disk when `/tmp` is tmpfs. The recorded run used ext4, an Intel i9-14900K,
+The comparative Node harness has been removed. The recorded run used ext4, an Intel i9-14900K,
 Linux 7.2.3, Node 26.8.1, Rust 1.97.1 and two Tokio worker threads. Production's
 Node agent toolkit uses Node 24; this comparison does not establish its performance.
 

@@ -332,7 +332,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
   virtualAgents = undefined
 
   function history(events: RunEvent[]) {
-    workspace.service.store.db.prepare('DELETE FROM events WHERE run_id=?').run(run.id)
+    workspace.service.store.clearEvents(run.id)
     for (const event of events)
       workspace.service.store.event(run.id, event.type, event.text, event.payload)
   }

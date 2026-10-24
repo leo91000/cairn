@@ -123,11 +123,10 @@ runs (`.env` is used by Compose, not loaded automatically by the development ser
 pnpm check                       # ESLint, rustfmt, types, JS tests and frontend build
 pnpm test:backend                # Native backend integration and migration tests
 cargo clippy --all-targets -- -D warnings
-cargo build --locked --workspace --bin cairn --bin cairn-beacon --example worker_fixture # Browser and worker test binaries
+cargo build --locked --workspace --bin cairn --bin cairn-beacon --example worker_fixture --example browser_fixture # Browser and worker test binaries
 pnpm exec playwright install chromium
 pnpm test:e2e                    # Real beacon + installation binaries (disposable Postgres URL required)
 pnpm build:backend               # Optimized native production binary
-node --import tsx scripts/benchmark-backend.mjs # Node/Rust comparison
 pnpm lint:fix                    # ESLint fixes and Rust formatting
 pnpm format:android              # Kotlin and Gradle Kotlin formatting (requires JDK)
 ```
@@ -139,9 +138,6 @@ apply the same isolation before starting their fixtures.
 Browser tests start a separate application, isolated home, and fixture project;
 they never use your Codex credentials. The fixture runner is only in the test suite
 and is absent from the production image.
-
-[Rust backend architecture and migration](docs/RUST-BACKEND.md) describes the
-runtime, database compatibility, execution supervision and performance evidence.
 
 ## Operations and boundaries
 
