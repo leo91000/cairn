@@ -27,7 +27,7 @@ struct Controller {
 /// Older controllers report admission pressure as a plain 503 error. Normalize
 /// only their known capacity refusals into the manager's existing wait contract.
 fn startup_rejection(status: StatusCode, reason: Option<&str>) -> String {
-    let mut message = format!("VM controller rejected startup (HTTP {status}).");
+    let mut message = format!("Execution controller rejected startup (HTTP {status}).");
     if let Some(reason) = reason {
         message.push(' ');
         message.push_str(reason);
@@ -59,7 +59,7 @@ impl Controller {
             .timeout(Duration::from_secs(30))
             .send()
             .await
-            .map_err(|_| Error::unavailable("VM controller could not start the run."))?;
+            .map_err(|_| Error::unavailable("Execution controller could not start the run."))?;
         if !response.status().is_success() {
             let status = response.status();
             let mut body = Vec::new();
@@ -97,9 +97,9 @@ impl Controller {
             .bearer_auth(&self.token)
             .send()
             .await
-            .map_err(|_| Error::unavailable("Could not read VM output."))?;
+            .map_err(|_| Error::unavailable("Could not read execution output."))?;
         if !logs.status().is_success() {
-            return Err(Error::unavailable("Could not read VM output."));
+            return Err(Error::unavailable("Could not read execution output."));
         }
         Ok(logs)
     }
@@ -111,16 +111,16 @@ impl Controller {
             .bearer_auth(&self.token)
             .send()
             .await
-            .map_err(|_| Error::unavailable("Could not wait for VM."))?;
+            .map_err(|_| Error::unavailable("Could not wait for execution."))?;
         let value: Value = response
             .json()
             .await
-            .map_err(|_| Error::unavailable("VM completion connection was interrupted."))?;
+            .map_err(|_| Error::unavailable("Execution completion connection was interrupted."))?;
         value["StatusCode"]
             .as_i64()
             .filter(|n| (0..=255).contains(n))
             .map(|n| n as i32)
-            .ok_or_else(|| Error::bad("Invalid VM exit status."))
+            .ok_or_else(|| Error::bad("Invalid execution exit status."))
     }
 
     async fn run(&self) -> Result<i32> {
@@ -152,7 +152,7 @@ async fn relay_output(logs: reqwest::Response) -> Result<()> {
     loop {
         let event = wire::read(&mut reader).await.map_err(|error| {
             if error.status == 500 {
-                Error::unavailable("VM output connection was interrupted.")
+                Error::unavailable("Execution output connection was interrupted.")
             } else {
                 error
             }
@@ -165,13 +165,13 @@ async fn relay_output(logs: reqwest::Response) -> Result<()> {
         let Event::Output {
             stderr: to_stderr,
             data,
-        } = wire::decode(event, "Invalid VM output.")?
+        } = wire::decode(event, "Invalid execution output.")?
         else {
             continue;
         };
         let bytes = STANDARD
             .decode(data)
-            .map_err(|_| Error::bad("Invalid VM output."))?;
+            .map_err(|_| Error::bad("Invalid execution output."))?;
         if to_stderr {
             stderr.write_all(&bytes).await?;
         } else {
@@ -206,5 +206,27 @@ pub async fn client(id: &str, stop: CancellationToken) -> Result<i32> {
         }
         Ok(STOPPED) if !stop.is_cancelled() => Ok(CONTROLLER_INTERRUPTED),
         result => result,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_rejections_are_backend_neutral_and_preserve_capacity_detection() {
+        let message = startup_rejection(
+            StatusCode::CONFLICT,
+            Some("Native workspace is still active."),
+        );
+        assert!(message.starts_with("Execution controller rejected startup"));
+        assert!(message.ends_with("Native workspace is still active."));
+        for reason in [
+            "All VM slots are occupied.",
+            "The native execution slot is occupied.",
+        ] {
+            let message = startup_rejection(StatusCode::SERVICE_UNAVAILABLE, Some(reason));
+            assert!(message.starts_with(crate::nodes::placement::NO_CAPACITY));
+        }
     }
 }
