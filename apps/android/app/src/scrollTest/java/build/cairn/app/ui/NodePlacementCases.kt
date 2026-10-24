@@ -704,6 +704,7 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Basculement en cours", substring = true).assertExists()
             privilegeStatus.set("failed")
             compose.waitUntil(20000) {
+                compose.mainClock.advanceTimeBy(500)
                 elapse(500)
                 compose
                     .onAllNodesWithText("Échec du basculement", substring = true)
@@ -712,6 +713,7 @@ abstract class NodePlacementCases {
             }
             privilegeStatus.set("applied")
             compose.waitUntil(20000) {
+                compose.mainClock.advanceTimeBy(500)
                 elapse(500)
                 compose
                     .onAllNodesWithText("Mode de node confirmé : Natif administrateur")
