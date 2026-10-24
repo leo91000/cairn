@@ -112,6 +112,8 @@ export interface NodeEnrollment {
   nodeId?: string
   backend?: 'firecracker' | 'native'
   installCommand?: string | null
+  // `beacon` when Beacon introduces the machine to the manager, without an address.
+  route?: 'beacon' | 'direct'
   managerUrl?: string | null
   code: string
   expiresAt: number

@@ -350,8 +350,8 @@ def install(manager):
     select(directory)
     Path('/etc/systemd/system/' + SERVICE).write_text('''[Unit]
 Description=Cairn native execution node
-After=network-online.target
-Wants=network-online.target
+After=network-online.target cairn-node-gateway.service
+Wants=network-online.target cairn-node-gateway.service
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 /opt/cairn-native/host.py run

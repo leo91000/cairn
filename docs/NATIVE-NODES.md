@@ -19,6 +19,8 @@ The installation manager and its S3 storage must be configured normally.
 
 As the installation owner, open Nodes, add a machine and choose Native process.
 Use the generated installer on that node and enter the single-use code when asked.
+Without a direct manager address, it first installs the node gateway, which Beacon
+introduces to the manager ([additional execution nodes](DEPLOYMENT.md#additional-execution-nodes)).
 The installer creates `cairn-workload`, installs a root-owned systemd controller,
 and leaves native execution disabled. In Configure, explicitly enable native work,
 select trusted people and conservative CPU/RAM/disk limits. Configure a native
@@ -107,9 +109,12 @@ user-managed tools under the private home. Respect repository version pins.
 Native runtime updates verify the complete tool inventory before activation.
 Supervisors installed before the Codex companion was bundled recognize only the
 original five executables: they reject the expanded archive and keep the previous
-runtime active. Refresh their supervisor once after updating the manager. Wait for
-the node to be idle, then run the following on the native host, replacing the origin
-with the direct HTTPS origin of its installation:
+runtime active. Refresh their supervisor once after updating the manager: rerun the
+node's installation command from Nodes → Add a machine (no new code is needed for an
+enrolled node), then `sudo systemctl restart cairn-native-node` once it is idle.
+Equivalently, wait for the node to be idle, then run the following on the native
+host, replacing the origin with its manager origin (`http://127.0.0.1:4319` for a
+node using the gateway):
 
 ```sh
 sudo sh -eu <<'SH'
@@ -225,7 +230,8 @@ and `cairn-workload` account before removing the systemd unit and running
 `systemctl daemon-reload`. The Revoke dialog shows one command that lists such mounts
 and stops before deleting anything, including when mount enumeration fails. It keeps
 the unit file until the directories and account are gone, and skips stopping a unit
-that no longer exists, so it can be rerun after any failed step. The
+that no longer exists, so it can be rerun after any failed step. When no Firecracker
+node remains on the machine, it also removes the node gateway. The
 installer leaves GPU drivers and the personal desktop session untouched.
 
 Claude's broker and CLI use a separate writable transient secure store for

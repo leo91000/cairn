@@ -1,4 +1,5 @@
 pub(crate) mod direct;
+pub(crate) mod nodes;
 
 use super::{ApiError, Service, digest, installations};
 use axum::{
@@ -12,8 +13,9 @@ use axum::{
 };
 use cairn_protocol::direct::{DIRECT_VERSION, DirectRevocation, SignalBudget, unix_time};
 use cairn_protocol::{
-    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_NOTIFICATION_IN_FLIGHT,
-    MAX_PUBLIC_IN_FLIGHT, MAX_STREAM_CHUNK, REQUEST_TIMEOUT, Role,
+    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_NODE_CHANNELS,
+    MAX_NOTIFICATION_IN_FLIGHT, MAX_PUBLIC_IN_FLIGHT, MAX_STREAM_CHUNK, NODE_CHANNEL_VERSION,
+    REQUEST_TIMEOUT, Role,
 };
 use futures_util::{SinkExt, StreamExt};
 use sqlx_core::query_as::query_as;
@@ -62,6 +64,13 @@ struct Tunnel {
     slots: Arc<Semaphore>,
     stream_slots: Arc<Semaphore>,
     public_slots: Arc<Semaphore>,
+    node_requests: mpsc::Sender<Frame>,
+    // Node sockets waiting for the installation to open its side.
+    node_channels: Mutex<HashMap<String, oneshot::Sender<WebSocket>>>,
+    // Node offers waiting for the installation's answer.
+    node_offers: Mutex<HashMap<String, oneshot::Sender<Option<String>>>>,
+    node_slots: Arc<Semaphore>,
+    node_address_slots: Mutex<HashMap<String, Weak<Semaphore>>>,
     // Replacing a connection closes the old generation and its pending replies.
     stop: watch::Sender<bool>,
     installation_revoked: AtomicBool,
@@ -328,6 +337,7 @@ async fn serve_socket(
     let (control, mut controls) =
         mpsc::channel::<Frame>((MAX_IN_FLIGHT + MAX_PUBLIC_IN_FLIGHT) * 2);
     let (signaling, mut signals) = mpsc::channel::<Frame>(cairn_protocol::direct::MAX_DIRECT_QUEUE);
+    let (node_requests, mut node_frames) = mpsc::channel::<Frame>(MAX_NODE_CHANNELS);
     let Ok(key) = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
     else {
         return;
@@ -348,6 +358,11 @@ async fn serve_socket(
         slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
         stream_slots: Arc::new(Semaphore::new(cairn_protocol::MAX_STREAMS)),
         public_slots: Arc::new(Semaphore::new(MAX_PUBLIC_IN_FLIGHT)),
+        node_requests,
+        node_channels: Mutex::new(HashMap::new()),
+        node_offers: Mutex::new(HashMap::new()),
+        node_slots: Arc::new(Semaphore::new(MAX_NODE_CHANNELS)),
+        node_address_slots: Mutex::new(HashMap::new()),
         stop,
         installation_revoked: AtomicBool::new(false),
     });
@@ -644,6 +659,12 @@ async fn serve_socket(
                     break;
                 }
             }
+            Some(frame) = node_frames.recv(), if version >= NODE_CHANNEL_VERSION => {
+                let message = serde_json::to_string(&frame).unwrap();
+                if socket.send(Message::Text(message.into())).await.is_err() {
+                    break;
+                }
+            }
             Some(frame) = signals.recv(), if version >= DIRECT_VERSION => {
                 let current = match &frame {
                     Frame::DirectAuthorize { authorization, .. }
@@ -717,6 +738,12 @@ async fn serve_socket(
                             }
                             Frame::DirectSignal { id, signal, .. } if version >= DIRECT_VERSION => {
                                 direct::receive_signal(&tunnel, &id, signal);
+                                None
+                            }
+                            Frame::NodeAnswer { id, sdp } if version >= NODE_CHANNEL_VERSION => {
+                                if let Some(reply) = tunnel.node_offers.lock().unwrap().remove(&id) {
+                                    let _ = reply.send(sdp);
+                                }
                                 None
                             }
                             Frame::Response(response) => {
