@@ -847,6 +847,8 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
             } }),
         )
         .await;
+        // Queue an earlier heartbeat, as the random first heartbeat can do.
+        send(&mut socket, json!({ "op": 1 })).await;
         // A large server's GUILD_CREATE, well over what a script receives whole.
         let channels = (0..12_000)
             .map(|index| json!({ "id": format!("{}", 10_000 + index), "type": 0, "name": "x".repeat(80) }))
@@ -869,9 +871,22 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
         )
         .await;
         send(&mut socket, json!({ "op": 1 })).await;
-        let heartbeat = tokio::time::timeout(Duration::from_secs(1), receive(&mut socket))
-            .await
-            .expect("oversized thread routing must not block heartbeats on REST");
+        let heartbeat = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let heartbeat = receive(&mut socket).await;
+                let caught_up = heartbeat["d"]
+                    .as_u64()
+                    .is_some_and(|sequence| sequence >= 3);
+                if heartbeat["op"] != 1 || caught_up {
+                    break heartbeat;
+                }
+                // A periodic heartbeat can precede the requested one. Acknowledge
+                // it while waiting for the response after the large dispatch.
+                send(&mut socket, json!({ "op": 11 })).await;
+            }
+        })
+        .await
+        .expect("oversized thread routing must not block heartbeats on REST");
         assert_eq!(
             heartbeat,
             json!({ "op": 1, "d": 3 }),
