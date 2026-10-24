@@ -331,6 +331,34 @@ async fn health_and_deployment_lease_report_live_worker_ownership() {
             .unwrap()
             .is_none()
     );
+    // An abandoned updater must not hold the worker forever or prevent the next
+    // updater from acquiring ownership after its lease expires.
+    service
+        .store
+        .set(
+            "deployment-lease",
+            json!("abandoned-owner"),
+            Some(cairn_installation::config::now() - 1),
+        )
+        .await
+        .unwrap();
+    assert!(
+        service
+            .store
+            .kv("deployment-lease")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    service
+        .worker
+        .deployment_lease(&service, "next-owner".into(), false)
+        .await
+        .unwrap();
+    assert_eq!(
+        service.store.kv("deployment-lease").await.unwrap(),
+        Some(json!("next-owner"))
+    );
 }
 
 /// Sends `bytes` to an attachment endpoint.

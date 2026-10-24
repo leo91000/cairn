@@ -163,6 +163,44 @@ async fn run(s: &Service, plan: Value) -> (cairn_installation::error::Result<()>
 }
 
 #[tokio::test]
+async fn disk_notice_is_submitted_without_user_delivery_receipts_including_replay() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s).await;
+    tokio::fs::create_dir_all(root.path().join("inbox"))
+        .await
+        .unwrap();
+    tokio::fs::write(
+        root.path().join("inbox/disk-notice.json"),
+        json!({ "id": "disk-notice", "operationalNotice": true, "text": "Runtime disk pressure" })
+            .to_string(),
+    )
+    .await
+    .unwrap();
+    let input = plan(&root, "Build the status panel");
+    for _ in 0..2 {
+        let (result, events) = run(&s, input.clone()).await;
+        result.unwrap();
+        assert!(events.iter().any(|event| event["type"] == "turn.completed"));
+        assert!(
+            !events
+                .iter()
+                .any(|event| event["type"] == "chat.delivered"
+                    && event["messageId"] == "disk-notice")
+        );
+    }
+    let receipt = tokio::fs::read_to_string(root.path().join("result.opencode-receipt.json"))
+        .await
+        .unwrap();
+    assert!(
+        !serde_json::from_str::<Value>(&receipt).unwrap()["delivered"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("disk-notice"))
+    );
+}
+
+#[tokio::test]
 async fn native_turn_streams_and_completed_receipt_replays_without_an_engine() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;

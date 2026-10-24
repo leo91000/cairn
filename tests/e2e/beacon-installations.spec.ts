@@ -14,9 +14,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
-import { config as loadConfig } from '../fixtures/legacy/server/config'
-import { Service as SeedService } from '../fixtures/legacy/server/service'
-import { Store } from '../fixtures/legacy/server/store'
+import { NativeFixture } from './native-fixture'
 
 test('selects installations, remembers the last one and honours deep workspace URLs', async ({ page }) => {
   test.setTimeout(120000)
@@ -25,13 +23,13 @@ test('selects installations, remembers the last one and honours deep workspace U
   const messages: string[] = []
   let installationLog = ''
   await Promise.all([mkdir(join(root, 'data')), mkdir(join(root, 'home'))])
-  const seed = new SeedService(new Store(join(root, 'data')), loadConfig({
+  const seed = new NativeFixture({
     dataDir: join(root, 'data'),
     home: join(root, 'home'),
     workspaceRoots: [root],
     workerEnabled: false,
     logger: false,
-  }))
+  })
   const mail = createServer(async (request, response) => {
     if (new URL(request.url!, 'http://localhost').pathname === '/test-callback') {
       response.writeHead(200, { 'content-type': 'text/html' }).end('<!doctype html><title>MCP client</title><p>Authorization received</p>')
@@ -505,8 +503,6 @@ test('selects installations, remembers the last one and honours deep workspace U
       child.kill('SIGTERM')
       await exited
     }))
-    await seed.accounts.close()
-    seed.store.close()
     await new Promise<void>(resolve => mail.close(() => resolve()))
     await rm(root, { recursive: true, force: true })
   }

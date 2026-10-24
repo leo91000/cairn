@@ -77,6 +77,7 @@ Possibilité de travail vérifiée sur une node, distincte de la seule présence
 
 **Réservation de ressources** :
 Part des ressources d’une node attribuée à une exécution dans les plafonds configurés. Elle est prise en compte avant d’accepter d’autres travaux sur cette node.
+Pour le disque natif compatible, le manager protège aussi la capacité accordée mais encore inutilisée ; il peut l’agrandir automatiquement par incréments dans le budget commun. Le workspace et le `/tmp` géré consomment la même capacité.
 
 **Déplacement d’une conversation** :
 Changement de node d’exécution d’une même conversation, avec une pause puis une reprise de sa session et de son environnement de travail. Il ne conserve pas les processus en cours ni leur mémoire.

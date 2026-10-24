@@ -8,9 +8,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
-import { config as loadConfig } from '../fixtures/legacy/server/config'
-import { Service as SeedService } from '../fixtures/legacy/server/service'
-import { Store } from '../fixtures/legacy/server/store'
 
 test('reads and creates conversations through the previous relay protocol', async ({ page }) => {
   test.setTimeout(60000)
@@ -29,13 +26,6 @@ test('reads and creates conversations through the previous relay protocol', asyn
   const url = 'http://localhost:4495'
   const children: ChildProcess[] = []
   let previousPeer: WebSocket | undefined
-  const seed = new SeedService(new Store(join(root, 'data')), loadConfig({
-    dataDir: join(root, 'data'),
-    home: join(root, 'home'),
-    workspaceRoots: [root],
-    workerEnabled: false,
-    logger: false,
-  }))
 
   function start(binary: string, env: NodeJS.ProcessEnv) {
     const child = spawn(binary, [], { env: { ...process.env, ...env }, stdio: ['ignore', 'ignore', 'ignore'] })
@@ -151,8 +141,6 @@ test('reads and creates conversations through the previous relay protocol', asyn
       child.kill('SIGTERM')
       await exited
     }))
-    await seed.accounts.close()
-    seed.store.close()
     await new Promise<void>(resolve => mail.close(() => resolve()))
     await rm(root, { recursive: true, force: true })
   }

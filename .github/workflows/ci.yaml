@@ -87,7 +87,7 @@ jobs:
       - uses: ./.github/actions/cache-rust
       - name: Build the browser-test backend and frontend
         run: |
-          cargo build --locked --bin cairn --example worker_fixture --example network_direct_client --example network_qualification --example native_storage_qualifier --features ublk
+          cargo build --locked --bin cairn --example worker_fixture --example browser_fixture --example network_direct_client --example network_qualification --example native_storage_qualifier --features ublk
           cargo build --locked -p cairn-beacon --bin cairn-beacon --example network_stun_server
           pnpm exec vite build --config apps/web/vite.config.ts
       - uses: actions/upload-artifact@v7.0.1
@@ -98,6 +98,7 @@ jobs:
             target/debug/cairn-beacon
             target/debug/examples/native_storage_qualifier
             target/debug/examples/worker_fixture
+            target/debug/examples/browser_fixture
             target/debug/examples/network_direct_client
             target/debug/examples/network_qualification
             target/debug/examples/network_stun_server
@@ -424,7 +425,7 @@ jobs:
         with:
           name: browser-backend
           path: target/debug/
-      - run: chmod +x target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/worker_fixture
+      - run: chmod +x target/debug/examples/browser_fixture target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/worker_fixture
       - name: Install Postgres client for beacon account fixtures
         run: apt-get update -qq && apt-get install -y --no-install-recommends postgresql-client
       - run: |
@@ -497,7 +498,7 @@ jobs:
         with:
           name: browser-backend
           path: target/debug/
-      - run: chmod +x target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/network_stun_server
+      - run: chmod +x target/debug/examples/browser_fixture target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/network_stun_server
       - run: chmod +x target/debug/examples/network_qualification
       - run: pnpm exec vite build --config tests/network-qualification.vite.ts
       - name: Validate real network topology and authenticated sessions
@@ -586,7 +587,7 @@ jobs:
         with:
           name: browser-backend
           path: target/debug/
-      - run: chmod +x target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/network_stun_server
+      - run: chmod +x target/debug/examples/browser_fixture target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/network_stun_server
       - uses: actions/download-artifact@v8.0.1
         with:
           name: android-direct-apks

@@ -22,7 +22,7 @@ refer to third-party official tools or documentation, rather than Beacon:
   `tests/container-smoke.mjs`, `tests/fixtures/claude.mjs`: Claude Code/Codex
   official CLI or sign-in flow; the release note is historical evidence.
 - `crates/installation/tests/mcps.rs`, `docs/MCP.md`, `docs/PLAN.md`,
-  `docs/QA.md`, `docs/RUST-BACKEND.md`: official third-party MCP SDK clients.
+  `docs/QA.md`: official third-party MCP SDK clients.
 - `docs/AGENT-ACCOUNTS.md`, `docs/CLAUDE-CODE.md`, `docs/DEPLOYMENT.md`,
   `docs/ONEPASSWORD.md`, `docs/PLAN.md`: provider-owned CLIs, sign-in and protocols.
 - `docs/DELIVERABLES.md`: Mozilla's official PDF.js examples.

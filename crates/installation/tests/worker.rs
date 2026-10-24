@@ -73,33 +73,16 @@ impl Fixture {
     }
 
     async fn start(&mut self) {
-        self.start_backend(false).await;
-    }
-
-    /// Starts the worker process, or the former Node backend when `legacy`.
-    async fn start_backend(&mut self, legacy: bool) {
         let file = self.root.path().join("config.json");
-        let mut config = serde_json::to_value(&self.service.config).unwrap();
-        // The historical backend still runs its own GitHub CLI.
-        config["ghBin"] = "gh".into();
-        tokio::fs::write(&file, serde_json::to_vec(&config).unwrap())
+        tokio::fs::write(&file, serde_json::to_vec(&self.service.config).unwrap())
             .await
             .unwrap();
-        let mut command = if legacy {
-            let mut command = Command::new("node");
-            command
-                .args(["--import", "tsx"])
-                .arg(common::fixture_path("legacy-worker.mjs"));
-            command
-        } else {
-            let binary = std::path::Path::new(env!("CARGO_BIN_EXE_cairn"))
-                .parent()
-                .unwrap()
-                .join("examples/worker_fixture");
-            let mut command = Command::new(binary);
-            command.arg("serve");
-            command
-        };
+        let binary = std::path::Path::new(env!("CARGO_BIN_EXE_cairn"))
+            .parent()
+            .unwrap()
+            .join("examples/worker_fixture");
+        let mut command = Command::new(binary);
+        command.arg("serve");
         let usage = self.root.path().join("usage.json");
         if usage.exists() {
             command.env("CAIRN_FIXTURE_USAGE", usage);
@@ -1016,48 +999,6 @@ async fn chat_messages_invoke_dollar_skills_without_changing_the_visible_text() 
         s.chat_detail(&chat_id).await.unwrap()["messages"][0]["text"],
         request
     );
-    fixture.stop(false).await;
-}
-
-#[tokio::test]
-async fn migration_resumes_a_checkpoint_written_by_the_node_backend() {
-    let mut fixture = Fixture::new().await;
-    fixture.stop(false).await;
-
-    // Seed an actual version-4 fixture before asking the historical backend to
-    // create its checkpoint. A version-5 database must reject that executable.
-    fixture
-        .service
-        .store
-        .transaction(|db| {
-            let objects: i64 =
-                db.0.query_row("SELECT count(*) FROM shared_objects", [], |row| row.get(0))?;
-            assert_eq!(objects, 0);
-            db.0.execute_batch(
-                "DROP TABLE shared_references;
-                 DROP TABLE shared_publications;
-                 DROP TABLE shared_objects;
-                 DROP TABLE remote_deletions;
-                 PRAGMA user_version=4;",
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-
-    fixture.start_backend(true).await;
-    let run = fixture.enqueue("fixture:restart").await;
-    let id = text(&run, "id");
-    let running = fixture
-        .until(id, |r| r["sessionId"] == "fixture-session")
-        .await;
-    fixture.stop(true).await;
-    fixture.start().await;
-    let completed = fixture.until_finished(id).await;
-    assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
-    assert_eq!(completed["workspace"], running["workspace"]);
-    assert_eq!(completed["sessionId"], running["sessionId"]);
-    assert_eq!(completed["resumeCount"], 1);
     fixture.stop(false).await;
 }
 

@@ -1116,6 +1116,38 @@ fn provider_defaults_and_sandbox_arguments_preserve_boundaries() {
 }
 
 #[tokio::test]
+async fn disk_notice_reaches_engine_without_user_receipts_including_replay() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let input = plan(&root, "fixture:slow");
+    std::fs::write(
+        root.path().join("inbox/disk-notice.json"),
+        json!({ "id": "disk-notice", "operationalNotice": true,
+            "text": "fixture:slow Runtime disk pressure" })
+        .to_string(),
+    )
+    .unwrap();
+    let (result, events) = run_to_end(&c, input.clone()).await;
+    result.unwrap();
+    assert!(completes(&events));
+    let inputs = std::fs::read_to_string(c.home.join(".claude/user-messages.jsonl")).unwrap();
+    assert!(inputs.contains("Runtime disk pressure"));
+    for round in [events, run_to_end(&c, input).await.1] {
+        assert!(
+            !round
+                .iter()
+                .any(|event| event["type"] == "chat.delivered"
+                    && event["messageId"] == "disk-notice")
+        );
+        assert!(
+            round
+                .iter()
+                .any(|event| event["type"] == "chat.delivered" && event["messageId"] == "original")
+        );
+    }
+}
+
+#[tokio::test]
 async fn steering_waits_for_both_responses_and_acknowledges_each_message() {
     let root = TempDir::new().unwrap();
     let c = setup(&root);
