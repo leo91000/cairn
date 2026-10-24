@@ -280,6 +280,15 @@ pub(crate) fn authorize_origin(db: &Db<'_>, agent: &Value, source: &Origin) -> R
     if !native(agent) {
         return Ok(grant);
     }
+
+    // Only saved tasks are stored origins. An edit never replaces unknown provenance,
+    // so a fresh authenticated commitment is the only way back to native execution.
+    if matches!(source, Origin::Stored(_)) && grant["nativeProvenanceUnknown"] != false {
+        return Err(Error::forbidden(
+            "This mission has no recorded native authority, so it cannot run on a native node. A trusted person must create it again, for example by duplicating it.",
+        ));
+    }
+
     let mut run = json!({ "snapshot": { "agent": agent } });
     apply(&mut run, &grant);
     for node in db.list("nodes")? {

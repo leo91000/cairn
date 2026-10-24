@@ -19,7 +19,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -681,6 +683,18 @@ private fun MissionDetail(
                 }
         }
     }
+    task.scheduleFailure
+        ?.takeIf { task.enabled && !task.archived && task.cron != null }
+        ?.let {
+            Text(
+                "L’exécution prévue le ${date(it.scheduledFor)} n’a pas démarré : ${it.message}",
+                Modifier.fillMaxWidth().padding(top = 12.dp).semantics {
+                    liveRegion = LiveRegionMode.Polite
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = signal.attention,
+            )
+        }
     Surface(
         onClick = { promptExpanded = !promptExpanded },
         modifier = Modifier.fillMaxWidth().padding(top = 12.dp),

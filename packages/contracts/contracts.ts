@@ -98,6 +98,8 @@ export type Task = z.infer<typeof taskInput> & {
   authorId?: string | null
   authorRemoved?: boolean | null
   scheduleWaitReason?: string | null
+  /** The latest scheduled occurrence that could not start; cleared by the next admitted one. */
+  scheduleFailure?: { message: string, scheduledFor: number, at: number } | null
 }
 export type RunStatus
   = 'queued' | 'running' | 'waiting' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'
