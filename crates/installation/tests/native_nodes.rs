@@ -1483,6 +1483,53 @@ async fn revoked_native_permissions_still_allow_disabling_but_never_reenabling_a
 }
 
 #[tokio::test]
+async fn a_native_task_without_recorded_provenance_says_how_to_schedule_it_again() {
+    let f = Fixture::new().await;
+    trust_owner(&f).await;
+    // A task saved before its agent moved to the native backend.
+    let task = json!({
+        "id": id(),
+        "name": "Older commitment",
+        "prompt": "Original brief",
+        "agentId": f.agent["id"],
+        "cron": "0 9 * * *",
+        "timezone": "Europe/Paris",
+        "enabled": true,
+        "authorId": "fixture-owner",
+        "authorAccessId": "fixture-owner",
+        "createdAt": now(),
+        "nextRun": now(),
+        "nativeProvenanceUnknown": true,
+    });
+    f.service.store.put("tasks", task.clone()).await.unwrap();
+
+    let error = policy::CALLER
+        .scope(
+            Some("fixture-owner".into()),
+            f.service.task(task.clone(), task["id"].as_str()),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, 403, "{}", error.message);
+    assert!(
+        error.message.contains("no recorded native authority"),
+        "{}",
+        error.message
+    );
+
+    let mut duplicate = task.clone();
+    duplicate.as_object_mut().unwrap().remove("id");
+    let saved = policy::CALLER
+        .scope(
+            Some("fixture-owner".into()),
+            f.service.task(duplicate, None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved["nativeProvenanceUnknown"], false);
+}
+
+#[tokio::test]
 async fn scheduled_native_placement_rechecks_the_retained_author_even_on_older_provenance() {
     let f = Fixture::new().await;
     let mut run = f.run();
