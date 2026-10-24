@@ -176,6 +176,10 @@ struct Question {
     message_id: Option<String>,
 }
 
+// Codex persists client IDs in history. A reserved wire namespace preserves
+// operational identity across turns without changing provider message UUIDs.
+const OPERATIONAL_ID: &str = "cairn-runtime-disk:";
+
 struct Chat<'a> {
     session: &'a mut Session,
     events: mpsc::Sender<Value>,
@@ -228,7 +232,7 @@ impl Chat<'_> {
     }
 
     async fn acknowledge(&mut self, id: &str) -> Result<()> {
-        if self.seen.insert(id.to_owned()) {
+        if self.seen.insert(id.to_owned()) && !id.starts_with(OPERATIONAL_ID) {
             self.emit(json!({ "type": "chat.delivered", "messageId": id }))
                 .await?;
         }
@@ -999,8 +1003,13 @@ impl Chat<'_> {
         };
         for message in messages {
             let id = text(&message, "id");
+            let client_id = if message["operationalNotice"] == true {
+                format!("{OPERATIONAL_ID}{id}")
+            } else {
+                id.to_owned()
+            };
             if self.completed.is_some()
-                || self.seen.contains(id)
+                || self.seen.contains(&client_id)
                 || !self.attempted.insert(id.to_owned())
             {
                 continue;
@@ -1042,13 +1051,13 @@ impl Chat<'_> {
             let params = json!({
                 "threadId": self.thread,
                 "expectedTurnId": self.turn,
-                "clientUserMessageId": id,
+                "clientUserMessageId": client_id,
                 "input": input,
             });
             if self.request("turn/steer", params).await.is_err() {
                 break;
             }
-            self.acknowledge(id).await?;
+            self.acknowledge(&client_id).await?;
         }
         Ok(())
     }

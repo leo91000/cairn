@@ -9,12 +9,14 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicI64, Ordering},
+        atomic::{AtomicI64, AtomicU64, Ordering},
     },
 };
 
 const BLOCK: u64 = 4 * 1024 * 1024;
 const MAX_IO: usize = 8 * 1024 * 1024;
+
+mod growth;
 
 fn failure(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
@@ -32,7 +34,7 @@ pub trait BlockSource: Send + Sync {
 
 pub struct LazyDisk {
     directory: PathBuf,
-    size: u64,
+    size: AtomicU64,
     db: Mutex<Connection>,
     journal: Mutex<journal::Journal>,
     commit: Mutex<()>,
@@ -212,7 +214,7 @@ impl LazyDisk {
         let foreground = blocks.working_set(directory)?;
         Ok(Self {
             directory: directory.to_owned(),
-            size,
+            size: AtomicU64::new(size),
             db: Mutex::new(db),
             journal: Mutex::new(journal),
             commit: Mutex::new(()),
@@ -270,7 +272,7 @@ impl LazyDisk {
         if length > MAX_IO {
             return Err(failure("Disk request exceeds the I/O limit"));
         }
-        super::device::range(self.size, offset, length)
+        super::device::range(self.size(), offset, length)
     }
 
     fn cached_record(
@@ -282,7 +284,7 @@ impl LazyDisk {
         if let Some(bytes) = self.records.lock().map_err(failure)?.get(&key, foreground) {
             return Ok((record.start, bytes));
         }
-        let bytes = record.read(self.size)?;
+        let bytes = record.read(self.size())?;
         let bytes = self
             .records
             .lock()
@@ -649,7 +651,7 @@ impl LazyDisk {
         length: usize,
         mut write: impl FnMut(u64, &[u8]) -> io::Result<()>,
     ) -> io::Result<()> {
-        super::device::range(self.size, offset, length)?;
+        super::device::range(self.size(), offset, length)?;
         let sample = self.metrics.discards.start();
         let mut position = offset;
         let end = offset + length as u64;
@@ -680,7 +682,7 @@ impl LazyDisk {
 
 impl Disk for LazyDisk {
     fn size(&self) -> u64 {
-        self.size
+        self.size.load(Ordering::Acquire)
     }
 
     fn read_at(&self, offset: u64, bytes: &mut [u8]) -> io::Result<()> {

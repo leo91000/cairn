@@ -54,6 +54,7 @@ struct HeartbeatRequest<'a> {
     backend: &'a Value,
     node_protocol: &'a Value,
     native_mode: &'a Value,
+    disk_growth: &'a Value,
 }
 
 pub(crate) fn master(input: &str) -> Result<url::Url> {
@@ -489,6 +490,7 @@ async fn heartbeat(
             backend: &health["backend"],
             node_protocol: &health["nodeProtocol"],
             native_mode: &health["nativeMode"],
+            disk_growth: &health["diskGrowth"],
         };
         let request = client
             .post(
@@ -560,6 +562,18 @@ async fn heartbeat(
                         });
                     }
                     forward_leases(&controller, &runner, &value, started).await?;
+                    if health["diskGrowth"]["protocol"] == 1 && value["diskGrowth"]["protocol"] == 1
+                    {
+                        // The manager commits grants before this response. A lost
+                        // acknowledgement is retried with the same allowance.
+                        let _ = controller
+                            .post(format!("{}/disk-growth", runner.trim_end_matches('/')))
+                            .bearer_auth(runner_credential().await?)
+                            .json(&value["diskGrowth"])
+                            .timeout(Duration::from_secs(3))
+                            .send()
+                            .await;
+                    }
                     let budget = json!({ "slots": value["slots"], "limits": value["limits"] });
                     if health["budget"].is_object() && health["budget"] != budget {
                         let response = controller
