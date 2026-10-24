@@ -423,8 +423,13 @@ async fn inbox_directory(path: &Path) -> Result<()> {
 async fn install_native_inbox(source: &Path, target: &Path) -> Result<()> {
     prepare_native_inbox(source).await?;
     let messages = source.join("messages.json");
-    if !tokio::fs::symlink_metadata(&messages).await?.is_file() {
-        return Err(Error::bad("Native inbox messages are missing."));
+    match tokio::fs::symlink_metadata(&messages).await {
+        Ok(metadata) if metadata.is_file() => {}
+        // Non-chat runs can have no messages yet. Match the master's absent
+        // inbox semantics without replacing a directory mounted by the workload.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Ok(_) => return Err(Error::bad("Native inbox messages are missing.")),
+        Err(error) => return Err(error.into()),
     }
     inbox_directory(target).await?;
     let mut pending = vec![(source.to_owned(), target.to_owned())];
@@ -504,6 +509,36 @@ pub async fn auth_listener(
 mod native_inbox_tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;
+
+    #[tokio::test]
+    async fn empty_native_inbox_refresh_waits_for_messages_without_replacing_the_mount() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        crate::skills::private_dir(&source).await.unwrap();
+        crate::skills::private_dir(&target).await.unwrap();
+        let inode = tokio::fs::metadata(&target).await.unwrap().ino();
+        tokio::fs::write(target.join("messages.json"), b"[]")
+            .await
+            .unwrap();
+
+        install_native_inbox(&source, &target).await.unwrap();
+        assert_eq!(
+            tokio::fs::read(target.join("messages.json")).await.unwrap(),
+            b"[]"
+        );
+        assert_eq!(tokio::fs::metadata(&target).await.unwrap().ino(), inode);
+
+        tokio::fs::write(source.join("messages.json"), b"[1]")
+            .await
+            .unwrap();
+        install_native_inbox(&source, &target).await.unwrap();
+        assert_eq!(
+            tokio::fs::read(target.join("messages.json")).await.unwrap(),
+            b"[1]"
+        );
+        assert_eq!(tokio::fs::metadata(&target).await.unwrap().ino(), inode);
+    }
 
     #[tokio::test]
     async fn native_refresh_publishes_readable_attachments_before_messages() {
