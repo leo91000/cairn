@@ -365,6 +365,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn home_refresh_replays_pending_credential_metadata_before_replacing_its_inode() {
+        // A service account below UID/GID999 cannot own the synthetic engine
+        // identity without privilege. Use the repository's metadata-only tool
+        // on those hosts; ordinary CI UIDs exercise real same-owner operations.
+        if unsafe { libc::geteuid() } != 0
+            && (unsafe { libc::getuid() } < 999 || unsafe { libc::getgid() } < 999)
+        {
+            let module = module_path!().split_once("::").unwrap().1;
+            let status = tokio::process::Command::new("fakeroot")
+                .arg("--")
+                .arg(std::env::current_exe().unwrap())
+                .arg(format!("{module}::home_refresh_replays_pending_credential_metadata_before_replacing_its_inode"))
+                .args(["--exact", "--nocapture"])
+                .status()
+                .await
+                .expect("fakeroot is required for metadata tests under low-numbered service accounts");
+            assert!(status.success());
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let data = directory.path().join("data");
+        let source = directory.path().join("stage");
+        crate::skills::private_dir(&data.join("home/.codex"))
+            .await
+            .unwrap();
+        crate::skills::private_dir(&source.join(".codex"))
+            .await
+            .unwrap();
+        std::fs::write(source.join(".codex/auth.json"), b"synthetic-runtime-only").unwrap();
+        let target = data.join("home/.codex/auth.json");
+        std::fs::write(&target, b"").unwrap();
+        std::fs::write(data.join("home/notes"), b"durable user file").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let metadata = std::fs::metadata(&target).unwrap();
+        let identity = Identity {
+            user: "fixture".into(),
+            root_uid: metadata.uid() + 131072,
+            root_gid: metadata.gid() + 131072,
+            subuid: metadata.uid().saturating_sub(999),
+            subgid: metadata.gid().saturating_sub(999),
+        };
+        let transition = Transition {
+            previous: Some(identity.clone()),
+            target: identity.clone(),
+        };
+        let entry = capture(&data, &target, &transition).unwrap();
+        atomic_write(
+            &data.join(TRANSITION),
+            &serde_json::to_vec(&transition).unwrap(),
+        )
+        .await
+        .unwrap();
+        atomic_write(
+            &data.join(PENDING),
+            &serde_json::to_vec(&vec![entry]).unwrap(),
+        )
+        .await
+        .unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // Holding this inode prevents unlink/create from accidentally reusing it.
+        let old_target = std::fs::File::open(&target).unwrap();
+
+        let bindings = crate::native::home::prepare_for_identity(&source, &data, &identity)
+            .await
+            .unwrap();
+
+        assert_eq!(old_target.metadata().unwrap().mode() & 0o7777, 0o640);
+        let fresh = std::fs::metadata(&target).unwrap();
+        assert_ne!(fresh.ino(), old_target.metadata().unwrap().ino());
+        assert_eq!((fresh.uid(), fresh.gid()), (identity.uid(), identity.gid()));
+        assert!(std::fs::read(&target).unwrap().is_empty());
+        assert_eq!(
+            std::fs::read(data.join("home/notes")).unwrap(),
+            b"durable user file"
+        );
+        assert!(bindings.iter().any(|binding| binding.target
+            == Path::new("/home/node/.codex/auth.json")
+            && binding.read_only));
+        assert!(!data.join(PENDING).exists());
+        assert!(!data.join(TRANSITION).exists());
+        assert_eq!(
+            serde_json::from_slice::<Identity>(&std::fs::read(data.join(MARKER)).unwrap()).unwrap(),
+            identity
+        );
+    }
+
+    #[tokio::test]
     async fn pending_metadata_replay_restores_mode_even_after_ownership_changed() {
         let directory = tempfile::tempdir().unwrap();
         let data = directory.path();

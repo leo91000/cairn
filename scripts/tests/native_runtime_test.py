@@ -619,10 +619,35 @@ def main():
                 assert abs(owner_a['subuid'] - owner_b['subuid']) >= 65536
                 api('/runs/' + parallel, method='DELETE')
                 fenced(docker_other, parallel)
+                # Seed the durable state left after an interrupted ownership
+                # batch. A hard link keeps the old empty target inode alive
+                # across unmount, publication and restart without pinning mounts.
+                # Runtime credentials themselves must never enter this disk.
+                docker_data = state / 'native' / docker_run / 'data'
+                auth_target = docker_data / 'home/.codex/auth.json'
+                assert auth_target.read_bytes() == b''
+                pinned_target = docker_data / '.fixture-pinned-auth'
+                os.link(auth_target, pinned_target)
+                metadata = auth_target.stat()
+                recovery_mode = (metadata.st_mode & ~0o7777) | 0o640
+                entry = dict(relative=list(b'home/.codex/auth.json'), inode=metadata.st_ino,
+                    uid=metadata.st_uid, gid=metadata.st_gid, mode=recovery_mode,
+                    symlink=False, attributes=[], needs_apply=True)
+                (docker_data / '.cairn-identity.transition.json').write_text(json.dumps(dict(previous=owner_a, target=owner_a)))
+                (docker_data / '.cairn-identity.pending.json').write_text(json.dumps([entry]))
+                for name in ('.cairn-identity.transition.json', '.cairn-identity.pending.json'):
+                    (docker_data / name).chmod(0o600)
+                auth_target.chmod(0o600)
                 api('/runs/' + fresh, method='DELETE')
                 fenced(docker_run, fresh)
                 point = manager('publish', run=docker_run)
                 resumed_docker = start(docker_run, lease=300000, docker_script=docker_script('resume'))
+                assert stat.S_IMODE(pinned_target.stat().st_mode) == 0o640, 'Pending inode metadata was not replayed before home refresh.'
+                assert auth_target.stat().st_ino != pinned_target.stat().st_ino
+                assert not (docker_data / '.cairn-identity.pending.json').exists()
+                assert not (docker_data / '.cairn-identity.transition.json').exists()
+                pinned_target.unlink()
+                metrics['pendingHomeMetadataRecovered'] = True
                 metrics['dockerResume'] = docker_result(docker_run)
                 api('/runs/' + resumed_docker, method='DELETE')
                 fenced(docker_run, resumed_docker)
@@ -631,7 +656,7 @@ def main():
                 # disposable host. No controller/workload is using this account.
                 command('userdel', owner_a['user'])
                 blocker = 'cairn-test-' + identifier[:8]
-                command('useradd', '--system', '--user-group', '--no-create-home', '--uid', str(owner_a['root_uid']), blocker)
+                command('useradd', '--system', '--user-group', '--no-create-home', '--no-log-init', '--uid', str(owner_a['root_uid']), blocker)
                 reserved_users.append(blocker)
                 command('usermod', '--add-subuids', str(owner_a['subuid']) + '-' + str(owner_a['subuid'] + 65535), '--add-subgids', str(owner_a['subgid']) + '-' + str(owner_a['subgid'] + 65535), blocker)
                 restored_docker = start(docker_run, lease=300000, docker_script=docker_script('resume'))

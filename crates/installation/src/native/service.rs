@@ -403,15 +403,8 @@ impl Controller {
         private_dir(&temporary).await?;
         workspace::own_tree(&temporary, identity.uid(), identity.gid()).await?;
         let stage = self.data.join("runs").join(text(plan, "runId"));
-        let bindings = super::home::prepare(
-            &stage.join("home"),
-            &data.join("home"),
-            identity.uid(),
-            identity.gid(),
-        )
-        .await?;
-        workspace::own_tree(&stage.join("home"), identity.uid(), identity.gid()).await?;
-        super::identity::reconcile(&data, &identity).await?;
+        let bindings =
+            super::home::prepare_for_identity(&stage.join("home"), &data, &identity).await?;
         // Keep the existing prepared-base admission marker. The authoritative
         // ownership mapping now travels inside the published filesystem.
         atomic_write(

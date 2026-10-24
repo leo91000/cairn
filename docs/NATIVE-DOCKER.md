@@ -91,7 +91,10 @@ the same encrypted block publication and demand reads as the other disk bytes.
 The UID/GID mapping travels inside the disk; a destination reconciles owners while
 preserving container users, volume modes, POSIX ACL identities and namespaced
 file capabilities. Durable transition and per-batch metadata journals allow an
-interrupted ownership change to finish before a subsequent destination remapping. A destination needs compatible
+interrupted ownership change to finish before a subsequent destination remapping.
+Startup completes pending inode recovery before refreshing empty generated
+configuration mount targets; their transient source files remain outside the disk.
+A destination needs compatible
 managed Docker tools and Linux native prerequisites. It does not restore running
 containers, network connections or process memory. Disk usage counts against the
 existing conversation filesystem and shared node disk budget; image pulls and
