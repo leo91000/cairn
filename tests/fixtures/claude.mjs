@@ -99,20 +99,37 @@ else {
   out({ type: 'system', subtype: 'init', session_id: session })
   let question
   let serial = 0
+  // Like Claude Code 2.1.280: the last response's prompt (cached or not) is the context,
+  // and a local estimate stands in before the first response or after `/compact`.
+  let lastUsage = null
+  const contextReport = () => ({
+    totalTokens: lastUsage ? lastUsage.input_tokens + lastUsage.cache_creation_input_tokens + lastUsage.cache_read_input_tokens : 18000,
+    maxTokens: 200000,
+    rawMaxTokens: 200000,
+    percentage: 9,
+    apiUsage: lastUsage,
+  })
   const complete = (text = 'Claude fixture completed', thinking = false, correlation = {}) => {
     const id = `assistant-${process.pid}-${++serial}`
+    lastUsage = {
+      input_tokens: 200 * serial,
+      cache_creation_input_tokens: 2000,
+      cache_read_input_tokens: 40000,
+      output_tokens: 7,
+    }
+    const usage = { ...lastUsage, output_tokens: 1 }
     out({ type: 'stream_event', event: { type: 'message_start', message: { id } } })
     // Like Claude Code, stream real block indexes but emit one assistant event per block.
     if (thinking) {
       out({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } } })
       out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'Fixture reasoning' } } })
-      out({ type: 'assistant', message: { id, content: [{ type: 'thinking', thinking: 'Fixture reasoning' }] } })
+      out({ type: 'assistant', message: { id, content: [{ type: 'thinking', thinking: 'Fixture reasoning' }], usage } })
     }
 
     const index = thinking ? 1 : 0
     out({ type: 'stream_event', event: { type: 'content_block_start', index, content_block: { type: 'text', text: '' } } })
     out({ type: 'stream_event', event: { type: 'content_block_delta', index, delta: { type: 'text_delta', text } } })
-    out({ type: 'assistant', message: { id, content: [{ type: 'text', text }] } })
+    out({ type: 'assistant', message: { id, content: [{ type: 'text', text }], usage } })
     out({
       type: 'result',
       subtype: 'success',
@@ -128,6 +145,12 @@ else {
     if (value.type === 'user')
       appendFileSync(path.join(home, 'user-messages.jsonl'), `${JSON.stringify(value)}\n`)
     if (value.type === 'control_request') {
+      if (value.request.subtype === 'get_context_usage') {
+        appendFileSync(path.join(home, 'context-requests.jsonl'), `${JSON.stringify(value.request)}\n`)
+        out({ type: 'control_response', response: { subtype: 'success', request_id: value.request_id, response: contextReport() } })
+        return
+      }
+
       if (value.request.subtype === 'get_usage') {
         appendFileSync(path.join(home, 'usage-requests.jsonl'), `${JSON.stringify(value.request)}\n`)
         const custom = path.join(home, 'fixture-usage.json')
@@ -220,6 +243,83 @@ else {
     appendFileSync(path.join(home, 'inputs.jsonl'), `${JSON.stringify(value)}\n`)
     const prompt = value.message.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
     const correlation = { user_message_uuid: value.uuid }
+    if (prompt === '/compact') {
+      // The local command: never a model turn, and nothing to compact in a new session.
+      out({ type: 'command_lifecycle', command_uuid: value.uuid, state: 'started' })
+      if (existsSync(path.join(home, 'fixture-empty-session'))) {
+        out({
+          type: 'assistant',
+          message: {
+            id: `synthetic-${process.pid}`,
+            model: '<synthetic>',
+            content: [{ type: 'text', text: 'Error: No messages to compact' }],
+            usage: {
+              input_tokens: 0,
+              output_tokens: 0,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0,
+            },
+          },
+        })
+      }
+      else {
+        out({
+          type: 'system',
+          subtype: 'status',
+          status: 'compacting',
+          session_id: session,
+        })
+        out({
+          type: 'system',
+          subtype: 'status',
+          status: null,
+          compact_result: 'success',
+          session_id: session,
+        })
+        out({ type: 'system', subtype: 'init', session_id: session })
+        out({
+          type: 'system',
+          subtype: 'compact_boundary',
+          session_id: session,
+          compact_metadata: { trigger: 'manual', pre_tokens: 42310, post_tokens: 695 },
+        })
+        out({ type: 'user', message: { role: 'user', content: 'This session is being continued from a previous conversation. Fixture summary.' }, session_id: session })
+        lastUsage = null
+      }
+
+      out({
+        type: 'user',
+        message: { role: 'user', content: '<command-name>/compact</command-name>' },
+        uuid: value.uuid,
+        isReplay: true,
+      })
+      out({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        num_turns: 0,
+        result: '',
+        session_id: session,
+      })
+      out({ type: 'command_lifecycle', command_uuid: value.uuid, state: 'completed' })
+      return
+    }
+
+    if (prompt.includes('fixture:autocompact')) {
+      out({
+        type: 'system',
+        subtype: 'status',
+        status: 'compacting',
+        session_id: session,
+      })
+      out({
+        type: 'system',
+        subtype: 'compact_boundary',
+        session_id: session,
+        compact_metadata: { trigger: 'auto', pre_tokens: 167500, post_tokens: 9100 },
+      })
+    }
+
     if (prompt.includes('fixture:spend-limit') || prompt.includes('Corrige le dialogue de révocation.')) {
       const message = 'You\'ve hit your individual spend limit · run /usage-credits to ask your admin for a higher limit · your weekly limit resets 3pm (UTC)'
       out(value)

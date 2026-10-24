@@ -99,6 +99,27 @@ export interface ChatMessage {
   status: 'queued' | 'sending' | 'delivered' | 'cancelled'
   createdAt: number
 }
+/**
+ * How full the coding agent's context was at its latest report. `contextTokens` is what the
+ * latest model request occupied, never the conversation's cumulative spend.
+ */
+export interface ContextUsage {
+  contextTokens: number
+  /** The model's context window; absent when the coding agent does not report it. */
+  contextWindow: number | null
+  /** Of `contextTokens`, input read from the prompt cache, when reported. */
+  cachedTokens: number | null
+  /** A local estimate: before the session's first response, or right after a compaction. */
+  estimated: boolean
+}
+/** Whether the coding agent can compact its context now, and why not when it cannot. */
+export interface ChatCompaction {
+  /** The coding agent offers a compaction control. OpenCode does not. */
+  supported: boolean
+  running: boolean
+  available: boolean
+  reason: string | null
+}
 export interface ChatView extends Chat {
   suspendedByExclusive?: Run['suspendedByExclusive']
   pendingQuestions: number
@@ -109,6 +130,9 @@ export interface ChatView extends Chat {
   provider?: Provider | null
   /** When the agent's latest turn ended. */
   finishedAt?: number | null
+  /** Absent for older servers and before the coding agent reports it. */
+  contextUsage?: ContextUsage | null
+  compaction?: ChatCompaction
   /** The agent finished a turn the signed-in account has not opened since. */
   unread?: boolean
   /** The opening of the agent's final message, while unread. */

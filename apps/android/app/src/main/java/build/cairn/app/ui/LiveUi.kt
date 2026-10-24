@@ -615,6 +615,8 @@ internal data class TimelineEntry(
     val plan: AgentPlan? = null,
     /** Where an update changed the plan. */
     val planUpdate: PlanUpdate? = null,
+    /** The coding agent compacted its context; the history above stays as it was. */
+    val compaction: ContextCompaction? = null,
     /** A failure notice's own title, such as Cairn's automatic retry. */
     val noticeTitle: String = "",
     /** Cairn retries this failure itself: the notice is a warning, not a dead end. */
@@ -634,7 +636,8 @@ internal fun timelineEntries(
         val subagents = subagentTimeline(events)
         var legacyTool: Int? = null
         for (event in events) {
-            if (event.type == "artifact") continue
+            // Context usage is a measurement the conversation header shows, not an activity.
+            if (event.type == "artifact" || event.type == "context.usage") continue
             if (event.id in subagents.captured) {
                 if (event.id in subagents.anchors) {
                     folded.add(event)
@@ -719,6 +722,8 @@ internal fun timelineEntries(
         var via = ""
         // The plan its updates change, until the agent finishes it or writes another one.
         var planIndex: Int? = null
+        // By run and item: a compaction's start and end update one divider.
+        val compactions = mutableMapOf<String, Int>()
         // The wait still pending, by its wakeup ID, so that its result and resumption complete it.
         val waits = mutableMapOf<String, Int>()
         var openWait: Int? = null
@@ -974,6 +979,27 @@ internal fun timelineEntries(
             if (event.type == "status" && route.string("providerName").isNotBlank()) {
                 via = route.string("providerName")
                 if (chat) continue
+            }
+            val compactionItem =
+                event.item()?.takeIf {
+                    it.string("type") == "context_compaction" && event.type.startsWith("item.")
+                }
+            if (compactionItem != null) {
+                val key =
+                    "compaction:${event.runId}:${compactionItem.string("id").ifBlank { event.id.toString() }}"
+                val index = compactions[key]
+                val compaction =
+                    contextCompaction(
+                        compactionItem,
+                        event.type,
+                        index?.let { result[it].compaction },
+                    )
+                if (index == null) {
+                    flushActivity()
+                    result.add(TimelineEntry(key, listOf(event), false, compaction = compaction))
+                    compactions[key] = result.lastIndex
+                } else result[index] = result[index].copy(compaction = compaction)
+                continue
             }
             // The agent's own plan shows apart from its tools. A call that failed did not change
             // it.
@@ -1282,6 +1308,7 @@ internal fun TimelineRow(
     else if (entry.wait != null) WaitCard(entry.wait)
     else if (entry.plan != null) PlanCard(entry.plan, live = active && livePlan == entry.key)
     else if (entry.planUpdate != null) PlanUpdateRow(entry.planUpdate)
+    else if (entry.compaction != null) ContextCompactionRow(entry.compaction)
     else if (entry.notice)
         entry.events.single().let { event ->
             val presentation = presentActivity(event)

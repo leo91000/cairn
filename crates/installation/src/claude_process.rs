@@ -3,6 +3,7 @@ use crate::{
     accounts::lenient,
     claude,
     config::Config,
+    context_usage::ContextUsage,
     error::{Error, Result},
     process::command,
     skills::atomic_write,
@@ -26,6 +27,9 @@ use tokio_util::sync::CancellationToken;
 const STOPPED: &str = "Claude execution stopped.";
 const MAX_LINE: usize = 32_000_000;
 const MAX_IMAGE: usize = 10_000_000;
+
+/// Prefix of the context usage requests this adapter sends Claude Code.
+const CONTEXT_REQUEST: &str = "cairn-context-";
 
 const DENIED: &str =
     "This tool is outside the agent's access policy. Ask the user in your response.";
@@ -98,6 +102,11 @@ async fn emit(events: &mpsc::Sender<Value>, value: Value) -> Result<()> {
         .send(value)
         .await
         .map_err(|_| Error::unavailable("Claude output stopped."))
+}
+
+/// An execution that compacts the native context instead of delivering a message.
+fn compacting(plan: &Value) -> bool {
+    plan["execution"]["operation"] == "compact"
 }
 
 fn delivered(id: &str) -> Value {
@@ -409,6 +418,16 @@ struct Turn<'a> {
     background_replayed: bool,
     /// The agent finished responding and only its background tasks keep the run open.
     waiting_for_background: bool,
+    /// Context usage requests sent to Claude Code.
+    context_requests: u64,
+    /// The model's context window, from Claude Code's latest context usage report.
+    context_window: Option<u64>,
+    /// The latest context usage shown, so unchanged reports are not repeated.
+    context: Option<ContextUsage>,
+    /// The compaction Claude Code is running, by the ID of its chat item.
+    compaction: Option<String>,
+    /// Compactions Claude Code reported during this execution.
+    compactions: usize,
 }
 
 impl Turn<'_> {
@@ -433,6 +452,13 @@ impl Turn<'_> {
     }
 
     async fn submit_initial(&mut self) -> Result<()> {
+        if compacting(self.plan) {
+            // Claude Code runs its own `/compact` command locally: it is never sent to the
+            // model as a user request, and a restarted attempt simply compacts again.
+            let command = json!({ "id": self.wire_id, "text": "/compact", "attachments": [] });
+            let command = input(&command, self.inbox).await?;
+            return send(&mut self.stdin, command).await;
+        }
         let mut message = crate::chats::execution_text(self.plan);
         if self.plan["execution"]["recovery"] == true {
             message = format!(
@@ -448,8 +474,95 @@ impl Turn<'_> {
         send(&mut self.stdin, initial).await
     }
 
+    /// Asks Claude Code how full its context is. Answering does not call the model.
+    async fn request_context(&mut self) -> Result<()> {
+        self.context_requests += 1;
+        let request = json!({
+            "type": "control_request",
+            "request_id": format!("{CONTEXT_REQUEST}{}", self.context_requests),
+            "request": { "subtype": "get_context_usage", "detail": "summary" },
+        });
+        send(&mut self.stdin, request).await
+    }
+
+    async fn show_context(&mut self, usage: Option<ContextUsage>) -> Result<()> {
+        let Some(usage) = usage else {
+            return Ok(());
+        };
+        if self.context.as_ref() == Some(&usage) {
+            return Ok(());
+        }
+        let event = usage.event();
+        self.context = Some(usage);
+        self.emit(event).await
+    }
+
+    async fn on_control_response(&mut self, value: &Value) -> Result<()> {
+        let response = &value["response"];
+        let ours = text(response, "request_id").starts_with(CONTEXT_REQUEST);
+        if !ours || response["subtype"] != "success" {
+            return Ok(());
+        }
+        let report = &response["response"];
+        if let Some(window) = report["maxTokens"].as_u64().filter(|window| *window > 0) {
+            self.context_window = Some(window);
+        }
+        self.show_context(ContextUsage::claude_report(report)).await
+    }
+
+    /// `status` while Claude Code compacts, and the `compact_boundary` that ends it.
+    async fn on_compaction(&mut self, value: &Value) -> Result<()> {
+        if value["subtype"] == "status" {
+            if value["status"] == "compacting" && self.compaction.is_none() {
+                let id = format!("{}-compaction-{}", self.initial_id, self.compactions + 1);
+                self.compaction = Some(id.clone());
+                let item =
+                    json!({ "id": id, "type": "context_compaction", "status": "in_progress" });
+                self.emit(json!({ "type": "item.started", "item": item }))
+                    .await?;
+            }
+            let failed = value["compact_result"]
+                .as_str()
+                .is_some_and(|result| result != "success");
+            if failed && let Some(id) = self.compaction.take() {
+                let item = json!({ "id": id, "type": "context_compaction", "status": "failed" });
+                self.emit(json!({ "type": "item.completed", "item": item }))
+                    .await?;
+            }
+            return Ok(());
+        }
+
+        self.compactions += 1;
+        let id = self
+            .compaction
+            .take()
+            .unwrap_or_else(|| format!("{}-compaction-{}", self.initial_id, self.compactions));
+        let metadata = &value["compact_metadata"];
+        let mut item = json!({
+            "id": id,
+            "type": "context_compaction",
+            "status": "completed",
+        });
+        if matches!(text(metadata, "trigger"), "manual" | "auto") {
+            item["trigger"] = metadata["trigger"].clone();
+        }
+        for (source, target) in [("pre_tokens", "pre_tokens"), ("post_tokens", "post_tokens")] {
+            if metadata[source].is_u64() {
+                item[target] = metadata[source].clone();
+            }
+        }
+        self.emit(json!({ "type": "item.completed", "item": item }))
+            .await?;
+        // The next response measures the compacted context; until then show Claude Code's estimate.
+        self.request_context().await
+    }
+
     /// Submits messages the user added to the inbox, or answers to pending questions.
     async fn poll_inbox(&mut self) -> Result<()> {
+        // Messages sent while compacting stay queued for the next turn.
+        if compacting(self.plan) {
+            return Ok(());
+        }
         let Some(bytes) =
             crate::chat_inbox::read(self.inbox, crate::chat_inbox::ADAPTER_LIMIT).await?
         else {
@@ -534,6 +647,14 @@ impl Turn<'_> {
                 self.background_tasks(value).await?;
             }
             "system"
+                if value["subtype"] == "compact_boundary"
+                    || (value["subtype"] == "status"
+                        && (value["status"] == "compacting"
+                            || value["compact_result"].is_string())) =>
+            {
+                self.on_compaction(value).await?;
+            }
+            "system"
                 if matches!(
                     text(value, "subtype"),
                     "task_started" | "task_progress" | "task_notification"
@@ -547,6 +668,7 @@ impl Turn<'_> {
                 self.on_stream_event(&value["event"]).await?;
             }
             "control_request" => self.on_control_request(value).await?,
+            "control_response" => self.on_control_response(value).await?,
             "result" => return self.on_result(value).await,
             _ => {}
         }
@@ -677,6 +799,12 @@ impl Turn<'_> {
         if parent.is_none() {
             // The agent responds again, so it no longer only waits for background tasks.
             self.waiting_for_background = false;
+            // Subagents have their own context. Local command replies are not model requests.
+            let response = &value["message"];
+            if response["model"] != "<synthetic>" {
+                let usage = ContextUsage::claude_response(&response["usage"], self.context_window);
+                self.show_context(usage).await?;
+            }
         }
         let message = text(&value["message"], "id").to_owned();
         for block in value["message"]["content"].as_array().into_iter().flatten() {
@@ -926,7 +1054,16 @@ impl Turn<'_> {
             };
             return Err(Error::bad_gateway(message));
         }
-        if !result.is_empty() {
+        if compacting(self.plan) && self.compactions == 0 {
+            // Claude Code answers `/compact` successfully even when it had nothing to compact.
+            let message = if self.last.is_empty() {
+                "Claude Code finished without compacting the conversation."
+            } else {
+                self.last.as_str()
+            };
+            return Err(Error::bad_gateway(message));
+        }
+        if !result.is_empty() && !compacting(self.plan) {
             self.last = result.into();
         }
         for id in self.settled(value) {
@@ -957,14 +1094,17 @@ impl Turn<'_> {
     }
 
     async fn complete(&self) -> Result<()> {
-        let receipt = Receipt {
-            message_id: Some(self.initial_id.into()),
-            delivered: self.delivered.iter().cloned().collect(),
-            text: Some(self.last.clone()),
-            item_id: Some(self.last_id.clone()),
-        };
-        // Save the receipt before completion so restart cannot repeat a finished request.
-        atomic_write(&self.receipt, &serde_json::to_vec(&receipt)?).await?;
+        // A compaction has no reply to replay: a restart compacts again instead.
+        if !compacting(self.plan) {
+            let receipt = Receipt {
+                message_id: Some(self.initial_id.into()),
+                delivered: self.delivered.iter().cloned().collect(),
+                text: Some(self.last.clone()),
+                item_id: Some(self.last_id.clone()),
+            };
+            // Save the receipt before completion so restart cannot repeat a finished request.
+            atomic_write(&self.receipt, &serde_json::to_vec(&receipt)?).await?;
+        }
         atomic_write(Path::new(text(self.plan, "output")), self.last.as_bytes()).await?;
         self.emit(json!({ "type": "chat.question.closed" })).await?;
         self.emit(json!({ "type": "turn.completed" })).await
@@ -976,6 +1116,7 @@ impl Turn<'_> {
         mut auth: Option<&mut crate::accounts::claude::Client>,
         cancel: &CancellationToken,
     ) -> Result<()> {
+        self.request_context().await?;
         self.submit_initial().await?;
         let mut buffer = Vec::new();
         let mut timer = tokio::time::interval(Duration::from_millis(250));
@@ -1046,6 +1187,11 @@ pub async fn run(
         return saved.replay(&plan, initial_id, &events).await;
     }
 
+    if compacting(&plan) && !plan["sessionId"].is_string() {
+        return Err(Error::conflict(
+            "This conversation has no saved Claude Code session to compact.",
+        ));
+    }
     // Completed receipts above do not launch Claude and must remain replayable.
     if let Some(session) = plan["sessionId"].as_str() {
         validate_session_environment(&directory, session).await?;
@@ -1120,6 +1266,11 @@ pub async fn run(
         awaiting_background: HashSet::new(),
         background_replayed: false,
         waiting_for_background: false,
+        context_requests: 0,
+        context_window: None,
+        context: None,
+        compaction: None,
+        compactions: 0,
     };
     let operation = turn.execute(&mut stdout, auth.as_mut(), &cancel).await;
     // Closes Claude Code's stdin.

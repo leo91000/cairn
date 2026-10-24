@@ -2910,3 +2910,82 @@ async fn owner_mcp_can_review_one_wildcard_administrator_node_without_broadening
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn chat_compaction_matches_public_mcp_and_installation_tools() {
+    for internal in [false, true] {
+        let root = TempDir::new().unwrap();
+        let s = service(&root).await;
+        let main = enabled_main(&s).await;
+        let (_, configuration) = active_run(&s, &main).await;
+        let (target, _) = active_run(&s, &main).await;
+        let run_id = target["id"].as_str().unwrap();
+        s.store
+            .patch_run(
+                run_id,
+                json!({
+                    "status": "succeeded",
+                    "sessionId": "native-session",
+                    "summary": "Last reply",
+                    "finishedAt": 500,
+                    "contextUsage": {
+                        "contextTokens": 150_000,
+                        "contextWindow": 200_000,
+                        "cachedTokens": 120_000,
+                        "estimated": false,
+                    },
+                }),
+            )
+            .await
+            .unwrap();
+        s.store
+            .set(
+                &format!("run-checkpoint:{run_id}"),
+                json!({ "launched": true, "completed": true }),
+                None,
+            )
+            .await
+            .unwrap();
+        let mut chat = s.chat_create(json!({})).await.unwrap();
+        chat["runId"] = target["id"].clone();
+        let chat_id = chat["id"].as_str().unwrap().to_owned();
+        s.store.put("chats", chat).await.unwrap();
+        let invoke = |name, args| {
+            let s = s.clone();
+            let configuration = configuration.clone();
+            async move {
+                if internal {
+                    call(&s, &configuration, name, args).await
+                } else {
+                    public_call(&s, &["read", "run"], name, args).await
+                }
+            }
+        };
+
+        let read = invoke("get_chat", json!({ "chatId": chat_id })).await;
+        let summary = &result(&read)["chat"];
+        assert_eq!(summary["contextUsage"]["contextTokens"], 150_000);
+        assert_eq!(summary["compaction"]["available"], true);
+        assert_eq!(summary["compaction"]["supported"], true);
+
+        // Compaction starts model work: reading alone is not enough.
+        let denied = public_call(&s, &["read"], "compact_chat", json!({ "chatId": chat_id })).await;
+        assert_eq!(denied["result"]["isError"], true);
+        assert_eq!(s.store.run(run_id).await.unwrap()["status"], "succeeded");
+
+        let compacted = invoke("compact_chat", json!({ "chatId": chat_id })).await;
+        assert_eq!(result(&compacted)["compaction"]["running"], true);
+        let run = s.store.run(run_id).await.unwrap();
+        assert_eq!(run["status"], "queued");
+        assert_eq!(run["chatExecution"]["operation"], "compact");
+        assert_eq!(run["summary"], "Last reply");
+
+        // A retry keeps the same compaction; nothing else can start meanwhile.
+        let retried = invoke("compact_chat", json!({ "chatId": chat_id })).await;
+        assert_eq!(result(&retried)["compaction"]["running"], true);
+        assert_eq!(
+            s.store.run(run_id).await.unwrap()["chatExecution"],
+            run["chatExecution"]
+        );
+    }
+}

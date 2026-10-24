@@ -1807,6 +1807,26 @@
     }
   },
   {
+    "name": "compact_chat",
+    "description": "Compact the coding agent's native context for an idle conversation whose last turn succeeded. Runs as its own execution, not a user message, and never rewrites the visible history. Codex and Claude Code only; get_chat reports chat.compaction availability and chat.contextUsage.",
+    "scope": "run",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "chatId": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "chatId"
+      ]
+    }
+  },
+  {
     "name": "delete_chat",
     "description": "Delete a conversation using the existing cleanup lifecycle. Busy chats require confirm: true to stop execution and cancel pending messages/questions. Cleanup may permanently remove history, files and workspace.",
     "scope": "manage",
