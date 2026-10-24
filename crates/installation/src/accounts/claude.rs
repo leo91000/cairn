@@ -19,6 +19,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
+    borrow::Cow,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -414,6 +415,27 @@ fn scope(windows: &mut [usage::Window], catalog: &Catalog) {
     }
 }
 
+/// The family a saved model runs, as model-scoped windows name it, so a model that a newer
+/// catalog no longer lists stays limited by its family: an alias without its context
+/// variant ("opus[1m]" is "opus"), or the family of a model ID ("claude-opus-4-6[1m]" is
+/// "opus"). Any other name, such as "default" or "opusplan", is matched as saved.
+fn family(model: &str) -> Cow<'_, str> {
+    let lower = model.to_ascii_lowercase();
+    let base = match lower
+        .strip_suffix(']')
+        .and_then(|rest| rest.rsplit_once('['))
+    {
+        Some((base, variant)) if !base.is_empty() && !variant.is_empty() => base,
+        _ => lower.as_str(),
+    };
+    let named = |name: &str| !name.is_empty() && name.bytes().all(|b| b.is_ascii_lowercase());
+    let family = match base.strip_prefix("claude-") {
+        Some(id) => id.split('-').find(|part| named(part)),
+        None => Some(base).filter(|alias| named(alias) && *alias != model),
+    };
+    family.map_or(Cow::Borrowed(model), |family| Cow::Owned(family.into()))
+}
+
 /// Reads usage at most every five minutes. A failure keeps the last known windows.
 async fn read_usage(s: &Service, id: &str, previous: Option<Usage>) -> Usage {
     let mut current = previous.unwrap_or_default();
@@ -712,6 +734,10 @@ impl Driver for Claude {
         false
     }
 
+    fn usage_model<'a>(&self, model: &'a str) -> Cow<'a, str> {
+        family(model)
+    }
+
     async fn supports(&self, _s: &Service, _id: &str, _model: &str) -> Result<bool> {
         Ok(true)
     }
@@ -853,6 +879,43 @@ mod tests {
         scope(&mut windows, &catalog);
         assert!(windows[0].models.is_empty());
         assert_eq!(windows[1].models, ["opus", "opus[1m]", "default"]);
+    }
+
+    #[test]
+    fn saved_models_are_limited_by_the_family_they_run() {
+        for (saved, runs) in [
+            ("opus[1m]", "opus"),
+            ("Sonnet[1M]", "sonnet"),
+            ("Opus", "opus"),
+            ("claude-opus-4-6", "opus"),
+            ("claude-opus-4-6[1m]", "opus"),
+            ("claude-haiku-4-5-20251001", "haiku"),
+            ("claude-3-5-sonnet-20241022", "sonnet"),
+        ] {
+            assert_eq!(family(saved), runs, "{saved}");
+        }
+        // Names without a precise family stay as saved: their catalog rows scope them.
+        for saved in [
+            "opus",
+            "default",
+            "opusplan",
+            "",
+            "opus[]",
+            "claude-",
+            "my-opus-proxy",
+            "us.anthropic.claude-opus-4-6-v1",
+        ] {
+            assert!(
+                matches!(family(saved), Cow::Borrowed(name) if name == saved),
+                "{saved}"
+            );
+        }
+        // Other engines match their usage windows by the exact saved model.
+        for provider in [Provider::Codex, Provider::Opencode] {
+            for saved in ["opus[1m]", "gpt-5.5[1m]", "opencode-go/claude-opus-4-6"] {
+                assert_eq!(provider.driver().usage_model(saved), saved, "{provider:?}");
+            }
+        }
     }
 
     fn stored() -> Value {

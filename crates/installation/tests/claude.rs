@@ -1618,6 +1618,77 @@ async fn opus_windows_limit_every_model_that_runs_opus() {
 }
 
 #[tokio::test]
+async fn auto_keeps_saved_models_the_catalog_no_longer_lists_within_their_family_windows() {
+    let root = TempDir::new().unwrap();
+    let s = Service::new(config(&root)).await.unwrap();
+    // A newer Claude Code catalog lists "opus" but no longer "opus[1m]", which agents
+    // saved under an earlier release still run.
+    s.store
+        .set(
+            claude::CATALOG,
+            json!({
+                "models": [
+                    { "model": "opus" },
+                    { "model": "sonnet", "resolvedModel": "claude-sonnet-fixture" },
+                ],
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let read = async |id: &str, opus: u32| {
+        let home = accounts::claude::account_home(&s.config, id);
+        let payload = json!({
+            "rate_limits_available": true,
+            "rate_limits": {
+                "five_hour": { "utilization": 10 },
+                "seven_day": { "utilization": 20 },
+                "seven_day_opus": { "utilization": opus },
+            },
+        });
+        std::fs::write(home.join("fixture-usage.json"), payload.to_string()).unwrap();
+        s.accounts.refresh(&s, id).await.unwrap();
+    };
+    let spent = connected(&s).await;
+    read(&spent, 100).await;
+    for model in ["opus[1m]", "claude-opus-4-6[1m]"] {
+        let error = acquire(&s, FIRST_RUN, model).await.unwrap_err();
+        assert!(error.message.contains("available usage"), "{model}");
+    }
+    // Other families keep the account's capacity.
+    for model in ["sonnet[1m]", "claude-haiku-4-5"] {
+        let lease = acquire(&s, FIRST_RUN, model).await.unwrap().unwrap();
+        assert_eq!(lease.account_id, spent, "{model}");
+        s.accounts.release(&lease).await.unwrap();
+    }
+
+    // Auto picks the account with Opus capacity left; other families still prefer the
+    // account with the most capacity.
+    let open = connected(&s).await;
+    read(&open, 50).await;
+    let mut account = s.accounts.get(&s, &open).await.unwrap();
+    account["usage"]["windows"][0]["usedPercent"] = 80.into();
+    s.store.put(KIND, account).await.unwrap();
+    let lease = acquire(&s, FIRST_RUN, "opus[1m]").await.unwrap().unwrap();
+    assert_eq!(lease.account_id, open);
+    s.accounts.release(&lease).await.unwrap();
+    let lease = acquire(&s, FIRST_RUN, "sonnet").await.unwrap().unwrap();
+    assert_eq!(lease.account_id, spent);
+    s.accounts.release(&lease).await.unwrap();
+
+    // An exhaustion recorded for the old alias clears once Opus capacity returns.
+    s.accounts.exhausted(&s, &open, "opus[1m]").await.unwrap();
+    reset_usage_backoff(&s, &open).await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    read(&open, 100).await;
+    assert_eq!(view(&s, &open).await["status"], "waiting");
+    reset_usage_backoff(&s, &open).await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    read(&open, 40).await;
+    assert_eq!(view(&s, &open).await["status"], "next");
+}
+
+#[tokio::test]
 async fn usage_handles_partial_invalid_and_unavailable_windows() {
     let root = TempDir::new().unwrap();
     let s = Service::new(config(&root)).await.unwrap();
