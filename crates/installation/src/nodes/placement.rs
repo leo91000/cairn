@@ -257,10 +257,12 @@ impl Fleet<'_> {
     ) -> bool {
         let id = text(node, "id");
         if node["diskGrowthProtocol"] == 1 && crate::native::policy::node_native(node) {
-            return super::disk_capacity::fits(
+            return super::disk_capacity::admission_fits(
                 node,
                 self.attempts,
+                request.run_id(),
                 resources.disk_mi_b.saturating_mul(1_048_576),
+                !request.replacing(id),
             );
         }
         // Nodes reporting free space keep their reserve plus room for each pending journal.
@@ -467,10 +469,12 @@ fn request_reclamation(db: &Db<'_>, run: &Value, configured: bool) -> Result<()>
             && request.eligible(node, configured)
             && snapshot.fleet().free_slots(&request, node) > 0
             && request.resources_for(node).is_some_and(|resources| {
-                !super::disk_capacity::fits(
+                !super::disk_capacity::admission_fits(
                     node,
                     &snapshot.attempts,
+                    request.run_id(),
                     resources.disk_mi_b.saturating_mul(1_048_576),
+                    !request.replacing(text(node, "id")),
                 )
             })
         {

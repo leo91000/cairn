@@ -20,7 +20,9 @@ pub(super) fn exclusive_bytes(path: &Path, physical: bool) -> Result<u64> {
         } else if physical {
             metadata.blocks() * 512
         } else {
-            metadata.len()
+            // Pool accounting charges tmp by logical length. Only already
+            // allocated bytes can reduce the host's future-space promise.
+            metadata.len().min(metadata.blocks().saturating_mul(512))
         });
     }
     if !metadata.is_dir() {
@@ -211,6 +213,21 @@ pub(crate) async fn staging_budget() -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sparse_temporary_holes_never_reduce_future_host_space_promises() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("sparse");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(16 * MIB).unwrap();
+        file.sync_all().unwrap();
+        assert_eq!(exclusive_bytes(&path, false).unwrap(), 0);
+        std::fs::write(&path, vec![1; MIB as usize]).unwrap();
+        std::fs::File::open(&path).unwrap().sync_all().unwrap();
+        assert!(exclusive_bytes(&path, false).unwrap() > 0);
+        std::fs::hard_link(&path, root.path().join("shared")).unwrap();
+        assert_eq!(exclusive_bytes(&path, false).unwrap(), 0);
+    }
 
     #[test]
     fn archive_cache_and_conversation_pins_are_charged_once_per_inode() {

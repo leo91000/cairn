@@ -394,7 +394,9 @@ def main():
             fenced(run, first)
             assert not (state / 'native-block' / run / 'root/disk.blk').exists(), 'Retired device inode was retained.'
             assert (state / 'native' / run / 'legacy-data').exists(), 'Migration source retired before S3 acknowledgement.'
-            assert api('/health', method='GET')['usage']['diskBytes'] > 0
+            stopped_health = api('/health', method='GET')
+            assert stopped_health['usage']['diskBytes'] > 0
+            assert stopped_health['diskGrowth']['retainedBytes'][run] > 0, 'Stopped journal lost its measured admission credit.'
             point = manager('publish', run=run)
             s3 = boto3.client('s3', endpoint_url=os.environ['CAIRN_NODE_TEST_S3_ENDPOINT'])
             first_objects = [obj for page in s3.get_paginator('list_objects_v2').paginate(Bucket='cairn-node-test') for obj in page.get('Contents', [])]

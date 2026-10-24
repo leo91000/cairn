@@ -16,6 +16,8 @@ pub(crate) struct Observation {
     pub used_bytes: u64,
     pub free_bytes: u64,
     pub owned_bytes: HashMap<String, u64>,
+    #[serde(default)]
+    pub retained_bytes: HashMap<String, u64>,
     pub requests: Vec<GrowthRequest>,
 }
 
@@ -37,8 +39,9 @@ fn observation(node: &Value) -> Option<Observation> {
 }
 
 /// Attribution includes only exclusively owned payloads, on the same accounting
-/// basis as total usage. Shared prepared-base inodes receive no double credit.
-fn unused(attempts: &[Value], node: &Value, sample: &Observation) -> u64 {
+/// basis as total usage, capped by live consumption and allocated backing.
+/// Shared prepared-base inodes receive no double credit.
+fn unused(attempts: &[Value], node: &Value, sample: &Observation) -> (u64, u64) {
     let mut credit_left = sample.used_bytes;
     let mut promised = 0u64;
     for attempt in attempts
@@ -59,7 +62,7 @@ fn unused(attempts: &[Value], node: &Value, sample: &Observation) -> u64 {
         credit_left -= credit;
         promised = promised.saturating_add(allowance - credit);
     }
-    promised
+    (promised, credit_left)
 }
 
 pub(crate) fn fits(node: &Value, attempts: &[Value], additional: u64) -> bool {
@@ -70,7 +73,7 @@ pub(crate) fn fits(node: &Value, attempts: &[Value], additional: u64) -> bool {
         .as_u64()
         .unwrap_or(0)
         .saturating_mul(MIB);
-    let promised = unused(attempts, node, &sample).saturating_add(additional);
+    let promised = unused(attempts, node, &sample).0.saturating_add(additional);
     let host_reserve = crate::storage::policy::Policy::for_node(&node["storage"])
         .unwrap_or_default()
         .reserve(
@@ -87,6 +90,31 @@ pub(crate) fn fits(node: &Value, attempts: &[Value], additional: u64) -> bool {
         && promised.saturating_add(host_reserve) <= sample.free_bytes
 }
 
+/// A stopped conversation can reuse its exclusively owned, currently measured
+/// backing. Credit shares the same total-usage cap as active promises.
+pub(crate) fn admission_fits(
+    node: &Value,
+    attempts: &[Value],
+    run: &str,
+    allowance: u64,
+    reuse: bool,
+) -> bool {
+    let credit = if reuse {
+        observation(node).map_or(0, |sample| {
+            sample
+                .retained_bytes
+                .get(run)
+                .copied()
+                .unwrap_or(0)
+                .min(unused(attempts, node, &sample).1)
+                .min(allowance)
+        })
+    } else {
+        0
+    };
+    fits(node, attempts, allowance.saturating_sub(credit))
+}
+
 /// Called only inside the authenticated heartbeat transaction. A durable grant
 /// survives a lost reply and is released through the ordinary fenced attempt.
 pub(crate) fn report(db: &Db<'_>, node: &mut Value, body: &Value) -> Result<Value> {
@@ -100,6 +128,7 @@ pub(crate) fn report(db: &Db<'_>, node: &mut Value, body: &Value) -> Result<Valu
     if sample.protocol != 1
         || !(0..=30_000).contains(&age)
         || sample.owned_bytes.len() > 4096
+        || sample.retained_bytes.len() > 4096
         || sample.requests.len() > 4096
         || sample.used_bytes > (1 << 60)
         || sample.free_bytes > (1 << 60)
@@ -207,6 +236,33 @@ mod tests {
         assert!(!fits(&node, &attempts, 8 * 1024 * MIB));
         node["diskCapacity"]["capturedAt"] = (now() - 31_000).into();
         assert!(!fits(&node, &attempts, 0));
+    }
+
+    #[test]
+    fn same_node_resume_reuses_retained_backing_without_double_crediting_other_attempts() {
+        let mut node = node();
+        node["limits"]["diskMiB"] = 32768.into();
+        node["diskCapacity"]["usedBytes"] = (256 * MIB).into();
+        node["diskCapacity"]["retainedBytes"] = json!({ "resuming": 256 * MIB });
+        assert!(!fits(&node, &[], 31_000 * MIB));
+        assert!(admission_fits(&node, &[], "resuming", 31_000 * MIB, true));
+        assert!(!admission_fits(
+            &node,
+            &[],
+            "different-run",
+            31_000 * MIB,
+            true
+        ));
+        assert!(!admission_fits(&node, &[], "resuming", 31_000 * MIB, false));
+        let attempts = [json!({ "id": "one", "nodeId": "node", "resources": { "diskMiB": 256 } })];
+        node["diskCapacity"]["ownedBytes"] = json!({ "one": 256 * MIB });
+        assert!(!admission_fits(
+            &node,
+            &attempts,
+            "resuming",
+            31_000 * MIB,
+            true
+        ));
     }
 
     #[tokio::test]

@@ -91,17 +91,31 @@ fn pressure_page(db: &Db<'_>, node: &str) -> Result<Vec<Value>> {
     let cursor = db
         .kv(&format!("native-capacity-cursor:{node}"))?
         .unwrap_or_default();
-    db.json_rows(
-        "SELECT r.data FROM runs r WHERE status IN ('succeeded','failed','cancelled','interrupted')
-         AND (COALESCE(json_extract(r.data,'$.finishedAt'),0)>?2 OR
-              (COALESCE(json_extract(r.data,'$.finishedAt'),0)=?2 AND r.id>?3))
+    // A normal chat continuation clears finishedAt before admission. Its last
+    // released execution still establishes when that inactive cache was used.
+    let idle_at = "COALESCE(json_extract(r.data,'$.finishedAt'),
+        (SELECT MAX(json_extract(a.data,'$.releasedAt')) FROM records a
+         WHERE a.kind='node-attempts' AND json_extract(a.data,'$.runId')=r.id),0)";
+    let query = format!(
+        "SELECT json_set(r.data,'$._evictionIdleAt',{idle_at}) FROM runs r
+         WHERE status IN ('succeeded','failed','cancelled','interrupted','queued')
+         AND ({idle_at}>?2 OR ({idle_at}=?2 AND r.id>?3))
          AND EXISTS(SELECT 1 FROM records v WHERE v.kind='node-volumes'
            AND json_extract(v.data,'$.runId')=r.id
            AND json_extract(v.data,'$.nodeId')=?1
            AND json_extract(v.data,'$.materialized')=1
-           AND json_extract(v.data,'$.lastEvictedBackupId') IS NOT json_extract(r.data,'$.backup.id'))
-         ORDER BY COALESCE(json_extract(r.data,'$.finishedAt'),0), r.id LIMIT 32",
-        rusqlite::params![node, cursor["finishedAt"].as_i64().unwrap_or(0), text(&cursor, "id")],
+           AND (json_extract(v.data,'$.lastEvictedBackupId') IS NOT json_extract(r.data,'$.backup.id')
+                OR json_extract(v.data,'$.lastEvictedDiskMiB') IS NULL
+                OR json_extract(v.data,'$.diskMiB')>json_extract(v.data,'$.lastEvictedDiskMiB')))
+         ORDER BY {idle_at}, r.id LIMIT 32"
+    );
+    db.json_rows(
+        &query,
+        rusqlite::params![
+            node,
+            cursor["finishedAt"].as_i64().unwrap_or(0),
+            text(&cursor, "id")
+        ],
     )
 }
 
@@ -148,7 +162,7 @@ async fn pressure(s: &Service) -> Result<()> {
                 } else if let Some(last) = runs.last() {
                     db.set(
                         &key,
-                        &json!({ "id": last["id"], "finishedAt": last["finishedAt"] }),
+                        &json!({ "id": last["id"], "finishedAt": last["_evictionIdleAt"] }),
                         None,
                     )?;
                 }
@@ -168,16 +182,18 @@ fn candidate(
     let Some(current) = db.run(run)? else {
         return Ok(None);
     };
-    if !RunStatus::of(&current).is_some_and(|status| !status.is_active())
-        || current["finishedAt"]
-            .as_i64()
-            .is_none_or(|finished| finished > cutoff)
+    let queued_resume = expected_node.is_some() && current["status"] == "queued";
+    if (!queued_resume
+        && (!RunStatus::of(&current).is_some_and(|status| !status.is_active())
+            || current["finishedAt"]
+                .as_i64()
+                .is_none_or(|finished| finished > cutoff)))
         || current["storage"]["mode"] != "on-demand"
         || current["backup"]["status"] != "ready"
         || super::publication::requested(&current)
         || !current["moveRequest"].is_null()
         || !current["nodeState"].is_null()
-        || current["recoveryPending"] == true
+        || !queued_resume && current["recoveryPending"] == true
     {
         return Ok(None);
     }
@@ -199,7 +215,13 @@ fn candidate(
     let Some(volume) = db.get("node-volumes", &format!("{run}:{node_id}"))? else {
         return Ok(None);
     };
-    if volume["materialized"] != true || volume["lastEvictedBackupId"] == current["backup"]["id"] {
+    let already_evicted = volume["lastEvictedBackupId"] == current["backup"]["id"]
+        && volume["lastEvictedDiskMiB"].as_u64().is_some_and(|after| {
+            volume["diskMiB"]
+                .as_u64()
+                .is_some_and(|current| current <= after)
+        });
+    if volume["materialized"] != true || already_evicted {
         return Ok(None);
     }
     let attempts = db.json_rows(
@@ -326,6 +348,11 @@ async fn evict_clean(
             }
             if let Some(mut volume) = db.get("node-volumes", &format!("{run}:{node_id}"))? {
                 volume["lastEvictedBackupId"] = point["id"].clone();
+                volume["lastEvictedDiskMiB"] = status["localBytes"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    .div_ceil(1_048_576)
+                    .into();
                 volume["diskMiB"] = status["localBytes"]
                     .as_u64()
                     .unwrap_or(0)
@@ -392,6 +419,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pressure_can_reclaim_refetched_clean_payload_without_repeating_empty_evictions() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let (run, time) = (id(), now());
+                records(db, &run, time)?;
+                let node = super::super::LOCAL_NODE_ID;
+                let mut volume = db.get("node-volumes", &format!("{run}:{node}"))?.unwrap();
+                volume["lastEvictedBackupId"] = db.run(&run)?.unwrap()["backup"]["id"].clone();
+                volume["lastEvictedDiskMiB"] = volume["diskMiB"].clone();
+                db.put("node-volumes", &volume)?;
+                assert!(candidate(db, &run, time, Some(node))?.is_none());
+                assert!(pressure_page(db, node)?.is_empty());
+                volume["diskMiB"] = 124.into();
+                db.put("node-volumes", &volume)?;
+                assert!(candidate(db, &run, time, Some(node))?.is_some());
+                assert_eq!(pressure_page(db, node)?[0]["id"], run);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pressure_can_reclaim_a_queued_resumes_old_clean_cache_without_deleting_work() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let (run, time) = (id(), now());
+                records(db, &run, time)?;
+                db.patch_run(
+                    &run,
+                    &json!({ "status": "queued", "finishedAt": null, "recoveryPending": true }),
+                )?;
+                let node = super::super::LOCAL_NODE_ID;
+                assert_eq!(pressure_page(db, node)?[0]["id"], run);
+                assert!(candidate(db, &run, time, None)?.is_none());
+                assert!(candidate(db, &run, time, Some(node))?.is_some());
+                db.patch_run(&run, &json!({ "backup": { "status": "saving" } }))?;
+                assert!(candidate(db, &run, time, Some(node))?.is_none());
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn pressure_never_evicts_the_current_cache_on_another_node_after_a_move() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
@@ -443,7 +519,7 @@ mod tests {
                 let last = page.last().unwrap();
                 db.set(
                     &format!("native-capacity-cursor:{node_id}"),
-                    &json!({ "id": last["id"], "finishedAt": last["finishedAt"] }),
+                    &json!({ "id": last["id"], "finishedAt": last["_evictionIdleAt"] }),
                     None,
                 )?;
                 let page = pressure_page(db, node_id)?;

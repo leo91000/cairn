@@ -1105,6 +1105,52 @@ async fn retained_conversations_exhaust_the_shared_native_admission_budget() {
 }
 
 #[tokio::test]
+async fn native_same_node_resume_reuses_retained_capacity_on_a_small_pool() {
+    let f = Fixture::new().await;
+    let mut node = f.node.clone();
+    node["limits"]["diskMiB"] = 32768.into();
+    node["diskGrowthProtocol"] = 1.into();
+    node["diskCapacity"] = json!({ "protocol": 1, "capturedAt": now(), "usedBytes": 0,
+        "freeBytes": 900 * 1024 * 1024 * 1024u64, "ownedBytes": {}, "retainedBytes": {}, "requests": [] });
+    f.service.store.put("nodes", node.clone()).await.unwrap();
+    let mut run = f.run();
+    common::add_run(&f.service.store, &run).await;
+    let first = id();
+    let selected = placement::reserve(&f.service, &run, &first).await.unwrap();
+    assert_eq!(selected["resources"]["diskMiB"], 31_000);
+    common::set_checkpoint(
+        &f.service.store,
+        text(&run, "id"),
+        json!({
+            "nodeId": node["id"], "runnerId": first, "resources": selected["resources"],
+        }),
+    )
+    .await;
+    placement::release(&f.service, &first).await.unwrap();
+    let volume_id = format!("{}:{}", text(&run, "id"), text(&node, "id"));
+    let mut volume = f.service.store.get("node-volumes", &volume_id).await.unwrap().unwrap();
+    volume["materialized"] = true.into();
+    volume["storageMode"] = "on-demand".into();
+    volume["diskMiB"] = 256.into();
+    volume["activeDiskMiB"] = 256.into();
+    f.service.store.put("node-volumes", volume).await.unwrap();
+    node["diskCapacity"]["usedBytes"] = (256 * 1024 * 1024u64).into();
+    node["diskCapacity"]["retainedBytes"] = json!({ text(&run, "id"): 256 * 1024 * 1024u64 });
+    f.service.store.put("nodes", node).await.unwrap();
+    run["status"] = "queued".into();
+    run["finishedAt"] = Value::Null;
+    run["recoveryPending"] = true.into();
+    f.service
+        .store
+        .patch_run(text(&run, "id"), run.clone())
+        .await
+        .unwrap();
+    placement::check(&f.service, &run).await.unwrap();
+    let selected = placement::reserve(&f.service, &run, &id()).await.unwrap();
+    assert_eq!(selected["resources"]["diskMiB"], 31_000);
+}
+
+#[tokio::test]
 async fn native_disk_growth_is_idempotent_and_competes_atomically_with_admission() {
     let f = Fixture::new().await;
     let gib = 1024 * 1024 * 1024u64;

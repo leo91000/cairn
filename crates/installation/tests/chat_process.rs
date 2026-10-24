@@ -478,6 +478,8 @@ async fn disk_notice_reaches_codex_without_a_user_delivery_receipt() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);
     let config = config(&root);
+    let next_config = config.clone();
+    let next_home = home.clone();
     let input = plan(&root, "fixture:question");
     std::fs::write(
         root.path().join("inbox/disk-notice.json"),
@@ -506,6 +508,26 @@ async fn disk_notice_reaches_codex_without_a_user_delivery_receipt() {
     .await
     .unwrap();
     task.await.unwrap().unwrap();
+    let mut next = plan(&root, "Continue after the disk notice");
+    next["execution"]["messageId"] = "next-user-message".into();
+    next["sessionId"] = "fixture-chat".into();
+    // A newer operational notice replaces the file before the next turn.
+    std::fs::write(root.path().join("inbox/disk-notice.json"),
+        json!({ "id": "newer-disk-notice", "operationalNotice": true, "text": "Updated runtime notice" }).to_string()).unwrap();
+    let (tx, mut rx) = mpsc::channel(64);
+    let next_task = tokio::spawn(async move {
+        chat_process::run(&next_config, &next_home, next, tx, CancellationToken::new()).await
+    });
+    let mut completed = false;
+    while let Some(event) = rx.recv().await {
+        if event["type"] == "chat.delivered" {
+            let id = event["messageId"].as_str().unwrap();
+            assert!(!id.contains("disk-notice"), "{event}");
+        }
+        completed |= event["type"] == "turn.completed";
+    }
+    next_task.await.unwrap().unwrap();
+    assert!(completed);
     assert!(
         std::fs::read_to_string(root.path().join("codex/fixture-conversation.json"))
             .unwrap()

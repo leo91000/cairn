@@ -22,8 +22,16 @@ events and `run.diskCapacity` carry the same information to existing clients.
 The manager grants space in the same serialized database transaction used for
 admission. It counts measured local usage plus every unreleased attempt's unused
 allowance. Only exclusively owned local payloads, on the node's accounting basis,
-reduce that attempt's unused promise. Shared prepared-base segments get no duplicate
-credit. The node pool retains 5%, capped at 10 GiB, and the host filesystem retains
+reduce that attempt's unused promise. Workspace credit cannot exceed live workspace
+consumption; old journal frames do not consume the allowance again. Temporary-file
+credit excludes unallocated sparse holes. These conservative credits also protect
+future host allocations. Shared prepared-base segments get no duplicate credit.
+A fenced native mount records its logical usage beside its journal. Fresh health
+observations measure that stopped journal's exclusive backing, bounded by the
+recorded usage and directory identity. Same-node admission reuses this credit;
+restored/rebuilt journals invalidate it. Missing observations remain conservative.
+Older clean caches can be reclaimed while their conversation queues for resumption.
+The node pool retains 5%, capped at 10 GiB, and the host filesystem retains
 its configured storage-policy reserve. Missing or older-than-30-second measurements
 block further admission and growth. Negotiation is sticky so a missing report cannot
 silently discard existing promises. A lost grant reply returns the already recorded
@@ -57,7 +65,9 @@ wait for current observations rather than reverting to legacy admission.
 When admission or growth lacks disk headroom, the manager queues asynchronous
 reclamation of the oldest eligible inactive local cache. It reuses all existing
 publication, run-preparation, writer-release, grant and generation checks. Under
-pressure only the one-hour idle age is waived. The controller still requires a
+pressure the one-hour idle age is waived, and a queued continuation's old cache
+can be reclaimed after its previous writer is positively released. Normal queued
+recovery does not authorize deleting dirty or unpublished work. The controller still requires a
 current acknowledged S3 generation and no dirty journal before eviction. One cache
 is reclaimed before remeasurement. Conversation history and unpublished work are
 never removed. If reclamation cannot establish safety or recover sufficient space,

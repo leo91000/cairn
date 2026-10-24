@@ -4,7 +4,10 @@ use crate::{
     nodes::disk_capacity::{GrowthRequest, MIB, Observation},
 };
 use serde_json::{Value, json};
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 #[derive(Clone)]
 pub(super) struct Allowance {
@@ -14,6 +17,7 @@ pub(super) struct Allowance {
     pub reason: String,
     notice: Option<(u64, u8, String)>,
     last_notice_at: i64,
+    workspace_bytes: u64,
 }
 
 #[derive(Clone, Default)]
@@ -33,6 +37,7 @@ impl Capacity {
                 reason: String::new(),
                 notice: None,
                 last_notice_at: 0,
+                workspace_bytes: 0,
             },
         );
     }
@@ -72,6 +77,7 @@ impl Capacity {
         filesystem: u64,
     ) -> Option<(u64, Option<Value>)> {
         let attempt = self.attempts.get_mut(id)?;
+        attempt.workspace_bytes = workspace;
         let used = workspace.saturating_add(temporary);
         let pressure = used >= attempt.bytes.saturating_mul(4) / 5
             || workspace >= filesystem.saturating_mul(4) / 5;
@@ -135,13 +141,23 @@ impl Capacity {
     pub async fn report(&self, state: &Path, used_bytes: u64) -> Result<Observation> {
         let (state, attempts) = (state.to_owned(), self.attempts.clone());
         tokio::task::spawn_blocking(move || {
+            let active = attempts
+                .values()
+                .map(|attempt| attempt.run.clone())
+                .collect();
+            let retained_bytes = retained_credits(&state, &active)?;
             let mut owned_bytes = HashMap::new();
             let mut requests = Vec::new();
             for (id, attempt) in attempts {
                 let directory = crate::storage::environment::directory(&state, &attempt.run)?;
-                let local = super::disk::exclusive_bytes(&directory, true)?;
+                let local = super::disk::exclusive_bytes(&directory.join("lazy"), true)?;
                 let temporary = super::workspace::directory(&state, &attempt.run)?.join("tmp");
-                let owned = local.saturating_add(super::disk::exclusive_bytes(&temporary, false)?);
+                // Old journal frames and cache amplification do not consume
+                // the logical workspace allowance a second time. Credit only
+                // the live workspace consumption actually backed locally.
+                let owned = local
+                    .min(attempt.workspace_bytes)
+                    .saturating_add(super::disk::exclusive_bytes(&temporary, false)?);
                 owned_bytes.insert(id.clone(), owned);
                 if attempt.requested {
                     requests.push(GrowthRequest {
@@ -157,6 +173,7 @@ impl Capacity {
                 used_bytes,
                 free_bytes,
                 owned_bytes,
+                retained_bytes,
                 requests,
             })
         })
@@ -165,9 +182,148 @@ impl Capacity {
     }
 }
 
+/// A quota observation is valid only for this owned journal directory and
+/// execution. Restoring/rebuilding a journal changes its inode and invalidates it.
+pub(super) async fn record_retained(directory: &Path, attempt: &str, workspace: u64) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = tokio::fs::metadata(directory).await?;
+    super::atomic_write(
+        &directory.join("capacity.json"),
+        &serde_json::to_vec(&json!({
+            "attempt": attempt, "workspaceBytes": workspace,
+            "journalDevice": metadata.dev(), "journalInode": metadata.ino(),
+        }))?,
+    )
+    .await
+}
+
+fn retained_credits(state: &Path, active: &HashSet<String>) -> Result<HashMap<String, u64>> {
+    use std::{io::Read, os::unix::fs::MetadataExt};
+    let mut credits = HashMap::new();
+    let entries = match std::fs::read_dir(state.join("native")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(credits),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let run = entry.file_name().to_string_lossy().into_owned();
+        if credits.len() >= 4096 {
+            break;
+        }
+        if !entry.file_type()?.is_dir()
+            || active.contains(&run)
+            || crate::validation::uuid(&run).is_err()
+        {
+            continue;
+        }
+        let root = entry.path();
+        let Ok(_owner) =
+            crate::file_lock::exclusive(&root.join("owner.lock"), "Native workspace is active.")
+        else {
+            continue;
+        };
+        let directory = crate::storage::environment::directory(state, &run)?.join("lazy");
+        let marker = directory.join("capacity.json");
+        let Ok(metadata) = std::fs::symlink_metadata(&marker) else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.len() > 1024 {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(marker)?
+            .take(1025)
+            .read_to_end(&mut bytes)?;
+        let Ok(usage) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
+        let attempt = std::fs::read_to_string(root.join("attempt")).unwrap_or_default();
+        let metadata = std::fs::metadata(&directory)?;
+        let Some(workspace) = usage["workspaceBytes"]
+            .as_u64()
+            .filter(|bytes| *bytes <= 1 << 40)
+        else {
+            continue;
+        };
+        if usage["attempt"] != attempt
+            || usage["journalDevice"] != metadata.dev()
+            || usage["journalInode"] != metadata.ino()
+        {
+            continue;
+        }
+        let owned = super::disk::exclusive_bytes(&directory, true)?
+            .min(workspace)
+            .saturating_add(super::disk::exclusive_bytes(&root.join("tmp"), false)?);
+        credits.insert(run, owned);
+    }
+    Ok(credits)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+
+    #[tokio::test]
+    async fn retained_credit_survives_controller_restart_but_not_a_journal_replacement() {
+        let state = tempfile::tempdir().unwrap();
+        let (run, attempt) = (crate::config::id(), crate::config::id());
+        let directory = crate::storage::environment::directory(state.path(), &run)
+            .unwrap()
+            .join("lazy");
+        let root = super::super::workspace::directory(state.path(), &run).unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("attempt"), &attempt).unwrap();
+        std::fs::write(directory.join("payload"), b"retained payload").unwrap();
+        record_retained(&directory, &attempt, MIB).await.unwrap();
+        let sample = Capacity::default().report(state.path(), MIB).await.unwrap();
+        assert!(sample.retained_bytes[&run] > 0);
+        let original = directory.with_file_name("previous");
+        std::fs::rename(&directory, &original).unwrap();
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::copy(
+            original.join("capacity.json"),
+            directory.join("capacity.json"),
+        )
+        .unwrap();
+        std::fs::write(directory.join("payload"), b"different journal").unwrap();
+        let sample = Capacity::default().report(state.path(), MIB).await.unwrap();
+        assert!(!sample.retained_bytes.contains_key(&run));
+    }
+
+    #[tokio::test]
+    async fn observations_do_not_credit_sparse_tmp_or_journal_amplification_as_consumed_allowance()
+    {
+        let state = tempfile::tempdir().unwrap();
+        let (run, attempt) = (crate::config::id(), crate::config::id());
+        let directory = crate::storage::environment::directory(state.path(), &run)
+            .unwrap()
+            .join("lazy");
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut payload = vec![0; 2 * MIB as usize];
+        std::fs::File::open("/dev/urandom")
+            .unwrap()
+            .read_exact(&mut payload)
+            .unwrap();
+        let mut journal = std::fs::File::create(directory.join("journal-payload")).unwrap();
+        journal.write_all(&payload).unwrap();
+        journal.sync_all().unwrap();
+        let temporary = super::super::workspace::directory(state.path(), &run)
+            .unwrap()
+            .join("tmp");
+        std::fs::create_dir_all(&temporary).unwrap();
+        std::fs::File::create(temporary.join("sparse"))
+            .unwrap()
+            .set_len(16 * MIB)
+            .unwrap();
+        let mut capacity = Capacity::default();
+        capacity.register(&attempt, &run, 32 * MIB);
+        capacity.observe(&attempt, MIB, 16 * MIB, 32 * MIB).unwrap();
+        let sample = capacity.report(state.path(), 18 * MIB).await.unwrap();
+        assert_eq!(sample.owned_bytes[&attempt], MIB);
+    }
 
     #[test]
     fn threshold_oscillation_does_not_flood_the_coding_agent() {

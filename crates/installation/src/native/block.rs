@@ -235,6 +235,8 @@ impl Handle {
 pub struct Mounted {
     pub volume: Arc<Volume>,
     filesystem: Arc<AtomicU64>,
+    quota_directory: PathBuf,
+    retained_usage: Option<u64>,
     target: PathBuf,
     jail: PathBuf,
     mounted: bool,
@@ -404,6 +406,8 @@ pub async fn mount(
             jail,
             mounted: true,
             filesystem: Arc::new(AtomicU64::new(0)),
+            quota_directory: directory.join("lazy"),
+            retained_usage: None,
             completed: false,
             aborted,
             device,
@@ -545,9 +549,24 @@ impl Mounted {
         if self.mounted {
             if !self.aborted {
                 sync(&self.target).await?;
+                self.retained_usage = used_bytes(&self.target).ok();
             }
             unmount(&self.target).await?;
             self.mounted = false;
+        }
+        if let Some(used) = self.retained_usage.take() {
+            // This optional admission credit must never prevent writer release.
+            // A missing observation falls back to conservative admission/eviction.
+            let recorded = async {
+                let attempt =
+                    tokio::fs::read_to_string(self.target.parent().unwrap().join("attempt"))
+                        .await?;
+                super::capacity::record_retained(&self.quota_directory, &attempt, used).await
+            }
+            .await;
+            if let Err(error) = recorded {
+                tracing::warn!(%error, "Native retained capacity credit unavailable");
+            }
         }
         if !self.completed
             && self
