@@ -1,13 +1,18 @@
-//! Explicit migration of an existing chat after its agent's backend changes.
-//! Conversion and restoration finish before the source checkpoint is replaced.
+//! Moves between Linux backends. Native nodes mount a VM disk directly, so most
+//! moves are ordinary node moves. A disk created natively is converted once
+//! before a VM boots it; conversion and restoration finish before the source
+//! checkpoint is replaced.
 use crate::{
     config::{id, now},
     conversation_lifecycle::require_active,
     error::{Error, Result, required},
     native::policy::{self, Origin},
-    nodes,
+    nodes::{
+        self,
+        backend::{self, DiskFormat},
+    },
     run_status::RunStatus,
-    service::{Service, policy as access},
+    service::Service,
     store::Db,
     validation::{parse, text},
 };
@@ -19,8 +24,8 @@ use std::{
 };
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
-// Only the explicit migration operation uses the verified public MCP owner.
-// Other management operations keep their existing provenance rules.
+// Only the explicit public MCP operations use the verified owner. Other
+// management operations keep their existing provenance rules.
 tokio::task_local! { pub(crate) static OWNER: Option<String>; }
 
 static PROCESS: LazyLock<String> = LazyLock::new(id);
@@ -52,7 +57,8 @@ fn migration_staging(data_dir: &Path) -> Result<PathBuf> {
     Ok(root)
 }
 
-fn origin() -> Origin {
+/// The explicit owner of a public MCP request, else the authenticated caller.
+pub(crate) fn origin() -> Origin {
     OWNER
         .try_with(Clone::clone)
         .ok()
@@ -60,21 +66,13 @@ fn origin() -> Origin {
         .map_or_else(policy::origin, Origin::Human)
 }
 
-fn backend(agent: &Value) -> &'static str {
-    if policy::native(agent) {
-        "native"
-    } else {
-        "firecracker"
-    }
-}
-
+/// How placement sees a conversation whose converted disk awaits its VM.
 pub(crate) fn candidate(run: &Value) -> Value {
     let migration = &run["backendMigration"];
     let mut candidate = run.clone();
-    candidate["snapshot"] = migration["snapshot"].clone();
-    policy::apply(&mut candidate, &migration["grant"]);
     candidate["nodeId"] = migration["nodeId"].clone();
     candidate["targetNodeId"] = migration["nodeId"].clone();
+    candidate["targetBackend"] = backend::FIRECRACKER.into();
     candidate["pinnedNodeId"] = Value::Null;
     candidate["preferredNodeId"] = Value::Null;
     candidate["requiredRuntime"] = migration["runtimeId"].clone();
@@ -90,36 +88,8 @@ fn chat_run(db: &Db<'_>, chat_id: &str) -> Result<(Value, Value, Value)> {
     Ok((chat, run, agent))
 }
 
-fn prospective(db: &Db<'_>, run: &Value, agent: &Value, origin: &Origin) -> Result<Value> {
-    check_access(run, agent)?;
-    let mut proposed = run.clone();
-    proposed["snapshot"]["agent"] = agent.clone();
-    for key in ["provider", "model", "reasoning"] {
-        proposed["snapshot"]["agent"][key] = run["snapshot"]["agent"][key].clone();
-    }
-    // An explicit authenticated owner adopts the existing work. Installation
-    // agents keep their parent's bounded, revocable native authority.
-    let grant = migration_grant(db, run, agent, origin)?;
-    policy::apply(&mut proposed, &grant);
-    Ok(proposed)
-}
-
-fn check_access(run: &Value, agent: &Value) -> Result<()> {
-    // A backend switch necessarily replaces placement grants. Other reductions
-    // retain the ordinary chat rule: old files cannot bypass reduced access.
-    let mut previous = run["snapshot"]["agent"].clone();
-    previous["access"]["backend"] = access(agent)["backend"].clone();
-    previous["access"]["nodes"] = access(agent)["nodes"].clone();
-    if !crate::service::covers(agent, &previous) {
-        return Err(Error::conflict(
-            "Other agent access was reduced. Restore that access before migrating this environment.",
-        ));
-    }
-    Ok(())
-}
-
 /// A stopped source can fetch its own base while being copied. This is never a
-/// workload lease: ordinary execution continues to use the current backend grants.
+/// workload lease: ordinary execution continues to use the current node grants.
 pub(crate) fn source_read(db: &Db<'_>, run_id: &str, node: &Value) -> Result<bool> {
     let Some(run) = db.run(run_id)? else {
         return Ok(false);
@@ -131,8 +101,6 @@ pub(crate) fn source_read(db: &Db<'_>, run_id: &str, node: &Value) -> Result<boo
     {
         return Ok(false);
     }
-    let agent = required(db.get("agents", nodes::run_agent(&run))?, "Agent removed")?;
-    check_access(&run, &agent)?;
     let destination = required(
         db.get("nodes", text(&run["backendMigration"], "nodeId"))?,
         "Destination removed",
@@ -146,57 +114,12 @@ pub(crate) fn source_read(db: &Db<'_>, run_id: &str, node: &Value) -> Result<boo
     Ok(true)
 }
 
-fn migration_grant(db: &Db<'_>, run: &Value, agent: &Value, source: &Origin) -> Result<Value> {
-    let mut grant = policy::authorize_origin(db, agent, source)?;
-    if matches!(source, Origin::Human(_)) {
-        return Ok(grant);
-    }
-    // A delegated manager cannot replace the target's provenance with its own.
-    // Only an explicit owner may adopt historical or unrelated work.
-    if run["nativeProvenanceUnknown"] != false
-        || policy::principals(run).as_array().is_none_or(Vec::is_empty)
-        || grant["nativeProvenanceUnknown"] != false
-        || (run["nativeParentRunId"].is_string()
-            && run["nativeParentRunId"] != grant["nativeParentRunId"])
-    {
-        return Err(Error::forbidden(
-            "An installation owner must explicitly adopt this conversation before a delegated agent can migrate it.",
-        ));
-    }
-    let mut people = policy::principals(run)
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    for person in policy::principals(&grant).as_array().into_iter().flatten() {
-        if !people.contains(person) {
-            people.push(person.clone());
-        }
-    }
-    grant["nativePrincipals"] = people.into();
-    grant["nativeAuthorityNodes"] = grant["nativeAuthorityNodes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|node| {
-            run["nativeAuthorityNodes"]
-                .as_array()
-                .is_some_and(|old| old.contains(node))
-        })
-        .cloned()
-        .collect::<Vec<_>>()
-        .into();
-    Ok(grant)
-}
-
-fn allowed(db: &Db<'_>, proposed: &Value, node: &Value) -> Result<bool> {
-    let agent = required(
-        db.get("agents", nodes::run_agent(proposed))?,
-        "Agent not found",
-    )?;
+/// Converted disks always boot in a VM the agent may still use.
+fn allowed(db: &Db<'_>, run: &Value, node: &Value) -> Result<bool> {
+    let agent = required(db.get("agents", nodes::run_agent(run))?, "Agent not found")?;
     Ok(node["revoked"] != true
-        && node["capabilities"]["backend"] == backend(&proposed["snapshot"]["agent"])
-        && nodes::agent_allows(&agent, text(node, "id"))
-        && (!policy::node_native(node) || policy::allows(db, proposed, node)?))
+        && !policy::node_native(node)
+        && nodes::agent_allows(&agent, text(node, "id")))
 }
 
 pub(crate) async fn chat_id(s: &Service, run: &str) -> Result<String> {
@@ -212,15 +135,9 @@ pub(crate) async fn chat_id(s: &Service, run: &str) -> Result<String> {
         .await
 }
 
-async fn refresh_authority(s: &Service, chat: &Value) -> Result<()> {
-    let run = s.store.run(text(chat, "runId")).await?;
-    let agent = s.get("agents", text(chat, "agentId")).await?;
-    if policy::native(&run["snapshot"]["agent"]) || policy::native(&agent) {
-        policy::refresh(s).await?;
-    }
-    Ok(())
-}
-
+/// The conversation's backend, where it may move and what each move costs.
+/// Native destinations still need the conversation's native authority when the
+/// move is requested; a conversion is listed but never started here.
 pub(crate) async fn preview(
     s: &Service,
     chat_id: &str,
@@ -228,84 +145,124 @@ pub(crate) async fn preview(
 ) -> Result<Value> {
     let check = authorize.clone();
     s.store.read(move |db| check(db)).await?;
-    // Both native sources and destinations need fresh human authority.
     let chat = s.get("chats", chat_id).await?;
-    refresh_authority(s, &chat).await?;
-    let (chat_id, origin) = (chat_id.to_owned(), origin());
+    policy::refresh_agent(s, text(&chat, "agentId")).await?;
+    let chat_id = chat_id.to_owned();
     s.store.read(move |db| {
         authorize(db)?;
         let (chat, run, agent) = chat_run(db, &chat_id)?;
-        let from = backend(&run["snapshot"]["agent"]);
-        let to = backend(&agent);
-        let mut nodes = Vec::new();
-        let mut reason = Value::Null;
-        if from != to {
-            match prospective(db, &run, &agent, &origin) {
-                Ok(proposed) => for node in db.list("nodes")? {
-                    if allowed(db, &proposed, &node)? {
-                        nodes.push(json!({ "id": node["id"], "name": node["name"] }));
-                    }
-                },
-                Err(error) => reason = error.message.into(),
+        let checkpoint = nodes::db_checkpoint(db, text(&run, "id"))?;
+        let current = backend::of_run_in(db, &run)?;
+        let format = DiskFormat::of(&checkpoint);
+        let mut destinations = Vec::new();
+        for node in db.list("nodes")? {
+            let target = backend::of_node(&node);
+            if node["revoked"] == true || target == current || !nodes::agent_allows(&agent, text(&node, "id")) {
+                continue;
             }
+            let authorized = !policy::node_native(&node) || policy::allows(db, &run, &node)?;
+            destinations.push(json!({
+                "id": node["id"],
+                "name": node["name"],
+                "backend": target,
+                "conversion": !format.runs_on(target),
+                "nativeAuthorityConfirmed": authorized,
+            }));
         }
+        let interrupted = run["backendMigration"].is_object() && run["backendMigration"]["process"] != PROCESS.as_str();
         Ok(json!({
             "chatId": chat["id"],
-            "fromBackend": from,
-            "toBackend": to,
-            "required": from != to,
-            "nodes": nodes,
-            "reason": reason,
+            "backend": current,
+            "diskFormat": format.as_str(),
+            "nodes": destinations,
             "pending": run["backendMigration"]["process"] == PROCESS.as_str(),
-            "error": if run["backendMigration"].is_object() && run["backendMigration"]["process"] != PROCESS.as_str() {
-                run["backendMigrationError"].as_str().map_or_else(|| json!("Migration interrupted by a manager restart. The original environment is retained; retry migration."), |message| json!(message))
+            "error": if interrupted {
+                run["backendMigrationError"].as_str().map_or_else(|| json!("Conversion interrupted by a manager restart. The original environment is retained; move the conversation again to retry."), |message| json!(message))
             } else { run["backendMigrationError"].clone() },
         }))
     }).await
 }
 
 impl Service {
+    /// Public MCP and installation tool: move a conversation to a node of the
+    /// other backend, exactly like the owner's move from its execution details.
     pub(crate) async fn migrate_chat_backend<F>(&self, input: Value, authorize: F) -> Result<Value>
     where
         F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
     {
         let input = parse("mcp:migrate_chat_backend", input)?;
-        let chat_id = text(&input, "chatId").to_owned();
-        let source = origin();
-        // Check management authority before contacting Beacon or a controller.
         let check = authorize.clone();
         self.store.read(move |db| check(db)).await?;
-        let chat = self.get("chats", &chat_id).await?;
-        refresh_authority(self, &chat).await?;
+        let chat = self.get("chats", text(&input, "chatId")).await?;
+        let run = self.store.run(text(&chat, "runId")).await?;
+        let node = self.get("nodes", text(&input, "nodeId")).await?;
+        let checkpoint = nodes::checkpoint(self, text(&run, "id")).await?;
+        let current = backend::recorded(&run, &checkpoint);
+        let target = backend::of_node(&node);
+        if input["backend"]
+            .as_str()
+            .is_some_and(|requested| requested != target)
+        {
+            return Err(Error::conflict(
+                "Choose the backend of the destination node.",
+            ));
+        }
+        if current.is_none_or(|current| current == target) {
+            return Err(Error::conflict(
+                "Choose a node of the other execution backend for this conversation.",
+            ));
+        }
+        nodes::moves::request_authorized(
+            self,
+            &run,
+            &json!({ "nodeId": node["id"] }),
+            origin(),
+            authorize,
+        )
+        .await
+    }
+
+    /// Starts the one-time conversion of a natively created disk for a VM. The
+    /// chat is paused and its active turn stopped until the converted point is
+    /// restored; the next message then starts a fresh engine session.
+    pub(crate) async fn convert_for_vm<F>(
+        &self,
+        run_id: &str,
+        node_id: &str,
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
+    {
+        let chat_id = chat_id(self, run_id).await?;
         let operation = id();
-        let (args, who, migration) = (input.clone(), source.clone(), operation.clone());
+        let (key, destination, migration) =
+            (chat_id.clone(), node_id.to_owned(), operation.clone());
         let request_authorization = authorize.clone();
         self.store.transaction(move |db| {
             request_authorization(db)?;
-            let (mut chat, run, agent) = chat_run(db, text(&args, "chatId"))?;
-            if backend(&agent) != text(&args, "backend") || backend(&agent) == backend(&run["snapshot"]["agent"]) {
-                return Err(Error::conflict("Choose the backend currently configured on this conversation's agent."));
-            }
+            let (mut chat, run, _) = chat_run(db, &key)?;
             if run["backendMigration"]["process"] == PROCESS.as_str() {
-                return Err(Error::conflict("A backend migration is already in progress."));
+                return Err(Error::conflict("A conversion is already in progress."));
             }
             if run["moveRequest"].is_object() {
                 return Err(Error::conflict("Finish the pending node move first."));
             }
             let checkpoint = nodes::db_checkpoint(db, text(&run, "id"))?;
             if !checkpoint["prepared"]["projectRoot"].is_string() {
-                return Err(Error::conflict("This conversation has no saved isolated environment to migrate."));
+                return Err(Error::conflict("This conversation has no saved isolated environment to move."));
             }
-            let node = required(db.get("nodes", text(&args, "nodeId"))?, "Destination node not found")?;
-            let proposed = prospective(db, &run, &agent, &who)?;
-            if !allowed(db, &proposed, &node)? || !nodes::valid_runtime(text(&node, "runtimeId")) {
-                return Err(Error::forbidden("Destination is not authorized for this backend."));
+            if DiskFormat::of(&checkpoint) != DiskFormat::Native {
+                return Err(Error::conflict("This environment runs in a VM without conversion."));
+            }
+            let node = required(db.get("nodes", &destination)?, "Destination node not found")?;
+            if !allowed(db, &run, &node)? || !nodes::valid_runtime(text(&node, "runtimeId")) {
+                return Err(Error::forbidden("Destination is not authorized for this conversation."));
             }
             let previous = &run["backendMigration"];
             let reusable = previous["convertedBackup"].is_string()
                 && previous["nodeId"] == node["id"]
-                && previous["runtimeId"] == node["runtimeId"]
-                && backend(&previous["snapshot"]["agent"]) == backend(&agent);
+                && previous["runtimeId"] == node["runtimeId"];
             let reservation = previous["reservationId"].as_str().map_or_else(|| migration.clone(), str::to_owned);
             let migration = json!({
                 "convertedBackup": if reusable { previous["convertedBackup"].clone() } else { Value::Null },
@@ -314,10 +271,7 @@ impl Service {
                 "sourceReadReady": false,
                 "nodeId": node["id"],
                 "runtimeId": node["runtimeId"],
-                "snapshot": proposed["snapshot"],
-                "grant": migration_grant(db, &run, &agent, &who)?,
                 "reservationId": reservation,
-                "agentRevision": agent["revision"],
                 "paused": if previous.is_object() { previous["paused"].clone() } else { chat["paused"].clone() },
                 "createdAt": now(),
             });
@@ -332,7 +286,7 @@ impl Service {
             db.patch_run(text(&run, "id"), &json!({ "backendMigration": migration, "backendMigrationError": null }))?;
             db.audit("chat.backend-migration.requested", &json!({
                 "chatId": chat["id"],
-                "backend": args["backend"],
+                "backend": backend::FIRECRACKER,
                 "nodeId": node["id"],
             }))?;
             Ok(())
@@ -343,9 +297,10 @@ impl Service {
             "chatId": chat_id,
             "migrationId": operation,
         });
+        let node_id = node_id.to_owned();
         tokio::spawn(async move {
             let outcome = s
-                .convert_chat(&chat_id, &operation, input, source, authorize)
+                .convert_chat(&chat_id, &operation, &node_id, authorize)
                 .await;
             if let Err(error) = outcome {
                 let message = error.message.clone();
@@ -371,14 +326,14 @@ impl Service {
                                 text(&run, "id"),
                                 &json!({
                                     "backendMigration": migration,
-                                            "backendMigrationError": message,
+                                    "backendMigrationError": message,
                                 }),
                             )?;
                         }
                         Ok(())
                     })
                     .await;
-                tracing::warn!(error = %error, "Backend migration retained its original environment");
+                tracing::warn!(error = %error, "Backend conversion retained its original environment");
             }
         });
         Ok(result)
@@ -388,8 +343,7 @@ impl Service {
         &self,
         chat_id: &str,
         operation: &str,
-        args: Value,
-        source: Origin,
+        node_id: &str,
         authorize: F,
     ) -> Result<()>
     where
@@ -419,7 +373,7 @@ impl Service {
         }
         if self.worker.active.lock().await.contains_key(&run_id) {
             return Err(Error::unavailable(
-                "Waiting for the previous execution to stop; retry migration after it finishes.",
+                "Waiting for the previous execution to stop; retry the move after it finishes.",
             ));
         }
         let preparation = self.worker.run_preparation_lock(&run_id).await;
@@ -441,7 +395,7 @@ impl Service {
                 let mut current = required(db.run(&key)?, "Conversation removed")?;
                 if current["backendMigration"]["id"] != operation_id {
                     return Err(Error::conflict(
-                        "Migration changed while fencing its source.",
+                        "Conversion changed while fencing its source.",
                     ));
                 }
                 current["backendMigration"]["sourceReadReady"] = true.into();
@@ -451,6 +405,8 @@ impl Service {
                 )
             })
             .await?;
+        // The source is native: reading it still needs fresh native authority.
+        policy::refresh(self).await?;
         let source_node = self.get("nodes", nodes::owner_node(&run)).await?;
         let (source_run_id, read_node) = (run_id.clone(), source_node.clone());
         let readable = self
@@ -459,18 +415,18 @@ impl Service {
             .await?;
         if !readable {
             return Err(Error::forbidden(
-                "The source environment is no longer authorized for migration reads.",
+                "The source environment is no longer authorized for conversion reads.",
             ));
         }
         let reservation = text(&run["backendMigration"], "reservationId").to_owned();
         // The reservation ID survives process death. No workload starts during
-        // migration; release an interrupted admission while retaining any
+        // conversion; release an interrupted admission while retaining any
         // materialized disk allocation, then reserve again with live limits.
         nodes::placement::release(self, &reservation).await?;
-        let node = self.get("nodes", text(&args, "nodeId")).await?;
+        let node = self.get("nodes", node_id).await?;
         let point = if let Some(saved) = run["backendMigration"]["convertedBackup"].as_str() {
             // A controller may have installed this exact point before losing its
-            // reply. Retrying it also completes the native restore transaction.
+            // reply. Retrying it also completes the restore transaction.
             self.get("node-backups", saved).await?
         } else {
             let point = nodes::publication::capture(self, &run).await?;
@@ -478,7 +434,7 @@ impl Service {
             let manifest = nodes::publication::manifest(self, &backup).await?;
             if manifest["kind"] == "native-files-v1" {
                 return Err(Error::conflict(
-                    "Resume this legacy native environment once on its original node to upgrade its storage before migrating.",
+                    "Resume this legacy native environment once on its original node to upgrade its storage before moving it to a VM.",
                 ));
             }
             let staging = tempfile::Builder::new()
@@ -491,7 +447,7 @@ impl Service {
                 &raw,
                 &manifest,
                 &checkpoint["prepared"],
-                text(&args, "backend"),
+                backend::FIRECRACKER,
                 staging.path(),
                 reserve,
             )
@@ -499,7 +455,7 @@ impl Service {
             let mut converted = nodes::snapshots::index(&disk).await?;
             converted["runtime"] = json!({
                 "runtimeId": node["runtimeId"],
-                "backend": args["backend"],
+                "backend": backend::FIRECRACKER,
                 "os": "linux",
                 "arch": "x86_64",
                 "storage": "ublk",
@@ -507,12 +463,8 @@ impl Service {
             converted["onDemand"] = true.into();
             converted["generation"] = 1.into();
             converted["capturedAt"] = now().into();
-            if args["backend"] == "native" {
-                converted["kind"] = "native-ext4-v1".into();
-            }
             nodes::publication::converted_environment(self, &run, &node, &disk, converted).await?
         };
-        policy::refresh(self).await?;
         let proposed = candidate(&self.store.run(&run_id).await?);
         let placement = nodes::placement::reserve(self, &proposed, &reservation).await?;
         let restored = async {
@@ -523,28 +475,27 @@ impl Service {
         let release = nodes::placement::release(self, &reservation).await;
         restored?;
         release?;
-        policy::refresh(self).await?;
         let (chat_id, operation) = (chat_id.to_owned(), operation.to_owned());
         self.store.transaction(move |db| {
             authorize(db)?;
-            let (mut chat, current, agent) = chat_run(db, &chat_id)?;
+            let (mut chat, current, _) = chat_run(db, &chat_id)?;
             let migration = &current["backendMigration"];
-            if migration["id"] != operation || migration["agentRevision"] != agent["revision"]
-                || backend(&agent) != text(&args, "backend") {
-                return Err(Error::conflict("Conversation or agent changed during backend migration."));
+            if migration["id"] != operation {
+                return Err(Error::conflict("Conversation changed during conversion."));
             }
-            let proposed = prospective(db, &current, &agent, &source)?;
             let source_node = required(db.get("nodes", text(&source_node, "id"))?, "Source node removed")?;
             if !source_read(db, &run_id, &source_node)? {
-                return Err(Error::forbidden("Source read permission was revoked during migration."));
+                return Err(Error::forbidden("Source read permission was revoked during conversion."));
             }
             let destination = required(db.get("nodes", text(&node, "id"))?, "Destination node removed")?;
-            if !allowed(db, &proposed, &destination)? {
-                return Err(Error::forbidden("Destination permission was revoked during migration."));
+            if !allowed(db, &current, &destination)? {
+                return Err(Error::forbidden("Destination permission was revoked during conversion."));
             }
             let key = nodes::checkpoint_key(&run_id);
             let mut checkpoint = nodes::db_checkpoint(db, &run_id)?;
-            checkpoint["prepared"]["backend"] = args["backend"].clone();
+            checkpoint["prepared"]["backend"] = backend::FIRECRACKER.into();
+            checkpoint["diskFormat"] = DiskFormat::Vm { runtime: None }.as_str().into();
+            checkpoint["diskRuntimeId"] = node["runtimeId"].clone();
             checkpoint["nodeId"] = node["id"].clone();
             checkpoint["runtimeId"] = node["runtimeId"].clone();
             checkpoint["resources"] = placement["resources"].clone();
@@ -554,8 +505,8 @@ impl Service {
             checkpoint["completed"] = true.into();
             for key in ["process", "settled", "controllerRecoveries"] { checkpoint[key] = Value::Null; }
             db.set(&key, &checkpoint, None)?;
-            let mut patch = json!({
-                "snapshot": proposed["snapshot"],
+            let patch = json!({
+                "executionBackend": backend::FIRECRACKER,
                 "nodeId": node["id"],
                 "resources": placement["resources"],
                 "requiredRuntime": node["runtimeId"],
@@ -573,18 +524,15 @@ impl Service {
                 "storage": { "mode": nodes::ON_DEMAND },
                 "backup": { "id": point["id"], "snapshotId": point["snapshotId"], "capturedAt": point["capturedAt"], "status": "ready" },
             });
-            let grant = migration_grant(db, &current, &agent, &source)?;
-            policy::apply(&mut patch, &grant);
             db.patch_run(&run_id, &patch)?;
-            policy::apply(&mut chat, &grant);
             chat["paused"] = migration["paused"].clone();
             chat["sessionRestartRequested"] = true.into();
             chat["wakeup"] = Value::Null;
             db.put("chats", &chat)?;
-            db.event(&run_id, "status", "Execution backend migrated. Conversation history and files preserved; the next message starts a fresh engine session.", None)?;
+            db.event(&run_id, "status", "Environment converted to run in a VM. Conversation history and files preserved; the next message starts a fresh engine session.", None)?;
             db.audit("chat.backend-migration.completed", &json!({
                 "chatId": chat_id,
-                "backend": args["backend"],
+                "backend": backend::FIRECRACKER,
                 "nodeId": node["id"],
             }))?;
             Ok(())
@@ -715,54 +663,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delegated_migration_keeps_historical_principals_and_parent_bounds() {
+    async fn conversions_only_target_vm_nodes_the_agent_still_allows() {
         let root = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(root.path()).unwrap();
-        store.transaction(|db| {
-            let node = id(); let parent = id(); let coordinator = id(); let target = id();
-            db.set("native-authority", &json!({ "observedAt": now(), "accounts": { "owner": {}, "editor": {} } }), None)?;
-            let parent_agent = json!({ "id": coordinator, "access": { "installation": true } });
-            db.put("agents", &parent_agent)?;
-            let parent_run = json!({
-                "id": parent,
-                "taskId": "fixture",
-                "status": RunStatus::Running,
-                "createdAt": now(),
-                "snapshot": { "agent": parent_agent },
-                "nativePrincipals": ["owner"],
-                "nativeAuthorityNodes": [node],
-                "nativeProvenanceUnknown": false,
-            });
-            db.add_run(&parent_run, None)?;
-            let agent = json!({ "id": target, "access": { "backend": "native", "nodes": [node] } });
-            db.put("agents", &agent)?;
-            db.put("nodes", &json!({
-                "id": node,
-                "capabilities": { "backend": "native" },
-                "nativeEnabled": true,
-                "nativeAccounts": ["owner", "editor"],
-            }))?;
-            let origin = Origin::Run(parent.clone());
-            let mut historical = json!({ "snapshot": { "agent": { "id": target, "access": { "backend": "firecracker", "nodes": [node] } } } });
-            assert!(prospective(db, &historical, &agent, &origin).is_err());
-            historical["nativePrincipals"] = json!(["editor"]);
-            historical["nativeAuthorityNodes"] = json!([node]);
-            historical["nativeProvenanceUnknown"] = false.into();
-            historical["nativeParentRunId"] = id().into();
-            assert!(prospective(db, &historical, &agent, &origin).is_err());
-            historical["nativeParentRunId"] = parent.clone().into();
-            let candidate = prospective(db, &historical, &agent, &origin)?;
-            assert_eq!(candidate["nativePrincipals"], json!(["editor", "owner"]));
-            assert_eq!(candidate["nativeParentRunId"], parent);
-            assert!(allowed(db, &candidate, &db.get("nodes", &node)?.unwrap())?);
-            let mut revoked = db.get("nodes", &node)?.unwrap();
-            revoked["nativeAccounts"] = json!(["owner"]); db.put("nodes", &revoked)?;
-            assert!(!allowed(db, &candidate, &revoked)?);
-            let mut unknown = historical.clone(); unknown["nativeProvenanceUnknown"] = true.into();
-            assert!(prospective(db, &unknown, &agent, &origin).is_err());
-            // The explicitly authenticated owner can adopt even unknown history.
-            assert!(prospective(db, &unknown, &agent, &Origin::Human("owner".into())).is_ok());
-            Ok(())
-        }).await.unwrap();
+        store
+            .transaction(|db| {
+                let (vm, native, other, agent) = (id(), id(), id(), id());
+                db.put(
+                    "agents",
+                    &json!({ "id": agent, "access": { "nodes": [vm, native] } }),
+                )?;
+                db.put(
+                    "nodes",
+                    &json!({ "id": vm, "capabilities": { "backend": "firecracker" } }),
+                )?;
+                db.put(
+                    "nodes",
+                    &json!({ "id": other, "capabilities": { "backend": "firecracker" } }),
+                )?;
+                db.put(
+                    "nodes",
+                    &json!({
+                        "id": native,
+                        "capabilities": { "backend": "native" },
+                        "nativeEnabled": true,
+                        "nativeAccounts": ["owner"],
+                    }),
+                )?;
+                let run = json!({ "snapshot": { "agent": { "id": agent } } });
+                assert!(allowed(db, &run, &db.get("nodes", &vm)?.unwrap())?);
+                assert!(!allowed(db, &run, &db.get("nodes", &native)?.unwrap())?);
+                assert!(!allowed(db, &run, &db.get("nodes", &other)?.unwrap())?);
+                let mut revoked = db.get("nodes", &vm)?.unwrap();
+                revoked["revoked"] = true.into();
+                assert!(!allowed(db, &run, &revoked)?);
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 }

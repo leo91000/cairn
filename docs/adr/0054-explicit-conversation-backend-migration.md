@@ -88,3 +88,8 @@ an unchanged source checkpoint until success. Downgrading during the operation i
 unsupported because old schedulers do not understand its admission guard; finish
 or retry it with the current manager first. Controllers need no new conversion API.
 This change does not release or deploy either runtime.
+
+Update, 2026-10-24: a backend change is now a move to a node of the other backend.
+Native nodes mount VM disks in place, so this conversion only runs once, for a disk
+created natively that moves to a VM. See
+[ADR 0059](0059-per-conversation-backend-and-in-place-vm-disks.md).

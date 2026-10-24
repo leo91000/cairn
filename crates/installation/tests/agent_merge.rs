@@ -347,7 +347,6 @@ async fn merge_rejects_invalid_targets_permissions_credentials_and_delegations()
     for change in [
         json!({ "access": { "installation": true } }),
         json!({ "access": { "nodes": null } }),
-        json!({ "access": { "backend": "native" } }),
         json!({ "plugins": [id()] }),
         json!({ "exclusiveNodes": [id()] }),
     ] {

@@ -391,7 +391,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     let skills = skill_index(&run["snapshot"]["skills"]);
-    let tooling = if crate::native::policy::native(&run["snapshot"]["agent"]) {
+    let tooling = if crate::execution::runs_natively(run) {
         "Tooling: This execution runs on a native Linux node using its installed GPU driver. \
             Cairn supplies the pinned coding engines, Node.js and GitHub CLI. Other tools and \
             project SDKs depend on this node; check availability before using them. Respect \

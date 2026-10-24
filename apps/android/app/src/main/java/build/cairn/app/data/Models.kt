@@ -43,7 +43,6 @@ data class AccessPolicy(
     val mcpTools: Map<String, List<String>> = emptyMap(),
     val installation: Boolean = false,
     val sandbox: String = "yolo",
-    val backend: String = "firecracker",
 )
 
 @Serializable

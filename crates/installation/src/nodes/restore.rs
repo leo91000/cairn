@@ -29,21 +29,49 @@ fn ready() -> Value {
     json!({ "ready": true })
 }
 
-pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Result<()> {
-    let _operation = s.node_backup_operation.lock(text(run, "id")).await;
-    let manifest = super::publication::manifest(s, backup).await?;
-    let record = s.get("nodes", node).await?;
-    let native = crate::native::policy::node_native(&record);
-    if native
-        != matches!(
-            manifest["kind"].as_str(),
-            Some("native-files-v1" | "native-ext4-v1")
-        )
-    {
+/// Describes a published disk for the backend that mounts it next. Native
+/// nodes mount VM disks directly and keep the VM image recorded for a later
+/// move back; a VM can only boot a VM disk.
+pub(crate) fn for_destination(mut manifest: Value, node: &Value) -> Result<Value> {
+    let native_node = crate::native::policy::node_native(node);
+    let native_disk = matches!(
+        manifest["kind"].as_str(),
+        Some("native-files-v1" | "native-ext4-v1")
+    );
+    let mounted_natively = manifest["runtime"]["backend"] == "native";
+    if native_disk && !native_node {
         return Err(Error::conflict(
-            "Conversation moves cannot change execution backend.",
+            "An environment created on a native node must be converted before a VM can run it.",
         ));
     }
+    if native_node && !native_disk && !mounted_natively {
+        let image = manifest["runtime"]["runtimeId"].clone();
+        manifest["runtime"] = json!({
+            "backend": "native",
+            "storage": "ublk",
+            "os": "linux",
+            "arch": "x86_64",
+            "runtimeId": node["runtimeId"],
+            "disk": "vm",
+            "vmRuntimeId": image,
+        });
+    } else if !native_node && mounted_natively {
+        let image = manifest["runtime"]["vmRuntimeId"].clone();
+        if !image.as_str().is_some_and(super::valid_runtime) {
+            return Err(Error::conflict(
+                "This environment has no recorded VM runtime.",
+            ));
+        }
+        manifest["runtime"] = json!({ "runtimeId": image });
+    }
+    Ok(manifest)
+}
+
+pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Result<()> {
+    let _operation = s.node_backup_operation.lock(text(run, "id")).await;
+    let record = s.get("nodes", node).await?;
+    let manifest = for_destination(super::publication::manifest(s, backup).await?, &record)?;
+    let native = crate::native::policy::node_native(&record);
     if !native && record["capabilities"]["fuse"] != true {
         return Err(Error::conflict("Destination has no FUSE device."));
     }
@@ -207,4 +235,36 @@ pub(crate) async fn restore_journal(
     tokio::fs::remove_file(directory.join("restore.pending")).await?;
     tokio::fs::File::open(&directory).await?.sync_all().await?;
     Ok(ready())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_nodes_mount_vm_disks_and_vms_never_receive_native_disks() {
+        let native = json!({ "capabilities": { "backend": "native" }, "runtimeId": "tools-2" });
+        let vm = json!({ "capabilities": { "backend": "firecracker" }, "runtimeId": "image-3" });
+        let disk = json!({ "version": 2, "runtime": { "runtimeId": "image-1" }, "layout": { "kind": "paired-ext4-v1" } });
+
+        let mounted = for_destination(disk.clone(), &native).unwrap();
+        assert_eq!(mounted["runtime"]["backend"], "native");
+        assert_eq!(mounted["runtime"]["runtimeId"], "tools-2");
+        assert_eq!(mounted["runtime"]["disk"], "vm");
+        assert_eq!(mounted["runtime"]["vmRuntimeId"], "image-1");
+        assert_eq!(mounted["layout"], disk["layout"]);
+        assert!(mounted.get("kind").is_none());
+
+        // Another native node keeps the pinned native runtime of the disk.
+        let moved = for_destination(mounted.clone(), &native).unwrap();
+        assert_eq!(moved, mounted);
+
+        let back = for_destination(mounted, &vm).unwrap();
+        assert_eq!(back["runtime"], json!({ "runtimeId": "image-1" }));
+        assert_eq!(for_destination(disk.clone(), &vm).unwrap(), disk);
+
+        let created = json!({ "kind": "native-ext4-v1", "runtime": { "backend": "native", "runtimeId": "tools-1" } });
+        assert!(for_destination(created.clone(), &vm).is_err());
+        assert_eq!(for_destination(created.clone(), &native).unwrap(), created);
+    }
 }

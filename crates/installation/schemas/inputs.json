@@ -46,7 +46,6 @@
       },
       "access": {
         "default": {
-          "backend": "firecracker",
           "nodes": [
             "00000000-0000-4000-8000-000000000002"
           ],
@@ -59,14 +58,6 @@
         },
         "type": "object",
         "properties": {
-          "backend": {
-            "default": "firecracker",
-            "type": "string",
-            "enum": [
-              "firecracker",
-              "native"
-            ]
-          },
           "nodes": {
             "default": [
               "00000000-0000-4000-8000-000000000002"
@@ -169,7 +160,6 @@
           }
         },
         "required": [
-          "backend",
           "nodes",
           "projects",
           "skills",

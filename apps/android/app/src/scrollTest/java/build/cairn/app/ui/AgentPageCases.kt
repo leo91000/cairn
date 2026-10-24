@@ -472,7 +472,7 @@ abstract class AgentPageCases {
                 .performScrollTo()
             capture("agent-nodes")
             back()
-            waitForText("2 sur 3 · exclusivité sur 1")
+            waitForText("2 sur 4 · exclusivité sur 1")
             capture("agent-overview")
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(15000) {
@@ -699,69 +699,53 @@ abstract class AgentPageCases {
     }
 
     @Test
-    fun switchingToNativeExecutionStartsFromNoNodesAndIsReviewed() {
+    fun nativeNodesAreGrantedBesideVmNodesAndReviewed() {
         journey("agent") { fixture ->
             open(AgentSection.Nodes)
             waitForDescription("Exécuter ses conversations sur gpu-box")
-            // A VM agent only sees VM machines.
+            // VM and native machines are listed together: no backend to choose on the agent.
+            compose.onNodeWithContentDescription("Exécution native sur l’hôte").assertDoesNotExist()
+            compose.onNodeWithText("Processus natif", substring = true).assertExists()
             compose
                 .onNodeWithContentDescription("Exécuter ses conversations sur desk-native")
-                .assertDoesNotExist()
-            compose
-                .onNodeWithContentDescription("Exécution native sur l’hôte")
+                .performScrollTo()
                 .assertIsOff()
                 .performClick()
-            compose
-                .onNodeWithText("Partage le GPU et les outils de l’hôte", substring = true)
-                .assertExists()
-            compose
-                .onNodeWithContentDescription("Toutes les nodes VM, y compris futures")
-                .assertDoesNotExist()
-            compose
-                .onNodeWithContentDescription("Exécuter ses conversations sur Runner actuel")
-                .assertDoesNotExist()
-            compose
-                .onNodeWithContentDescription("Exécuter ses conversations sur gpu-box")
-                .assertDoesNotExist()
-            compose
-                .onNodeWithContentDescription("Exécuter ses conversations sur desk-native")
-                .assertIsOff()
-                .performClick()
+                .assertIsOn()
             back()
             compose
-                .onNodeWithContentDescription("Nodes, Exécution native · 1 sur 1, modifié")
+                .onNodeWithContentDescription("nodes natives, modifié", substring = true)
                 .assertExists()
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(15000) {
                 compose.onAllNodesWithTag("agent-review").fetchSemanticsNodes().isNotEmpty()
             }
             compose
-                .onNodeWithText("Ajout : exécution native sur l’hôte", substring = true)
+                .onNodeWithText("Ajout : node native desk-native.", substring = true)
                 .assertExists()
             confirmReview()
             compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
             val access = fixture.saved.single().second["access"]!!.jsonObject
-            assertEquals(JsonPrimitive("native"), access["backend"])
-            assertEquals(JsonArray(listOf(JsonPrimitive("desk"))), access["nodes"])
+            assertEquals(null, access["backend"])
+            assertTrue(JsonPrimitive("desk") in access["nodes"]!!.jsonArray)
+            assertTrue(JsonPrimitive(LOCAL_NODE_ID) in access["nodes"]!!.jsonArray)
         }
     }
 
     @Test
-    fun nativeAgentCanUseAllCurrentAndFutureNodes() {
+    fun anAgentCanUseAllCurrentAndFutureNodesOfBothBackends() {
         journey("agent") { fixture ->
             open(AgentSection.Nodes)
             compose.waitUntil(15000) {
                 compose
                     .onAllNodes(
-                        hasContentDescription("Exécution native sur l’hôte") and isEnabled()
+                        hasContentDescription("Toutes les nodes, y compris futures") and isEnabled()
                     )
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
-            compose.onNodeWithContentDescription("Exécution native sur l’hôte").performClick()
-            waitForDescription("Toutes les nodes natives, y compris futures")
             compose
-                .onNodeWithContentDescription("Toutes les nodes natives, y compris futures")
+                .onNodeWithContentDescription("Toutes les nodes, y compris futures")
                 .assertIsOff()
                 .performClick()
                 .assertIsOn()
@@ -770,10 +754,12 @@ abstract class AgentPageCases {
             compose.waitUntil(15000) {
                 compose.onAllNodesWithTag("agent-review").fetchSemanticsNodes().isNotEmpty()
             }
+            compose
+                .onNodeWithText("Ajout : toutes les nodes, y compris natives.", substring = true)
+                .assertExists()
             confirmReview()
             compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
             val access = fixture.saved.single().second["access"]!!.jsonObject
-            assertEquals(JsonPrimitive("native"), access["backend"])
             assertEquals(JsonNull, access["nodes"])
         }
     }
@@ -948,9 +934,8 @@ abstract class AgentPageCases {
             open(AgentSection.Nodes)
             waitForText("Impossible de charger les nodes", substring = true)
             compose
-                .onNodeWithContentDescription("Toutes les nodes VM, y compris futures")
+                .onNodeWithContentDescription("Toutes les nodes, y compris futures")
                 .assertIsNotEnabled()
-            compose.onNodeWithContentDescription("Exécution native sur l’hôte").assertIsNotEnabled()
             // What the agent holds is listed as saved, not as a guessed machine with a status.
             compose.onNodeWithText("Exécution autorisée sur : $LOCAL_NODE_ID").assertExists()
             compose
@@ -964,7 +949,7 @@ abstract class AgentPageCases {
                 .onNodeWithText("Impossible de charger les nodes", substring = true)
                 .assertDoesNotExist()
             compose
-                .onNodeWithContentDescription("Toutes les nodes VM, y compris futures")
+                .onNodeWithContentDescription("Toutes les nodes, y compris futures")
                 .assertIsEnabled()
         }
     }

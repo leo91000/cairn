@@ -26,7 +26,6 @@ import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { LOCAL_NODE_ID } from '../../../../packages/contracts/nodes'
 import {
   alwaysAvailable,
-  backendOf,
   changes,
   draftOf,
   effectiveExclusive,
@@ -37,12 +36,13 @@ import {
   mainLockedSections,
   needsReview,
   newAgentDraft,
+  nodeBackend,
   nodeName,
   nodesFor,
   olderInstallation,
   rebaseDraft,
   reviewLines,
-  sandboxOptionsFor,
+  sandboxOptions,
   savedDraft,
   selectionSummary,
   sentDraft,
@@ -157,9 +157,10 @@ const context = computed<Context>(() => ({
   workspaceUnavailable: !state.workspaceLoaded,
 }))
 const access = computed(() => draft.value.access)
-const backend = computed(() => backendOf(access.value))
-// Nodes of the agent's execution backend, the only ones it can be granted.
-const availableNodes = computed(() => nodesFor(nodes.value, backend.value))
+// VM and native nodes alike: each conversation keeps the backend it started on.
+const availableNodes = computed(() => nodesFor(nodes.value))
+// Native nodes the agent may run on: conversations moved there run as host processes.
+const native = computed(() => availableNodes.value.some(node => nodeBackend(node) === 'native' && (access.value.nodes === null || access.value.nodes.includes(node.id))))
 const changed = computed(() => changes(saved.value, draft.value))
 const dirty = computed(() => loaded.value && !notFound.value && changed.value.length > 0)
 const issues = computed(() => loaded.value ? findIssues(draft.value, context.value, isMain.value, isNew.value ? null : id.value) : [])
@@ -202,7 +203,7 @@ function chip(value: string[] | null): { tone: ChipTone, label: string } {
 const projectName = (project: string) => state.projects.find(item => item.id === project)?.name ?? 'Removed project'
 const connectionName = (connection: string) => catalog.value.connections.find(item => item.id === connection)?.name ?? 'Removed instance'
 const provider = computed(() => codingAgents[draft.value.provider] ?? codingAgents.codex)
-const modes = computed(() => sandboxOptionsFor(backendOf(access.value)))
+const modes = computed(() => sandboxOptions)
 const sandbox = computed(() => modes.value.find(option => option.value === access.value.sandbox) ?? modes.value[0]!)
 // Only grants that take effect: the agent may run there and the runtime supports exclusive reservations.
 const exclusiveNodes = computed(() => effectiveExclusive(draft.value, nodes.value))
@@ -235,7 +236,7 @@ const summaries = computed<Record<SectionId, { short: string, long: string }>>((
     : { short: draft.value.plugins.length ? String(draft.value.plugins.length) : 'None', long: pluginSummary.value || 'None' },
   nodes: nodesError.value
     ? { short: 'Unavailable', long: 'Not loaded' }
-    : { short: `${backend.value === 'native' ? 'Native · ' : ''}${short(access.value.nodes, availableNodes.value.length)}`, long: `${backend.value === 'native' ? 'Native process · ' : ''}${selectionSummary(access.value.nodes, availableNodes.value.length)}${exclusiveNodes.value.length ? ` · exclusive on ${exclusiveNodes.value.length}` : ''}` },
+    : { short: short(access.value.nodes, availableNodes.value.length), long: `${selectionSummary(access.value.nodes, availableNodes.value.length)}${native.value ? ' · native nodes' : ''}${exclusiveNodes.value.length ? ` · exclusive on ${exclusiveNodes.value.length}` : ''}` },
   sandbox: { short: sandbox.value.label, long: sandbox.value.label },
   powers: { short: powers.value ? String(powers.value) : nodesError.value ? 'Unavailable' : 'None', long: [nodesError.value ? 'Exclusive reservation not loaded' : exclusiveNodes.value.length ? 'Exclusive reservation' : '', access.value.installation ? 'Installation management' : ''].filter(Boolean).join(' · ') || 'None' },
   advanced: { short: draft.value.timeoutMinutes ? `${draft.value.timeoutMinutes} min` : '', long: draft.value.timeoutMinutes ? `Time limit: ${draft.value.timeoutMinutes} minutes` : 'No time limit' },
@@ -286,12 +287,12 @@ const overview = computed(() => [
         id: 'nodes',
         section: 'nodes' as const,
         title: 'Execution',
-        summary: nodesError.value ? 'Not loaded' : `${backend.value === 'native' ? 'Native process · ' : ''}${access.value.nodes === null ? 'All nodes, including future' : `${access.value.nodes.length} of ${availableNodes.value.length} ${availableNodes.value.length === 1 ? 'node' : 'nodes'}`}`,
+        summary: nodesError.value ? 'Not loaded' : `${access.value.nodes === null ? 'All nodes, including future' : `${access.value.nodes.length} of ${availableNodes.value.length} ${availableNodes.value.length === 1 ? 'node' : 'nodes'}`}`,
         detail: nodesError.value ? 'Nodes could not be loaded' : access.value.nodes === null ? `${availableNodes.value.length} today` : names(access.value.nodes, node => nodeName(nodes.value.find(item => item.id === node), node)) || 'Cannot run anywhere',
         chip: nodesError.value
           ? { tone: 'unavailable' as const, label: 'Unavailable' }
-          : backend.value === 'native'
-            ? { tone: 'power' as const, label: 'Native process' }
+          : native.value
+            ? { tone: 'power' as const, label: 'Native nodes' }
             : access.value.nodes?.length === 0 ? { tone: 'none' as const, label: 'None' } : { tone: 'granted' as const, label: 'Granted' },
       },
       {
@@ -1157,7 +1158,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               </label>
             </fieldset>
             <p class="text-xs text-muted">
-              {{ isolationNote(backend) }}
+              {{ isolationNote }}
             </p>
           </template>
 

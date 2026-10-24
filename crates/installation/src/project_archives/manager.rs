@@ -226,8 +226,7 @@ async fn allowed(s: &Service, node_id: &str, project: &Value) -> Result<bool> {
     }
     Ok(s.store.list("agents").await?.iter().any(|agent| {
         let policy = crate::service::policy(agent);
-        crate::native::policy::native(agent) == native
-            && crate::nodes::agent_allows(agent, node_id)
+        crate::nodes::agent_allows(agent, node_id)
             && crate::service::allowed(&policy["projects"], text(project, "id"))
     }))
 }

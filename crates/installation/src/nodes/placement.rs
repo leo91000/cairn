@@ -102,18 +102,29 @@ struct Request<'a> {
     checkpoint: &'a Value,
     moving: bool,
     required_runtime: Option<&'a str>,
+    /// The backend the environment runs on at the selected node.
+    backend: &'static str,
 }
 
 impl<'a> Request<'a> {
-    fn new(run: &'a Value, access: &'a Value, checkpoint: &'a Value) -> Result<Self> {
+    fn new(
+        run: &'a Value,
+        access: &'a Value,
+        checkpoint: &'a Value,
+        nodes: &[Value],
+    ) -> Result<Self> {
+        // The saved runtime belongs to the source backend when the move changes it.
+        let changes_backend = run["targetBackend"].is_string();
+        let saved_runtime = (!changes_backend)
+            .then(|| checkpoint["runtimeId"].as_str())
+            .flatten();
         Ok(Self {
             run,
             access,
             checkpoint,
             moving: run["placementTransition"] == true,
-            required_runtime: run["requiredRuntime"]
-                .as_str()
-                .or(checkpoint["runtimeId"].as_str()),
+            required_runtime: run["requiredRuntime"].as_str().or(saved_runtime),
+            backend: super::backend::of_run(run, checkpoint, access, nodes),
         })
     }
 
@@ -146,10 +157,19 @@ impl<'a> Request<'a> {
         // An existing environment stays where it is unless it is moving.
         let existing = self.moving || self.checkpoint["nodeId"].as_str().is_none_or(|p| p == id);
         let local_unconfigured = node["local"] == true && !configured;
-        let native = crate::native::policy::native(&self.run["snapshot"]["agent"]);
+        let native = self.backend == super::backend::NATIVE;
         if native != crate::native::policy::node_native(node)
             || native && node["capabilities"]["ublk"] != true
         {
+            return false;
+        }
+        // Only native controllers with idmapped mounts can run a saved VM disk.
+        let vm_disk = self.checkpoint["prepared"].is_object()
+            && matches!(
+                super::backend::DiskFormat::of(self.checkpoint),
+                super::backend::DiskFormat::Vm { .. }
+            );
+        if native && vm_disk && node["capabilities"]["vmDisks"] != true {
             return false;
         }
         let ready = (native
@@ -415,7 +435,7 @@ fn shortage(full: &[String]) -> String {
 
 fn reserve_in(db: &Db<'_>, run: &Value, attempt: &str, configured: bool) -> Result<Value> {
     let snapshot = Snapshot::load(db, run, configured)?;
-    let request = Request::new(run, &snapshot.access, &snapshot.checkpoint)?;
+    let request = Request::new(run, &snapshot.access, &snapshot.checkpoint, &snapshot.nodes)?;
     if !request.moving
         && let Some(reservation) = run["moveReservation"].as_str()
     {
@@ -433,7 +453,12 @@ pub async fn check(s: &Service, run: &Value) -> Result<()> {
     s.store
         .read(move |db| {
             let snapshot = Snapshot::load(db, &run, configured)?;
-            let request = Request::new(&run, &snapshot.access, &snapshot.checkpoint)?;
+            let request = Request::new(
+                &run,
+                &snapshot.access,
+                &snapshot.checkpoint,
+                &snapshot.nodes,
+            )?;
             // A move already holds its destination.
             if !request.moving && run["moveReservation"].is_string() {
                 return Ok(());
@@ -459,7 +484,7 @@ fn claim_reservation(
         .iter()
         .find(|n| n["id"] == node.as_str())
         .ok_or_else(|| Error::conflict("Destination removed."))?;
-    let native = crate::native::policy::native(&request.run["snapshot"]["agent"]);
+    let native = request.backend == super::backend::NATIVE;
     if native != crate::native::policy::node_native(record)
         || native && record["capabilities"]["ublk"] != true
     {
@@ -679,12 +704,24 @@ fn configure_in(db: &Db<'_>, run: &str, input: Option<Value>) -> Result<Value> {
             .flatten()
         {
             crate::validation::uuid(node)?;
+            let selected = db.get("nodes", node)?;
             let unauthorized = !allowed(&access["nodes"], node)
                 || (node != LOCAL_NODE_ID
-                    && db.get("nodes", node)?.is_none_or(|n| n["revoked"] == true));
+                    && selected.as_ref().is_none_or(|n| n["revoked"] == true));
             if unauthorized {
                 return Err(Error::forbidden(
                     "This node is not authorized for the conversation's agent.",
+                ));
+            }
+            // A saved environment changes backend only through an explicit move,
+            // which remounts or converts it before the next start.
+            let target = selected
+                .as_ref()
+                .map_or(super::backend::FIRECRACKER, super::backend::of_node);
+            let checkpoint = super::db_checkpoint(db, run)?;
+            if super::backend::recorded(&record, &checkpoint).is_some_and(|saved| saved != target) {
+                return Err(Error::conflict(
+                    "This node uses the other execution backend. Move the conversation there instead.",
                 ));
             }
         }

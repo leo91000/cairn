@@ -278,9 +278,9 @@ async fn drain(s: &Service, node: &str) -> Result<()> {
         })
     {
         let run = s.store.run(text(&attempt, "runId")).await?;
-        let native = crate::native::policy::native(&run["snapshot"]["agent"]);
         let run_id = text(&run, "id");
         let checkpoint = super::checkpoint(s, run_id).await?;
+        let native = checkpoint["prepared"]["backend"] == super::backend::NATIVE;
         if checkpoint["nodeId"] != node || checkpoint["runnerId"] != attempt["id"] {
             continue;
         }

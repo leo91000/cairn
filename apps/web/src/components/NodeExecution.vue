@@ -2,6 +2,7 @@
 import type { Run } from '../../../../packages/contracts/contracts'
 import type { ExecutionNode } from '../../../../packages/contracts/nodes'
 import type { Placement } from '../placement'
+import type { BackendMigrationState } from './BackendMigration.vue'
 import {
   computed,
   nextTick,
@@ -14,6 +15,7 @@ import {
   LOCAL_NODE_ID,
   relativeAge,
 } from '../../../../packages/contracts/nodes'
+import { backendLabels, nodeBackend } from '../agent-access'
 import { api } from '../api'
 import {
   Check,
@@ -36,7 +38,11 @@ const props = defineProps<{ run: Run }>()
 // Lets hosts drop the row around the chip while it renders nothing.
 const emit = defineEmits<{ relevance: [relevant: boolean] }>()
 const nodes = ref<ExecutionNode[]>([])
-const nodeOptions = computed(() => nodes.value.map(node => ({ value: node.id, label: node.name })))
+// Once its environment exists, a conversation starts again only on nodes of its backend; moving it
+// to the other backend is an explicit move.
+const nodeOptions = computed(() => nodes.value
+  .filter(node => !props.run.executionBackend || nodeBackend(node) === props.run.executionBackend)
+  .map(node => ({ value: node.id, label: node.name })))
 const labels: Record<string, string> = {
   'pausing': 'Pausing execution',
   'saving': 'Saving the environment',
@@ -89,7 +95,13 @@ const relevant = computed(() => (!!props.run.nodeId && props.run.nodeId !== LOCA
   || !!(props.run.nodeState || props.run.movementError || props.run.restoredAt || props.run.capacityWaitUntil || props.run.backup?.error))
 watch(relevant, value => emit('relevance', value), { immediate: true })
 const destinations = computed(() => nodes.value.filter(candidate => candidate.id !== props.run.nodeId))
-const destinationOptions = computed(() => destinations.value.map(node => ({ value: node.id, label: node.name })))
+const destinationOptions = computed(() => destinations.value.map(node => ({ value: node.id, label: `${node.name} · ${backendLabels[nodeBackend(node)]}` })))
+const target = computed(() => nodes.value.find(node => node.id === destination.value))
+// A move to the other backend keeps the same files; only a natively created disk is copied for a VM.
+const switching = computed(() => !!target.value && !!props.run.executionBackend && nodeBackend(target.value) !== props.run.executionBackend)
+const migration = ref<BackendMigrationState>()
+const conversion = computed(() => switching.value && nodeBackend(target.value!) === 'firecracker' && migration.value?.diskFormat === 'native')
+const migrationKey = ref(0)
 const canMove = computed(() => !!props.run.sessionId && !busy.value && !!destination.value && destination.value !== props.run.nodeId && ['running', 'succeeded'].includes(props.run.status) && !props.run.nodeState)
 const changed = computed(() => mode.value !== savedPlacement.value.mode || (mode.value !== 'automatic' && selection.value !== savedPlacement.value.selection))
 const dirtyBytes = computed(() => props.run.storage?.dirtyBytes || 0)
@@ -182,16 +194,33 @@ function savePreference() {
 
 function move() {
   return request(async () => {
-    await api(`/nodes/placement/${props.run.id}/move`, {
+    const result = await api<{ status: string }>(`/nodes/placement/${props.run.id}/move`, {
       method: 'POST',
       body: JSON.stringify({
         nodeId: destination.value,
       }),
     })
     moving.value = false
-    saved.value = 'Move requested.'
+    if (result?.status === 'migrating') {
+      migrationKey.value++
+      saved.value = 'Conversion started.'
+    }
+    else {
+      saved.value = switching.value ? 'Move requested; the conversation switches backend at the destination.' : 'Move requested.'
+    }
   })
 }
+
+watch(moving, async (value) => {
+  if (!value || migration.value)
+    return
+  try {
+    migration.value = await api<BackendMigrationState>(`/nodes/placement/${props.run.id}/backend-migration`)
+  }
+  catch {
+    // Without it, a natively created disk is reported by the move itself.
+  }
+})
 
 function close(returnFocus = false) {
   panel.value?.close()
@@ -344,7 +373,7 @@ onUnmounted(() => {
           </div>
         </section>
 
-        <BackendMigration :key="run.id" :run-id="run.id" @completed="loadPlacement(run.id).then(applyPlacement)" />
+        <BackendMigration :key="`${run.id}-${migrationKey}`" :run-id="run.id" @completed="loadPlacement(run.id).then(applyPlacement)" />
         <section class="mt-3 border-t border-line pt-3">
           <div class="flex items-center justify-between gap-3">
             <h3 class="m-0! text-xs! font-semibold text-ink">
@@ -421,6 +450,9 @@ onUnmounted(() => {
           />
           <p class="m-0! mt-2!">
             {{ modeHelp[mode] }} This does not move the conversation now.
+            <template v-if="run.executionBackend">
+              Only {{ backendLabels[run.executionBackend] }} nodes are listed; use Move… to switch backend.
+            </template>
           </p>
           <div class="mt-3 flex justify-end">
             <UiButton
@@ -454,9 +486,21 @@ onUnmounted(() => {
         <p class="m-0! mt-2!">
           Reserves the destination, pauses the conversation, transfers its environment and resumes it there. Running commands are interrupted. The disk cannot shrink.
         </p>
+        <p v-if="conversion" role="note" class="m-0! rounded-lg bg-warning-surface px-3 py-2 text-warning">
+          This environment was created on a native node. Its files are copied once for a VM; the current turn stops and the next message starts a fresh engine session. The original is kept if this fails.
+        </p>
+        <p v-else-if="switching && target && nodeBackend(target) === 'native'" role="note" class="m-0! rounded-lg bg-power-surface px-3 py-2 text-power">
+          This conversation will run as a native host process on {{ target.name }}, using the same files in place. Running commands stop; system packages installed in the VM are not available there. Isolation is weaker than a VM.
+          <template v-if="!target.capabilities.vmDisks">
+            Update this node to receive VM conversations.
+          </template>
+        </p>
+        <p v-else-if="switching" role="note" class="m-0! rounded-lg bg-inset px-3 py-2">
+          This conversation will run in a Firecracker VM again, using the same files. Running commands stop; tools installed on the native host are not kept.
+        </p>
         <div class="mt-3 flex justify-end">
           <UiButton size="small" :disabled="!canMove" type="submit">
-            Move now
+            {{ switching ? 'Move and switch backend' : 'Move now' }}
           </UiButton>
         </div>
         <p v-if="error" role="alert" class="text-coral">

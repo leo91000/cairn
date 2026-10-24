@@ -1,5 +1,6 @@
 //! Trusted node identities. Enrollment and revocation are serialized with heartbeats.
 pub mod alerts;
+pub mod backend;
 pub mod checkpoint;
 pub mod connector;
 pub mod coordination;
@@ -255,6 +256,9 @@ struct Capabilities {
     fuse: bool,
     #[serde(default)]
     ublk: bool,
+    /// Native nodes able to mount VM disks in place through idmapped mounts.
+    #[serde(default)]
+    vm_disks: bool,
     cpu: u32,
     memory_mi_b: u64,
     disk_mi_b: u64,
@@ -430,11 +434,7 @@ impl Usage<'_> {
         let id = text(node, "id");
         self.agents
             .iter()
-            .filter(|agent| {
-                agent_allows(agent, id)
-                    && crate::native::policy::native(agent)
-                        == crate::native::policy::node_native(node)
-            })
+            .filter(|agent| agent_allows(agent, id))
             .map(|agent| AgentGrant {
                 id: &agent["id"],
                 name: &agent["name"],
@@ -892,14 +892,6 @@ async fn grant_agents(s: &Service, node: &str, body: Value) -> Result<Value> {
                 let granted = request.agent_ids.iter().any(|id| agent["id"] == *id);
                 if request.add && !granted {
                     continue;
-                }
-                if granted
-                    && crate::native::policy::native(&agent)
-                        != crate::native::policy::node_native(&record)
-                {
-                    return Err(Error::bad(
-                        "Choose agents configured for this node's execution backend.",
-                    ));
                 }
                 set_node_grant(db, agent, &node, granted)?;
             }

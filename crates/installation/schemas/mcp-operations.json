@@ -63,7 +63,6 @@
         },
         "access": {
           "default": {
-            "backend": "firecracker",
             "nodes": [
               "00000000-0000-4000-8000-000000000002"
             ],
@@ -76,14 +75,6 @@
           },
           "type": "object",
           "properties": {
-            "backend": {
-              "default": "firecracker",
-              "type": "string",
-              "enum": [
-                "firecracker",
-                "native"
-              ]
-            },
             "nodes": {
               "default": [
                 "00000000-0000-4000-8000-000000000002"
@@ -186,7 +177,6 @@
             }
           },
           "required": [
-            "backend",
             "nodes",
             "projects",
             "skills",
@@ -266,13 +256,6 @@
             "access": {
               "type": "object",
               "properties": {
-                "backend": {
-                  "type": "string",
-                  "enum": [
-                    "firecracker",
-                    "native"
-                  ]
-                },
                 "nodes": {
                   "anyOf": [
                     {
@@ -413,7 +396,7 @@
   },
   {
     "name": "merge_agents",
-    "description": "Merge an idle Firecracker agent into an existing profile, transferring all tasks (including archived), chats (including trash) and run identities atomically. Existing runs retain their engine, model and settings; future task runs use destination defaults. Destination access and live grants must already cover the source. Main can only be the destination. Rejects active/recovering work, native agents and plugin delegations. Does not change destination permissions or credentials. Requires explicit confirmation.",
+    "description": "Merge an idle agent into an existing profile, transferring all tasks (including archived), chats (including trash) and run identities atomically. Existing runs retain their engine, model and settings; future task runs use destination defaults. Destination access and live grants must already cover the source. Main can only be the destination. Rejects active/recovering work and plugin delegations. Conversations keep their execution backend and native provenance. Does not change destination permissions or credentials. Requires explicit confirmation.",
     "scope": "manage",
     "destructive": true,
     "inputSchema": {
@@ -2192,7 +2175,7 @@
   },
   {
     "name": "list_nodes",
-    "description": "List execution nodes, their immutable backends, budgets, trusted people, agent grants and storage status. Read this before configuring or replacing a node.",
+    "description": "List execution nodes, their immutable backends (each conversation runs on one backend at a time), budgets, trusted people, agent grants and storage status. Read this before configuring or replacing a node.",
     "scope": "read",
     "destructive": false,
     "inputSchema": {
@@ -2218,7 +2201,7 @@
   },
   {
     "name": "create_node_enrollment",
-    "description": "Create a single-use enrollment for a separate node. To switch an existing machine, choose the other backend, install its runtime on that machine, then wait for this exact nodeId in list_nodes. Configure it and agent grants before offering to retire the previous node. Does not convert existing conversations or install anything.",
+    "description": "Create a single-use enrollment for a separate node. To switch an existing machine, choose the other backend, install its runtime on that machine, then wait for this exact nodeId in list_nodes. Configure it and agent grants before offering to retire the previous node. Does not move existing conversations or install anything; move them with migrate_chat_backend once the new node is configured.",
     "scope": "manage",
     "destructive": false,
     "inputSchema": {
@@ -2404,7 +2387,7 @@
   },
   {
     "name": "revoke_node",
-    "description": "Permanently revoke a node identity and its execution grants, preserving files on the machine. After a replacement is configured, releasePlacements returns conversations pinned to or preferring the old node to automatic placement. Ordinary revocation keeps those choices. Conversations retain their execution backend. Does not uninstall the runtime or delete its files.",
+    "description": "Permanently revoke a node identity and its execution grants, preserving files on the machine. After a replacement is configured, releasePlacements returns conversations pinned to or preferring the old node to automatic placement. Ordinary revocation keeps those choices. Conversations retain their execution backend; move them to another node, including one of the other backend, to continue elsewhere. Does not uninstall the runtime or delete its files.",
     "scope": "manage",
     "destructive": true,
     "inputSchema": {
@@ -2428,7 +2411,7 @@
   },
   {
     "name": "get_chat_backend_migration",
-    "description": "Inspect a conversation whose agent execution backend changed. Returns its current and configured backend, authorized destination nodes, pending migration and errors. Migration preserves the same chat and files and starts a fresh engine session.",
+    "description": "Inspect a conversation's execution backend before moving it to a node of the other backend. Returns its current backend (firecracker VM or native host process), its disk format, authorized destination nodes of the other backend with whether a one-time conversion is needed and whether native authority is already confirmed, plus any pending conversion and its error. Native nodes mount a VM disk in place; only a disk created natively needs conversion before a VM can run it.",
     "scope": "read",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2447,7 +2430,7 @@
   },
   {
     "name": "migrate_chat_backend",
-    "description": "Explicitly migrate an existing conversation to the backend currently configured on its agent. Stops execution, publishes its original environment, copies home/workspaces/output into a fresh runtime and restores it on an authorized node. Keeps the same chat and history. Operating-system packages may need reinstalling; the next message starts a fresh engine session with preserved context. Failure retains the original environment. Returns immediately; poll get_chat_backend_migration. Requires explicit confirmation and installation management access; never grants additional native node authority.",
+    "description": "Move an existing conversation to an authorized node of the other execution backend, keeping the same chat, history and files. A VM disk moves to a native node without copying: execution pauses, the same files are mounted in place and the conversation resumes there; system packages installed in the VM and running processes do not follow. Moving back to a VM is the same. A disk created on a native node is converted once before a VM can run it: that stops the active turn, keeps the original until the converted copy is restored, and the next message starts a fresh engine session. Moving to a native node records the caller as the conversation's native authority and requires that node to trust them. Returns immediately; poll get_chat_backend_migration for conversions. Requires explicit confirmation and installation management access.",
     "scope": "manage",
     "destructive": true,
     "inputSchema": {
@@ -2467,7 +2450,8 @@
           "enum": [
             "native",
             "firecracker"
-          ]
+          ],
+          "description": "Optional: the backend of the destination node, checked when given."
         },
         "confirm": {
           "type": "boolean",
@@ -2477,7 +2461,6 @@
       "required": [
         "chatId",
         "nodeId",
-        "backend",
         "confirm"
       ],
       "additionalProperties": false

@@ -117,7 +117,13 @@ impl Fixture {
             "slots": 1,
         });
         service.store.put("nodes", node.clone()).await.unwrap();
-        let agent = service.agent(json!({ "name": "Trusted native", "access": { "backend": "native", "nodes": [node["id"]] } }), None).await.unwrap();
+        let agent = service
+            .agent(
+                json!({ "name": "Trusted native", "access": { "nodes": [node["id"]] } }),
+                None,
+            )
+            .await
+            .unwrap();
         Self {
             _root: root,
             service,
@@ -580,12 +586,10 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
         node["capabilities"]["kvm"] = (!native).into();
         node["capabilities"]["fuse"] = (!native).into();
         f.service.store.put("nodes", node.clone()).await.unwrap();
-        let mut agent = f.agent.clone();
-        agent["access"]["backend"] = backend.into();
-        f.service.store.put("agents", agent.clone()).await.unwrap();
 
+        // The conversation, not its agent, records the backend it runs on.
         let mut run = f.run();
-        run["snapshot"]["agent"] = agent;
+        run["executionBackend"] = backend.into();
         run["placementTransition"] = true.into();
         run["targetNodeId"] = node["id"].clone();
         common::add_run(&f.service.store, &run).await;

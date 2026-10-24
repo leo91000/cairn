@@ -1,31 +1,27 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref } from 'vue'
+import { onUnmounted, ref } from 'vue'
 import { api } from '../api'
-import Modal from './Modal.vue'
-import UiButton from './UiButton.vue'
-import VirtualSelect from './VirtualSelect.vue'
 
-interface Migration {
+/** A conversation's backend and, for an environment created natively, its one-time conversion for a VM. */
+export interface BackendMigrationState {
   chatId: string
-  required: boolean
-  fromBackend: 'native' | 'firecracker'
-  toBackend: 'native' | 'firecracker'
-  nodes: { id: string, name: string }[]
+  backend: 'native' | 'firecracker'
+  diskFormat: 'vm' | 'native'
+  nodes: {
+    id: string
+    name: string
+    backend: 'native' | 'firecracker'
+    conversion: boolean
+    nativeAuthorityConfirmed: boolean
+  }[]
   pending: boolean
-  reason?: string | null
   error?: string | null
 }
 
 const props = defineProps<{ runId: string }>()
 const emit = defineEmits<{ completed: [] }>()
-const state = ref<Migration>()
-const destination = ref('')
-const confirm = ref(false)
-const busy = ref(false)
-const error = ref('')
+const state = ref<BackendMigrationState>()
 const completed = ref(false)
-const label = computed(() => state.value?.toBackend === 'native' ? 'native execution' : 'a Firecracker VM')
-const options = computed(() => state.value?.nodes.map(node => ({ value: node.id, label: node.name })) || [])
 let stopped = false
 let timer: ReturnType<typeof setTimeout> | undefined
 onUnmounted(() => {
@@ -35,23 +31,18 @@ onUnmounted(() => {
 
 async function load() {
   try {
-    const value = await api<Migration>(`/nodes/placement/${props.runId}/backend-migration`)
+    const value = await api<BackendMigrationState>(`/nodes/placement/${props.runId}/backend-migration`)
     if (stopped)
       return
-    if (state.value?.pending && !value.pending && !value.required) {
+    if (state.value?.pending && !value.pending && !value.error) {
       completed.value = true
       emit('completed')
     }
 
     state.value = value
-    if (!value.nodes.some(node => node.id === destination.value))
-      destination.value = value.nodes[0]?.id || ''
-    error.value = ''
   }
-  catch (e) {
-    // Older installations and non-owner views do not expose migration controls.
-    if (state.value)
-      error.value = e instanceof Error ? e.message : 'Unable to read migration progress'
+  catch {
+    // Older installations and non-owner views have no conversion progress to show.
   }
 
   if (!stopped && state.value?.pending)
@@ -59,79 +50,21 @@ async function load() {
 }
 
 void load()
-
-async function migrate() {
-  if (!state.value)
-    return
-  busy.value = true
-  error.value = ''
-  try {
-    await api(`/nodes/placement/${props.runId}/backend-migration`, {
-      method: 'POST',
-      body: JSON.stringify({ nodeId: destination.value, backend: state.value.toBackend, confirm: true }),
-    })
-    state.value.pending = true
-    confirm.value = false
-    await load()
-  }
-  catch (e) { error.value = e instanceof Error ? e.message : 'Unable to migrate this conversation' }
-  finally { busy.value = false }
-}
 </script>
 
 <template>
-  <section v-if="state?.required || state?.pending || completed" class="mt-3 border-t border-line pt-3" aria-label="Change execution backend">
+  <section v-if="state?.pending || state?.error || completed" class="mt-3 border-t border-line pt-3" aria-label="Environment conversion">
     <h3 class="m-0! text-xs! font-semibold text-ink">
-      Change execution backend
+      Moving to a VM
     </h3>
     <p v-if="completed" role="status">
-      Migration complete. Send a new message to continue in the same conversation.
+      Conversion complete. Send a new message to continue in the same conversation.
     </p>
     <p v-else-if="state?.pending" role="status">
-      Migrating to {{ label }}. Execution is stopped while the environment is saved and transferred. You can leave this screen.
+      Converting this natively created environment for a VM. Execution is stopped while its files are copied and restored. You can leave this screen.
     </p>
-    <template v-else>
-      <p>The agent now uses {{ label }}. Migrate this conversation to keep its history and files.</p>
-      <p v-if="state?.reason" class="text-warning">
-        {{ state.reason }}
-      </p>
-      <template v-else-if="options.length">
-        <VirtualSelect
-          v-model="destination"
-          :options="options"
-          label="Migration destination"
-          compact
-        />
-        <UiButton
-          class="mt-2"
-          size="small"
-          :disabled="busy || !destination"
-          @click="confirm = true"
-        >
-          Migrate this conversation…
-        </UiButton>
-      </template>
-      <p v-else>
-        Authorize a destination node on the agent's page before migrating.
-      </p>
-    </template>
-    <p v-if="error || state?.error" role="alert" class="text-coral">
-      {{ error || state?.error }}
+    <p v-if="state?.error" role="alert" class="text-coral">
+      {{ state.error }} Move the conversation again to retry.
     </p>
-    <Modal v-if="confirm" title="Migrate this conversation?" @close="confirm = false">
-      <div class="p-6 grid gap-4">
-        <p>Execution will stop and its files will move to {{ label }}. This keeps the same conversation and history.</p>
-        <p>The next message starts a fresh engine session with the conversation context. Operating-system tools and dependencies may need reinstalling.</p>
-        <p>The original environment is retained if migration fails. The conversation's previous node preference will be cleared.</p>
-        <div class="mt-4 flex justify-end gap-2">
-          <UiButton :disabled="busy" @click="confirm = false">
-            Cancel
-          </UiButton>
-          <UiButton variant="primary" :disabled="busy" @click="migrate">
-            Stop and migrate
-          </UiButton>
-        </div>
-      </div>
-    </Modal>
   </section>
 </template>

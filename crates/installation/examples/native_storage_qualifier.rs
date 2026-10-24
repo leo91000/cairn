@@ -36,8 +36,7 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
             let mut agent = s.agent(json!({ "name": "Fixture" }), None).await?;
             // The reserved local ID is a VM runner in production. Only this
             // disposable manager seeds it as native to route through the private
-            // fixture bridge; do not weaken the real agent-save prohibition.
-            agent["access"]["backend"] = "native".into();
+            // fixture bridge; the run records its native backend directly.
             agent["access"]["nodes"] = json!([nodes::LOCAL_NODE_ID]);
             s.store.put("agents", agent.clone()).await?;
             let run = json!({

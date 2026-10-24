@@ -43,3 +43,8 @@ retained. Epoch-5 binaries cannot interpret the native records introduced here.
 Rollback to epoch 5 requires its matching prepared data backup and binary; automatic
 updates do not cross epochs or restore data. Windows/macOS and desktop-session
 access remain separate future work.
+
+Update, 2026-10-24: agents no longer select a backend; each conversation keeps the
+backend of its environment and native nodes mount VM disks in place. Node-side
+opt-in, trusted people, provenance and delegation rules are unchanged. See
+[ADR 0059](0059-per-conversation-backend-and-in-place-vm-disks.md).

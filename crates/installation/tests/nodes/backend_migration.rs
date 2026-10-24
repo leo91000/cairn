@@ -16,17 +16,35 @@ async fn wait_migration(owner: &Owner, run: &str) -> Value {
     .unwrap()
 }
 
-async fn seed_ext4(owner: &Owner, record: &Value, node: &str, master: &str) {
+/// Seeds `node` with a VM disk, or with a disk created natively when `native`.
+async fn seed_ext4(owner: &Owner, record: &Value, node: &str, master: &str, native: bool) {
     let run = record["id"].as_str().unwrap();
-    let tree = owner.root().join("migration-tree");
-    let workspace = tree.join("upper/data/runs/test/workspace");
+    let tree = owner.root().join(if native {
+        "native-tree"
+    } else {
+        "migration-tree"
+    });
+    let (workspace, home, output) = if native {
+        ("workspaces", "home/.codex/sessions", "output")
+    } else {
+        (
+            "upper/data/runs/test/workspace",
+            "upper/home/node/.codex/sessions",
+            "upper/data/runs/test/output",
+        )
+    };
+    let workspace = tree.join(workspace);
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::write(workspace.join("uncommitted.txt"), MOVED_CONTENTS).unwrap();
-    let home = tree.join("upper/home/node/.codex/sessions");
+    let home = tree.join(home);
     std::fs::create_dir_all(&home).unwrap();
     std::fs::write(home.join("history"), b"engine context").unwrap();
-    std::fs::create_dir_all(tree.join("upper/data/runs/test/output")).unwrap();
-    let raw = owner.root().join("migration-source.ext4");
+    std::fs::create_dir_all(tree.join(output)).unwrap();
+    let raw = owner.root().join(if native {
+        "native-source.ext4"
+    } else {
+        "migration-source.ext4"
+    });
     std::fs::File::create(&raw)
         .unwrap()
         .set_len(128 * MIB as u64)
@@ -42,12 +60,16 @@ async fn seed_ext4(owner: &Owner, record: &Value, node: &str, master: &str) {
             .success()
     );
     let directory = owner.root().join(node).join("disks").join(run);
+    if directory.exists() {
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
     std::fs::create_dir_all(&directory).unwrap();
-    std::fs::write(
-        directory.join("runtime.json"),
-        br#"{"runtimeId":"fixture","backend":"firecracker","storage":"ublk"}"#,
-    )
-    .unwrap();
+    let runtime: &[u8] = if native {
+        br#"{"backend":"native","storage":"ublk","os":"linux","arch":"x86_64","runtimeId":"fixture"}"#
+    } else {
+        br#"{"runtimeId":"fixture","backend":"firecracker","storage":"ublk"}"#
+    };
+    std::fs::write(directory.join("runtime.json"), runtime).unwrap();
     let grant = disk_grants::new_disk(&owner.service, record, node)
         .await
         .unwrap();
@@ -136,20 +158,45 @@ async fn assert_files(owner: &Owner, node: &str, run: &str, native: bool) {
     assert_eq!(fs.read(home).unwrap(), b"engine context");
 }
 
+async fn runtime(owner: &Owner, node: &str, run: &str) -> Value {
+    let path = owner
+        .root()
+        .join(node)
+        .join("disks")
+        .join(run)
+        .join("runtime.json");
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+async fn move_to(owner: &Owner, run: &str, node: &str) -> Value {
+    let (status, response) = owner
+        .send(
+            "POST",
+            &format!("/api/nodes/placement/{run}/move"),
+            json!({ "nodeId": node }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    response
+}
+
 #[tokio::test]
 #[ignore = "requires loopback S3; run scripts/tests/node_s3_test.py --case backend_migration"]
-async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_source_on_failure() {
+async fn backend_moves_remount_vm_disks_and_convert_native_ones_once() {
     let (listener, address) = common::bind().await;
     let owner = Owner::at(address.to_string()).await;
     let (run, agent, chat, vm_node, native_node) = (id(), id(), id(), id(), id());
-    let original_agent = json!({ "id": agent, "revision": 1, "access": { "backend": "firecracker", "nodes": [vm_node] } });
-    owner.put("agents", original_agent.clone()).await;
+    // One agent may use both machines: each conversation keeps its own backend.
+    let profile =
+        json!({ "id": agent, "revision": 1, "access": { "nodes": [vm_node, native_node] } });
+    owner.put("agents", profile.clone()).await;
     let mut record = run_record(&run, RunStatus::Succeeded);
     record["isolated"] = true.into();
     record["nodeId"] = vm_node.clone().into();
     record["sessionId"] = "old-engine-session".into();
+    record["executionBackend"] = "firecracker".into();
     record["resources"] = limits(1, 512, 128);
-    record["snapshot"] = json!({ "agent": original_agent });
+    record["snapshot"] = json!({ "agent": profile });
     owner.add_run(&record).await;
     owner.put("chats", json!({ "id": chat, "runId": run, "agentId": agent, "paused": false, "title": "same conversation" })).await;
     let message = json!({ "id": id(), "chatId": chat, "text": "keep this history", "createdAt": now(), "status": "delivered" });
@@ -160,8 +207,8 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
         .transaction(move |db| db.put_message(&saved))
         .await
         .unwrap();
-    owner.set_checkpoint(&run, json!({ "nodeId": vm_node, "runnerId": run, "runtimeId": "fixture", "completed": true,
-        "prepared": { "backend": "firecracker", "isolated": true, "projectRoot": "/data/runs/test/workspace", "output": "/data/runs/test/output/result.md" } })).await;
+    let prepared = json!({ "backend": "firecracker", "isolated": true, "projectRoot": "/data/runs/test/workspace", "output": "/data/runs/test/output/result.md" });
+    owner.set_checkpoint(&run, json!({ "nodeId": vm_node, "runnerId": run, "runtimeId": "fixture", "completed": true, "prepared": prepared })).await;
     let stop = CancellationToken::new();
     let faults = MoveFaults {
         failed: Arc::new(AtomicBool::new(false)),
@@ -183,14 +230,93 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     let mut native = owner.stored("nodes", &native_node).await.unwrap();
     native["capabilities"]["backend"] = "native".into();
     native["capabilities"]["ublk"] = true.into();
+    native["capabilities"]["vmDisks"] = true.into();
     native["nativeEnabled"] = true.into();
     native["nativeAccounts"] = json!(["fixture-owner"]);
     owner.put("nodes", native).await;
     let mut vm_record = owner.stored("nodes", &vm_node).await.unwrap();
     vm_record["capabilities"]["backend"] = "firecracker".into();
     owner.put("nodes", vm_record).await;
-    seed_ext4(&owner, &record, &vm_node, &format!("http://{address}/")).await;
+    seed_ext4(
+        &owner,
+        &record,
+        &vm_node,
+        &format!("http://{address}/"),
+        false,
+    )
+    .await;
     tasks.push(owner.serve(listener));
+    publication::capture(&owner.service, &owner.run(&run).await)
+        .await
+        .unwrap();
+
+    // A VM disk moves to the native node and back without conversion: the
+    // same files keep their VM layout, and the engine session is retained.
+    for (destination, backend) in [(&native_node, "native"), (&vm_node, "firecracker")] {
+        let response = move_to(&owner, &run, destination).await;
+        assert_eq!(response["backend"], backend, "{response}");
+        let pending = owner.run(&run).await;
+        assert_eq!(pending["moveRequest"]["idle"], true, "{pending}");
+        assert_eq!(pending["moveRequest"]["backend"], backend);
+        moves::advance(&owner.service, &pending).await.unwrap();
+        let settled = owner.run(&run).await;
+        assert!(settled["movementError"].is_null(), "{settled}");
+        assert_eq!(settled["nodeId"], *destination, "{settled}");
+        assert_eq!(settled["status"], RunStatus::Succeeded);
+        assert_eq!(settled["executionBackend"], backend);
+        assert_eq!(settled["sessionId"], "old-engine-session");
+        assert!(settled["backendMigration"].is_null());
+        let checkpoint = owner
+            .service
+            .store
+            .kv(&format!("run-checkpoint:{run}"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(checkpoint["prepared"]["backend"], backend);
+        assert_eq!(checkpoint["diskFormat"], "vm");
+        assert_eq!(checkpoint["diskRuntimeId"], "fixture");
+        let identity = runtime(&owner, destination, &run).await;
+        if backend == "native" {
+            assert_eq!(identity["backend"], "native", "{identity}");
+            assert_eq!(identity["disk"], "vm");
+            assert_eq!(identity["vmRuntimeId"], "fixture");
+        } else {
+            assert_eq!(identity, json!({ "runtimeId": "fixture" }));
+        }
+        assert_files(&owner, destination, &run, false).await;
+        let saved_chat = owner.stored("chats", &chat).await.unwrap();
+        assert_eq!(saved_chat["paused"], false);
+        assert_ne!(saved_chat["sessionRestartRequested"], true);
+    }
+
+    // A disk created on the native node is converted once before a VM runs it.
+    seed_ext4(
+        &owner,
+        &record,
+        &native_node,
+        &format!("http://{address}/"),
+        true,
+    )
+    .await;
+    let mut native_prepared = prepared.clone();
+    native_prepared["backend"] = "native".into();
+    owner.set_checkpoint(&run, json!({ "nodeId": native_node, "runnerId": run, "runtimeId": "fixture", "completed": true, "prepared": native_prepared })).await;
+    owner
+        .service
+        .store
+        .patch_run(
+            &run,
+            json!({
+                "nodeId": native_node,
+                "executionBackend": "native",
+                "nativePrincipals": ["fixture-owner"],
+                "nativeAuthorityNodes": [native_node],
+                "nativeProvenanceUnknown": false,
+            }),
+        )
+        .await
+        .unwrap();
     publication::capture(&owner.service, &owner.run(&run).await)
         .await
         .unwrap();
@@ -207,218 +333,21 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
         })
         .await
         .unwrap();
-    for (backend, destination) in [("native", &native_node), ("firecracker", &vm_node)] {
-        let source_node = if backend == "native" {
-            &vm_node
-        } else {
-            &native_node
-        };
-        partial_cold_write(&owner, source_node, &run).await;
-        owner
-            .service
-            .store
-            .patch_run(&run, json!({ "status": RunStatus::Running }))
-            .await
-            .unwrap();
-        owner.service.store.set("native-authority", json!({ "observedAt": now(), "accounts": { "fixture-owner": { "email": "fixture@example.test" } } }), None).await.unwrap();
-        let mut profile = original_agent.clone();
-        profile["access"]["backend"] = backend.into();
-        profile["access"]["nodes"] = json!([destination]);
-        owner.put("agents", profile).await;
-        let source_context = LazyDisk::context(
-            &owner
-                .root()
-                .join(source_node)
-                .join("disks")
-                .join(&run)
-                .join("lazy"),
-        )
-        .unwrap();
-        let credential = source_context["grant"].as_str().unwrap();
-        assert!(
-            disk_grants::authorize(&owner.service, credential)
-                .await
-                .is_err(),
-            "normal source grants must not bypass the new profile"
-        );
-        let path = format!("/api/nodes/placement/{run}/backend-migration");
-        let (status, preview) = owner.get(&path).await;
-        assert_eq!(status, StatusCode::OK, "{preview}");
-        assert_eq!(preview["required"], true, "{preview}");
-        assert!(
-            preview["nodes"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|n| n["id"] == *destination),
-            "{preview}"
-        );
-        let (denied, _) = owner
-            .send(
-                "POST",
-                &path,
-                json!({ "nodeId": destination, "backend": backend, "confirm": false }),
-            )
-            .await;
-        assert_eq!(denied, StatusCode::BAD_REQUEST);
-        let wrong_node = if backend == "native" {
-            &vm_node
-        } else {
-            &native_node
-        };
-        let (denied, _) = owner
-            .send(
-                "POST",
-                &path,
-                json!({ "nodeId": wrong_node, "backend": backend, "confirm": true }),
-            )
-            .await;
-        assert_eq!(denied, StatusCode::FORBIDDEN);
-        let (status, response) = owner
-            .send(
-                "POST",
-                &path,
-                json!({ "nodeId": destination, "backend": backend, "confirm": true }),
-            )
-            .await;
-        assert_eq!(status, StatusCode::OK, "{response}");
-        let settled = wait_migration(&owner, &run).await;
-        assert!(settled["backendMigrationError"].is_null(), "{settled}");
-        assert_eq!(settled["nodeId"], *destination, "{settled}");
-        assert!(settled["sessionId"].is_null());
-        assert_eq!(settled["snapshot"]["agent"]["access"]["backend"], backend);
-        let saved_chat = owner.stored("chats", &chat).await.unwrap();
-        assert_eq!(saved_chat["runId"], run);
-        assert_eq!(saved_chat["title"], "same conversation");
-        assert_eq!(saved_chat["paused"], false);
-        assert_eq!(saved_chat["sessionRestartRequested"], true);
-        let key = chat.clone();
-        let messages = owner
-            .service
-            .store
-            .read(move |db| db.messages(&key))
-            .await
-            .unwrap();
-        let mut cancelled = sending.clone();
-        cancelled["status"] = "cancelled".into();
-        assert_eq!(messages, vec![message.clone(), cancelled, queued.clone()]);
-        assert!(
-            disk_grants::authorize(&owner.service, credential)
-                .await
-                .is_err(),
-            "source exception must end at commit"
-        );
-        assert_files(&owner, destination, &run, backend == "native").await;
-    }
     let before = owner.run(&run).await;
-    let mut profile = original_agent;
-    profile["access"]["backend"] = "native".into();
-    profile["access"]["nodes"] = json!([native_node]);
-    owner.put("agents", profile).await;
-    faults.failed.store(true, Ordering::SeqCst);
-    let (status, response) = owner
-        .send(
-            "POST",
-            &format!("/api/nodes/placement/{run}/backend-migration"),
-            json!({ "nodeId": native_node, "backend": "native", "confirm": true }),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{response}");
-    let failed = wait_migration(&owner, &run).await;
-    assert!(failed["backendMigrationError"].is_string(), "{failed}");
-    assert_eq!(failed["nodeId"], before["nodeId"]);
-    assert_eq!(failed["backup"]["id"], before["backup"]["id"]);
-    assert_files(&owner, &vm_node, &run, false).await;
-    faults.failed.store(false, Ordering::SeqCst);
-    assert!(
-        failed["backendMigration"].is_null(),
-        "a pre-conversion failure must allow repairing the source"
-    );
-    let marker = json!({ "id": id(), "reservationId": id(), "process": "old-manager-process", "paused": false });
-    owner
-        .service
-        .store
-        .patch_run(&run, json!({ "backendMigration": marker }))
-        .await
-        .unwrap();
-    let (status, response) = owner
-        .send(
-            "POST",
-            &format!("/api/nodes/placement/{run}/backend-migration"),
-            json!({ "nodeId": native_node, "backend": "native", "confirm": true }),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{response}");
-    let retried = wait_migration(&owner, &run).await;
-    assert!(retried["backendMigrationError"].is_null(), "{retried}");
-    assert_eq!(retried["nodeId"], native_node);
-    assert_eq!(owner.stored("chats", &chat).await.unwrap()["paused"], false);
-    let checkpoint_before = owner
-        .service
-        .store
-        .kv(&format!("run-checkpoint:{run}"))
-        .await
-        .unwrap()
-        .unwrap();
-    let saved_point = retried["backup"]["id"].clone();
-    let reservation = id();
-    let mut pending = json!({ "id": id(), "reservationId": reservation, "process": "old-manager-process", "paused": false,
-        "nodeId": native_node, "runtimeId": "fixture", "snapshot": retried["snapshot"], "convertedBackup": saved_point });
-    pending["grant"] = json!({ "nativePrincipals": retried["nativePrincipals"], "nativeAuthorityNodes": retried["nativeAuthorityNodes"], "nativeProvenanceUnknown": false });
-    owner.service.store.patch_run(&run, json!({ "snapshot": before["snapshot"], "nodeId": before["nodeId"], "backup": before["backup"], "backendMigration": pending })).await.unwrap();
-    let mut source_checkpoint = checkpoint_before;
-    source_checkpoint["nodeId"] = vm_node.clone().into();
-    source_checkpoint["prepared"]["backend"] = "firecracker".into();
-    owner.set_checkpoint(&run, source_checkpoint).await;
-    let mut candidate = retried.clone();
-    candidate["placementTransition"] = true.into();
-    candidate["targetNodeId"] = native_node.clone().into();
-    candidate["requiredRuntime"] = "fixture".into();
-    placement::reserve(&owner.service, &candidate, &reservation)
-        .await
-        .unwrap();
-    placement::materialize(&owner.service, &reservation)
-        .await
-        .unwrap();
-    assert_ne!(
-        owner.stored("node-attempts", &reservation).await.unwrap()["released"],
-        true
-    );
-    let (status, response) = owner
-        .send(
-            "POST",
-            &format!("/api/nodes/placement/{run}/backend-migration"),
-            json!({ "nodeId": native_node, "backend": "native", "confirm": true }),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{response}");
-    let recovered = wait_migration(&owner, &run).await;
-    assert!(recovered["backendMigrationError"].is_null(), "{recovered}");
-    assert_eq!(recovered["backup"]["id"], saved_point);
-    assert_eq!(
-        owner.stored("node-attempts", &reservation).await.unwrap()["released"],
-        true
-    );
-    assert_files(&owner, &native_node, &run, true).await;
-    // A permissive remote destination must not spend the manager's reserve.
-    let mut vm_profile = owner.stored("agents", &agent).await.unwrap();
-    vm_profile["access"]["backend"] = "firecracker".into();
-    vm_profile["access"]["nodes"] = json!([vm_node]);
-    owner.put("agents", vm_profile).await;
+    let resume_chat = || async {
+        let mut current = owner.stored("chats", &chat).await.unwrap();
+        current["paused"] = false.into();
+        owner.put("chats", current).await;
+    };
+
+    // The manager's own reserve bounds conversion staging.
     owner
         .put(
             "nodes",
             json!({ "id": LOCAL_NODE_ID, "storage": { "reserveMiB": 16 * 1024 * 1024 } }),
         )
         .await;
-    let (status, response) = owner
-        .send(
-            "POST",
-            &format!("/api/nodes/placement/{run}/backend-migration"),
-            json!({ "nodeId": vm_node, "backend": "firecracker", "confirm": true }),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(move_to(&owner, &run, &vm_node).await["status"], "migrating");
     let refused = wait_migration(&owner, &run).await;
     assert!(
         refused["backendMigrationError"]
@@ -428,13 +357,63 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
         "{refused}"
     );
     assert_eq!(refused["nodeId"], native_node);
-    assert_eq!(refused["snapshot"]["agent"]["access"]["backend"], "native");
+    assert_eq!(refused["executionBackend"], "native");
     assert!(refused["backendMigration"].is_null());
-    let mut native_profile = owner.stored("agents", &agent).await.unwrap();
-    native_profile["access"]["backend"] = "native".into();
-    native_profile["access"]["nodes"] = json!([native_node]);
-    owner.put("agents", native_profile).await;
+    owner
+        .put(
+            "nodes",
+            json!({ "id": LOCAL_NODE_ID, "storage": { "reserveMiB": 64 } }),
+        )
+        .await;
+
+    // A failed capture retains the original environment and allows a retry.
+    resume_chat().await;
+    faults.failed.store(true, Ordering::SeqCst);
+    assert_eq!(move_to(&owner, &run, &vm_node).await["status"], "migrating");
+    let failed = wait_migration(&owner, &run).await;
+    assert!(failed["backendMigrationError"].is_string(), "{failed}");
+    assert_eq!(failed["nodeId"], before["nodeId"]);
+    assert!(
+        failed["backendMigration"].is_null(),
+        "a pre-conversion failure must allow repairing the source"
+    );
     assert_files(&owner, &native_node, &run, true).await;
+    faults.failed.store(false, Ordering::SeqCst);
+
+    // Conversion demand-reads cold blocks of the acknowledged S3 base.
+    partial_cold_write(&owner, &native_node, &run).await;
+    resume_chat().await;
+    assert_eq!(move_to(&owner, &run, &vm_node).await["status"], "migrating");
+    let converted = wait_migration(&owner, &run).await;
+    assert!(converted["backendMigrationError"].is_null(), "{converted}");
+    assert_eq!(converted["nodeId"], vm_node, "{converted}");
+    assert_eq!(converted["executionBackend"], "firecracker");
+    assert!(converted["sessionId"].is_null());
+    let checkpoint = owner
+        .service
+        .store
+        .kv(&format!("run-checkpoint:{run}"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint["prepared"]["backend"], "firecracker");
+    assert_eq!(checkpoint["diskFormat"], "vm");
+    let saved_chat = owner.stored("chats", &chat).await.unwrap();
+    assert_eq!(saved_chat["runId"], run);
+    assert_eq!(saved_chat["title"], "same conversation");
+    assert_eq!(saved_chat["paused"], false);
+    assert_eq!(saved_chat["sessionRestartRequested"], true);
+    let key = chat.clone();
+    let messages = owner
+        .service
+        .store
+        .read(move |db| db.messages(&key))
+        .await
+        .unwrap();
+    let mut cancelled = sending.clone();
+    cancelled["status"] = "cancelled".into();
+    assert_eq!(messages, vec![message.clone(), cancelled, queued.clone()]);
+    assert_files(&owner, &vm_node, &run, false).await;
     stop.cancel();
     for task in tasks {
         task.abort();

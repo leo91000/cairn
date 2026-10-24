@@ -30,8 +30,8 @@ gardent leurs réglages techniques et n’affichent plus les agents qu’en lect
 Seule l’étape finale d’ajout d’une machine propose encore de choisir qui peut
 l’utiliser, avec l’API existante `PUT /nodes/{id}/agents` en mode `add`, qui accorde
 sans jamais retirer. Une réservation exclusive exige le droit d’exécuter sur la node :
-le retirer retire aussi la réservation. Elle ne concerne que les VM Firecracker : un
-agent natif, ou une node native, ne peut pas en recevoir.
+le retirer retire aussi la réservation. Elle ne concerne que les VM Firecracker : une
+node native ne peut pas en recevoir.
 
 Ces deux droits restent appliqués en direct, pas figés au moment de la mise en file :
 ils ne font pas partie de `access`, donc de `policy()`. Les retirer n’interrompt donc pas le travail en file et ne
@@ -42,7 +42,7 @@ gestion ne les expose pas :
 un agent qui gère l’installation ne peut pas s’accorder un compte 1Password ni une
 réservation exclusive, et ses modifications conservent ceux que le propriétaire a
 réglés, sauf les réservations qu’il rend impossibles : celle d’une node sur laquelle
-il retire le droit d’exécuter, ou toutes s’il passe l’agent en exécution native.
+il retire le droit d’exécuter.
 
 Chaque enregistrement change la `revision` de l’agent. Un éditeur qui renvoie une
 révision périmée reçoit un conflit au lieu d’écraser des droits plus récents.

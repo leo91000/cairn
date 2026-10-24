@@ -31,10 +31,13 @@ pub fn uses_vm(run: &Value, config: &Config) -> bool {
     let remote_nodes = access["nodes"]
         .as_array()
         .is_some_and(|nodes| nodes.iter().any(|node| node != crate::nodes::LOCAL_NODE_ID));
-    access["backend"] == "native"
-        || !config.runner_url.is_empty()
-        || access["nodes"].is_null()
-        || remote_nodes
+    runs_natively(run) || !config.runner_url.is_empty() || access["nodes"].is_null() || remote_nodes
+}
+
+/// Whether the run's environment executes as a native host process. The
+/// backend is recorded on the run before its environment is first prepared.
+pub fn runs_natively(run: &Value) -> bool {
+    run["executionBackend"] == Backend::Native.as_str()
 }
 
 pub async fn secret(directory: &Path, name: &str) -> Result<String> {
@@ -179,13 +182,11 @@ pub async fn prepare_execution(
         isolated: true,
         mounts,
         skills: Value::Array(skills),
-        backend: Some(
-            if crate::native::policy::native(&run["snapshot"]["agent"]) {
-                Backend::Native
-            } else {
-                Backend::Firecracker
-            },
-        ),
+        backend: Some(if runs_natively(run) {
+            Backend::Native
+        } else {
+            Backend::Firecracker
+        }),
     })
 }
 

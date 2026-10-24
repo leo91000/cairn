@@ -773,7 +773,7 @@ test('when nodes cannot be loaded, the page stays usable and node access is read
   await expect(page.getByRole('switch', { name: 'All nodes, including future' })).toBeChecked()
 })
 
-test('the execution backend chooses which nodes an agent can be granted', async ({ page, workspace }) => {
+test('an agent can run on VM and native nodes alike, each native node reviewed like a power', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const vm = await enroll(page, workspace, 'vm-box', true)
   const invitation = await workspace.api('/api/nodes/enrollments', 'POST', { name: 'native-box', backend: 'native' })
@@ -801,41 +801,37 @@ test('the execution backend chooses which nodes an agent can be granted', async 
   await page.goto(workspacePath(`/agents/${agent.id}?section=nodes`))
   await authenticateWorkspace(page)
 
-  // Firecracker VM agents choose among VM nodes, the current runner included, or all of them.
+  // VM and native nodes are listed together, the current runner included, with their backend.
   const nodes = page.getByRole('list', { name: 'Nodes' })
   await expect(page.getByRole('switch', { name: 'All nodes, including future' })).toBeVisible()
-  await expect(nodes.getByRole('listitem', { name: 'vm-box' })).toBeVisible()
+  await expect(nodes.getByRole('listitem', { name: 'vm-box' })).toContainText('Firecracker VM')
   // Unreported by this installation, the current runner is still offered, without a state.
   const runner = nodes.getByRole('listitem', { name: 'Current runner' })
   await expect(runner).toBeVisible()
   await expect(runner).not.toContainText('Online')
   await expect(page.getByRole('switch', { name: 'Can run its conversations on Current runner' })).not.toBeChecked()
-  await expect(nodes.getByRole('listitem', { name: 'native-box' })).toHaveCount(0)
+  await expect(nodes.getByRole('listitem', { name: 'native-box' })).toContainText('Native process')
+  await expect(page.getByRole('combobox', { name: 'Agent execution backend' })).toHaveCount(0)
 
-  // Native agents may grant all nodes; each host still controls trusted people.
-  await page.getByRole('combobox', { name: 'Agent execution backend' }).click()
-  await page.getByRole('option', { name: 'Native process · trusted people only', exact: true }).click()
-  await expect(page.getByText('Uses the host GPU and OS tools with weaker isolation.')).toBeVisible()
-  await expect(page.getByRole('switch', { name: 'All nodes, including future' })).toBeVisible()
-  await expect(nodes.getByRole('listitem', { name: 'vm-box' })).toHaveCount(0)
-  await expect(nodes.getByRole('listitem', { name: 'Current runner' })).toHaveCount(0)
+  // A native node keeps the VM grant; each host still controls trusted people.
   const run = page.getByRole('switch', { name: 'Can run its conversations on native-box' })
   await expect(run).not.toBeChecked()
   await run.check()
 
   await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
   const review = page.getByRole('dialog', { name: 'Review before saving' })
-  await expect(review).toContainText('Added: native execution. Uses the host GPU and OS tools with weaker isolation.')
+  await expect(review).toContainText('Added: native node native-box. Conversations moved there run as host processes with its GPU and weaker isolation')
   await review.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(review).toHaveCount(0)
   const saved = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id)
-  expect(saved.access).toMatchObject({ backend: 'native', nodes: [native] })
+  expect(saved.access).toMatchObject({ nodes: [vm, native] })
+  expect(saved.access).not.toHaveProperty('backend')
   await page.getByRole('switch', { name: 'All nodes, including future' }).check()
   await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
   await expect(review).toHaveCount(0)
   await expect.poll(async () => (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id).access.nodes).toBeNull()
   await page.getByRole('link', { name: 'Overview', exact: true }).click()
-  await expect(page.getByRole('button', { name: /^Execution Native process/ })).toContainText('Native process')
+  await expect(page.getByRole('button', { name: /^Execution / })).toContainText('Native nodes')
 })
 
 test('a rejected first creation says the agent was not saved', async ({ page, workspace }) => {

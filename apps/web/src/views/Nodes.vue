@@ -268,7 +268,7 @@ function saveGrants() {
   if (!node)
     return
   // `add` only grants the chosen agents: finishing never revokes one allowed meanwhile.
-  const agentIds = granted.value.filter(agentId => !allowed(agentId) && !mismatch(agentId))
+  const agentIds = granted.value.filter(agentId => !allowed(agentId))
   return action(async () => {
     if (agentIds.length) {
       try {
@@ -301,17 +301,8 @@ function freeStaleDisks() {
   })
 }
 
-/** Why an agent cannot run on the node being granted: the server only accepts agents of its backend. */
-function mismatch(agentId: string) {
-  const agent = state.agents.find(item => item.id === agentId)
-  const native = granting.value?.capabilities.backend === 'native'
-  if (!agent || (agent.access?.backend === 'native') === native)
-    return ''
-  return native ? 'Runs in a Firecracker VM: set it to native execution on its page first' : 'Uses native execution: only native nodes can run it'
-}
-
 function allNodes(agentId: string) {
-  return (!mismatch(agentId) && state.agents.some(agent => agent.id === agentId && agent.access?.nodes === null))
+  return state.agents.some(agent => agent.id === agentId && agent.access?.nodes === null)
     || (granting.value?.agents?.some(agent => agent.id === agentId && agent.allNodes) ?? false)
 }
 
@@ -374,7 +365,7 @@ function statusLabel(node: ExecutionNode) {
     >
       <section class="node-form">
         <p v-if="replacing" class="text-sm text-muted">
-          Install the {{ backendNames[enrollmentBackend] }} runtime on the machine running {{ replacing.name }}. It enrolls as a new node; once it connects and is set up, Cairn offers to revoke {{ replacing.name }}. Conversations keep their execution backend, and each agent’s backend is chosen on its page.
+          Install the {{ backendNames[enrollmentBackend] }} runtime on the machine running {{ replacing.name }}. It enrolls as a new node; once it connects and is set up, Cairn offers to revoke {{ replacing.name }}. Conversations keep their execution backend until you move them to the new node from their execution details.
         </p>
         <p v-else class="text-sm text-muted">
           Connect a trusted Linux machine, then choose its execution backend and authorized agents.
@@ -656,12 +647,7 @@ function statusLabel(node: ExecutionNode) {
         </p>
         <label v-for="agent in state.agents" :key="agent.id" class="access-row">
           <input
-            v-if="mismatch(agent.id)"
-            type="checkbox"
-            disabled
-          >
-          <input
-            v-else-if="allowed(agent.id)"
+            v-if="allowed(agent.id)"
             type="checkbox"
             checked
             disabled
@@ -672,7 +658,7 @@ function statusLabel(node: ExecutionNode) {
             type="checkbox"
             :value="agent.id"
           >
-          <span class="min-w-0">{{ agent.name }}<span v-if="mismatch(agent.id)" class="block text-xs text-muted">{{ mismatch(agent.id) }}</span><span v-else-if="allNodes(agent.id)" class="block text-xs text-muted">Allowed on all nodes</span><span v-else-if="allowed(agent.id)" class="block text-xs text-muted">Already allowed on this machine</span></span>
+          <span class="min-w-0">{{ agent.name }}<span v-if="allNodes(agent.id)" class="block text-xs text-muted">Allowed on all nodes</span><span v-else-if="allowed(agent.id)" class="block text-xs text-muted">Already allowed on this machine</span></span>
         </label>
         <p class="text-xs text-muted">
           You can change this later on each agent’s page.
@@ -842,12 +828,12 @@ function statusLabel(node: ExecutionNode) {
       <div class="node-form">
         <p>{{ retiring.next.name }} now runs as a {{ backendNames[nodeBackend(retiring.next)] }} node. Revoke the previous {{ backendNames[nodeBackend(retiring.previous)] }} node, {{ retiring.previous.name }}, to finish the switch: it loses access to the master, and agents lose their permission to use it.</p>
         <p v-if="retiring.previous.agents?.some(agent => !agent.allNodes)">
-          Agents allowed on the previous node: {{ retiring.previous.agents.filter(agent => !agent.allNodes).map(agent => agent.name).join(', ') }}. To run them on the new node, set them to {{ backendNames[nodeBackend(retiring.next)] }} on their page and allow it.
+          Agents allowed on the previous node: {{ retiring.previous.agents.filter(agent => !agent.allNodes).map(agent => agent.name).join(', ') }}. To run them on the new node, allow it on their page.
           <RouterLink to="/agents" class="text-accent hover:underline">
             Open agents ›
           </RouterLink>
         </p>
-        <p>Conversations fixed to or preferring the previous node return to automatic placement. Conversations keep their execution backend: existing ones continue on other {{ backendNames[nodeBackend(retiring.previous)] }} nodes.</p>
+        <p>Conversations fixed to or preferring the previous node return to automatic placement. Each conversation keeps its execution backend until it is moved: move one to the new node from its execution details to continue there.</p>
         <p v-if="retiring.previous.occupiedSlots">
           Conversations running there pause within the disconnection delay, then resume from their latest recovery point on another authorized machine when one has capacity.
         </p>

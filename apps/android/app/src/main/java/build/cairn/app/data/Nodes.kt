@@ -25,6 +25,8 @@ data class NodeCapabilities(
     val kvm: Boolean = false,
     val backend: String = "firecracker",
     val ublk: Boolean = false,
+    /** A native node able to run a VM conversation's disk in place. */
+    val vmDisks: Boolean = false,
 )
 
 @Serializable
@@ -62,15 +64,19 @@ data class ExecutionNode(
     val storage: NodeStoragePolicy? = null,
 )
 
-/** The execution backend of native nodes and agents; the other one is "firecracker" (a VM). */
+/** The execution backend of native nodes and conversations; the other one is "firecracker". */
 const val NATIVE_BACKEND = "native"
 
 /** The default execution backend: a Firecracker VM. */
 const val VM_BACKEND = "firecracker"
 
-/** Whether the node runs on the agent's execution backend: the server refuses any other grant. */
-fun ExecutionNode.accepts(agent: Agent) =
-    (capabilities.backend == NATIVE_BACKEND) == (agent.access.backend == NATIVE_BACKEND)
+/** The backend this node runs conversations with: [NATIVE_BACKEND] or [VM_BACKEND]. */
+val ExecutionNode.backend
+    get() = if (capabilities.backend == NATIVE_BACKEND) NATIVE_BACKEND else VM_BACKEND
+
+/** "VM Firecracker" or "Processus natif", as node rows and destinations show a backend. */
+fun backendLabel(backend: String?) =
+    if (backend == NATIVE_BACKEND) "Processus natif" else "VM Firecracker"
 
 /**
  * Agents already allowed to run on this machine without being allowed everywhere, from the node

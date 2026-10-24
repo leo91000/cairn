@@ -111,7 +111,7 @@ abstract class NodePlacementCases {
         }
     }
 
-    @Test fun aNewNativeNodeIsConfiguredThenAsksWhichNativeAgentsMayUseIt() = nativeEnrollment(true)
+    @Test fun aNewNativeNodeIsConfiguredThenAsksWhichAgentsMayUseIt() = nativeEnrollment(true)
 
     @Test
     fun dismissingTheConfigurationOfANewNativeNodeCancelsTheLastStep() = nativeEnrollment(false)
@@ -231,15 +231,15 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("trusted@example.test").performScrollTo().performClick()
             compose.onNodeWithText("Enregistrer").performClick()
 
-            // Then the same add-only step, offering native agents only.
+            // Then the same add-only step, offering every agent.
             compose.waitUntil(15000) {
                 compose
                     .onAllNodesWithText("Qui peut utiliser « Desk » ?")
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
-            compose.onNode(isOff() and hasText("Agent VM")).assertIsNotEnabled()
-            compose.onNodeWithText("Agent en VM : réservé aux nodes VM").assertExists()
+            compose.onNode(isOff() and hasText("Agent VM")).assertIsEnabled()
+            compose.onNodeWithText("Agent en VM : réservé aux nodes VM").assertDoesNotExist()
             compose.onNode(isOff() and hasText("Agent natif")).assertIsEnabled().performClick()
             compose.onNodeWithText("Terminer").performScrollTo().performClick()
             compose.waitUntil(10000) {
@@ -726,25 +726,26 @@ abstract class NodePlacementCases {
     }
 
     @Test
-    fun backendMigrationRequiresConfirmationAndFollowsItsCompletion() {
+    fun movingToANativeNodeExplainsTheBackendSwitchBeforeConfirming() {
         MockWebServer().use { server ->
-            val submitted = CopyOnWriteArrayList<JsonObject>()
-            val completed = AtomicBoolean(false)
+            val moves = CopyOnWriteArrayList<JsonObject>()
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
                         val body =
                             when {
-                                path.endsWith("/backend-migration") && request.method == "POST" -> {
-                                    submitted +=
+                                path.endsWith("/move") -> {
+                                    moves +=
                                         wireJson
                                             .parseToJsonElement(request.body.readUtf8())
                                             .jsonObject
-                                    "{}"
+                                    """{"status":"moving","nodeId":"gpu","backend":"native"}"""
                                 }
                                 path.endsWith("/backend-migration") ->
-                                    """{"required":${!completed.get()},"toBackend":"native","pending":${submitted.isNotEmpty() && !completed.get()},"nodes":[{"id":"gpu","name":"Desktop GPU"}]}"""
+                                    """{"backend":"firecracker","diskFormat":"vm","pending":false}"""
+                                path.endsWith("/nodes/placement/run") ->
+                                    """{"nodes":[{"id":"vm","name":"Build VM","status":"online","capabilities":{"backend":"firecracker"}},{"id":"gpu","name":"Desktop GPU","status":"online","capabilities":{"backend":"native","ublk":true,"vmDisks":true}}]}"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path.endsWith("/overview") -> "{}"
@@ -754,22 +755,88 @@ abstract class NodePlacementCases {
                     }
                 }
             server.start()
-            val vault =
-                object : SessionVault {
-                    private val values = mutableMapOf<String, String>()
+            val vm = connectedViewModel()
+            compose.setContent {
+                val state by vm.state.collectAsStateWithLifecycle()
+                LaunchedEffect(Unit) {
+                    vm.state.first { it.ready }
+                    vm.connect(server.url("/").toString())
+                }
+                CairnTheme {
+                    if (state.session.authenticated)
+                        Page {
+                            NodePlacement(
+                                vm,
+                                Run(
+                                    id = "run",
+                                    status = "succeeded",
+                                    nodeId = "vm",
+                                    sessionId = "engine-session",
+                                    executionBackend = "firecracker",
+                                    storage = RunStorage(mode = "on-demand", dirtyBytes = 0),
+                                ),
+                            )
+                        }
+                }
+            }
+            compose.waitUntil(20000) {
+                compose.onAllNodesWithText("Node : Build VM").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Node : Build VM").performClick()
+            // Pinning stays within the conversation's backend; moving switches it.
+            compose
+                .onNodeWithText("utilisez Déplacer… pour changer de backend", substring = true)
+                .assertExists()
+            compose.onNodeWithText("Déplacer…").performScrollTo().performClick()
+            compose.onNodeWithText("Desktop GPU · Processus natif").assertExists()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText(
+                        "tournera comme processus natif de l’hôte",
+                        substring = true,
+                    )
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            capture("backend-switch-confirm")
+            assertTrue(moves.isEmpty())
+            compose
+                .onNodeWithText("Déplacer et changer de backend")
+                .performScrollTo()
+                .performClick()
+            compose.waitUntil(10000) {
+                moves.isNotEmpty() &&
+                    compose
+                        .onAllNodesWithText("change de backend à destination", substring = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+            }
+            assertEquals("gpu", moves.single()["nodeId"]?.jsonPrimitive?.content)
+        }
+    }
 
-                    override fun read(origin: String) = values[origin]
-
-                    override fun write(origin: String, cookie: String?) {
-                        if (cookie == null) values.remove(origin) else values[origin] = cookie
+    @Test
+    fun aNativeEnvironmentConversionShowsItsProgressUntilCompletion() {
+        MockWebServer().use { server ->
+            val completed = AtomicBoolean(false)
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val path = request.path!!.substringBefore('?')
+                        val body =
+                            when {
+                                path.endsWith("/backend-migration") ->
+                                    """{"backend":"native","diskFormat":"native","pending":${!completed.get()}}"""
+                                path == "/api/installations" -> beaconInstallationsFixture()
+                                path == "/api/account/session" -> beaconAccountFixture("fixture")
+                                path.endsWith("/overview") -> "{}"
+                                else -> "[]"
+                            }
+                        return MockResponse().setBody(body)
                     }
                 }
-            val vm =
-                CairnViewModel(
-                    ApplicationProvider.getApplicationContext<Application>(),
-                    vault,
-                    beaconOrigin = "",
-                )
+            server.start()
+            val vm = connectedViewModel()
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()
                 LaunchedEffect(Unit) {
@@ -780,26 +847,15 @@ abstract class NodePlacementCases {
             }
             compose.waitUntil(20000) {
                 compose
-                    .onAllNodesWithText("Migrer cette conversation…")
+                    .onAllNodesWithText("Conversion de cet environnement", substring = true)
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
-            compose.onNodeWithText("Migrer cette conversation…").performScrollTo().performClick()
-            compose
-                .onNodeWithText("Le prochain message ouvre une nouvelle session", substring = true)
-                .assertExists()
-            assertTrue(submitted.isEmpty())
-            capture("backend-migration-confirm")
-            compose.onNodeWithText("Confirmer").performClick()
-            compose.waitUntil(10000) { submitted.isNotEmpty() }
-            assertEquals("native", submitted[0]["backend"]?.jsonPrimitive?.content)
-            assertEquals("gpu", submitted[0]["nodeId"]?.jsonPrimitive?.content)
-            assertEquals(true, submitted[0]["confirm"]?.jsonPrimitive?.boolean)
             completed.set(true)
             elapse(2000)
             compose.waitUntil(10000) {
                 compose
-                    .onAllNodesWithText("Migration terminée.", substring = true)
+                    .onAllNodesWithText("Conversion terminée.", substring = true)
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
@@ -1067,11 +1123,11 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Déjà autorisé sur cette machine").assertExists()
             compose.onNode(isOn() and hasText("Agent autorisé")).assertIsNotEnabled()
             compose.onNodeWithText("Plus tard").assertExists()
-            // An agent of another execution backend cannot run on this VM node.
-            compose.onNode(isOff() and hasText("Agent natif")).assertIsNotEnabled()
+            // Agents have no backend of their own: any of them may run on this VM node.
+            compose.onNode(isOff() and hasText("Agent natif")).assertIsEnabled()
             compose
                 .onNodeWithText("Agent en exécution native : réservé aux nodes natives")
-                .assertExists()
+                .assertDoesNotExist()
             compose.onNodeWithText("Agent test").performScrollTo().performClick()
             // Another window grants an agent meanwhile; the next refresh brings it in.
             grantedElsewhere = true

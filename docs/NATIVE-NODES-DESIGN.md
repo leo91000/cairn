@@ -3,7 +3,8 @@
 Status: implemented for Linux x86-64 in PR #292; hardware qualification is performed
 by the node owner after code review. [Operator guide](NATIVE-NODES.md).
 Windows and macOS are future backends, not supported installation targets in this change.
-Firecracker remains the enrollment and agent default. Native execution is explicit.
+Firecracker remains the enrollment default and the backend of new conversations
+whenever their agent may use a VM node. Native execution is explicit.
 
 ## Purpose and boundary
 
@@ -32,9 +33,11 @@ flowchart LR
 
 ## Authorization
 
-Admission requires the node owner's native enable switch, an explicitly selected
-native agent, an explicit node list on that agent, and every directing person's
-presence in that node's trusted-person list. Wildcards, tags, installation
+Admission requires the node owner's native enable switch, a grant of that node to
+the conversation's agent, and every directing person's presence in that node's
+trusted-person list. Agents have no backend of their own: each conversation keeps
+the backend of its environment and switches only through an explicit move
+([ADR 0059](adr/0059-per-conversation-backend-and-in-place-vm-disks.md)). Wildcards, tags, installation
 membership and an agent name never grant native execution by themselves.
 
 Authenticated human requests record their Cairn account identity after input
@@ -45,7 +48,7 @@ revoked or authority is unavailable; they do not add directing provenance.
 Resuming and unpausing still require current native admission.
 
 A Firecracker coordinator with installation-management permission can
-delegate to a selected native agent. Its authenticated MCP grant supplies the
+delegate to an agent granted a native node. Its authenticated MCP grant supplies the
 parent run identity. Descendants inherit the originating people and a node
 ceiling; they cannot enlarge either. Current parent permissions, cancellation,
 node grants and all people in the lineage are rechecked on admission and renewal.

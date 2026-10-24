@@ -301,7 +301,7 @@ impl Execution<'_> {
 
     /// Prepares the workspace, or restores the one saved before a restart.
     async fn prepare_execution(
-        &self,
+        &mut self,
         existing: bool,
     ) -> Result<(Value, crate::plugins::run_credentials::RunCredentials)> {
         let s = self.s;
@@ -318,9 +318,21 @@ impl Execution<'_> {
         let credentials = crate::plugins::run_credentials::for_run(s, agent_id, &projects).await?;
         let prepared = match saved.prepared() {
             Some(prepared) => {
+                // The saved environment, not the agent profile, keeps the backend.
+                if let Some(backend) = prepared["backend"].as_str() {
+                    self.run["executionBackend"] = backend.into();
+                }
                 execution::restore(self.run, prepared.clone(), &s.config, &credentials).await?
             }
             None => {
+                // A new environment fixes its backend from an explicit target or
+                // the agent's nodes. Later changes need an explicit move.
+                let run = self.run.clone();
+                let backend = s
+                    .store
+                    .read(move |db| nodes::backend::of_run_in(db, &run))
+                    .await?;
+                self.run["executionBackend"] = backend.into();
                 let account_home = self.account.as_ref().map(|a| a.home.as_path());
                 execution::prepare(
                     self.run,

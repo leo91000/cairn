@@ -32,6 +32,8 @@ export interface ExecutionNode {
     diskTotalMiB?: number
     backend?: 'firecracker' | 'native'
     ublk?: boolean
+    /** Native node able to run a VM conversation's disk in place. */
+    vmDisks?: boolean
     os: string
     arch: string
     kvm: boolean

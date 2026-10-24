@@ -2670,11 +2670,15 @@ async fn backend_migration_tools_match_and_recheck_management_grants() {
         .await
         .unwrap();
     // Neither caller has a traced native host grant. Management access alone
-    // must not allow the migration to manufacture that authority.
-    let profile = s.agent(json!({ "name": "Native destination", "access": { "backend": "native", "nodes": [node] } }), None).await.unwrap();
-    let mut previous = profile.clone();
-    previous["access"]["backend"] = "firecracker".into();
-    common::add_run(&s.store, &json!({ "id": run, "taskId": "fixture", "status": "succeeded", "createdAt": 0, "snapshot": { "agent": previous } })).await;
+    // must not allow the move to manufacture that authority.
+    let profile = s
+        .agent(
+            json!({ "name": "Native destination", "access": { "nodes": [node] } }),
+            None,
+        )
+        .await
+        .unwrap();
+    common::add_run(&s.store, &json!({ "id": run, "taskId": "fixture", "status": "succeeded", "createdAt": 0, "executionBackend": "firecracker", "snapshot": { "agent": profile } })).await;
     s.store
         .put(
             "chats",
@@ -2685,7 +2689,7 @@ async fn backend_migration_tools_match_and_recheck_management_grants() {
     common::set_checkpoint(
         &s.store,
         &run,
-        json!({ "prepared": { "projectRoot": "/data/work" } }),
+        json!({ "prepared": { "projectRoot": "/data/work", "backend": "firecracker" }, "runtimeId": "image" }),
     )
     .await;
     for (endpoint, token) in [
@@ -2700,8 +2704,15 @@ async fn backend_migration_tools_match_and_recheck_management_grants() {
             json!({ "chatId": chat }),
         )
         .await;
-        assert_eq!(result(&preview)["required"], true);
-        assert!(result(&preview)["nodes"].as_array().unwrap().is_empty());
+        // The VM disk can move to the native node in place, once its authority allows it.
+        assert_eq!(result(&preview)["backend"], "firecracker");
+        assert_eq!(result(&preview)["diskFormat"], "vm");
+        assert_eq!(result(&preview)["nodes"][0]["id"], node);
+        assert_eq!(result(&preview)["nodes"][0]["conversion"], false);
+        assert_eq!(
+            result(&preview)["nodes"][0]["nativeAuthorityConfirmed"],
+            false
+        );
         let (_, denied) = node_management_call(
             &app,
             endpoint,
