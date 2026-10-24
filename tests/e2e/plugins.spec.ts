@@ -126,15 +126,18 @@ test('Discord bots are set up through the package’s own form and keep the toke
 
   await expect(dialog.getByRole('heading', { name: 'Who can talk to it' })).toBeVisible()
   await expect(dialog.getByRole('radio', { name: /Approve people as they ask/ })).toBeChecked()
-  // Anyone may only reach a read-only agent; this one isn't.
+  // Any agent can answer anyone; the owner is warned of what a writing agent allows.
   await dialog.getByRole('radio', { name: /^Anyone/ }).check()
-  await expect(dialog.getByRole('radio', { name: /Discord helper/ })).toBeDisabled()
-  await expect(dialog.getByText('Not read-only').first()).toBeVisible()
+  await dialog.getByRole('radio', { name: /Discord helper/ }).check()
+  await expect(dialog.getByText('Anyone in the channel can use everything Discord helper can do')).toBeVisible()
+  await expect(dialog.getByText(/they can change files and run commands/)).toBeVisible()
   await dialog.getByRole('radio', { name: /Approve people as they ask/ }).check()
+  await expect(dialog.getByText(/can use everything Discord helper can do/)).toBeHidden()
   await dialog.getByLabel('Person’s ID').fill('300')
   await dialog.getByRole('button', { name: 'Add', exact: true }).click()
   await expect(dialog.getByText('300', { exact: true })).toBeVisible()
-  await expect(dialog.getByRole('radio', { name: /Release helper/ })).toBeDisabled()
+  await dialog.getByRole('radio', { name: /Release helper/ }).check()
+  await expect(dialog.getByText('The people you allow can use everything Release helper can do')).toBeVisible()
   await dialog.getByRole('radio', { name: /Discord helper/ }).check()
   await dialog.getByLabel('Name', { exact: true }).fill('#support on Acme')
   await dialog.getByRole('button', { name: 'Save bot' }).click()
