@@ -182,6 +182,7 @@ abstract class NodePlacementCases {
     @Test
     fun nativeNodeEditorRequiresExplicitPeopleAndSupportsSixExecutionSlots() {
         var saved: NodeConfiguration? = null
+        var keyboard: androidx.compose.ui.platform.SoftwareKeyboardController? = null
         val node =
             ExecutionNode(
                 id = "native",
@@ -191,6 +192,7 @@ abstract class NodePlacementCases {
                 capabilities = NodeCapabilities(backend = "native"),
             )
         compose.setContent {
+            keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
             CairnTheme {
                 NodeEditor(
                     node,
@@ -202,13 +204,19 @@ abstract class NodePlacementCases {
             }
         }
         compose.onNodeWithText("Slots d’exécution").assertIsEnabled().performTextReplacement("6")
+        compose.runOnIdle { keyboard?.hide() }
+        compose.waitForIdle()
         compose
             .onNodeWithText("Tous les slots partagent ces budgets.", substring = true)
             .assertExists()
         compose.onNodeWithText("Réservation exclusive").assertDoesNotExist()
         compose.onNodeWithText("Mettez à jour le runtime", substring = true).assertDoesNotExist()
         compose.onNodeWithText("Personnes de confiance").performScrollTo().assertExists()
-        compose.onNodeWithText("Activer l’exécution native").performScrollTo().performClick()
+        compose
+            .onNodeWithText("Activer l’exécution native")
+            .performScrollTo()
+            .performClick()
+            .assertIsOn()
         compose.onNodeWithText("trusted@example.test").performScrollTo().performClick()
         capture("native-node-trust")
         compose.onNodeWithText("Enregistrer").performClick()

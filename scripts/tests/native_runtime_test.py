@@ -255,8 +255,13 @@ def main():
             script = '#!/bin/sh\nset -eux\n'
             script += 'test "$(id -u)" -ne 0\n'
             administrator = current_mode['mode'] == 'administrator'
+            script += "/usr/bin/python3 - <<'CAPS'\nfrom pathlib import Path\ns=dict(line.split(':',1) for line in Path('/proc/self/status').read_text().splitlines() if ':' in line)\n"
+            script += 'for k in ("CapEff", "CapAmb"): assert bool(int(s[k].strip(),16) & 4) == ' + str(administrator) + '\nCAPS\n'
             if administrator:
                 script += 'test "$(sudo -n id -u)" = 0\n'
+                # Admin's read/search capability preserves private logical
+                # workspace ancestors without chmod or path/session remapping.
+                script += 'test "$(cat ' + str(private) + ')" = "synthetic owner data"\n'
                 script += 'test "$(sudo -n cat ' + str(private) + ')" = "synthetic owner data"\n'
                 script += 'sudo -n sh -c "printf administrative-change > ' + str(host_marker) + '"\n'
             else:
@@ -518,6 +523,7 @@ def main():
             fenced(run, first_protected)
             fenced(other, second_protected)
             admin_first, admin_second = start(run), start(other)
+            assert stat.S_IMODE(root.stat().st_mode) == 0o700, 'Administrator changed private ancestor permissions.'
             assert host_marker.read_text() == 'administrative-change', 'sudo did not administer the actual host.'
             target = dict(mode='protected', generation=str(uuid.uuid4()))
             applied = api('/native-mode', target)

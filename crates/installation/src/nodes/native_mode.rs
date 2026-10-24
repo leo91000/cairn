@@ -64,6 +64,10 @@ pub fn administrator(node: &Value) -> bool {
     requested(node)["mode"] == "administrator"
 }
 
+pub(crate) fn unconfirmed(node: &Value) -> bool {
+    node["revoked"] != true && node["capabilities"]["backend"] == "native" && !applied(node)
+}
+
 /// Review belongs to a node's current administrative generation, never to an
 /// agent-side privilege toggle or a wildcard that includes future machines.
 pub fn reviewed(node: &Value, agent: &Value) -> bool {
@@ -183,13 +187,27 @@ fn snapshot(db: &Db<'_>, node: &Value, mode: Mode) -> Result<Value> {
         "id": account, "email": authority["accounts"][account.as_str().unwrap_or("")]["email"],
     })).collect::<Vec<_>>();
     let mut conversations = Vec::new();
+    let mut reservations = db
+        .list("node-attempts")?
+        .into_iter()
+        .filter(|attempt| attempt["nodeId"] == node_id && attempt["released"] != true)
+        .map(|attempt| json!({ "id": attempt["id"], "runId": attempt["runId"] }))
+        .collect::<Vec<_>>();
+    reservations.sort_by(|left, right| text(left, "id").cmp(text(right, "id")));
     for run in db.runs(None, None, i64::MAX, 0, true)? {
         let checkpoint = super::db_checkpoint(db, text(&run, "id"))?;
+        let reserved = reservations
+            .iter()
+            .filter(|attempt| attempt["runId"] == run["id"])
+            .map(|attempt| attempt["id"].clone())
+            .collect::<Vec<_>>();
         let already_associated = run["nodeId"] == node_id
             || checkpoint["nodeId"] == node_id
             || run["pinnedNodeId"] == node_id
             || run["preferredNodeId"] == node_id
-            || run["targetNodeId"] == node_id;
+            || run["targetNodeId"] == node_id
+            || run["moveRequest"]["nodeId"] == node_id
+            || !reserved.is_empty();
         // Automatic queued work has no node yet. Include every potential first
         // placement covered by the displayed agent grants, even at capacity or
         // while offline; a concurrent arrival must invalidate this preview.
@@ -210,6 +228,10 @@ fn snapshot(db: &Db<'_>, node: &Value, mode: Mode) -> Result<Value> {
                 "id": run["id"], "agentId": super::run_agent(&run),
                 "name": run["snapshot"]["task"]["name"], "status": run["status"],
                 "nativePrincipals": run["nativePrincipals"],
+                "nodeId": run["nodeId"], "checkpointNodeId": checkpoint["nodeId"],
+                "pinnedNodeId": run["pinnedNodeId"], "preferredNodeId": run["preferredNodeId"],
+                "targetNodeId": run["targetNodeId"], "moveRequest": run["moveRequest"],
+                "reservations": reserved,
             }));
         }
     }

@@ -388,11 +388,23 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
         // systemd-run to leave executable resolution to the service manager,
         // as it already does for protected units with RootDirectory.
         property("ExecSearchPath=/run/cairn-entrypoint".into());
+        // Keep the same logical workspace/session paths even when their host
+        // ancestors are owner-private. Administrator already grants full host
+        // access; read/search capability avoids changing those directories or
+        // replacing them with a namespace scaffold. Writes still use sudo.
+        property("AmbientCapabilities=CAP_DAC_READ_SEARCH".into());
     }
-    property(format!(
-        "WorkingDirectory={}",
-        path_property(Path::new(text(launch.plan, "cwd")))?
-    ));
+    if administrator {
+        // Ambient capabilities become effective at execve, after systemd's
+        // own chdir. runner-entry then uses the unchanged plan.cwd when it
+        // starts the engine, with read/search capability already effective.
+        property("WorkingDirectory=/".into());
+    } else {
+        property(format!(
+            "WorkingDirectory={}",
+            path_property(Path::new(text(launch.plan, "cwd")))?
+        ));
+    }
     for source in [
         "/usr",
         "/bin",

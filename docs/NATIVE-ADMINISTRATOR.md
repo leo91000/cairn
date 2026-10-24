@@ -16,6 +16,13 @@ has already isolated for this purpose. `sudo`, `visudo`, `runuser` and the stand
 validates actual noninteractive sudo before reporting administrator applied.
 Enrollment and migration never enable administrator automatically.
 
+Administrator executions also receive `CAP_DAC_READ_SEARCH`: the ordinary UID can
+traverse owner-private parent directories and read host files without sudo. This
+preserves existing workspace and engine-session paths without changing directory
+permissions or masking the host tree. System administration and writes outside
+the workload account's permissions use sudo. This read access is part of the same
+full-machine authority, and is absent from protected executions.
+
 Root can read all data and credentials present on this machine, including the
 supervisor, node identity and other local executions. Cairn does not grant any
 additional remote accounts or resources: credentials obtained on the host still
@@ -80,6 +87,10 @@ All new messages, schedules, retries, resumptions, delegation and automatic,
 pinned or preferred placement use current node admission and the confirmed mode.
 Existing environments stay on their node unless explicitly moved; pinned work
 waits for that node. Incoming directing people still contribute to provenance.
+Pending or failed privilege confirmation does not trigger automatic capacity
+relocation or recovery to another node. Ordinary recovery remains available after
+confirmation or an explicit node revocation. The owner preview includes incoming
+move requests and active destination reservations; changes invalidate confirmation.
 No new placements on a transitioning node overtake its stop. Existing work keeps
 files and thread history; an interrupted engine resumes under the confirmed mode
 with an explicit effective-mode notice. The node and conversation details show
