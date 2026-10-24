@@ -7,6 +7,15 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.longOrNull
 
+private val workspaceDelegateTool = Regex("^(?:mcp__)?cairn_workspace(?:__|_|\\.)delegate_task$")
+
+/** Successful calls are represented by Cairn's chat.delegated team event. */
+internal fun isDelegateTool(item: JsonObject?): Boolean {
+    val tool = item.string("tool")
+    return workspaceDelegateTool.matches(tool) ||
+        (item.string("server") == "cairn_workspace" && tool == "delegate_task")
+}
+
 internal enum class SubagentState(val label: String) {
     RUNNING("En cours"),
     DONE("Terminé"),
@@ -254,17 +263,18 @@ internal fun Subagent.followed(chat: Chat?): Subagent {
     val state =
         when {
             chat.status in listOf("failed", "interrupted") -> SubagentState.FAILED
+            chat.paused || chat.status == "cancelled" -> SubagentState.STOPPED
             chat.pendingQuestions > 0 ||
                 chat.status in listOf("running", "queued") ||
                 chat.wakeup != null -> SubagentState.RUNNING
-            chat.paused || chat.status == "cancelled" -> SubagentState.STOPPED
             chat.status == "idle" -> SubagentState.RUNNING
             else -> SubagentState.DONE
         }
     val summary =
         when {
-            chat.pendingQuestions > 1 -> "${chat.pendingQuestions} questions attendent une réponse"
-            chat.pendingQuestions == 1 -> "Pose une question"
+            state == SubagentState.RUNNING && chat.pendingQuestions > 1 ->
+                "${chat.pendingQuestions} questions attendent une réponse"
+            state == SubagentState.RUNNING && chat.pendingQuestions == 1 -> "Pose une question"
             state == SubagentState.RUNNING ->
                 if (chat.status in listOf("queued", "idle")) "En attente d’un runner"
                 else if (chat.wakeup != null) "En attente" else "En cours"

@@ -180,7 +180,23 @@ fn target_agent(db: &Db<'_>, run: &Value, input: &Value) -> Result<Value> {
         .unwrap_or_else(|| text(requesting, "id"));
     let current = required(db.get("agents", text(requesting, "id"))?, "Agent not found")?;
     let agent = required(db.get("agents", agent_id)?, "Agent not found")?;
-    if !covers(&current, &agent) {
+    let current_access = policy(&current);
+    let target_access = policy(&agent);
+    let nodes = current_access["nodes"].is_null()
+        || target_access["nodes"].as_array().is_some_and(|nodes| {
+            nodes.iter().all(|node| {
+                crate::service::allowed(&current_access["nodes"], node.as_str().unwrap_or(""))
+            })
+        });
+    let plugins = crate::agent_grants::plugins(&current);
+    let exclusive_nodes = crate::agent_grants::exclusive_nodes(&current);
+    let live_grants = crate::agent_grants::plugins(&agent)
+        .iter()
+        .all(|instance| plugins.contains(instance))
+        && crate::agent_grants::exclusive_nodes(&agent)
+            .iter()
+            .all(|node| exclusive_nodes.contains(node));
+    if !covers(&current, &agent) || !nodes || !live_grants {
         return Err(Error::forbidden(
             "This agent has access the requesting agent does not have.",
         ));
@@ -189,12 +205,13 @@ fn target_agent(db: &Db<'_>, run: &Value, input: &Value) -> Result<Value> {
 }
 
 /// Checks the coding agent and model now, so a bad choice fails the call rather than the turn.
-fn validate_engine(agent: &Value, message: &Value) -> Result<()> {
+fn select_engine(agent: &Value, message: &Value) -> Result<Value> {
     let mut snapshot = json!({ "snapshot": { "agent": agent } });
     chats::select_agent(&mut snapshot, None, message)?;
     Provider::of_run(&snapshot)?
         .adapter()
-        .validate_agent(&snapshot["snapshot"]["agent"])
+        .validate_agent(&snapshot["snapshot"]["agent"])?;
+    Ok(snapshot["snapshot"]["agent"].clone())
 }
 
 fn create(db: &Db<'_>, bearer: &str, input: &Value) -> Result<Value> {
@@ -219,7 +236,7 @@ fn create(db: &Db<'_>, bearer: &str, input: &Value) -> Result<Value> {
     }
 
     let agent = target_agent(db, &run, input)?;
-    let message = parse(
+    let mut message = parse(
         "message",
         json!({
             "id": id(),
@@ -229,14 +246,17 @@ fn create(db: &Db<'_>, bearer: &str, input: &Value) -> Result<Value> {
             "reasoning": input["reasoning"].as_str().unwrap_or_default(),
         }),
     )?;
-    validate_engine(&agent, &message)?;
+    let engine = select_engine(&agent, &message)?;
+    for key in ["provider", "model", "reasoning"] {
+        message[key] = engine[key].clone();
+    }
     let project = match input.get("projectId") {
         Some(project) => project.clone(),
         None => requesting["projectId"].clone(),
     };
 
     // The requester's run is the origin: delegated work keeps its callers' native bounds.
-    let origin = Origin::Run(text(&run, "id").to_owned());
+    let origin = Origin::DelegatedTask(text(&run, "id").to_owned());
     let created = chats::create_as(
         db,
         json!({ "agentId": agent["id"], "projectId": project }),
@@ -316,16 +336,29 @@ fn truncated(reply: &str) -> String {
 /// What the requester sees of a delegated task. `finished` follows the task_finished condition.
 fn summary(db: &Db<'_>, chat: &Value, report: bool) -> Result<Value> {
     let view = chats::view(db, chat.clone())?;
-    let run = db.run(text(chat, "runId"))?;
-    let first = db.messages(text(chat, "id"))?.into_iter().next();
+    // Deletion withdraws access to content immediately, even while purge is pending.
+    let active = is_active(chat);
+    let (run, first) = if active {
+        (
+            db.run(text(chat, "runId"))?,
+            db.messages(text(chat, "id"))?.into_iter().next(),
+        )
+    } else {
+        (None, None)
+    };
     let engine = |key: &str| match &run {
         Some(run) => run["snapshot"]["agent"][key].clone(),
         None => first
             .as_ref()
             .map_or(Value::Null, |message| message[key].clone()),
     };
-    let finished = is_active(chat) && !working(db, chat)?;
+    let finished = !working(db, chat)?;
     let reply = run.as_ref().map_or("", |run| text(run, "summary"));
+    let pending_questions = if active {
+        view["pendingQuestions"].clone()
+    } else {
+        0.into()
+    };
     let mut result = json!({
         "chatId": chat["id"],
         "title": view["title"],
@@ -337,7 +370,7 @@ fn summary(db: &Db<'_>, chat: &Value, report: bool) -> Result<Value> {
         "status": view["status"],
         "lifecycle": view["lifecycle"],
         "finished": finished,
-        "pendingQuestions": view["pendingQuestions"],
+        "pendingQuestions": pending_questions,
         "outcome": run.as_ref().map_or(Value::Null, |run| run["outcome"].clone()),
         "runId": chat["runId"],
         "finishedAt": view["finishedAt"],

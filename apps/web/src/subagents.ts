@@ -40,19 +40,19 @@ function delegatedState(chat: ChatView | undefined): SubagentState {
     return 'stopped'
   if (chat.status === 'failed' || chat.status === 'interrupted')
     return 'failed'
-  if (chat.pendingQuestions > 0 || chat.status === 'running' || chat.status === 'queued' || chat.wakeup)
-    return 'running'
   if (chat.paused || chat.status === 'cancelled')
     return 'stopped'
+  if (chat.pendingQuestions > 0 || chat.status === 'running' || chat.status === 'queued' || chat.wakeup)
+    return 'running'
   return chat.status === 'idle' ? 'running' : 'done'
 }
 
 function delegatedSummary(chat: ChatView | undefined) {
   if (!chat || (chat.lifecycle && chat.lifecycle !== 'active'))
     return 'Conversation deleted'
-  if (chat.pendingQuestions > 0)
-    return chat.pendingQuestions > 1 ? `${chat.pendingQuestions} questions need an answer` : 'Asks a question'
   const state = delegatedState(chat)
+  if (state === 'running' && chat.pendingQuestions > 0)
+    return chat.pendingQuestions > 1 ? `${chat.pendingQuestions} questions need an answer` : 'Asks a question'
   if (state === 'running')
     return chat.status === 'queued' || chat.status === 'idle' ? 'Waiting for a runner' : chat.wakeup ? 'Waiting' : 'Working'
   if (state === 'failed')

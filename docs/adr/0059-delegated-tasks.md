@@ -32,10 +32,17 @@ not merely when its turn ends, or once it is paused or deleted.
 
 Delegated work never widens access. A task runs as the requesting agent, or as
 another agent whose access the requester's current access covers (`covers`, the
-rule that already guards queued work). Turning delegation off is a reduction:
+rule that already guards queued work), with an additional ceiling on execution
+nodes, plugin instances and exclusive node reservations at creation. Thereafter
+each ordinary conversation uses its own agent's current grants; native work also
+retains the parent's revocable host authority. Turning delegation off is a reduction:
 live grants fail and queued work stops as for other powers. A delegated
 conversation cannot delegate further, a requester has at most five working tasks,
 and the requester's run is the native-policy origin of what it creates.
+Native lineage records `nativeParentAccess: "delegation"` for these parent edges;
+management-created and historical edges still require installation access. Both
+the saved and current parent permissions, caller authority and node ceiling are
+checked at admission and renewal.
 
 The requester's history records a `chat.delegated` event where the task started.
 Clients show these as the existing subagent team card, followed through the
@@ -54,3 +61,9 @@ task is a normal conversation: a person can open it, answer its questions,
 continue it or delete it. Requesters must state self-contained tasks and push the
 work a task reads. Agents that need a person's answer still route it through the
 person: requesters cannot answer their tasks' questions yet.
+
+The persisted lineage fields are additive and the data compatibility epoch stays
+unchanged: older releases can read the records, and new releases treat an absent
+`nativeParentAccess` as installation-management provenance. Older releases cannot
+run a native child authorized only by the new delegation permission; they deny it
+under their existing installation-access requirement.

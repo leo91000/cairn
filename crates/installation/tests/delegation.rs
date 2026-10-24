@@ -304,6 +304,140 @@ async fn delegation_never_reaches_access_the_requesting_agent_lacks() {
 }
 
 #[tokio::test]
+async fn delegation_checks_node_plugin_and_exclusive_reservation_grants() {
+    let f = Fixture::new(true).await;
+    let turn = f.conversation(MAIN_AGENT_ID).await;
+    let requester = f.s.get("agents", MAIN_AGENT_ID).await.unwrap();
+    let target = f.s.agent(json!({ "name": "Target" }), None).await.unwrap();
+    let node = id();
+    let instance = id();
+    let changes = [
+        ("plugins", json!([instance])),
+        ("exclusiveNodes", json!([node])),
+        ("access", {
+            let mut access = requester["access"].clone();
+            access["nodes"] = json!([cairn_installation::nodes::LOCAL_NODE_ID, node]);
+            access
+        }),
+        ("access", {
+            let mut access = requester["access"].clone();
+            access["nodes"] = Value::Null;
+            access
+        }),
+    ];
+    for (key, value) in changes {
+        let mut wider = target.clone();
+        wider[key] = value;
+        f.s.store.put("agents", wider).await.unwrap();
+        let denied = f
+            .delegate(&turn, json!({ "task": "Review", "agentId": target["id"] }))
+            .await
+            .unwrap_err();
+        assert_eq!(denied.status, 403, "{key}: {}", denied.message);
+    }
+
+    // Equal live resource grants permit another agent, without changing covers() globally.
+    let mut current = requester;
+    current["plugins"] = json!([instance]);
+    current["exclusiveNodes"] = json!([node]);
+    f.s.store.put("agents", current).await.unwrap();
+    let mut allowed = target.clone();
+    allowed["plugins"] = json!([instance]);
+    allowed["exclusiveNodes"] = json!([node]);
+    f.s.store.put("agents", allowed).await.unwrap();
+    assert!(
+        f.delegate(&turn, json!({ "task": "Review", "agentId": target["id"] }))
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn omitted_engine_choices_are_recorded_before_the_task_starts() {
+    let f = Fixture::new(true).await;
+    f.s.agent(
+        json!({
+            "name": "Main agent",
+            "provider": "codex",
+            "model": "gpt-5.5",
+            "reasoning": "high",
+            "access": { "delegation": true },
+        }),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
+    let turn = f.conversation(MAIN_AGENT_ID).await;
+    let delegated = f
+        .delegate(&turn, json!({ "task": "Review" }))
+        .await
+        .unwrap();
+    assert_eq!(delegated["provider"], "codex");
+    assert_eq!(delegated["model"], "gpt-5.5");
+    let events =
+        f.s.store
+            .read(move |db| db.events(&turn.run, 0, 500))
+            .await
+            .unwrap();
+    let announced = events
+        .iter()
+        .find(|event| event["type"] == "chat.delegated")
+        .unwrap();
+    assert_eq!(announced["payload"]["provider"], "codex");
+    assert_eq!(announced["payload"]["model"], "gpt-5.5");
+}
+
+#[tokio::test]
+async fn deleted_tasks_are_finished_in_status_and_waits() {
+    let f = Fixture::new(true).await;
+    let turn = f.conversation(MAIN_AGENT_ID).await;
+    let delegated = f
+        .delegate(&turn, json!({ "task": "Review" }))
+        .await
+        .unwrap();
+    let child = text(&delegated, "chatId");
+    let child_turn = f.running(child).await;
+    f.finish(&child_turn).await;
+    f.s.store
+        .patch_run(
+            &child_turn.run,
+            json!({
+                "summary": "A report that must disappear when deleted",
+                "outcome": { "status": "completed", "reason": "A private outcome" },
+            }),
+        )
+        .await
+        .unwrap();
+    f.s.chat_trash(child, true).await.unwrap();
+    let status = delegation::status(&f.s, &turn.token, &json!({ "chatId": child }))
+        .await
+        .unwrap();
+    assert_eq!(status["finished"], true);
+    assert_eq!(status["lifecycle"], "trash");
+    assert_eq!(status["report"], "");
+    assert!(status["outcome"].is_null());
+    assert_eq!(status["pendingQuestions"], 0);
+    let listed = delegation::status(&f.s, &turn.token, &json!({}))
+        .await
+        .unwrap();
+    assert_eq!(listed["tasks"][0]["preview"], "");
+    assert!(listed["tasks"][0]["outcome"].is_null());
+    let wait = wait_for::schedule(
+        &f.s,
+        &turn.token,
+        &json!({
+            "condition": { "type": "task_finished", "chatId": child },
+            "reason": "Observe the deleted task",
+            "timeoutSeconds": 60,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(wait["deferred"], false);
+    assert_eq!(wait["observation"]["status"], "deleted");
+}
+
+#[tokio::test]
 async fn the_requester_waits_for_its_task_and_reads_the_report() {
     let f = Fixture::new(true).await;
     let turn = f.conversation(MAIN_AGENT_ID).await;

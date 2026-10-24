@@ -67,9 +67,17 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_workspace(false).await
+    }
+
+    async fn with_workspace(workspace: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("home")).unwrap();
-        let service = Service::new(common::config(root.path())).await.unwrap();
+        let mut config = common::config(root.path());
+        if workspace {
+            config.runner_url = "http://unused-runner:4311".into();
+        }
+        let service = Service::new(config).await.unwrap();
         let router = common::relay_fixture::router(service.clone())
             .await
             .unwrap();
@@ -219,6 +227,97 @@ impl Fixture {
             "snapshot": { "agent": self.agent },
         })
     }
+}
+
+#[tokio::test]
+async fn task_delegation_has_its_own_revocable_native_authority() {
+    let mut f = Fixture::with_workspace(true).await;
+    f.agent["access"]["delegation"] = true.into();
+    f.service
+        .store
+        .put("agents", f.agent.clone())
+        .await
+        .unwrap();
+    let (_, parent) = f.conversation().await;
+    let parent = f
+        .service
+        .store
+        .patch_run(text(&parent, "id"), json!({ "status": "running" }))
+        .await
+        .unwrap();
+    let configuration = f
+        .service
+        .mcps
+        .run_configuration(&f.service, &parent)
+        .await
+        .unwrap();
+    let task = cairn_installation::delegation::delegate(
+        &f.service,
+        text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN"),
+        &json!({ "task": "Review on the authorized native node" }),
+    )
+    .await
+    .unwrap();
+    let child_id = text(&task, "chatId");
+    let child = f.service.get("chats", child_id).await.unwrap();
+    assert_eq!(child["nativeParentRunId"], parent["id"]);
+    assert_eq!(child["nativeParentAccess"], "delegation");
+    assert_eq!(child["nativeAuthorityNodes"], json!([f.node["id"]]));
+    f.service.chat_tick(&HashSet::new()).await.unwrap();
+    let child = f.service.chat_detail(child_id).await.unwrap()["run"].clone();
+    assert_eq!(child["nativeParentAccess"], "delegation");
+
+    let check = |run: Value| {
+        let node = f.node.clone();
+        f.service
+            .store
+            .read(move |db| policy::allows(db, &run, &node))
+    };
+    assert!(check(child.clone()).await.unwrap());
+    let mut management_child = child.clone();
+    management_child["nativeParentAccess"] = Value::Null;
+    assert!(
+        !check(management_child).await.unwrap(),
+        "Management-created and historical edges still require installation access"
+    );
+
+    // A human follow-up preserves the capability that authorized the parent edge.
+    policy::CALLER
+        .scope(
+            Some(TRUSTED.into()),
+            f.service.chat_send(
+                child_id,
+                json!({ "id": id(), "text": "Also inspect the tests" }),
+            ),
+        )
+        .await
+        .unwrap();
+    let continued = f.service.get("chats", child_id).await.unwrap();
+    assert_eq!(continued["nativeParentAccess"], "delegation");
+
+    let mut revoked = f.agent.clone();
+    revoked["access"]["delegation"] = false.into();
+    revoked["access"]["installation"] = true.into();
+    f.service.store.put("agents", revoked).await.unwrap();
+    assert!(
+        !check(child.clone()).await.unwrap(),
+        "Installation access cannot replace revoked task delegation"
+    );
+    f.service
+        .store
+        .put("agents", f.agent.clone())
+        .await
+        .unwrap();
+    assert!(check(child.clone()).await.unwrap());
+    f.service
+        .store
+        .patch_run(text(&parent, "id"), json!({ "nativeAuthorityNodes": [] }))
+        .await
+        .unwrap();
+    assert!(
+        !check(child).await.unwrap(),
+        "The parent's node ceiling remains live"
+    );
 }
 
 #[tokio::test]

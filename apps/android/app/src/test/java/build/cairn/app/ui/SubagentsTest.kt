@@ -570,8 +570,48 @@ class SubagentsTest {
             follow(chat.copy(status = "cancelled", paused = true)),
         )
         assertEquals(SubagentState.FAILED to "Échec", follow(chat.copy(status = "failed")))
+        assertEquals(
+            SubagentState.STOPPED to "Arrêtée",
+            follow(chat.copy(status = "succeeded", paused = true, pendingQuestions = 1)),
+        )
+        assertEquals(
+            SubagentState.STOPPED to "Arrêtée",
+            follow(chat.copy(paused = true, pendingQuestions = 2)),
+        )
         assertEquals(SubagentState.STOPPED to "Conversation supprimée", follow(null))
         assertEquals("", team.first().elapsed(active = true, now = 10_000))
+    }
+
+    @Test
+    fun `interleaved delegation calls form one team while failed calls stay visible`() {
+        fun call(type: String, id: String, qualified: Boolean, status: String) =
+            item(type) {
+                put("id", id)
+                put("type", "mcp_tool_call")
+                put(
+                    "tool",
+                    if (qualified) "mcp__cairn_workspace__delegate_task" else "delegate_task",
+                )
+                if (!qualified) put("server", "cairn_workspace")
+                put("status", status)
+            }
+        val events =
+            listOf(
+                user("Review it"),
+                call("item.started", "call-a", true, "in_progress"),
+                delegated("a"),
+                call("item.completed", "call-a", true, "completed"),
+                call("item.started", "call-b", false, "in_progress"),
+                delegated("b"),
+                call("item.completed", "call-b", false, "completed"),
+            )
+        val timeline = timelineEntries(events, chat = true)
+        assertEquals(2, timeline.size)
+        assertEquals(listOf("a", "b"), timeline.last().agents.map { it.delegation?.chatId })
+        val failed = call("item.completed", "call-c", true, "failed")
+        val withFailure = timelineEntries(events + failed, chat = true)
+        assertTrue(withFailure.last().events.contains(failed))
+        assertTrue(presentActivity(failed).failed)
     }
 
     @Test
