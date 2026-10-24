@@ -1002,4 +1002,35 @@ class AgentEditingTest {
         assertTrue(agentChanges(omitted, AgentDraft(explicit)).isEmpty())
         assertFalse(profileChanged(omitted, explicit))
     }
+
+    @Test
+    fun wildcardConversionKeepsUnreviewedAdministratorNodesOutAndExplicitAccessRequiresReview() {
+        val administrator =
+            gpu.copy(
+                capabilities = gpu.capabilities.copy(backend = NATIVE_BACKEND),
+                nativeModeRequest = NativeModeState("administrator", "generation"),
+            )
+        val native = agent.copy(access = agent.access.copy(backend = NATIVE_BACKEND, nodes = null))
+        assertEquals(
+            emptyList<String>(),
+            native.access.withAllNodes(false, listOf(administrator), agent.id).nodes,
+        )
+        val edited = native.copy(access = native.access.copy(nodes = listOf(administrator.id)))
+        val current = resources.copy(nodes = listOf(administrator))
+        val lines = agentReview(native, edited, current, null)
+        assertTrue(lines.any { it.kind == ReviewKind.Power && "sudo sans mot de passe" in it.text })
+        assertEquals(listOf(administrator.id), edited.nativeReviewNodes(current))
+        assertTrue(needsReview(lines, null))
+        val body = agentSaveBody(edited, nativeNodeReviews = edited.nativeReviewNodes(current))
+        assertEquals(
+            administrator.id,
+            body["nativeNodeReviews"]!!.jsonArray.single().jsonPrimitive.content,
+        )
+        val reviewed = administrator.copy(nativeReviewedAgents = listOf(agent.id))
+        assertEquals(
+            listOf(administrator.id),
+            native.access.withAllNodes(false, listOf(reviewed), agent.id).nodes,
+        )
+        assertTrue(edited.nativeReviewNodes(resources.copy(nodes = listOf(reviewed))).isEmpty())
+    }
 }

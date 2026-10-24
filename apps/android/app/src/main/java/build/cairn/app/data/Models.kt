@@ -209,6 +209,7 @@ data class Run(
     /** The opening of the agent's final message, while unread. */
     val preview: String? = null,
     val nodeId: String? = null,
+    val nativeMode: NativeModeState? = null,
     val nodeState: String? = null,
     val resources: NodeResources? = null,
     val pinnedNodeId: String? = null,

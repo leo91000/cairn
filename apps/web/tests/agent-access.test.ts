@@ -17,6 +17,7 @@ import {
   issues,
   keptAgentIds,
   mergeList,
+  nativeReviewNodes,
   needsReview,
   newAgentDraft,
   nodesFor,
@@ -577,7 +578,7 @@ it('flags run permissions on removed nodes or nodes of the other backend', () =>
 
 it('describes execution modes for what is known', () => {
   expect(sandboxOptionsFor('firecracker')[0]!.description).toBe('Private VM with sudo and Docker. Default.')
-  expect(sandboxOptionsFor('native')[0]!.description).toBe('Native process under a managed account on the host: GPU and system tools, no sudo or Docker. Default.')
+  expect(sandboxOptionsFor('native')[0]!.description).toBe('Native process under a managed account. Host privileges follow the node’s confirmed protected or administrator mode. Default.')
 })
 
 it('never sends tool choices of deleted MCP connections', () => {
@@ -705,4 +706,25 @@ it('keeps read-only exclusive reservations when run permissions or the backend c
   expect(withRun(access, ['gpu'], 'other', true)).toEqual({ nodes: ['gpu', 'box', 'other'], exclusiveNodes: ['gpu'] })
   expect(withBackend(['gpu'])).toEqual({ nodes: [], exclusiveNodes: [] })
   expect(withBackend(['gpu'], true)).toEqual({ nodes: [], exclusiveNodes: ['gpu'] })
+})
+
+it('reviews administrator node admission as a power even after converting a wildcard grant', () => {
+  const administrator: ExecutionNode = {
+    ...gpu,
+    nativeModeRequest: { mode: 'administrator', generation: 'generation' },
+    nativeReviewedAgents: [],
+    capabilities: { ...gpu.capabilities, backend: 'native' },
+  }
+  const ownContext = { ...context, agentId: 'future', nodes: [administrator] }
+  const before = newAgentDraft()
+  before.access.backend = 'native'
+  before.access.nodes = null
+  const draft = structuredClone(before)
+  draft.access.nodes = [administrator.id]
+  expect(nativeReviewNodes(draft, ownContext)).toEqual([administrator.id])
+  const lines = reviewLines(before, draft, ownContext)
+  expect(lines.some(line => line.kind === 'power' && line.text.includes('unrestricted passwordless sudo'))).toBe(true)
+  expect(needsReview(lines, null)).toBe(true)
+  administrator.nativeReviewedAgents = ['future']
+  expect(nativeReviewNodes(draft, ownContext)).toEqual([])
 })

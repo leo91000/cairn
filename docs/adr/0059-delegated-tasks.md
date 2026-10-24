@@ -41,7 +41,10 @@ another agent whose access the requester's current access covers (`covers`, the
 rule that already guards queued work), with an additional ceiling on execution
 nodes, plugin instances and exclusive node reservations at creation. Thereafter
 each ordinary conversation uses its own agent's current grants; native work also
-retains the parent's revocable host authority. Turning delegation off is a reduction:
+retains the parent's revocable host authority. Native administrator admission
+reviews are part of that ceiling: a reviewed target cannot grant an unreviewed
+requester administrator access, and removing the requester's review revokes its
+delegated children's admission on that node. Turning delegation off is a reduction:
 live grants fail and queued work stops as for other powers. A delegated
 conversation cannot delegate further, a requester has at most five working tasks,
 and the requester's run is the native-policy origin of what it creates.

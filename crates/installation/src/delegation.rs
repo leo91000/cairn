@@ -197,7 +197,15 @@ fn target_agent(db: &Db<'_>, run: &Value, input: &Value) -> Result<Value> {
         && crate::agent_grants::exclusive_nodes(&agent)
             .iter()
             .all(|node| exclusive_nodes.contains(node));
-    if !covers(&current, &agent) || !nodes || !live_grants {
+    // Wildcard node grants do not include an administrator review. A narrower
+    // reviewed target must not give an unreviewed requester host privileges.
+    let administrator_reviews = !crate::native::policy::native(&agent)
+        || db.list("nodes")?.iter().all(|node| {
+            !crate::service::allowed(&target_access["nodes"], text(node, "id"))
+                || !crate::nodes::native_mode::reviewed(node, &agent)
+                || crate::nodes::native_mode::reviewed(node, &current)
+        });
+    if !covers(&current, &agent) || !nodes || !live_grants || !administrator_reviews {
         return Err(Error::forbidden(
             "This agent has access the requesting agent does not have.",
         ));
