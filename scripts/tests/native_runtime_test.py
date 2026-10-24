@@ -88,7 +88,8 @@ def main():
     mcp_servers = {}
     metrics = dict(host=dict(kernel=platform.release(), machine=platform.machine(), cpuCount=os.cpu_count(),
                             cpu=Path('/proc/cpuinfo').read_text().split('model name')[1].splitlines()[0],
-                            memory=Path('/proc/meminfo').read_text().splitlines()[0]),
+                            memory=Path('/proc/meminfo').read_text().splitlines()[0],
+                            loadAverageStart=os.getloadavg(), cpuTicksStart=Path('/proc/stat').read_text().splitlines()[0]),
                    conditions='Disposable hosted Linux VM; loopback Moto S3, synthetic credentials; no WAN latency. '
                               'Cold file reads use advisory POSIX_FADV_DONTNEED; post-eviction controller restart clears userspace cache.',
                    workload='Seeded random42 8MiB asset +128 fsynced 4KiB text writes, per-process wall/CPU milliseconds.',
@@ -368,8 +369,7 @@ def main():
                 return (managed(run) / 'ready').read_text() == attempt
 
             eventually(execution_ready, timeout=600 if docker_script else 60)
-            metrics.setdefault('conversationStartupMs', []).append(dict(ms=(time.perf_counter() - startup) * 1000,
-                docker=bool(docker_script), resume=run in started_runs))
+            startup_ms = (time.perf_counter() - startup) * 1000
             if (state / (attempt + '.exit')).exists() and int((state / (attempt + '.exit')).read_text()) != 0:
                 for record in (state / (attempt + '.log')).read_text().splitlines():
                     event = json.loads(record)
@@ -391,6 +391,16 @@ def main():
                 evidence.mkdir(parents=True, exist_ok=True)
                 (evidence / 'failure-diagnostics.txt').write_text(diagnostic_text)
                 raise AssertionError('Synthetic workload failed before readiness.')
+            startup_cpu_ms = None
+            if long:
+                namespace = command('systemctl', 'show', 'cairn-native-' + attempt + '.service', '--property=ControlGroup', '--value').stdout.strip()
+                assert namespace.startswith('/'), 'Workload cgroup unavailable for startup CPU sampling.'
+                cpu_stat = dict(line.split() for line in (Path('/sys/fs/cgroup') / namespace.lstrip('/') / 'cpu.stat').read_text().splitlines())
+                startup_cpu_ms = int(cpu_stat['usage_usec']) / 1000
+            metrics.setdefault('conversationStartupMs', []).append(dict(ms=startup_ms,
+                docker=bool(docker_script), resume=run in started_runs, workloadCgroupCpuMs=startup_cpu_ms,
+                cpuScope='Whole fresh workload cgroup at readiness; short executions may already be collected.',
+                loadAverage=os.getloadavg(), readinessIncludesDockerWorkload=bool(docker_script)))
             started_runs.add(run)
             if long:
                 pid = command('systemctl', 'show', supervisor, '--property=MainPID', '--value').stdout.strip()
@@ -656,6 +666,8 @@ def main():
             for current in runs:
                 manager('purge', run=current)
             metrics['harnessCpuSeconds'] = resource.getrusage(resource.RUSAGE_SELF).ru_utime
+            metrics['host']['loadAverageEnd'] = os.getloadavg()
+            metrics['host']['cpuTicksEnd'] = Path('/proc/stat').read_text().splitlines()[0]
             evidence = Path(os.environ.get('NATIVE_STORAGE_EVIDENCE_DIR', str(root / 'evidence')))
             evidence.mkdir(parents=True, exist_ok=True)
             (evidence / 'native-storage.json').write_text(json.dumps(metrics, indent=2) + '\n')

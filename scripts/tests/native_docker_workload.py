@@ -106,12 +106,23 @@ def raw_api_rejections():
 
 def main():
     phase = sys.argv[1]
-    metrics = dict(phase=phase, pulls=[], timings={})
+    metrics = dict(phase=phase, pulls=[], timings={}, workloadCgroupCpuMs={}, loadAverage={},
+                   cpuScope='Whole conversation cgroup: client, daemon, helpers and any running services; aggregate CPU, not exclusive per-process attribution.')
+    membership = next(line.removeprefix('0::') for line in Path('/proc/self/cgroup').read_text().splitlines() if line.startswith('0::'))
+    cpu_file = Path('/sys/fs/cgroup') / membership.lstrip('/') / 'cpu.stat'
+
+    def charged_cpu_ms():
+        counters = dict(line.split() for line in cpu_file.read_text().splitlines())
+        return int(counters['usage_usec']) / 1000
 
     def timed(name, *args):
+        cpu_before = charged_cpu_ms()
+        load_before = os.getloadavg()
         start = time.perf_counter()
         result = command(*args)
         metrics['timings'][name] = (time.perf_counter() - start) * 1000
+        metrics['workloadCgroupCpuMs'][name] = charged_cpu_ms() - cpu_before
+        metrics['loadAverage'][name] = dict(before=load_before, after=os.getloadavg())
         return result
 
     status = dict(line.split(':', 1) for line in Path('/proc/self/status').read_text().splitlines() if ':' in line)
@@ -169,9 +180,14 @@ def main():
         # separate from daemon startup and rejection measurements below.
         if phase == 'fresh' and not metrics['pulls']:
             for image in (ALPINE, POSTGRES, REDIS):
+                cpu_before = charged_cpu_ms()
+                load_before = os.getloadavg()
                 elapsed = time.perf_counter()
                 command('docker', 'pull', image)
-                metrics['pulls'].append(dict(image=image, ms=(time.perf_counter() - elapsed) * 1000,
+                pull_ms = (time.perf_counter() - elapsed) * 1000
+                pull_cpu_ms = charged_cpu_ms() - cpu_before
+                metrics['pulls'].append(dict(image=image, ms=pull_ms, workloadCgroupCpuMs=pull_cpu_ms,
+                    loadAverage=dict(before=load_before, after=os.getloadavg()),
                     digest=command('docker', 'image', 'inspect', '--format', '{{json .RepoDigests}}', image)))
         command(*forbidden, success=False)
     if phase != 'other':

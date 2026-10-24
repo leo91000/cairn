@@ -155,6 +155,15 @@ command runs against the owner's desktop node or its Docker daemon.
 startup samples, cold daemon startup before pulls, warm daemon commands, image
 pull time/digests separately, build/cache resume and restore, storage read/write
 wall and process CPU times, encoded S3 bytes and cgroup limits/accounting.
+Host load averages (1/5/15 minutes) and aggregate CPU ticks bracket the fixture.
+Startup samples include CPU charged to the fresh workload cgroup at readiness;
+short executions may already be collected and report unavailable CPU as null.
+Docker timings include matching cgroup CPU deltas and observed host load. These
+are aggregate client/daemon/helper/service costs, not exclusive daemon CPU.
+Compare no-Docker startup samples separately: Docker-marked readiness includes
+the complete qualification workload, while `firstDaemonMs` measures only the
+first server command before image pulls. Cold here means a new conversation
+store and daemon, without forcing the host's executable page cache cold.
 A static C probe records identical direct-host and named-volume 8 MiB read / 128
 fsynced 4 KiB write workloads separately from the seeded native filesystem probe.
 The destination-ID test emulates unavailable source IDs on the same disposable
