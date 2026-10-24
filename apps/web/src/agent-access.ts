@@ -99,6 +99,7 @@ export function newAgentDraft(): AgentDraft {
       mcps: [],
       mcpTools: {},
       installation: false,
+      delegation: false,
       sandbox: 'yolo',
     },
     exclusiveNodes: [],
@@ -125,6 +126,7 @@ export function draftOf(agent: Agent): AgentDraft {
       mcps: access.mcps ? [...access.mcps] : null,
       mcpTools: structuredClone(JSON.parse(JSON.stringify(access.mcpTools ?? {}))),
       installation: access.installation ?? false,
+      delegation: access.delegation ?? false,
       sandbox: access.sandbox ?? 'yolo',
     },
     // Responses omit empty live grants: absent means none.
@@ -507,7 +509,7 @@ export function changes(saved: AgentDraft, draft: AgentDraft) {
   for (const connection of tools)
     add('mcps', Number(asSet(savedTools[connection]) !== asSet(draftTools[connection])))
   add('sandbox', Number(saved.access.sandbox !== draft.access.sandbox))
-  add('powers', Number(saved.access.installation !== draft.access.installation))
+  add('powers', Number(saved.access.installation !== draft.access.installation) + Number(!!saved.access.delegation !== !!draft.access.delegation))
   add('nodes', Number(backendOf(saved.access) !== backendOf(draft.access)))
   add('nodes', listCount(saved.access.nodes, draft.access.nodes))
   // Responses omit empty live grants: absent means none.
@@ -565,6 +567,8 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
     lines.push({ kind: 'power', section: 'nodes', text: `Added: native execution. ${nativeHelp}` })
   if (draft.access.installation && !saved.access.installation)
     lines.push({ kind: 'power', section: 'powers', text: 'Added: installation management. This agent will be able to create and change agents, projects, skills, MCP connections, missions and runs on your behalf.' })
+  if (draft.access.delegation && !saved.access.delegation)
+    lines.push({ kind: 'power', section: 'powers', text: 'Added: task delegation. This agent will be able to start conversations that report back to it, on any coding agent and model, as itself or as an agent whose access it covers.' })
   for (const id of listChanges(saved.plugins ?? [], draft.plugins ?? []).added)
     lines.push({ kind: 'secret', section: 'plugins', text: `Added: ${connectionLabel(id, context)} — effective immediately, including in running conversations.` })
 
@@ -591,6 +595,8 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
     removed.push(connectionLabel(id, context))
   if (saved.access.installation && !draft.access.installation)
     removed.push('installation management')
+  if (saved.access.delegation && !draft.access.delegation)
+    removed.push('task delegation')
   if (backendOf(saved.access) === 'native' && backendOf(draft.access) !== 'native')
     removed.push('native execution')
   if (sandboxStrictness[draft.access.sandbox] > sandboxStrictness[saved.access.sandbox]) {
@@ -748,6 +754,8 @@ export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 
     parts.push('Exclusive reservation')
   if (access.installation)
     parts.push('Installation management')
+  if (access.delegation)
+    parts.push('Task delegation')
   return parts.join(' · ')
 }
 

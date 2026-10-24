@@ -136,7 +136,7 @@ fn record_name(db: &Db<'_>, chat: &Value, kind: &str, key: &str, deleted: &str) 
     })
 }
 
-fn view(db: &Db<'_>, mut chat: Value) -> Result<Value> {
+pub(crate) fn view(db: &Db<'_>, mut chat: Value) -> Result<Value> {
     chat["lifecycle"] = crate::conversation_lifecycle::state(&chat).into();
     chat["pendingQuestions"] = questions(db, text(&chat, "id"))?
         .iter()
@@ -152,9 +152,15 @@ fn view(db: &Db<'_>, mut chat: Value) -> Result<Value> {
     let run = db.run(text(&chat, "runId"))?;
     chat["canRequestNewSession"] =
         crate::conversation_lifecycle::can_request_new_session(&chat, run.as_ref()).into();
-    chat["status"] = run
-        .as_ref()
-        .map_or_else(|| "idle".into(), |run| run["status"].clone());
+    let queued_delegation = run.is_none()
+        && chat["requestedBy"].is_object()
+        && continuation::has_pending_input(db, &chat)?;
+    chat["status"] = if queued_delegation {
+        "queued".into()
+    } else {
+        run.as_ref()
+            .map_or_else(|| "idle".into(), |run| run["status"].clone())
+    };
     chat["suspendedByExclusive"] = run
         .as_ref()
         .map_or(Value::Null, |run| run["suspendedByExclusive"].clone());
@@ -165,6 +171,14 @@ fn view(db: &Db<'_>, mut chat: Value) -> Result<Value> {
         .map_or(Value::Null, |provider| provider.as_str().into());
     // When the agent's latest turn ended, for what the Fil shows as unread.
     chat["finishedAt"] = run.map_or(Value::Null, |run| run["finishedAt"].clone());
+    // The delegating conversation, while it can still be opened.
+    chat["requester"] = match chat["requestedBy"]["chatId"].as_str() {
+        Some(id) => db.get("chats", id)?.filter(is_active).map_or(
+            Value::Null,
+            |requester| json!({ "chatId": requester["id"], "title": requester["title"] }),
+        ),
+        None => Value::Null,
+    };
     Ok(chat)
 }
 
@@ -509,7 +523,11 @@ fn needs_attention(chat: &Value, run: Option<&Value>) -> bool {
 }
 
 /// Applies the provider, model and reasoning chosen for this message.
-fn select_agent(snapshot: &mut Value, run: Option<&Value>, message: &Value) -> Result<()> {
+pub(crate) fn select_agent(
+    snapshot: &mut Value,
+    run: Option<&Value>,
+    message: &Value,
+) -> Result<()> {
     let previous = run.map_or(
         &snapshot["snapshot"]["agent"],
         |run| &run["snapshot"]["agent"],
@@ -1091,6 +1109,8 @@ impl Service {
         task["createdAt"] = chat["createdAt"].clone();
         task["nextRun"] = Value::Null;
         let mut snapshot = self.snapshot(task, "chat").await?;
+        snapshot["snapshot"]["delegation"] =
+            crate::delegation::role(&chat, &snapshot["snapshot"]["agent"]);
         select_agent(&mut snapshot, run.as_ref(), &message)?;
         Provider::of_run(&snapshot)?
             .adapter()

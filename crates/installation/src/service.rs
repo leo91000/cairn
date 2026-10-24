@@ -1090,7 +1090,7 @@ fn inherit_agent_settings(input: &mut Value, existing: &Value) {
     if !input["access"].is_object() {
         return;
     }
-    for key in ["nodes", "installation", "backend"] {
+    for key in ["nodes", "installation", "delegation", "backend"] {
         if input["access"].get(key).is_none() {
             input["access"][key] = policy(existing)[key].clone();
         }
@@ -1217,6 +1217,7 @@ pub fn policy(agent: &Value) -> Value {
         "mcps": null,
         "mcpTools": {},
         "installation": false,
+        "delegation": false,
         "sandbox": "yolo",
         "nodes": [crate::nodes::LOCAL_NODE_ID],
         "backend": "firecracker",
@@ -1262,8 +1263,9 @@ pub fn covers(current: &Value, granted: &Value) -> bool {
         .flatten()
         .all(|(server, selection)| within(&granted["mcpTools"][server], selection));
     let installation = current["installation"] == true || granted["installation"] != true;
+    let delegation = current["delegation"] == true || granted["delegation"] != true;
     let sandbox = sandbox_rank(&current["sandbox"]) >= sandbox_rank(&granted["sandbox"]);
-    scopes && tools && installation && sandbox
+    scopes && tools && installation && delegation && sandbox
 }
 
 /// Whether a granted scope stays within the current one; `null` means everything.
