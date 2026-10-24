@@ -2708,5 +2708,74 @@
       ],
       "additionalProperties": false
     }
+  },
+  {
+    "name": "manage_plugin_resource",
+    "description": "List, read, create, replace or delete plugin resources using the owner UI validation. resourceId selects a saved resource; save takes complete name/settings/secrets?/enabled?/parentId? and revision when editing. list is bounded with cursor. Deletion removes child resources and dependent grants, routes and OAuth. Installation management supplies no private credentials or agent grants; reusing saved credentials requires the separate instance grant. Choose exactly one live instanceId or inert draftId. Draft writes also require data.setupRevision, and draft deletion requires the resource revision. Draft resources never acquire live authority; saved private draft credentials remain owner-only. form evaluates settings/parentId and optional changed or remote lookup, with resourceId selecting an existing resource; it returns bounded redacted options, derived values, errors and guidance. Use resourceId rather than data.resource.",
+    "scope": "manage",
+    "destructive": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "pluginId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "instanceId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "collection": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "list",
+            "get",
+            "save",
+            "delete",
+            "form"
+          ]
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "resourceId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "cursor": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "draftId": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "pluginId",
+        "collection",
+        "action"
+      ],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "instanceId"
+          ]
+        },
+        {
+          "required": [
+            "draftId"
+          ]
+        }
+      ]
+    }
   }
 ]

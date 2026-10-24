@@ -9,6 +9,7 @@ use crate::{
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+pub(crate) mod resources;
 pub(crate) mod setup;
 
 /// Management access does not replace a saved instance's separate agent grant, for
@@ -24,6 +25,26 @@ pub struct Authority {
 }
 
 impl Authority {
+    pub(super) fn configuration_credentials(
+        &mut self,
+        target: &super::resources::target::Target,
+        private: bool,
+        include_root: bool,
+    ) -> Result<()> {
+        if include_root && target.is_setup() {
+            self.uses_setup_credentials = true;
+        }
+        if private {
+            if target.is_setup() {
+                return Err(Error::forbidden(
+                    "Private setup credentials belong to the owner. Finish this configuration from the owner's plugin page.",
+                ));
+            }
+            self.instance = Some(Box::new(target.connection()));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
         if let Some(requester) = &self.requester {
             super::requesters::recheck(s, requester).await?;

@@ -1,5 +1,6 @@
 //! Instance-owned collections. Schema validation and encrypted fields are shared
 //! with instance forms; neither management responses nor Luau can read secrets.
+pub(crate) mod configuration;
 pub(crate) mod forms;
 pub(crate) mod target;
 
@@ -174,6 +175,25 @@ pub(super) async fn save_for(
     existing: Option<&str>,
     owner: Arc<super::operations::Owner>,
 ) -> Result<Value> {
+    save_configured(
+        s,
+        target,
+        name,
+        input,
+        existing,
+        configuration::Configuration::owner(owner),
+    )
+    .await
+}
+
+pub(super) async fn save_configured(
+    s: &Service,
+    target: Arc<Target>,
+    name: &str,
+    input: &Value,
+    existing: Option<&str>,
+    mut configuration: configuration::Configuration,
+) -> Result<Value> {
     target.require_revision(input)?;
     let manifest = target.manifest();
     let collection = declared(manifest, name)?.clone();
@@ -216,6 +236,9 @@ pub(super) async fn save_for(
             field["required"] = json!(false);
         }
     }
+    configuration
+        .credentials(s, &target, previous.as_slice(), false)
+        .await?;
     let form = if collection.form {
         Some(
             forms::Form::load(
@@ -225,7 +248,7 @@ pub(super) async fn save_for(
                 existing,
                 input,
                 true,
-                owner.clone(),
+                configuration.clone(),
             )
             .await?,
         )
@@ -274,11 +297,12 @@ pub(super) async fn save_for(
         updated_at: now(),
     };
     let encrypted = s.vault.encrypt(&key, &json!({ "fields": secrets }))?;
-    owner.recheck(s).await?;
+    configuration.recheck(s).await?;
     target.recheck_package(s).await?;
     let input = input.clone();
     s.store
         .transaction(move |db| {
+            configuration.current(db)?;
             target.current(db)?;
             if let Some(form) = &form {
                 form.current(db)?;
@@ -366,6 +390,17 @@ async fn remove_for(
     resource: &str,
     input: &Value,
 ) -> Result<Value> {
+    remove_configured(s, target, collection, resource, input, None).await
+}
+
+pub(super) async fn remove_configured(
+    s: &Service,
+    target: Arc<Target>,
+    collection: &str,
+    resource: &str,
+    input: &Value,
+    configuration: Option<configuration::Configuration>,
+) -> Result<Value> {
     target.require_revision(input)?;
     let resource = get_for(s, target.clone(), collection, resource).await?;
     if target.is_setup() && input["revision"] != resource.revision {
@@ -373,8 +408,14 @@ async fn remove_for(
             "The resource changed. Reload before deleting.",
         ));
     }
+    if let Some(configuration) = &configuration {
+        configuration.recheck(s).await?;
+    }
     s.store
         .transaction(move |db| {
+            if let Some(configuration) = &configuration {
+                configuration.current(db)?;
+            }
             target.current(db)?;
             if target.is_setup()
                 && target
@@ -470,7 +511,7 @@ pub async fn choices(
     }).await
 }
 
-async fn list_for(
+pub(super) async fn list_for(
     s: &Service,
     target: Arc<Target>,
     collection: &str,

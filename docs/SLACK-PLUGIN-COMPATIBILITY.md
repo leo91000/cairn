@@ -261,3 +261,13 @@ deployment or release. [Local measurements](performance/SETUP-OAUTH-EXPIRATION.m
 separate encoded-value sizes from KV expiry and production latency. Web/Android
 sign-in and equivalent public-MCP/agent-tool mutations remain required before
 complete delivery.
+
+
+Resource configuration MCP parity reuses the HTTP resource representation,
+encrypted secret values, OAuth records and cleanup transactions. Delegated
+configuration retains additional in-memory run/requester/instance authority;
+owner-only calls retain their existing storage reads and writes. The credential
+guard adds authorization reads for delegated calls, not a persisted cache or
+format. There is no new table, key, serialized field, envelope, epoch or migration.
+The unreleased epoch-13 / SQLite-12 candidate still requires whole-PR forward
+transition and recovery qualification before any production migration.

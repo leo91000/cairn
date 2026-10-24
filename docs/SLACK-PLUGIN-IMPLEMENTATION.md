@@ -1859,3 +1859,31 @@ are unchanged; no production Stop handler changed. A temporary HTTP-response
 probe also exposed why HTTP-only synchronization is unsuitable here: the direct
 transport can complete Stop without an HTTP response on the page. That probe
 failure is separate from the original assertion and its instrumentation is removed.
+
+
+## Resource configuration tool parity
+
+`manage_plugin_resource` shares the native resource CRUD and form handlers with
+the owner HTTP surface, for active instances and inert root drafts. Both MCP
+interfaces use the same schema and dispatcher. Draft and resource revisions,
+approval, owner lifetime and the installation run/requester are retained through
+form I/O and the final transaction; no agent grant is created.
+
+Public-interface regressions use the actual owner HTTP and public/built-in MCP,
+real Luau workers and local provider endpoints. They cover lifecycle/stale edits,
+inert namespace separation, private-parent forms, remote-choice pagination,
+forged selectors, revocation during provider I/O and OAuth refresh. A reproduced
+shared-resource OAuth gap required binding the separate instance grant even
+without saved secret fields. Another reproduced denial incorrectly required
+the previous private parent when the editor selected a public parent. Credential
+selectors now use only saved self and selected parent; all ancestry revisions
+remain fenced. Private inert forms stay owner-only, and personal consent is not
+conferred by management access.
+
+This checkpoint adds runtime authority snapshots and an MCP operation, with no
+stored shape, key, table, encryption envelope or migration change. The existing
+resource/OAuth cleanup and uncertain-refresh state are reused. Broad regression,
+independent review and CI remain separate from these targeted local proofs.
+Routes, participants, grants, resource/personal OAuth mutation parity, guided
+inert setup and all remaining Slack Q1–Q20 are still required. No live Slack
+workspace was used; PR #226 remains draft and unmerged.

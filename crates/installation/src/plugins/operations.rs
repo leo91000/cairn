@@ -18,6 +18,10 @@ use tokio::sync::Semaphore;
 pub struct Owner(cairn_protocol::TaskAuthorGrant);
 
 impl Owner {
+    pub(crate) fn account_id(&self) -> &str {
+        &self.0.account_id
+    }
+
     pub(crate) async fn current(s: &Service) -> Result<Self> {
         crate::relay::task_author_policy(s)
             .await?

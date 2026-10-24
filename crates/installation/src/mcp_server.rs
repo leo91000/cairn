@@ -776,6 +776,12 @@ pub(crate) async fn invoke(
         "manage_plugin_setup" => {
             Box::pin(crate::plugins::management::setup::invoke(s, &args, bearer)).await
         }
+        "manage_plugin_resource" => {
+            Box::pin(crate::plugins::management::resources::invoke(
+                s, &args, bearer,
+            ))
+            .await
+        }
         "list_plugins" | "manage_plugin" => {
             Box::pin(crate::plugins::management::invoke(s, name, &args, bearer)).await
         }

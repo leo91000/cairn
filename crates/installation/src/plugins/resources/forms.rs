@@ -1,6 +1,6 @@
 //! Owner configuration is a separate authority from enabled operational resources.
 //! A form retains one exact root, saved resource and selected parent/ancestor chain.
-use super::{Resource, Target, declared};
+use super::{Resource, Target, configuration::Configuration, declared};
 use crate::{
     error::{Error, Result},
     plugins::{connections, operations::Owner},
@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 pub(crate) struct Form {
     pub(crate) target: Arc<Target>,
-    owner: Arc<Owner>,
+    configuration: Configuration,
     pub(crate) collection: ResourceCollection,
     pub(crate) existing: Option<Resource>,
     parent: Option<Resource>,
@@ -57,14 +57,14 @@ fn chain(db: &Db<'_>, target: &Target, start: &str) -> Result<Vec<Resource>> {
 }
 
 impl Form {
-    pub(crate) async fn load(
+    pub(in crate::plugins) async fn load(
         s: &Service,
         target: Arc<Target>,
         collection: &str,
         existing: Option<&str>,
         input: &Value,
         submit: bool,
-        owner: Arc<Owner>,
+        mut configuration: Configuration,
     ) -> Result<Arc<Self>> {
         target.require_revision(input)?;
         let declaration = declared(target.manifest(), collection)?.clone();
@@ -75,9 +75,11 @@ impl Form {
         let snapshot = input.clone();
         let bound = target.clone();
         let schema = declaration.clone();
+        let authority = configuration.clone();
         let (previous, parent, revisions) = s
             .store
             .read(move |db| {
+                authority.current(db)?;
                 bound.current(db)?;
                 let old = match &id {
                     Some(id) => chain(db, &bound, id)?,
@@ -105,13 +107,19 @@ impl Form {
                     _ => return Err(Error::bad("Select the declared parent resource.")),
                 };
                 let parent = selected.first().cloned();
-                let revisions = old
-                    .into_iter()
-                    .chain(selected)
-                    .map(|r| (r.id, r.revision))
+                let resources: Vec<_> = old.into_iter().chain(selected).collect();
+                let revisions = resources
+                    .iter()
+                    .map(|r| (r.id.clone(), r.revision.clone()))
                     .collect();
                 Ok((previous, parent, revisions))
             })
+            .await?;
+        // Only self and the selected parent are credential selectors. Retain the
+        // full old/selected ancestry above for revision fences, not credential access.
+        let credentials: Vec<_> = previous.iter().chain(parent.iter()).cloned().collect();
+        configuration
+            .credentials(s, &target, &credentials, true)
             .await?;
         let saved = match &previous {
             Some(item) => s
@@ -131,7 +139,7 @@ impl Form {
         let secrets = connections::secret_fields(&fields, &input["secrets"], &saved)?;
         let form = Arc::new(Self {
             target,
-            owner,
+            configuration,
             collection: declaration,
             existing: previous,
             parent,
@@ -143,6 +151,7 @@ impl Form {
     }
 
     pub(crate) fn current(&self, db: &Db<'_>) -> Result<()> {
+        self.configuration.current(db)?;
         self.target.current(db)?;
         for (id, revision) in &self.revisions {
             if !self
@@ -159,7 +168,7 @@ impl Form {
     }
 
     pub(crate) async fn recheck(self: &Arc<Self>, s: &Service) -> Result<()> {
-        self.owner.recheck(s).await?;
+        self.configuration.recheck(s).await?;
         self.target.recheck_package(s).await?;
         let form = self.clone();
         s.store.read(move |db| form.current(db)).await
@@ -241,22 +250,22 @@ impl Form {
                 s,
                 setup,
                 self.target.approved(),
-                &self.owner,
-                None,
+                &self.configuration.owner,
+                self.configuration.management.as_ref(),
             )
             .await?
         } else {
             super::super::oauth::draft_token(
                 s,
                 &connection,
-                None,
-                &self.owner,
+                self.configuration.management.as_ref(),
+                &self.configuration.owner,
                 self.target.approved(),
             )
             .await?
         };
         let draft = super::super::forms::Draft {
-            management: None,
+            management: self.configuration.management.clone(),
             credential,
             secrets: connections::secret_values(s, &connection.id).await?,
             setup: self.target.setup_snapshot().cloned().map(Box::new),
@@ -266,6 +275,12 @@ impl Form {
             root: None,
         };
         let scope = super::super::scope::Scope::Draft(Box::new(connection), Arc::new(draft));
+        let scope = match &self.configuration.management {
+            Some(authority) => {
+                super::super::scope::Scope::Managed(Box::new(scope), authority.clone())
+            }
+            None => scope,
+        };
         let mut payload = json!({
             "instance": self.target.instance(), "app": app, "resource": self.metadata(),
             "values": values,
@@ -289,12 +304,22 @@ pub(crate) async fn preview(
     input: &Value,
     owner: Arc<Owner>,
 ) -> Result<Value> {
+    preview_configured(s, target, collection, input, Configuration::owner(owner)).await
+}
+
+pub(in crate::plugins) async fn preview_configured(
+    s: &Service,
+    target: Arc<Target>,
+    collection: &str,
+    input: &Value,
+    configuration: Configuration,
+) -> Result<Value> {
     let resource = match input.get("resource").filter(|v| !v.is_null()) {
         Some(Value::String(id)) => Some(id.as_str()),
         Some(_) => return Err(Error::bad("Name a saved resource.")),
         None => None,
     };
-    let form = Form::load(s, target, collection, resource, input, false, owner).await?;
+    let form = Form::load(s, target, collection, resource, input, false, configuration).await?;
     let evaluation =
         super::super::forms::Evaluation::preview(&form.collection.settings, &["parentId"], input)?;
     let result = form.run(s, input["settings"].clone(), &evaluation).await?;

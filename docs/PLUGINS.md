@@ -670,6 +670,16 @@ Secret fields are submitted separately; blank keeps the existing secret. Respons
 contain `secretKeys` (names), never values. Deleting a parent deletes its descendants
 and encrypted secrets atomically; removing the instance also removes its resources.
 
+The public MCP and built-in `cairn_installation` tool expose the same resource
+configuration through `manage_plugin_resource` (`manage` scope). Choose exactly
+one `instanceId` or inert `draftId`, a `pluginId` and `collection`, then `list`,
+`get`, `save`, `delete` or `form`. `resourceId` selects a saved resource; `cursor`
+continues the same bounded list. `save` takes the complete editable fields in
+`data`, including the resource `revision` on replacement. Draft writes also need
+`data.setupRevision`; draft deletion needs both revisions. Deletion uses the same
+atomic descendant, route, grant, secret and OAuth cleanup as HTTP. Neither
+creation nor editing grants an agent access to the root or resource.
+
 `cairn.resources.list{collection, cursor?}` and `get{collection, resource}` read
 metadata. HTTP can select a secret using
 `auth = {resource = id, secret = key, header = "authorization", prefix = "Bearer "}`.
@@ -685,6 +695,21 @@ parentId?, resource?, revision?, setupRevision?, changed?}` to preview it. Editi
 a saved resource supplies its ID as `resource` and its exact `revision`; inert
 setup targets also require `setupRevision`. A missing parent can be reported as
 an error before any parent credential is requested.
+
+For `manage_plugin_resource` with `action: "form"`, put the same preview fields
+and optional `lookup` in `data`, selecting an existing resource with the outer
+`resourceId` instead of `data.resource`. Results retain the same redacted values,
+errors, guidance, bounded options and pagination as HTTP. A choice lookup cannot
+derive saved values; saving always reruns final validation.
+
+Installation management is separate from credential access. A form using saved
+root, self or selected-parent credentials requires the current whole-instance
+agent grant; a scoped operational resource grant does not replace it. Shared
+resource OAuth also requires this grant even when `secretKeys` is empty. Personal
+OAuth stays unavailable to configuration forms. Private inert configuration is
+owner-only. The host retains the run/requester authority during provider I/O,
+OAuth refresh and the final write. Moving to a public parent does not borrow the
+old parent's credentials; the old ancestry still retains its revision fences.
 
 The event contains `instance`, `app` (the root's nonsecret summary), `resource`
 (`collection`, saved `id` or null, saved nonsecret `settings` or null, the selected
