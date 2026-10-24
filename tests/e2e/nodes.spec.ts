@@ -654,75 +654,78 @@ test('switching a machine to native enrolls it again and retires the previous no
   expect((await workspace.api(`/api/nodes/placement/${detail.run.id}`)).pinnedNodeId).toBeNull()
 })
 
-test('moving a conversation to the other backend remounts its files or converts them once', async ({ page, workspace }) => {
-  test.setTimeout(60000)
-  await useRelayForHttpMocks(page)
-  const chat = await workspace.api('/api/chats', 'POST', {})
-  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Keep this conversation' })
-  // Only a finished turn matters here; its saved environment is described below.
-  await expect.poll(async () => ['succeeded', 'failed'].includes((await workspace.api(`/api/chats/${chat.id}`)).run?.status), { timeout: 20000 }).toBe(true)
-  const run = (await workspace.api(`/api/chats/${chat.id}`)).run
-  workspace.service.store.updateRun(run.id, { status: 'succeeded', executionBackend: 'firecracker', sessionId: 'session-fixture' } as any)
-  const vm = { id: randomUUID(), name: 'Build VM', capabilities: { backend: 'firecracker' } }
-  const gpu = { id: randomUUID(), name: 'Desktop GPU', capabilities: { backend: 'native', vmDisks: true } }
-  await page.route('**/nodes/placement/*', route => route.fulfill({ json: { nodes: [vm, gpu], pinnedNodeId: null, preferredNodeId: null } }))
-  let diskFormat = 'vm'
-  let phase = 'ready'
-  await page.route('**/nodes/placement/*/backend-migration', route => route.fulfill({
-    json: {
-      chatId: chat.id,
-      backend: diskFormat === 'vm' ? 'firecracker' : 'native',
-      diskFormat,
-      nodes: [],
-      pending: phase === 'pending',
-      error: phase === 'failed' ? 'Previous conversion restore failed.' : null,
-    },
-  }))
-  const moves: unknown[] = []
-  await page.route('**/nodes/placement/*/move', async (route) => {
-    moves.push(route.request().postDataJSON())
-    if (diskFormat === 'native') {
-      phase = 'pending'
-      await route.fulfill({ json: { status: 'migrating', chatId: chat.id } })
-      return
-    }
+for (const nativeStatus of ['failed', 'cancelled'] as const) {
+  test(`moving a conversation remounts files and converts a ${nativeStatus} native environment`, async ({ page, workspace }) => {
+    test.setTimeout(60000)
+    await useRelayForHttpMocks(page)
+    const chat = await workspace.api('/api/chats', 'POST', {})
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Keep this conversation' })
+    // Only a finished turn matters here; its saved environment is described below.
+    await expect.poll(async () => ['succeeded', 'failed'].includes((await workspace.api(`/api/chats/${chat.id}`)).run?.status), { timeout: 20000 }).toBe(true)
+    const run = (await workspace.api(`/api/chats/${chat.id}`)).run
+    workspace.service.store.updateRun(run.id, { status: 'succeeded', executionBackend: 'firecracker', sessionId: 'session-fixture' } as any)
+    const vm = { id: randomUUID(), name: 'Build VM', capabilities: { backend: 'firecracker' } }
+    const gpu = { id: randomUUID(), name: 'Desktop GPU', capabilities: { backend: 'native', vmDisks: true } }
+    await page.route('**/nodes/placement/*', route => route.fulfill({ json: { nodes: [vm, gpu], pinnedNodeId: null, preferredNodeId: null } }))
+    let diskFormat = 'vm'
+    let phase = 'ready'
+    await page.route('**/nodes/placement/*/backend-migration', route => route.fulfill({
+      json: {
+        chatId: chat.id,
+        backend: diskFormat === 'vm' ? 'firecracker' : 'native',
+        diskFormat,
+        nodes: [],
+        pending: phase === 'pending',
+        error: phase === 'failed' ? 'Previous conversion restore failed.' : null,
+      },
+    }))
+    const moves: unknown[] = []
+    await page.route('**/nodes/placement/*/move', async (route) => {
+      moves.push(route.request().postDataJSON())
+      if (diskFormat === 'native') {
+        phase = 'pending'
+        await route.fulfill({ json: { status: 'migrating', chatId: chat.id } })
+        return
+      }
 
-    await route.fulfill({ json: { status: 'moving', nodeId: gpu.id, backend: 'native' } })
+      await route.fulfill({ json: { status: 'moving', nodeId: gpu.id, backend: 'native' } })
+    })
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+    await page.getByRole('button', { name: 'Execution node', exact: true }).filter({ visible: true }).click()
+    const panel = page.getByRole('dialog', { name: 'Execution node', exact: true })
+    // Pinning stays within the conversation's backend; moving switches it explicitly.
+    await expect(panel).toContainText('Only Firecracker VM nodes are listed; use Move… to switch backend.')
+    await panel.getByRole('button', { name: 'Move…', exact: true }).click()
+    const move = page.getByRole('dialog', { name: 'Move to another node', exact: true })
+    await move.getByRole('combobox', { name: 'Destination' }).click()
+    await page.getByRole('option', { name: 'Desktop GPU · Native process', exact: true }).click()
+    await expect(move.getByRole('note')).toContainText('will run as a native host process on Desktop GPU, using the same files in place')
+    await move.getByRole('button', { name: 'Move and switch backend', exact: true }).click()
+    await expect(page.getByRole('status').filter({ hasText: 'switches backend at the destination' })).toBeVisible()
+    expect(moves).toEqual([{ nodeId: gpu.id }])
+
+    // A natively created environment is copied once before a VM can run it.
+    workspace.service.store.updateRun(run.id, { executionBackend: 'native', status: nativeStatus, sessionId: null } as any)
+    diskFormat = 'native'
+    // First conversion after an engine failure, and retry after a conversion failure.
+    phase = nativeStatus === 'cancelled' ? 'failed' : 'ready'
+    await page.reload()
+    await page.getByRole('button', { name: 'Execution node', exact: true }).filter({ visible: true }).click()
+    await panel.getByRole('button', { name: 'Move…', exact: true }).click()
+    await move.getByRole('combobox', { name: 'Destination' }).click()
+    await page.getByRole('option', { name: 'Build VM · Firecracker VM', exact: true }).click()
+    await expect(move.getByRole('note')).toContainText('Its files are copied once for a VM')
+    await page.screenshot({ path: `test-results/backend-conversion-${nativeStatus}-confirm.png` })
+    await expect(move.getByRole('button', { name: 'Move and switch backend', exact: true })).toBeEnabled()
+    await move.getByRole('button', { name: 'Move and switch backend', exact: true }).click()
+    await expect(page.getByRole('status').filter({ hasText: 'Converting this natively created environment' })).toBeVisible()
+    expect(moves).toEqual([{ nodeId: gpu.id }, { nodeId: vm.id }])
+    phase = 'complete'
+    await expect(page.getByRole('status').filter({ hasText: 'Conversion complete' })).toBeVisible()
+    await expect(page).toHaveURL(/\/chats\//)
   })
-  await page.goto(workspacePath(`/chats/${chat.id}`))
-  await authenticateWorkspace(page)
-  await page.getByRole('button', { name: 'Execution node', exact: true }).filter({ visible: true }).click()
-  const panel = page.getByRole('dialog', { name: 'Execution node', exact: true })
-  // Pinning stays within the conversation's backend; moving switches it explicitly.
-  await expect(panel).toContainText('Only Firecracker VM nodes are listed; use Move… to switch backend.')
-  await panel.getByRole('button', { name: 'Move…', exact: true }).click()
-  const move = page.getByRole('dialog', { name: 'Move to another node', exact: true })
-  await move.getByRole('combobox', { name: 'Destination' }).click()
-  await page.getByRole('option', { name: 'Desktop GPU · Native process', exact: true }).click()
-  await expect(move.getByRole('note')).toContainText('will run as a native host process on Desktop GPU, using the same files in place')
-  await move.getByRole('button', { name: 'Move and switch backend', exact: true }).click()
-  await expect(page.getByRole('status').filter({ hasText: 'switches backend at the destination' })).toBeVisible()
-  expect(moves).toEqual([{ nodeId: gpu.id }])
-
-  // A natively created environment is copied once before a VM can run it.
-  workspace.service.store.updateRun(run.id, { executionBackend: 'native', status: 'cancelled', sessionId: null } as any)
-  diskFormat = 'native'
-  phase = 'failed'
-  await page.reload()
-  await page.getByRole('button', { name: 'Execution node', exact: true }).filter({ visible: true }).click()
-  await panel.getByRole('button', { name: 'Move…', exact: true }).click()
-  await move.getByRole('combobox', { name: 'Destination' }).click()
-  await page.getByRole('option', { name: 'Build VM · Firecracker VM', exact: true }).click()
-  await expect(move.getByRole('note')).toContainText('Its files are copied once for a VM')
-  await page.screenshot({ path: 'test-results/backend-conversion-confirm.png' })
-  await expect(move.getByRole('button', { name: 'Move and switch backend', exact: true })).toBeEnabled()
-  await move.getByRole('button', { name: 'Move and switch backend', exact: true }).click()
-  await expect(page.getByRole('status').filter({ hasText: 'Converting this natively created environment' })).toBeVisible()
-  expect(moves).toEqual([{ nodeId: gpu.id }, { nodeId: vm.id }])
-  phase = 'complete'
-  await expect(page.getByRole('status').filter({ hasText: 'Conversion complete' })).toBeVisible()
-  await expect(page).toHaveURL(/\/chats\//)
-})
+}
 
 test('previews node administrator powers and keeps failed transitions visibly blocked', async ({ page, workspace: _workspace }) => {
   await useRelayForHttpMocks(page)

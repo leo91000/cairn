@@ -184,3 +184,7 @@ neither client adds a retention control. Chat and published artifact links remai
 The native-born environment conversion also supports missions without a chat: both
 apps show its conversion cost and progress, then automatic continuation in a fresh
 engine session. Chat conversions continue to wait for a new message.
+Both apps allow the first conversion of a saved native environment after a failed
+or cancelled turn, including when engine startup failed before creating a session.
+An active conversion disables another conversion request; a failed conversion can
+be retried from the same move dialog.

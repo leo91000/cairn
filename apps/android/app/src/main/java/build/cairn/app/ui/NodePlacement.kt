@@ -360,7 +360,12 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
         target != null && run.executionBackend != null && target.backend != run.executionBackend
     val conversion =
         switching && target?.backend == VM_BACKEND && migration?.diskFormat == NATIVE_BACKEND
-    val retryingConversion = conversion && migration?.error != null && migration?.pending == false
+    val canMove =
+        if (conversion) migration?.pending == false
+        else
+            run.status in listOf("running", "succeeded") &&
+                run.sessionId != null &&
+                run.nodeState == null
     LaunchedEffect(run.id, moving) {
         if (moving)
             migration =
@@ -408,13 +413,7 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
                     )
             }
             TextButton(
-                enabled =
-                    !busy &&
-                        destination.isNotEmpty() &&
-                        (retryingConversion ||
-                            (run.status in listOf("running", "succeeded") &&
-                                run.sessionId != null)) &&
-                        run.nodeState == null,
+                enabled = !busy && destination.isNotEmpty() && canMove,
                 onClick = {
                     request(
                         {

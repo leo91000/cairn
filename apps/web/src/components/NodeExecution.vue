@@ -113,8 +113,13 @@ const switching = computed(() => !!target.value && !!props.run.executionBackend 
 const migration = ref<BackendMigrationState>()
 const conversion = computed(() => switching.value && nodeBackend(target.value!) === 'firecracker' && migration.value?.diskFormat === 'native')
 const migrationKey = ref(0)
-const retryingConversion = computed(() => conversion.value && !!migration.value?.error && !migration.value.pending)
-const canMove = computed(() => !busy.value && !!destination.value && destination.value !== props.run.nodeId && (retryingConversion.value || (!!props.run.sessionId && ['running', 'succeeded'].includes(props.run.status) && !props.run.nodeState)))
+const canMove = computed(() => {
+  if (busy.value || !destination.value || destination.value === props.run.nodeId)
+    return false
+  if (conversion.value)
+    return !migration.value?.pending
+  return !!props.run.sessionId && ['running', 'succeeded'].includes(props.run.status) && !props.run.nodeState
+})
 const changed = computed(() => mode.value !== savedPlacement.value.mode || (mode.value !== 'automatic' && selection.value !== savedPlacement.value.selection))
 const dirtyBytes = computed(() => props.run.storage?.dirtyBytes || 0)
 const localBytes = computed(() => props.run.storage?.localBytes)

@@ -870,7 +870,11 @@ abstract class NodePlacementCases {
 
     @Test fun aCancelledConversionCanBeRetriedWithoutAProviderSession() = backendMove(true)
 
-    private fun backendMove(retry: Boolean) {
+    @Test
+    fun aFailedNativeEnvironmentCanFirstMoveToAVmWithoutAProviderSession() =
+        backendMove(true, false)
+
+    private fun backendMove(conversion: Boolean, previousError: Boolean = true) {
         MockWebServer().use { server ->
             val moves = CopyOnWriteArrayList<JsonObject>()
             server.dispatcher =
@@ -887,8 +891,10 @@ abstract class NodePlacementCases {
                                     """{"status":"moving","nodeId":"gpu","backend":"native"}"""
                                 }
                                 path.endsWith("/backend-migration") ->
-                                    if (retry)
+                                    if (conversion && previousError)
                                         """{"backend":"native","diskFormat":"native","pending":false,"error":"Previous conversion restore failed."}"""
+                                    else if (conversion)
+                                        """{"backend":"native","diskFormat":"native","pending":false}"""
                                     else
                                         """{"backend":"firecracker","diskFormat":"vm","pending":false}"""
                                 path.endsWith("/nodes/placement/run") ->
@@ -916,17 +922,19 @@ abstract class NodePlacementCases {
                                 vm,
                                 Run(
                                     id = "run",
-                                    status = if (retry) "cancelled" else "succeeded",
-                                    nodeId = if (retry) "gpu" else "vm",
-                                    sessionId = if (retry) null else "engine-session",
-                                    executionBackend = if (retry) "native" else "firecracker",
+                                    status =
+                                        if (!conversion) "succeeded"
+                                        else if (previousError) "cancelled" else "failed",
+                                    nodeId = if (conversion) "gpu" else "vm",
+                                    sessionId = if (conversion) null else "engine-session",
+                                    executionBackend = if (conversion) "native" else "firecracker",
                                     storage = RunStorage(mode = "on-demand", dirtyBytes = 0),
                                 ),
                             )
                         }
                 }
             }
-            val sourceName = if (retry) "Node : Desktop GPU" else "Node : Build VM"
+            val sourceName = if (conversion) "Node : Desktop GPU" else "Node : Build VM"
             compose.waitUntil(20000) {
                 compose.onAllNodesWithText(sourceName).fetchSemanticsNodes().isNotEmpty()
             }
@@ -938,20 +946,23 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Déplacer…").performScrollTo().performClick()
             compose
                 .onNodeWithText(
-                    if (retry) "Build VM · VM Firecracker" else "Desktop GPU · Processus natif"
+                    if (conversion) "Build VM · VM Firecracker" else "Desktop GPU · Processus natif"
                 )
                 .assertExists()
             compose.waitUntil(10000) {
                 compose
                     .onAllNodesWithText(
-                        if (retry) "Ses fichiers sont copiés une fois pour une VM"
+                        if (conversion) "Ses fichiers sont copiés une fois pour une VM"
                         else "tournera comme processus natif de l’hôte",
                         substring = true,
                     )
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
-            capture(if (retry) "backend-conversion-retry" else "backend-switch-confirm")
+            capture(
+                if (!conversion) "backend-switch-confirm"
+                else if (previousError) "backend-conversion-retry" else "backend-conversion-first"
+            )
             assertTrue(moves.isEmpty())
             compose
                 .onNodeWithText("Déplacer et changer de backend")
@@ -966,7 +977,7 @@ abstract class NodePlacementCases {
                         .isNotEmpty()
             }
             assertEquals(
-                if (retry) "vm" else "gpu",
+                if (conversion) "vm" else "gpu",
                 moves.single()["nodeId"]?.jsonPrimitive?.content,
             )
         }
