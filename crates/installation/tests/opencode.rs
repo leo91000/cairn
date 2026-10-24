@@ -497,8 +497,10 @@ async fn cancellation_stops_a_busy_native_turn() {
 
 /// Optional pinned-native smoke: real OpenCode, a local model server, synthetic auth.
 /// Run with OPENCODE_NATIVE_BIN set via the credential-isolated backend launcher.
+/// OPENCODE_NATIVE_RESUME_BIN resumes the session with another release, such as
+/// a newer one taking over sessions an installation already holds.
 #[tokio::test]
-#[ignore = "requires the pinned OpenCode 1.19.0 binary"]
+#[ignore = "requires a native OpenCode 1.19 binary"]
 async fn pinned_native_cli_executes_and_resumes_without_global_plugins() {
     use axum::{Router, http::HeaderMap, routing::post};
     let binary = std::env::var("OPENCODE_NATIVE_BIN").expect("set OPENCODE_NATIVE_BIN");
@@ -616,6 +618,9 @@ async fn pinned_native_cli_executes_and_resumes_without_global_plugins() {
         "thread_id",
     )
     .to_owned();
+    if let Ok(binary) = std::env::var("OPENCODE_NATIVE_RESUME_BIN") {
+        config.opencode_bin = binary;
+    }
     input["sessionId"] = session.clone().into();
     input["execution"]["messageId"] = "follow-up".into();
     input["execution"]["text"] = "Continue in the same session. Do not call tools.".into();

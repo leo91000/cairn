@@ -503,6 +503,8 @@ struct Execution {
 struct Tools {
     codex: Option<String>,
     gh: Option<String>,
+    claude: Option<String>,
+    opencode: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -575,6 +577,8 @@ async fn health(State(app): State<App>, request: Request) -> Result<Response> {
         tools: Tools {
             codex: env("APP_CODEX_VERSION"),
             gh: env("APP_GH_VERSION"),
+            claude: env("APP_CLAUDE_VERSION"),
+            opencode: env("APP_OPENCODE_VERSION"),
         },
         toolkit: &app.toolkit,
         execution,
