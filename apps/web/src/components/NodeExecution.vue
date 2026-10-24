@@ -61,6 +61,16 @@ const storageShort: Record<string, string> = {
 const modes: { value: Mode, label: string }[] = [{ value: 'automatic', label: 'Automatic' }, { value: 'preferred', label: 'Prefer a node' }, { value: 'fixed', label: 'Fix to a node' }]
 const modeHelp: Record<Mode, string> = { automatic: 'Picks an authorized node with a free slot and shared resource headroom.', preferred: 'Uses this node when it is available, otherwise fails over to another.', fixed: 'Waits for this machine; no automatic failover.' }
 const node = computed(() => nodes.value.find(node => node.id === props.run.nodeId))
+const privilegeError = ref('')
+const privilegeNotice = computed(() => {
+  if (node.value?.nativeModeStatus === 'failed')
+    return 'Node privilege change failed; current privileges are unconfirmed. New placements are blocked.'
+  if (node.value?.nativeModeStatus === 'pending')
+    return 'Node privilege change in progress; current privileges are unconfirmed. New placements are blocked.'
+  if (node.value?.nativeModeStatus === 'applied')
+    return `Confirmed node mode: ${nativeModeLabel(node.value.nativeModeObserved?.mode ?? node.value.nativeModeRequest?.mode ?? 'protected')}`
+  return ''
+})
 const nodeName = computed(() => node.value?.name || (props.run.nodeId === LOCAL_NODE_ID ? 'Master runner' : 'Unknown node'))
 const selection = ref('')
 const mode = ref<Mode>('automatic')
@@ -160,6 +170,38 @@ watch(() => props.run.id, async (runId, _, onCleanup) => {
       error.value = e instanceof Error ? e.message : 'Unable to load placement'
   }
 }, { immediate: true })
+
+watch([open, () => props.run.id, () => props.run.executionBackend], ([isOpen, runId, backend], _, onCleanup) => {
+  if (!isOpen || backend !== 'native')
+    return
+  let cancelled = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  onCleanup(() => {
+    cancelled = true
+    if (timer)
+      clearTimeout(timer)
+  })
+
+  async function refreshPrivileges() {
+    try {
+      const value = await loadPlacement(runId)
+      if (!cancelled) {
+        // Refresh observation without overwriting an unsaved placement choice.
+        nodes.value = value.nodes
+        privilegeError.value = ''
+      }
+    }
+    catch {
+      if (!cancelled)
+        privilegeError.value = 'Unable to confirm the node’s current privilege state.'
+    }
+
+    if (!cancelled)
+      timer = setTimeout(refreshPrivileges, 3000)
+  }
+
+  void refreshPrivileges()
+})
 
 async function request(operation: () => Promise<void>) {
   busy.value = true
@@ -316,11 +358,14 @@ onUnmounted(() => {
             </h2>
             <p class="m-0! mt-0.5!">
               <template v-if="run.executionBackend === 'native'">
-                {{ nativeModeLabel(run.nativeMode?.mode ?? 'protected') }} · shared host GPU · {{ run.storage?.mode === 'native' ? 'checkpoints between turns' : 'files load on demand' }}
+                Last execution: {{ nativeModeLabel(run.nativeMode?.mode ?? 'protected') }} · shared host GPU · {{ run.storage?.mode === 'native' ? 'checkpoints between turns' : 'files load on demand' }}
               </template>
               <template v-else-if="run.storage?.mode === 'on-demand'">
                 Files load on demand
               </template>
+            </p>
+            <p v-if="run.executionBackend === 'native' && (privilegeNotice || privilegeError)" role="status" class="m-0! mt-1!">
+              {{ privilegeError || privilegeNotice }}
             </p>
             <p v-if="savedPlacement.mode === 'fixed'" class="m-0! mt-0.5!">
               Fixed node; automatic failover disabled

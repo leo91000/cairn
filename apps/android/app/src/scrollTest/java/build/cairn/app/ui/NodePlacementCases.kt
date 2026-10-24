@@ -642,13 +642,14 @@ abstract class NodePlacementCases {
     @Test
     fun aRunningNativeConversationShowsItsStorageSynchronization() {
         MockWebServer().use { server ->
+            val privilegeStatus = java.util.concurrent.atomic.AtomicReference("pending")
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val body =
                             when (request.path!!.substringBefore('?')) {
                                 "/api/installations/fixture/api/nodes/placement/native" ->
-                                    """{"nodes":[{"id":"desk","name":"Bureau GPU","status":"online","capabilities":{"backend":"native","ublk":true}}]}"""
+                                    """{"nodes":[{"id":"desk","name":"Bureau GPU","status":"online","capabilities":{"backend":"native","ublk":true},"nativeModeStatus":"${privilegeStatus.get()}","nativeModeObserved":{"mode":"${if (privilegeStatus.get() == "applied") "administrator" else "protected"}"}}]}"""
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/overview" -> "{}"
@@ -697,7 +698,29 @@ abstract class NodePlacementCases {
                 compose.onAllNodesWithText("Node : Bureau GPU").fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithText("Node : Bureau GPU").performClick()
-            compose.onNodeWithText("Natif protégé · GPU partagé").assertExists()
+            compose
+                .onNodeWithText("Dernière exécution : Natif protégé · GPU partagé")
+                .assertExists()
+            compose.onNodeWithText("Basculement en cours", substring = true).assertExists()
+            privilegeStatus.set("failed")
+            compose.waitUntil(20000) {
+                elapse(500)
+                compose
+                    .onAllNodesWithText("Échec du basculement", substring = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            privilegeStatus.set("applied")
+            compose.waitUntil(20000) {
+                elapse(500)
+                compose
+                    .onAllNodesWithText("Mode de node confirmé : Natif administrateur")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose
+                .onNodeWithText("Dernière exécution : Natif protégé · GPU partagé")
+                .assertExists()
             compose.onNodeWithText("Fichiers chargés à la demande").assertExists()
             compose.onNodeWithText("Sauvegarde entre les tours").assertDoesNotExist()
             capture("native-run-synchronized")

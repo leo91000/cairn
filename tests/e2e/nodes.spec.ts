@@ -110,6 +110,7 @@ test('registers, configures and revokes a node through the owner interface', asy
 
 test('conversation placement distinguishes a preference from a strict pin and shows synchronization age', async ({ page, workspace }) => {
   test.setTimeout(60000)
+  await useRelayForHttpMocks(page)
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Inspect the fixture' })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
@@ -205,10 +206,37 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await heartbeat()
   await expect(header).not.toContainText('saved when execution stops', { timeout: 15000 })
   await expect(header).toContainText('Synced 2 min ago')
+  const nativePlacement = await workspace.api(`/api/nodes/placement/${detail.run.id}`)
+  let privilegeStatus = 'pending'
+  const privilegeGeneration = randomUUID()
+  await page.route(`**/nodes/placement/${detail.run.id}`, route => route.fulfill({
+    json: {
+      ...nativePlacement,
+      nodes: nativePlacement.nodes.map((candidate: { id: string }) => candidate.id !== node.nodeId
+        ? candidate
+        : {
+            ...candidate,
+            nativeModeStatus: privilegeStatus,
+            nativeModeRequest: { mode: 'administrator', generation: privilegeGeneration },
+            nativeModeObserved: {
+              mode: privilegeStatus === 'applied' ? 'administrator' : 'protected',
+              generation: privilegeStatus === 'applied' ? privilegeGeneration : null,
+              status: privilegeStatus,
+            },
+          }),
+    },
+  }))
   await header.click()
-  await expect(panel).toContainText('Native protected · shared host GPU · files load on demand')
+  await expect(panel).toContainText('Last execution: Native protected · shared host GPU · files load on demand')
+  await expect(panel).toContainText('Node privilege change in progress; current privileges are unconfirmed. New placements are blocked.')
+  privilegeStatus = 'failed'
+  await expect(panel).toContainText('Node privilege change failed; current privileges are unconfirmed. New placements are blocked.')
+  privilegeStatus = 'applied'
+  await expect(panel).toContainText('Confirmed node mode: Native administrator')
+  await expect(panel).toContainText('Last execution: Native protected')
   await page.keyboard.press('Escape')
   await expect(panel).toHaveCount(0)
+  await page.unroute(`**/nodes/placement/${detail.run.id}`)
   workspace.service.store.updateRun(detail.run.id, { status: 'succeeded', executionBackend: null } as any)
   workspace.service.store.updateRun(detail.run.id, {
     storage: {
