@@ -6,6 +6,7 @@ use crate::{
     run_retry::Retry,
     run_status::RunStatus,
     service::Service,
+    store::Db,
 };
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -75,22 +76,32 @@ pub(super) async fn schedule(
 /// Expire a delayed recovery only after its old execution has been fenced.
 pub(super) async fn expire(s: &Service, id: &str) -> Result<bool> {
     let id = id.to_owned();
-    s.store.transaction(move |db| {
-        let run = db.run(&id)?.ok_or_else(|| Error::not_found("Run not found"))?;
-        if run["status"] != RunStatus::Queued || !run["cancelRequestedAt"].is_null()
-            || !Retry::expired(&run, now())
-        {
-            return Ok(false);
-        }
-        match crate::conversation_lifecycle::require_active_run(db, &id) {
-            Ok(()) => {},
-            Err(error) if error.is_conflict() => return Ok(false),
-            Err(error) => return Err(error),
-        }
-        let message = "Automatic recovery reached its 10-minute limit. Your conversation and files are preserved; resume when ready.";
-        let mut retry = run["retry"].clone();
-        retry["nextAttemptAt"] = serde_json::Value::Null;
-        db.patch_run(&id, &json!({
+    s.store.transaction(move |db| expire_in(db, &id)).await
+}
+
+/// Admission calls this again after asynchronous preparation. Both callers have
+/// fenced the previous execution before entering the transaction.
+pub(super) fn expire_in(db: &Db<'_>, id: &str) -> Result<bool> {
+    let run = db
+        .run(id)?
+        .ok_or_else(|| Error::not_found("Run not found"))?;
+    if run["status"] != RunStatus::Queued
+        || !run["cancelRequestedAt"].is_null()
+        || !Retry::expired(&run, now())
+    {
+        return Ok(false);
+    }
+    match crate::conversation_lifecycle::require_active_run(db, id) {
+        Ok(()) => {}
+        Err(error) if error.is_conflict() => return Ok(false),
+        Err(error) => return Err(error),
+    }
+    let message = "Automatic recovery reached its 10-minute limit. Your conversation and files are preserved; resume when ready.";
+    let mut retry = run["retry"].clone();
+    retry["nextAttemptAt"] = serde_json::Value::Null;
+    db.patch_run(
+        id,
+        &json!({
             "status": RunStatus::Failed,
             "finishedAt": now(),
             "error": message,
@@ -98,8 +109,8 @@ pub(super) async fn expire(s: &Service, id: &str) -> Result<bool> {
             "accountWaitReason": null,
             "recoveryPending": false,
             "retry": retry,
-        }))?;
-        db.event(&id, "status", RunStatus::Failed.as_str(), None)?;
-        Ok(true)
-    }).await
+        }),
+    )?;
+    db.event(id, "status", RunStatus::Failed.as_str(), None)?;
+    Ok(true)
 }
