@@ -80,6 +80,8 @@ it.each(['rm-failure', 'userdel-failure'])('keeps the unit when cleanup fails: %
 it('finishes an unmounted uninstall and reports a failed daemon reload', () => {
   expect(uninstall('success').status).toBe(0)
   expect(uninstall('success').stdout).toContain('REMOVE -f /etc/systemd/system/cairn-native-node.service')
+  // Without a Firecracker node left on the machine, the shared gateway goes too.
+  expect(uninstall('success').stdout).toContain('REMOVE -rf /etc/systemd/system/cairn-node-gateway.service /opt/cairn-gateway /var/lib/cairn-gateway')
   expect(uninstall('reload-failure').status).not.toBe(0)
 })
 

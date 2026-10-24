@@ -111,7 +111,7 @@ const cookies = [
     <article class="mx-auto mt-10 max-w-3xl break-words phone:mt-8">
       <h1>Privacy Policy</h1>
       <p class="mt-2 text-sm text-muted">
-        Last updated <time datetime="2026-10-10">October 10, 2026</time>
+        Last updated <time datetime="2026-10-24">October 24, 2026</time>
       </p>
 
       <section aria-labelledby="privacy-who" class="mt-8 grid gap-3">
@@ -145,6 +145,10 @@ const cookies = [
           <li>
             <strong>Relay.</strong> When a direct connection is not possible, Beacon relays the exchange between your device and your installation.
             Relayed content passes through Beacon’s memory on its way; Beacon does not store it or write it to its logs.
+          </li>
+          <li>
+            <strong>Execution nodes.</strong> A machine you add to your installation without a manager address is put in touch with it the same way and connects to it directly when the networks allow it.
+            Otherwise Beacon relays their exchanges, including conversation disks, encrypted end to end to your installation: Beacon cannot read them and does not store them.
           </li>
         </ul>
       </section>

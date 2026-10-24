@@ -2247,7 +2247,7 @@
   },
   {
     "name": "create_node_enrollment",
-    "description": "Create a single-use enrollment for a separate node. To switch an existing machine, choose the other backend, install its runtime on that machine, then wait for this exact nodeId in list_nodes. Configure it and agent grants before offering to retire the previous node. Does not convert existing conversations or install anything.",
+    "description": "Create a single-use enrollment for a separate node. Without managerUrl, the returned installCommand lets Beacon introduce the machine to the manager (route beacon): no address, certificate or open port. They connect directly when the networks allow it; otherwise node traffic, including conversation disks, transits Beacon encrypted end to end to the manager certificate pinned in the command. Pass a direct HTTPS managerUrl reachable from the machine (LAN or VPN) to keep that traffic off Beacon entirely. To switch an existing machine, choose the other backend, install its runtime on that machine, then wait for this exact nodeId in list_nodes. Configure it and agent grants before offering to retire the previous node. Does not convert existing conversations or install anything.",
     "scope": "manage",
     "destructive": false,
     "inputSchema": {
@@ -2269,7 +2269,8 @@
         },
         "managerUrl": {
           "type": "string",
-          "maxLength": 2000
+          "maxLength": 2000,
+          "description": "Optional direct HTTPS manager origin. Omit it to let Beacon introduce the machine to the manager."
         }
       },
       "required": [

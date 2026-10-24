@@ -1,5 +1,6 @@
 //! The installation owns the outbound connection and dispatches through its real HTTP router.
 pub(crate) mod application;
+pub(crate) mod nodes;
 
 use crate::{
     auth::{InstallationIdentity, InstallationRole},
@@ -13,9 +14,9 @@ use axum::{
     http::{HeaderName, HeaderValue, Request},
 };
 use cairn_protocol::{
-    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_NOTIFICATION_IN_FLIGHT,
-    MAX_PUBLIC_IN_FLIGHT, MAX_STREAM_CHUNK, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
-    REQUEST_TIMEOUT, Role, SUPPORTED_VERSIONS,
+    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_NODE_CHANNELS,
+    MAX_NOTIFICATION_IN_FLIGHT, MAX_PUBLIC_IN_FLIGHT, MAX_STREAM_CHUNK, MIN_PROTOCOL_VERSION,
+    NODE_CHANNEL_VERSION, PROTOCOL_VERSION, REQUEST_TIMEOUT, Role, SUPPORTED_VERSIONS,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -235,6 +236,19 @@ async fn read_private<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Opt
         Error::bad("Invalid private installation identity. Back up the file before recovery.")
     })?;
     Ok(Some(identity))
+}
+
+/// Beacon's origin and this installation's ID once claimed. Nodes added
+/// without a manager address reach the manager through Beacon with them.
+pub(crate) async fn node_channel_route(data_dir: &Path) -> Result<Option<(String, String)>> {
+    let Some(identity) = read_identity(&data_dir.join("installation-relay")).await? else {
+        return Ok(None);
+    };
+    let beacon = origin(&identity.origin)?;
+    Ok(Some((
+        beacon.as_str().trim_end_matches('/').to_owned(),
+        identity.installation_id,
+    )))
 }
 
 async fn read_identity(directory: &Path) -> Result<Option<Identity>> {
@@ -546,6 +560,13 @@ pub async fn connect_with_direct(
         .await?
         .ok_or_else(|| Error::bad("Run cairn claim before starting the relay."))?;
     let beacon = origin(&identity.origin)?;
+    // Direct node connections outlive a reconnect of this tunnel.
+    let nodes = nodes::NodePeers::new(
+        router.clone(),
+        directory.clone(),
+        direct.clone(),
+        stop.clone(),
+    );
     let mut delay = Duration::from_millis(250);
     loop {
         let started = tokio::time::Instant::now();
@@ -554,7 +575,7 @@ pub async fn connect_with_direct(
                 direct.detach();
                 return Ok(());
             },
-            result = connected(&identity, &beacon, router.clone(), &service, direct.clone()) => {
+            result = connected(&identity, &beacon, router.clone(), &service, direct.clone(), &nodes) => {
                 direct.detach();
                 if let Err(error) = result {
                     if error.status == 401 {
@@ -590,6 +611,7 @@ async fn connected(
     router: Router,
     service: &crate::service::Service,
     direct: crate::direct::DirectConnections,
+    nodes: &nodes::NodePeers,
 ) -> Result<()> {
     service.synchronize_task_authors().await?;
     let mut url = beacon
@@ -652,6 +674,8 @@ async fn connected(
     }
 
     let direct_supported = version >= cairn_protocol::direct::DIRECT_VERSION;
+    // Node channels end with this connection; Beacon closes their other side too.
+    let mut node_channels = JoinSet::new();
     let mut requests = JoinSet::new();
     let mut request_ids = HashMap::new();
     let mut active = HashMap::<String, (AbortHandle, std::sync::Arc<Semaphore>)>::new();
@@ -749,6 +773,7 @@ async fn connected(
                     .await
                     .map_err(Error::internal)?;
             }
+            Some(_) = node_channels.join_next(), if !node_channels.is_empty() => {}
             Some(frame) = direct_frames.recv(), if direct_supported => {
                 let message = serde_json::to_string(&frame)?;
                 socket
@@ -800,6 +825,48 @@ async fn connected(
                                         .await
                                         .map_err(Error::internal)?;
                                 }
+                                continue;
+                            }
+                            Frame::NodeChannel { id, address } if version >= NODE_CHANNEL_VERSION => {
+                                if node_channels.len() >= MAX_NODE_CHANNELS {
+                                    continue;
+                                }
+                                let beacon = beacon.clone();
+                                let installation = identity.installation_id.clone();
+                                let token = identity.token.clone();
+                                let router = router.clone();
+                                let nodes = nodes.clone();
+                                node_channels.spawn(async move {
+                                    let accepted = match nodes.certificate().await {
+                                        Ok(certificate) => nodes::accept(
+                                            &beacon,
+                                            &installation,
+                                            &token,
+                                            &id,
+                                            address.as_deref(),
+                                            router,
+                                            certificate,
+                                        )
+                                        .await,
+                                        Err(error) => Err(error),
+                                    };
+                                    if accepted.is_err() {
+                                        tracing::debug!("Node channel was not accepted");
+                                    }
+                                });
+                                continue;
+                            }
+                            Frame::NodeOffer { id, sdp, address } if version >= NODE_CHANNEL_VERSION => {
+                                if node_channels.len() >= MAX_NODE_CHANNELS {
+                                    continue;
+                                }
+                                let nodes = nodes.clone();
+                                let output = output.clone();
+                                node_channels.spawn(async move {
+                                    let address = address.and_then(|value| value.parse().ok());
+                                    let sdp = nodes.answer(sdp, address).await;
+                                    let _ = output.send(Frame::NodeAnswer { id, sdp }).await;
+                                });
                                 continue;
                             }
                             Frame::Request(request) => request,

@@ -20,6 +20,9 @@ NAME = 'cairn-execution-node'
 STOP = False
 STOP_AT = None
 IMAGE = re.compile(r'^[a-z0-9][a-z0-9./:_-]*@sha256:[a-f0-9]{64}$')
+# Nodes added without a manager address reach it through this local gateway to Beacon.
+GATEWAY = 'http://127.0.0.1:4319'
+GATEWAY_SOCKETS = Path('/var/lib/cairn-gateway/socket')
 HEALTH_CHECK = "fetch('http://127.0.0.1:4311/health').then(r=>{if(!r.ok)throw Error();return r.json()}).then(v=>{if(v.status!=='ok'||v.nodeProtocol!==2||!(v.pool?.capacity>0))process.exit(1)}).catch(()=>process.exit(1))"
 
 
@@ -127,6 +130,15 @@ def refresh_supervisor():
     os.execv(sys.executable, [sys.executable, str(current), 'run'])
 
 
+def gateway_arguments(master):
+    # The container has its own loopback. The node daemon bridges the gateway
+    # origin there to the host gateway's socket, mounted at the same path.
+    if master != GATEWAY:
+        return []
+    return ['-v', f'{GATEWAY_SOCKETS}:{GATEWAY_SOCKETS}',
+            '-e', f'CAIRN_NODE_GATEWAY_SOCKET={GATEWAY_SOCKETS}/gateway.sock']
+
+
 def block_device_arguments(transport='ublk'):
     # Upgrade the former persisted selection; no legacy backend is launched.
     if transport not in ('ublk', 'vhost-user'):
@@ -206,8 +218,8 @@ def launch(image):
              '-v', f'{ROOT}/data:/data', '-v', f'{ROOT}/state:/runner-state',
              '-e', 'DATA_DIR=/data', '-e', 'RUNNER_STATE_DIR=/runner-state',
              '-e', 'RUNNER_BIND=127.0.0.1:4311', '-e', 'RUNNER_URL=http://127.0.0.1:4311',
-             '-e', 'CAIRN_NODE_IMAGE=' + image, '--entrypoint=/usr/local/bin/cairn', image,
-             'node-daemon', '/data/node'])
+             '-e', 'CAIRN_NODE_IMAGE=' + image, *gateway_arguments(config.get('master')),
+             '--entrypoint=/usr/local/bin/cairn', image, 'node-daemon', '/data/node'])
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline and not STOP:
         try:
@@ -319,7 +331,9 @@ def install(master):
     release = target(master)
     command(['docker', 'pull', release['image']], timeout=1200)
     code = getpass.getpass('Single-use enrollment code: ').encode()
-    command(['docker', 'run', '--rm', '-i', '--user=0:0', '--device=/dev/kvm',
+    # Enrollment is short-lived and starts no VM; host networking lets it use the gateway.
+    network = ['--network=host'] if master == GATEWAY else []
+    command(['docker', 'run', '--rm', '-i', '--user=0:0', '--device=/dev/kvm', *network,
              '-v', f'{ROOT}/data:/data', '--entrypoint=/usr/local/bin/cairn', release['image'],
              'node-enroll', master, '/data/node'], data=code)
     atomic(ROOT / 'config.json', {'master': master, 'image': release['image']})
