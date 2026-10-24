@@ -52,13 +52,20 @@ Before forwarding a container create, the gateway resolves bind sources with
 `openat2` without symlinks, clones the pinned mount descriptors, and gives Docker
 immutable private mirror paths. Replacing a source name cannot redirect Docker
 to private runtime or store files. Mirrors are rebuilt from durable source records
-before daemon startup and rechecked against the current turn's rights. Runtime
+before daemon startup and rechecked against the current turn's rights. Once a
+mirror is pinned in the current turn, changing its original pathname cannot
+redirect it and does not invalidate that inode. A missing mirror fails closed;
+new turns must resolve and pin the original path again. Runtime
 mirrors are limited to 4,096 per turn, including deleted-container mirrors pending
 reclamation; a new turn reclaims unreferenced mirrors. This bounds metadata outside
 the ext4 payload as well as the payload's normal disk budget.
 The read-only system/credential bindings remain read-only through Docker too.
 YOLO does not grant host administrator rights. The engine cannot read or replace
 raw daemon metadata, its authorization plugin or its configuration.
+Container operations resolve exact names before short IDs and pin their full ID
+at the gateway, so concurrent renaming cannot redirect a checked operation.
+A container name equal to another container's full ID is refused for activating
+operations; remove or rename that alias to avoid Docker's ID-to-name fallback.
 
 RootlessKit has no parent port driver. Published container ports listen only in
 the conversation's network namespace, where the agent can reach them on localhost.

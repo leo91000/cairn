@@ -63,6 +63,18 @@ fn record(id: &str) -> PathBuf {
         .join(format!("{id}.json"))
 }
 
+fn confirmed_mount(path: &Path) -> Result<bool> {
+    // These private targets contain only fixed ASCII components and a validated
+    // UUID, so mountinfo does not escape their names. A leftover empty target
+    // from a failed attach must never be mistaken for a pinned mount.
+    let target = path
+        .to_str()
+        .ok_or_else(|| Error::forbidden("Invalid Docker mirror path."))?;
+    Ok(std::fs::read_to_string("/proc/self/mountinfo")?
+        .lines()
+        .any(|line| line.split_whitespace().nth(4) == Some(target)))
+}
+
 pub(super) fn validate(policy: &Policy, path: &Path, read_only: bool) -> Result<()> {
     let binding: Binding = serde_json::from_slice(&std::fs::read(record(uuid(path)?))?)?;
     if binding.read_only && !read_only {
@@ -70,7 +82,16 @@ pub(super) fn validate(policy: &Policy, path: &Path, read_only: bool) -> Result<
             "Docker must retain this bind's read-only permission.",
         ));
     }
-    policy.bind_original(
+    // This turn already pinned the source inode. Re-resolving its mutable
+    // original name can reject attach/start midway through Docker run, leaving
+    // the client's upgraded attach waiting for a start that was refused.
+    // A new turn restores mirrors only after resolving the source again.
+    if !confirmed_mount(path)? {
+        return Err(Error::forbidden(
+            "Docker bind mirror is unavailable in this turn.",
+        ));
+    }
+    policy.bind_scope(
         binding
             .source
             .to_str()
@@ -227,6 +248,11 @@ async fn mount(policy: &Policy, binding: &Binding, id: &str) -> Result<PathBuf> 
     crate::skills::private_dir(&parent).await?;
     let target = parent.join("source");
     if target.exists() {
+        if !confirmed_mount(&target)? {
+            return Err(Error::unavailable(
+                "Docker bind attachment is unconfirmed; retry in a new turn.",
+            ));
+        }
         return Ok(target);
     }
     if metadata.is_dir() {
@@ -328,6 +354,16 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::Arc;
+
+    #[test]
+    fn unmounted_targets_are_not_confirmed_mirrors() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(!confirmed_mount(root.path()).unwrap());
+        let target = root.path().join("source");
+        std::fs::write(&target, b"").unwrap();
+        assert!(!confirmed_mount(&target).unwrap());
+        assert!(confirmed_mount(Path::new("/proc")).unwrap());
+    }
 
     #[test]
     fn replaced_source_names_cannot_redirect_a_pinned_descriptor() {

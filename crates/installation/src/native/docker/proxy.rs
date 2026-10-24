@@ -73,6 +73,8 @@ async fn forward(policy: Policy, mut request: Request) -> Result<Response> {
         request.headers_mut().remove(header::CONTENT_LENGTH);
         request.headers_mut().remove(header::TRANSFER_ENCODING);
     }
+    let method = request.method().clone();
+    super::containers::pin_uri(request.uri_mut(), &method, Path::new(super::DATA))?;
     // Capture the frontend's upgrade before transferring the HTTP request.
     let upgrade = hyper::upgrade::on(&mut request);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);

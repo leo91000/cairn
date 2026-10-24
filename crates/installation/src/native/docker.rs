@@ -22,6 +22,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 mod config;
+mod containers;
 mod hardening;
 mod mounts;
 mod proxy;
@@ -34,6 +35,25 @@ const DOCKER: &str = "/opt/cairn-docker/bin/docker";
 #[derive(Clone)]
 struct Policy {
     plan: Arc<Value>,
+}
+
+fn api_path(mut path: &str) -> Result<&str> {
+    if let Some(versioned) = path.strip_prefix("/v")
+        && versioned.as_bytes().first().is_some_and(u8::is_ascii_digit)
+    {
+        let (version, rest) = versioned
+            .split_once('/')
+            .ok_or_else(|| Error::forbidden("Invalid Docker API path."))?;
+        if !version
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+        {
+            return Err(Error::forbidden("Invalid Docker API version."));
+        }
+        path = &path[version.len() + 2..];
+        let _ = rest;
+    }
+    Ok(path)
 }
 
 fn present(value: &Value, name: &str) -> bool {
@@ -67,7 +87,7 @@ impl Policy {
         self.bind_original(source, read_only)
     }
 
-    fn bind_original(&self, source: &str, read_only: bool) -> Result<()> {
+    fn bind_scope(&self, source: &str, read_only: bool) -> Result<()> {
         let path = Path::new(source);
         if !path.is_absolute()
             || path
@@ -92,6 +112,12 @@ impl Policy {
                 "This conversation requires read-only workspace bind mounts.",
             ));
         }
+        Ok(())
+    }
+
+    fn bind_original(&self, source: &str, read_only: bool) -> Result<()> {
+        self.bind_scope(source, read_only)?;
+        let path = Path::new(source);
         // Do not let a symlink turn a permitted name into another root. Missing
         // sources are rejected too: Docker must not create a path as namespace root.
         if std::fs::canonicalize(path).ok().as_deref() != Some(path) {
@@ -280,23 +306,13 @@ impl Policy {
     }
 
     fn authorize(&self, request: &Value) -> Result<()> {
+        self.authorize_in(request, Path::new(DATA))
+    }
+
+    fn authorize_in(&self, request: &Value, store: &Path) -> Result<()> {
         let uri = text(request, "RequestUri");
         let mut path = uri.split('?').next().unwrap_or("");
-        if let Some(versioned) = path.strip_prefix("/v")
-            && versioned.as_bytes().first().is_some_and(u8::is_ascii_digit)
-        {
-            let (version, rest) = versioned
-                .split_once('/')
-                .ok_or_else(|| Error::forbidden("Invalid Docker API path."))?;
-            if !version
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || byte == b'.')
-            {
-                return Err(Error::forbidden("Invalid Docker API version."));
-            }
-            path = &path[version.len() + 2..];
-            let _ = rest;
-        }
+        path = api_path(path)?;
         // Docker escapes registry/repository separators inside image references.
         // Keep all management routes strict, including encoded container paths.
         let image_path = path.replace("%2F", "/").replace("%2f", "/");
@@ -315,7 +331,7 @@ impl Policy {
         // Go merges duplicate map/struct fields where serde would replace them.
         let configuration = match segments.first().copied() {
             Some("containers") => {
-                segments.get(1) == Some(&"create")
+                segments.len() == 2 && segments.get(1) == Some(&"create")
                     || matches!(segments.get(2), Some(&"update" | &"exec"))
             }
             Some("exec") => segments.get(2) == Some(&"start"),
@@ -336,10 +352,12 @@ impl Policy {
             Some("_ping" | "version" | "info" | "events" | "system" | "distribution")
                 if method == "GET" || method == "HEAD" => {}
             Some("containers") => {
-                if segments.get(1) == Some(&"create") && method == "POST" {
+                if segments.len() == 2 && segments.get(1) == Some(&"create") && method == "POST" {
                     config::fields(&json_body, &["HostConfig"])?;
                     self.host_config(&json_body["HostConfig"])?;
-                } else if !matches!(segments.get(1), Some(&"json" | &"prune")) {
+                } else if !(segments.len() == 2
+                    && matches!(segments.get(1), Some(&"json" | &"prune")))
+                {
                     let name = segments.get(1).copied().unwrap_or("");
                     if name.is_empty()
                         || !name
@@ -358,27 +376,15 @@ impl Policy {
                     if inspection || removal {
                         return Ok(());
                     }
-                    // Names and unambiguous short IDs are both part of Docker's
-                    // public API. Resolve only directories in this private store.
-                    let mut found = None;
-                    for entry in std::fs::read_dir(Path::new(DATA).join("containers"))? {
-                        let entry = entry?;
-                        let id = entry.file_name();
-                        let id = id.to_string_lossy();
-                        if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                            continue;
-                        }
-                        let config: Value = serde_json::from_slice(&std::fs::read(
-                            entry.path().join("config.v2.json"),
-                        )?)?;
-                        if (id.starts_with(name) || config["Name"] == format!("/{name}"))
-                            && found.replace(entry.path()).is_some()
-                        {
-                            return Err(Error::forbidden("Ambiguous Docker container ID."));
-                        }
+                    // The gateway pins names/short IDs before authorization.
+                    // Re-resolving a mutable name afterward must not select a
+                    // different container with an unchecked saved HostConfig.
+                    if !containers::canonical(name) {
+                        return Err(Error::forbidden(
+                            "Docker container operations require a gateway-resolved ID.",
+                        ));
                     }
-                    let directory = found
-                        .ok_or_else(|| Error::forbidden("Docker container is unavailable."))?;
+                    let directory = containers::resolve(store, name)?;
                     let mut host: Value =
                         serde_json::from_slice(&std::fs::read(directory.join("hostconfig.json"))?)?;
                     // Docker fills these with its default masks after the
@@ -785,6 +791,37 @@ mod tests {
                 "runId": "run",
             })),
         }
+    }
+
+    #[test]
+    fn pinned_bind_scope_keeps_rights_without_following_replaced_source_names() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let denied = root.path().join("private");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(&denied, b"private").unwrap();
+        let source = workspace.join("source");
+        std::fs::write(&source, b"allowed").unwrap();
+        let mut policy = Policy {
+            plan: Arc::new(json!({
+                "projectRoot": workspace,
+                "sandbox": "workspace-write",
+            })),
+        };
+        let source = source.to_str().unwrap();
+        policy.bind_original(source, false).unwrap();
+        std::fs::remove_file(source).unwrap();
+        std::os::unix::fs::symlink(&denied, source).unwrap();
+        assert!(policy.bind_original(source, false).is_err());
+        policy.bind_scope(source, false).unwrap();
+        Arc::make_mut(&mut policy.plan)["sandbox"] = "read-only".into();
+        assert!(policy.bind_scope(source, false).is_err());
+        policy.bind_scope(source, true).unwrap();
+        assert!(
+            policy
+                .bind_scope("/var/lib/cairn-docker/private", true)
+                .is_err()
+        );
     }
 
     #[test]

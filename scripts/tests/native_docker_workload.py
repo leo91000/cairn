@@ -81,33 +81,34 @@ def bind_race(image):
         thread.join()
 
 
-def raw_api_rejections():
+def raw_rejected(path, body):
     class UnixConnection(http.client.HTTPConnection):
         def connect(self):
             self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self.sock.settimeout(self.timeout)
             self.sock.connect(os.environ['DOCKER_HOST'].removeprefix('unix://'))
 
-    def rejected(path, body):
-        connection = UnixConnection('localhost', timeout=30)
-        try:
-            connection.request('POST', path, body.encode(), {'Content-Type': 'application/json'})
-            response = connection.getresponse()
-            message = response.read(65536).decode(errors='replace')
-            assert 400 <= response.status < 500, f'Raw API control bypass: {path}: {body}: {response.status}: {message}'
-        finally:
-            connection.close()
+    connection = UnixConnection('localhost', timeout=30)
+    try:
+        connection.request('POST', path, body.encode(), {'Content-Type': 'application/json'})
+        response = connection.getresponse()
+        message = response.read(65536).decode(errors='replace')
+        assert 400 <= response.status < 500, f'Raw API control bypass: {path}: {body}: {response.status}: {message}'
+    finally:
+        connection.close()
 
+
+def raw_api_rejections():
     options = '{"device":"/run/cairn-docker","type":"none","o":"bind"}'
     for field in ('driverOpts', 'DRIVEROPTS', 'DriverOptſ'):
-        rejected('/volumes/create', '{"Name":"native-case-escape","Driver":"local","' + field + '":' + options + '}')
-    rejected('/volumes/create', '{"Name":"native-case-escape","DriverOpts":' + options + ',"DriverOpts":{}}')
+        raw_rejected('/volumes/create', '{"Name":"native-case-escape","Driver":"local","' + field + '":' + options + '}')
+    raw_rejected('/volumes/create', '{"Name":"native-case-escape","DriverOpts":' + options + ',"DriverOpts":{}}')
     assert 'native-case-escape' not in command('docker', 'volume', 'ls', '-q').splitlines()
-    rejected('/containers/create', json.dumps(dict(Image=ALPINE, hostConfig=dict(Binds=['/:/host']))))
-    rejected('/containers/create', '{"Image":"' + ALPINE + '","HostConfig":{"Privileged":true},"HostConfig":{}}')
+    raw_rejected('/containers/create', json.dumps(dict(Image=ALPINE, hostConfig=dict(Binds=['/:/host']))))
+    raw_rejected('/containers/create', '{"Image":"' + ALPINE + '","HostConfig":{"Privileged":true},"HostConfig":{}}')
     container = command('docker', 'run', '-d', ALPINE, 'sleep', '300')
     try:
-        rejected('/containers/' + container + '/exec', '{"Cmd":["true"],"privileged":true}')
+        raw_rejected('/containers/' + container + '/exec', '{"Cmd":["true"],"privileged":true}')
     finally:
         command('docker', 'rm', '-f', container)
 
@@ -208,6 +209,9 @@ def main():
     if phase == 'oom':
         command('docker', 'run', '-d', '--name', 'node-ceiling', '-v', str(probe) + ':/probe:ro', '-v', 'persistent:/v', ALPINE, '/probe', 'oom', '/v')
     elif phase == 'readonly':
+        for name in ('create', 'json', 'prune'):
+            command('docker', 'start', name, success=False)
+            raw_rejected('/containers/' + name + '/start', '{}')
         command('docker', 'run', '--rm', '-v', str(Path.cwd()) + ':/workspace', ALPINE, 'true', success=False)
         command('docker', 'run', '--rm', '-v', str(Path.cwd()) + ':/workspace:ro', ALPINE,
                 'sh', '-c', 'test -f /workspace/persisted && ! touch /workspace/forbidden')
@@ -241,6 +245,11 @@ def main():
         if phase == 'fresh':
             bind_race(ALPINE)
             raw_api_rejections()
+            # These are valid container names, not collection routes. Persist
+            # writable binds and prove the later read-only turn refuses both
+            # CLI and raw API activation instead of skipping saved controls.
+            for name in ('create', 'json', 'prune'):
+                command('docker', 'create', '--name', name, '-v', str(Path.cwd()) + ':/workspace', ALPINE, 'true')
         assert command('docker', 'run', '--rm', '-v', 'persistent:/v', ALPINE, 'cat', '/v/marker') == 'durable'
         assert command('docker', 'run', '--rm', '-v', 'persistent:/v', ALPINE, 'stat', '-c', '%u:%g:%a', '/v/marker') == '999:999:600'
         compose = dict(services=dict(
