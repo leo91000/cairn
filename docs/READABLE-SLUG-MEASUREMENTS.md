@@ -1,7 +1,7 @@
 # Local measurements for readable slugs
 
 Measured on 2026-10-12 with
-[`scripts/measure-readable-slugs.py`](../scripts/measure-readable-slugs.py).
+a standalone probe (since retired).
 The reference omits the slug field and its unique index. Both cases use 1,000
 records, 5,000 warm reads and 100 individually committed writes. SQLite writes
 update conversations; the slug variant reads and preserves the stored slug.
@@ -10,10 +10,7 @@ and unique index. No production accounts or installation data are used.
 
 Reproduce against a disposable local Postgres database:
 
-```sh
-CAIRN_SLUG_MEASUREMENT_DATABASE_URL='postgres://<local-test-database>' \
-  uv run scripts/measure-readable-slugs.py
-```
+The standalone measurement probe has been retired.
 
 The script removes its isolated Postgres schema and temporary SQLite files.
 Its pinned measurement dependency does not change the application dependencies.

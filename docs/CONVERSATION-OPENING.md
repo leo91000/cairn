@@ -133,7 +133,7 @@ sides.
 
 ## History cache
 
-`scripts/measure-history-cache.mjs 293117d0` adds a write with eleven other conversations
+The recorded history-cache experiment adds a write with eleven other conversations
 saved. Same workload as [the cache measurements](CONVERSATION-CACHE-MEASUREMENTS.md):
 1,250 events (719,346 bytes), medians of 30 samples, Chromium 153, shared Linux host.
 
@@ -148,7 +148,6 @@ saved. Same workload as [the cache measurements](CONVERSATION-CACHE-MEASUREMENTS
 CAIRN_PROFILE_OPENING=1 cargo test --release -p cairn-installation --test live \
   profile_conversation_opening -- --nocapture
 CAIRN_MEASURE_OPENING=1 pnpm exec playwright test --project=measure-opening
-node scripts/measure-history-cache.mjs 293117d0
 ```
 
 For a reference, copy the profile and the browser measurement into a checkout of it; the

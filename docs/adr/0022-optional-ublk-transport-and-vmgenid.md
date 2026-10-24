@@ -149,10 +149,10 @@ capacité, le démarrage échoue avant la création d'un périphérique. Seuls l
 conteneurs configurés pour ublk reçoivent `CAP_SYS_RESOURCE` ; les plafonds
 mémoire du conteneur et la frontière durable restent en place.
 
-Le test noyau `tests/ublk-writeback-smoke.mjs IMAGE PROBE` couvre la progression
+Le test noyau autonome retiré couvrait la progression
 d'un Gio, le regroupement durable, l'absence d'OOM, un SIGKILL, la relecture
 complète après réouverture du journal et le refus sans capacité. `PROBE` est
-construit avec `--features ublk-prototype --example ublk_probe` pour la libc de
+construit comme sonde autonome (depuis retirée) pour la libc de
 l'image testée. Les détails et pressions hôte sont conservés hors Git dans
 `/var/tmp/leo-ublk-evidence-*`. L'ancien binaire échoue sur la progression après
 20 s ; le candidat réussit trois répétitions consécutives sans charge ajoutée

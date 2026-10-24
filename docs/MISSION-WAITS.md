@@ -32,7 +32,7 @@ it stopped; this preserves that wait until the turn completes successfully.
 
 ## Local storage measurement
 
-Reproduce with `python3 scripts/measure-mission-waits.py`. The reference models the
+The standalone reproduction probe has been retired. The reference models the
 base revision `8bfa03d6b0f342700c2598bc9d3740a4d8f5dbee`: its active index includes
 queued/running, and the equivalent pending records are queued without mission
 wakeups. The candidate includes waiting in the index and stores one small timer

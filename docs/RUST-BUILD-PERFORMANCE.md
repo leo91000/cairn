@@ -1,6 +1,9 @@
 # Rust release build performance
 
-Cairn keeps the pinned stable Rust compiler and ThinLTO. Its workspace packages
+The custom wrapper described below has been retired; release builds now use
+the standard ThinLTO profile with one codegen unit and stripped debug info.
+
+The historical experiment kept the pinned stable Rust compiler and ThinLTO. Its workspace packages
 use four release codegen units and cap LLVM's normal, hinted and locally hot
 inlining thresholds at 75. The global release profile stays at one codegen unit
 so third-party dependencies retain their existing settings.
@@ -19,7 +22,7 @@ Explicit `-C llvm-args=...` opts out of the wrapper's inlining defaults. Compile
 response files (`@path`) also pass through, since they can override those options.
 To disable the wrapper entirely for a diagnostic build, set `RUSTC_WORKSPACE_WRAPPER=`.
 Keep its pathname versioned: changing compiler arguments requires a new wrapper
-filename and updates to `.cargo/config.toml` and both Docker copies, so Cargo
+filename and updates to its Cargo configuration and both Docker copies, so Cargo
 cannot reuse workspace artifacts compiled with an older wrapper policy.
 
 ## Measured workload

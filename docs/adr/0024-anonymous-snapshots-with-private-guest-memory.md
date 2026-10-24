@@ -111,9 +111,8 @@ blocs sont vérifiés ; commande outil, thread et réponse finale sont contrôl�
 Cela qualifie la mécanique de reprise, pas encore une charge prolongée.
 
 Les mesures brutes et scripts de benchmark restent hors Git pour les assets de release.
-Le test natif reproductible est versionné :
-`node tests/runner-snapshots-smoke.mjs IMAGE`, puis la même commande avec
-`LEO_VM_SNAPSHOTS=false` pour le contrôle. Il requiert KVM et `ublk_drv`, conserve
+La sonde native autonome a depuis été retirée ; le contrôle utilisait
+`LEO_VM_SNAPSHOTS=false`. Il requiert KVM et `ublk_drv`, conserve
 le modèle synthétique hors du guest pour vérifier le réseau renouvelé, contrôle
 quatre mappings privés vers le même inode et vérifie après SIGKILL des marqueurs
 fsync dans le système et le workspace de chaque conversation. Les seuls accès

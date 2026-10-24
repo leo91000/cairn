@@ -43,18 +43,16 @@ thread avant de rendre le disque réouvrable ; le scénario complet est passé e
 Reproduction (Linux, KVM, FUSE, privilèges de montage, BusyBox statique, e2fsprogs,
 Firecracker/jailer installés aux emplacements du projet) :
 
-```sh
-tests/lazy-disk-smoke.sh /chemin/vers/vmlinux
-```
+The standalone measurement probe has been retired.
 
 ### Annulation pendant une lecture distante bloquée
 
 Le parcours CI complet a révélé un ordre d'arrêt incorrect : le contrôleur
-attendait la sortie du VMM avant d'annuler ses lectures FUSE. Le scénario réduit
-`lazy_disk_smoke --cancel` appelle le vrai `Vm::boot` et bloque son premier accès
+attendait la sortie du VMM avant d'annuler ses lectures FUSE. La sonde d’annulation
+autonome, depuis retirée, appelait le vrai `Vm::boot` et bloquait son premier accès
 à une origine indisponible. Avant correction : dépassement du délai de 12 secondes.
 Après correction : **89 ms** pour annuler et libérer le VMM, le montage et le verrou.
-Le script de reproduction ci-dessus exécute également ce scénario.
+Ce scénario faisait aussi partie de la sonde de reproduction retirée.
 Les invités disponibles conservent l'arrêt gracieux ; les E/S sont annulées avant
 un arrêt forcé, avec conservation du journal durable.
 

@@ -129,20 +129,7 @@ end-to-end durability contract before enabling discard in Cairn.
 
 ## Comparative measurements
 
-```sh
-umask 077
-uv run --python 3.11 scripts/benchmark-storage-formats.py \
-  --output /private/new-trial \
-  --corpus /private/experiment-inputs/production.private.json \
-  --corpus /private/experiment-inputs/discard.private.json \
-  --policies current-v2 delta-4m cdc-64k cdc-delta-64k
-
-# Keep all owners live while trimming only the allocation-validated subset.
-uv run --python 3.11 scripts/benchmark-storage-formats.py \
-  --output /private/new-cohort-trial \
-  --corpus /private/experiment-inputs/discard-cohort.private.json \
-  --policies current-v2
-```
+The standalone format-comparison probe has been retired.
 
 Generate the controlled ext4 corpus by omitting `--corpus`, then reuse its
 `corpus.private.json` for repeated trials over identical bytes. Repeat at least
@@ -182,8 +169,6 @@ for actual codec and loopback-S3/LazyDisk timings.
 
 ```sh
 python3 scripts/tests/storage_observer_test.py
-uv run --python 3.11 --with cryptography==46.0.3 --with fastcdc==1.7.0 \
-  --with zstandard==0.25.0 python scripts/tests/storage_formats_test.py
 uv run --python 3.11 --with blake3==1.0.8 python scripts/tests/storage_sample_test.py
 ```
 

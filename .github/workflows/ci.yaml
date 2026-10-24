@@ -226,7 +226,9 @@ jobs:
           bash tests/installation-installer-container.sh
           python3 tests/installation_update_containers.py
           python3 -m venv .node-s3-test
-          .node-s3-test/bin/pip install 'moto[server]==5.2.3' awscli
+          .node-s3-test/bin/pip install 'moto[server]==5.2.3' awscli blake3==1.0.8
+          .node-s3-test/bin/python scripts/tests/storage_observer_test.py
+          .node-s3-test/bin/python scripts/tests/storage_sample_test.py
           PATH="$PWD/.node-s3-test/bin:$PATH" .node-s3-test/bin/python scripts/tests/node_s3_test.py
   native-runtime:
     name: Native Linux ublk storage and process ownership (CPU workload)

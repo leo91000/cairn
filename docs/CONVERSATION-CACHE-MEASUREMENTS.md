@@ -23,7 +23,6 @@ failures, running calls, messages and subagent teams retain their presentation.
 
 ```sh
 pnpm exec playwright install chromium
-node scripts/measure-history-cache.mjs d23a5a52eb76405a4f4327dc61f231cd10305fe0
 ```
 
 Measured locally on 2026-10-14: Linux x86-64, Intel Xeon, 12 logical CPUs,

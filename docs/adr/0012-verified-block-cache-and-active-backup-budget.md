@@ -108,7 +108,7 @@ oversized entries, resize, mixed checksum formats, a blocked policy file and the
 bounded activation deadline. Existing crash, publication, refusal and lost-ack
 tests remain required, alongside encrypted S3 and real Firecracker qualification.
 
-Run `cargo run --locked --release --example storage-benchmark` to compare the same
+The retired standalone benchmark compared the same
 working set with 32/256 MiB cache budgets, SHA-256/BLAKE3, and direct positional
 disk reads. This isolates block-serving cost and does not measure FUSE, network,
 VM boot or model latency. End-to-end startup and prolonged-load results belong
