@@ -321,6 +321,7 @@ pub(super) async fn provision(state: &Path, run_id: &str) -> Result<Identity> {
                 "--gid",
                 &user,
                 "--no-user-group",
+                "--no-log-init",
                 "--no-create-home",
                 "--shell",
                 "/usr/sbin/nologin",
