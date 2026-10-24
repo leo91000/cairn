@@ -37,15 +37,11 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharin
     && printf '' > crates/plugin-host/src/lib.rs \
     && printf '' > crates/plugin-runtime/src/lib.rs \
     && printf 'fn main() {}\n' > crates/installation/src/main.rs \
-    && printf 'fn main() {}\n' > crates/installation/examples/ublk_probe.rs \
     && printf 'fn main() {}\n' > crates/installation/examples/native_storage_qualifier.rs \
     && printf '' > crates/installation/src/lib.rs \
     && printf 'fn main() {}\n' > crates/beacon/src/main.rs \
     && printf '' > crates/protocol/src/lib.rs \
     && printf '' > crates/beacon/src/lib.rs && cargo build --locked --release --bin cairn --features ublk
-# Workspace tuning must not invalidate the third-party dependency layer.
-COPY .cargo/config.toml ./.cargo/config.toml
-COPY --chmod=755 scripts/rust-release-inline75-v1.sh ./scripts/rust-release-inline75-v1.sh
 COPY crates/plugin-api ./crates/plugin-api
 COPY crates/plugin-host ./crates/plugin-host
 COPY crates/plugin-runtime ./crates/plugin-runtime
@@ -88,15 +84,12 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharin
     && printf '' > crates/plugin-runtime/src/lib.rs \
     && printf 'fn main() {}\n' > crates/installation/src/main.rs \
     && printf '' > crates/installation/src/lib.rs \
-    && printf 'fn main() {}\n' > crates/installation/examples/ublk_probe.rs \
     && printf 'fn main() {}\n' > crates/installation/examples/native_storage_qualifier.rs \
     && printf 'fn main() {}\n' > crates/beacon/src/main.rs \
     && printf '' > crates/beacon/src/lib.rs \
     && printf '' > crates/protocol/src/lib.rs \
     && cargo build --locked --release --bin cairn-beacon \
     && cargo build --locked --release --target x86_64-unknown-linux-musl --bin cairn-node-gateway
-COPY .cargo/config.toml ./.cargo/config.toml
-COPY --chmod=755 scripts/rust-release-inline75-v1.sh ./scripts/rust-release-inline75-v1.sh
 COPY crates/beacon ./crates/beacon
 COPY crates/protocol ./crates/protocol
 COPY crates/node-gateway ./crates/node-gateway

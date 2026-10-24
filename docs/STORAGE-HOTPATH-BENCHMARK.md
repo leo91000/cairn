@@ -1,7 +1,7 @@
 # Storage hot path: first optimization cycle
 
 Measured on 2026-09-30, against the implementation in PR #25. The harness is
-`crates/installation/examples/storage-benchmark.rs`; run it in release mode. Integrity
+a standalone release-mode probe (since retired). Integrity
 assertions check all returned bytes. No S3 or FUSE is involved in this microbenchmark.
 
 ## Local working set
@@ -46,7 +46,7 @@ their trigger was not recorded, so they are not the baseline of this fresh-chat 
 
 ## Durable writes on persistent storage
 
-`cargo run --locked --release --example storage-write-benchmark` compares the
+The recorded write benchmark compares the
 direct disk interface, the segmented journal, and the controller's journal with
 write admission enabled. Each acknowledged write is followed by a checked read.
 Three samples rotate their order. Temporary files are created in the current

@@ -137,10 +137,7 @@ it does not resurrect discarded bytes, which were already free in ext4.
 
 Native storage/codec comparison, isolated from live agent credentials:
 
-```sh
-pnpm test:backend -p cairn-installation --example storage-discard-benchmark \
-  --features ublk-prototype -- --ignored --nocapture --test-threads=1
-```
+The standalone measurement probe has been retired.
 
 It alternates three reference and three discard trials over the same 64 MiB
 controlled data: sixteen unique 4 MiB regions, each half seeded random and half
@@ -189,13 +186,7 @@ controlled gains are not a forecast for the whole production bucket.
 Real native guest qualification, on a disposable private directory with KVM and
 ublk available (root, Debian Python 3.11, busybox-static and e2fsprogs required):
 
-```sh
-python3 tests/storage-discard-native.py \
-  --firecracker /path/to/candidate/firecracker --probe /path/to/ublk_probe \
-  --kernel /path/to/candidate/vmlinux \
-  --control-image /path/to/candidate/control.squashfs \
-  --legacy-init /path/to/pre-change/cairn-init --output /path/to/native.json
-```
+The standalone measurement probe has been retired.
 
 Use the exact musl binary/kernel/control disk from the built candidate image;
 provide the historical init explicitly when the checkout no longer has it at
@@ -203,7 +194,7 @@ HEAD. The harness checks flat and paired retained guests, holds a real backend
 discard pending for at least two seconds, requires GET and pause/resume responses
 within one second, then releases it and verifies retained files and completed
 FITRIM on both mounts. It verifies kernel-device and private-registry removal
-before deleting fixtures. `ublk_probe` supports only private fixture markers
+before deleting fixtures. The retired standalone probe supported only private fixture markers
 `METRICS.discard-hold` and `METRICS.discard-entered`; managed-stop also releases a
 held fixture request. This opt-in fault injection is absent from production code.
 The harness also requires the ublk device to advertise host WRITE_ZEROES, the

@@ -28,9 +28,7 @@ Use the pinned runtimes and dependencies. Copy the measurement script and fixtur
 from this change into a detached checkout of the reference, sharing the installed
 dependencies. Run each build serially without other compilation workloads:
 
-```sh
-mise exec -- node scripts/measure-chat-rendering.mjs /absolute/path/web.json
-```
+The standalone measurement probe has been retired.
 
 Character counts are initial UTF-16 code units; they are not encoded byte sizes.
 The script builds production components, starts a local preview, and launches a

@@ -175,5 +175,4 @@ cut -f1 runs.tsv | xargs -P 8 -I{} sh -c \
   'gh api --paginate "repos/leo91000/cairn/actions/runs/{}/jobs?filter=all&per_page=100" \
      --jq ".jobs[] | {name, conclusion, started_at, completed_at}" > jobs-{}.json'
 # Sum ceil((completed_at - started_at) / 60) per job name, skipping skipped jobs; scale by 30 / window days.
-node scripts/ci-timings.mjs 37221466077 37138675072   # per-step durations of the runs analysed above
 ```

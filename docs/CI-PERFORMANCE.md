@@ -22,12 +22,9 @@ compression reference 17m52s in separate workflows.
 
 Reference run: https://github.com/leo91000/cairn/actions/runs/39551334642
 
-```sh
-node scripts/ci-timings.mjs 39551334642 --budget=300
-```
+The standalone measurement probe has been retired.
 
-The existing timing script exits unsuccessfully when the completed workflow
-exceeds the budget. Replace the run ID to compare the new PR and main runs.
+The historical timing probe checked completed workflow duration against the budget.
 Compare cold cache initialization separately from subsequent warm runs.
 
 ### Execution and coverage
@@ -330,14 +327,6 @@ gh workflow run ci.yaml --ref v0.1.6-rc.2 -f browser-workers=5
 
 # Current three-group workflow; compare one or two workers per group.
 gh workflow run ci.yaml --ref main -f browser-workers=2
-
-# Completed-run elapsed, aggregate runner, job, and step durations.
-node scripts/ci-timings.mjs 34419219831 34421319030 34421520389
-# October 2026 pull request baseline and the tree-keyed reuse pull request.
-node scripts/ci-timings.mjs 37221466077 37241143537
-
-# Optional experiment budget: fails for a failed run or an exceeded elapsed budget.
-node scripts/ci-timings.mjs RUN_ID --budget=300
 ```
 
 Run `pnpm check`, `pnpm test:e2e`, and `node tests/container-smoke.mjs IMAGE` for local

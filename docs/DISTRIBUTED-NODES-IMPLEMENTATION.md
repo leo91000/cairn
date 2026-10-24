@@ -123,13 +123,6 @@ The repeatable checks live beside the implementation:
   included in Android CI; JVM results alone are not device evidence.
 - `node tests/runner-smoke.mjs <image>` also verifies active capture and block
   integrity on the exact image built by CI.
-- `node tests/node-recovery-smoke.mjs <assets> <cairn-binary>`: real KVM cold restore
-  between separately stopped/started controllers. Untracked files, an installed
-  tool, a Docker volume and real native Codex/Claude sessions survive. The native
-  CLIs use a local model-response fixture and synthetic credentials; both session
-  identities and initial conversation history are checked after restore. The test
-  also captures a stopped destination disk before any execution and verifies
-  lease-expiry shutdown with recoverable exit code 75.
 
 The latest local KVM measurement used a 1 GiB writable disk: 71,303,168 bytes for
 its base, 25,165,824 bytes for its next increment, a 341 ms second capture pause

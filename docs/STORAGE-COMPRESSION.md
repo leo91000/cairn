@@ -183,10 +183,10 @@ The loopback source also omits manager-to-node plaintext transport.
 Record comparable workload and host conditions for future changes. Do not turn
 these timings into flaky CI thresholds.
 
-The `Storage compression reference` workflow runs this benchmark for storage PRs
-and on manual dispatch. Its job summary compares both policies and its artifact
-retains the sixteen JSON rows, input hashes, revision, host details and log for
-thirty days. It also records three `STORAGE_MIGRATION_PERF` trials. Each trial
+The retired `Storage compression reference` workflow ran this benchmark for storage
+PRs and on manual dispatch. Its job summary compared both policies; artifacts
+retained the sixteen JSON rows, input hashes, revision, host details and log for
+thirty days. It also recorded three `STORAGE_MIGRATION_PERF` trials. Each trial
 compares `Service::new` with a completed migration marker against startup that
 must convert four old raw 4 MiB S3 objects from the same corpus. Migration timing
 includes manifest authentication, durable planning/checkpoints, verified copy,
