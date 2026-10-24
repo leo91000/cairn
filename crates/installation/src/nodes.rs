@@ -1301,7 +1301,7 @@ fn record_heartbeat(
     node["storage"] = serde_json::to_value(Policy::for_node(&node["storage"])?)?;
     node["imageDigest"] = body["imageDigest"].clone();
     node["nativeModeObserved"] = body["nativeMode"].clone();
-    if node["nativeModeRequest"].is_object() {
+    if node["capabilities"]["backend"] == "native" {
         node["nativeModeStatus"] = if native_mode::applied(&node) {
             "applied"
         } else if body["nativeMode"]["status"] == "failed"

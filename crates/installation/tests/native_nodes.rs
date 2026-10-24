@@ -1010,6 +1010,58 @@ async fn native_nodes_admit_six_attempts_only_after_the_configured_budget_is_app
 }
 
 #[tokio::test]
+async fn native_mode_default_protected_failure_is_observable_without_a_saved_request() {
+    let f = Fixture::new().await;
+    let token = auth::token();
+    f.service
+        .store
+        .set(
+            &format!("node-token:{}", auth::digest(&token)),
+            f.node["id"].clone(),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut capabilities = f.node["capabilities"].clone();
+    capabilities["nativeModeProtocol"] = 1.into();
+    for state in ["failed", "pending", "applied"] {
+        let body = json!({
+            "runtimeId": "development", "capabilities": capabilities,
+            "dataRoot": "/private/native-node/data", "backend": "native", "nodeProtocol": 2,
+            "executionReady": true, "budget": { "slots": 1, "limits": f.node["limits"] },
+            "pool": { "capacity": 1 },
+            "nativeMode": { "mode": "protected", "generation": null, "status": state },
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/internal/nodes/heartbeat")
+            .header("host", common::HOST)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = common::send(&f.router, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let node = f.service.get("nodes", text(&f.node, "id")).await.unwrap();
+        assert!(
+            node["nativeModeRequest"].is_null(),
+            "No default migration creates an elevation request"
+        );
+        assert_eq!(node["nativeModeStatus"], state);
+        assert_eq!(node["executionReady"], state == "applied");
+        let (status, listed) = f.owner_call("GET", "/api/nodes", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        let public = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["id"] == f.node["id"])
+            .unwrap();
+        assert_eq!(public["nativeModeStatus"], state);
+    }
+}
+
+#[tokio::test]
 async fn revoking_a_native_person_stops_lease_renewals_and_workspace_access() {
     let f = Fixture::new().await;
     let mut run = f.run();
