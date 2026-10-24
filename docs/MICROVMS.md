@@ -225,10 +225,8 @@ worker recovery can settle it without relaunching the agent.
 
 The `chat_binary_compacts_large_mcp_pages_before_guest_transport` regression
 test sends 160 synthetic MCP pages with 350,000-byte text and structured results.
-On 2026-10-18 the local debug binary emitted 112,050,698 bytes before this change
-and 60,408 bytes afterward, with all 160 outcomes and the final turn marker
-preserved. The test also verifies that the native result remains complete. These
-are serialized transport bytes, not production network-latency measurements.
+It verifies that all outcomes and the final turn marker survive compaction while
+the coding agent's native result remains complete.
 Run it with `pnpm test:backend -p cairn-installation --test codex
 chat_binary_compacts_large_mcp_pages_before_guest_transport`.
 

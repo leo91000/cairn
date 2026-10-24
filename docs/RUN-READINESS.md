@@ -156,36 +156,11 @@ run can be recovered; missing intermediate exchanges cannot be reconstructed.
   It uses disposable state under `/var/tmp` (or `VM_TEST_ROOT`); do not use a small
   tmpfs for VM disks. It downloads several GiB and runs with the image checks, not the fast unit suite.
 
-Local validation on 2026-09-13: 193 JavaScript tests, 80 Rust tests, lint, TypeScript
-and production build, Clippy, the focused browser review, container/toolkit tests
-and Firecracker lifecycle/isolation tests passed. Browser fixtures and captures
-are in [screenshots/run-readiness](screenshots/run-readiness/); they use test data.
-No production deployment or GitHub scope grant is implied by these checks.
-
-Android API 34 measurements on a local 2-vCPU/4-GiB Firecracker guest:
-
-| Measurement | Observed time |
-| --- | --- |
-| First SDK/system-image installation plus Android boot | 7 min 36 s |
-| Subsequent setup/boot with installed SDK and device data | 2 min 11–22 s |
-| Successful compile/install/tap/capture/stop pass, SDK already installed | 6 min 25 s |
-| VM restart, unchanged SDK, saved app state, capture and emulator stop | 3 min 21 s |
-
-The functional pass used one bounded System UI wait and retried UI hierarchy
-reads. [The resulting screenshot](screenshots/run-readiness/android-first.png)
-shows the fixture's confirmed state after the ADB tap.
-[The restart screenshot](screenshots/run-readiness/android-resume.png) confirms
-the same state without reinstalling the APK; the probe also checked that the
-Linux boot ID changed and the SDK installation timestamp did not. Both passes
-completed successfully. These are local
-measurements, not VPS timings or guarantees for other apps/API levels.
-
-One separate diagnostic was observed at fixture teardown: the existing 6.12.109
-guest kernel can print `Missing ENDBR` in the forced-reboot path after the guest
-has synced its disk. The VM controller still terminates it, and lifecycle tests
-pass; this is not the Android assertion failure. Kernel shutdown deserves a
-separate investigation. Replacing reboot with poweroff blindly is inappropriate:
-on x86, [Firecracker documents that poweroff leaves the VMM process alive](https://github.com/firecracker-microvm/firecracker/blob/main/FAQ.md#how-can-i-gracefully-reboot-the-guest-how-can-i-gracefully-poweroff-the-guest).
+The Android smoke fixture checks interaction and persistence after a fresh
+Firecracker boot. Its synthetic expected screen is illustrated by the
+[first-boot capture](screenshots/run-readiness/android-first.png) and
+[restart capture](screenshots/run-readiness/android-resume.png). These do not
+establish production timings or qualification for another Android API level.
 
 References: [GitHub CLI login](https://cli.github.com/manual/gh_auth_login),
 [mise Java](https://mise.jdx.dev/lang/java.html),

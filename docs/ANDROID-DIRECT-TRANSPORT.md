@@ -1,6 +1,6 @@
 # Android direct transport: native dependency
 
-Verified 2026-10-07 for #104. The transport and replay rules remain those of
+The transport and replay rules follow
 [ADR-0033](adr/0033-direct-connection-with-relay-fallback.md) and
 [DIRECT-CONNECTION.md](DIRECT-CONNECTION.md).
 
@@ -8,19 +8,10 @@ Verified 2026-10-07 for #104. The transport and replay rules remain those of
 
 Use the pinned Maven Central artifact **`io.github.webrtc-sdk:android:150.7871.01`**,
 the unprefixed `org.webrtc` build. The publisher's
-[README](https://github.com/webrtc-sdk/android/blob/v150.7871.01/README.md) recommends
-that coordinate; the [release](https://github.com/webrtc-sdk/android/releases/tag/v150.7871.01)
-was published on 2026-08-31, and [Maven metadata](https://repo.maven.apache.org/maven2/io/github/webrtc-sdk/android/maven-metadata.xml)
-lists it as the latest stable release, updated 2026-09-05. The
+[README](https://github.com/webrtc-sdk/android/blob/v150.7871.01/README.md) documents
+that coordinate; its
 [POM](https://repo.maven.apache.org/maven2/io/github/webrtc-sdk/android/150.7871.01/android-150.7871.01.pom)
 declares no transitive dependencies. No Stream account or hosted video SDK is needed.
-
-The alternative `io.getstream:stream-webrtc-android:1.3.10` is still the latest
-Stream stable artifact, published 2025-09-11 according to its
-[Maven metadata](https://repo.maven.apache.org/maven2/io/getstream/stream-webrtc-android/maven-metadata.xml).
-The current webrtc-sdk publication gives this delivery a more recent native
-baseline. This is a maintenance judgement based on release history, not a
-promise about future releases.
 
 The downloaded [150.7871.01 AAR](https://repo.maven.apache.org/maven2/io/github/webrtc-sdk/android/150.7871.01/android-150.7871.01.aar)
 has SHA-256 `0a1627b1a48c2bc17d9a40d62fc47bd45166f44a311e95917f147c402de379b0`.

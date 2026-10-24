@@ -241,7 +241,7 @@ traffic resumes. Never widen trust to fix a mismatch. Sources:
 [Coolify main proxy configuration](https://coolify.io/docs/core/networking/proxy/traefik/overview),
 [Compose static network addresses](https://docs.docker.com/reference/compose-file/services/#ipv4_address-ipv6_address).
 
-**Lessons from the first deployment (2026-10-10).**
+**Proxy recreation requirements.**
 
 - Recreating `coolify-proxy` outside Coolify drops the networks that Coolify had attached
   to it dynamically (`docker network connect`), one per service. Every service routed through
