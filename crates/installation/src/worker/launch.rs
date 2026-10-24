@@ -515,10 +515,15 @@ impl Execution<'_> {
                 )));
             }
 
+            let controller = controller_name(self.run);
             let message = if session.is_some() {
-                "VM controller interrupted execution. The saved conversation and workspace have been preserved."
+                format!(
+                    "{controller} interrupted execution. The saved conversation and workspace have been preserved."
+                )
             } else {
-                "VM controller interrupted execution. Working files were preserved, but no resumable agent session was confirmed."
+                format!(
+                    "{controller} interrupted execution. Working files were preserved, but no resumable agent session was confirmed."
+                )
             };
             return Err(Error::unavailable(message));
         }
@@ -528,9 +533,10 @@ impl Execution<'_> {
         let controller_failed = exit.code == Some(crate::runner::CONTROLLER_FAILED);
         let may_retry = saved.controller_recoveries() < super::execution::MAX_CONTROLLER_RECOVERIES;
         if managed && stopped_by_controller && controller_failed && may_retry {
-            return Err(Error::unavailable(
-                "VM controller failed while running this attempt. The saved conversation and workspace have been preserved.",
-            ));
+            return Err(Error::unavailable(format!(
+                "{} failed while running this attempt. The saved conversation and workspace have been preserved.",
+                controller_name(self.run),
+            )));
         }
 
         // Preserve the controller's outcome before cleanup can fail. Failed
@@ -1134,13 +1140,24 @@ impl Execution<'_> {
         }
         match exit.code {
             Some(crate::runner::CONTROLLER_FAILED) => {
-                "VM controller failed while running this attempt. Resume the conversation to continue.".into()
+                format!(
+                    "{} failed while running this attempt. Resume the conversation to continue.",
+                    controller_name(self.run)
+                )
             }
             Some(code) => {
                 format!("Process exited with status {code}. Resume the conversation to continue.")
             }
             None => "Process stopped before finishing. Resume the conversation to continue.".into(),
         }
+    }
+}
+
+fn controller_name(run: &Value) -> &'static str {
+    if crate::native::policy::native(&run["snapshot"]["agent"]) {
+        "Native controller"
+    } else {
+        "VM controller"
     }
 }
 
@@ -1151,6 +1168,23 @@ fn current_exe() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn controller_messages_follow_the_execution_backend() {
+        assert_eq!(
+            controller_name(
+                &json!({ "snapshot": { "agent": { "access": { "backend": "native" } } } })
+            ),
+            "Native controller"
+        );
+        assert_eq!(
+            controller_name(
+                &json!({ "snapshot": { "agent": { "access": { "backend": "firecracker" } } } })
+            ),
+            "VM controller"
+        );
+        assert_eq!(controller_name(&json!({})), "VM controller");
+    }
 
     #[tokio::test]
     async fn mode_restart_before_first_session_preserves_available_sessions_and_other_recovery_rules()

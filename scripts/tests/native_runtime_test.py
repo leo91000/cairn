@@ -196,6 +196,7 @@ def main():
 
         contexts = {}
         started_runs = set()
+        retained_disk_mib = {}
         current_mode = dict(mode="protected", generation=None)
         host_marker = Path("/etc/cairn-native-qualification-" + identifier)
         base_projects, base_archives, base_keys = {}, {}, {}
@@ -362,9 +363,13 @@ def main():
                 script += ("sudo -n " if administrator else "") + "setsid sh -c 'while :; do printf x >> descendant; sleep 0.1; done' &\nwait\n"
             (tools / 'bin/codex').write_text(script)
             (tools / 'bin/codex').chmod(0o555)
+            # Docker grows this conversation's retained disk. A later turn
+            # without Docker (including administrator mode) must not shrink it.
+            disk_mib = max(retained_disk_mib.get(run, 256), 2048 if docker_script else 256)
+            retained_disk_mib[run] = disk_mib
             plan = dict(id=attempt, runId=run, backend='native', runtimeId='synthetic', nodeLeaseRequired=True, nativeMode=current_mode.copy(),
                 expires=None, cwd=str(workspace / base_projects[run] if run in base_projects else workspace), projectRoot=str(workspace), sandbox=sandbox,
-                resources=dict(cpu=1, memoryMiB=1024 if docker_script else 512, diskMiB=2048 if docker_script else 256), args=[], prompt='synthetic input', storage=contexts[run],
+                resources=dict(cpu=1, memoryMiB=1024 if docker_script else 512, diskMiB=disk_mib), args=[], prompt='synthetic input', storage=contexts[run],
                 imports=[dict(source=str(workspace), target=str(workspace)), dict(source=str(data / 'runs' / run / 'home'), target='/home/node')])
             if run in base_archives:
                 plan.update(nativeProjectArchives=base_archives[run], nativeProjectBase=base_keys[run])

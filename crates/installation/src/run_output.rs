@@ -391,6 +391,14 @@ pub fn prompt(run: &Value, chat: bool) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     let skills = skill_index(&run["snapshot"]["skills"]);
+    let storage = if crate::native::policy::native(&run["snapshot"]["agent"]) {
+        "The managed /tmp is cleared on every execution attempt. Keep SDKs and build caches \
+            (including Cargo target directories) in the managed home or workspace, never in /tmp. \
+            Moving a large directory across filesystems copies it before removing the source \
+            and can temporarily exceed the disk budget; managed /tmp and workspace share that budget."
+    } else {
+        ""
+    };
     let tooling = if crate::native::policy::native(&run["snapshot"]["agent"])
         && run["nativeMode"]["mode"] == "administrator"
     {
@@ -428,7 +436,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
     };
     format!(
         "{}\n\n{}\n\nAuthorized projects (open only those needed for the task; \
-            unopened repositories are not on disk):\n{}\n\n{tooling}\n\nSelected skills (read a skill's SKILL.md before using it; its \
+            unopened repositories are not on disk):\n{}\n\n{tooling}\n{storage}\n\nSelected skills (read a skill's SKILL.md before using it; its \
             scripts and references sit beside it):\n{skills}\n\n{plugins}\n\nRun this task to completion within \
             its stated scope. Preserve unrelated files. Do not expose credentials. \
             {interaction}\n{deliverables}{requested}\n{waiting} All task-authorized effects such as creating \
