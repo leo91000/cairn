@@ -1,4 +1,5 @@
 import type { Route } from '@playwright/test'
+import type { PluginConnection } from '../../apps/web/src/plugins'
 import { Buffer } from 'node:buffer'
 import {
   expect,
@@ -766,19 +767,22 @@ test('bot warnings include the current instance and new draft plugin grants', as
     agentAccess: { description: 'Agents can use this bot’s tools.' },
     settings: [],
   }
-  const connection = {
+  const connection: PluginConnection = {
     id: 'hybrid-bot',
     pluginId: 'hybrid',
     name: 'Hybrid bot',
     settings: {},
     agentIds: [helper.id],
     agentId: helper.id,
+    projectId: null,
     accessMode: 'everyone',
     userIds: [],
     people: [],
     requests: [],
     enabled: false,
     status: { state: 'paused' },
+    usage: { hour: 0 },
+    activity: [],
     maxMessagesPerHour: 20,
     maxPerPersonPerHour: 5,
   }
