@@ -80,6 +80,7 @@ struct NewAttempt<'a> {
     created_at: i64,
     lease_expires_at: i64,
     released: bool,
+    native_mode: Value,
     additional_disk_mi_b: u64,
     disk_materialized: bool,
 }
@@ -91,6 +92,7 @@ struct Placement<'a> {
     node_id: &'a Value,
     resources: &'a Value,
     runtime_id: &'a Value,
+    native_mode: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     lease_expires_at: Option<i64>,
 }
@@ -491,6 +493,7 @@ fn claim_reservation(
     db.put("node-attempts", &held)?;
     db.patch_run(request.run_id(), &json!({ "moveReservation": null }))?;
     let placement = Placement {
+        native_mode: held["nativeMode"].clone(),
         node_id: &held["nodeId"],
         resources: &held["resources"],
         runtime_id: &held["runtimeId"],
@@ -553,12 +556,14 @@ fn admit(
         created_at: now(),
         lease_expires_at,
         released: false,
+        native_mode: super::native_mode::requested(&best.node),
         additional_disk_mi_b: disk.saturating_sub(previous),
         disk_materialized: false,
     };
     db.put("node-attempts", &serde_json::to_value(record)?)?;
     db.put("node-volumes", &volume)?;
     let placement = Placement {
+        native_mode: super::native_mode::requested(&best.node),
         node_id: &id.into(),
         resources: &serde_json::to_value(&best.resources)?,
         runtime_id: &runtime_id.into(),

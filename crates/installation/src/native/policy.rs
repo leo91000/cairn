@@ -198,7 +198,7 @@ pub fn allows(db: &Db<'_>, run: &Value, node: &Value) -> Result<bool> {
     let agent = db
         .get("agents", crate::nodes::run_agent(run))?
         .unwrap_or_default();
-    allows_agent(db, run, node, &agent)
+    allows_agent(db, run, node, &agent, Admission::Execution)
 }
 
 /// Only the fenced migration read path can substitute the saved backend for the
@@ -214,15 +214,40 @@ pub(crate) fn allows_migration_source(db: &Db<'_>, run: &Value, node: &Value) ->
     agent["access"]["nodes"] = json!([node["id"]]);
     let mut source = run.clone();
     apply(&mut source, &run["backendMigration"]["grant"]);
-    allows_agent(db, &source, node, &agent)
+    allows_agent(db, &source, node, &agent, Admission::MigrationSource)
 }
 
-fn allows_agent(db: &Db<'_>, run: &Value, node: &Value, agent: &Value) -> Result<bool> {
+fn authority_allows(db: &Db<'_>, run: &Value, node: &Value) -> Result<bool> {
+    let agent = db
+        .get("agents", crate::nodes::run_agent(run))?
+        .unwrap_or_default();
+    allows_agent(db, run, node, &agent, Admission::Authority)
+}
+
+#[derive(Clone, Copy)]
+enum Admission {
+    Execution,
+    Authority,
+    MigrationSource,
+}
+
+fn allows_agent(
+    db: &Db<'_>,
+    run: &Value,
+    node: &Value,
+    agent: &Value,
+    admission: Admission,
+) -> Result<bool> {
     if !native(agent)
         || !native(&run["snapshot"]["agent"])
         || !node_native(node)
         || node["nativeEnabled"] != true
         || node["revoked"] == true
+        || !matches!(admission, Admission::Authority) && !crate::nodes::native_mode::applied(node)
+        // A fenced migration reads existing storage; it never launches a workload.
+        // Switching backend revokes the agent's administrator execution review.
+        || !matches!(admission, Admission::MigrationSource)
+            && !crate::nodes::native_mode::reviewed(node, agent)
         || !crate::service::allowed(&policy(agent)["nodes"], text(node, "id"))
     {
         return Ok(false);
@@ -292,7 +317,7 @@ pub(crate) fn authorize_origin(db: &Db<'_>, agent: &Value, source: &Origin) -> R
     let mut run = json!({ "snapshot": { "agent": agent } });
     apply(&mut run, &grant);
     for node in db.list("nodes")? {
-        if allows(db, &run, &node)? {
+        if authority_allows(db, &run, &node)? {
             return Ok(grant);
         }
     }
@@ -392,7 +417,7 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
             run["nodeId"]
                 .as_str()
                 .is_none_or(|current| node["id"] == current)
-                && allows(db, &combined, node).unwrap_or(false)
+                && authority_allows(db, &combined, node).unwrap_or(false)
         }) {
             return Err(Error::forbidden(
                 "The conversation's callers have no common authorized native node.",
