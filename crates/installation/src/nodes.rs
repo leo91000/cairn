@@ -3,6 +3,7 @@ pub mod alerts;
 pub mod checkpoint;
 pub mod connector;
 pub mod coordination;
+pub(crate) mod disk_capacity;
 pub mod disk_grants;
 pub(crate) mod eviction;
 pub mod exclusive;
@@ -1212,6 +1213,8 @@ struct HeartbeatReply {
     limits: Value,
     leases: Vec<Lease>,
     native_mode: Value,
+    #[serde(skip_serializing_if = "Value::is_null")]
+    disk_growth: Value,
     heartbeat_interval_ms: i64,
     disconnect_timeout_ms: i64,
 }
@@ -1316,10 +1319,12 @@ fn record_heartbeat(
         .into();
     }
     node["executionReady"] = execution_ready(&node, body, expected).into();
+    let disk_growth = disk_capacity::report(db, &mut node, &body["diskGrowth"])?;
     db.put("nodes", &node)?;
     let leases = renew_leases(db, &node_id, expected.lease_ms)?;
     Ok(HeartbeatReply {
         native_mode: native_mode::requested(&node),
+        disk_growth,
         node_id,
         accepting: node["accepting"].clone(),
         slots: slots(&node),

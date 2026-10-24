@@ -291,6 +291,9 @@ def main():
                 script += "while ! test -e measure-go; do sleep 0.05; done\n/usr/bin/python3 - <<'MEASURE' > measure.json\n" + MEASURE + '\nMEASURE\n'
                 script += 'printf measured > measure-ready\n'
             if long:
+                # Read the actual read-only bind as the unprivileged workload,
+                # including concurrent steering updates after a disk warning.
+                script += "/usr/bin/python3 - <<'INBOX' &\nimport json,time\nfrom pathlib import Path\nwhile True:\n    for name in ('messages.json','disk-notice.json'):\n        try: value=json.loads((Path('/run/cairn-chat')/name).read_text())\n        except FileNotFoundError: continue\n        except PermissionError:\n            Path('inbox-read-error').write_text(name); raise\n        if name=='disk-notice.json': Path('disk-notice-seen').write_text(value['id'])\n        elif value: Path('steering-seen').write_text(value[0]['text'])\n    time.sleep(0.02)\nINBOX\n"
                 script += ("sudo -n " if administrator else "") + "setsid sh -c 'while :; do printf x >> descendant; sleep 0.1; done' &\nwait\n"
             (tools / 'bin/codex').write_text(script)
             (tools / 'bin/codex').chmod(0o555)
@@ -425,6 +428,52 @@ def main():
             start_controller()
             resumed = start(run, legacy=True, measure='nativeEvicted')
             assert metrics['nativeEvicted']['readTriggeredRemoteRequests'] > 0, 'Payload did not use demand-paged S3 reads.'
+            # Real journal -> live ublk -> online ext4 growth. The workload
+            # process and namespace stay alive; no whole-disk materialization.
+            growth_health = api('/health', method='GET')
+            assert growth_health.get('diskGrowth', {}).get('protocol') == 1, 'Qualification host lacks live ublk resize.'
+            unit = 'cairn-native-' + resumed + '.service'
+            workload_pid = command('systemctl', 'show', unit, '--property=MainPID', '--value').stdout.strip()
+            before_capacity = os.statvfs(managed(run)).f_blocks * os.statvfs(managed(run)).f_frsize
+            # Negotiate first, then generate real combined workspace/tmp
+            # pressure without filling the workspace itself. Sparse tmp is
+            # intentionally charged by logical length, as in production.
+            api('/disk-growth', dict(protocol=1, grants=[]))
+            space = os.statvfs(managed(run))
+            used = (space.f_blocks - space.f_bfree) * space.f_frsize
+            pressure_file = state / 'native' / run / 'tmp/growth-pressure'
+            with pressure_file.open('wb') as stream:
+                stream.truncate(max(0, 256 * 1024 * 1024 * 83 // 100 - used))
+            eventually(lambda: (managed(run) / 'disk-notice-seen').exists(), timeout=20)
+            assert not (managed(run) / 'inbox-read-error').exists()
+            inbox = data / 'runs' / run / 'chat-input'
+            steering = inbox / '.fixture-steering'
+            steering.write_text(json.dumps([dict(id='synthetic-follow-up', text='Continue safely')]))
+            steering.chmod(0o444)
+            steering.replace(inbox / 'messages.json')
+            eventually(lambda: (managed(run) / 'steering-seen').read_text() == 'Continue safely', timeout=20)
+            assert not (managed(run) / 'inbox-read-error').exists()
+            before_reads = manager('metrics')['remoteRequests']
+            growth_start = time.monotonic()
+            api('/disk-growth', dict(protocol=1, grants=[dict(attemptId=resumed, allowanceMiB=384, reason='granted')]))
+            eventually(lambda: os.statvfs(managed(run)).f_blocks * os.statvfs(managed(run)).f_frsize > before_capacity)
+            metrics['onlineGrowth'] = dict(fromMiB=256, toMiB=384, wallMs=(time.monotonic()-growth_start)*1000,
+                                          remoteRequests=manager('metrics')['remoteRequests']-before_reads)
+            assert command('systemctl', 'show', unit, '--property=MainPID', '--value').stdout.strip() == workload_pid
+            pressure_file.unlink()
+            # Allocating more than the entire old disk exercises the ublk I/O
+            # bounds after resizing, including its newly appended journal tail.
+            tail = managed(run) / 'growth-tail'
+            with tail.open('wb') as stream:
+                os.posix_fallocate(stream.fileno(), 0, 260 * 1024 * 1024)
+                stream.seek(260 * 1024 * 1024 - 8)
+                stream.write(b'new-tail'); stream.flush(); os.fsync(stream.fileno())
+            with tail.open('rb') as stream:
+                stream.seek(-8, os.SEEK_END)
+                assert stream.read() == b'new-tail'
+            tail.unlink()
+            api('/disk-growth', dict(protocol=1, grants=[dict(attemptId=resumed, allowanceMiB=256, reason='granted')]))
+            assert os.statvfs(managed(run)).f_blocks * os.statvfs(managed(run)).f_frsize > before_capacity, 'Grant replay shrank filesystem.'
             for consistency in ('crash', 'filesystem'):
                 live = api('/runs/' + resumed + '/snapshot', dict(consistency=consistency))
                 assert live['manifest']['consistency'] == consistency

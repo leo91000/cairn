@@ -106,6 +106,56 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn runtime_disk_notice_preserves_publication_metadata_and_redacts_all_payloads() {
+    let mut fixture = Fixture::new().await;
+    let storage = json!({ "mode": "on-demand", "grantId": "retained-grant", "dirtyBytes": 123,
+        "published": { "generation": 7, "backupId": "retained-backup" }, "policy": { "cacheMiB": 64 } });
+    fixture
+        .service
+        .store
+        .patch_run(&fixture.id, json!({ "storage": storage }))
+        .await
+        .unwrap();
+    fixture
+        .event(
+            json!({ "type": "runtime.disk_notice", "text": "Pressure sensitive-tool-credential",
+        "capacity": { "allowanceBytes": 34359738368u64, "note": "sensitive-tool-credential" } }),
+        )
+        .await;
+    let run = fixture.service.store.run(&fixture.id).await.unwrap();
+    let expected = json!({ "allowanceBytes": 34359738368u64, "note": "[redacted]" });
+    assert_eq!(run["storage"], storage);
+    assert_eq!(run["diskCapacity"], expected);
+    // Ordinary storage polling replaces its own authoritative document.
+    fixture
+        .service
+        .store
+        .patch_run(
+            &fixture.id,
+            json!({ "storage": { "mode": "on-demand", "dirtyBytes": 0 } }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.service.store.run(&fixture.id).await.unwrap()["diskCapacity"],
+        expected
+    );
+    let id = fixture.id.clone();
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.events(&id, 0, 100))
+        .await
+        .unwrap();
+    assert!(events.iter().any(|event| event["type"] == "status"));
+    assert!(
+        !serde_json::to_string(&events)
+            .unwrap()
+            .contains("sensitive-tool-credential")
+    );
+}
+
+#[tokio::test]
 async fn partial_guest_stdout_cannot_hide_controller_failure_after_exhausted_logs() {
     let mut fixture = Fixture::new().await;
     fixture.log_total = LOG_BUDGET;

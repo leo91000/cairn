@@ -108,6 +108,7 @@ struct Controller {
     data: PathBuf,
     state: PathBuf,
     active: Arc<Mutex<HashMap<String, Attempt>>>,
+    capacity: Arc<Mutex<super::capacity::Capacity>>,
     mounted: Arc<Mutex<HashMap<String, Arc<block::Handle>>>>,
     leases: Arc<Mutex<HashMap<String, u64>>>,
     admission: Arc<Mutex<()>>,
@@ -369,6 +370,11 @@ impl Controller {
                 protection: None,
             },
         );
+        self.capacity.lock().await.register(
+            id,
+            text(&plan, "runId"),
+            resources.disk_mi_b.saturating_mul(disk::MIB),
+        );
         let (controller, id) = (self.clone(), id.to_owned());
         let (lease_controller, lease_id, lease_stop) =
             (controller.clone(), id.clone(), stop.clone());
@@ -478,6 +484,7 @@ impl Controller {
             let _ = atomic_write(&controller.file(&id, "exit"), code.to_string().as_bytes()).await;
             let _ = tokio::fs::remove_file(controller.file(&id, "active")).await;
             controller.active.lock().await.remove(&id);
+            controller.capacity.lock().await.attempts.remove(&id);
             controller.leases.lock().await.remove(&id);
             controller.changed.notify_waiters();
         });
@@ -919,7 +926,7 @@ impl Controller {
                     let workspace_bytes = block::used_bytes(&data)?;
                     let temporary_bytes = disk::bytes_if_present(&temporary).await?;
                     let conversation_bytes = workspace_bytes.saturating_add(temporary_bytes);
-                    let conversation_limit = self.disk_budget(&plan);
+                    let conversation_limit = self.monitor_capacity(id, &plan, workspace_bytes, temporary_bytes).await?;
                     let node_bytes = disk::used(&self.data, &self.state).await?;
                     let node_limit = self.disk_limit().await?;
                     let reason = supervision_stop_reason(
@@ -965,6 +972,63 @@ impl Controller {
         let _ = tokio::fs::remove_file(plan_file).await;
         let _ = tokio::fs::remove_dir_all(container).await;
         Ok(code)
+    }
+
+    async fn monitor_capacity(
+        &self,
+        id: &str,
+        plan: &Value,
+        workspace: u64,
+        temporary: u64,
+    ) -> Result<u64> {
+        let run = text(plan, "runId");
+        let mounted = self.mounted.lock().await.get(run).cloned();
+        let filesystem = mounted.as_ref().map_or(self.disk_budget(plan), |handle| {
+            handle.filesystem.load(std::sync::atomic::Ordering::Acquire)
+        });
+        let (allowance, notice, negotiated) = {
+            let mut capacity = self.capacity.lock().await;
+            let (allowance, notice) = capacity
+                .observe(id, workspace, temporary, filesystem)
+                .unwrap_or((self.disk_budget(plan), None));
+            (allowance, notice, capacity.negotiated)
+        };
+        if let Some(notice) = notice {
+            let directory = self.data.join("runs").join(run).join("chat-input");
+            crate::nodes::workspace::publish_native_notice(
+                &directory,
+                &serde_json::to_vec(&notice)?,
+            )
+            .await?;
+            let event = json!({
+                "type": "runtime.disk_notice", "text": notice["text"],
+                "capacity": { "capturedAt": crate::config::now(), "workspaceBytes": workspace, "temporaryBytes": temporary,
+                    "allowanceBytes": allowance, "filesystemBytes": filesystem },
+            });
+            self.append(id, false, format!("{event}\n").as_bytes())
+                .await?;
+        }
+        if negotiated
+            && allowance > filesystem
+            && let Some(mounted) = mounted
+        {
+            let attempt = id.to_owned();
+            // The lifecycle lock pins the mount through the metadata commit and
+            // resize, while supervision remains responsive to lease/cancellation.
+            tokio::spawn(async move {
+                let Ok(mut mount) = mounted.mount.try_lock() else {
+                    return;
+                };
+                if let Err(error) = mount.grow(allowance).await {
+                    tracing::warn!(
+                        attempt,
+                        status = error.status,
+                        "Native disk growth deferred; data retained"
+                    );
+                }
+            });
+        }
+        Ok(allowance)
     }
 
     fn disk_budget(&self, plan: &Value) -> u64 {
@@ -1367,6 +1431,16 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         let capabilities = crate::nodes::connector::capabilities(&controller.state)?;
         let usage = controller.usage().await?;
         let budget = controller.budget.lock().await.clone();
+        let capacity = controller.capacity.lock().await.clone();
+        let disk_growth = if storage::ublk::supports_growth() {
+            serde_json::to_value(
+                capacity
+                    .report(&controller.state, usage["diskBytes"].as_u64().unwrap_or(0))
+                    .await?,
+            )?
+        } else {
+            Value::Null
+        };
         return Ok(Json(json!({
             "status": "ok", "backend": "native", "nodeProtocol": 2, "projectArchives": 1, "nativeProjectBases": 1,
             "runtimeId": std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into()),
@@ -1375,7 +1449,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             "runtimes": systemd::runtimes()?,
             "pool": { "capacity": budget["slots"] }, "activeRuns": controller.active.lock().await.len(),
             "sharedResources": true, "exclusiveReservations": false, "budget": budget,
-            "usage": usage, "pressure": null
+            "usage": usage, "pressure": null, "diskGrowth": disk_growth
         })).into_response());
     }
     let secret = tokio::fs::read_to_string(controller.data.join("runner-secret")).await?;
@@ -1385,6 +1459,15 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
     }
     let parts = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
     let value = match (method.as_str(), parts.as_slice()) {
+        ("POST", ["disk-growth"]) => {
+            let value = input(request, 1_000_000).await?;
+            controller
+                .capacity
+                .lock()
+                .await
+                .apply(&value, controller.disk_limit().await?);
+            json!({ "ready": true })
+        }
         ("POST", ["native-bases", "lookup"]) => {
             let value = input(request, 8_000_000).await?;
             let archives: Vec<crate::project_archives::Archive> =
@@ -2053,6 +2136,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         data,
         state,
         active: Arc::default(),
+        capacity: Arc::default(),
         mounted: Arc::default(),
         leases: Arc::default(),
         admission: Arc::default(),
@@ -2227,6 +2311,7 @@ mod tests {
             data,
             state,
             active: Arc::default(),
+            capacity: Arc::default(),
             mounted: Arc::default(),
             leases: Arc::default(),
             admission: Arc::default(),

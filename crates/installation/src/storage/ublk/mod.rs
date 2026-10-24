@@ -432,7 +432,32 @@ pub struct MountedDisk {
     thread: Option<JoinHandle<stdio::Result<()>>>,
 }
 
+pub(crate) fn supports_growth() -> bool {
+    libublk::ctrl::UblkCtrl::get_features().unwrap_or_default()
+        & u64::from(libublk::sys::UBLK_F_UPDATE_SIZE)
+        != 0
+}
+
 impl MountedDisk {
+    /// Serialize with close/abort through the handle's lifecycle mutex. Some
+    /// kernels cannot safely accept UPDATE_SIZE concurrently with STOP_DEV.
+    pub(crate) fn grow(&mut self, size: u64) -> stdio::Result<()> {
+        if self.stopped.load(Ordering::Acquire) || self.failed() || !supports_growth() {
+            return Err(stdio::Error::other("Live ublk growth is unavailable"));
+        }
+        let control = UblkCtrlBuilder::default()
+            .id(self.record.device_id()?)
+            .build()
+            .map_err(error)?;
+        if control.dev_info().ublksrv_flags != self.record.token
+            || self.record.boot_id != boot_id()?
+        {
+            return Err(stdio::Error::other("ublk ownership changed"));
+        }
+        control.update_size(size).map_err(error)?;
+        Ok(())
+    }
+
     pub fn failed(&self) -> bool {
         self.failed.load(Ordering::Acquire)
             || self.thread.as_ref().is_some_and(JoinHandle::is_finished)

@@ -474,6 +474,46 @@ async fn model_and_reasoning_reach_codex_and_model_changes_resolve_the_new_defau
 }
 
 #[tokio::test]
+async fn disk_notice_reaches_codex_without_a_user_delivery_receipt() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    let input = plan(&root, "fixture:question");
+    std::fs::write(
+        root.path().join("inbox/disk-notice.json"),
+        json!({ "id": "disk-notice", "operationalNotice": true,
+            "text": "Runtime disk pressure" })
+        .to_string(),
+    )
+    .unwrap();
+    let (tx, mut rx) = mpsc::channel(64);
+    let task = tokio::spawn(async move {
+        chat_process::run(&config, &home, input, tx, CancellationToken::new()).await
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = rx.recv().await {
+            assert!(!(event["type"] == "chat.delivered" && event["messageId"] == "disk-notice"));
+            if event["type"] == "chat.question" {
+                deliver(
+                    &root,
+                    &json!([{ "id": "answer", "questionId": event["question"]["id"],
+                    "answers": { "direction": ["Gradual rollout"] }, "text": "Continue" }]),
+                )
+                .await;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    task.await.unwrap().unwrap();
+    assert!(
+        std::fs::read_to_string(root.path().join("codex/fixture-conversation.json"))
+            .unwrap()
+            .contains("Runtime disk pressure")
+    );
+}
+
+#[tokio::test]
 async fn native_in_flight_question_accepts_answer_and_preserves_receipt() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);

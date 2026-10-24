@@ -3,13 +3,16 @@ use super::{atomic_write, workspace};
 use crate::{
     error::{Error, Result},
     skills::private_dir,
-    storage::{self, environment, runtime::Volume},
+    storage::{self, Disk, environment, runtime::Volume},
     validation::text,
 };
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use tokio_util::sync::CancellationToken;
 
@@ -21,6 +24,38 @@ pub fn exists(state: &Path, run: &str) -> Result<bool> {
     Ok(storage::runtime::exists(&environment::directory(
         state, run,
     )?))
+}
+
+/// Resume the retained journal as-is even if a manager grant arrived before a
+/// stop. The supervision path applies any outstanding allowance lazily after
+/// mount, without bootstrap's legacy whole-image materialization.
+fn preparation_size(directory: &Path, requested: u64) -> Result<u64> {
+    if storage::runtime::exists(directory) {
+        return Ok(storage::LazyDisk::geometry(&directory.join("lazy"))?.0);
+    }
+    Ok(requested)
+}
+
+fn ext4_bytes(superblock: &[u8; 1024]) -> Result<u64> {
+    if u16::from_le_bytes(superblock[56..58].try_into().unwrap()) != 0xef53 {
+        return Err(Error::conflict("Invalid native ext4 geometry."));
+    }
+    let low = u64::from(u32::from_le_bytes(superblock[4..8].try_into().unwrap()));
+    let features = u32::from_le_bytes(superblock[96..100].try_into().unwrap());
+    let high = if features & 0x80 != 0 {
+        u64::from(u32::from_le_bytes(
+            superblock[0x150..0x154].try_into().unwrap(),
+        ))
+    } else {
+        0
+    };
+    let shift = u32::from_le_bytes(superblock[24..28].try_into().unwrap());
+    let size = 1024u64
+        .checked_shl(shift)
+        .and_then(|block| ((high << 32) | low).checked_mul(block))
+        .filter(|bytes| *bytes > 0 && *bytes <= 1 << 40)
+        .ok_or_else(|| Error::conflict("Invalid native ext4 size."))?;
+    Ok(size)
 }
 
 struct HostMount {
@@ -177,6 +212,7 @@ async fn unmount(path: &Path) -> Result<()> {
 /// filesystem flush holds its lifecycle lock waiting for journal headroom.
 pub struct Handle {
     pub volume: Arc<Volume>,
+    pub filesystem: Arc<AtomicU64>,
     pub mount: tokio::sync::Mutex<Mounted>,
 }
 
@@ -184,6 +220,7 @@ impl Handle {
     pub fn new(mount: Mounted) -> Self {
         Self {
             volume: mount.volume.clone(),
+            filesystem: mount.filesystem.clone(),
             mount: tokio::sync::Mutex::new(mount),
         }
     }
@@ -197,6 +234,7 @@ impl Handle {
 
 pub struct Mounted {
     pub volume: Arc<Volume>,
+    filesystem: Arc<AtomicU64>,
     target: PathBuf,
     jail: PathBuf,
     mounted: bool,
@@ -233,12 +271,13 @@ pub async fn mount(
         // file backend invalidates restored.json when it acquires its writer.
         remove(&directory.join("recovery.json")).await?;
         tokio::fs::File::open(directory).await?.sync_all().await?;
+        let requested = plan["resources"]["diskMiB"]
+            .as_u64()
+            .ok_or_else(|| Error::bad("Missing native disk size."))?
+            .saturating_mul(super::disk::MIB);
         storage::bootstrap::prepare_native(
             directory,
-            plan["resources"]["diskMiB"]
-                .as_u64()
-                .ok_or_else(|| Error::bad("Missing native disk size."))?
-                .saturating_mul(super::disk::MIB),
+            preparation_size(directory, requested)?,
             &plan["storage"],
             stop,
         )
@@ -359,21 +398,126 @@ pub async fn mount(
             .await;
             return Err(error.into());
         }
-        Ok(Mounted {
+        let mut result = Mounted {
             volume,
             target,
             jail,
             mounted: true,
+            filesystem: Arc::new(AtomicU64::new(0)),
             completed: false,
             aborted,
             device,
             _owner: Some(owner),
             _physical: Some(physical),
-        })
+        };
+        // The durable journal size is also the resize intent. A crash after
+        // growing the journal/device, or a restored older filesystem image,
+        // resumes resize2fs on the next owned mount without a separate marker.
+        let resized = async {
+            let filesystem = result.filesystem_bytes().await?;
+            result.filesystem.store(filesystem, Ordering::Release);
+            if filesystem > result.volume.disk.size() {
+                return Err(Error::conflict(
+                    "Native filesystem exceeds its journal geometry.",
+                ));
+            }
+            if filesystem < result.volume.disk.size() {
+                result.finish_growth().await?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = resized {
+            result.close().await?;
+            return Err(error);
+        }
+        Ok(result)
     }
 }
 
 impl Mounted {
+    /// Journal -> kernel geometry -> ext4. A crash after either geometry change
+    /// leaves the journal geometry as intent for the next owned mount.
+    pub(crate) async fn grow(&mut self, bytes: u64) -> Result<bool> {
+        if self.aborted || !self.mounted || !storage::ublk::supports_growth() {
+            return Err(Error::unavailable(
+                "Online native disk growth is unavailable.",
+            ));
+        }
+        if bytes < self.volume.disk.size() {
+            return Err(Error::conflict(
+                "Native disk allowance cannot shrink retained geometry.",
+            ));
+        }
+        let filesystem = self.filesystem_bytes().await?;
+        if filesystem > bytes {
+            return Err(Error::conflict(
+                "Native filesystem exceeds its journal geometry.",
+            ));
+        }
+        if bytes == self.volume.disk.size() && filesystem == bytes {
+            return Ok(true);
+        }
+        if bytes > self.volume.disk.size() {
+            // Keep the mount and its leases alive through an uncancellable
+            // metadata commit; the caller owns the native lifecycle lock.
+            let disk = self.volume.disk.clone();
+            let result = tokio::task::spawn_blocking(move || disk.grow(bytes))
+                .await
+                .map_err(Error::internal)?;
+            match result {
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+                result => result?,
+            }
+        }
+        let device = self.device.clone();
+        tokio::task::spawn_blocking(move || {
+            device
+                .lock()
+                .map_err(|_| std::io::Error::other("Native device lock poisoned"))?
+                .grow(bytes)
+        })
+        .await
+        .map_err(Error::internal)??;
+        self.finish_growth().await?;
+        Ok(true)
+    }
+
+    async fn filesystem_bytes(&self) -> Result<u64> {
+        let disk = self.volume.disk.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut bytes = [0; 1024];
+            storage::Disk::read_at(disk.as_ref(), 1024, &mut bytes)?;
+            ext4_bytes(&bytes)
+        })
+        .await
+        .map_err(Error::internal)?
+    }
+
+    async fn finish_growth(&mut self) -> Result<()> {
+        let mut command = tokio::process::Command::new("resize2fs");
+        command.arg(self.jail.join("disk.blk")).kill_on_drop(true);
+        let output = tokio::time::timeout(std::time::Duration::from_secs(120), command.output())
+            .await
+            .map_err(|_| {
+                Error::unavailable("Native filesystem growth timed out; it will retry.")
+            })??;
+        if !output.status.success() {
+            return Err(Error::unavailable(
+                "Native filesystem growth failed; the journal and growth intent are retained.",
+            ));
+        }
+        sync(&self.target).await?;
+        let bytes = self.filesystem_bytes().await?;
+        self.filesystem.store(bytes, Ordering::Release);
+        if bytes != self.volume.disk.size() {
+            return Err(Error::unavailable(
+                "Native filesystem growth is incomplete; it will retry.",
+            ));
+        }
+        Ok(())
+    }
+
     /// Keep this object owned on every error: an uncertain flush/unmount cannot
     /// release its physical lease or terminate a backend still serving a mount.
     pub async fn abort_io(&mut self) -> Result<()> {
@@ -992,6 +1136,41 @@ pub fn used_bytes(path: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unapplied_grant_resumes_retained_journal_without_materializing_it() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join(crate::config::id());
+        let size = 4 * 1024 * 1024;
+        let manifest = json!({ "version": 1, "size": size, "blockSize": size,
+            "blocks": [{ "offset": 0, "size": size, "hash": null }] });
+        let context = json!({ "master": "http://127.0.0.1:1/", "grant": "synthetic", "policy": storage::policy::Policy::default() });
+        let disk = storage::runtime::create(&directory.join("lazy"), &manifest, &context)
+            .await
+            .unwrap();
+        disk.write_at(0, b"retained").unwrap();
+        disk.sync().unwrap();
+        drop(disk);
+        let requested = 2 * size;
+        let prepare = preparation_size(&directory, requested).unwrap();
+        assert_eq!(prepare, size);
+        storage::bootstrap::prepare_native(
+            &directory,
+            prepare,
+            &context,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            storage::LazyDisk::geometry(&directory.join("lazy"))
+                .unwrap()
+                .0,
+            size
+        );
+        assert!(!directory.join("data.ext4").exists());
+        assert!(!directory.join("bootstrap.pending").exists());
+    }
 
     #[test]
     fn host_recovery_selects_only_conversation_mounts_and_rejects_stacked_or_foreign_filesystems() {
