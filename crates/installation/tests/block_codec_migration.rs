@@ -254,7 +254,19 @@ async fn upgrades_version_eleven_preserving_protected_native_defaults() {
 async fn upgrades_version_twelve_preserving_native_administrator_reviews() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open(root.path()).unwrap();
-    let node = json!({ "id": "native", "nativeModeRequest": { "mode": "administrator", "generation": "reviewed" }, "nativeModeObserved": { "mode": "administrator", "generation": "reviewed", "status": "applied" }, "nativeReviewedAgents": ["agent"] });
+    let node = json!({
+        "id": "native",
+        "nativeModeRequest": {
+            "mode": "administrator",
+            "generation": "reviewed",
+        },
+        "nativeModeObserved": {
+            "mode": "administrator",
+            "generation": "reviewed",
+            "status": "applied",
+        },
+        "nativeReviewedAgents": ["agent"],
+    });
     store.put("nodes", node.clone()).await.unwrap();
     store
         .transaction(|db| {
