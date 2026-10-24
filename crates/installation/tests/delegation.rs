@@ -551,6 +551,167 @@ async fn a_requester_has_a_bounded_number_of_working_tasks() {
 }
 
 #[tokio::test]
+async fn withdrawing_the_first_message_finishes_an_unstarted_task_and_releases_its_slot() {
+    let f = Fixture::new(true).await;
+    let turn = f.conversation(MAIN_AGENT_ID).await;
+    let mut children = Vec::new();
+    for index in 0..delegation::MAX_ACTIVE {
+        let task = f
+            .delegate(&turn, json!({ "task": format!("Task {index}") }))
+            .await
+            .unwrap();
+        children.push(text(&task, "chatId").to_owned());
+    }
+    let child = &children[0];
+    let detail = f.s.chat_detail(child).await.unwrap();
+    assert!(detail["run"].is_null());
+    assert_eq!(detail["status"], "queued");
+    let message = text(&detail["messages"][0], "id");
+    f.s.chat_edit(child, message, None).await.unwrap();
+
+    let status = delegation::status(&f.s, &turn.token, &json!({ "chatId": child }))
+        .await
+        .unwrap();
+    assert_eq!(status["finished"], true);
+    assert_eq!(status["status"], "idle");
+    let wait = wait_for::schedule(
+        &f.s,
+        &turn.token,
+        &json!({
+            "condition": { "type": "task_finished", "chatId": child },
+            "reason": "Observe the withdrawn task",
+            "timeoutSeconds": 60,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(wait["deferred"], false);
+    assert_eq!(wait["observation"]["status"], "idle");
+    assert!(
+        f.delegate(&turn, json!({ "task": "Replacement" }))
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn preparation_failures_reach_the_requester_and_are_redacted_after_deletion() {
+    let f = Fixture::new(true).await;
+    let turn = f.conversation(MAIN_AGENT_ID).await;
+    let project = id();
+    f.s.store
+        .put(
+            "projects",
+            json!({ "id": project, "name": "Review project", "path": f._root.path() }),
+        )
+        .await
+        .unwrap();
+    let agent =
+        f.s.agent(
+            json!({ "name": "Reviewer", "access": { "projects": [project] } }),
+            None,
+        )
+        .await
+        .unwrap();
+    let delegated = f
+        .delegate(
+            &turn,
+            json!({ "task": "Review the project", "agentId": agent["id"], "projectId": project }),
+        )
+        .await
+        .unwrap();
+    let child = text(&delegated, "chatId");
+    f.s.agent(
+        json!({ "name": "Reviewer", "access": { "projects": [] } }),
+        agent["id"].as_str(),
+    )
+    .await
+    .unwrap();
+    f.s.chat_tick(&HashSet::new()).await.unwrap();
+    let error =
+        f.s.store
+            .kv(&format!("chat-error:{child}"))
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(!error.as_str().unwrap().is_empty());
+    assert!(f.s.chat_detail(child).await.unwrap()["run"].is_null());
+
+    let status = delegation::status(&f.s, &turn.token, &json!({ "chatId": child }))
+        .await
+        .unwrap();
+    assert_eq!(status["finished"], true);
+    assert_eq!(status["paused"], true);
+    assert_eq!(status["error"], error);
+    let listed = delegation::status(&f.s, &turn.token, &json!({}))
+        .await
+        .unwrap();
+    assert_eq!(listed["tasks"][0]["error"], error);
+
+    let wait_input = json!({
+        "condition": { "type": "task_finished", "chatId": child },
+        "reason": "Observe the preparation failure",
+        "timeoutSeconds": 60,
+    });
+    let wait = wait_for::schedule(&f.s, &turn.token, &wait_input)
+        .await
+        .unwrap();
+    assert_eq!(wait["deferred"], false);
+    assert_eq!(wait["observation"]["status"], "queued");
+    assert_eq!(wait["observation"]["paused"], true);
+    assert_eq!(wait["observation"]["error"], error);
+
+    f.s.chat_trash(child, true).await.unwrap();
+    let deleted = delegation::status(&f.s, &turn.token, &json!({ "chatId": child }))
+        .await
+        .unwrap();
+    assert!(deleted["error"].is_null());
+    let wait = wait_for::schedule(&f.s, &turn.token, &wait_input)
+        .await
+        .unwrap();
+    assert_eq!(wait["observation"]["status"], "deleted");
+    assert!(wait["observation"]["error"].is_null());
+}
+
+#[tokio::test]
+async fn run_failures_include_their_error_in_status_and_wait_results() {
+    let f = Fixture::new(true).await;
+    let turn = f.conversation(MAIN_AGENT_ID).await;
+    let delegated = f
+        .delegate(&turn, json!({ "task": "Review" }))
+        .await
+        .unwrap();
+    let child = text(&delegated, "chatId");
+    let child_turn = f.running(child).await;
+    f.s.store
+        .patch_run(
+            &child_turn.run,
+            json!({ "status": "failed", "error": "Provider request failed" }),
+        )
+        .await
+        .unwrap();
+    let status = delegation::status(&f.s, &turn.token, &json!({ "chatId": child }))
+        .await
+        .unwrap();
+    assert_eq!(status["finished"], true);
+    assert_eq!(status["error"], "Provider request failed");
+    let wait = wait_for::schedule(
+        &f.s,
+        &turn.token,
+        &json!({
+            "condition": { "type": "task_finished", "chatId": child },
+            "reason": "Observe the failure",
+            "timeoutSeconds": 60,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(wait["deferred"], false);
+    assert_eq!(wait["observation"]["status"], "failed");
+    assert_eq!(wait["observation"]["error"], "Provider request failed");
+}
+
+#[tokio::test]
 async fn removing_delegation_revokes_a_live_requester() {
     let f = Fixture::new(true).await;
     let turn = f.conversation(MAIN_AGENT_ID).await;

@@ -386,7 +386,8 @@ describe('delegated tasks', () => {
     }
 
     expect(state(view('a'))).toEqual(['running', 'Working'])
-    expect(state(view('a', { runId: null, status: 'idle' }))).toEqual(['running', 'Waiting for a runner'])
+    expect(state(view('a', { runId: null, status: 'queued' }))).toEqual(['running', 'Waiting for a runner'])
+    expect(state(view('a', { runId: null, status: 'idle' }))).toEqual(['stopped', 'Stopped'])
     expect(state(view('a', { status: 'succeeded', pendingQuestions: 1 }))).toEqual(['running', 'Asks a question'])
     expect(state(view('a', { status: 'succeeded', preview: '2 findings' }))).toEqual(['done', '2 findings'])
     expect(state(view('a', { status: 'succeeded' }))).toEqual(['done', 'Reported back'])

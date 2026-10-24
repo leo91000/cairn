@@ -29,6 +29,12 @@ in Elevated rights and reviewed like it. It gives a conversation turn three
 `wait_for` gains the native `task_finished { chatId }` condition. Like
 `run_finished`, it is polled without the LLM. It completes once the task is idle,
 not merely when its turn ends, or once it is paused or deleted.
+Before its first run, a task with queued input shows as queued. Withdrawing that
+input leaves an empty idle task: it completes the wait and releases its active
+slot, and both clients show it as stopped.
+Task status and wait observations include the paused state and any preparation
+or execution error, so a failed start does not look like an empty successful
+report. Deleted tasks no longer expose these errors.
 
 Delegated work never widens access. A task runs as the requesting agent, or as
 another agent whose access the requester's current access covers (`covers`, the

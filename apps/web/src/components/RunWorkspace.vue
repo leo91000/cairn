@@ -9,11 +9,13 @@ import {
   state,
 } from '../api'
 import { chatList } from '../chat-list'
+import { recordedTitle } from '../chat-wait'
 import {
   ArrowLeft,
   CalendarClock,
   Copy,
   FileText,
+  Hourglass,
   MessageCircle,
   RotateCw,
   Square,
@@ -38,6 +40,7 @@ import RunDetails from './RunDetails.vue'
 import Status from './Status.vue'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
+import UiNotice from './UiNotice.vue'
 import UiSegments from './UiSegments.vue'
 
 // From the Fil, a mission run stays beside it: its runs open there and its Mission tab holds the
@@ -58,11 +61,13 @@ const { events, connectionNotice, catchingUp: loading } = live
 const run = computed(() => live.snapshot.value?.run ?? undefined)
 const suspended = computed(() => isExclusivelySuspended(run.value))
 const retryNotice = useRetryNotice(() => run.value)
+// What the run waits for, above its tabs: its scheduled continuation, a retry or an account.
 const waitNotice = computed(() => {
   const wakeup = run.value?.wakeup
   if (run.value?.status === 'waiting' && wakeup)
-    return `${wakeup.reason} · ${wakeup.display?.title || (wakeup.condition ? 'Waiting for the condition' : 'Scheduled continuation')} · ${new Date(wakeup.wakeAt).toLocaleString()}`
-  return retryNotice.value ?? run.value?.accountWaitReason
+    return { title: recordedTitle(wakeup), detail: wakeup.reason }
+  const reason = retryNotice.value ?? run.value?.accountWaitReason
+  return reason ? { title: 'Waiting', detail: reason } : undefined
 })
 const deliverables = computed(() => live.snapshot.value?.artifacts ?? [])
 const artifactViewer = ref<string | null>(null)
@@ -216,9 +221,17 @@ async function copy() {
           </div>
         </div>
       </div>
-      <p v-if="waitNotice" role="status" class="mb-3 shrink-0 text-sm text-warning">
-        {{ waitNotice }}
-      </p>
+      <UiNotice
+        v-if="waitNotice"
+        role="status"
+        class="mt-0 mb-3 shrink-0"
+        :icon="Hourglass"
+        :title="waitNotice.title"
+      >
+        <p class="line-clamp-2" :title="waitNotice.detail">
+          {{ waitNotice.detail }}
+        </p>
+      </UiNotice>
       <section class="panel run-panel flex flex-1 min-h-0 flex-col overflow-hidden">
         <header class="run-panel-head flex shrink-0 items-center justify-between border-b border-line p-[7px] phone:p-[5px]">
           <UiSegments v-model="tab" label="Run view" :options="tabs" />

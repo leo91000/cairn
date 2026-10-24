@@ -26,8 +26,11 @@ Le plugin GitHub livré en ajoute deux :
   [l’accès agent](AGENT-ACCESS.md).
 - `task_finished` : une tâche que cette conversation a déléguée avec
   `delegate_task` ne travaille plus : son tour est fini sans réveil ni message à
-  traiter, ou elle est en pause, arrêtée ou supprimée. Cette source exige la
+  traiter, son premier message a été retiré avant de démarrer, ou elle est en
+  pause, arrêtée ou supprimée. Cette source exige la
   délégation de tâches et ne vise que les tâches de la conversation qui attend.
+  Le résultat indique aussi sa pause et son erreur éventuelle, y compris un
+  échec de préparation avant son premier tour ; une tâche supprimée masque l’erreur.
   Le rapport se lit ensuite avec `task_status` (voir les
   [tâches déléguées](adr/0059-delegated-tasks.md)).
 - `github_workflow` : un workflow GitHub Actions identifié par un projet autorisé,

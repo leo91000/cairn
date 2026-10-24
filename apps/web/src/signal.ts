@@ -198,8 +198,9 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
     if (isExclusivelySuspended(run)) {
       live.push({ ...base, kind: 'suspended', subtitle: exclusiveSuspensionLabel })
     }
+    // A mission that scheduled its continuation resumes on its own, like a chat.
     else if (run.status === 'waiting') {
-      live.push({
+      waiting.push({
         ...base,
         kind: 'waiting',
         subtitle: run.wakeup?.reason || 'Mission waiting for continuation',

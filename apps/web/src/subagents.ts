@@ -44,7 +44,7 @@ function delegatedState(chat: ChatView | undefined): SubagentState {
     return 'stopped'
   if (chat.pendingQuestions > 0 || chat.status === 'running' || chat.status === 'queued' || chat.wakeup)
     return 'running'
-  return chat.status === 'idle' ? 'running' : 'done'
+  return chat.status === 'idle' ? 'stopped' : 'done'
 }
 
 function delegatedSummary(chat: ChatView | undefined) {

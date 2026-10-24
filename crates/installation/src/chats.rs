@@ -152,9 +152,15 @@ pub(crate) fn view(db: &Db<'_>, mut chat: Value) -> Result<Value> {
     let run = db.run(text(&chat, "runId"))?;
     chat["canRequestNewSession"] =
         crate::conversation_lifecycle::can_request_new_session(&chat, run.as_ref()).into();
-    chat["status"] = run
-        .as_ref()
-        .map_or_else(|| "idle".into(), |run| run["status"].clone());
+    let queued_delegation = run.is_none()
+        && chat["requestedBy"].is_object()
+        && continuation::has_pending_input(db, &chat)?;
+    chat["status"] = if queued_delegation {
+        "queued".into()
+    } else {
+        run.as_ref()
+            .map_or_else(|| "idle".into(), |run| run["status"].clone())
+    };
     chat["suspendedByExclusive"] = run
         .as_ref()
         .map_or(Value::Null, |run| run["suspendedByExclusive"].clone());

@@ -267,7 +267,7 @@ internal fun Subagent.followed(chat: Chat?): Subagent {
             chat.pendingQuestions > 0 ||
                 chat.status in listOf("running", "queued") ||
                 chat.wakeup != null -> SubagentState.RUNNING
-            chat.status == "idle" -> SubagentState.RUNNING
+            chat.status == "idle" -> SubagentState.STOPPED
             else -> SubagentState.DONE
         }
     val summary =

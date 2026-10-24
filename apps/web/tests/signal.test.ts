@@ -260,6 +260,28 @@ describe('the Fil', () => {
     expect(fil.recent.map(item => item.title).sort()).toEqual(['paused', 'read'])
   })
 
+  it('lists a mission that scheduled its continuation with waiting conversations, soonest first', () => {
+    const wakeup = (wakeAt: number) => ({
+      id: `wake-${wakeAt}`,
+      messageId: null,
+      seconds: 60,
+      reason: 'Wait for CI',
+      createdAt: 1,
+      wakeAt,
+    })
+    const fil = filOf([
+      chat('later', { status: 'succeeded', unread: false, wakeup: wakeup(900) }),
+    ], [task('watch')], [
+      run('watch-1', 'watch', { status: 'waiting', finishedAt: null, wakeup: wakeup(300) }),
+    ])
+    expect(fil.live).toEqual([])
+    expect(fil.waiting.map(item => [item.title, item.kind, item.wakeAt])).toEqual([
+      ['watch', 'waiting', 300],
+      ['later', 'waiting', 900],
+    ])
+    expect(fil.waiting[0]).toMatchObject({ key: 'task:watch', subtitle: 'Wait for CI', runId: 'watch-1' })
+  })
+
   describe('a blocked mission', () => {
     const blocked = (values: Partial<RunListItem['outcome'] & object> = {}): RunListItem['outcome'] => ({
       status: 'blocked',

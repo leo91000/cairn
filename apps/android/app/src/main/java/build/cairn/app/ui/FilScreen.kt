@@ -44,6 +44,8 @@ internal enum class FeedKind {
     RUNNING_CHAT,
     RUNNING_TASK,
     WAITING_CHAT,
+    /** A mission run that scheduled its continuation. */
+    WAITING_TASK,
     /** A blocked mission snoozed until [FeedItem.wakeAt]. */
     SNOOZED_TASK,
     /** A blocked mission that waits on someone else, or that the user dismissed. */
@@ -110,7 +112,7 @@ internal data class Feed(
     val forYou: List<FeedItem>,
     val running: List<FeedItem>,
     val recent: List<FeedItem>,
-    /** Conversations that resume on their own, soonest first. */
+    /** Conversations and missions that resume on their own, soonest first. */
     val waiting: List<FeedItem> = emptyList(),
 ) {
     val empty
@@ -286,14 +288,25 @@ internal fun buildFeed(
                     harness = run.provider,
                 )
             when {
+                // A mission that scheduled its continuation resumes on its own, like a chat.
+                run.status == "waiting" && run.suspendedByExclusive == null ->
+                    waiting +=
+                        item(
+                                FeedKind.WAITING_TASK,
+                                run.wakeup?.reason?.ifBlank { null }
+                                    ?: "Mission en attente de reprise",
+                            )
+                            .copy(
+                                wakeAt = run.wakeup?.wakeAt,
+                                condition = run.wakeup?.condition != null,
+                                resolved = run.wakeup?.observation != null,
+                            )
                 run.active ->
                     running +=
                         item(
                                 FeedKind.RUNNING_TASK,
                                 if (run.suspendedByExclusive != null)
                                     "Suspendue (exclusivité) · Mission · $agent"
-                                else if (run.status == "waiting")
-                                    "Attente programmée · ${run.wakeup?.reason ?: agent}"
                                 else if (run.status == "queued") "Mission en attente · $agent"
                                 else "Mission · $agent",
                             )
@@ -756,6 +769,7 @@ private fun FeedRow(
             FeedKind.UNREAD_CHAT,
             FeedKind.UNREAD_TASK -> AvatarBadge.DONE
             FeedKind.WAITING_CHAT,
+            FeedKind.WAITING_TASK,
             FeedKind.SNOOZED_TASK -> AvatarBadge.WAITING
             FeedKind.SET_ASIDE_TASK,
             FeedKind.CHAT -> null

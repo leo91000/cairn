@@ -14,9 +14,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -125,29 +123,20 @@ internal fun ChatWaitingNotice(
     openConnections: () -> Unit,
     canManage: Boolean = true,
 ) {
-    Surface(
-        modifier =
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).semantics {
-                liveRegion = LiveRegionMode.Polite
-            },
-        color = MaterialTheme.colorScheme.secondaryContainer,
-        shape = MaterialTheme.shapes.medium,
-    ) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(
-                notice.account?.let { "Compte $it requis" } ?: "Conversation en attente",
-                style = MaterialTheme.typography.titleSmall,
-            )
-            Text(
-                if (notice.account != null && !canManage)
-                    "Demandez au propriétaire de reconnecter le compte. Votre message est conservé."
-                else notice.message,
-                style = MaterialTheme.typography.bodyMedium,
-            )
+    Notice(
+        if (notice.account != null && !canManage)
+            "Demandez au propriétaire de reconnecter le compte. Votre message est conservé."
+        else notice.message,
+        Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+        if (notice.account != null) NoticeTone.WARNING else NoticeTone.INFO,
+        title = notice.account?.let { "Compte $it requis" } ?: "Conversation en attente",
+        icon = if (notice.account != null) CairnIcons.Key else CairnIcons.Hourglass,
+        maxLines = 3,
+        action =
             if (notice.account != null && canManage)
-                TextButton(onClick = openConnections) { Text("Ouvrir les connexions") }
-        }
-    }
+                ({ TextButton(onClick = openConnections) { Text("Ouvrir les connexions") } })
+            else null,
+    )
 }
 
 /** The server's durable dispatch queue is not necessarily a waiting user message. */

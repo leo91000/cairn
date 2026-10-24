@@ -551,6 +551,10 @@ class SubagentsTest {
         assertEquals(SubagentState.RUNNING to "En cours", follow(chat))
         assertEquals(
             SubagentState.RUNNING to "En attente d’un runner",
+            follow(chat.copy(status = "queued", runId = null)),
+        )
+        assertEquals(
+            SubagentState.STOPPED to "Arrêtée",
             follow(chat.copy(status = "idle", runId = null)),
         )
         assertEquals(
