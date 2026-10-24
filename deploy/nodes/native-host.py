@@ -19,6 +19,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import urllib.error
@@ -31,6 +32,178 @@ INSTALL = Path('/opt/cairn-native')
 SERVICE = 'cairn-native-node.service'
 CGROUP_ROOT = Path('/sys/fs/cgroup')
 STOP = False
+
+# Managed tools are independent of the conversation's pinned coding engines.
+# No host Docker service is installed, joined, stopped or reconfigured.
+DOCKER_TOOLS = (
+    ('https://download.docker.com/linux/static/stable/x86_64/docker-29.9.0.tgz',
+     '33e1ab8b63d14bca449f7a3d30d7f6aa669daa544e60a86b17fec87f61afe2b4',
+     {'docker/' + name: 'bin/' + name for name in ('docker', 'dockerd', 'containerd', 'containerd-shim-runc-v2', 'runc', 'docker-init', 'docker-proxy')}),
+    ('https://github.com/rootless-containers/rootlesskit/releases/download/v3.3.0/rootlesskit-x86_64.tar.gz',
+     '0e757c8f80510d764df8c9a5f169805580b48d02329f0a200900e261ecec27ed', {'rootlesskit': 'bin/rootlesskit'}),
+    ('https://github.com/rootless-containers/slirp4netns/releases/download/v1.3.6/slirp4netns-x86_64',
+     '411167abceff1fc8a7c562f53ed9f26d3ec8a17df4e2fe6eaa3bd53f1c1e1d48', {'': 'bin/slirp4netns'}),
+    ('https://github.com/docker/buildx/releases/download/v0.38.1/buildx-v0.38.1.linux-amd64',
+     'e25d5cd675092bb5d1d03632fdc46cdf3fede7b514dc5f023a105e00d3ce5ad4', {'': 'plugins/docker-buildx'}),
+    ('https://github.com/docker/compose/releases/download/v5.6.1/docker-compose-linux-x86_64',
+     '47737f4236e6d3ccea7291995203f8f018058783b4c3a9469119811a0b5db8c0', {'': 'plugins/docker-compose'}),
+)
+
+DOCKER_WRAPPER = '''#!/bin/sh
+set -eu
+if test "${1:-}" = cairn-reset; then
+  if test "$#" -ne 2 || test "$2" != --confirm-delete-state; then
+    echo 'To delete ALL conversation Docker images, containers, build cache and volumes, use docker cairn-reset --confirm-delete-state.' >&2
+    exit 2
+  fi
+  exec /run/cairn-entrypoint/cairn native-docker-reset
+fi
+client_config=${DOCKER_CONFIG:-/home/node/.docker}
+mkdir -p "$client_config/cli-plugins"
+for plugin in buildx compose; do
+  if ! test -e "$client_config/cli-plugins/docker-$plugin"; then
+    ln -s "/opt/cairn-docker/plugins/docker-$plugin" "$client_config/cli-plugins/docker-$plugin"
+  fi
+done
+case "${1:-}" in
+  compose|buildx)
+    plugin=$1
+    case "${2:-}" in
+      version|--help|help)
+        shift
+        exec "/opt/cairn-docker/plugins/docker-$plugin" "$@"
+        ;;
+    esac
+    ;;
+esac
+export DOCKER_HOST=unix:///run/cairn-docker/docker.sock
+exec /opt/cairn-docker/bin/docker "$@"
+'''
+
+
+def trusted_mapping_helper(path, required_bit):
+    metadata = Path(path).stat()
+    if metadata.st_uid != 0 or metadata.st_mode & 0o022 or not metadata.st_mode & stat.S_IXOTH or not stat.S_ISREG(metadata.st_mode):
+        return False
+    if metadata.st_mode & stat.S_ISUID:
+        return True
+    try:
+        capability = os.getxattr(path, 'security.capability')
+    except OSError:
+        return False
+    if len(capability) not in (20, 24):
+        return False
+    words = [int.from_bytes(capability[offset:offset + 4], 'little') for offset in range(0, len(capability), 4)]
+    expected_revision = 0x02000001 if len(words) == 5 else 0x03000001
+    return words[0] == expected_revision and words[1:5] == [required_bit, 0, 0, 0] and (len(words) == 5 or words[5] == 0)
+
+
+def require_docker_host():
+    version = subprocess.run(['systemctl', '--version'], check=True, capture_output=True, text=True, timeout=10).stdout.split()[1]
+    if int(version) < 255:
+        raise ValueError('Native rootless enclaves require systemd 255 or newer; older versions force NoNewPrivileges on mapping helpers.')
+    for name in ('/proc/sys/user/max_user_namespaces', '/proc/sys/kernel/unprivileged_userns_clone'):
+        path = Path(name)
+        if path.exists() and int(path.read_text().strip()) == 0:
+            raise ValueError('Native Docker requires enabled unprivileged user namespaces; global restrictions are not changed automatically.')
+    for name, required_bit in (('newuidmap', 1 << 7), ('newgidmap', 1 << 6)):
+        path = shutil.which(name)
+        if not path:
+            raise ValueError('Native Docker requires the distribution uidmap package (newuidmap/newgidmap).')
+        if not trusted_mapping_helper(path, required_bit):
+            raise ValueError('Native Docker requires root-owned non-writable mapping helpers with setuid or the exact effective CAP_SETUID/CAP_SETGID file capability.')
+    for name in ('iptables', 'ip6tables', 'ip', 'usermod', 'useradd', 'groupadd', 'getent'):
+        if not shutil.which(name):
+            raise ValueError('Native Docker requires iptables, iproute2 and account tools (useradd/groupadd/usermod/getent); install distribution packages before enrollment.')
+    for name in ('/etc/subuid', '/etc/subgid'):
+        metadata = Path(name).stat()
+        if metadata.st_uid != 0 or metadata.st_mode & 0o022:
+            raise ValueError('Native Docker requires root-managed subordinate UID/GID databases.')
+    if not stat.S_ISCHR(Path('/dev/net/tun').stat().st_mode):
+        raise ValueError('Native Docker requires the existing /dev/net/tun device.')
+    if tuple(int(part) for part in os.uname().release.split('.')[:2]) < (5, 12):
+        raise ValueError('Native Docker bind isolation requires Linux 5.12 or newer.')
+
+
+def prepare_docker_tools():
+    # Bump this package generation when wrapper or generated metadata changes.
+    target = INSTALL / 'docker-tools/v2'
+    if target.exists():
+        manifest = json.loads((target / 'manifest.json').read_text())
+        for name, digest in manifest.items():
+            path = target / name
+            if path.is_symlink() or not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                raise ValueError('Managed native Docker tool integrity check failed.')
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+    with tempfile.TemporaryDirectory(prefix='.docker-tools-', dir=target.parent) as temporary:
+        stage = Path(temporary)
+        stage.chmod(0o755)
+        (stage / 'bin').mkdir(mode=0o755)
+        (stage / 'plugins').mkdir(mode=0o755)
+        for url, digest, names in DOCKER_TOOLS:
+            archive = stage / 'download'
+            # These public downloads carry no enrollment/node credential.
+            with urllib.request.urlopen(url, timeout=60) as response, archive.open('wb') as output:
+                total = 0
+                while chunk := response.read(65536):
+                    total += len(chunk)
+                    if total > 256 * 1024 * 1024:
+                        raise ValueError('Native Docker tool download exceeds its size bound.')
+                    output.write(chunk)
+            if hashlib.sha256(archive.read_bytes()).hexdigest() != digest:
+                raise ValueError('Native Docker tool download digest mismatch.')
+            if url.endswith('.tar.gz') or url.endswith('.tgz'):
+                with tarfile.open(archive) as bundle:
+                    for source, name in names.items():
+                        record = bundle.getmember(source)
+                        if not record.isfile() or record.size > 256 * 1024 * 1024:
+                            raise ValueError('Invalid managed Docker executable.')
+                        with bundle.extractfile(record) as source_file, (stage / name).open('xb') as output:
+                            shutil.copyfileobj(source_file, output)
+            else:
+                shutil.copyfile(archive, stage / names[''])
+            archive.unlink()
+        (stage / 'docker').write_text(DOCKER_WRAPPER)
+        # Extract the paired client's API version without ever contacting a daemon.
+        # Client version output is emitted even when the explicit missing socket
+        # makes the server half of `docker version` fail.
+        client = stage / 'bin/docker'
+        client.chmod(0o555)
+        probe = subprocess.run([str(client), 'version', '--format', '{{json .Client}}'],
+            env=dict(PATH=os.defpath, HOME=str(stage), DOCKER_CONFIG=str(stage / 'client-probe'),
+                     DOCKER_HOST='unix://' + str(stage / 'unavailable.sock')),
+            capture_output=True, text=True, timeout=20)
+        version = json.loads(probe.stdout)['ApiVersion']
+        if not re.fullmatch(r'[0-9]+\.[0-9]+', version):
+            raise ValueError('Managed Docker API version probe failed.')
+        (stage / 'engine-api.json').write_text(json.dumps(dict(apiVersion=version)))
+        inventory = {}
+        for path in [stage / 'docker', stage / 'engine-api.json', *(stage / 'bin').iterdir(), *(stage / 'plugins').iterdir()]:
+            path.chmod(0o444 if path.name == 'engine-api.json' else 0o555)
+            inventory[str(path.relative_to(stage))] = hashlib.sha256(path.read_bytes()).hexdigest()
+        atomic_json(stage / 'manifest.json', inventory)
+        (stage / 'manifest.json').chmod(0o444)
+        os.rename(stage, target)
+    return target
+
+
+def configure_docker_apparmor(target):
+    restriction = Path('/proc/sys/kernel/apparmor_restrict_unprivileged_userns')
+    if not restriction.exists() or restriction.read_text().strip() != '1':
+        return
+    parser = shutil.which('apparmor_parser')
+    if not parser:
+        raise ValueError('Restricted user namespaces require AppArmor tooling for the managed RootlessKit profile.')
+    executable = str(target / 'bin/rootlesskit')
+    if any(character in executable for character in ('"', '\n', '\r')):
+        raise ValueError('Invalid managed RootlessKit path.')
+    profile = Path('/etc/apparmor.d/cairn-native-rootlesskit')
+    profile.write_text('abi <abi/4.0>,\ninclude <tunables/global>\n'
+                       'profile cairn-native-rootlesskit "' + executable + '" flags=(unconfined) {\n  userns,\n}\n'
+                       'profile cairn-native-rootlesskit-enclave "/opt/cairn-docker/bin/rootlesskit" flags=(unconfined) {\n  userns,\n}\n')
+    profile.chmod(0o644)
+    subprocess.run([parser, '--replace', str(profile)], check=True, capture_output=True, timeout=30)
 
 
 class UnixControllerConnection(http.client.HTTPConnection):
@@ -287,7 +460,8 @@ def environment(directory):
     return {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8', 'DATA_DIR': str(ROOT / 'data'),
             'RUNNER_STATE_DIR': str(ROOT / 'state'), 'RUNNER_URL': 'http://127.0.0.1:4311', 'RUNNER_BIND': '127.0.0.1:4311',
             'CAIRN_NODE_BACKEND': 'native', 'CAIRN_NATIVE_TOOLS': str(directory / 'tools'),
-            'CAIRN_NATIVE_SUPERVISOR_UNIT': SERVICE, 'APP_RUNTIME_ID': release['runtimeId']}
+            'CAIRN_NATIVE_SUPERVISOR_UNIT': SERVICE, 'APP_RUNTIME_ID': release['runtimeId'],
+            'CAIRN_NATIVE_DOCKER_TOOLS': str(INSTALL / 'docker-tools/v2')}
 
 
 def require_storage():
@@ -312,8 +486,8 @@ def install(manager):
     if (ROOT / 'data/node/identity.json').exists():
         raise ValueError('Native node is already enrolled.')
     version = subprocess.run(['systemctl', '--version'], check=True, capture_output=True, text=True).stdout.split()[1]
-    if int(version) < 252:
-        raise ValueError('Native execution requires systemd 252 or newer.')
+    if int(version) < 255:
+        raise ValueError('Native rootless execution requires systemd 255 or newer.')
     try:
         controllers = set((CGROUP_ROOT / 'cgroup.controllers').read_text().split())
     except OSError as error:
@@ -321,6 +495,8 @@ def install(manager):
     if not {'cpu', 'memory', 'pids'} <= controllers:
         raise ValueError('Native execution requires cgroup v2 with CPU, memory and PID controllers.')
     require_storage()
+    require_docker_host()
+    configure_docker_apparmor(prepare_docker_tools())
     ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(ROOT, 0o700)
     (ROOT / 'data').mkdir(mode=0o700, exist_ok=True)
@@ -420,6 +596,8 @@ def activate(candidate, previous, child):
 
 def run():
     require_storage()
+    require_docker_host()
+    configure_docker_apparmor(prepare_docker_tools())
     manager = origin(json.loads((ROOT / 'settings.json').read_text())['manager'])
     identity = json.loads((ROOT / 'data/node/identity.json').read_text())
     token = identity['token']
@@ -443,6 +621,8 @@ def run():
                     if release['dataEpoch'] != installed['dataEpoch']:
                         raise ValueError('Native update needs a reviewed installation data epoch transition.')
                     candidate = prepare(manager, release, token=token)
+                    require_docker_host()
+                    configure_docker_apparmor(prepare_docker_tools())
                     verify_workload_tools(candidate)
                     if STOP:
                         break

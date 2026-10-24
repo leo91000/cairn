@@ -61,7 +61,7 @@ async fn upgrades_version_ten_preserving_plugin_packages_and_fences_older_binari
     let version: i64 = db
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
     // Epoch-11 managers reject anything above ten before reading installed manifests.
     assert!(version > 10);
     drop(upgraded);
@@ -240,7 +240,7 @@ async fn upgrades_version_eleven_preserving_protected_native_defaults() {
     assert_eq!(
         db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap(),
-        12
+        13
     );
     // An epoch-12 manager rejects SQLite versions above eleven before mutations.
     assert!(
@@ -248,4 +248,52 @@ async fn upgrades_version_eleven_preserving_protected_native_defaults() {
             .unwrap()
             > 11
     );
+}
+
+#[tokio::test]
+async fn upgrades_version_twelve_preserving_native_administrator_reviews() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    let node = json!({
+        "id": "native",
+        "nativeModeRequest": {
+            "mode": "administrator",
+            "generation": "reviewed",
+        },
+        "nativeModeObserved": {
+            "mode": "administrator",
+            "generation": "reviewed",
+            "status": "applied",
+        },
+        "nativeReviewedAgents": ["agent"],
+    });
+    store.put("nodes", node.clone()).await.unwrap();
+    store
+        .transaction(|db| {
+            db.0.execute_batch("PRAGMA user_version=12;")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    drop(store);
+    let upgraded = Store::open(root.path()).unwrap();
+    assert_eq!(
+        upgraded.get("nodes", "native").await.unwrap(),
+        Some(node.clone())
+    );
+    assert!(cairn_installation::nodes::native_mode::reviewed(
+        &node,
+        &json!({ "id": "agent" })
+    ));
+    assert!(!cairn_installation::nodes::native_mode::reviewed(
+        &node,
+        &json!({ "id": "unreviewed" })
+    ));
+    let db = Connection::open(root.path().join("manager.db")).unwrap();
+    let version: i64 = db
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 13);
+    // Epoch-13 managers refuse this database before reading native disk state.
+    assert!(version > 12);
 }

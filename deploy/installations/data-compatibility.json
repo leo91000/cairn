@@ -1,7 +1,7 @@
 {
   "schema": 2,
-  "epoch": 13,
-  "databaseVersion": 12,
+  "epoch": 14,
+  "databaseVersion": 13,
   "legacyTree": "a6aae371f1d76cceb2f510180531f0ef17ec3e60",
   "automaticMigration": {
     "fromEpochs": [
@@ -14,9 +14,10 @@
       9,
       10,
       11,
-      12
+      12,
+      13
     ],
-    "previousDatabaseVersion": 11,
+    "previousDatabaseVersion": 12,
     "plan": "docs/AUTOMATIC-MIGRATIONS.md",
     "tests": [
       "settings::tests::length_limits_are_positive_integers_with_type_specific_caps",
@@ -37,10 +38,26 @@
       "wildcard_node_access_still_requires_trusted_contributors",
       "native::service::tests::native_budget_supports_six_slots_and_rejects_invalid_capacities",
       "native::service::tests::controller_enforces_all_configured_slots_before_preparing_an_attempt",
+      "native::identity::tests::ranges_never_overlap_host_users_or_other_subordinates",
+      "native::identity::tests::remapping_preserves_volume_users_and_is_idempotent_for_disjoint_ranges",
+      "native::docker::tests::docker_api_cannot_acquire_namespace_mount_device_or_restart_privileges",
+      "native::docker::tests::docker_driver_options_and_unrecognized_management_apis_fail_closed",
+      "native::identity::reconcile::tests::capability_and_acl_ids_follow_the_namespace_mapping",
+      "native::identity::reconcile::tests::pending_metadata_replay_restores_mode_even_after_ownership_changed",
+      "native::docker::mounts::tests::replaced_source_names_cannot_redirect_a_pinned_descriptor",
+      "native::identity::reconcile::tests::legacy_acl_qualifiers_are_preserved_without_collapsing_distinct_users",
+      "native::docker::proxy::tests::client_negotiation_does_not_need_a_start_socket_or_daemon",
+      "native::identity::tests::root_ids_skip_host_accounts_groups_and_subordinates_beyond_system_pool_limits",
+      "native::identity::tests::reserved_root_ids_are_not_recycled_after_interrupted_account_creation",
+      "native::identity::tests::namespace_maps_must_match_the_reserved_identity_exactly",
+      "native::docker::tests::plugin_rpc_without_json_media_type_still_enforces_authorization",
+      "native::docker::tests::unversioned_version_and_volume_routes_are_not_misread_as_api_versions",
       "upgrades_version_eleven_preserving_protected_native_defaults",
       "native_administrator_requires_owner_review_verified_generation_and_explicit_admission",
       "native_mode_preview_detects_concurrent_access_changes_and_agent_requests_need_owner",
-      "native::mode::tests::unknown_modes_and_stale_or_unconfirmed_plans_fail_closed"
+      "native::mode::tests::unknown_modes_and_stale_or_unconfirmed_plans_fail_closed",
+      "upgrades_version_twelve_preserving_native_administrator_reviews",
+      "native::identity::reconcile::tests::administrator_engine_mapping_preserves_namespace_volume_users"
     ]
   }
 }

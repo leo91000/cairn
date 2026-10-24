@@ -8,7 +8,7 @@ never crash a driver. Review code before testing on a personal workstation.
 
 ## Requirements and enrollment
 
-Use Linux x86-64 with systemd 252+, cgroup v2, Python 3, curl, useradd/usermod,
+Use Linux x86-64 with systemd 255+, cgroup v2, Python 3, curl, useradd/usermod,
 e2fsprogs, io_uring and a working `ublk_drv` kernel driver. Host libraries must be
 compatible with the published coding engines. The installed GPU
 driver, render/video device permissions and application libraries must already
@@ -96,7 +96,11 @@ An offline Beacon authority check eventually stops native work too.
 
 The managed filesystem contains system binaries/libraries read-only, a private
 HOME, project files, output, temporary files and GPU devices. The personal home,
-desktop sockets, Docker daemon and administrator privileges are unavailable.
+desktop sockets, host Docker daemon and administrator privileges are unavailable.
+Conversations use their own lazy [rootless Docker enclave](NATIVE-DOCKER.md) for
+builds, containers and Compose. Published ports are private to that conversation's
+network; GPU containers and privileged Docker features are unavailable. Images,
+build cache and named volumes follow the durable environment's native storage.
 Graphics tests must use headless/offscreen APIs. Cairn bundles the coding engines,
 including Codex's `codex-code-mode-host` companion beside its executable, Node.js
 and `gh`; other toolchains use this node's installed binaries/libraries or
@@ -189,6 +193,12 @@ session files, user tools and workspace/output files stay on the journal-backed
 filesystem. This does not detect secrets deliberately written into arbitrary user
 files. A different workload UID on a destination can require a one-time ownership
 reconciliation of filesystem metadata.
+
+Native conversations keep a distinct identity and subordinate ID range. The
+mapping travels with the disk and preserves container UID/GID ownership during
+reconciliation. Native-to-VM conversion refuses initialized Docker metadata rather
+than discarding it; [export and compatibility limits](NATIVE-DOCKER.md#persistence-and-compatibility)
+apply in addition to ordinary application dependencies.
 
 Existing stopped `native-files-v1` checkpoints remain readable. Local file work is
 copied into the block filesystem while retaining the old source until its new S3

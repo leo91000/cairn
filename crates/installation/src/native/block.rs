@@ -254,14 +254,23 @@ pub async fn mount(
         let runtime = json!({
             "backend": "native", "storage": "ublk", "os": "linux", "arch": "x86_64",
             "runtimeId": plan["runtimeId"],
+            "nativeIsolation": "rootless-v1",
         });
         if directory.join("runtime.json").exists() {
             let previous: Value =
                 serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
-            if previous != runtime {
+            let mut upgraded = previous.clone();
+            if upgraded.get("nativeIsolation").is_none() {
+                upgraded["nativeIsolation"] = "rootless-v1".into();
+            }
+            if upgraded != runtime {
                 return Err(Error::conflict("Native disk runtime changed."));
             }
-        } else {
+        }
+        // Commit the reader fence before mounting or changing any file owner.
+        // Previous controllers compare the complete runtime identity and reject
+        // this additional field, including after a restore on another node.
+        {
             atomic_write(
                 &directory.join("runtime.json"),
                 &serde_json::to_vec(&runtime)?,

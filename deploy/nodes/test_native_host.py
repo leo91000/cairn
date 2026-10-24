@@ -25,6 +25,37 @@ def release(**changes):
 
 
 class NativeHostTests(unittest.TestCase):
+    def test_mapping_helpers_accept_only_their_effective_global_file_capability(self):
+        metadata = Mock(st_uid=0, st_mode=host.stat.S_IFREG | 0o755)
+        def capability(*words):
+            return b''.join(word.to_bytes(4, 'little') for word in words)
+        for bit in (1 << 7, 1 << 6):
+            for data, expected in [
+                (capability(0x02000001, bit, 0, 0, 0), True),
+                (capability(0x03000001, bit, 0, 0, 0, 0), True),
+                (capability(0x02000000, bit, 0, 0, 0), False),
+                (capability(0x02000001, bit | 1, 0, 0, 0), False),
+                (capability(0x03000001, bit, 0, 0, 0, 1000), False),
+            ]:
+                with patch.object(host.Path, 'stat', return_value=metadata), patch.object(host.os, 'getxattr', return_value=data):
+                    self.assertEqual(expected, host.trusted_mapping_helper('/synthetic', bit))
+        with patch.object(host.Path, 'stat', return_value=Mock(st_uid=0, st_mode=host.stat.S_IFREG | 0o4755)):
+            self.assertTrue(host.trusted_mapping_helper('/synthetic', 1 << 7))
+
+    def test_disabled_user_namespaces_fail_without_changing_global_restrictions(self):
+        with patch.object(host.subprocess, 'run', return_value=Mock(stdout='systemd 255')), \
+                patch.object(host.Path, 'exists', return_value=True), \
+                patch.object(host.Path, 'read_text', return_value='0'), \
+                patch.object(host.Path, 'write_text') as write, \
+                self.assertRaisesRegex(ValueError, 'enabled unprivileged user namespaces'):
+            host.require_docker_host()
+        write.assert_not_called()
+
+    def test_rootless_mapping_fails_before_enrollment_on_implicit_nnp_systemd(self):
+        with patch.object(host.subprocess, 'run', return_value=Mock(stdout='systemd 252')), \
+                self.assertRaisesRegex(ValueError, 'systemd 255'):
+            host.require_docker_host()
+
     def test_codex_companion_is_extracted_and_rechecked_before_reuse(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -80,7 +111,7 @@ class NativeHostTests(unittest.TestCase):
                 if controllers is not None:
                     (root / 'cgroup.controllers').write_text(controllers)
                 with patch.object(host, 'ROOT', root / 'state'), patch.object(host, 'CGROUP_ROOT', root), \
-                        patch.object(host.subprocess, 'run', return_value=Mock(stdout='systemd 252')), \
+                        patch.object(host.subprocess, 'run', return_value=Mock(stdout='systemd 255')), \
                         patch.object(host.getpass, 'getpass') as enrollment, patch.object(host, 'prepare') as prepare:
                     with self.assertRaisesRegex(ValueError, 'cgroup v2'):
                         host.install('https://manager.example.test')

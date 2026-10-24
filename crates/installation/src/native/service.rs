@@ -720,6 +720,11 @@ impl Controller {
         if stop.is_cancelled() {
             return Ok(143);
         }
+        let administrator = plan["nativeMode"]["mode"] == "administrator";
+        let mut identity = super::identity::provision(&self.state, text(plan, "runId")).await?;
+        if administrator {
+            identity.host_engine = Some((self.identity.uid, self.identity.gid));
+        }
         block::initialize(
             &self.state,
             text(plan, "runId"),
@@ -742,30 +747,35 @@ impl Controller {
             tokio::fs::remove_dir_all(&temporary).await?;
         }
         private_dir(&temporary).await?;
-        workspace::own_tree(&temporary, self.identity.uid, self.identity.gid).await?;
+        workspace::own_tree(&temporary, identity.uid(), identity.gid()).await?;
         let stage = self.data.join("runs").join(text(plan, "runId"));
-        let bindings = super::home::prepare(
-            &stage.join("home"),
-            &data.join("home"),
-            self.identity.uid,
-            self.identity.gid,
+        let bindings =
+            super::home::prepare_for_identity(&stage.join("home"), &data, &identity).await?;
+        // Keep the existing prepared-base admission marker. The authoritative
+        // ownership mapping now travels inside the published filesystem.
+        atomic_write(
+            &root.join("file-owner.json"),
+            &serde_json::to_vec(&identity)?,
         )
         .await?;
-        workspace::own_tree(&stage.join("home"), self.identity.uid, self.identity.gid).await?;
-        let ownership = json!({ "uid": self.identity.uid, "gid": self.identity.gid });
-        let saved_owner: Value = match tokio::fs::read(root.join("file-owner.json")).await {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Value::Null,
-            Err(error) => return Err(error.into()),
-        };
-        if saved_owner != ownership {
-            workspace::own_tree(&data, self.identity.uid, self.identity.gid).await?;
-            block::sync(&data).await?;
-            atomic_write(
-                &root.join("file-owner.json"),
-                &serde_json::to_vec(&ownership)?,
-            )
-            .await?;
+        let docker_data = data.join("docker");
+        // Only namespace root may access raw daemon metadata. Engine access is
+        // exclusively through the mandatory authorization plugin.
+        tokio::fs::create_dir_all(&docker_data).await?;
+        std::os::unix::fs::lchown(
+            &docker_data,
+            Some(identity.root_uid),
+            Some(identity.root_gid),
+        )?;
+        tokio::fs::set_permissions(&docker_data, std::fs::Permissions::from_mode(0o700)).await?;
+        let runtime = root.join("docker-runtime");
+        if runtime.exists() {
+            tokio::fs::remove_dir_all(&runtime).await?;
+        }
+        for name in ["runtime", "rootlesskit", "plugins"] {
+            let path = runtime.join(name);
+            private_dir(&path).await?;
+            std::os::unix::fs::lchown(&path, Some(identity.root_uid), Some(identity.root_gid))?;
         }
         if disk::used(&self.data, &self.state).await? > self.disk_limit().await? {
             return Err(Error::conflict(
@@ -782,46 +792,83 @@ impl Controller {
             "sys",
             "run",
             "tmp",
+            "var",
             "var/tmp",
+            "home",
             "home/node",
         ] {
-            tokio::fs::create_dir_all(container.join(dir)).await?;
+            let path = container.join(dir);
+            tokio::fs::create_dir_all(&path).await?;
+            tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).await?;
         }
         let mut plan = plan.clone();
+        plan["guestDataRoot"] = guest_data(&plan, &self.data)
+            .to_string_lossy()
+            .into_owned()
+            .into();
+        if !administrator {
+            plan["nativeIdentity"] = serde_json::to_value(&identity)?;
+        }
         plan["nativeHomeBindings"] = serde_json::to_value(bindings)?;
         if plan["chat"]["provider"] == "claude" {
             plan["chat"]["claudeCredentialsDirectory"] = super::home::CLAUDE_AUTH_DIRECTORY.into();
         }
         let mcp_stop = stop.child_token();
         let _mcp_guard = mcp_stop.clone().drop_guard();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let origin = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
-        for field in ["codexConfig", "claudeMcps", "opencodeConfig", "args"] {
-            if let Some(value) = plan["chat"].get_mut(field) {
+        if administrator {
+            // Preserve administrator's host execution and existing local relay;
+            // it does not enter the protected Docker namespace or receive its socket.
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let origin = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
+            for field in ["codexConfig", "claudeMcps", "opencodeConfig", "args"] {
+                if let Some(value) = plan["chat"].get_mut(field) {
+                    replace_origin(value, &origin);
+                }
+            }
+            if let Some(value) = plan.get_mut("args") {
                 replace_origin(value, &origin);
             }
+            plan["mcpEnv"][crate::plugins::cli::ORIGIN_ENV] = origin.into();
+            tokio::spawn(relay(
+                listener,
+                stage.join("home").join(crate::microvm::mcp::SOCKET),
+                mcp_stop,
+            ));
+        } else {
+            plan["mcpEnv"][crate::plugins::cli::ORIGIN_ENV] = crate::microvm::mcp::ORIGIN.into();
         }
-        if let Some(value) = plan.get_mut("args") {
-            replace_origin(value, &origin);
-        }
-        // `cairn plugin` reaches the same channel as the agent's MCP servers.
-        plan["mcpEnv"][crate::plugins::cli::ORIGIN_ENV] = origin.clone().into();
-        let channel = stage.join("home").join(crate::microvm::mcp::SOCKET);
-        tokio::spawn(relay(listener, channel, mcp_stop));
         let auth = stage
             .join("home")
             .join(crate::nodes::workspace::provider_home(&plan))
             .join("cairn-auth.sock");
+        let channel = stage.join("home").join(crate::microvm::mcp::SOCKET);
         if plan["chat"].is_object() {
             let _ = tokio::time::timeout(Duration::from_secs(3), async {
-                while !auth.exists() {
+                while !auth.exists() || !channel.exists() {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             })
             .await;
         }
+        if !administrator && channel.exists() {
+            use std::os::unix::fs::FileTypeExt;
+            if !tokio::fs::symlink_metadata(&channel)
+                .await?
+                .file_type()
+                .is_socket()
+            {
+                return Err(Error::unavailable(
+                    "Native conversation MCP channel is not a socket.",
+                ));
+            }
+            std::os::unix::fs::lchown(&channel, Some(identity.root_uid), Some(identity.root_gid))?;
+        } else if !administrator && plan["chat"].is_object() {
+            return Err(Error::unavailable(
+                "Native conversation MCP channel did not become available.",
+            ));
+        }
         let auth = if auth.exists() {
-            std::os::unix::fs::lchown(&auth, Some(self.identity.uid), Some(self.identity.gid))?;
+            std::os::unix::fs::lchown(&auth, Some(identity.uid()), Some(identity.gid()))?;
             Some(auth)
         } else {
             None
@@ -847,6 +894,9 @@ impl Controller {
             workspace: &data.join("workspaces"),
             output: &data.join("output"),
             identity: &self.identity,
+            conversation: (!administrator).then_some(&identity),
+            docker_data: (!administrator).then_some(docker_data.as_path()),
+            docker_runtime: (!administrator).then_some(runtime.as_path()),
             temporary: &temporary,
             auth: auth.as_deref(),
         };
@@ -1252,6 +1302,36 @@ fn guest_data(plan: &Value, data: &Path) -> PathBuf {
         .map_or_else(|| data.to_owned(), PathBuf::from)
 }
 
+fn replace_origin(value: &mut Value, origin: &str) {
+    match value {
+        Value::String(text) => *text = text.replace(crate::microvm::mcp::ORIGIN, origin),
+        Value::Array(values) => values
+            .iter_mut()
+            .for_each(|value| replace_origin(value, origin)),
+        Value::Object(values) => values
+            .values_mut()
+            .for_each(|value| replace_origin(value, origin)),
+        _ => {}
+    }
+}
+
+async fn relay(listener: tokio::net::TcpListener, channel: PathBuf, stop: CancellationToken) {
+    let _ = crate::microvm::listener::serve(
+        || listener.accept(),
+        |(mut client, _)| {
+            let channel = channel.clone();
+            async move {
+                if let Ok(mut server) = tokio::net::UnixStream::connect(channel).await {
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                }
+            }
+        },
+        32,
+        stop,
+    )
+    .await;
+}
+
 #[cfg(test)]
 async fn install_home(source: &Path, target: &Path) -> Result<()> {
     let agents = target.join(".agents");
@@ -1307,36 +1387,6 @@ async fn install_home(source: &Path, target: &Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn replace_origin(value: &mut Value, origin: &str) {
-    match value {
-        Value::String(text) => *text = text.replace(crate::microvm::mcp::ORIGIN, origin),
-        Value::Array(values) => values
-            .iter_mut()
-            .for_each(|value| replace_origin(value, origin)),
-        Value::Object(values) => values
-            .values_mut()
-            .for_each(|value| replace_origin(value, origin)),
-        _ => {}
-    }
-}
-
-async fn relay(listener: tokio::net::TcpListener, channel: PathBuf, stop: CancellationToken) {
-    let _ = crate::microvm::listener::serve(
-        || listener.accept(),
-        |(mut client, _)| {
-            let channel = channel.clone();
-            async move {
-                if let Ok(mut server) = tokio::net::UnixStream::connect(channel).await {
-                    let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
-                }
-            }
-        },
-        32,
-        stop,
-    )
-    .await;
 }
 
 async fn input(request: Request, limit: usize) -> Result<Value> {
@@ -1927,8 +1977,12 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                     remaining.min(controller.disk_growth().await?),
                 )
                 .await?;
-                workspace::own_tree(&received, controller.identity.uid, controller.identity.gid)
-                    .await?;
+                let mut identity =
+                    super::identity::provision(&controller.state, &attempt.run).await?;
+                if plan["nativeMode"]["mode"] == "administrator" {
+                    identity.host_engine = Some((controller.identity.uid, controller.identity.gid));
+                }
+                workspace::own_tree(&received, identity.uid(), identity.gid()).await?;
                 tokio::fs::rename(received, &target).await?;
             }
             json!({ "ok": true })

@@ -162,24 +162,42 @@ forward fix. Never lower SQLite `user_version`, the epoch or the legacy tree, or
 start an older manager against the migrated installation. Merging does not
 release or deploy an installation.
 
-## Current transition: epochs 3–12 to 13
+## Retained transition: epochs 3–12 to 13
 
-Epoch 13 adds native node privilege requests, observed generation/state and
-owner-reviewed administrator admission. SQLite advances from 11 to 12 before
-startup reads any records. Existing records remain unchanged: absent mode means
-protected, absent reviews never grant administrator access. Existing tasks,
-provenance, files and history are preserved. There is no default elevation.
-`upgrades_version_eleven_preserving_protected_native_defaults` verifies this
-preservation and the older-version fence. The retained transition regressions
-remain part of exact-tree validation.
+Epoch 13 adds owner-reviewed native administrator admission and SQLite 12.
+Absent mode remains protected; existing reviews and generation handshakes are
+preserved. The strict native budget marker fences older controllers. See
+[native administrator](NATIVE-ADMINISTRATOR.md) and its retained regressions.
 
-Native supervisors require the matching new release through the reviewed epoch
-update procedure described above; no release or host update is performed by this
-PR. The controller writes `nativeModeProtocol: 1` in its strict on-disk budget;
-older native binaries reject this field. Public health keeps the ordinary budget
-shape. New controllers read both budgets. Supervisor state records pending,
-applied or failed mode transitions atomically, and refuses unconfirmed plans.
-Failure recovery is a forward fix with the candidate and state retained. Never
-lower the epoch/database version or remove the native marker to restart an older
-controller. Returning to protected is a runtime mode change, not data rollback or
-host restoration. See [native administrator](NATIVE-ADMINISTRATOR.md).
+## Current transition: epochs 3–13 to 14
+
+Epoch 14 stores native conversation ownership mappings inside encrypted ext4 and
+allocates distinct host accounts and subordinate UID/GID ranges for protected
+execution. Old controllers flatten ownership and cannot safely write Docker
+state. SQLite advances from 12 to 13 before manager admission. The block objects,
+encryption, manifests, administrator reviews and existing records are unchanged.
+
+Under exclusive physical ownership, existing files are assigned to the engine
+identity once. Same-node resumes compare one mapping record. A destination
+translates the previous reserved IDs while preserving container users, volume
+modes, ACLs and file capabilities. Durable transition and per-batch journals replay
+pending inode metadata before home refresh, complete that mapping, then apply a
+new destination if needed. Interrupted transitions retain source work and journals.
+Administrator mode keeps its existing shared host account and sudo contract: only
+the engine owner is translated when switching modes; container identities and the
+private Docker store remain reserved. Returning to protected translates that
+engine owner back before admission. Rootless Docker is provided in protected mode.
+
+Retain the identity registry and durable high root-ID sequence with the environment,
+including cache eviction. Never recycle accounts into another conversation.
+Before activation refresh the reviewed supervisor and managed Docker prerequisites,
+drain and stop the previous native runtime. The supervisor epoch gate refuses a
+routine in-place cross-epoch update; use the reviewed native transition. This PR
+neither releases nor deploys it. Never start old controllers against new disks or
+lower markers. Rollback requires matching pre-transition data and binaries; prefer
+a forward fix. Keep every earlier transition regression and legacy Git tree.
+
+Qualification includes ID isolation, ownership/admin transitions, authorization,
+existing storage recovery and disposable native-runtime tests. Docker images,
+cache and volumes use normal publication/eviction. Native-to-VM conversion refuses
+a nonempty Docker store with source retained; see [native Docker](NATIVE-DOCKER.md).

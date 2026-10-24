@@ -176,3 +176,10 @@ metadata bytes and local costs; sequential order and fsync variance prevent a
 production throughput inference. The JSON output also includes means and all
 reported percentiles. The existing [object compression measurements](STORAGE-COMPRESSION.md)
 remain the reference for unchanged disk objects.
+
+Protected conversations provide a private lazy rootless Docker daemon; administrator
+execution keeps this document's host/sudo behavior and does not receive that daemon
+or socket. Mode changes preserve Docker state: the journal translates the agent's
+file owner while retaining container users, volume permissions and reserved ranges.
+Services stop with the protected turn and can restart after returning to protected.
+See [native Docker](NATIVE-DOCKER.md) and the current epoch14/SQLite13 transition.
