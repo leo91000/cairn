@@ -7,6 +7,8 @@ use crate::{
 use serde_json::Value;
 use std::path::Path;
 
+pub(crate) const DISK_BUSY: &str = "VM disk is active.";
+
 pub async fn prepare(
     directory: &Path,
     size: u64,
@@ -121,7 +123,7 @@ async fn prepare_source(
     seed: Option<(&Path, (u32, u32))>,
 ) -> Result<()> {
     crate::skills::private_dir(directory).await?;
-    let _lock = crate::file_lock::exclusive(&directory.join("lock"), "VM disk is active.")?;
+    let _lock = crate::file_lock::exclusive(&directory.join("lock"), DISK_BUSY)?;
     let marker = directory.join("bootstrap.pending");
     let resize_source = directory.join("resize-source");
     let mut context = context.clone();
