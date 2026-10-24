@@ -12,7 +12,7 @@ use cairn_installation::{
     plugins::{
         capabilities,
         connections::{self, Connection},
-        registry, runtime, scope, socket, work,
+        panels, registry, runtime, socket, work,
     },
     service::Service,
     validation::text,
@@ -233,6 +233,7 @@ fn context(connection: &Connection, event: &Value) -> capabilities::Context {
         event: event.clone(),
         link: None,
         draft: None,
+        resource_grant: None,
     }
 }
 
@@ -560,15 +561,16 @@ async fn rejected_handlers_keep_filtered_messages_and_leave_the_worker_usable() 
 
 #[tokio::test]
 async fn handler_presentations_preserve_rejection_and_host_refusal_policies() {
-    let (_root, s, connection) = fixture().await;
-    let mut package = registry::builtin("discord").unwrap();
-    let instance = scope::Scope::Instance(Box::new(connection.clone()));
+    let (_root, s, agent) = service().await;
+    let mut manifest = registry::builtin("discord").unwrap().manifest;
+    manifest.id = "presentations".into();
+    manifest.instance_form = false;
     let (link, _commands) = socket::Link::channel();
     let rejected = "Review this instance.";
     let refused = "This host is not declared by the plugin.";
     let handler_failed = "The Discord plugin failed while handling test.";
     let socket_failed = "The plugin failed while handling its connection.";
-    for (body, handler_error, socket_error, start_message) in [
+    for (index, (body, handler_error, socket_error, start_message)) in [
         (
             "cairn.fail('Review this instance.')",
             (502, rejected),
@@ -593,9 +595,43 @@ async fn handler_presentations_preserve_rejection_and_host_refusal_policies() {
             (403, rejected),
             "rejected: Review this instance.",
         ),
-    ] {
-        package.source = format!("return {{ test = function() {body} end, socket = function() {body} end, start = function() {body} end }}").as_str().into();
-        let error = scope::invoke(&s, &package, "test", Value::Null, &instance)
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut manifest = manifest.clone();
+        manifest.version = format!("99.0.0-presentation-{index}");
+        let source = format!("return {{ test = function() {body} end, socket = function() {body} end, start = function() {body} end }}");
+        let installed = registry::install(
+            &s,
+            &json!({
+                "manifest": manifest,
+                "source": source,
+            }),
+        )
+        .await
+        .unwrap();
+        registry::approve(&s, &manifest.id, &manifest.version, text(&installed, "digest"))
+            .await
+            .unwrap();
+        let package = registry::active(&s, &manifest.id).await.unwrap();
+        let connection = connections::save(
+            &s,
+            &manifest.id,
+            &json!({
+                "name": "Presentation instance",
+                "settings": {"guildId": "100", "channelId": "200", "botName": "Cairn"},
+                "userIds": ["300"],
+                "agentId": agent["id"],
+                "enabled": true,
+                "token": "synthetic_discord_token",
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+        let connection: Connection = serde_json::from_value(connection).unwrap();
+        let error = panels::test(&s, &manifest.id, &connection.id)
             .await
             .unwrap_err();
         assert_eq!((error.status, error.message.as_str()), handler_error);
@@ -893,11 +929,34 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
         chat,
         "same thread, same conversation"
     );
+    // Fill only unrelated pending-delivery slots. A textual stop is a message
+    // handler too, but must remain available while new submissions are saturated.
+    let mut occupied = Vec::new();
+    for _ in 0..20 {
+        let id = cairn_installation::config::id();
+        s.store
+            .put(
+                work::DELIVERIES,
+                json!({
+                    "id": id,
+                    "connectionId": connection.id,
+                    "revision": connection.revision,
+                    "createdAt": now(),
+                    "nextAttemptAt": now() + 86_400_000,
+                }),
+            )
+            .await
+            .unwrap();
+        occupied.push(id);
+    }
     let mut stop = message("502", "300", "<@400> stop");
     stop["channel_id"] = json!("500");
-    accept_in(&s, &connection, &threads, stop.clone())
-        .await
-        .unwrap();
+    assert!(
+        accept_in(&s, &connection, &threads, stop.clone())
+            .await
+            .unwrap(),
+        "A full work queue refused a textual stop"
+    );
     runtime::pump(&s, &connection, &mut session).await.unwrap();
     assert_eq!(s.get("chats", &chat).await.unwrap()["paused"], true);
     assert_eq!(
@@ -908,6 +967,15 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
         .await,
         1
     );
+    s.store
+        .transaction(move |db| {
+            for id in occupied {
+                db.remove(work::DELIVERIES, &id)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
     session.stop().await;
     server.abort();
 }
@@ -2752,4 +2820,157 @@ async fn installed_packages_can_be_split_into_modules_and_any_file_change_needs_
     assert!(registry::active(&s, "splitter").await.is_err());
     std::fs::remove_file(directory.join("link.luau")).unwrap();
     registry::active(&s, "splitter").await.unwrap();
+}
+
+#[tokio::test]
+async fn upgrade_retires_unattributed_questions_visibly_without_answering_them() {
+    let (_root, s, connection) = fixture().await;
+    let event = json!({
+        "name": "message", "revision": connection.revision,
+        "authorId": "300", "payload": { "id": "590" },
+    });
+    let receipt = work::submit(
+        &s,
+        &context(&connection, &event),
+        &json!({ "text": "Help", "thread": "590", "shared": true }),
+    )
+    .await
+    .unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let chat_id = text(&receipt, "chatId").to_owned();
+    let chat = s.get("chats", &chat_id).await.unwrap();
+    let run = text(&chat, "runId").to_owned();
+    let pending = "d".repeat(64);
+    let answering = "e".repeat(64);
+    let current = "f".repeat(64);
+    let answered = "a".repeat(64);
+    for id in [&pending, &answering, &current, &answered] {
+        s.question_receive(
+            &run,
+            json!({
+                "id": id, "blocking": true,
+                "fields": [{
+                    "id": "0", "title": "PRIVATE_QUESTION_CONTENT",
+                    "secret": true, "options": [],
+                }],
+            }),
+        )
+        .await
+        .unwrap();
+    }
+    let prefix = cairn_installation::chats::question_prefix(&chat_id);
+    let answer = cairn_installation::config::id();
+    s.store
+        .transaction({
+            let (prefix, chat, pending, answering, answered, answer) = (
+                prefix.clone(),
+                chat_id.clone(),
+                pending.clone(),
+                answering.clone(),
+                answered.clone(),
+                answer.clone(),
+            );
+            move |db| {
+                // These are the fields a base-release host had persisted before
+                // turn attribution and its one-time transition marker existed.
+                db.delete("migration:question-turn-attribution")?;
+                for id in [&pending, &answering, &answered] {
+                    let key = format!("{prefix}{id}");
+                    let mut question = db.kv(&key)?.unwrap();
+                    question.as_object_mut().unwrap().remove("turnId");
+                    if id == &answering {
+                        question["status"] = json!("answering");
+                        question["messageId"] = json!(answer);
+                    } else if id == &answered {
+                        question["status"] = json!("answered");
+                        question["blocking"] = json!(false);
+                    }
+                    db.set(&key, &question, None)?;
+                }
+                db.put_message(&json!({
+                    "id": answer, "chatId": chat, "questionId": answering,
+                    "text": "PRIVATE_ANSWER_CONTENT", "mode": "steer",
+                    "status": "queued", "createdAt": now(),
+                }))?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let unchanged = s.store.keys(&prefix).await.unwrap();
+    let config = s.config.clone();
+    s.shutdown.cancel();
+    let reopened = Service::new(config.clone()).await.unwrap();
+    for id in [&pending, &answering] {
+        let value = reopened
+            .store
+            .kv(&format!("{prefix}{id}"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            value["status"], "cancelled",
+            "An ambiguous old question stays hidden and pending"
+        );
+        assert_eq!(value["blocking"], false);
+        assert!(
+            value["turnId"].is_null(),
+            "Do not infer another turn's authority"
+        );
+    }
+    for id in [&current, &answered] {
+        let key = format!("{prefix}{id}");
+        assert_eq!(
+            reopened.store.kv(&key).await.unwrap().unwrap(),
+            unchanged.iter().find(|(saved, _)| saved == &key).unwrap().1,
+        );
+    }
+    let chat = reopened.chat_detail(&chat_id).await.unwrap();
+    let message = chat["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == answer)
+        .unwrap();
+    assert_eq!(message["status"], "cancelled");
+    assert_eq!(
+        chat["run"]["chatExecution"]["messageId"],
+        receipt["messageId"]
+    );
+    let notices = reopened
+        .store
+        .read({
+            let run = run.clone();
+            move |db| db.events(&run, 0, 1000)
+        })
+        .await
+        .unwrap();
+    let recovery = notices
+        .iter()
+        .filter(|e| text(e, "text").contains("Ask the agent to repeat"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recovery.len(),
+        1,
+        "One visible recovery notice per affected conversation"
+    );
+    assert_eq!(
+        recovery[0]["type"], "error",
+        "Both clients present this as an attention notice"
+    );
+    assert!(!recovery[0].to_string().contains("PRIVATE_"));
+    reopened.shutdown.cancel();
+    let again = Service::new(config).await.unwrap();
+    let repeated = again
+        .store
+        .read(move |db| db.events(&run, 0, 1000))
+        .await
+        .unwrap();
+    assert_eq!(
+        repeated, notices,
+        "Restarting cannot repeat the retirement notice"
+    );
+    again.shutdown.cancel();
 }

@@ -45,6 +45,9 @@ pub struct Question {
     pub chat_id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub run_id: String,
+    /// The user message whose execution issued this question, not its answer.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub turn_id: String,
     #[serde(default)]
     pub blocking: bool,
     pub status: QuestionStatus,
@@ -76,6 +79,72 @@ impl Question {
 
 pub fn question_prefix(chat: &str) -> String {
     format!("chat-question:{chat}:")
+}
+
+/// Older questions cannot prove which turn asked them. Withdraw them before any
+/// native or plugin delivery starts, without assigning the current turn's rights.
+pub(crate) fn retire_unattributed(db: &mut Db<'_>) -> Result<()> {
+    let marker = "migration:question-turn-attribution";
+    if db.kv(marker)?.is_some() {
+        return Ok(());
+    }
+
+    let mut affected: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for (key, mut question) in db.keys("chat-question:")? {
+        let open = matches!(text(&question, "status"), "pending" | "answering");
+        if !open || !text(&question, "turnId").is_empty() {
+            continue;
+        }
+        let chat = key
+            .strip_prefix("chat-question:")
+            .and_then(|key| key.rsplit_once(':'))
+            .map_or("", |(chat, _)| chat);
+        affected.entry(chat.to_owned()).or_default().push((
+            text(&question, "id").to_owned(),
+            text(&question, "messageId").to_owned(),
+        ));
+        question["status"] = json!("cancelled");
+        question["blocking"] = json!(false);
+        question["retiredReason"] = json!("missing-turn-attribution");
+        db.set(&key, &question, None)?;
+    }
+
+    for (chat_id, answers) in affected {
+        for mut message in db.messages(&chat_id)? {
+            let pending = matches!(text(&message, "status"), "queued" | "sending");
+            let retired_answer = answers.iter().any(|(question, answer)| {
+                !answer.is_empty() && message["id"] == *answer && message["questionId"] == *question
+            });
+            if pending && retired_answer {
+                message["status"] = super::MessageStatus::Cancelled.into();
+                db.put_message(&message)?;
+            }
+        }
+        if let Some(chat) = db.get("chats", &chat_id)? {
+            let run = text(&chat, "runId");
+            if db.run(run)?.is_some() {
+                // Error notices are visible in both clients. This event does not
+                // change the run's status and contains no question/answer text.
+                db.event(
+                    run,
+                    "error",
+                    "Questions saved before this update could not be matched to their original turn. \
+                     They were withdrawn without answering. Ask the agent to repeat them in this conversation.",
+                    None,
+                )?;
+            }
+        }
+        db.audit(
+            "chat.questions.retired",
+            &json!({
+                "chatId": chat_id,
+                "count": answers.len(),
+                "reason": "missing-turn-attribution",
+            }),
+        )?;
+    }
+
+    db.set(marker, &json!(true), None)
 }
 
 pub(super) fn questions(db: &Db<'_>, chat: &str) -> Result<Vec<Question>> {
@@ -124,7 +193,14 @@ fn receive(db: &Db<'_>, mut question: Question) -> Result<()> {
         return Ok(());
     }
     question.chat_id = text(&chat, "id").to_owned();
-    if let Some(mut existing) = find_question(db, &question.chat_id, &question.id)? {
+    question.turn_id = db
+        .run(&question.run_id)?
+        .map(|run| text(&run["chatExecution"], "messageId").to_owned())
+        .unwrap_or_default();
+    if let Some(mut existing) = find_question(db, &question.chat_id, &question.id)?
+        && existing.run_id == question.run_id
+        && existing.turn_id == question.turn_id
+    {
         existing.blocking = existing.status == QuestionStatus::Pending && question.blocking;
         return save_question(db, &existing);
     }
@@ -256,15 +332,33 @@ fn answer(
     id: &str,
     input: &AnswerInput,
     origin: &crate::native::policy::Origin,
+    principal: Option<&crate::plugins::requesters::Principal>,
+    owner_control: bool,
 ) -> Result<Question> {
+    use crate::plugins::requesters::{self, Capture};
+
     chat(db, chat_id)?;
     let question = required(find_question(db, chat_id, id)?, "Question not found")?;
     let answers = serde_json::to_value(&input.answers)?;
     let previous = find_message(db, chat_id, &input.id)?;
     let already_sent = question.message_id.as_deref() == Some(input.id.as_str())
-        && previous.is_some_and(|message| message["answers"] == answers);
+        && previous
+            .as_ref()
+            .is_some_and(|message| message["answers"] == answers);
     if already_sent {
+        // A receipt is read-only. In particular, an owner's old retry must not
+        // suspend a later turn or move the answer's original provenance.
+        if !owner_control && requesters::recorded(db, chat_id, &input.id)?.as_ref() != principal {
+            return Err(Error::conflict(
+                "This message belongs to another requester.",
+            ));
+        }
         return Ok(question);
+    }
+    if previous.is_some() {
+        return Err(Error::conflict(
+            "This message identifier has already been used.",
+        ));
     }
     if question.status != QuestionStatus::Pending {
         return Err(Error::conflict(
@@ -287,6 +381,12 @@ fn answer(
             "text": answer_text(&question.fields, &input.answers),
         }),
     )?;
+    let kind = if owner_control {
+        Capture::OwnerAnswer
+    } else {
+        Capture::New
+    };
+    requesters::capture_principal(db, chat_id, &message, principal, kind)?;
     send(db, chat_id, message, Some((question, answers)), origin)?;
     required(find_question(db, chat_id, id)?, "Question not found")
 }
@@ -308,6 +408,7 @@ impl Service {
             id: id.to_owned(),
             chat_id: String::new(),
             run_id: run_id.to_owned(),
+            turn_id: String::new(),
             blocking,
             status: QuestionStatus::Pending,
             fields,
@@ -354,8 +455,35 @@ impl Service {
     }
 
     pub async fn question_answer(&self, chat_id: &str, id: &str, input: Value) -> Result<Value> {
-        self.question_answer_authorized(chat_id, id, input, |_| Ok(()))
-            .await
+        self.question_answer_as(chat_id, id, input, None).await
+    }
+
+    pub async fn question_answer_as(
+        &self,
+        chat_id: &str,
+        id: &str,
+        input: Value,
+        identity: Option<&crate::auth::InstallationIdentity>,
+    ) -> Result<Value> {
+        use crate::{auth::InstallationRole, plugins::requesters};
+
+        let actor = match identity {
+            Some(identity) => Some(requesters::message_actor(self, &identity.account_id).await?),
+            None => None,
+        };
+        // The role is supplied by the authenticated relay/direct lease. Owner
+        // control suspends personal credentials; it never supplies their proof.
+        let owner_control = identity.is_some_and(|i| i.role == InstallationRole::Owner);
+
+        self.question_answer_authorized(
+            chat_id,
+            id,
+            input,
+            actor.map(requesters::Principal::Account),
+            owner_control,
+            |_, _| Ok(()),
+        )
+        .await
     }
 
     pub(crate) async fn question_answer_authorized<F>(
@@ -363,22 +491,34 @@ impl Service {
         chat_id: &str,
         id: &str,
         input: Value,
+        principal: Option<crate::plugins::requesters::Principal>,
+        owner_control: bool,
         authorize: F,
     ) -> Result<Value>
     where
-        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+        F: FnOnce(&Db<'_>, &Question) -> Result<()> + Send + 'static,
     {
         let origin = crate::native::policy::origin();
         if origin.known() {
             crate::native::policy::refresh_chat(self, chat_id).await?;
         }
         let input = parse_as::<AnswerInput>("answer", input)?;
+
         let (chat_id, id) = (chat_id.to_owned(), id.to_owned());
         let question = self
             .store
             .transaction(move |db| {
-                authorize(db)?;
-                answer(db, &chat_id, &id, &input, &origin)
+                let question = required(find_question(db, &chat_id, &id)?, "Question not found")?;
+                authorize(db, &question)?;
+                answer(
+                    db,
+                    &chat_id,
+                    &id,
+                    &input,
+                    &origin,
+                    principal.as_ref(),
+                    owner_control,
+                )
             })
             .await?;
         self.worker.notify();

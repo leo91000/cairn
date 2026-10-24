@@ -234,7 +234,12 @@ pub struct Observed {
     pub check_after: Option<i64>,
 }
 
-pub async fn observe(s: &Service, run: &Value, condition: &Value) -> Result<Observed> {
+pub async fn observe(
+    s: &Service,
+    run: &Value,
+    condition: &Value,
+    bearer: Option<&str>,
+) -> Result<Observed> {
     let caller = run.clone();
     let source = condition.clone();
     let project = s
@@ -269,9 +274,9 @@ pub async fn observe(s: &Service, run: &Value, condition: &Value) -> Result<Obse
             object.remove(key);
         }
     }
-    let scope = Scope::Agent {
-        agent_id: agent_id.clone(),
-        instances,
+    let scope = match bearer {
+        Some(bearer) => Scope::for_agent(s, run, instances, bearer).await?,
+        None => Scope::for_condition(s, run, condition, instances).await?,
     };
     let payload = json!({
         "condition": declared.name,
@@ -379,6 +384,7 @@ pub async fn poll_once(s: &Service) -> Result<()> {
                     "access": policy(&run["snapshot"]["agent"]),
                     "condition": owner.record["wakeup"]["condition"],
                     "projectOrigin": granted_origin,
+                    "requester": super::requesters::observation_key_in(db, &run)?,
                 })
                 .to_string();
                 groups.entry(key).or_default().push((owner, run));
@@ -398,7 +404,7 @@ pub async fn poll_once(s: &Service) -> Result<()> {
     let results = stream::iter(groups)
         .map(|group| async move {
             let (first, run) = &group[0];
-            let observed = observe(s, run, &first.record["wakeup"]["condition"]).await;
+            let observed = observe(s, run, &first.record["wakeup"]["condition"], None).await;
             s.store
                 .transaction(move |db| record(db, group, &observed))
                 .await
@@ -413,27 +419,45 @@ pub async fn poll_once(s: &Service) -> Result<()> {
     Ok(())
 }
 
+/// Resolve one still-current wait from the snapshot used by a provider probe.
+fn current_wait(
+    db: &Db<'_>,
+    expected: &crate::waits::Owner,
+    observed_run: &Value,
+) -> Result<Option<(crate::waits::Owner, Value)>> {
+    let Some(owner) = expected.reload(db)? else {
+        return Ok(None);
+    };
+    let Some(run) = db.run(owner.run_id())? else {
+        return Ok(None);
+    };
+    if run["id"] != observed_run["id"]
+        || run["snapshot"]["agent"] != observed_run["snapshot"]["agent"]
+        || owner.record["wakeup"] != expected.record["wakeup"]
+        || !watchable(&owner, &run, now())
+    {
+        return Ok(None);
+    }
+    Ok(Some((owner, run)))
+}
+
 fn record(
     db: &Db<'_>,
     group: Vec<(crate::waits::Owner, Value)>,
     observed: &Result<Observed>,
 ) -> Result<()> {
+    // A shared probe carries its representative's requester proof. If its wait
+    // changed during I/O, retry peers under a current representative instead of
+    // permanently resolving another conversation or mission with a stale denial.
+    if let Some((expected, run)) = group.first()
+        && current_wait(db, expected, run)?.is_none()
+    {
+        return Ok(());
+    }
     for (expected, observed_run) in group {
-        let Some(mut owner) = expected.reload(db)? else {
+        let Some((mut owner, run)) = current_wait(db, &expected, &observed_run)? else {
             continue;
         };
-        let Some(run) = db.run(owner.run_id())? else {
-            continue;
-        };
-        // A merge can transfer a sleeping run while its plugin check is in flight.
-        // Retry under the current profile rather than recording a stale denial.
-        if run["id"] != observed_run["id"]
-            || run["snapshot"]["agent"] != observed_run["snapshot"]["agent"]
-            || owner.record["wakeup"] != expected.record["wakeup"]
-            || !watchable(&owner, &run, now())
-        {
-            continue;
-        }
         let authorized = crate::waits::access(db, &run, &owner.record["wakeup"]["condition"]);
         let result = match (&authorized, observed) {
             (Err(error), _) => Some(json!({ "state": "unavailable", "message": error.message })),

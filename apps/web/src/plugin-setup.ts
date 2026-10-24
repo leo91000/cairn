@@ -4,6 +4,7 @@ import type {
   PluginEntry,
   SettingField,
 } from './plugins'
+import { delegates } from './plugins'
 
 /** What connecting an instance takes: a sign-in, a pasted token, or an app registered first. */
 export type SetupEffort = 'signin' | 'token' | 'app'
@@ -83,7 +84,7 @@ function defaultSetup(manifest: Manifest): PluginSetup {
     ? [{ id: 'credential', kind: 'credential', title: credential.oauth || credential.deviceFlow ? `Sign in with ${manifest.name}` : credential.label }]
     : []
   const steps = credential?.oauth ? [...settings, ...signIn] : [...signIn, ...settings]
-  if (manifest.capabilities.includes('conversations.submit'))
+  if (delegates(manifest))
     steps.push({ id: 'people', kind: 'people', title: 'Who can talk to it' })
   if (manifest.agentAccess)
     steps.push({ id: 'agents', kind: 'agents', title: 'Agents' })

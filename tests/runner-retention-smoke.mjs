@@ -52,6 +52,29 @@ http.createServer(async(req,res)=>{
 }).listen(8080,'0.0.0.0');
 `
 
+// A completed prefix and even a later snapshot may still precede queued host
+// block writes. Never admit eviction until a fresh publication drains the journal.
+export async function acknowledgeBeforeEviction({
+  api,
+  runId,
+  retention,
+  flushPublication,
+  until,
+}) {
+  await flushPublication()
+  if (retention <= 0)
+    return
+
+  let status
+  await until(async () => {
+    const current = await (await api(`/disks/${runId}/snapshot`, 'POST', {})).json()
+    await flushPublication(current)
+    status = await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json()
+    return status.dirtyBytes === 0
+  }, 10000)
+  assert.equal(status.dirtyBytes, 0, 'Eviction requires the current journal to be acknowledged')
+}
+
 async function main() {
   const image = process.argv[2]
   assert.ok(image, 'Provide the runner image')
@@ -211,19 +234,13 @@ async function main() {
       pendingPublication = undefined
     }
 
-    async function publishForEviction() {
-      await flushPublication()
-      if (retention <= 0)
-        return
-
-      // A completed-turn prefix can precede queued block writes. Publish the
-      // current paused disk at each eviction boundary; other guest starts can
-      // give those queued writes time to land after an earlier acknowledgement.
-      const current = await (await api(`/disks/${runId}/snapshot`, 'POST', {})).json()
-      await flushPublication(current)
-      const status = await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json()
-      assert.equal(status.dirtyBytes, 0, 'Eviction requires the current journal to be acknowledged')
-    }
+    const publishForEviction = () => acknowledgeBeforeEviction({
+      api,
+      runId,
+      retention,
+      flushPublication,
+      until,
+    })
 
     let sessionId
     let previousVm
@@ -514,7 +531,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error)
-  process.exitCode = 1
-})
+if (import.meta.main) {
+  main().catch((error) => {
+    console.error(error)
+    process.exitCode = 1
+  })
+}

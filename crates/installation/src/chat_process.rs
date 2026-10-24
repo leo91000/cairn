@@ -549,6 +549,7 @@ impl Chat<'_> {
     /// `item/tool/requestUserInput`: a question the user answers through the inbox.
     async fn request_user_input(&mut self, request_id: Value, params: &Value) -> Result<()> {
         let ours = !text(params, "itemId").is_empty()
+            && !text(params, "turnId").is_empty()
             && (self.thread.is_empty() || params["threadId"] == self.thread.as_str());
         if !ours {
             return self.session.rpc.reject(request_id).await;
@@ -574,7 +575,14 @@ impl Chat<'_> {
         } else {
             &self.thread
         };
-        let id = hex_digest(&format!("{thread}:{}", text(params, "itemId")));
+        // A provider can reuse item IDs after a turn or process interruption.
+        // Replaying the same native turn is stable; a newly issued question in
+        // another turn cannot inherit an earlier question's answer/withdrawal.
+        let id = hex_digest(&format!(
+            "{thread}:{}:{}",
+            text(params, "turnId"),
+            text(params, "itemId")
+        ));
         self.questions.insert(
             id.clone(),
             Question {
@@ -997,12 +1005,19 @@ impl Chat<'_> {
         };
         for message in messages {
             let id = text(&message, "id");
-            if self.completed.is_some()
-                || self.seen.contains(id)
-                || !self.attempted.insert(id.to_owned())
-            {
+            if self.completed.is_some() || self.seen.contains(id) || self.attempted.contains(id) {
                 continue;
             }
+            if message["blockingQuestion"] == true
+                && message["answers"].is_object()
+                && !self.questions.contains_key(text(&message, "questionId"))
+            {
+                // A restored inbox can arrive before requestUserInput. Keep the
+                // answer pending until the request is registered. Ordinary and
+                // nonblocking input keeps its existing steering behavior.
+                continue;
+            }
+            self.attempted.insert(id.to_owned());
             if message["questionCancelled"] == true {
                 if let Some(question) = self.questions.remove(text(&message, "questionId")) {
                     self.session

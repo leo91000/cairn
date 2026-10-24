@@ -355,6 +355,8 @@ fn request(id: &str, path: &str) -> cairn_protocol::Frame {
         role: cairn_protocol::Role::Member,
         mcp_scopes: Some(vec!["forged-scope".into()]),
         public_artifact: Some("forged-capability".into()),
+        public_webhook: Some("/api/plugin-webhooks/forged/events".into()),
+        public_oauth: Some("/api/plugin-oauth/forged/callback".into()),
         method: "GET".into(),
         path: path.into(),
         headers: vec![("x-cairn-account-id".into(), "forged-account".into())],
@@ -480,6 +482,8 @@ async fn fragmented_request_and_response_keep_body_bytes_and_verified_capabiliti
                 assert_eq!(identity.role, InstallationRole::Owner);
                 assert!(identity.mcp_scopes.is_none());
                 assert!(identity.public_artifact.is_none());
+                assert!(identity.public_webhook.is_none());
+                assert!(identity.public_oauth.is_none());
                 bytes
             },
         ),

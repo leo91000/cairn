@@ -46,6 +46,13 @@ class PluginSetupTest {
         assertEquals(listOf("Sign in with Google"), resolved.steps.map { it.title })
         assertEquals(PluginSetup(), PluginEntry().resolvedSetup())
 
+        val entryWithResolvedSteps =
+            PluginEntry(
+                manifest = manifest(mail.getValue("manifest")),
+                setup = PluginSetup("app", "Create an app once.", steps = listOf(signIn)),
+            )
+        assertEquals(resolved, entryWithResolvedSteps.configuration().resolvedSetup())
+
         // Without the resolved setup, the manifest's own steps still win over the default ones.
         val declared =
             manifest(mail.getValue("manifest"))

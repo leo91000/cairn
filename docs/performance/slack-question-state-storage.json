@@ -1,0 +1,228 @@
+{
+  "cache": "connection-cold first read, five warm reads; OS cache retained; prepared schema/auth and fixture setup excluded",
+  "cases": [
+    {
+      "deliveryOwned": false,
+      "observedRowJsonBytes": 296,
+      "reads": [
+        {
+          "processCpuMs": 1.2266309999999976,
+          "returnedJsonBytes": 296,
+          "sample": 0,
+          "wallMs": 1.019344
+        },
+        {
+          "processCpuMs": 0.0801330000000462,
+          "returnedJsonBytes": 296,
+          "sample": 1,
+          "wallMs": 0.075419
+        },
+        {
+          "processCpuMs": 0.07333400000004531,
+          "returnedJsonBytes": 296,
+          "sample": 2,
+          "wallMs": 0.068706
+        },
+        {
+          "processCpuMs": 0.06053399999996145,
+          "returnedJsonBytes": 296,
+          "sample": 3,
+          "wallMs": 0.056113
+        },
+        {
+          "processCpuMs": 0.05848500000001877,
+          "returnedJsonBytes": 296,
+          "sample": 4,
+          "wallMs": 0.054606
+        },
+        {
+          "processCpuMs": 0.11175900000000638,
+          "returnedJsonBytes": 296,
+          "sample": 5,
+          "wallMs": 0.106584
+        }
+      ],
+      "remainingRows": 1000,
+      "retirements": [
+        {
+          "processCpuMs": 9.40640899999994,
+          "sample": 0,
+          "wallMs": 9.302268000000002
+        },
+        {
+          "processCpuMs": 6.546861000000035,
+          "sample": 1,
+          "wallMs": 6.50904
+        },
+        {
+          "processCpuMs": 7.6819169999999986,
+          "sample": 2,
+          "wallMs": 7.661149
+        },
+        {
+          "processCpuMs": 11.701432000000068,
+          "sample": 3,
+          "wallMs": 11.723664999999999
+        },
+        {
+          "processCpuMs": 10.142751999999973,
+          "sample": 4,
+          "wallMs": 10.095855
+        },
+        {
+          "processCpuMs": 15.129323,
+          "sample": 5,
+          "wallMs": 15.093497000000001
+        }
+      ],
+      "unrelatedRows": 999,
+      "writes": [
+        {
+          "processCpuMs": 1.7392130000000634,
+          "sample": 0,
+          "wallMs": 1.700075
+        },
+        {
+          "processCpuMs": 1.0228939999999511,
+          "sample": 1,
+          "wallMs": 0.9909199999999999
+        },
+        {
+          "processCpuMs": 1.1815609999999879,
+          "sample": 2,
+          "wallMs": 1.1939419999999998
+        },
+        {
+          "processCpuMs": 1.4145500000000766,
+          "sample": 3,
+          "wallMs": 1.4178330000000001
+        },
+        {
+          "processCpuMs": 1.3189729999999145,
+          "sample": 4,
+          "wallMs": 1.275759
+        },
+        {
+          "processCpuMs": 1.5078780000000052,
+          "sample": 5,
+          "wallMs": 1.431281
+        }
+      ]
+    },
+    {
+      "deliveryOwned": true,
+      "observedRowJsonBytes": 396,
+      "reads": [
+        {
+          "processCpuMs": 1.0081629999999677,
+          "returnedJsonBytes": 396,
+          "sample": 0,
+          "wallMs": 0.851686
+        },
+        {
+          "processCpuMs": 0.07434900000021116,
+          "returnedJsonBytes": 396,
+          "sample": 1,
+          "wallMs": 0.06945799999999999
+        },
+        {
+          "processCpuMs": 0.07084100000020044,
+          "returnedJsonBytes": 396,
+          "sample": 2,
+          "wallMs": 0.065662
+        },
+        {
+          "processCpuMs": 0.0666839999998956,
+          "returnedJsonBytes": 396,
+          "sample": 3,
+          "wallMs": 0.061715
+        },
+        {
+          "processCpuMs": 0.06944900000007692,
+          "returnedJsonBytes": 396,
+          "sample": 4,
+          "wallMs": 0.064514
+        },
+        {
+          "processCpuMs": 0.06633000000010725,
+          "returnedJsonBytes": 396,
+          "sample": 5,
+          "wallMs": 0.061197
+        }
+      ],
+      "remainingRows": 999,
+      "retirements": [
+        {
+          "processCpuMs": 11.870612000000165,
+          "sample": 0,
+          "wallMs": 11.817960000000001
+        },
+        {
+          "processCpuMs": 8.256273999999848,
+          "sample": 1,
+          "wallMs": 8.194939
+        },
+        {
+          "processCpuMs": 7.126882999999907,
+          "sample": 2,
+          "wallMs": 7.060651
+        },
+        {
+          "processCpuMs": 7.506782999999814,
+          "sample": 3,
+          "wallMs": 7.476831
+        },
+        {
+          "processCpuMs": 7.988327000000027,
+          "sample": 4,
+          "wallMs": 7.912890000000001
+        },
+        {
+          "processCpuMs": 6.866465000000062,
+          "sample": 5,
+          "wallMs": 6.827369
+        }
+      ],
+      "unrelatedRows": 999,
+      "writes": [
+        {
+          "processCpuMs": 1.2675970000000234,
+          "sample": 0,
+          "wallMs": 1.204645
+        },
+        {
+          "processCpuMs": 35.559874000000036,
+          "sample": 1,
+          "wallMs": 35.498267
+        },
+        {
+          "processCpuMs": 31.326236000000108,
+          "sample": 2,
+          "wallMs": 31.277722
+        },
+        {
+          "processCpuMs": 32.762203,
+          "sample": 3,
+          "wallMs": 32.674923
+        },
+        {
+          "processCpuMs": 33.963227999999845,
+          "sample": 4,
+          "wallMs": 33.932003
+        },
+        {
+          "processCpuMs": 31.75313600000004,
+          "sample": 5,
+          "wallMs": 31.694933000000002
+        }
+      ]
+    }
+  ],
+  "host": {
+    "cpuMax": null,
+    "memoryMax": null,
+    "parallelism": 7
+  },
+  "limits": "serialized JSON bytes exclude database/WAL/index pages; reads bypass capability authorization, writes include host checks and actor scheduling; no live Slack/model/VM/network latency claim",
+  "workload": "same synthetic question in 1000-key instance; 6 reads on one reopened reader, 6 actual native writes/retirements; reference ordinary state versus delivery-owned candidate"
+}

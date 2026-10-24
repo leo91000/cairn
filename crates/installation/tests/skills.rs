@@ -1044,6 +1044,7 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
         .await
         .unwrap();
     let service = api.service.clone();
+    let next_task = task.clone();
     let snapshot = tokio::spawn(async move { service.snapshot(task, "manual").await.unwrap() });
     // Hold the project listing inside its read lock after the global listing.
     // A FIFO writer opens only once the listing has reached the blocked read.
@@ -1093,6 +1094,22 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
         "writer must commit between listing and freezing"
     );
     assert_eq!(selected["description"], "Use the latest branch conventions");
+    let frozen =
+        cairn_installation::skills::frozen(&api.service.config, text(selected, "bundle")).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(frozen.join("SKILL.md")).unwrap(),
+        text(selected, "content")
+    );
+
+    // After the writer finishes, a fresh snapshot must select the new version.
+    // Only the first listing is meant to block on this gate.
+    std::fs::remove_file(&gate).unwrap();
+    let next = api.service.snapshot(next_task, "manual").await.unwrap();
+    assert_eq!(next["snapshot"]["skills"][0]["content"], content);
+    assert_eq!(
+        next["snapshot"]["skills"][0]["description"],
+        "Use the latest branch conventions"
+    );
 }
 
 /// A local GitHub serving `fixture/skills` through the bundled package and one instance.

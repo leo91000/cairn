@@ -78,6 +78,7 @@ impl Github {
 
 /// A GitHub instance saved through the package's own form, granted to `agents`.
 pub async fn instance(s: &Service, name: &str, token: &str, agents: &[&str]) -> String {
+    super::relay_fixture::claimed(s).await.unwrap();
     let saved = connections::save(
         s,
         "github",

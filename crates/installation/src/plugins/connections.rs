@@ -1,5 +1,7 @@
 //! Configured plugin connections: an owner delegation (agent, project, people, quota)
 //! plus plugin settings declared by the manifest. Identical for every plugin.
+pub mod owner;
+
 use super::{forms, registry};
 use crate::{
     config::{id, now},
@@ -11,6 +13,7 @@ use crate::{
 use cairn_plugin_api::Manifest;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use std::collections::HashSet;
 
 pub const KIND: &str = "plugin-connections";
 
@@ -18,11 +21,14 @@ pub const KIND: &str = "plugin-connections";
 pub const OWNED: &[&str] = &[
     "plugin-events",
     "plugin-deliveries",
+    "plugin-delivery-checkpoints",
     "plugin-requests",
     "plugin-activity",
     "plugin-storage",
     "plugin-http-receipts",
     "plugin-timers",
+    "plugin-resource-grants",
+    "plugin-routes",
 ];
 
 #[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -58,6 +64,10 @@ pub struct Connection {
     pub name: String,
     pub enabled: bool,
     pub revision: String,
+    /// Host-derived authority for a single admitted resource event. Root records
+    /// never contain this field and packages cannot supply it through settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) routing: Option<super::routes::Binding>,
     /// Plugin-specific values validated against the manifest's settings schema.
     pub settings: Value,
     /// Empty when the plugin cannot start conversations.
@@ -91,6 +101,7 @@ impl Connection {
             name: String::new(),
             enabled: false,
             revision: String::new(),
+            routing: None,
             settings,
             agent_id: String::new(),
             project_id: None,
@@ -115,6 +126,12 @@ impl Connection {
     pub fn grants(&self, agent_id: &str) -> bool {
         self.enabled && self.agent_ids.iter().any(|id| id == agent_id)
     }
+
+    pub(crate) fn delegation_key(&self) -> &str {
+        self.routing
+            .as_ref()
+            .map_or(&self.id, |routing| &routing.id)
+    }
 }
 
 /// An agent anyone may reach: read-only sandbox, one project at most, and no
@@ -124,28 +141,109 @@ pub(crate) fn public_safe(db: &Db<'_>, agent_id: &str, access: &Value) -> Result
     public_access(access, plugin_granted(db, agent_id)?)
 }
 
-/// Whether any plugin instance is granted to the agent.
+/// Whether any plugin instance or resource operation is granted to the agent.
 fn plugin_granted(db: &Db<'_>, agent_id: &str) -> Result<bool> {
     Ok(db.list(KIND)?.iter().any(|connection| {
         connection["agentIds"]
             .as_array()
             .is_some_and(|ids| ids.iter().any(|id| id == agent_id))
-    }))
+    }) || super::grants::agent_has_grants(db, agent_id)?)
 }
 
-fn public_access(access: &Value, secrets: bool) -> Result<()> {
+fn public_access(access: &Value, plugin_access: bool) -> Result<()> {
     let projects = access["projects"].as_array().map_or(usize::MAX, Vec::len);
     if access["sandbox"] != "read-only"
         || access["installation"] == true
         || access["mcps"] != json!([])
         || projects > 1
-        || secrets
+        || plugin_access
     {
         return Err(Error::bad(
             "For anyone in the channel, choose an agent with a read-only sandbox, at most one project, and no installation, MCP or plugin access such as GitHub or 1Password.",
         ));
     }
     Ok(())
+}
+
+/// The same dedicated-agent contract applies to instance and resource delegation.
+pub(crate) fn delegation_access(
+    db: &Db<'_>,
+    agent_id: &str,
+    project: Option<&str>,
+    mode: AccessMode,
+) -> Result<Value> {
+    let agent = db
+        .get("agents", agent_id)?
+        .ok_or_else(|| Error::bad("Agent not found."))?;
+    let access = dedicated_access(db, &agent, project)?;
+    if let Some(project) = project
+        && db.get("projects", project)?.is_none()
+    {
+        return Err(Error::bad("Project not found."));
+    }
+    if mode == AccessMode::Everyone {
+        public_safe(db, agent_id, &access)?;
+    }
+    Ok(access)
+}
+
+fn dedicated_access(db: &Db<'_>, agent: &Value, project: Option<&str>) -> Result<Value> {
+    let access = policy(agent);
+    let projects = project.map_or_else(|| json!([]), |id| json!([id]));
+    if access["projects"] != projects || access["installation"] == true {
+        return Err(Error::bad(
+            "Choose a dedicated agent restricted to the selected project (or no projects), with installation access disabled.",
+        ));
+    }
+
+    // External people have no authenticated Cairn origin for native host execution.
+    crate::native::policy::authorize_caller(db, agent, None)?;
+
+    Ok(access)
+}
+
+/// Advisory owner preview from the same policy predicates as save/effects. Read
+/// plugin grants once for the whole agent list, inside the caller's snapshot.
+pub(crate) fn delegation_eligibility(
+    db: &Db<'_>,
+    project: Option<&str>,
+    mode: AccessMode,
+) -> Result<Value> {
+    if let Some(project) = project
+        && db.get("projects", project)?.is_none()
+    {
+        return Err(Error::bad("Project not found."));
+    }
+    let mut plugin_agents = HashSet::new();
+    if mode == AccessMode::Everyone {
+        for connection in db.list(KIND)? {
+            if let Some(ids) = connection["agentIds"].as_array() {
+                plugin_agents.extend(ids.iter().filter_map(Value::as_str).map(str::to_owned));
+            }
+        }
+        for grant in db.list(super::grants::KIND)? {
+            plugin_agents.insert(text(&grant, "agentId").to_owned());
+        }
+    }
+    let items = db
+        .list("agents")?
+        .iter()
+        .map(|agent| {
+            let id = text(agent, "id");
+            let eligibility = dedicated_access(db, agent, project).and_then(|access| {
+                if mode == AccessMode::Everyone {
+                    public_access(&access, plugin_agents.contains(id))
+                } else {
+                    Ok(())
+                }
+            });
+            match eligibility {
+                Ok(()) => json!({ "agentId": id, "eligible": true }),
+                Err(error) => json!({ "agentId": id, "eligible": false, "reason": error.message }),
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({ "items": items }))
 }
 
 pub fn label(value: &str) -> String {
@@ -174,6 +272,11 @@ pub fn credential_key(id: &str) -> String {
 /// External delegation stays bound to the owner who set it up. Instances that
 /// delegate nothing (no agent answering people) have no owner binding to check.
 pub(crate) async fn ensure_owner(s: &Service, connection: &Connection) -> Result<()> {
+    if let Some(routing) = &connection.routing
+        && registry::active(s, &connection.plugin_id).await?.digest != routing.digest
+    {
+        return Err(Error::forbidden("The route's package approval changed."));
+    }
     if connection.agent_id.is_empty() {
         return Ok(());
     }
@@ -197,6 +300,9 @@ pub(crate) fn authorize(db: &Db<'_>, expected: &Connection) -> Result<Connection
     let current: Connection = serde_json::from_value(value)?;
     if !current.enabled || current.revision != expected.revision {
         return Err(denied());
+    }
+    if let Some(binding) = &expected.routing {
+        return super::routes::authorize(db, current, binding);
     }
     if !current.agent_id.is_empty() {
         let agent = db.get("agents", &current.agent_id)?.ok_or_else(denied)?;
@@ -280,7 +386,17 @@ pub fn settings_with(fields: &[Value], input: &Value) -> Result<Value> {
         };
         output.insert(key, setting(field, value)?);
     }
-    Ok(Value::Object(output))
+    bounded_settings(Value::Object(output))
+}
+
+/// Reserve room for the enclosing event and instance metadata in a worker frame.
+pub(crate) fn bounded_settings(settings: Value) -> Result<Value> {
+    if serde_json::to_vec(&settings)?.len() > cairn_plugin_api::MAX_FRAME_BYTES / 2 {
+        return Err(Error::too_large(
+            "Plugin settings are limited to 512 KiB of encoded JSON.",
+        ));
+    }
+    Ok(settings)
 }
 
 fn matches_pattern(field: &Value, value: &str) -> bool {
@@ -409,14 +525,21 @@ pub fn secrets(
     input: &Value,
     saved: &Map<String, Value>,
 ) -> Result<Map<String, Value>> {
+    secret_fields(&manifest.settings, input, saved)
+}
+
+pub(crate) fn secret_fields(
+    settings: &[Value],
+    input: &Value,
+    saved: &Map<String, Value>,
+) -> Result<Map<String, Value>> {
     let empty = Map::new();
     let input = match input {
         Value::Object(map) => map,
         Value::Null => &empty,
         _ => return Err(Error::bad("Plugin secrets must be an object.")),
     };
-    let fields = manifest
-        .settings
+    let fields = settings
         .iter()
         .filter(|field| field["type"] == "secret")
         .collect::<Vec<_>>();
@@ -601,13 +724,43 @@ fn labels(value: &Value) -> Vec<Label> {
         .collect()
 }
 
+/// Validation is shared by ordinary saves and atomic activation. A setup source
+/// retains its UUID and secrets without creating a temporary live connection.
+pub(crate) enum SaveSource<'a> {
+    New,
+    Existing(&'a str),
+    Setup(&'a super::setup::SetupDraft),
+}
+
+pub(crate) struct Prepared {
+    pub(crate) connection: Connection,
+    encrypted: Option<Value>,
+    encrypted_secrets: Option<Value>,
+    updating: bool,
+    keep_agents: bool,
+    root: Option<std::sync::Arc<super::resources::target::Target>>,
+    one_per_agent: bool,
+    package_name: String,
+}
+
 pub async fn save(
     s: &Service,
     plugin_id: &str,
     input: &Value,
     existing: Option<&str>,
 ) -> Result<Value> {
-    save_authorized(s, plugin_id, input, existing, |_| Ok(()), None).await
+    let owner = std::sync::Arc::new(super::operations::Owner::current(s).await?);
+    save_owned(s, plugin_id, input, existing, owner).await
+}
+
+pub(crate) async fn save_owned(
+    s: &Service,
+    plugin_id: &str,
+    input: &Value,
+    existing: Option<&str>,
+    owner: std::sync::Arc<super::operations::Owner>,
+) -> Result<Value> {
+    save_with_owner(s, plugin_id, input, existing, owner, |_| Ok(()), None).await
 }
 
 pub(crate) async fn save_authorized<F>(
@@ -621,23 +774,143 @@ pub(crate) async fn save_authorized<F>(
 where
     F: Fn(&Db<'_>) -> Result<()> + Send + Sync + 'static,
 {
-    let package = registry::active(s, plugin_id).await?;
-    let manifest = package.manifest.clone();
-    let shared_input = shared(s, &manifest, plugin_id, input, existing.is_some())
-        .await?
-        .map(|shared| shared.apply(input));
-    let input = shared_input.as_ref().unwrap_or(input);
-    let expected_revision = match existing {
-        Some(id) => Some(get(s, plugin_id, id).await?.revision),
+    let owner = std::sync::Arc::new(super::operations::Owner::current(s).await?);
+    save_with_owner(
+        s,
+        plugin_id,
+        input,
+        existing,
+        owner,
+        authorize_management,
+        management,
+    )
+    .await
+}
+
+async fn save_with_owner<F>(
+    s: &Service,
+    plugin_id: &str,
+    input: &Value,
+    existing: Option<&str>,
+    owner: std::sync::Arc<super::operations::Owner>,
+    authorize_management: F,
+    management: Option<super::management::Authority>,
+) -> Result<Value>
+where
+    F: Fn(&Db<'_>) -> Result<()> + Send + Sync + 'static,
+{
+    let authorize_management = std::sync::Arc::new(authorize_management);
+    let initial = authorize_management.clone();
+    s.store.read(move |db| initial(db)).await?;
+    let flow = input["credentialFlow"]
+        .as_str()
+        .filter(|flow| !flow.is_empty());
+    let flow_lock = flow.map(|flow| s.plugins.oauth_flows.lock(&format!("flow:{flow}")));
+    let _flow_guard = match flow_lock {
+        Some(lock) => Some(lock.lock_owned().await),
         None => None,
     };
+    owner.recheck(s).await?;
+    let approved = registry::approved(s, plugin_id).await?;
+    let shared_input = shared(
+        s,
+        &approved.package.manifest,
+        plugin_id,
+        input,
+        existing.is_some(),
+    )
+    .await?
+    .map(|shared| shared.apply(input));
+    let input = shared_input.as_ref().unwrap_or(input);
+    let source = existing.map_or(SaveSource::New, SaveSource::Existing);
+    let prepared = prepare(
+        s,
+        &approved,
+        input,
+        source,
+        Some(owner.clone()),
+        management.clone(),
+    )
+    .await?;
+    owner.recheck(s).await?;
+    if let Some(authority) = &management {
+        authority.recheck(s).await?;
+    }
+    approved.recheck(s).await?;
+    let oauth_flow = approved
+        .package
+        .manifest
+        .credential
+        .as_ref()
+        .is_some_and(|c| c.oauth.is_some());
+    let result = s
+        .store
+        .transaction(move |db| {
+            authorize_management(db)?;
+            approved.recheck_in(db)?;
+            prepared.persist_in(db)
+        })
+        .await?;
+    if let Some(flow) = input["credentialFlow"]
+        .as_str()
+        .filter(|flow| !flow.is_empty())
+    {
+        if oauth_flow {
+            s.plugins.oauth_flows.consume(plugin_id, flow);
+        } else {
+            let _ = s.plugins.device_flows.token(s, plugin_id, flow, true).await;
+        }
+    }
+    s.plugins.changed.notify_one();
+    Ok(result)
+}
+
+pub(crate) async fn prepare(
+    s: &Service,
+    approved: &registry::ApprovedPackage,
+    input: &Value,
+    source: SaveSource<'_>,
+    request_owner: Option<std::sync::Arc<super::operations::Owner>>,
+    management: Option<super::management::Authority>,
+) -> Result<Prepared> {
+    let package = &approved.package;
+    let (existing, setup, updating) = match source {
+        SaveSource::New => (None, None, false),
+        SaveSource::Existing(id) => (Some(id), None, true),
+        SaveSource::Setup(draft) => (Some(draft.id.as_str()), Some(draft), false),
+    };
+    let plugin_id = package.manifest.id.as_str();
+    let root = if updating {
+        Some(
+            super::resources::target::Target::active_with_approval(s, existing.unwrap(), approved)
+                .await?,
+        )
+    } else {
+        None
+    };
+    let manifest = package.manifest.clone();
     let owner = crate::relay::task_author_policy(s).await?;
     let name = text(input, "name").trim();
     if name.is_empty() || name.chars().count() > 100 {
         return Err(Error::bad("Enter a connection name."));
     }
-    let mut settings = settings(&manifest, &input["settings"])?;
-    let delegates = manifest.permits_capability("conversations.submit");
+    let mut form_schema = manifest.clone();
+    if manifest.instance_form {
+        for field in &mut form_schema.settings {
+            field["required"] = json!(false);
+        }
+    }
+    let mut settings = settings(&form_schema, &input["settings"])?;
+    let resource_routes = manifest
+        .resources
+        .iter()
+        .any(|resource| resource.delegation);
+    let delegates = manifest.delegates();
+    if resource_routes && !text(input, "agentId").is_empty() {
+        return Err(Error::bad(
+            "Choose agents on resource routes, rather than on the app instance.",
+        ));
+    }
     let agent_id = if delegates {
         text(input, "agentId")
     } else {
@@ -703,15 +976,10 @@ where
         .as_u64()
         .filter(|value| (1..=50).contains(value))
         .unwrap_or(5) as u32;
-    // A device sign-in the owner completed supplies the credential instead of a paste.
+    // Sign-in supplies an encrypted credential record instead of a pasted token.
     let flow = input["credentialFlow"]
         .as_str()
         .filter(|flow| !flow.is_empty());
-    let flow_lock = flow.map(|flow| s.plugins.oauth_flows.lock(&format!("flow:{flow}")));
-    let _flow_guard = match &flow_lock {
-        Some(lock) => Some(lock.lock().await),
-        None => None,
-    };
     let signed_record = match flow {
         Some(flow) => Some(
             super::oauth::flow_credential(s, plugin_id, flow, existing, &settings, false).await?,
@@ -747,6 +1015,17 @@ where
     }
     let connection_id = existing.map_or_else(id, str::to_owned);
     uuid(&connection_id)?;
+    if setup.is_some()
+        && manifest.credential.is_some()
+        && s.vault
+            .get(&credential_key(&connection_id))
+            .await?
+            .is_none()
+    {
+        return Err(Error::bad(
+            "Configure the plugin credential before activation.",
+        ));
+    }
     // Agents are granted from their own page; clients that omit the list keep it.
     let keep_agents = existing.is_some() && input.get("agentIds").is_none();
     let agent_ids = agent_grants(&manifest, &input["agentIds"])?;
@@ -768,12 +1047,35 @@ where
         ));
     }
     let secret_keys = secret_fields.keys().cloned().collect::<Vec<_>>();
+    let saved_setup_token = match setup {
+        Some(setup) => {
+            let owner = request_owner
+                .as_ref()
+                .ok_or_else(|| Error::forbidden("Setup has no current owner authority."))?;
+            super::oauth::credential::setup_token(s, setup, approved, owner, management.as_ref())
+                .await?
+        }
+        None => None,
+    };
     if manifest.instance_form {
         let credential = match (token.is_empty(), existing) {
             (false, _) => Some(token.to_owned()),
-            (true, Some(id)) => {
-                super::oauth::draft_token(s, &get(s, plugin_id, id).await?, management.as_ref())
-                    .await?
+            (true, Some(_)) if setup.is_some() => saved_setup_token,
+            (true, Some(_)) => {
+                let form_owner = request_owner.as_deref().ok_or_else(|| {
+                    Error::forbidden("This configuration has no current owner authority.")
+                })?;
+                let root = root.as_ref().ok_or_else(|| {
+                    Error::forbidden("This configuration has no original root snapshot.")
+                })?;
+                super::oauth::draft_token(
+                    s,
+                    &root.connection(),
+                    management.as_ref(),
+                    form_owner,
+                    approved,
+                )
+                .await?
             }
             (true, None) => None,
         };
@@ -781,15 +1083,25 @@ where
             management,
             credential,
             secrets: secret_fields.clone(),
+            setup: setup.cloned().map(Box::new),
+            owner: request_owner,
+            resource: None,
+            root: root.clone(),
+            urls: if setup.is_some() {
+                Some(forms::setup_urls(s, &package.manifest, &connection_id, input).await?)
+            } else {
+                None
+            },
         };
-        settings = forms::submit(s, &package, &connection_id, settings, draft).await?;
+        settings = forms::submit(s, package, &connection_id, settings, draft).await?;
     }
     if signed_record.is_none()
         && let Some(oauth) = manifest.credential.as_ref().and_then(|c| c.oauth.as_ref())
     {
-        let previous = match existing {
-            Some(id) => Some(get(s, plugin_id, id).await?),
-            None => None,
+        let previous = match (setup, existing) {
+            (Some(draft), _) => Some(draft.connection()),
+            (None, Some(id)) => Some(get(s, plugin_id, id).await?),
+            (None, None) => None,
         };
         if let Some(previous) = previous {
             let client_changed =
@@ -832,12 +1144,13 @@ where
             )?,
         )
     };
-    let mut connection = Connection {
+    let connection = Connection {
         id: connection_id,
         plugin_id: plugin_id.to_owned(),
         name: name.to_owned(),
         enabled,
         revision: id(),
+        routing: None,
         settings,
         agent_id: agent_id.to_owned(),
         project_id: project,
@@ -852,111 +1165,112 @@ where
         secret_keys,
         updated_at: now(),
     };
-    let updating = existing.is_some();
-    let one_per_agent = super::run_credentials::one_per_package(&manifest);
-    let package_name = manifest.name.clone();
-    let result = s
-        .store
-        .transaction(move |db| {
-            authorize_management(db)?;
-            if let Some(current) = db.get(KIND, &connection.id)? {
-                if expected_revision.as_ref().is_some_and(|revision| current["revision"] != *revision) {
-                    return Err(Error::conflict("This instance changed while it was being checked. Reload it and retry."));
-                }
-                if current["pluginId"] != connection.plugin_id {
-                    return Err(Error::not_found("Plugin connection not found."));
-                }
-            } else if updating {
+    Ok(Prepared {
+        connection,
+        encrypted,
+        encrypted_secrets,
+        updating,
+        keep_agents,
+        root,
+        one_per_agent: super::run_credentials::one_per_package(&manifest),
+        package_name: manifest.name.clone(),
+    })
+}
+
+impl Prepared {
+    pub(crate) fn persist_in(self, db: &Db<'_>) -> Result<Value> {
+        let Self {
+            mut connection,
+            encrypted,
+            encrypted_secrets,
+            updating,
+            keep_agents,
+            root,
+            one_per_agent,
+            package_name,
+        } = self;
+        if let Some(root) = root {
+            root.current(db)?;
+        }
+        if let Some(current) = db.get(KIND, &connection.id)? {
+            if !updating || current["pluginId"] != connection.plugin_id {
                 return Err(Error::not_found("Plugin connection not found."));
             }
-            if !updating && db.list(KIND)?.len() >= 64 {
-                return Err(Error::bad(
-                    "At most 64 plugin instances can exist on this installation.",
-                ));
-            }
-            for agent in &connection.agent_ids {
-                if db.get("agents", agent)?.is_none() {
-                    return Err(Error::bad("A selected agent no longer exists."));
-                }
-            }
-            // Runs receive the credentials of one instance per package.
-            if one_per_agent && !keep_agents {
-                let held = db.list(KIND)?.into_iter().any(|other| {
-                    other["pluginId"] == connection.plugin_id
-                        && other["id"] != connection.id.as_str()
-                        && other["agentIds"].as_array().is_some_and(|ids| {
-                            ids.iter()
-                                .any(|id| connection.agent_ids.iter().any(|agent| id == agent))
-                        })
-                });
-                if held {
-                    return Err(Error::bad(format!(
-                        "Grant one {package_name} instance per agent: its runs use that instance's credentials."
-                    )));
-                }
-            }
-            if !connection.agent_id.is_empty() {
-                let agent = db
-                    .get("agents", &connection.agent_id)?
-                    .ok_or_else(|| Error::bad("Agent not found."))?;
-                let access = policy(&agent);
-                let plugins = plugin_granted(db, &connection.agent_id)?;
-                delegation_rules(db, &connection, &access, plugins)?;
-                connection.granted_access = access;
-            }
-            if connection.access_mode != AccessMode::Requests {
-                for request in db.list("plugin-requests")? {
-                    if request["connectionId"] == connection.id && request["status"] == "pending" {
-                        db.remove("plugin-requests", text(&request, "id"))?;
-                    }
-                }
-            }
-            if let Some(encrypted) = encrypted {
-                db.set(
-                    &format!("mcp-secret:{}", credential_key(&connection.id)),
-                    &encrypted,
-                    None,
-                )?;
-            }
-            if let Some(encrypted) = encrypted_secrets {
-                db.set(
-                    &format!("mcp-secret:{}", secrets_key(&connection.id)),
-                    &encrypted,
-                    None,
-                )?;
-            }
-            if !keep_agents {
-                crate::agent_grants::set_instance_agents(
-                    db,
-                    &connection.id,
-                    &connection.agent_ids,
-                )?;
-            } else if let Some(current) = db.get(KIND, &connection.id)? {
-                connection.agent_ids =
-                    serde_json::from_value(current["agentIds"].clone()).unwrap_or_default();
-            }
-            let value = serde_json::to_value(&connection)?;
-            db.put(KIND, &value)?;
-            db.audit(
-                "plugin.connection.saved",
-                &json!({ "id": connection.id, "plugin": connection.plugin_id }),
-            )?;
-            Ok(value)
-        })
-        .await?;
-    if let Some(flow) = flow {
-        if manifest
-            .credential
-            .as_ref()
-            .is_some_and(|c| c.oauth.is_some())
-        {
-            s.plugins.oauth_flows.consume(plugin_id, flow);
-        } else {
-            let _ = s.plugins.device_flows.token(plugin_id, flow, true);
+        } else if updating {
+            return Err(Error::not_found("Plugin connection not found."));
         }
+        if !updating && db.list(KIND)?.len() >= 64 {
+            return Err(Error::bad(
+                "At most 64 plugin instances can exist on this installation.",
+            ));
+        }
+        for agent in &connection.agent_ids {
+            if db.get("agents", agent)?.is_none() {
+                return Err(Error::bad("A selected agent no longer exists."));
+            }
+        }
+        // Runs receive the credentials of one instance per package.
+        if one_per_agent && !keep_agents {
+            let held = db.list(KIND)?.into_iter().any(|other| {
+                other["pluginId"] == connection.plugin_id
+                    && other["id"] != connection.id.as_str()
+                    && other["agentIds"].as_array().is_some_and(|ids| {
+                        ids.iter()
+                            .any(|id| connection.agent_ids.iter().any(|agent| id == agent))
+                    })
+            });
+            if held {
+                return Err(Error::bad(format!(
+                    "Grant one {package_name} instance per agent: its runs use that instance's credentials."
+                )));
+            }
+        }
+        if !connection.agent_id.is_empty() {
+            connection.granted_access = delegation_access(
+                db,
+                &connection.agent_id,
+                connection.project_id.as_deref(),
+                connection.access_mode,
+            )?;
+        }
+        if connection.access_mode != AccessMode::Requests {
+            for request in db.list("plugin-requests")? {
+                if request["connectionId"] == connection.id
+                    && request["routeId"].is_null()
+                    && request["status"] == "pending"
+                {
+                    db.remove("plugin-requests", text(&request, "id"))?;
+                }
+            }
+        }
+        if let Some(encrypted) = encrypted {
+            db.set(
+                &format!("mcp-secret:{}", credential_key(&connection.id)),
+                &encrypted,
+                None,
+            )?;
+        }
+        if let Some(encrypted) = encrypted_secrets {
+            db.set(
+                &format!("mcp-secret:{}", secrets_key(&connection.id)),
+                &encrypted,
+                None,
+            )?;
+        }
+        if !keep_agents {
+            crate::agent_grants::set_instance_agents(db, &connection.id, &connection.agent_ids)?;
+        } else if let Some(current) = db.get(KIND, &connection.id)? {
+            connection.agent_ids =
+                serde_json::from_value(current["agentIds"].clone()).unwrap_or_default();
+        }
+        let value = serde_json::to_value(&connection)?;
+        db.put(KIND, &value)?;
+        db.audit(
+            "plugin.connection.saved",
+            &json!({ "id": connection.id, "plugin": connection.plugin_id }),
+        )?;
+        Ok(value)
     }
-    s.plugins.changed.notify_one();
-    Ok(result)
 }
 
 /// What external people may reach through a delegation: one project at most, never
@@ -1005,6 +1319,14 @@ pub(crate) async fn refresh(s: &Service, connection: &Connection) -> Result<()> 
         management: None,
         credential,
         secrets: secret_values(s, &connection.id).await?,
+        setup: None,
+        urls: None,
+        owner: None,
+        resource: None,
+        root: Some(
+            super::resources::target::Target::active(s, &connection.plugin_id, &connection.id)
+                .await?,
+        ),
     };
     let settings = forms::submit(
         s,
@@ -1055,7 +1377,9 @@ pub(crate) fn reapprove(db: &Db<'_>, connection_id: &str, agent: &Value) -> Resu
         ));
     }
     let access = policy(agent);
-    let plugins = !crate::agent_grants::plugins(agent).is_empty();
+    let plugins = !crate::agent_grants::plugins(agent).is_empty()
+        || super::grants::agent_has_grants(db, text(agent, "id"))?;
+    crate::native::policy::authorize_caller(db, agent, None)?;
     delegation_rules(db, &connection, &access, plugins).map_err(|error| {
         Error::bad(format!(
             "{} cannot answer as this agent with the new access: {error}",
@@ -1086,7 +1410,8 @@ pub(crate) fn delegation_effects(
     owner: Option<&str>,
 ) -> Result<Value> {
     let access = policy(agent);
-    let plugins = !crate::agent_grants::plugins(agent).is_empty();
+    let plugins = !crate::agent_grants::plugins(agent).is_empty()
+        || super::grants::agent_has_grants(db, text(agent, "id"))?;
     let saved = db.get("agents", agent_id)?;
     let mut effects = Vec::new();
     for value in db.list(KIND)? {
@@ -1094,7 +1419,8 @@ pub(crate) fn delegation_effects(
             continue;
         }
         let connection: Connection = serde_json::from_value(value)?;
-        let rules = delegation_rules(db, &connection, &access, plugins)
+        let rules = crate::native::policy::authorize_caller(db, agent, None)
+            .and_then(|()| delegation_rules(db, &connection, &access, plugins))
             .err()
             .map(|error| error.to_string());
         let previous_owner = connection.owner_access_id.as_deref() != owner;
@@ -1153,6 +1479,7 @@ where
         .transaction(move |db| {
             authorize_management(db)?;
             db.remove(KIND, &connection_id)?;
+            super::resources::remove_owned(db, &connection_id)?;
             crate::agent_grants::forget_resource(db, crate::agent_grants::PLUGINS, &connection_id)?;
             db.delete(&format!("mcp-secret:{}", credential_key(&connection_id)))?;
             db.delete(&format!("mcp-secret:{}", secrets_key(&connection_id)))?;
@@ -1160,7 +1487,13 @@ where
             for kind in OWNED {
                 for value in db.list(kind)? {
                     if value["connectionId"] == connection_id {
-                        db.remove(kind, text(&value, "id"))?;
+                        if *kind == super::work::EVENTS {
+                            super::work::remove_event(db, text(&value, "id"))?;
+                        } else if *kind == super::work::DELIVERIES {
+                            super::work::remove_delivery(db, &value)?;
+                        } else {
+                            db.remove(kind, text(&value, "id"))?;
+                        }
                     }
                 }
             }
@@ -1189,7 +1522,7 @@ pub async fn overview(s: &Service) -> Result<Vec<Value>> {
                     "hour": db
                         .kv(&format!("plugin-rate:{id}:{hour}"))?
                         .and_then(|value| value.as_u64())
-                        .unwrap_or(0)
+                        .unwrap_or(0),
                 });
                 let mut pending = requests
                     .iter()
@@ -1295,10 +1628,11 @@ pub async fn people(
                 db.get(KIND, &connection_id)?
                     .ok_or_else(|| Error::not_found("Plugin connection not found."))?,
             )?;
-            let request = db
-                .list("plugin-requests")?
-                .into_iter()
-                .find(|value| value["connectionId"] == connection_id && value["userId"] == user_id);
+            let request = db.list("plugin-requests")?.into_iter().find(|value| {
+                value["connectionId"] == connection_id
+                    && value["userId"] == user_id
+                    && value["routeId"].is_null()
+            });
             match action.as_str() {
                 "approve" => {
                     let request =

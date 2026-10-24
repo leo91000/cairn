@@ -116,8 +116,13 @@ abstract class CairnAccountCases {
         }
     }
 
-    fun switchingToASharedInstallationHidesManagementAndRestoresTheSelection() {
-        MockWebServer().use { server ->
+    fun switchingToASharedInstallationHidesManagementAndRestoresTheSelection(
+        deferAccountMethods: Boolean = false
+    ) {
+        val methodsRequested = java.util.concurrent.CountDownLatch(1)
+        val releaseMethods = java.util.concurrent.CountDownLatch(if (deferAccountMethods) 1 else 0)
+        val server = MockWebServer()
+        try {
             val installations =
                 """[{"id":"selection-home","name":"Maison","role":"owner","online":true},{"id":"selection-work","name":"Bureau","role":"member","online":true}]"""
             val accessibleInstallations = java.util.concurrent.atomic.AtomicReference(installations)
@@ -132,6 +137,17 @@ abstract class CairnAccountCases {
                         val response =
                             when (path) {
                                 "/api/account/session" -> session
+                                "/api/account/options" -> "{}"
+                                "/api/account/methods" -> {
+                                    methodsRequested.countDown()
+                                    check(
+                                        releaseMethods.await(
+                                            30,
+                                            java.util.concurrent.TimeUnit.SECONDS,
+                                        )
+                                    )
+                                    """{"methods":[{"id":"fixture-email","kind":"email","label":"member@example.test"}]}"""
+                                }
                                 "/api/installations" -> accessibleInstallations.get()
                                 else -> {
                                     val installation = path.split('/').getOrNull(3)
@@ -241,7 +257,27 @@ abstract class CairnAccountCases {
             compose.waitUntil(30000) { compose.onNodeWithText("Apparence").isDisplayed() }
             compose.onNodeWithText("Apparence").performScrollTo().assertIsDisplayed()
             compose.onNodeWithText("Mises à jour").performScrollTo().assertIsDisplayed()
-            compose.onNodeWithText("Notifications").performScrollTo().assertIsDisplayed()
+            if (deferAccountMethods) {
+                compose.waitUntil(10000) {
+                    compose.onRoot().fetchSemanticsNode()
+                    methodsRequested.count == 0L
+                }
+            }
+            val notifications = compose.onNodeWithText("Notifications")
+            notifications.performScrollTo()
+            if (deferAccountMethods) {
+                notifications.assertIsDisplayed()
+                releaseMethods.countDown()
+                // Account details can extend a preceding card after the first scroll.
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("E-mail · member@example.test")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+            }
+            compose.waitUntil(10000) { notifications.performScrollTo().isDisplayed() }
+            notifications.assertIsDisplayed()
             compose.onNodeWithText("Notifications push").assertExists()
             compose.onNodeWithText("Connecter un assistant").assertDoesNotExist()
             compose.onNodeWithText("Clients et jetons d’accès").assertDoesNotExist()
@@ -333,6 +369,9 @@ abstract class CairnAccountCases {
             compose.onNodeWithContentDescription("Atelier").assertDoesNotExist()
             compose.onNodeWithText("Ajouter une installation").assertIsDisplayed()
             assertTrue(model.value.state.value.session.authenticated)
+        } finally {
+            releaseMethods.countDown()
+            server.close()
         }
     }
 

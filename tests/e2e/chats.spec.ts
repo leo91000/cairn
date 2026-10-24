@@ -249,9 +249,10 @@ test('stopping a scheduled wait cancels its wakeup and pauses the conversation',
   const card = page.locator('.chat-wait')
   await expect(card).toContainText(/Resumes at .+Wait for review/)
   await page.getByRole('button', { name: 'Cancel scheduled wait', exact: true }).click()
+  // Pause is the first step of Stop; wait for its visible completion before reading the final state.
+  await expect(card).toHaveCount(0)
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).paused).toBe(true)
   expect((await workspace.api(`/api/chats/${chat.id}`)).wakeup).toBeNull()
-  await expect(card).toHaveCount(0)
 })
 
 test('a durable condition wait follows a dependency across restart and queue pause', async ({ page, workspace }) => {

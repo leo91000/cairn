@@ -37,6 +37,7 @@ async fn fixture() -> Fixture {
     .await
     .unwrap();
     github.attach(&s);
+    common::relay_fixture::claimed(&s).await.unwrap();
     Fixture { root, s, github }
 }
 
@@ -94,7 +95,7 @@ async fn the_owner_signs_in_through_the_host_and_the_token_never_leaves_it() {
         Duration::from_secs(10),
         Duration::from_millis(50),
         || async {
-            let status = device_flow::status(&f.s, "github", &flow).unwrap();
+            let status = device_flow::status(&f.s, "github", &flow).await.unwrap();
             (status["state"] == "completed").then_some(status)
         },
     )
@@ -128,6 +129,7 @@ async fn the_owner_signs_in_through_the_host_and_the_token_never_leaves_it() {
     // The sign-in is consumed by the save.
     assert_eq!(
         device_flow::status(&f.s, "github", &flow)
+            .await
             .unwrap_err()
             .status,
         404
@@ -141,7 +143,9 @@ async fn the_owner_signs_in_through_the_host_and_the_token_never_leaves_it() {
         Duration::from_secs(10),
         Duration::from_millis(50),
         || async {
-            let status = device_flow::status(&f.s, "github", &declined).unwrap();
+            let status = device_flow::status(&f.s, "github", &declined)
+                .await
+                .unwrap();
             (status["state"] == "failed").then_some(status)
         },
     )
@@ -667,7 +671,7 @@ async fn live_device_sign_in_against_github() {
     std::fs::write(&file, text(&started, "userCode")).unwrap();
     let flow = text(&started, "id").to_owned();
     let status = common::eventually(Duration::from_secs(300), Duration::from_secs(2), || async {
-        let status = device_flow::status(&s, "github", &flow).unwrap();
+        let status = device_flow::status(&s, "github", &flow).await.unwrap();
         (status["state"] != "pending").then_some(status)
     })
     .await;
@@ -688,4 +692,44 @@ async fn live_device_sign_in_against_github() {
         .await
         .unwrap();
     println!("LIVE_GITHUB_TEST {test}");
+}
+
+#[tokio::test]
+async fn device_sign_in_keeps_the_original_owners_grant_generation() {
+    for completed in [false, true] {
+        let f = fixture().await;
+        let started = device_flow::start(&f.s, "github").await.unwrap();
+        let flow = text(&started, "id").to_owned();
+        if completed {
+            f.github.state(&json!({ "device": "approved" }));
+            common::eventually(
+                Duration::from_secs(10),
+                Duration::from_millis(25),
+                || async {
+                    let state = device_flow::status(&f.s, "github", &flow).await.unwrap();
+                    (state["state"] == "completed").then_some(())
+                },
+            )
+            .await;
+        }
+        let authority =
+            common::relay_fixture::replace_owner_access(&f.s, "replacement-owner-access").await;
+        let status = device_flow::status(&f.s, "github", &flow)
+            .await
+            .unwrap_err();
+        assert!(matches!(status.status, 403 | 404));
+        let saved = connections::save(
+            &f.s,
+            "github",
+            &json!({
+                "name": "Old sign-in", "enabled": true, "credentialFlow": flow,
+            }),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(saved.status, 400 | 403 | 404));
+        assert!(f.s.store.list(connections::KIND).await.unwrap().is_empty());
+        authority.abort();
+    }
 }

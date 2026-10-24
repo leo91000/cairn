@@ -356,7 +356,7 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
         return Ok(json!({ "deferred": true, "wakeup": owner.record["wakeup"] }));
     }
     let (observed, display) = if conditions::is_condition(&input["condition"]) {
-        let observed = conditions::observe(s, &run, &input["condition"]).await?;
+        let observed = conditions::observe(s, &run, &input["condition"], Some(bearer)).await?;
         // A condition that cannot be observed is refused rather than awaited.
         if let Some(result) = &observed.result
             && result["state"] == "unavailable"
@@ -434,6 +434,9 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
                 if let Some(display) = &display {
                     wakeup["display"] = display.clone();
                 }
+            }
+            if owner.chat {
+                crate::plugins::work::reserve_continuation(db, &owner.record, &run, &wakeup)?;
             }
             owner.record["wakeup"] = wakeup.clone();
             crate::nodes::exclusive::release_before_wait(db, text(&run, "id"))?;

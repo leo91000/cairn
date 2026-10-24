@@ -32,6 +32,19 @@ native-execution and GitHub transition plans, including
 [ADR 0052](adr/0052-native-ublk-workspaces-and-idle-eviction.md). Their conversion,
 trust and recovery rules remain required.
 
+## Slack draft boundary
+
+Main's guided plugin setup transition uses epoch 12 / SQLite 11, after mission
+waits at epoch 10 / SQLite 9 and native concurrency at epoch 11 / SQLite 10.
+PR #226 reserves epoch **13 / SQLite 12** for its incompatible plugin/requester
+contract. Its earlier, unreleased 12/11 reservation was raised when the guided
+setup transition was integrated; it cannot share Main's boundary.
+The retained transitions below do not qualify Slack. This draft declares no
+automatic migration to epoch 13; deployment from an earlier epoch remains blocked
+until [Slack's compatibility inventory](SLACK-PLUGIN-COMPATIBILITY.md) and a
+separate forward transition are fully qualified and independently reviewed.
+Do not lower the version fence to bypass this gate.
+
 ## Retained transition: epochs 3–8 to 9
 
 The served production source inspected during preparation was
@@ -138,7 +151,9 @@ state, diagnose and retry it or apply a reviewed forward fix. Never lower
 Manager/runner rollout uses the existing automatic migration gate. This release
 does not create or restore backups, convert conversations, or grant host trust.
 
-## Current transition: epochs 3–11 to 12
+<a id="current-transition-epochs-311-to-12"></a>
+
+## Retained transition: epochs 3–11 to 12
 
 Epoch 12 adds optional `[setup]` declarations to installed plugin manifests.
 Previous binaries reject this field, so SQLite advances from version 10 to 11
@@ -149,7 +164,8 @@ steps; declaring it requires the new reader. Shared settings copy into each new
 connection's existing settings and vault format.
 
 `upgrades_version_ten_preserving_plugin_packages_and_fences_older_binaries`
-checks preservation of package files and plugin records, the version-11 fence,
+checks preservation of package files and plugin records and the candidate fence
+(which is now SQLite 12 on the unqualified Slack branch),
 and refusal of a newer database without downgrading it. All earlier migration
 regressions remain required by the exact-tree release gate. The version advance
 changes only the compatibility marker; it adds no read/write storage format or

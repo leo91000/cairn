@@ -20,5 +20,7 @@ keep working. Use a descriptive link when citing a decision, for example
 | 0037 | [Coding-agent execution adapters](0037-coding-agent-execution-adapters.md) · [Durable conversation wakeups](0037-durable-conversation-wakeups.md) · [Readable workspace URLs](0037-readable-workspace-urls.md) |
 | 0038 | [Durable condition waits](0038-durable-condition-waits.md) · [Luau installation plugins and external delegation](0038-luau-installation-plugins-and-external-bot-delegation.md) |
 
+| 0051 | [Agent-centric permissions](0051-agent-centric-permissions.md) · [Transient plugin contexts](0051-transient-plugin-contexts.md) |
+
 The other decisions can be found by their descriptive filenames in this directory.
 This index disambiguates references; it does not change any decision or supersession.

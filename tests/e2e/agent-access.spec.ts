@@ -335,6 +335,8 @@ test('installation management is a reviewed power, and the main agent keeps its 
 
 test('exclusive reservation is granted per node from the agent page once the agent may run there', async ({ page, workspace }, testInfo) => {
   test.setTimeout(90000)
+  // Earlier journeys share this worker's HTTP budget; retain data with a fresh process.
+  await workspace.restart()
   const gpu = await enroll(page, workspace, 'gpu-box', true)
   await enroll(page, workspace, 'old-box', false)
   const agent = await workspace.api('/api/agents', 'POST', { name: 'Release engineer', description: 'Publishes web and Android releases' })
@@ -571,6 +573,7 @@ test('a held plugin grant whose package cannot give agents access is shown, coun
     const agents = await response.json()
     await route.fulfill({ response, json: agents.map((item: { id: string }) => item.id === agent.id ? { ...item, plugins: ['queue'] } : item) })
   })
+  await page.route('**/api/plugins/packages', route => route.fulfill({ status: 404, json: { error: 'Older host has no compact directory' } }))
   await page.route('**/api/plugins', route => route.fulfill({
     json: {
       packages: [{
@@ -650,30 +653,29 @@ test('a GitHub account is granted like any plugin instance, and the server refus
     requests: [],
     activity: [],
   })
-  await page.route('**/api/plugins', route => route.fulfill({
+  await page.route('**/api/plugins/packages', route => route.fulfill({
     json: {
-      packages: [{
+      packageReads: true,
+      agentReads: true,
+      items: [{
         id: 'github',
         builtin: true,
         status: 'active',
         active: '1.0.0',
-        manifest: {
-          id: 'github',
+        presentation: {
           name: 'GitHub',
-          version: '1.0.0',
-          apiVersion: 2,
-          description: 'Agents push as your account.',
-          capabilities: ['http'],
           instances: { singular: 'Account', plural: 'Accounts' },
-          agentAccess: { description: 'Grant one account per agent.' },
-          runCredentials: { git: [] },
+          agentAccess: true,
+          agentAccessDescription: 'Grant one account per agent.',
+          contributions: { operations: 0 },
         },
-        versions: [],
       }],
-      capabilities: [],
-      connections: [account('work', 'Work'), account('personal', 'Personal')],
     },
   }))
+  await page.route('**/api/plugins/instance-access', route => route.fulfill({
+    json: { items: [account('work', 'Work'), account('personal', 'Personal')] },
+  }))
+  await page.route('**/api/plugins/agent-grant-counts', route => route.fulfill({ json: { items: [] } }))
   await page.route(`**/api/agents/${agent.id}/preview`, route => route.fulfill({ json: { runs: { queued: 0, running: 0 }, delegations: [] } }))
   const refusal = 'Grant one GitHub instance per agent: its runs use that instance\'s credentials.'
   const saves: Record<string, any>[] = []
@@ -714,6 +716,7 @@ test('when plugins cannot be loaded, plugin access is read-only and no grant loo
     await route.fulfill({ response, json: agents.map((item: { id: string }) => item.id === agent.id ? { ...item, plugins: ['queue'] } : item) })
   })
   let catalogFails = true
+  await page.route('**/api/plugins/packages', route => route.fulfill({ status: 404, json: { error: 'Older host has no compact directory' } }))
   await page.route('**/api/plugins', route => catalogFails
     ? route.fulfill({ status: 500, json: { error: 'Plugin host unavailable' } })
     : route.fulfill({ json: { packages: [], capabilities: [], connections: [] } }))
@@ -995,6 +998,7 @@ test('on an older installation, grants read from resources appear once plugins l
     })
   })
   let pluginsFail = true
+  await page.route('**/api/plugins/packages', route => route.fulfill({ status: 404, json: { error: 'Older host has no compact directory' } }))
   await page.route('**/api/plugins', async (route) => {
     if (pluginsFail) {
       await route.fulfill({ status: 500, json: { error: 'Plugin host unavailable' } })

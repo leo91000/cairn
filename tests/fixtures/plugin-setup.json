@@ -105,6 +105,45 @@
       },
       "effort": null,
       "steps": []
+    },
+    {
+      "name": "Resource conversations keep their people on routes, not on the root app",
+      "manifest": {
+        "id": "routed",
+        "name": "Routed",
+        "version": "1",
+        "apiVersion": 2,
+        "capabilities": [
+          "resources",
+          "conversations.submit"
+        ],
+        "settings": [
+          {
+            "key": "label",
+            "title": "Label",
+            "type": "string"
+          }
+        ],
+        "resources": [
+          {
+            "name": "workspace",
+            "title": "Workspaces",
+            "singular": "Workspace",
+            "delegation": true
+          }
+        ]
+      },
+      "effort": null,
+      "steps": [
+        {
+          "id": "settings",
+          "kind": "settings",
+          "title": "Settings",
+          "settings": [
+            "label"
+          ]
+        }
+      ]
     }
   ],
   "presets": {

@@ -241,7 +241,9 @@ pub(super) async fn invoke(
                 text(&args, "chatId"),
                 text(&args, "questionId"),
                 args["answer"].clone(),
-                commit_authority,
+                None,
+                true,
+                move |db, _question| commit_authority(db),
             )
             .await;
     }
@@ -282,14 +284,11 @@ pub(super) async fn invoke(
                     crate::conversation_lifecycle::request_new_session(db, id)
                 }
                 "create_chat" => chats::create_as(db, args, &origin),
-                "send_chat_message" => chats::send(db, id, crate::validation::parse("message", args["message"].clone())?, None, &origin),
-                "edit_chat_message" => {
-                    let mut message = args["message"].clone();
-                    message["id"] = args["messageId"].clone();
-                    let message = crate::validation::parse("message", message)?;
-                    chats::edit_as(db, id, text(&args, "messageId"), Some(message), &origin)
-                }
-                "delete_chat_message" => chats::edit(db, id, text(&args, "messageId"), None),
+                "send_chat_message" => chats::send_in(db, id, args["message"].clone(), None, &origin),
+                "edit_chat_message" => chats::edit_in(
+                    db, id, text(&args, "messageId"), Some(args["message"].clone()), &origin,
+                ),
+                "delete_chat_message" => chats::edit_in(db, id, text(&args, "messageId"), None, &origin),
                 "set_chat_paused" => chats::pause_in(db, id, args["paused"] == true),
                 "rename_chat" => {
                     let title = text(&args, "title").trim();

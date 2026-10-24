@@ -65,11 +65,15 @@ data class PluginSetup(
  * The setup the owner follows. An older installation sends only the manifest: resolve it the same
  * way, the package's declared steps first, else the default ones.
  */
-fun PluginEntry.resolvedSetup(): PluginSetup {
+fun PluginEntry.resolvedSetup(): PluginSetup = resolvedSetup(manifest, setup)
+
+internal fun PluginConfigurationEntry.resolvedSetup(): PluginSetup = resolvedSetup(manifest, setup)
+
+private fun resolvedSetup(manifest: PluginManifest?, setup: PluginSetup?): PluginSetup {
     setup?.let {
         return it
     }
-    val manifest = manifest ?: return PluginSetup()
+    if (manifest == null) return PluginSetup()
     val derived = manifest.defaultSetup()
     val declared = manifest.setup ?: return derived
     return declared.copy(
@@ -94,8 +98,7 @@ fun PluginManifest.defaultSetup(): PluginSetup {
     // their choices.
     val steps =
         (if (credential?.oauth != null) fields + signIn else signIn + fields).toMutableList()
-    if ("conversations.submit" in capabilities)
-        steps += SetupStep("people", "people", "Who can talk to it")
+    if (delegates) steps += SetupStep("people", "people", "Who can talk to it")
     if (agentAccess != null) steps += SetupStep("agents", "agents", "Agents")
     val secret = settings.any { it.type == "secret" && it.required }
     val effort =

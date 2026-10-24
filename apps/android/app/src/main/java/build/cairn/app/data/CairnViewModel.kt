@@ -241,6 +241,7 @@ constructor(
         if (clearStorage || scopeChanged || sessionChanged) {
             historyCache.clear()
             files.clear()
+            PluginSettingsDraftStore.clear(getApplication())
         }
     }
 

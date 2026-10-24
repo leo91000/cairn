@@ -1,0 +1,148 @@
+id = "slack"
+name = "Slack"
+version = "0.1.0"
+description = "Start Cairn work from an authorized Slack mention and receive its answer in the same thread."
+apiVersion = 2
+capabilities = [
+  "socket",
+  "webhooks",
+  "inbound",
+  "resources",
+  "conversations.submit",
+  "conversations.control",
+  "http",
+  "storage"
+]
+hosts = [
+  "slack.com",
+  "*.slack.com"
+]
+instanceForm = true
+instanceView = true
+
+[brand]
+color = "#611f69"
+path = "M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm10 0h6v6h-6z"
+
+[instances]
+singular = "App"
+plural = "Apps"
+
+[[settings]]
+key = "transport"
+title = "Receive Slack events using"
+type = "select"
+default = "http"
+refresh = true
+options = [
+  { value = "http", label = "Signed public HTTP" },
+  { value = "socket", label = "Socket Mode (outgoing connection)" }
+]
+
+[[settings]]
+key = "appToken"
+title = "App-level Socket Mode token"
+type = "secret"
+maxLength = 16384
+description = "For Socket Mode, create an app-level token with connections:write. It is separate from each workspace's bot token."
+
+[[settings]]
+key = "appId"
+title = "Slack app ID"
+type = "string"
+required = true
+pattern = "A[A-Z0-9]+"
+maxLength = 80
+refresh = true
+
+[[settings]]
+key = "signingSecret"
+title = "Signing secret"
+type = "secret"
+required = true
+maxLength = 256
+
+[[settings]]
+key = "sharingAcknowledged"
+title = "I accept shared Cairn visibility and retention"
+description = "Imported Slack requests and Cairn answers are visible to installation members and follow Cairn retention."
+type = "boolean"
+
+[[settings]]
+key = "maxRequestAgeMinutes"
+title = "Accept delayed requests for this many minutes"
+type = "number"
+default = 15
+minimum = 1
+maximum = 1440
+
+[[webhooks]]
+name = "events"
+
+[webhooks.signature]
+secret = "signingSecret"
+header = "x-slack-signature"
+prefix = "v0="
+template = "v0:{{timestamp}}:{{body}}"
+
+[webhooks.signature.timestamp]
+header = "x-slack-request-timestamp"
+maxAgeSeconds = 300
+
+[webhooks.setup.match]
+"/type" = "url_verification"
+
+[[resources]]
+name = "workspace"
+title = "Workspaces"
+singular = "Workspace"
+delegation = true
+form = true
+
+[[resources.settings]]
+key = "botToken"
+title = "Installed bot token"
+type = "secret"
+required = true
+maxLength = 16384
+
+[[resources.settings]]
+key = "channelId"
+title = "Public channel ID"
+type = "string"
+required = true
+pattern = "C[A-Z0-9]+"
+maxLength = 80
+refresh = true
+description = "Invite the app to this channel. Mentions are accepted only here; configure its agent and allowed people under Routes."
+
+[[resources.settings]]
+key = "externalId"
+title = "Workspace ID"
+type = "string"
+hidden = true
+required = true
+maxLength = 80
+
+[[resources.settings]]
+key = "appId"
+title = "Verified app ID"
+type = "string"
+hidden = true
+required = true
+maxLength = 80
+
+[[resources.settings]]
+key = "botId"
+title = "Bot user ID"
+type = "string"
+hidden = true
+required = true
+maxLength = 80
+
+[[resources.settings]]
+key = "channelName"
+title = "Channel name"
+type = "string"
+hidden = true
+maxLength = 100

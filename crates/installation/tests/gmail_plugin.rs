@@ -12,7 +12,8 @@ use cairn_installation::{
     config::{MAIN_AGENT_ID, now},
     plugins::{
         connections::{self, Connection},
-        oauth, registry,
+        oauth::credential as oauth,
+        registry,
         scope::{self, Scope},
     },
     service::Service,
@@ -123,6 +124,8 @@ struct Fixture {
     _root: TempDir,
     s: Arc<Service>,
     google: Arc<Google>,
+    run: Value,
+    bearer: String,
 }
 
 async fn fixture() -> Fixture {
@@ -142,10 +145,27 @@ async fn fixture() -> Fixture {
     let app = Router::new().fallback(move |request| answer(state.clone(), request));
     let (origin, _server) = common::serve_locally(app).await;
     s.plugins.route_http_to(Some(origin));
+    let task = s.task(json!({
+        "name": "Gmail fixture", "prompt": "Exercise the approved plugin", "agentId": MAIN_AGENT_ID,
+        "worktree": false,
+    }), None).await.unwrap();
+    let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
+    let run = s
+        .store
+        .patch_run(
+            text(&run, "id"),
+            json!({"status": "running", "isolated": true}),
+        )
+        .await
+        .unwrap();
+    let configuration = s.mcps.run_configuration(&s, &run).await.unwrap();
+    let bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN").to_owned();
     Fixture {
         _root: root,
         s,
         google,
+        run,
+        bearer,
     }
 }
 
@@ -332,10 +352,7 @@ async fn tool(
     input: Value,
 ) -> cairn_installation::error::Result<Value> {
     let package = registry::active(&f.s, "gmail").await?;
-    let scope = Scope::Agent {
-        agent_id: MAIN_AGENT_ID.to_owned(),
-        instances: accounts.to_vec(),
-    };
+    let scope = Scope::for_agent(&f.s, &f.run, accounts.to_vec(), &f.bearer).await?;
     scope::invoke(
         &f.s,
         &package,

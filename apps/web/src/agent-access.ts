@@ -1,6 +1,7 @@
 import type { Agent, Project, Skill } from '../../../packages/contracts/contracts'
 import type { McpView } from '../../../packages/contracts/mcp'
 import type { ExecutionNode } from '../../../packages/contracts/nodes'
+import type { AgentPluginInstance, AgentPluginPackage } from './agent-plugin-directory'
 import type { PluginConnection, PluginEntry } from './plugins'
 import { MAIN_AGENT_ID } from '../../../packages/contracts/constants'
 import { LOCAL_NODE_ID } from '../../../packages/contracts/nodes'
@@ -264,7 +265,9 @@ export async function currentAgentIds(
   if (!connection || keptAgentIds(agents, entry, { agentIds: ['?'] }) === undefined)
     return undefined
   const fresh = (await connections()).find(item => item.id === connection.id)
-  return keptAgentIds(agents, entry, fresh ?? connection)
+  if (!fresh)
+    throw new Error('This plugin instance was removed. Reopen the plugin before saving.')
+  return keptAgentIds(agents, entry, fresh)
 }
 
 export const updateForGrants = 'Update the installation to grant these from the agent page.'
@@ -426,21 +429,21 @@ export function nodeState(node: ExecutionNode): { state: NodeState, label: strin
  * Packages whose instances give agents something (commands, tools or instructions) with an
  * approved active version, as the server requires to use a grant.
  */
-export function grantablePackages(packages: PluginEntry[]) {
-  return packages.filter(entry => (entry.status === 'active' || entry.status === 'update') && entry.manifest?.agentAccess)
+export function grantablePackages(packages: AgentPluginPackage[]) {
+  return packages.filter(entry => (entry.status === 'active' || entry.status === 'update') && entry.agentAccess)
 }
 
 /**
  * Whether an agent can use a grant on this instance. A grant on any other instance is kept
  * but unusable, e.g. until its package is reviewed again.
  */
-export function grantableConnection(connection: Pick<PluginConnection, 'pluginId'>, packages: PluginEntry[]) {
+export function grantableConnection(connection: Pick<PluginConnection, 'pluginId'>, packages: AgentPluginPackage[]) {
   return grantablePackages(packages).some(entry => entry.id === connection.pluginId)
 }
 
-export function instanceState(connection: PluginConnection): { tone: 'granted' | 'unavailable', label: string } {
+export function instanceState(connection: AgentPluginInstance): { tone: 'granted' | 'unavailable', label: string } {
   if (!connection.enabled)
-    return { tone: 'unavailable', label: connection.pluginId === 'onepassword' ? 'Account disabled' : 'Disabled' }
+    return { tone: 'unavailable', label: 'Disabled' }
   if (connection.status.state === 'needs_review')
     return { tone: 'unavailable', label: 'Needs review' }
   if (['error', 'failed', 'invalid'].includes(connection.status.state))
@@ -453,8 +456,8 @@ export interface Context {
   skills: Skill[]
   mcps: McpView[]
   nodes: ExecutionNode[]
-  packages: PluginEntry[]
-  connections: PluginConnection[]
+  packages: AgentPluginPackage[]
+  connections: AgentPluginInstance[]
   // The plugin catalogue could not be loaded: plugin grants cannot be checked.
   pluginsUnavailable?: boolean
   // The nodes could not be loaded: node grants cannot be checked.
@@ -524,7 +527,7 @@ export interface ReviewLine {
 function connectionLabel(id: string, context: Context) {
   const connection = context.connections.find(item => item.id === id)
   const pack = context.packages.find(entry => entry.id === connection?.pluginId)
-  return `${pack?.manifest?.name ?? 'Plugin'} “${connection?.name ?? 'Removed instance'}”`
+  return `${pack?.name ?? 'Plugin'} “${connection?.name ?? 'Removed instance'}”`
 }
 
 const sandboxStrictness: Record<AgentAccess['sandbox'], number> = { 'yolo': 0, 'workspace-write': 1, 'read-only': 2 }
@@ -703,7 +706,7 @@ export function issues(draft: AgentDraft, context: Context, isMain: boolean, age
 }
 
 /** "3 projects · 2 nodes · 1Password" for the agents list. */
-export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 'connections'> & { nodes?: ExecutionNode[] }, older = false) {
+export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 'connections'> & { nodes?: ExecutionNode[], resourceGrantCounts?: Record<string, number> }, older = false) {
   const access = agent.access ?? {} as AgentAccess
   // An older installation keeps plugin grants on its instances (unknown to members, who get none).
   const plugins = older
@@ -723,7 +726,7 @@ export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 
   let unnamed = 0
   for (const id of plugins) {
     const connection = context.connections.find(item => item.id === id)
-    const name = context.packages.find(entry => entry.id === connection?.pluginId)?.manifest?.name
+    const name = context.packages.find(entry => entry.id === connection?.pluginId)?.name
     if (name)
       packages.add(name)
     else
@@ -733,6 +736,11 @@ export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 
   parts.push(...packages)
   if (unnamed)
     parts.push(`${unnamed} ${packages.size ? 'other ' : ''}plugin${unnamed === 1 ? '' : 's'}`)
+  const resourceRules = context.resourceGrantCounts?.[agent.id] ?? 0
+  if (resourceRules)
+    parts.push(`${resourceRules} saved resource rule${resourceRules === 1 ? '' : 's'}`)
+  else if (context.resourceGrantCounts === undefined && context.packages.some(entry => entry.operations))
+    parts.push('Resource access not loaded')
   // Only an effective reservation, which the node list says; without it, none is claimed.
   if (!older && agent.exclusiveNodes?.length && context.nodes && effectiveExclusive({ access, exclusiveNodes: agent.exclusiveNodes }, context.nodes).length)
     parts.push('Exclusive reservation')

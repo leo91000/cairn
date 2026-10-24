@@ -299,6 +299,8 @@ async fn direct_read(
             role: Role::Member,
             mcp_scopes: None,
             public_artifact: None,
+            public_webhook: None,
+            public_oauth: None,
             method: "GET".into(),
             path: path.into(),
             headers: Vec::new(),

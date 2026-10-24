@@ -13,7 +13,7 @@ use crate::{
     service::Service,
     validation::text,
 };
-use cairn_plugin_api::{Manifest, validate_form_result};
+use cairn_plugin_api::{FormLookup, Manifest, validate_form_fields, validate_lookup_result};
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
 
@@ -22,16 +22,49 @@ pub struct Draft {
     pub management: Option<super::management::Authority>,
     pub credential: Option<String>,
     pub secrets: Map<String, Value>,
+    pub setup: Option<Box<super::setup::SetupDraft>>,
+    pub urls: Option<Value>,
+    pub(crate) owner: Option<Arc<super::operations::Owner>>,
+    pub(crate) resource: Option<Arc<super::resources::forms::Form>>,
+    pub(crate) root: Option<Arc<super::resources::target::Target>>,
+}
+
+/// A credential entered during setup; incomplete drafts may omit it.
+pub(crate) fn typed_credential(manifest: &Manifest, input: &Value) -> Result<Option<String>> {
+    if input.is_null() {
+        return Ok(None);
+    }
+    let token = input
+        .as_str()
+        .ok_or_else(|| Error::bad("Enter a valid credential."))?
+        .trim();
+    if token.is_empty() {
+        return Ok(None);
+    }
+    if manifest
+        .credential
+        .as_ref()
+        .is_some_and(|credential| credential.oauth.is_some())
+    {
+        return Err(Error::bad(
+            "Connect this account through OAuth; pasted access tokens are not accepted.",
+        ));
+    }
+    if manifest.credential.is_none()
+        || token.len() > 16384
+        || token.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(Error::bad(
+            "Enter a valid credential declared by the plugin.",
+        ));
+    }
+    Ok(Some(token.to_owned()))
 }
 
 /// Settings as typed so far: valid values only, nothing required yet.
-fn values(manifest: &Manifest, input: &Value) -> Value {
+pub(super) fn partial_values(fields: &[Value], input: &Value) -> Result<Value> {
     let mut output = Map::new();
-    for field in manifest
-        .settings
-        .iter()
-        .filter(|field| field["type"] != "secret")
-    {
+    for field in fields.iter().filter(|field| field["type"] != "secret") {
         let key = text(field, "key");
         if let Some(value) = input.get(key).filter(|value| !value.is_null())
             && let Ok(value) = connections::setting(field, value)
@@ -39,7 +72,7 @@ fn values(manifest: &Manifest, input: &Value) -> Value {
             output.insert(key.to_owned(), value);
         }
     }
-    Value::Object(output)
+    connections::bounded_settings(Value::Object(output))
 }
 
 /// Typed secrets over saved ones, ignoring invalid input.
@@ -55,14 +88,87 @@ fn secrets(manifest: &Manifest, input: &Value, saved: Map<String, Value>) -> Map
     output
 }
 
+/// A preview/choice lookup cannot weaken the final submit evaluation.
+pub(super) struct Evaluation {
+    changed: Option<String>,
+    lookup: Option<FormLookup>,
+    submit: bool,
+}
+
+impl Evaluation {
+    pub(super) fn preview(fields: &[Value], globals: &[&str], input: &Value) -> Result<Self> {
+        let lookup = FormLookup::parse(fields, input.get("lookup")).map_err(Error::bad)?;
+        if lookup.is_some() && !input["changed"].is_null() {
+            return Err(Error::bad(
+                "A choice lookup is separate from a changed-field evaluation.",
+            ));
+        }
+        let changed = input["changed"]
+            .as_str()
+            .filter(|key| globals.contains(key) || fields.iter().any(|field| field["key"] == *key))
+            .map(str::to_owned);
+        Ok(Self {
+            changed,
+            lookup,
+            submit: false,
+        })
+    }
+
+    pub(super) fn submit() -> Self {
+        Self {
+            changed: None,
+            lookup: None,
+            submit: true,
+        }
+    }
+
+    pub(super) fn finish(
+        &self,
+        fields: &[Value],
+        globals: &[&str],
+        mut result: Value,
+    ) -> Result<Value> {
+        if let Some(lookup) = &self.lookup {
+            validate_lookup_result(fields, globals, lookup, &result).map_err(Error::bad_gateway)?;
+            if result.is_null() {
+                result = json!({});
+            }
+            // Host-owned echo distinguishes lookups from older hosts' full forms.
+            result["lookup"] = serde_json::to_value(lookup)?;
+        } else {
+            validate_form_fields(fields, globals, &result).map_err(Error::bad_gateway)?;
+        }
+        Ok(result)
+    }
+
+    pub(super) fn fields(&self) -> Value {
+        json!({ "changed": self.changed, "lookup": self.lookup, "submit": self.submit })
+    }
+}
+
+/// Keep optional pagination while preserving ordinary response shapes.
+pub(super) fn response(result: &Value) -> Value {
+    let mut response = json!({
+        "options": result.get("options").cloned().unwrap_or_else(|| json!({})),
+        "values": result.get("values").cloned().unwrap_or_else(|| json!({})),
+        "errors": result.get("errors").cloned().unwrap_or_else(|| json!({})),
+        "view": result.get("view").cloned().unwrap_or_else(|| json!([])),
+    });
+    for key in ["pages", "lookup"] {
+        if let Some(value) = result.get(key) {
+            response[key] = value.clone();
+        }
+    }
+    response
+}
+
 async fn run(
     s: &Service,
     package: &Package,
     instance: Option<&str>,
     settings: Value,
     draft: Draft,
-    changed: Option<&str>,
-    submit: bool,
+    evaluation: &Evaluation,
 ) -> Result<Value> {
     let secret_keys = draft.secrets.keys().cloned().collect::<Vec<_>>();
     let previous = match instance {
@@ -73,15 +179,22 @@ async fn run(
             .map(|v| v["settings"].clone()),
         None => None,
     };
-    let payload = json!({
+    let mut payload = json!({
         "previous": previous,
         "values": settings,
         "credential": draft.credential.is_some(),
         "secrets": secret_keys,
         "instance": instance,
-        "changed": changed,
-        "submit": submit,
+        "setup": draft.setup.as_ref().map(|setup| json!({
+            "revision": setup.revision,
+            "expiresAt": setup.expires_at,
+            "urls": draft.urls,
+        })),
     });
+    payload
+        .as_object_mut()
+        .unwrap()
+        .extend(evaluation.fields().as_object().unwrap().clone());
     let connection = Connection::draft(
         &instance.map_or_else(id, str::to_owned),
         &package.manifest.id,
@@ -95,15 +208,15 @@ async fn run(
         None => scope,
     };
     let result = scope::invoke(s, package, "form", payload, &scope).await?;
-    validate_form_result(&package.manifest, &result).map_err(Error::bad_gateway)?;
-    Ok(result)
+    evaluation.finish(&package.manifest.settings, &["credential", "form"], result)
 }
 
 /// `POST /api/plugins/{id}/form`:
 /// `{ instance?, settings, secrets?, token? | credentialFlow?, changed? }`
 /// → `{ options, values, errors, view }`.
 pub async fn form(s: &Service, plugin_id: &str, input: &Value) -> Result<Value> {
-    form_managed(s, plugin_id, input, None).await
+    let owner = Arc::new(super::operations::Owner::current(s).await?);
+    form_owned(s, plugin_id, input, owner).await
 }
 
 pub(crate) async fn form_managed(
@@ -112,7 +225,28 @@ pub(crate) async fn form_managed(
     input: &Value,
     management: Option<super::management::Authority>,
 ) -> Result<Value> {
-    let package = registry::active(s, plugin_id).await?;
+    let owner = Arc::new(super::operations::Owner::current(s).await?);
+    form_authorized(s, plugin_id, input, owner, management).await
+}
+
+pub(crate) async fn form_owned(
+    s: &Service,
+    plugin_id: &str,
+    input: &Value,
+    owner: Arc<super::operations::Owner>,
+) -> Result<Value> {
+    form_authorized(s, plugin_id, input, owner, None).await
+}
+
+async fn form_authorized(
+    s: &Service,
+    plugin_id: &str,
+    input: &Value,
+    owner: Arc<super::operations::Owner>,
+    management: Option<super::management::Authority>,
+) -> Result<Value> {
+    let approved = registry::approved(s, plugin_id).await?;
+    let package = &approved.package;
     let manifest = &package.manifest;
     if !manifest.instance_form {
         return Err(Error::not_found("This plugin has no instance form."));
@@ -122,10 +256,14 @@ pub(crate) async fn form_managed(
             .await?
             .map(|shared| shared.apply(input));
     let input = shared_input.as_ref().unwrap_or(input);
-    let instance = match input["instance"].as_str() {
-        Some(id) => Some(connections::get(s, plugin_id, id).await?.id),
+    let evaluation = Evaluation::preview(&manifest.settings, &["credential"], input)?;
+    let root = match input["instance"].as_str() {
+        Some(id) => {
+            Some(super::resources::target::Target::active_with_approval(s, id, &approved).await?)
+        }
         None => None,
     };
+    let instance = root.as_ref().map(|root| root.instance().to_owned());
     let signed_in = match input["credentialFlow"]
         .as_str()
         .filter(|flow| !flow.is_empty())
@@ -136,7 +274,7 @@ pub(crate) async fn form_managed(
                 plugin_id,
                 flow,
                 instance.as_deref(),
-                &values(manifest, &input["settings"]),
+                &partial_values(&manifest.settings, &input["settings"])?,
                 false,
             )
             .await?,
@@ -153,15 +291,23 @@ pub(crate) async fn form_managed(
             .credential
             .as_ref()
             .map_or("credential", |credential| credential.label.as_str());
-        return Ok(json!({ "errors": { "credential": format!("Enter a valid {label}.") } }));
+        return evaluation
+            .finish(
+                &manifest.settings,
+                &["credential", "form"],
+                json!({ "errors": { "credential": format!("Enter a valid {label}.") } }),
+            )
+            .map(|result| response(&result));
     }
-    let credential = match (&instance, token.is_empty()) {
+    let credential = match (&root, token.is_empty()) {
         (_, false) => Some(token.to_owned()),
-        (Some(id), true) => {
+        (Some(root), true) => {
             super::oauth::draft_token(
                 s,
-                &connections::get(s, plugin_id, id).await?,
+                &root.connection(),
                 management.as_ref(),
+                &owner,
+                &approved,
             )
             .await?
         }
@@ -175,27 +321,97 @@ pub(crate) async fn form_managed(
         management,
         credential: credential.filter(|_| manifest.credential.is_some()),
         secrets: secrets(manifest, &input["secrets"], saved),
+        setup: None,
+        urls: None,
+        owner: Some(owner),
+        resource: None,
+        root,
     };
-    let changed = input["changed"].as_str().filter(|key| {
-        *key == "credential" || manifest.settings.iter().any(|field| field["key"] == *key)
-    });
-    let settings = values(manifest, &input["settings"]);
+    let settings = partial_values(&manifest.settings, &input["settings"])?;
     let result = run(
         s,
-        &package,
+        package,
         instance.as_deref(),
         settings,
         draft,
-        changed,
-        false,
+        &evaluation,
     )
     .await?;
-    Ok(json!({
-        "options": result.get("options").cloned().unwrap_or_else(|| json!({})),
-        "values": result.get("values").cloned().unwrap_or_else(|| json!({})),
-        "errors": result.get("errors").cloned().unwrap_or_else(|| json!({})),
-        "view": result.get("view").cloned().unwrap_or_else(|| json!([])),
-    }))
+    Ok(response(&result))
+}
+
+/// Owner-only form for a persisted, still-inert setup draft. Typed values are
+/// temporary; saving them requires the draft's separate revision-checked PATCH.
+pub(crate) async fn setup_form(
+    s: &Service,
+    approved: &registry::ApprovedPackage,
+    setup: super::setup::SetupDraft,
+    input: &Value,
+    management: Option<super::management::Authority>,
+) -> Result<Value> {
+    if let Some(authority) = &management {
+        authority.recheck(s).await?;
+    }
+    let package = &approved.package;
+    if !package.manifest.instance_form {
+        return Err(Error::not_found("This plugin has no instance form."));
+    }
+    let saved = secret_values(s, &setup.id).await?;
+    let settings = partial_values(
+        &package.manifest.settings,
+        input.get("settings").unwrap_or(&setup.settings),
+    )?;
+    let evaluation = Evaluation::preview(&package.manifest.settings, &["credential"], input)?;
+    let instance = setup.id.clone();
+    let urls = setup_urls(s, &package.manifest, &instance, input).await?;
+    let owner = Arc::new(super::operations::Owner::for_account(s, &setup.owner_account).await?);
+    let credential = match typed_credential(&package.manifest, &input["token"])? {
+        Some(token) => Some(token),
+        None => {
+            super::oauth::credential::setup_token(s, &setup, approved, &owner, management.as_ref())
+                .await?
+        }
+    };
+    let root = Arc::new(super::resources::target::Target::Setup {
+        draft: Box::new(setup.clone()),
+        approved: approved.clone(),
+    });
+    let draft = Draft {
+        management,
+        credential,
+        secrets: secrets(&package.manifest, &input["secrets"], saved),
+        setup: Some(Box::new(setup)),
+        urls: Some(urls),
+        owner: Some(owner),
+        resource: None,
+        root: Some(root),
+    };
+    run(s, package, Some(&instance), settings, draft, &evaluation).await
+}
+
+pub(crate) async fn setup_urls(
+    s: &Service,
+    manifest: &Manifest,
+    instance: &str,
+    input: &Value,
+) -> Result<Value> {
+    let direct = match input.get("directOrigin").filter(|value| !value.is_null()) {
+        None => None,
+        Some(Value::String(origin)) => Some(origin.as_str()),
+        Some(_) => return Err(Error::bad("Enter an HTTPS installation origin.")),
+    };
+    let addresses = super::addresses::Addresses::load(s, direct).await?;
+    let webhooks = manifest
+        .webhooks
+        .iter()
+        .map(|endpoint| {
+            (
+                endpoint.name.clone(),
+                json!(addresses.webhook(instance, &endpoint.name)),
+            )
+        })
+        .collect::<Map<String, Value>>();
+    Ok(json!({"webhooks": webhooks, "oauthCallback": addresses.oauth(instance)}))
 }
 
 /// The package's last word before an instance is saved: derived values are applied
@@ -207,12 +423,30 @@ pub(crate) async fn submit(
     settings: Value,
     draft: Draft,
 ) -> Result<Value> {
-    let existing = s
-        .store
-        .get(connections::KIND, instance)
-        .await?
-        .map(|_| instance);
-    let result = run(s, package, existing, settings.clone(), draft, None, true).await?;
+    let existing = if draft.setup.is_some() {
+        Some(instance)
+    } else {
+        s.store
+            .get(connections::KIND, instance)
+            .await?
+            .map(|_| instance)
+    };
+    let result = run(
+        s,
+        package,
+        existing,
+        settings.clone(),
+        draft,
+        &Evaluation::submit(),
+    )
+    .await?;
+    require_valid(&package.manifest.settings, &result)?;
+    let mut merged = settings;
+    merge_values(&mut merged, &result);
+    connections::settings(&package.manifest, &merged)
+}
+
+pub(crate) fn require_valid(settings: &[Value], result: &Value) -> Result<()> {
     if let Some(errors) = result["errors"]
         .as_object()
         .filter(|errors| !errors.is_empty())
@@ -221,9 +455,7 @@ pub(crate) async fn submit(
         let message = errors
             .get("form")
             .or_else(|| {
-                package
-                    .manifest
-                    .settings
+                settings
                     .iter()
                     .find_map(|field| errors.get(text(field, "key")))
             })
@@ -232,8 +464,14 @@ pub(crate) async fn submit(
             .unwrap_or("Check the form.");
         return Err(Error::bad(message));
     }
-    let mut merged = settings;
-    if let (Some(target), Some(values)) = (merged.as_object_mut(), result["values"].as_object()) {
+    Ok(())
+}
+
+pub(crate) fn merge_values(settings: &mut Value, result: &Value) {
+    if settings.is_null() {
+        *settings = json!({});
+    }
+    if let (Some(target), Some(values)) = (settings.as_object_mut(), result["values"].as_object()) {
         for (key, value) in values {
             if value.is_null() {
                 target.remove(key);
@@ -242,5 +480,4 @@ pub(crate) async fn submit(
             }
         }
     }
-    connections::settings(&package.manifest, &merged)
 }

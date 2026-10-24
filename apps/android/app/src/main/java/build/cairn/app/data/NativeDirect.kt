@@ -154,8 +154,9 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                                         generation.get() == attemptGeneration &&
                                         !denied.get() &&
                                         unavailableAt.get() != attemptGeneration
-                                )
+                                ) {
                                     retry.failed()
+                                }
                             }
                             active.compareAndSet(attempt, null)
                             withContext(NonCancellable) { attempt.close() }
@@ -368,21 +369,23 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                 }
             if (!peer!!.setConfiguration(configuration))
                 throw IOException("Configuration ICE refusée")
-            workers.launch { readSignals() }
-            // Acknowledge the offer before native trickle starts: the installation creates its peer
-            // here.
-            signal(
-                buildJsonObject {
-                    put("kind", "offer")
-                    put("sdp", sdp)
-                }
-            )
+            // A fast answer can arrive on the event stream before the offer HTTP
+            // acknowledgement. Put the native peer in have-local-offer first.
             description {
                 peer!!.setLocalDescription(
                     it,
                     SessionDescription(SessionDescription.Type.OFFER, sdp),
                 )
             }
+            workers.launch { readSignals() }
+            signal(
+                buildJsonObject {
+                    put("kind", "offer")
+                    put("sdp", sdp)
+                }
+            )
+            // Local candidates remain in the bounded queue until the installation
+            // acknowledges its offer, preserving offer-before-candidate ordering.
             workers.launch {
                 try {
                     for (candidate in candidates) {

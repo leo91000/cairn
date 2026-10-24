@@ -10,6 +10,7 @@ use crate::{
     execution,
     nodes::{self, placement},
     performance::{Activity, Operation},
+    plugins::requesters::ExecutionSource,
     process::Environment,
     provider::Provider,
     recovery, run_output,
@@ -38,6 +39,12 @@ const SUMMARY_LIMIT: usize = 100_000;
 const HISTORY_LIMIT: usize = 16_000;
 const RESUME_PROMPT: &str = "Continue the same task from the saved conversation and current workspace. Execution was interrupted. Resume the original task from its last completed step. Preserve completed work and verify external effects before repeating any action.";
 
+/// Source verification can be retried without treating it as an agent failure.
+pub(super) enum Failure {
+    SourceUnavailable(Error),
+    Other(Error),
+}
+
 /// Runs `run` until it finishes, retrying on another account when usage runs out.
 pub(super) async fn execute(
     s: &Arc<Service>,
@@ -47,7 +54,7 @@ pub(super) async fn execute(
     checkpoint: &Checkpoint,
     existing: bool,
     sensitive: &mut Vec<String>,
-) -> Result<()> {
+) -> std::result::Result<(), Failure> {
     let span = tracing::info_span!(target: "cairn_performance", "agent_execution", run_id = text(run, "id"));
     execute_inner(s, run, admission, cancel, checkpoint, existing, sensitive)
         .instrument(span)
@@ -62,12 +69,11 @@ async fn execute_inner(
     checkpoint: &Checkpoint,
     existing: bool,
     sensitive: &mut Vec<String>,
-) -> Result<()> {
+) -> std::result::Result<(), Failure> {
     let id = text(run, "id").to_owned();
-    let mut timing = Operation::new("agent_prepare", &id, "mark_running");
     let mut execution = Execution {
         s,
-        provider: Provider::of_run(run)?,
+        provider: Provider::of_run(run).map_err(Failure::Other)?,
         directory: s.config.data_dir.join("runs").join(&id),
         id,
         run,
@@ -77,23 +83,40 @@ async fn execute_inner(
         checkpoint,
         sensitive,
         attempt_id: String::new(),
+        source: admission.source.as_ref(),
+        source_unavailable: false,
     };
-    execution.mark_running().await?;
-    timing.next("access");
-    execution.refresh_access().await?;
-    timing.next("workspace");
-    let mut workspace = execution.prepare(existing).await?;
-    timing.next("session_lookup");
-    let mut resume = execution.resume_session(&workspace).await?;
-    timing.finish();
-    let mut log_total = 0;
-    loop {
-        match execution
-            .attempt(&mut workspace, resume.as_deref(), &mut log_total)
-            .await?
-        {
-            Attempt::Finished => return Ok(()),
-            Attempt::Resume(session) => resume = Some(session),
+    execution.run(existing).await.map_err(|error| {
+        if execution.source_unavailable {
+            Failure::SourceUnavailable(error)
+        } else {
+            Failure::Other(error)
+        }
+    })
+}
+
+impl Execution<'_> {
+    async fn run(&mut self, existing: bool) -> Result<()> {
+        let mut timing = Operation::new("agent_prepare", &self.id, "mark_running");
+        self.check_source().await?;
+        self.mark_running().await?;
+        timing.next("access");
+        self.refresh_access().await?;
+        self.check_source().await?;
+        timing.next("workspace");
+        let mut workspace = self.prepare(existing).await?;
+        timing.next("session_lookup");
+        let mut resume = self.resume_session(&workspace).await?;
+        timing.finish();
+        let mut log_total = 0;
+        loop {
+            match self
+                .attempt(&mut workspace, resume.as_deref(), &mut log_total)
+                .await?
+            {
+                Attempt::Finished => return Ok(()),
+                Attempt::Resume(session) => resume = Some(session),
+            }
         }
     }
 }
@@ -110,6 +133,8 @@ struct Execution<'a> {
     provider: Provider,
     directory: PathBuf,
     attempt_id: String,
+    source: Option<&'a ExecutionSource>,
+    source_unavailable: bool,
 }
 
 /// The prepared execution environment shared by every launch attempt.
@@ -184,6 +209,19 @@ struct RunnerStorage<'a> {
 }
 
 impl Execution<'_> {
+    async fn check_source(&mut self) -> Result<()> {
+        if let Some(source) = self.source
+            && let Err(error) = source.recheck(self.s).await
+        {
+            if ExecutionSource::is_revoked(&error) {
+                self.cancel.cancel();
+            }
+            self.source_unavailable = ExecutionSource::is_unavailable(&error);
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn stopping(&self) -> bool {
         self.cancel.is_cancelled() || self.s.shutdown.is_cancelled()
     }
@@ -259,8 +297,10 @@ impl Execution<'_> {
                 self.sensitive.push(secret.clone());
             }
         }
+        self.check_source().await?;
         timing.next("account_home");
         let state_home = self.prepare_state_home(&prepared).await?;
+        self.check_source().await?;
         let patch = json!({
             "workspace": prepared["cwd"],
             "workspaces": prepared["workspaces"],
@@ -290,6 +330,7 @@ impl Execution<'_> {
         for (key, value) in mcp["env"].as_object().unwrap() {
             env.insert(key.clone(), value.as_str().unwrap_or("").into());
         }
+        self.check_source().await?;
         timing.finish();
         Ok(Workspace {
             prepared,
@@ -403,6 +444,7 @@ impl Execution<'_> {
         if self.stopping() {
             return Err(Error::conflict("Execution stopped."));
         }
+        self.check_source().await?;
         if self.checkpoint.expired() {
             return Err(Error::conflict("Run exceeded its time limit."));
         }
@@ -603,6 +645,7 @@ impl Execution<'_> {
         launch: &mut Launch,
     ) -> Result<()> {
         let s = self.s;
+        self.check_source().await?;
         crate::object_storage::Storage::configured(s)?;
         let mut timing = Operation::new("runner_prepare", &self.id, "placement");
         let runner = crate::config::id();
@@ -620,15 +663,18 @@ impl Execution<'_> {
             .await?;
         drop(self.preparation.take());
         s.worker.notify();
+        self.check_source().await?;
         timing.next("plan");
         self.write_runner_plan(workspace, &runner, &placement, resume, chat, launch)
             .await?;
+        self.check_source().await?;
         timing.next("remote_prepare");
         let runner_url = nodes::transport::url(s, &self.id).await?;
         if placement["nodeId"] != nodes::LOCAL_NODE_ID {
             self.prepare_remote(&runner_url, &runner, text(&placement, "nodeId"))
                 .await?;
         }
+        self.check_source().await?;
         timing.next("placement_commit");
         let patch = json!({
             "nodeId": placement["nodeId"],
@@ -759,6 +805,7 @@ impl Execution<'_> {
     ) -> Result<Exit> {
         let s = self.s;
         let previously_launched = self.checkpoint.read(RunCheckpoint::launched).await;
+        self.check_source().await?;
         let mut child = Supervised::spawn(
             &launch.binary,
             &launch.args,
@@ -782,6 +829,10 @@ impl Execution<'_> {
                 c.last_error = Some(None);
             })
             .await?;
+        if let Err(error) = self.check_source().await {
+            child.stop().await;
+            return Err(error);
+        }
         if self.stopping() {
             child.stop().await;
             return Err(Error::conflict("Execution stopped before launch."));

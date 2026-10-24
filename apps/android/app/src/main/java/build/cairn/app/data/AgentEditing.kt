@@ -106,7 +106,7 @@ fun reviewBaseline(baseline: Agent, edited: Agent, legacy: Boolean): Agent =
     else baseline
 
 /** On an older installation, the agent's live grants as its resources record them. */
-fun Agent.withResourceGrants(catalog: PluginCatalog?, nodes: List<ExecutionNode>): Agent =
+fun Agent.withResourceGrants(catalog: AgentPluginDirectory?, nodes: List<ExecutionNode>): Agent =
     copy(
         plugins = catalog?.connections?.filter { id in it.agentIds }?.map { it.id }.orEmpty(),
         exclusiveNodes =
@@ -121,7 +121,7 @@ data class AgentResources(
     val skills: List<Skill> = emptyList(),
     val mcps: List<Mcp> = emptyList(),
     val nodes: List<ExecutionNode> = emptyList(),
-    val catalog: PluginCatalog? = null,
+    val catalog: AgentPluginDirectory? = null,
     /** False while the machine list is loading or failed to load. */
     val nodesLoaded: Boolean = true,
     /** Whether the installation's skills have loaded, so a missing one can be reported. */
@@ -368,11 +368,11 @@ fun choosableSkills(skills: List<Skill>, access: AccessPolicy): List<Skill> = sk
  * Whether the package's instances can be granted to agents: an approved version runs and its
  * manifest gives agents commands, tools or instructions.
  */
-fun PluginEntry.agentGrantable() =
-    manifest?.agentAccess != null && (status == "active" || status == "update")
+fun AgentPluginPackage.agentGrantable() = agentAccess && (status == "active" || status == "update")
 
 /** Plugin instances whose package gives agents access, grouped by package. */
-fun PluginCatalog.agentGrantable(): List<Pair<PluginEntry, List<PluginConnection>>> =
+fun AgentPluginDirectory.agentGrantable():
+    List<Pair<AgentPluginPackage, List<AgentPluginInstance>>> =
     packages
         .filter { it.agentGrantable() }
         .map { entry -> entry to connections.filter { it.pluginId == entry.id } }
@@ -382,7 +382,7 @@ fun PluginCatalog.agentGrantable(): List<Pair<PluginEntry, List<PluginConnection
  * Instances the agent holds whose package no longer gives agents access (not approved, invalid or
  * without agent access): the grant is kept but has no effect, so it is shown to be removed.
  */
-fun PluginCatalog.unavailableGrants(plugins: List<String>): List<PluginConnection> =
+fun AgentPluginDirectory.unavailableGrants(plugins: List<String>): List<AgentPluginInstance> =
     connections.filter { connection ->
         connection.id in plugins &&
             packages.find { it.id == connection.pluginId }?.agentGrantable() != true
@@ -392,18 +392,38 @@ private fun plural(count: Int, singular: String, plural: String = "${singular}s"
     "$count ${if (count == 1) singular else plural}"
 
 /** "1Password : 1 compte · Discord", or empty when the agent has no plugin grant. */
-fun pluginSummary(agent: Agent, catalog: PluginCatalog?): String {
-    if (agent.plugins.isEmpty()) return ""
-    if (catalog == null) return plural(agent.plugins.size, "instance")
+fun pluginSummary(agent: Agent, catalog: AgentPluginDirectory?): String {
+    if (catalog == null)
+        return if (agent.plugins.isEmpty()) NOT_LOADED else plural(agent.plugins.size, "instance")
     val groups =
         catalog.connections
             .filter { it.id in agent.plugins }
             .groupBy { it.pluginId }
             .map { (pluginId, granted) ->
                 val name = catalog.packages.find { it.id == pluginId }?.name ?: pluginId
-                if (pluginId == "onepassword") "$name : ${plural(granted.size, "compte")}" else name
+                val nouns = catalog.packages.find { it.id == pluginId }?.instances
+                if (nouns == null) name
+                else
+                    "$name : ${plural(granted.size, nouns.singular.lowercase(), nouns.plural.lowercase())}"
             }
-    return groups.joinToString(" · ").ifBlank { plural(agent.plugins.size, "instance") }
+    val instanceAccess =
+        groups.joinToString(" · ").ifBlank {
+            if (agent.plugins.isEmpty()) "" else plural(agent.plugins.size, "instance")
+        }
+    return listOf(instanceAccess, resourceAccessSummary(agent.id, catalog))
+        .filter { it.isNotBlank() }
+        .joinToString(" · ")
+}
+
+private fun resourceAccessSummary(agentId: String, catalog: AgentPluginDirectory?): String {
+    if (catalog == null || agentId.isBlank()) return ""
+    val count = catalog.resourceGrantCounts?.get(agentId) ?: 0
+    return when {
+        count > 0 -> "$count règle${if (count > 1) "s" else ""} sur les ressources"
+        catalog.resourceGrantCounts == null && catalog.packages.any { it.operations > 0 } ->
+            "Droits sur les ressources non chargés"
+        else -> ""
+    }
 }
 
 fun sandboxLabel(value: String) =
@@ -448,7 +468,7 @@ fun timeoutSummary(minutes: Int) =
 /** The short access summary on an agent card: "3 projets · 2 nodes · 1 plugin". */
 fun agentAccessSummary(
     agent: Agent,
-    catalog: PluginCatalog? = null,
+    catalog: AgentPluginDirectory? = null,
     /** Known machines, to show exclusivity only where it takes effect; null (unknown) omits it. */
     nodes: List<ExecutionNode>? = null,
     /**
@@ -475,6 +495,8 @@ fun agentAccessSummary(
                             }
                             .distinct()
                     )
+            val resourceSummary = resourceAccessSummary(shown.id, catalog)
+            if (resourceSummary.isNotBlank()) add(resourceSummary)
             if (
                 // Only where it takes effect, so never while the machines are unknown.
                 nodes != null && shown.effectiveExclusive(nodes).isNotEmpty()
@@ -707,7 +729,7 @@ fun agentReductions(
 }
 
 /** "1Password « Production »": a granted plugin instance and its package. */
-private fun pluginGrantLabel(id: String, catalog: PluginCatalog?): String {
+private fun pluginGrantLabel(id: String, catalog: AgentPluginDirectory?): String {
     val connection = catalog?.connections?.find { it.id == id }
     val plugin =
         catalog?.packages?.find { it.id == connection?.pluginId }?.name

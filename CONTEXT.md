@@ -134,7 +134,7 @@ L’emplacement d’où une skill a été importée par la source de skills d’
 
 **Délégation externe d’un plugin** :
 L’accès précis que le propriétaire accorde à des identités externes, par exemple
-à des utilisateurs Discord dans un canal, pour faire travailler un agent dédié et
+à des personnes sur Slack ou Discord dans un canal, pour faire travailler un agent dédié et
 recevoir ses réponses. Ces identités ne deviennent pas membres de l’installation
 et n’obtiennent aucun accès général à son interface, ses conversations ou sa gestion.
 Les conversations créées restent partagées dans Cairn ; les réponses du bot sont
@@ -149,6 +149,14 @@ utiliser ce que le plugin leur apporte se choisissent sur la page de chaque agen
 ou à la dernière étape de sa création, qui ne fait qu’ajouter des droits.
 Aucun agent n’est autorisé par défaut.
 _Avoid_ : connexion (réservé aux comptes des agents de code)
+
+**Brouillon de configuration d’un plugin** :
+Une configuration temporaire préparée par le propriétaire avant d’activer une
+instance. Elle garde une identité stable pendant la mise en place auprès du
+service externe, sans donner d’accès aux agents ni accepter du travail. Elle
+expire si le propriétaire ne termine pas la configuration. L’activation valide la
+configuration complète puis publie l’instance, ses ressources et les autorisations
+préparées dans une seule transaction, en conservant leurs identifiants.
 
 **Assistant de configuration d’un plugin** :
 Les étapes que le propriétaire suit pour ajouter ou modifier une instance, dans
@@ -189,11 +197,63 @@ Ce qu’un agent autorisé peut attendre avec `wait_for` grâce à un plugin, pa
 les checks requis d’une pull request. Cairn garde l’attente et reprend la
 conversation ; le plugin dit seulement si la condition est remplie.
 
+**Recherche de choix d’un formulaire de plugin** :
+Une prévisualisation bornée pour un seul champ distant, avec un texte de recherche
+et un curseur opaque facultatif. Elle conserve les mêmes preuves d’autorité que le
+formulaire complet et ne peut pas modifier ses valeurs. Une page vide peut encore
+avoir une suite ; sans information de pagination, la complétude reste inconnue.
+La sélection demeure indépendante de la page affichée et la sauvegarde exécute
+toujours la validation complète du package.
+
+**Autorisation personnelle d’un plugin** :
+L’accord d’une personne pour qu’un plugin agisse avec son identité et les droits
+qu’elle lui a confiés sur un service externe. Cette autorisation reste propre à
+cette personne et ne la rend pas membre de l’installation Cairn.
+
+**Demandeur d’un tour** :
+L’identité vérifiée de la personne dont le message déclenche le tour courant d’une
+conversation. Ses autorisations personnelles accompagnent ce tour ; elles ne
+viennent ni du premier participant du fil ni du propriétaire de l’installation.
+Une demande sans identité vérifiée ne reçoit aucune autorisation personnelle par
+défaut.
+
+**Consultation éphémère d’un plugin** :
+Une consultation dont les résultats et réponses restent réservés au demandeur, sans être
+conservés dans une conversation partagée ou un historique. Elle peut être assistée
+par un agent lorsque cette même limite de conservation est respectée.
+
+**Profil d’accès d’un plugin** :
+Un ensemble de droits accordés à un agent sur un périmètre du service externe,
+comme un espace ou un canal Slack. Les profils Lecture, Contribution et Gestion
+peuvent être ajustés sans attribuer d’accès aux autres agents.
+
+**Ressource d’un plugin** :
+Un élément configuré au sein d’une instance, comme un workspace, une route de
+conversation ou une autorisation personnelle. Il délimite les réglages et les
+droits qui lui appartiennent, indépendamment des autres ressources.
+
+**Opération d’un plugin** :
+Une action nommée proposée par un plugin sur une ressource, comme lire des messages
+ou en publier. Son profil et son périmètre définissent ce qu’un agent peut recevoir
+comme droit.
+
+**Route de conversation d’un plugin** :
+Une délégation définie par le propriétaire pour une ressource externe. Cairn choisit
+la règle qui correspond le plus précisément au contexte reçu, puis applique son
+agent, son projet, les personnes autorisées et les limites. Le package décrit la
+source ; il ne choisit pas l’autorité. Le contrôle d’une exécution reste réservé à
+son auteur, même dans un fil partagé.
+
+**Règle d’automatisation d’un plugin** :
+Une instruction activée par le propriétaire pour déclencher le travail d’un agent
+sur des événements externes, avec une source, des conditions et des limites
+définies. Elle respecte les droits de l’auteur humain ou l’autorisation dédiée aux
+déclenchements sans auteur humain.
+
 **Transport d’un plugin** :
-La connexion qu’un package entretient lui-même avec un service externe, par exemple la
-Gateway de Discord : un worker dédié par instance pilote un socket que Cairn ouvre vers
-les hôtes déclarés, et remet à Cairn ce que les personnes écrivent. Cairn applique les
-règles d’admission de l’instance avant de garder quoi que ce soit.
+Le mode d’échange d’un plugin avec un service externe, par une connexion qu’il
+entretient ou des requêtes qu’il reçoit. Cairn applique les règles d’admission de
+l’instance avant de conserver les messages des personnes externes.
 _Avoid_ : transport natif
 
 **Programme déclaré** :

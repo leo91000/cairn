@@ -1,5 +1,5 @@
 //! A source-only Luau interpreter. Run in a dedicated process, never in the manager.
-use cairn_plugin_api::{API_VERSION, Frame, MAX_FRAME_BYTES, Sources};
+use cairn_plugin_api::{API_VERSION, Frame, MAX_EVENT_FRAME_BYTES, MAX_FRAME_BYTES, Sources};
 use mlua::{Lua, LuaSerdeExt, VmState, serde::SerializeOptions};
 use serde_json::Value;
 use std::{
@@ -20,9 +20,13 @@ cairn.array_metatable = nil
 cairn.array = function(items) return setmetatable(items or {}, array_mt) end
 cairn.storage = {
     get = function(key) return call("storage.get", { key = key }) end,
-    set = function(key, value) call("storage.set", { key = key, value = value }) end,
+    set = function(key, value, options) call("storage.set", { key = key, value = value, delivery = options and options.delivery }) end,
+    max = function(key, value) return call("storage.max", { key = key, value = value }) end,
     delete = function(key) call("storage.delete", { key = key }) end,
     list = function(prefix) return call("storage.list", { prefix = prefix or "" }) end,
+}
+cairn.delivery = {
+    checkpoint = function(state) call("delivery.checkpoint", { state = state }) end,
 }
 cairn.http = {
     request = function(request) return call("http.request", request) end,
@@ -45,6 +49,7 @@ cairn.conversations = {
     check = function(target) return call("conversations.check", target) end,
     answer = function(answer) return call("conversations.answer", answer) end,
     cancel = function(target) return call("conversations.cancel", target) end,
+    reset = function(target) return call("conversations.reset", target) end,
 }
 cairn.exec = {
     run = function(request) return call("exec.run", request) end,
@@ -68,6 +73,17 @@ cairn.socket = {
 }
 cairn.inbound = {
     accept = function(message) return call("inbound.accept", message) end,
+    deliver = function(message) return call("inbound.deliver", message) end,
+}
+cairn.resources = {
+    get = function(options) return call("resources.get", options) end,
+    list = function(options) return call("resources.list", options) end,
+}
+cairn.oauth = {
+    start = function(options) return call("oauth.start", options) end,
+    finish = function(options) return call("oauth.finish", options) end,
+    status = function(options) return call("oauth.status", options) end,
+    disconnect = function(options) return call("oauth.disconnect", options) end,
 }
 cairn.instance = {
     status = function(state, message) call("instance.status", { state = state, message = message }) end,
@@ -208,6 +224,9 @@ impl Runtime {
         )?;
         api.set("array_metatable", lua.array_metatable())?;
         let json = lua.create_table()?;
+        // Incoming JSON null still becomes nil. This explicit sentinel lets a
+        // package return a present null field (which a Lua nil would remove).
+        json.set("null", lua.null())?;
         json.set(
             "decode",
             lua.create_function(|lua, text: mlua::LuaString| {
@@ -312,18 +331,20 @@ impl Runtime {
 fn read_frame(reader: &mut impl BufRead) -> Result<Option<Frame>, String> {
     let mut bytes = Vec::new();
     reader
-        .take(MAX_FRAME_BYTES as u64 + 1)
+        .take(MAX_EVENT_FRAME_BYTES as u64 + 1)
         .read_until(b'\n', &mut bytes)
         .map_err(|_| "Plugin input failed.")?;
     if bytes.is_empty() {
         return Ok(None);
     }
-    if bytes.len() > MAX_FRAME_BYTES || bytes.last() != Some(&b'\n') {
+    if bytes.len() > MAX_EVENT_FRAME_BYTES || bytes.last() != Some(&b'\n') {
         return Err("Invalid plugin frame.".into());
     }
-    serde_json::from_slice(&bytes)
-        .map(Some)
-        .map_err(|_| "Invalid plugin frame.".into())
+    let frame: Frame = serde_json::from_slice(&bytes).map_err(|_| "Invalid plugin frame.")?;
+    if bytes.len() > frame.encoded_limit() {
+        return Err("Invalid plugin frame.".into());
+    }
+    Ok(Some(frame))
 }
 
 fn write_frame(writer: &mut impl Write, frame: &Frame) -> Result<(), String> {
@@ -402,6 +423,37 @@ mod luau_files;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn input_event_frames_have_a_larger_budget_without_widening_replies_or_output() {
+        for event in [true, false] {
+            let make = |length| {
+                let value = json!("x".repeat(length));
+                if event {
+                    Frame::Event {
+                        name: "probe".into(),
+                        payload: value,
+                    }
+                } else {
+                    Frame::Reply { value }
+                }
+            };
+            let empty = make(0);
+            let limit = empty.encoded_limit();
+            let overhead = serde_json::to_vec(&empty).unwrap().len();
+            let mut allowed = serde_json::to_vec(&make(limit - overhead - 1)).unwrap();
+            assert_eq!(allowed.len(), limit - 1);
+            allowed.push(b'\n');
+            assert!(read_frame(&mut allowed.as_slice()).unwrap().is_some());
+            let mut oversized = serde_json::to_vec(&make(limit - overhead)).unwrap();
+            oversized.push(b'\n');
+            assert!(read_frame(&mut oversized.as_slice()).is_err());
+        }
+        let result = Frame::Done {
+            value: json!("x".repeat(MAX_FRAME_BYTES)),
+        };
+        assert!(write_frame(&mut Vec::new(), &result).is_err());
+    }
 
     fn load(source: &str) -> Runtime {
         Runtime::load(source, Duration::from_secs(5)).unwrap_or_else(|_| panic!("load"))
@@ -544,6 +596,16 @@ mod tests {
             .dispatch("probe", Value::Null, |_, _| unreachable!())
             .unwrap();
         assert_eq!(output, json!({ "empty": [], "map": {} }));
+        let runtime = load(
+            "return { probe = function() return { page = {nextCursor = cairn.json.null}, encoded = cairn.json.encode({key = cairn.json.null}) } end }",
+        );
+        let output = runtime
+            .dispatch("probe", Value::Null, |_, _| unreachable!())
+            .unwrap();
+        assert_eq!(
+            output,
+            json!({"page": {"nextCursor": null}, "encoded": "{\"key\":null}"})
+        );
     }
 
     #[test]

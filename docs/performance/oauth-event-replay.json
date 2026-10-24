@@ -1,0 +1,141 @@
+{
+  "scope": "Python/SQLite KV shape only; excludes Rust, database actor, audit and ordinary chat writes, authentication, provider I/O and network",
+  "reference": "R16 suspension and original requester, no owner-answer marker",
+  "candidate": "Same records plus exact chat/run/initial/input owner-answer marker",
+  "cold_definition": "New SQLite connection; OS caches retained, temporary filesystem",
+  "host": {
+    "kernel": "6.12.109",
+    "python": "3.14.7",
+    "sqlite": "3.53.1",
+    "cpus": 7,
+    "load": [
+      1.3154296875,
+      1.54052734375,
+      2.767578125
+    ],
+    "memory": [
+      "MemTotal:       19462272 kB",
+      "MemAvailable:    9975104 kB"
+    ],
+    "context": "R18 OAuth-event KV shape; Rust formatting only, no native tests, Android, emulator or PostgreSQL traffic; reference runs first, temporary filesystem with OS caches retained"
+  },
+  "before": {
+    "rows": 2,
+    "encoded_json_bytes": 104,
+    "key_bytes": 235,
+    "database_bytes": 12288,
+    "warm_read": {
+      "samples": 1000,
+      "p50_ms": 0.0224335,
+      "p95_ms": 0.035722,
+      "cpu_total_ms": 25.833407
+    },
+    "new_connection_read": {
+      "samples": 50,
+      "p50_ms": 0.4551475,
+      "p95_ms": 0.730112,
+      "cpu_total_ms": 25.460995
+    },
+    "write_commit": {
+      "samples": 100,
+      "p50_ms": 0.0140785,
+      "p95_ms": 0.026645,
+      "cpu_total_ms": 1.794354
+    },
+    "pragmas": {
+      "synchronous": 2,
+      "journal_mode": "wal",
+      "page_size": 4096
+    }
+  },
+  "after": {
+    "rows": 3,
+    "encoded_json_bytes": 243,
+    "key_bytes": 342,
+    "database_bytes": 12288,
+    "warm_read": {
+      "samples": 1000,
+      "p50_ms": 0.0363675,
+      "p95_ms": 0.082859,
+      "cpu_total_ms": 48.948787
+    },
+    "new_connection_read": {
+      "samples": 50,
+      "p50_ms": 0.541168,
+      "p95_ms": 0.786929,
+      "cpu_total_ms": 27.425373
+    },
+    "write_commit": {
+      "samples": 100,
+      "p50_ms": 0.03068,
+      "p95_ms": 0.056173,
+      "cpu_total_ms": 3.540556
+    },
+    "pragmas": {
+      "synchronous": 2,
+      "journal_mode": "wal",
+      "page_size": 4096
+    }
+  },
+  "oauth_event": {
+    "scope": "External flow index before; same flow plus event receipt after; excludes encrypted pending consent, event/authority validation, authorization lookup and provider calls",
+    "before": {
+      "rows": 1,
+      "encoded_json_bytes": 142,
+      "key_bytes": 137,
+      "database_bytes": 12288,
+      "warm_read": {
+        "samples": 1000,
+        "p50_ms": 0.02264,
+        "p95_ms": 0.034852,
+        "cpu_total_ms": 25.767353
+      },
+      "new_connection_read": {
+        "samples": 50,
+        "p50_ms": 0.597494,
+        "p95_ms": 0.929333,
+        "cpu_total_ms": 32.079077
+      },
+      "write_commit": {
+        "samples": 100,
+        "p50_ms": 0.023933,
+        "p95_ms": 0.039175,
+        "cpu_total_ms": 2.649117
+      },
+      "pragmas": {
+        "synchronous": 2,
+        "journal_mode": "wal",
+        "page_size": 4096
+      }
+    },
+    "after": {
+      "rows": 2,
+      "encoded_json_bytes": 264,
+      "key_bytes": 303,
+      "database_bytes": 12288,
+      "warm_read": {
+        "samples": 1000,
+        "p50_ms": 0.0457565,
+        "p95_ms": 0.074611,
+        "cpu_total_ms": 48.771292
+      },
+      "new_connection_read": {
+        "samples": 50,
+        "p50_ms": 0.550444,
+        "p95_ms": 0.756153,
+        "cpu_total_ms": 27.689223
+      },
+      "write_commit": {
+        "samples": 100,
+        "p50_ms": 0.0127165,
+        "p95_ms": 0.028889,
+        "cpu_total_ms": 1.500799
+      },
+      "pragmas": {
+        "synchronous": 2,
+        "journal_mode": "wal",
+        "page_size": 4096
+      }
+    }
+  }
+}

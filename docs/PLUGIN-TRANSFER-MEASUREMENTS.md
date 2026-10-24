@@ -62,3 +62,50 @@ bound. Transfer files have mode 0600 and are unlinked before writing their paylo
 no named file survives a process crash. Handles are ephemeral, regularly expired
 by the plugin maintenance loop and removed on disconnect/deletion; no transfer
 index is persisted.
+
+## Native authority and mutation-receipt record observation
+
+Local run on 2026-10-22, after the selected native suites completed, with no
+concurrent build or other qualification process. The unoptimized test profile
+uses the real Store with two separate temporary databases. Both cases contain
+1,000 representative completed receipt records with identical keys, response
+values and field lengths. The reference hashes the previous intent input; the
+new case hashes input with native authorization proof. Only the SHA-256 value
+changes: authority details and secrets are not added to the persisted record.
+
+Each case seeds its records, closes and reopens Store, then reads the same row
+once with the new connection and five more times. It performs six same-value
+writes. The first read is connection-cold; the OS cache is retained. Read timings
+exclude actor scheduling; writes include it. CPU is process CPU time. Encoded
+key-plus-JSON bytes exclude SQLite pages, WAL, indices and the kind string.
+
+| Case | Encoded bytes, 1,000 rows | First read ms | Median warm read ms | Median write ms | Warm read CPU ms | Write CPU ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Prior fingerprint | 453000 | 0.762 | 0.055 | 0.267 | 0.058 | 0.285 |
+| Authority-bound fingerprint | 453000 | 0.793 | 0.056 | 0.244 | 0.063 | 0.259 |
+
+The VM runs Linux 6.12.109 and reported 7 available CPUs. Its cgroup CPU and
+memory limit files were unavailable to the observation. Temporary databases were
+on `/tmp` (tmpfs), so these are memory-backed I/O observations, not physical cold
+disk latency.
+
+This checks storage shape and local I/O only. It does not measure authorization
+lookups, hashing, provider requests or complete plugin calls, and establishes no
+throughput or production latency improvement. Raw wall/CPU samples, limits,
+command and relevant source hashes are in
+[the receipt observation](performance/PLUGIN-RECEIPT-AUTHORITY.json).
+
+Reproduce alone with the credential-isolating launcher and the pinned toolchain:
+
+```sh
+CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  pnpm test:backend -p cairn-installation --test plugin_oauth \
+  receipts::measure_authority_receipt_storage_shape \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
+The existing instance/key namespace and stored record shape remain unchanged.
+The stronger fingerprint is part of the unreleased epoch-10 compatibility gate.
+An older receipt conflicts rather than replaying a response without current
+authority or silently repeating an uncertain write. No deployment or downgrade
+is authorized by this observation.

@@ -1,0 +1,93 @@
+{
+  "status": "Confirmed4/4 storage contracts and40/40 shared plugin cases PASS in full518/518 JVM suite, no skipped",
+  "reviewTree": "a79f3ddd189b31f78ee8aea282a5b3a9fcce5790",
+  "source": "PluginSettingsDraftStoreTest.largeOrdinaryInputsUseBoundedLocalStorage / shared PluginsCases.largeSetupSavesOnlySmallEditorReferencesAndOrdinaryEdits",
+  "workload": "20 declared ordinary fields, 10,000 chars each:6 quote defaults and14 ASCII values;1 atomic write,1 read via new store object,5 warm reads; no secrets",
+  "host": {
+    "platform": "Linux-6.12.109-x86_64-with-glibc2.36",
+    "cpus": 7,
+    "ramBytes": 19929366528,
+    "tempFilesystem": "tmpfs"
+  },
+  "cacheConditions": "Robolectric JVM application temp files, tmpfs, OS cache retained; not physical-device storage or physical cold disk read; full Gradle JVM suite, no other heavy test job",
+  "measurement": {
+    "encodedBytes": 260251,
+    "writeNanos": 36991554,
+    "firstNewStoreReadNanos": 40726782,
+    "repeatedReadMeanNanos": 12476935,
+    "threadCpuNanos": 139683322
+  },
+  "savedParcelBytes": 1280,
+  "reference": {
+    "oldSavedParcelBytes": 1543572,
+    "oldEvidence": "slack-large-setup-state-red-r12-result.json",
+    "ordinaryInputs": "20x10000chars unchanged,6 quote/14ASCII fields",
+    "newSavedParcelBytes": 1280
+  },
+  "unsavedResourceFollowUp": {
+    "source": "PluginsCases.largeUnsavedResourceInputsUseSmallSavedStateAndNeverPersistSecrets / PluginSettingsDraftStoreTest.largeOrdinaryInputsUseBoundedLocalStorage",
+    "workload": "29 ordinary fields x10000 quotation marks plus transient credential; small valid schema; per-field-valid unsaved inputs, no resource POST; aggregate exceeds server save limit",
+    "oldSavedParcelBytes": 1173992,
+    "newSavedParcelBytes": 13200,
+    "qualification": "Values captured from current two-workload harness output; full Gradle task outcome still pending. Saved-state13200B restoration case passed in preceding R2 JVM run. No physical-device qualification.",
+    "measurement": {
+      "encodedBytes": 580368,
+      "writeNanos": 18105588,
+      "firstNewStoreReadNanos": 19163819,
+      "repeatedReadMeanNanos": 15142049,
+      "threadCpuNanos": 100165703
+    },
+    "sameRunSetupReference": {
+      "encodedBytes": 260251,
+      "writeNanos": 2696214,
+      "firstNewStoreReadNanos": 4898944,
+      "repeatedReadMeanNanos": 4659700,
+      "threadCpuNanos": 30762321
+    },
+    "conditions": "2026-10-19 current merged-source full Gradle JVM suite, concurrent native integrations and other build/test jobs; same Linux7vCPU/19.9GB nestedVM; Robolectric temp files/tmpfs; OS cache retained, no physical cold read; descriptive wall/current-threadCPU single trial, no speedup claim"
+  },
+  "grantScopesFollowUp": {
+    "source": "PluginSettingsDraftStoreTest.largeOrdinaryInputsUseBoundedLocalStorage / PluginsCases.largeGrantInputsUseSmallSavedStateAndRetainExactLimits / missingLocalGrantInputsCannotRestoreAnUnrestrictedRule",
+    "workload": "8 scope fields, each100 distinct178-byte ASCII identifiers joined by newline, matching public HTTP accepted grant fixture; 1 atomicwrite,1 newstore read,5 repeated reads",
+    "oldSavedParcelBytes": 289488,
+    "newSavedParcelBytes": 1272,
+    "measurement": {
+      "encodedBytes": 144081,
+      "writeNanos": 5154456,
+      "firstNewStoreReadNanos": 15064580,
+      "repeatedReadMeanNanos": 3329977,
+      "threadCpuNanos": 30573305
+    },
+    "sameRunReferences": {
+      "setup": {
+        "encodedBytes": 260251,
+        "writeNanos": 75395812,
+        "firstNewStoreReadNanos": 53553531,
+        "repeatedReadMeanNanos": 9279737,
+        "threadCpuNanos": 174696806
+      },
+      "unsaved-resource": {
+        "encodedBytes": 580368,
+        "writeNanos": 19586748,
+        "firstNewStoreReadNanos": 12307421,
+        "repeatedReadMeanNanos": 9169389,
+        "threadCpuNanos": 77632621
+      }
+    },
+    "host": {
+      "date": "2026-10-20",
+      "platform": "Linux-6.12.109-x86_64-with-glibc2.36",
+      "cpus": 7,
+      "ramBytes": 19929366528,
+      "tempFilesystem": "tmpfs",
+      "conditions": "Robolectric API36/pinned JDK21; OS cache retained; concurrent native integration suites and running AOSP36 KVM emulator; no physical cold-read/device-storage/network claim"
+    },
+    "sourceSha256": {
+      "apps/android/app/src/main/java/build/cairn/app/ui/PluginResourceGrants.kt": "6b753b3f2c4418c17d8d9abf933b56b17b01c11c4579a38419630950fefeeba6",
+      "apps/android/app/src/main/java/build/cairn/app/ui/PluginSettingsDraft.kt": "764fe19fdadc32ea0bb06e387fd17af74e4176fc0abbe4bc5b71e128016182ba",
+      "apps/android/app/src/scrollTest/java/build/cairn/app/ui/PluginsCases.kt": "084b3b85ff30f4ce93dc2ed4b153146df2d8dcc8cf43cf7c9b51c363a8226f84",
+      "apps/android/app/src/test/java/build/cairn/app/data/PluginSettingsDraftStoreTest.kt": "67c1bb9513649014c7947c73b52fd7885f74e088dd63794d031ff8ae8bbacc02"
+    },
+    "qualification": "2026-10-20: all4 store contracts pass, all4 focused Compose grant cases pass; whole current Android/device and PR qualification remain separate and pending. First newstore read retains OS cache, not physical cold disk or device storage."
+  }
+}

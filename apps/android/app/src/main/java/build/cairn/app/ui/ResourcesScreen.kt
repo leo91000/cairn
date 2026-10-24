@@ -12,6 +12,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
 
@@ -27,6 +28,17 @@ fun ResourcesScreen(
     var editing by rememberSaveable { mutableStateOf<String?>(null) }
     var deleting by rememberSaveable { mutableStateOf<String?>(null) }
     var query by rememberSaveable { mutableStateOf("") }
+    var pluginDirectory by remember { mutableStateOf<AgentPluginDirectory?>(null) }
+    LaunchedEffect(agents, state.isOwner) {
+        pluginDirectory = null
+        if (agents && state.isOwner) {
+            try {
+                pluginDirectory = vm.api.agentPluginDirectory()
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+            }
+        }
+    }
     val kind = if (agents) "agents" else "projects"
     Page {
         Heading(
@@ -79,6 +91,7 @@ fun ResourcesScreen(
                             Text(
                                 agentAccessSummary(
                                     agent,
+                                    catalog = pluginDirectory,
                                     older = olderInstallation(state.agents),
                                 ),
                                 style = MaterialTheme.typography.bodySmall,

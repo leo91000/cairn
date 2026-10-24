@@ -44,6 +44,8 @@ export interface SettingField {
   options?: FieldOption[]
   /** Choices come from the package's form handler while the owner edits. */
   dynamic?: boolean
+  /** Choices are looked up by query/cursor rather than assumed to be exhaustive. */
+  remote?: boolean
   /** Changing this field asks the package's form handler again. */
   refresh?: boolean
   /** How much a switch lets agents do. */
@@ -57,6 +59,36 @@ export interface FormResult {
   values: Record<string, unknown>
   errors: Record<string, string>
   view: any[]
+  pages?: Record<string, { nextCursor: string | null }>
+  /** Added by the host after validating a choice-only result. */
+  lookup?: FormLookup
+}
+
+export interface FormLookup {
+  field: string
+  query: string
+  cursor?: string
+}
+
+/** Omitted or null guidance is a successful form with nothing to add. */
+export function formResult(value: Partial<FormResult> | null): FormResult {
+  return {
+    options: value?.options ?? {},
+    values: value?.values ?? {},
+    errors: value?.errors ?? {},
+    view: value?.view ?? [],
+    ...(value?.pages && { pages: value.pages }),
+    ...(value?.lookup && { lookup: value.lookup }),
+  }
+}
+
+/** Errors without an inline field still need an explanation in the form. */
+export function unshownFormErrors(manifest: Manifest, errors: Record<string, string> = {}) {
+  const inline = new Set((manifest.settings ?? []).filter(field => !field.hidden).map(field => field.key))
+  inline.add('form')
+  if (manifest.credential)
+    inline.add('credential')
+  return Object.entries(errors).filter(([key]) => !inline.has(key)).map(([, message]) => message)
 }
 
 export interface PluginArgument {
@@ -120,6 +152,10 @@ export interface Manifest {
   instanceView?: boolean
   instanceTest?: boolean
   instanceForm?: boolean
+  resources?: PluginResourceCollection[]
+  operations?: PluginOperation[]
+  oauth?: PluginOAuthProvider[]
+  webhooks?: { name: string }[]
   /** Where its enabled instances import projects from. */
   projectSources?: PluginSource[]
   /** Where its enabled instances import skills from, with the location's fields. */
@@ -131,6 +167,122 @@ export interface Manifest {
   secretPatterns?: string[]
   /** What connecting takes and the steps the owner follows, as the package declares them. */
   setup?: Partial<PluginSetup>
+}
+
+export type PluginAccessProfile = 'read' | 'contribute' | 'manage'
+
+export interface PluginOperation {
+  name: string
+  collection: string
+  profile: PluginAccessProfile
+  scopes?: string[]
+}
+
+export interface PluginResourceGrant {
+  id: string
+  resourceId: string
+  agentId: string
+  profile: PluginAccessProfile | null
+  operations: string[]
+  deniedOperations: string[]
+  scopes: Record<string, string[]>
+  revision: string
+}
+
+/** A preview of this rule only; other saved rules may independently grant access. */
+export function resourceRuleOperations(operations: PluginOperation[], rule: Pick<PluginResourceGrant, 'profile' | 'operations' | 'deniedOperations' | 'scopes'>) {
+  const levels = { read: 1, contribute: 2, manage: 3 }
+  return operations.filter(operation => !rule.deniedOperations.includes(operation.name)
+    && ((rule.profile && levels[rule.profile] >= levels[operation.profile]) || rule.operations.includes(operation.name))
+    && Object.keys(rule.scopes).every(scope => operation.scopes?.includes(scope)))
+}
+
+export interface PluginResourceCollection {
+  name: string
+  title: string
+  singular: string
+  parent?: string
+  delegation?: boolean
+  form?: boolean
+  settings?: SettingField[]
+}
+
+export interface PluginResource {
+  id: string
+  connectionId: string
+  collection: string
+  parentId?: string | null
+  name: string
+  enabled: boolean
+  revision: string
+  settings: Record<string, any>
+  secretKeys: string[]
+}
+
+export interface PluginOAuthProvider {
+  name: string
+  title: string
+  collection: string
+  scopes: string[]
+  personal?: { subject: string }
+}
+
+export interface PluginOAuthStatus {
+  status: 'disconnected' | 'authorized' | 'reconnect' | 'pending' | 'denied'
+  scopes?: string[]
+  requestedScopes?: string[]
+  expiresAt?: number | null
+  subject?: string
+}
+
+export interface PluginOAuthConsent {
+  state: string
+  url: string
+  redirectUri?: string
+  expiresAt: number
+}
+
+export interface PluginPersonalAuthorization {
+  id: string
+  pluginId: string
+  pluginName: string
+  instanceId: string
+  instanceName: string
+  collection: string
+  resourceId: string
+  resourceName: string
+  providerName: string
+  title: string
+  scopes: string[]
+  enabled: boolean
+  authorization: PluginOAuthStatus
+}
+
+export function personalAuthorizationPath(item: PluginPersonalAuthorization) {
+  return `/plugins/${encodeURIComponent(item.pluginId)}/connections/${encodeURIComponent(item.instanceId)}/resources/${encodeURIComponent(item.collection)}/${encodeURIComponent(item.resourceId)}/oauth/${encodeURIComponent(item.providerName)}`
+}
+
+export interface PluginSetupDraft {
+  id: string
+  pluginId: string
+  name: string
+  status: 'setup' | 'review_needed'
+  settings: Record<string, any>
+  secretKeys: string[]
+  credential: boolean
+  revision: string
+  createdAt: number
+  expiresAt: number
+}
+
+export interface PluginPage<T> {
+  items: T[]
+  nextCursor?: string | null
+}
+
+/** Configuration requiring stable callbacks or resources before activation. */
+export function hasSetup(manifest: Manifest | null | undefined) {
+  return Boolean(manifest?.resources?.length || manifest?.oauth?.length || manifest?.webhooks?.length)
 }
 
 /** A named source a package offers, such as GitHub repositories. */
@@ -188,6 +340,9 @@ export interface PluginEntry {
 }
 
 export interface Catalog {
+  /** The host supports owner setup drafts; absent on earlier installations. */
+  setupDrafts?: boolean
+  resourceGrantCounts?: Record<string, number>
   packages: PluginEntry[]
   capabilities: { name: string, description: string }[]
   connections: PluginConnection[]
@@ -250,6 +405,9 @@ export const capabilityLabels: Record<string, [IconName, string]> = {
   'storage': [HardDrive, 'Storage'],
   'timers': [Clock, 'Timers'],
   'exec': [Cpu, 'Runs programs'],
+  'resources': [HardDrive, 'Resources'],
+  'oauth': [KeyRound, 'Account authorization'],
+  'webhooks': [Inbox, 'Receives web requests'],
 }
 
 /** Risk pills: low reads as safe, high as a warning. */
@@ -279,11 +437,11 @@ export function needsWorker(manifest: Manifest | null | undefined) {
 
 /** Packages whose instances let people outside Cairn talk to an agent. */
 export function delegates(manifest: Manifest | null | undefined) {
-  return manifest?.capabilities.includes('conversations.submit') ?? false
+  return Boolean(manifest?.capabilities.includes('conversations.submit') && !manifest.resources?.some(resource => resource.delegation))
 }
 
 /** "Service account" / "Service accounts", or the generic wording. */
-export function instanceNoun(manifest: Manifest | null | undefined, count = 1) {
+export function instanceNoun(manifest: Pick<Manifest, 'instances'> | null | undefined, count = 1) {
   if (manifest?.instances)
     return count === 1 ? manifest.instances.singular : manifest.instances.plural
   return count === 1 ? 'Instance' : 'Instances'
@@ -305,7 +463,7 @@ export const upcoming: Record<string, { icon: IconName, color: string }> = {
   linear: { icon: BrandLinear, color: '#5E6AD2' },
 }
 
-export function connectionState(connection: PluginConnection) {
+export function connectionState(connection: Pick<PluginConnection, 'enabled' | 'status'>) {
   if (!connection.enabled)
     return { label: 'Paused', tone: 'muted' } as const
   return ({
@@ -329,14 +487,37 @@ export function eligibleAgent(agent: Agent) {
  * Why an agent can't serve anyone in a channel, or '' when it can. Mirrors the server:
  * read-only sandbox, one project at most, no installation, MCP or plugin grants.
  */
-export function publicProblem(agent: Agent, connections: Pick<PluginConnection, 'agentIds'>[]) {
+export function publicProblem(agent: Agent, pluginAccess: boolean) {
   if (!eligibleAgent(agent))
     return 'Too broad'
   if (agent.access.sandbox !== 'read-only')
     return 'Not read-only'
   if (!Array.isArray(agent.access.mcps) || agent.access.mcps.length)
     return 'Has MCPs'
-  if (connections.some(connection => connection.agentIds?.includes(agent.id)))
+  if (pluginAccess)
     return 'Has plugin access'
   return ''
+}
+
+export interface RouteEligibility {
+  agentId: string
+  eligible: boolean
+  reason?: string
+}
+
+export interface PluginRoute {
+  id: string
+  resourceId: string
+  name: string
+  enabled: boolean
+  match: Record<string, string>
+  agentId: string
+  projectId: string | null
+  accessMode: 'allowlist' | 'requests' | 'everyone'
+  userIds: string[]
+  people: { id: string, name: string }[]
+  maxMessagesPerHour: number
+  maxPerPersonPerHour: number
+  revision: string
+  summary?: { hourStartedAt: number, messagesThisHour: number, pendingRequests: number } | null
 }

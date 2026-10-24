@@ -1,19 +1,27 @@
 //! Package registry. Bundled packages ship inside the binary. Installed packages live
 //! in `<data>/plugins/<id>/<version>/` and run only once the owner approves that exact
 //! manifest and every Luau file; any later change on disk needs a new approval.
+pub mod owner;
+
+#[cfg(test)]
+mod measurement;
+
 use crate::{
     config::now,
     error::{Error, Result},
     service::Service,
+    store::Db,
     validation::text,
 };
 use cairn_plugin_api::{
     CAPABILITIES, MAX_MODULES, MAX_SOURCE_BYTES, Manifest, Sources, module_path,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 const KIND: &str = "plugin-packages";
@@ -39,14 +47,122 @@ pub struct Package {
     pub digest: String,
 }
 
+/// The exact approval which selected these loaded files. A delayed configuration
+/// write must not survive uninstall/reinstallation of otherwise identical files.
+#[derive(Clone)]
+pub(crate) struct ApprovedPackage {
+    pub package: Package,
+    record: Option<Value>,
+}
+
+/// Durable proof of the precise approval which admitted an unfinished operation.
+/// Hash the complete record so restoring identical source files cannot revive it.
+#[derive(Clone, Deserialize, Serialize)]
+pub(crate) struct Approval {
+    plugin: String,
+    record_digest: Option<String>,
+}
+
+impl Approval {
+    fn from_record(plugin: &str, record: Option<&Value>) -> Self {
+        Self {
+            plugin: plugin.to_owned(),
+            record_digest: record.map(|value| crate::auth::hex_digest(&value.to_string())),
+        }
+    }
+
+    /// Retain native execution's current approval before any remote authority
+    /// lookup. Local checks can then fence replacement in the same transaction.
+    pub(crate) fn capture_in(db: &Db<'_>, plugin: &str, digest: &str) -> Result<Self> {
+        let changed = || Error::forbidden("The source package approval changed.");
+        let record = if let Some(package) = builtin(plugin) {
+            if package.digest != digest {
+                return Err(changed());
+            }
+            None
+        } else {
+            let record = db
+                .get(KIND, &format!("package:{plugin}"))?
+                .ok_or_else(changed)?;
+            if record["approvals"][text(&record, "active")] != digest {
+                return Err(changed());
+            }
+            Some(record)
+        };
+        Ok(Self::from_record(plugin, record.as_ref()))
+    }
+
+    /// Remote authority checks can outlive an on-disk edit as well as an approval
+    /// replacement. Check both after the last remote lookup; retain `recheck_in`
+    /// at the commit boundary to fence subsequent database changes atomically.
+    pub(crate) async fn recheck(&self, s: &Service, digest: &str) -> Result<()> {
+        let current = approved(s, &self.plugin).await?;
+        if current.snapshot().record_digest != self.record_digest {
+            return Err(Error::conflict(
+                "The package approval changed. Start the operation again.",
+            ));
+        }
+        if current.package.digest != digest {
+            return Err(Error::forbidden("The source package changed."));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn recheck_in(&self, db: &Db<'_>) -> Result<()> {
+        if let Some(expected) = &self.record_digest {
+            let current = db.get(KIND, &format!("package:{}", self.plugin))?;
+            let digest = current.map(|value| crate::auth::hex_digest(&value.to_string()));
+            if digest.as_ref() != Some(expected) {
+                return Err(Error::conflict(
+                    "The package approval changed. Start the operation again.",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ApprovedPackage {
+    pub(crate) fn snapshot(&self) -> Approval {
+        Approval::from_record(&self.package.manifest.id, self.record.as_ref())
+    }
+
+    pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
+        self.snapshot().recheck(s, &self.package.digest).await
+    }
+
+    pub(crate) fn recheck_in(&self, db: &Db<'_>) -> Result<()> {
+        if let Some(expected) = &self.record
+            && db
+                .get(KIND, &format!("package:{}", self.package.manifest.id))?
+                .as_ref()
+                != Some(expected)
+        {
+            return Err(Error::conflict(
+                "The package approval changed. Retry with its current version.",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// What the owner approves: the manifest and every Luau file, by path.
-fn digest(manifest: &Manifest, source: &Sources) -> Result<String> {
+pub(crate) fn digest(manifest: &Manifest, source: &Sources) -> Result<String> {
     let files = source.files().collect::<BTreeMap<_, _>>();
     Ok(crate::auth::hex_digest(&format!(
         "cairn-package\n{}\n{}",
         serde_json::to_string(manifest)?,
         serde_json::to_string(&files)?
     )))
+}
+
+pub(crate) async fn require_digest(s: &Service, plugin: &str, digest: &str) -> Result<()> {
+    if active(s, plugin).await?.digest != digest {
+        return Err(Error::forbidden(
+            "The plugin worker's package approval changed.",
+        ));
+    }
+    Ok(())
 }
 
 fn package(format: &str, manifest: &str, source: Sources, builtin: bool) -> Result<Package> {
@@ -89,22 +205,31 @@ fn package(format: &str, manifest: &str, source: Sources, builtin: bool) -> Resu
 }
 
 pub fn builtin(id: &str) -> Option<Package> {
-    BUILTIN
-        .iter()
-        .find(|(name, _, _, _)| *name == id)
-        .map(|(_, format, manifest, files)| {
-            let mut source = Sources::default();
-            for (path, text) in *files {
-                if *path == "main.luau" {
-                    source.main = (*text).to_owned();
-                } else {
-                    source
-                        .modules
-                        .insert((*path).to_owned(), (*text).to_owned());
-                }
-            }
-            package(format, manifest, source, true).expect("bundled plugin")
+    // Embedded bytes cannot change before a process restart. Parsing and hashing
+    // them on every capability check can delay a transport worker's heartbeats.
+    static PACKAGES: OnceLock<Vec<Package>> = OnceLock::new();
+    PACKAGES
+        .get_or_init(|| {
+            BUILTIN
+                .iter()
+                .map(|(_, format, manifest, files)| {
+                    let mut source = Sources::default();
+                    for (path, text) in *files {
+                        if *path == "main.luau" {
+                            source.main = (*text).to_owned();
+                        } else {
+                            source
+                                .modules
+                                .insert((*path).to_owned(), (*text).to_owned());
+                        }
+                    }
+                    package(format, manifest, source, true).expect("bundled plugin")
+                })
+                .collect()
         })
+        .iter()
+        .find(|package| package.manifest.id == id)
+        .cloned()
 }
 
 /// Files of a package as the owner reviews them: path and size, `main.luau` first.
@@ -130,28 +255,52 @@ fn segment(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-' | b'+'))
 }
 
+/// A broken package is local to its admitted work, rather than an internal
+/// scheduler failure. Retain other I/O diagnostics as temporary unavailability;
+/// database failures keep their separate internal-error semantics.
+fn package_io<T>(result: std::io::Result<T>) -> Result<T> {
+    use std::io::ErrorKind;
+
+    result.map_err(|error| match error.kind() {
+        ErrorKind::NotFound => {
+            Error::not_found("A plugin package file is missing. Review it in Plugins.")
+        }
+        ErrorKind::InvalidData | ErrorKind::NotADirectory => {
+            Error::bad("Plugin package files must contain valid UTF-8 in regular directories.")
+        }
+        _ => Error::unavailable(format!("Cannot read the plugin package: {error}")),
+    })
+}
+
 fn read_limited(path: &Path, limit: u64) -> Result<String> {
-    let metadata = std::fs::symlink_metadata(path)?;
+    let metadata = package_io(std::fs::symlink_metadata(path))?;
     if !metadata.is_file() || metadata.len() > limit {
         return Err(Error::bad(
             "Plugin files must be regular files within size limits.",
         ));
     }
-    std::fs::read_to_string(path).map_err(Into::into)
+    package_io(std::fs::read_to_string(path))
 }
 
 /// Reads one installed version. Its directory names must match the manifest.
 fn read_version(s: &Service, id: &str, version: &str) -> Result<Package> {
+    read_version_at(&root(s), id, version)
+}
+
+fn read_version_at(root: &Path, id: &str, version: &str) -> Result<Package> {
     if !segment(id) || !segment(version) {
         return Err(Error::not_found("Plugin version not found."));
     }
-    let directory = root(s).join(id).join(version);
-    if !std::fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.is_dir()) {
+    let directory = root.join(id).join(version);
+    if !package_io(std::fs::symlink_metadata(&directory))?.is_dir() {
         return Err(Error::not_found("Plugin version not found."));
     }
     let json = directory.join("manifest.json");
     let toml = directory.join("manifest.toml");
-    let (format, path) = match (json.try_exists()?, toml.try_exists()?) {
+    let (format, path) = match (
+        package_io(json.try_exists())?,
+        package_io(toml.try_exists())?,
+    ) {
         (true, false) => ("json", json),
         (false, true) => ("toml", toml),
         _ => {
@@ -179,8 +328,8 @@ fn read_version(s: &Service, id: &str, version: &str) -> Result<Package> {
 /// and oversized packages are refused rather than skipped.
 fn read_modules(directory: &Path, prefix: &str, source: &mut Sources) -> Result<()> {
     let invalid = || Error::bad("Plugin files must be like lib/name.luau, without links.");
-    let mut entries = std::fs::read_dir(directory)?
-        .collect::<std::io::Result<Vec<_>>>()?
+    let directory_entries = package_io(std::fs::read_dir(directory))?;
+    let mut entries = package_io(directory_entries.collect::<std::io::Result<Vec<_>>>())?
         .into_iter()
         .map(|entry| entry.path())
         .collect::<Vec<_>>();
@@ -191,7 +340,7 @@ fn read_modules(directory: &Path, prefix: &str, source: &mut Sources) -> Result<
             .and_then(|name| name.to_str())
             .ok_or_else(invalid)?;
         let relative = format!("{prefix}{name}");
-        let metadata = std::fs::symlink_metadata(&path)?;
+        let metadata = package_io(std::fs::symlink_metadata(&path))?;
         if metadata.is_dir() {
             if prefix.matches('/').count() >= 3 {
                 return Err(invalid());
@@ -212,17 +361,24 @@ fn read_modules(directory: &Path, prefix: &str, source: &mut Sources) -> Result<
     Ok(())
 }
 
-fn entries(path: &Path) -> Vec<String> {
-    let mut names = std::fs::read_dir(path)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| segment(name))
-        .collect::<Vec<_>>();
+fn entries(path: &Path) -> Result<Vec<String>> {
+    let directory = match std::fs::read_dir(path) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return package_io(Err(error)),
+    };
+    let mut names = Vec::new();
+    for entry in directory {
+        let entry = package_io(entry)?;
+        if package_io(entry.file_type())?.is_dir()
+            && let Ok(name) = entry.file_name().into_string()
+            && segment(&name)
+        {
+            names.push(name);
+        }
+    }
     names.sort();
-    names
+    Ok(names)
 }
 
 async fn record(s: &Service, id: &str) -> Result<Value> {
@@ -236,20 +392,49 @@ async fn record(s: &Service, id: &str) -> Result<Value> {
 
 /// The package a connection runs: bundled, or the approved active installed version.
 pub async fn active(s: &Service, id: &str) -> Result<Package> {
+    Ok(approved(s, id).await?.package)
+}
+
+pub(crate) async fn approved(s: &Service, id: &str) -> Result<ApprovedPackage> {
     if let Some(package) = builtin(id) {
-        return Ok(package);
+        return Ok(ApprovedPackage {
+            package,
+            record: None,
+        });
     }
     let record = record(s, id).await?;
     let version = record["active"]
         .as_str()
         .ok_or_else(|| Error::forbidden("Approve this plugin before connecting it."))?;
-    let package = read_version(s, id, version)?;
+    // File reads and bounded manifest/regex validation are synchronous. Run
+    // them outside nested form/credential futures, whose caller retains its
+    // original approval and rechecks it at effects and commit.
+    let directory = root(s);
+    let plugin = id.to_owned();
+    let selected = version.to_owned();
+    let package =
+        tokio::task::spawn_blocking(move || read_version_at(&directory, &plugin, &selected))
+            .await
+            .map_err(Error::internal)?
+            .map_err(|error| {
+                if matches!(error.status, 400 | 413) {
+                    Error::forbidden("This plugin package is invalid. Review it in Plugins.")
+                } else {
+                    error
+                }
+            })?;
     if record["approvals"][version] != package.digest {
         return Err(Error::forbidden(
             "This plugin changed since it was approved. Review it in Plugins.",
         ));
     }
-    Ok(package)
+    let approved = ApprovedPackage {
+        package,
+        record: Some(record),
+    };
+    let approval = approved.snapshot();
+    s.store.read(move |db| approval.recheck_in(db)).await?;
+    Ok(approved)
 }
 
 /// Every package that can run now: bundled ones and approved active installed versions.
@@ -259,7 +444,7 @@ pub async fn all_active(s: &Service) -> Result<Vec<Package>> {
         .iter()
         .map(|(id, _, _, _)| builtin(id).expect("bundled plugin"))
         .collect::<Vec<_>>();
-    for id in entries(&root(s)) {
+    for id in entries(&root(s))? {
         if BUILTIN.iter().any(|(name, _, _, _)| *name == id) {
             continue;
         }
@@ -283,67 +468,18 @@ fn summary(package: &Package) -> Value {
 /// Everything the owner reviews: requested capabilities, hosts and approval state.
 pub async fn catalog(s: &Service) -> Result<Value> {
     let mut packages = Vec::new();
+    // Preserve the legacy complete response while clients migrate to bounded
+    // owner reads. Both contracts share package selection and approval semantics.
     for (id, _, _, _) in BUILTIN {
-        let package = builtin(id).expect("bundled plugin");
-        packages.push(json!({
-            "id": id,
-            "builtin": true,
-            "status": "active",
-            "active": package.manifest.version,
-            "manifest": package.manifest,
-            "setup": package.manifest.setup(),
-            "versions": [summary(&package)],
-        }));
+        packages.push(owner::legacy(s, id).await?);
     }
-    for id in entries(&root(s)) {
-        if BUILTIN.iter().any(|(name, _, _, _)| *name == id) {
-            continue;
+    for id in entries(&root(s))? {
+        if !BUILTIN.iter().any(|(name, _, _, _)| *name == id) {
+            packages.push(owner::legacy(s, &id).await?);
         }
-        let record = record(s, &id).await?;
-        let active = record["active"].as_str().unwrap_or("");
-        let mut versions = Vec::new();
-        let mut latest = None;
-        for version in entries(&root(s).join(&id)) {
-            match read_version(s, &id, &version) {
-                Ok(package) => {
-                    let mut item = summary(&package);
-                    item["approved"] = json!(record["approvals"][&version] == package.digest);
-                    versions.push(item);
-                    latest = Some(package);
-                }
-                Err(error) => versions.push(json!({ "version": version, "error": error.message })),
-            }
-        }
-        let current = versions
-            .iter()
-            .find(|item| item["version"] == active && item["approved"] == true);
-        let (manifest, setup) = match (current, latest) {
-            (Some(item), _) => (Some(item["manifest"].clone()), item["setup"].clone()),
-            (None, Some(package)) => (
-                Some(json!(package.manifest)),
-                json!(package.manifest.setup()),
-            ),
-            (None, None) => (None, Value::Null),
-        };
-        let pending = versions
-            .iter()
-            .any(|item| item["approved"] == false && item["error"].is_null());
-        packages.push(json!({
-            "id": id,
-            "builtin": false,
-            "status": match (current.is_some(), pending, manifest.is_some()) {
-                (_, _, false) => "invalid",
-                (true, false, _) => "active",
-                (true, true, _) => "update",
-                (false, _, _) => "needs_approval",
-            },
-            "active": current.map(|item| item["version"].clone()),
-            "manifest": manifest,
-            "setup": setup,
-            "versions": versions,
-        }));
     }
     Ok(json!({
+        "packageReads": true,
         "packages": packages,
         "capabilities": CAPABILITIES
             .iter()
@@ -460,41 +596,36 @@ async fn set_active(
     id: &str,
     version: &str,
     reviewed_digest: Option<&str>,
+    owner: &super::operations::Owner,
 ) -> Result<Value> {
     if builtin(id).is_some() {
         return Err(Error::bad("Built-in plugins are updated with Cairn."));
     }
+    owner.recheck(s).await?;
     let package = read_version(s, id, version)?;
-    let mut record = record(s, id).await?;
+    let record = record(s, id).await?;
     if let Some(reviewed_digest) = reviewed_digest {
         if package.digest != reviewed_digest {
             return Err(Error::conflict(
                 "This version changed while you reviewed it. Reload Plugins and review it again.",
             ));
         }
-        record["approvals"][version] = json!(package.digest);
     } else if record["approvals"][version] != package.digest {
         return Err(Error::forbidden(
             "Approve this version before activating it.",
         ));
     }
     // Approval has been checked before any installer is allowed network or file effects.
-    super::program_installation::prepare(s, &package).await?;
+    super::program_installation::prepare(s, &package, Some(owner)).await?;
+    owner.recheck(s).await?;
     let current = read_version(s, id, version)?;
     if current.digest != package.digest {
         return Err(Error::conflict(
             "The plugin changed during program preparation. Review it again.",
         ));
     }
-    // Preparation can take time; preserve approvals written by concurrent requests.
-    record = self::record(s, id).await?;
-    if reviewed_digest.is_some() {
-        record["approvals"][version] = json!(package.digest);
-    } else if record["approvals"][version] != package.digest {
-        return Err(Error::forbidden("This version is no longer approved."));
-    }
-    record["active"] = json!(version);
-    record["updatedAt"] = json!(now());
+    let approve = reviewed_digest.is_some();
+    let digest = package.digest.clone();
     let (plugin, action) = (
         id.to_owned(),
         if reviewed_digest.is_some() {
@@ -506,6 +637,20 @@ async fn set_active(
     let version = version.to_owned();
     s.store
         .transaction(move |db| {
+            // Merge into the live record in the same transaction: preparation
+            // must not overwrite approvals committed while it was waiting.
+            let key = format!("package:{plugin}");
+            let mut record = db
+                .get(KIND, &key)?
+                .unwrap_or_else(|| json!({"id": key, "pluginId": plugin, "approvals": {}}));
+            if approve {
+                record["approvals"][&version] = json!(digest);
+            } else if record["approvals"][&version] != digest {
+                return Err(Error::forbidden("This version is no longer approved."));
+            }
+            record["active"] = json!(version);
+            record["revision"] = json!(crate::config::id());
+            record["updatedAt"] = json!(now());
             db.put(KIND, &record)?;
             db.audit(
                 &format!("plugin.package.{action}"),
@@ -524,9 +669,11 @@ pub async fn activate_request(
     id: &str,
     version: &str,
     reviewed_digest: Option<&str>,
+    account: &str,
 ) -> Result<Value> {
+    let owner = super::operations::Owner::for_account(s, account).await?;
     if builtin(id).is_some() {
-        return set_active(s, id, version, reviewed_digest).await;
+        return set_active(s, id, version, reviewed_digest, &owner).await;
     }
     let package = read_version(s, id, version)?;
     if !package
@@ -535,7 +682,7 @@ pub async fn activate_request(
         .iter()
         .any(|program| !program.installer.is_empty())
     {
-        return set_active(s, id, version, reviewed_digest).await;
+        return set_active(s, id, version, reviewed_digest, &owner).await;
     }
     if reviewed_digest.is_some_and(|digest| digest != package.digest) {
         return Err(Error::conflict(
@@ -549,18 +696,20 @@ pub async fn activate_request(
         reviewed_digest.map(str::to_owned),
     );
     s.plugins.operations.start(s.clone(), async move {
-        set_active(&service, &id, &version, digest.as_deref()).await
+        set_active(&service, &id, &version, digest.as_deref(), &owner).await
     })
 }
 
 /// Records the owner's approval of this exact version and runs it.
 pub async fn approve(s: &Service, id: &str, version: &str, digest: &str) -> Result<Value> {
-    set_active(s, id, version, Some(digest)).await
+    let owner = super::operations::Owner::current(s).await?;
+    set_active(s, id, version, Some(digest), &owner).await
 }
 
 /// Switches to another previously approved version, e.g. to roll back an update.
 pub async fn activate(s: &Service, id: &str, version: &str) -> Result<Value> {
-    set_active(s, id, version, None).await
+    let owner = super::operations::Owner::current(s).await?;
+    set_active(s, id, version, None, &owner).await
 }
 
 pub async fn uninstall(s: &Service, id: &str) -> Result<Value> {
@@ -584,6 +733,7 @@ pub async fn uninstall(s: &Service, id: &str) -> Result<Value> {
     s.store
         .transaction(move |db| {
             db.remove(KIND, &format!("package:{plugin}"))?;
+            super::setup::forget_plugin_in(db, &plugin)?;
             db.audit("plugin.package.uninstalled", &json!({ "plugin": plugin }))
         })
         .await?;

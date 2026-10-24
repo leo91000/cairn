@@ -524,3 +524,59 @@ async fn merge_http_is_owner_only_and_both_mcp_interfaces_have_the_same_effect()
         );
     }
 }
+
+#[tokio::test]
+async fn merge_requires_explicit_resolution_of_resource_delegations_and_access() {
+    use cairn_installation::plugins::{grants, routes};
+    for kind in [grants::KIND, routes::KIND] {
+        let (_root, s, source) = fixture().await;
+        let task = task(&s, &source).await;
+        // Saved records may belong to paused or currently unavailable packages.
+        // They still represent owner decisions and must not disappear in a merge.
+        let record = if kind == grants::KIND {
+            json!({
+                "id": id(), "connectionId": id(), "resourceId": id(), "agentId": source["id"],
+                "profile": "read", "operations": [], "deniedOperations": [], "scopes": {"channel":["C111"]},
+                "ownerAccessId":"fixture-owner", "revision":id(), "updatedAt":0,
+            })
+        } else {
+            json!({
+                "id":id(), "connectionId":id(), "resourceId":id(), "name":"Held delegation", "enabled":false,
+                "match":{"channel":"C111"}, "agentId":source["id"], "projectId":null,
+                "grantedAccess":source["access"], "ownerAccessId":"fixture-owner", "accessMode":"allowlist",
+                "userIds":["U111"], "people":[{"id":"U111","name":"Fixture person"}],
+                "maxMessagesPerHour":20, "maxPerPersonPerHour":5, "revision":id(), "digest":"1".repeat(64), "updatedAt":0,
+            })
+        };
+        // Validate the persisted shape, rather than relying on an impossible row.
+        if kind == grants::KIND {
+            serde_json::from_value::<grants::Grant>(record.clone()).unwrap();
+        } else {
+            serde_json::from_value::<routes::Route>(record.clone()).unwrap();
+        }
+        s.store.put(kind, record.clone()).await.unwrap();
+        let before = s.store.list("agents").await.unwrap();
+        let error = s.merge_agents(input(&source)).await.unwrap_err();
+        assert_eq!(error.status, 409);
+        assert!(error.message.contains("resource"));
+        assert_eq!(s.store.list("agents").await.unwrap(), before);
+        assert_eq!(
+            s.get("tasks", task["id"].as_str().unwrap()).await.unwrap()["agentId"],
+            source["id"]
+        );
+        assert_eq!(
+            s.get(kind, record["id"].as_str().unwrap()).await.unwrap(),
+            record
+        );
+        let record_id = record["id"].as_str().unwrap().to_owned();
+        s.store
+            .transaction(move |db| db.remove(kind, &record_id))
+            .await
+            .unwrap();
+        s.merge_agents(input(&source)).await.unwrap();
+        assert_eq!(
+            s.get("tasks", task["id"].as_str().unwrap()).await.unwrap()["agentId"],
+            MAIN_AGENT_ID
+        );
+    }
+}

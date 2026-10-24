@@ -528,6 +528,7 @@ async fn sockets_reach_only_declared_hosts_from_the_transport_worker() {
         event: json!({ "name": "socket" }),
         link: Some(link.clone()),
         draft: None,
+        resource_grant: None,
     };
     for url in [
         "wss://gateway.discord.gg.attacker.example",
@@ -588,10 +589,11 @@ async fn handle(
     connection: &Connection,
     session: &mut cairn_plugin_host::Session,
     link: &socket::Link,
-    commands: &mut tokio::sync::mpsc::UnboundedReceiver<socket::Command>,
+    commands: &mut tokio::sync::mpsc::Receiver<socket::Command>,
     event: Value,
 ) -> Vec<socket::Command> {
-    socket::deliver(s, connection, session, link, event)
+    // The lifecycle script awaits many dispatches in one debug test frame.
+    Box::pin(socket::deliver(s, connection, session, link, event))
         .await
         .unwrap();
     let mut issued = Vec::new();
@@ -837,7 +839,22 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
             json!({ "op": 10, "d": { "heartbeat_interval": 30000 } }),
         )
         .await;
-        assert_eq!(receive(&mut socket).await["op"], 2);
+        // The randomized initial heartbeat may precede Identify. Acknowledge
+        // valid pre-dispatch beats rather than assuming they cannot arrive yet.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let frame = receive(&mut socket).await;
+                if frame["op"] == 1 {
+                    assert!(frame["d"].is_null());
+                    send(&mut socket, json!({ "op": 11 })).await;
+                } else {
+                    assert_eq!(frame["op"], 2);
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
         send(
             &mut socket,
             json!({ "op": 0, "s": 1, "t": "READY", "d": {
@@ -869,9 +886,25 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
         )
         .await;
         send(&mut socket, json!({ "op": 1 })).await;
-        let heartbeat = tokio::time::timeout(Duration::from_secs(1), receive(&mut socket))
-            .await
-            .expect("oversized thread routing must not block heartbeats on REST");
+        let heartbeat = tokio::time::timeout(Duration::from_secs(1), async {
+            let mut previous = 0;
+            loop {
+                let heartbeat = receive(&mut socket).await;
+                assert_eq!(heartbeat["op"], 1);
+                if let Some(sequence) = heartbeat["d"].as_u64() {
+                    assert!((previous..=3).contains(&sequence));
+                    previous = sequence;
+                } else {
+                    assert!(heartbeat["d"].is_null() && previous == 0);
+                }
+                send(&mut socket, json!({ "op": 11 })).await;
+                if heartbeat["d"] == 3 {
+                    break heartbeat;
+                }
+            }
+        })
+        .await
+        .expect("oversized thread routing must not block heartbeats on REST");
         assert_eq!(
             heartbeat,
             json!({ "op": 1, "d": 3 }),
@@ -926,6 +959,7 @@ async fn same_credential_reserves_the_last_session_start_across_instances() {
         event: json!({ "name": "socket" }),
         link: Some(link.clone()),
         draft: None,
+        resource_grant: None,
     };
     let (first, second) = (context(first), context(second));
     let send = json!({ "text": "{\"token\":\"{{secret}}\"}", "auth": true, "pace": 5000,
@@ -1010,11 +1044,14 @@ async fn waiting_for_identify_keeps_heartbeats_and_the_worker_alive() {
         let (s, package, stop) = (s.clone(), package.clone(), stop.clone());
         workers.spawn(async move { socket::run(&s, &connection, &package, &stop).await });
     }
+    let started = tokio::time::Instant::now();
+    let mut events = Vec::new();
     let evidence = tokio::time::timeout(Duration::from_secs(15), async {
         let mut identifies = Vec::new();
         let mut beats = [0; 2];
         while identifies.len() < 2 {
             let (id, op, at) = received.recv().await.unwrap();
+            events.push((id, op, at.duration_since(started).as_millis()));
             if op == 1 {
                 beats[id] += 1;
             }
@@ -1036,7 +1073,7 @@ async fn waiting_for_identify_keeps_heartbeats_and_the_worker_alive() {
     }
     upstream.await.unwrap();
     server.abort();
-    evidence.unwrap();
+    evidence.unwrap_or_else(|error| panic!("{error}; (socket, opcode, elapsed ms): {events:?}"));
 }
 
 #[tokio::test]
@@ -1116,17 +1153,42 @@ async fn expired_session_budget_is_refetched_before_identifying() {
     server.abort();
 }
 
+async fn socket_fixture(s: &Service, source: &str) -> (Connection, registry::Package) {
+    let installed = registry::install(
+        s,
+        &json!({
+            "manifest": {
+                "id": "socket-fixture", "name": "Socket fixture", "version": "1", "apiVersion": 2,
+                "capabilities": ["socket"], "hosts": ["gateway.discord.gg"]
+            },
+            "source": source
+        }),
+    )
+    .await
+    .unwrap();
+    registry::approve(s, "socket-fixture", "1", text(&installed, "digest"))
+        .await
+        .unwrap();
+    let connection = connections::save(
+        s,
+        "socket-fixture",
+        &json!({"name": "Socket fixture", "enabled": true}),
+        None,
+    )
+    .await
+    .unwrap();
+    (
+        serde_json::from_value(connection).unwrap(),
+        registry::active(s, "socket-fixture").await.unwrap(),
+    )
+}
+
 #[tokio::test]
 async fn every_named_socket_send_delivers_its_completion() {
-    let (_root, s, agent) = service().await;
-    let connection: Connection = serde_json::from_value(
-        save(&s, &agent, json!({ "guildId": "100", "channelId": "200" }))
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    let mut package = registry::active(&s, "discord").await.unwrap();
-    package.source.main = r#"
+    let (_root, s, _agent) = service().await;
+    let (connection, package) = socket_fixture(
+        &s,
+        r#"
         return { socket = function(event)
             if event.type == "start" then
                 cairn.socket.connect({ url = "wss://gateway.discord.gg" })
@@ -1137,8 +1199,9 @@ async fn every_named_socket_send_delivers_its_completion() {
                 cairn.socket.send("done:" .. event.name)
             end
         end }
-    "#
-    .into();
+    "#,
+    )
+    .await;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     s.plugins
         .route_sockets_to(Some(format!("ws://{}", listener.local_addr().unwrap())));
@@ -1167,15 +1230,10 @@ async fn every_named_socket_send_delivers_its_completion() {
 
 #[tokio::test]
 async fn continuous_named_send_completions_do_not_starve_reads_or_cancellation() {
-    let (_root, s, agent) = service().await;
-    let connection: Connection = serde_json::from_value(
-        save(&s, &agent, json!({ "guildId": "100", "channelId": "200" }))
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    let mut package = registry::active(&s, "discord").await.unwrap();
-    package.source.main = r#"
+    let (_root, s, _agent) = service().await;
+    let (connection, package) = socket_fixture(
+        &s,
+        r#"
         return { socket = function(event)
             if event.type == "start" then
                 cairn.socket.connect({ url = "wss://gateway.discord.gg" })
@@ -1185,8 +1243,9 @@ async fn continuous_named_send_completions_do_not_starve_reads_or_cancellation()
                 cairn.socket.send("ack")
             end
         end }
-    "#
-    .into();
+    "#,
+    )
+    .await;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     s.plugins
         .route_sockets_to(Some(format!("ws://{}", listener.local_addr().unwrap())));

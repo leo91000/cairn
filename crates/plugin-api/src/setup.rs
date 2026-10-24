@@ -195,7 +195,7 @@ impl super::Manifest {
             steps.extend(credential_step);
             steps.extend(settings_step);
         }
-        if self.permits_capability("conversations.submit") {
+        if self.delegates() {
             steps.push(step(
                 "people",
                 StepKind::People,
@@ -277,7 +277,7 @@ impl super::Manifest {
             let allowed = match step.kind {
                 StepKind::Settings => !step.settings.is_empty(),
                 StepKind::Credential => self.credential.is_some(),
-                StepKind::People => self.permits_capability("conversations.submit"),
+                StepKind::People => self.delegates(),
                 // Grants are offered once the instance exists: on its last step.
                 StepKind::Agents => self.agent_access.is_some() && index == setup.steps.len() - 1,
             };
@@ -349,8 +349,7 @@ impl super::Manifest {
 
         // Declared steps replace the derived ones, so they cover the whole instance.
         let missing_step = (self.credential.is_some() && !kinds.contains(&StepKind::Credential))
-            || (self.permits_capability("conversations.submit")
-                && !kinds.contains(&StepKind::People))
+            || (self.delegates() && !kinds.contains(&StepKind::People))
             || (self.agent_access.is_some() && !kinds.contains(&StepKind::Agents));
         let missing_setting = self
             .visible_settings()
@@ -521,6 +520,28 @@ mod tests {
         let mut changed = value;
         changed["credential"]["oauth"] = Value::Null;
         assert!(parse(changed).is_err());
+    }
+
+    #[test]
+    fn resource_routes_need_no_root_people_step_in_declared_setup() {
+        let mut value = json!({
+            "id": "routed", "name": "Routed", "version": "1", "apiVersion": 2,
+            "capabilities": ["resources", "conversations.submit"],
+            "settings": [{"key": "label", "title": "Label", "type": "string"}],
+            "resources": [{"name": "workspace", "title": "Workspaces", "singular": "Workspace", "delegation": true}],
+            "setup": {"steps": [{"id": "details", "title": "Details", "settings": ["label"]}]}
+        });
+        assert!(
+            parse(value.clone()).is_ok(),
+            "Root setup must not require route participants"
+        );
+        value["setup"]["steps"].as_array_mut().unwrap().push(json!({
+            "id": "people", "kind": "people", "title": "People"
+        }));
+        assert!(
+            parse(value).is_err(),
+            "A root participant step must not imply route authority"
+        );
     }
 
     #[test]

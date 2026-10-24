@@ -116,6 +116,10 @@ impl Service {
         service.store.transaction(crate::accounts::migrate).await?;
         service
             .store
+            .transaction(crate::chats::questions::retire_unattributed)
+            .await?;
+        service
+            .store
             .transaction(crate::notifications::remove_local_registrations)
             .await?;
         service.avatars.recover(&service).await?;
@@ -1047,6 +1051,11 @@ fn ensure_removable(db: &Db<'_>, kind: &str, id: &str) -> Result<()> {
 /// Drops an agent's portrait, plugin grants and exclusive node grants.
 pub(crate) fn forget_agent(db: &Db<'_>, id: &str) -> Result<()> {
     db.delete(&format!("agent-avatar:{id}"))?;
+    for grant in db.list(crate::plugins::grants::KIND)? {
+        if grant["agentId"] == id {
+            db.remove(crate::plugins::grants::KIND, text(&grant, "id"))?;
+        }
+    }
     crate::agent_grants::forget_agent(db, id)
 }
 

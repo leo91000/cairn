@@ -3,7 +3,7 @@ import { api } from './api'
 /** Installation continues on the manager while each relay request stays short. */
 export async function pluginOperation<T = unknown>(path: string, body?: unknown, method = 'POST'): Promise<T> {
   const result = await api<T & { operation?: string }>(path, { method, body: body === undefined ? undefined : JSON.stringify(body) })
-  if (!result.operation)
+  if (!result?.operation)
     return result
 
   const deadline = Date.now() + 10 * 60 * 1000

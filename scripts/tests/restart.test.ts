@@ -4,6 +4,7 @@ import { readFile, rm, writeFile } from 'node:fs/promises'
 import http from 'node:http'
 import path from 'node:path'
 import process from 'node:process'
+import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import {
   afterEach,
@@ -15,7 +16,7 @@ import {
 } from 'vitest'
 import { accountFixture, credential, limits } from '../../tests/fixtures/codex-account-fixture.ts'
 import { fixture } from '../../tests/fixtures/legacy-helpers.ts'
-import { prepareExecution } from '../../tests/fixtures/legacy/server/execution.ts'
+import * as execution from '../../tests/fixtures/legacy/server/execution.ts'
 import { processIdentity } from '../../tests/fixtures/legacy/server/run-recovery.ts'
 import { Worker } from '../../tests/fixtures/legacy/server/worker.ts'
 import { runnerProvider } from '../../tests/fixtures/runner-provider.ts'
@@ -271,26 +272,41 @@ describe('durable conversation recovery', () => {
     }
   })
 
-  it('does not grant a fresh timeout or broaden changed agent permissions on automatic resume', async () => {
-    ctx.service.agent({ ...ctx.agent, timeoutMinutes: 120 }, ctx.agent.id)
-    const run = await ctx.service.enqueue(ctx.task.id)
-    await ctx.worker.tick()
-    await waitForWork(run.id)
-    await ctx.worker.close()
-    const checkpoint = ctx.worker.recovery.get(run.id)!
-    checkpoint.remainingMs = 0
-    ctx.worker.recovery.save(run.id, checkpoint)
-    const worker = await restart()
-    await expect.poll(() => ctx.service.store.run(run.id)?.status).toBe('failed')
-    expect(ctx.service.store.run(run.id)?.summary).toContain('time limit')
-    await expect.poll(() => worker.active.size).toBe(0)
-    worker.resume(run.id)
-    expect(worker.recovery.get(run.id)!.remainingMs).toBe(run.snapshot.agent.timeoutMinutes * 60000)
-    ctx.service.agent({ ...ctx.agent, access: { projects: [], skills: [], github: false } }, ctx.agent.id)
-    await worker.tick()
-    await expect.poll(() => ctx.service.store.run(run.id)?.status).toBe('failed')
-    expect(ctx.service.store.run(run.id)?.summary).toContain('access changed')
-    expect(ctx.service.store.events(run.id).filter(event => event.type === 'thread.started')).toHaveLength(1)
+  it.each([0, 1250])('keeps its original budget and permissions with a %ims workspace restore delay', async (restoreDelay) => {
+    const originalRestore = execution.restoreExecution
+    const restoration = restoreDelay
+      ? vi.spyOn(execution, 'restoreExecution').mockImplementation(async (...args) => {
+          await new Promise(resolve => setTimeout(resolve, restoreDelay))
+          return originalRestore(...args)
+        })
+      : undefined
+    try {
+      ctx.service.agent({ ...ctx.agent, timeoutMinutes: 120 }, ctx.agent.id)
+      const run = await ctx.service.enqueue(ctx.task.id)
+      await ctx.worker.tick()
+      await waitForWork(run.id)
+      await ctx.worker.close()
+      const checkpoint = ctx.worker.recovery.get(run.id)!
+      checkpoint.remainingMs = 0
+      ctx.worker.recovery.save(run.id, checkpoint)
+      const worker = await restart()
+      // Preparation may still be restoring files before the saved zero budget is checked.
+      await Promise.all(worker.executions)
+      expect(ctx.service.store.run(run.id)?.status).toBe('failed')
+      expect(ctx.service.store.run(run.id)?.summary).toContain('time limit')
+      await expect.poll(() => worker.active.size).toBe(0)
+      worker.resume(run.id)
+      expect(worker.recovery.get(run.id)!.remainingMs).toBe(run.snapshot.agent.timeoutMinutes * 60000)
+      ctx.service.agent({ ...ctx.agent, access: { projects: [], skills: [], github: false } }, ctx.agent.id)
+      await worker.tick()
+      await Promise.all(worker.executions)
+      expect(ctx.service.store.run(run.id)?.status).toBe('failed')
+      expect(ctx.service.store.run(run.id)?.summary).toContain('access changed')
+      expect(ctx.service.store.events(run.id).filter(event => event.type === 'thread.started')).toHaveLength(1)
+    }
+    finally {
+      restoration?.mockRestore()
+    }
   })
 
   const initializeGit = async () => {
@@ -317,16 +333,27 @@ describe('durable conversation recovery', () => {
     expect(await readFile(path.join(ctx.projectPath, 'README.md'), 'utf8')).toBe('unrelated dirty source')
   })
 
-  it('preserves an incomplete workspace preparation and uses a new generation', async () => {
+  it.each([0, 1250])('preserves an incomplete preparation with a %ims process start delay and uses a new generation', async (startupDelay) => {
     await initializeGit()
     ctx.service.task({ ...ctx.task, prompt: 'Complete fixture task', worktree: true }, ctx.task.id)
     const run = await ctx.service.enqueue(ctx.task.id)
-    const abandoned = await prepareExecution(run, ctx.service.config)
+    const abandoned = await execution.prepareExecution(run, ctx.service.config)
     await writeFile(path.join(abandoned.cwd, 'partial-work.txt'), 'preserve incomplete attempt')
     ctx.worker.recovery.save(run.id, { launched: false, remainingMs: 60000 })
     ctx.service.store.updateRun(run.id, { status: 'running', startedAt: Date.now() })
+    if (startupDelay) {
+      const delayed = path.join(ctx.directory, 'delayed-generation-codex.mjs')
+      await writeFile(delayed, `#!/usr/bin/env node
+await new Promise(resolve => setTimeout(resolve, ${startupDelay}));
+await import(${JSON.stringify(pathToFileURL(path.resolve('tests/fixtures/codex.mjs')).href)});
+`, { mode: 0o755 })
+      ctx.service.config.codexBin = delayed
+    }
+
     const worker = await restart()
-    await expect.poll(() => ctx.service.store.run(run.id)?.status).toBe('succeeded')
+    // Recovery includes asynchronous workspace preparation and process startup.
+    await Promise.all(worker.executions)
+    expect(ctx.service.store.run(run.id)?.status).toBe('succeeded')
     expect(ctx.service.store.run(run.id)?.workspace).not.toBe(abandoned.cwd)
     expect(await readFile(path.join(abandoned.cwd, 'partial-work.txt'), 'utf8')).toBe('preserve incomplete attempt')
     await expect.poll(() => worker.active.size).toBe(0)

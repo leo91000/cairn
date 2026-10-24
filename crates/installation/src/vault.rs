@@ -111,6 +111,13 @@ impl Vault {
             .transpose()
     }
 
+    /// Read a credential in the same snapshot as its caller's authorization.
+    pub fn get_in(&self, db: &Db<'_>, id: &str) -> Result<Option<Value>> {
+        db.kv(&key(id))?
+            .map(|value| self.decrypt(id, &value))
+            .transpose()
+    }
+
     pub async fn set(&self, id: &str, value: &Value) -> Result<()> {
         self.store
             .set(&key(id), self.encrypt(id, value)?, None)

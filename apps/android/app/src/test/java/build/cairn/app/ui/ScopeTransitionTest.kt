@@ -60,6 +60,8 @@ class ScopeTransitionTest {
     private val installationsReleased = CountDownLatch(1)
     private lateinit var vm: CairnViewModel
     private lateinit var cachedFile: File
+    private lateinit var settingsDrafts: PluginSettingsDraftStore
+    private lateinit var settingsDraftKey: String
     private var mounted by mutableStateOf(false)
 
     @Before
@@ -167,6 +169,9 @@ class ScopeTransitionTest {
                     parentFile!!.mkdirs()
                     writeText("fixture")
                 }
+            settingsDrafts = PluginSettingsDraftStore(application, "fixture-scope", setOf("label"))
+            settingsDraftKey = java.util.UUID.randomUUID().toString()
+            assertTrue(settingsDrafts.write(settingsDraftKey, mapOf("label" to "private draft")))
         }
         return vm.historyCache.generation
     }
@@ -181,6 +186,10 @@ class ScopeTransitionTest {
     private fun assertStorageCleared(generation: Long) {
         assertTrue(vm.historyCache.generation > generation)
         assertFalse(cachedFile.exists())
+        compose.waitUntil(20000) {
+            !File(application.noBackupFilesDir, "plugin-setup-drafts").exists()
+        }
+        assertNull(settingsDrafts.read(settingsDraftKey))
         action { assertNull(vm.historyCache.read("retained")) }
         assertTransientCleared()
     }
@@ -191,6 +200,7 @@ class ScopeTransitionTest {
         action { vm.retrySession() }
         assertEquals(generation, vm.historyCache.generation)
         assertTrue(cachedFile.exists())
+        assertEquals(mapOf("label" to "private draft"), settingsDrafts.read(settingsDraftKey))
         action {
             assertNotNull(vm.historyCache.read("retained"))
             assertEquals(setOf("question"), vm.notifications.seen())
@@ -310,6 +320,7 @@ class ScopeTransitionTest {
         assertEquals(before, values)
         assertEquals(generation, vm.historyCache.generation)
         assertTrue(cachedFile.exists())
+        assertEquals(mapOf("label" to "private draft"), settingsDrafts.read(settingsDraftKey))
     }
 
     @Test

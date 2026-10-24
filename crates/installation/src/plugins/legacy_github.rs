@@ -42,6 +42,7 @@ fn instance(name: &str, agent_ids: Vec<String>) -> Connection {
         name: name.chars().take(100).collect(),
         enabled: true,
         revision: id(),
+        routing: None,
         settings: json!({}),
         agent_id: String::new(),
         project_id: None,

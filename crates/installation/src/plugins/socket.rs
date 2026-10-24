@@ -27,7 +27,7 @@ use tokio::{
     time::Instant,
 };
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async_with_config,
+    MaybeTlsStream, WebSocketStream, connect_async_tls_with_config,
     tungstenite::{
         Message,
         client::IntoClientRequest,
@@ -47,9 +47,13 @@ pub const MAX_MESSAGE: usize = 1_048_576;
 const MAX_WIRE: usize = 16 * 1_048_576;
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const MAX_TIMERS: usize = 8;
+/// Aggregate encoded payload budget for queued/in-flight transport events across
+/// the installation. Wire buffers and deserialized value overhead are additional;
+/// each existing socket still has the separate MAX_WIRE read limit.
+pub(crate) const MAX_QUEUED_EVENT_BYTES: usize = 32 * 1_048_576;
 
 /// What a transport worker's capability calls ask the host to do. Applied in order
-/// once the running handler returns.
+/// by the I/O loop, independently of a running handler.
 #[derive(Debug)]
 pub enum Command {
     Connect {
@@ -59,6 +63,9 @@ pub enum Command {
         after: Duration,
         /// JSON fields (`d.id`) kept from messages too large to deliver whole.
         oversized: Vec<String>,
+        /// Deadline for each received message, including time waiting in the queue.
+        event_timeout: Option<Duration>,
+        heartbeat: Option<Heartbeat>,
     },
     Send(Outgoing),
     Close(u16),
@@ -76,7 +83,7 @@ pub enum Command {
 /// The transport worker's handle on its socket, given to its capability calls.
 #[derive(Clone)]
 pub struct Link {
-    sender: mpsc::UnboundedSender<Command>,
+    sender: mpsc::Sender<Command>,
     slots: Arc<Semaphore>,
 }
 
@@ -88,9 +95,94 @@ pub struct Outgoing {
     _slot: OwnedSemaphorePermit,
 }
 
+/// Optional RFC 6455 control-frame health checks. The package chooses its
+/// protocol's deadlines; monitoring stays with I/O while its handler awaits HTTP.
+#[derive(Clone, Debug)]
+pub struct Heartbeat {
+    interval: Duration,
+    timeout: Duration,
+    peer_timeout: Option<Duration>,
+}
+
+impl Heartbeat {
+    fn parse(value: &Value) -> Result<Self> {
+        fn duration(value: &Value, name: &str) -> Result<Duration> {
+            value
+                .as_u64()
+                .filter(|ms| (1_000..=300_000).contains(ms))
+                .map(Duration::from_millis)
+                .ok_or_else(|| {
+                    Error::bad(format!(
+                        "Set heartbeat {name} from 1000 to 300000 milliseconds."
+                    ))
+                })
+        }
+        Ok(Self {
+            interval: duration(&value["interval"], "interval")?,
+            timeout: duration(&value["timeout"], "timeout")?,
+            peer_timeout: value
+                .get("peerTimeout")
+                .map(|value| duration(value, "peerTimeout"))
+                .transpose()?,
+        })
+    }
+}
+
+struct HeartbeatState {
+    config: Heartbeat,
+    next_ping: Instant,
+    pending: Option<(Vec<u8>, Instant)>,
+    peer_deadline: Option<Instant>,
+}
+
+impl HeartbeatState {
+    fn new(config: Heartbeat) -> Self {
+        let now = Instant::now();
+        Self {
+            next_ping: now + config.interval,
+            pending: None,
+            peer_deadline: config.peer_timeout.map(|timeout| now + timeout),
+            config,
+        }
+    }
+
+    fn next(&self) -> Instant {
+        let next = self
+            .pending
+            .as_ref()
+            .map_or(self.next_ping, |(_, deadline)| *deadline);
+        self.peer_deadline
+            .map_or(next, |deadline| deadline.min(next))
+    }
+
+    fn expired(&self, now: Instant) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|(_, deadline)| now >= *deadline)
+            || self.peer_deadline.is_some_and(|deadline| now >= deadline)
+    }
+
+    fn pong(&mut self, bytes: &[u8]) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|(expected, deadline)| expected == bytes && Instant::now() < *deadline)
+        {
+            self.pending = None;
+        }
+    }
+
+    fn peer_ping(&mut self) {
+        let now = Instant::now();
+        if self.peer_deadline.is_some_and(|deadline| now < deadline) {
+            self.peer_deadline = self.config.peer_timeout.map(|timeout| now + timeout);
+        }
+    }
+}
+
 impl Link {
-    pub fn channel() -> (Self, mpsc::UnboundedReceiver<Command>) {
-        let (sender, receiver) = mpsc::unbounded_channel();
+    pub fn channel() -> (Self, mpsc::Receiver<Command>) {
+        let (sender, receiver) = mpsc::channel(64);
         (
             Self {
                 sender,
@@ -101,9 +193,12 @@ impl Link {
     }
 
     pub(crate) fn send(&self, command: Command) -> Result<()> {
-        self.sender
-            .send(command)
-            .map_err(|_| Error::bad_gateway("The connection stopped."))
+        self.sender.try_send(command).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => {
+                Error::bad_gateway("The socket command queue is full.")
+            }
+            mpsc::error::TrySendError::Closed(_) => Error::bad_gateway("The connection stopped."),
+        })
     }
 }
 
@@ -126,6 +221,11 @@ pub(crate) async fn call(
     method: &str,
     args: &Value,
 ) -> Result<Value> {
+    if args["auth"].get("resource").is_some() {
+        return Err(Error::forbidden(
+            "Resource credentials are only available to HTTP requests.",
+        ));
+    }
     let link = context
         .link
         .as_ref()
@@ -158,9 +258,29 @@ pub(crate) async fn call(
             {
                 return Err(Error::bad("Name at most 16 fields such as d.id."));
             }
+            let event_timeout = args
+                .get("eventTimeout")
+                .filter(|value| !value.is_null())
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .filter(|value| (100..=35_000).contains(value))
+                        .map(Duration::from_millis)
+                        .ok_or_else(|| {
+                            Error::bad("Set a socket event timeout from 100 to 35000 milliseconds.")
+                        })
+                })
+                .transpose()?;
+            let heartbeat = args
+                .get("heartbeat")
+                .filter(|value| !value.is_null())
+                .map(Heartbeat::parse)
+                .transpose()?;
             link.send(Command::Connect {
                 url,
                 header,
+                event_timeout,
+                heartbeat,
                 after: Duration::from_secs_f64(after),
                 oversized: oversized
                     .iter()
@@ -288,6 +408,8 @@ pub async fn deliver(
     link: &Link,
     event: Value,
 ) -> Result<Value> {
+    let digest = super::registry::digest(session.manifest(), session.sources())?;
+    super::registry::require_digest(s, &connection.plugin_id, &digest).await?;
     let context = Context {
         management: None,
         connection: connection.clone(),
@@ -295,12 +417,13 @@ pub async fn deliver(
         event: json!({ "name": "socket", "revision": connection.revision }),
         link: Some(link.clone()),
         draft: None,
+        resource_grant: None,
     };
     let refused = Mutex::new(None::<Error>);
-    let (context_ref, refused_ref) = (&context, &refused);
+    let (context_ref, refused_ref, digest_ref) = (&context, &refused, &digest);
     let result = session
         .dispatch("socket", event, |method, args| async move {
-            capabilities::checked(s, context_ref, &method, args)
+            capabilities::approved(s, context_ref, digest_ref, &method, args)
                 .await
                 .map_err(|error| {
                     let code = capabilities::code(&error);
@@ -309,6 +432,7 @@ pub async fn deliver(
                 })
         })
         .await;
+    super::registry::require_digest(s, &connection.plugin_id, &digest).await?;
     match (result, refused.into_inner().unwrap()) {
         (Ok(value), _) => Ok(value),
         (Err(InvocationError::Rejected(message)), _) => Err(Error::forbidden(message)),
@@ -329,6 +453,7 @@ struct Pending {
     url: String,
     header: Header,
     oversized: Vec<String>,
+    heartbeat: Option<Heartbeat>,
 }
 
 struct State {
@@ -340,15 +465,18 @@ struct State {
     oversized: Vec<String>,
     last_attempt: Option<Instant>,
     backoff: Duration,
+    event_timeout: Option<Duration>,
+    heartbeat: Option<HeartbeatState>,
 }
 
 enum Wake {
     Stop,
-    Queued,
+    Command(Option<Command>),
     Frame(Option<std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>),
     Timer,
     Send,
     Connect,
+    Heartbeat,
 }
 
 /// Only the requested fields; `*` projects each array entry without keeping large
@@ -425,7 +553,12 @@ fn message_event(message: &str, paths: &[String]) -> Value {
 }
 
 fn closed(code: Option<u16>, reason: &str, error: Option<&str>) -> Value {
-    json!({ "type": "close", "code": code, "reason": reason, "error": error })
+    json!({
+        "type": "close",
+        "code": code,
+        "reason": reason,
+        "error": error,
+    })
 }
 
 impl State {
@@ -437,7 +570,10 @@ impl State {
                 header,
                 after,
                 oversized,
+                event_timeout,
+                heartbeat,
             } => {
+                self.event_timeout = event_timeout;
                 // Reconnections slow down until the package reports a healthy connection.
                 let paced = self.last_attempt.map_or_else(Instant::now, |last| {
                     (last + self.backoff).max(Instant::now())
@@ -447,6 +583,7 @@ impl State {
                     url,
                     header,
                     oversized,
+                    heartbeat,
                 });
             }
             Command::Send(message) => {
@@ -467,6 +604,7 @@ impl State {
                 }
                 self.timers.clear();
                 self.outgoing.clear();
+                self.heartbeat = None;
             }
             Command::Timer { name, at, every } => {
                 if self.timers.len() < MAX_TIMERS || self.timers.contains_key(&name) {
@@ -486,12 +624,40 @@ impl State {
         self.socket = None;
         self.timers.clear();
         self.outgoing.clear();
+        self.heartbeat = None;
     }
 
     async fn shutdown(&mut self) {
         if let Some(mut socket) = self.socket.take() {
             let _ = tokio::time::timeout(Duration::from_secs(2), socket.close(None)).await;
         }
+    }
+
+    async fn heartbeat(&mut self) -> Option<Value> {
+        let heartbeat = self.heartbeat.as_mut()?;
+        if heartbeat.expired(Instant::now()) {
+            self.drop_socket();
+            return Some(closed(None, "", Some("heartbeat_timeout")));
+        }
+        if heartbeat.pending.is_some() || Instant::now() < heartbeat.next_ping {
+            return None;
+        }
+        let bytes = uuid::Uuid::new_v4().as_bytes().to_vec();
+        let socket = self.socket.as_mut()?;
+        let sent = tokio::time::timeout(
+            Duration::from_secs(2),
+            socket.send(Message::Ping(bytes.clone().into())),
+        )
+        .await;
+        if !matches!(sent, Ok(Ok(()))) {
+            self.drop_socket();
+            return Some(closed(None, "", Some("interrupted")));
+        }
+        // Start the response deadline after the Ping has actually been flushed.
+        let now = Instant::now();
+        heartbeat.pending = Some((bytes, now + heartbeat.config.timeout));
+        heartbeat.next_ping = now + heartbeat.config.interval;
+        None
     }
 
     async fn send(&mut self, message: Outgoing) -> Option<Value> {
@@ -529,9 +695,14 @@ impl State {
                 self.outgoing.push_back(message);
                 None
             }
-            pacing::Ready::Expired => message.name.map(
-                |name| json!({ "type": "sent", "name": name, "sent": false, "retryAfter": 0 }),
-            ),
+            pacing::Ready::Expired => message.name.map(|name| {
+                json!({
+                    "type": "sent",
+                    "name": name,
+                    "sent": false,
+                    "retryAfter": 0,
+                })
+            }),
         }
     }
 
@@ -540,6 +711,7 @@ impl State {
             url,
             header,
             oversized,
+            heartbeat,
             ..
         }) = self.connect.take()
         else {
@@ -575,12 +747,18 @@ impl State {
             .max_frame_size(Some(MAX_WIRE));
         match tokio::time::timeout(
             Duration::from_secs(15),
-            connect_async_with_config(request, Some(config), false),
+            connect_async_tls_with_config(
+                request,
+                Some(config),
+                false,
+                s.plugins.socket_connector(),
+            ),
         )
         .await
         {
             Ok(Ok((socket, _))) => {
                 self.socket = Some(socket);
+                self.heartbeat = heartbeat.map(HeartbeatState::new);
                 json!({ "type": "open" })
             }
             Ok(Err(_)) => closed(None, "", Some("unavailable")),
@@ -609,13 +787,83 @@ pub async fn run(
     result
 }
 
+struct QueuedEvent {
+    value: Value,
+    deadline: Option<Instant>,
+    _bytes: Option<OwnedSemaphorePermit>,
+}
+
 async fn serve(
     s: &Service,
     connection: &Connection,
     session: &mut Session,
     stop: &CancellationToken,
 ) -> Result<()> {
-    let (link, mut commands) = Link::channel();
+    let (link, commands) = Link::channel();
+    let (events, received) = mpsc::channel(128);
+    let io_stop = stop.child_token();
+    let mut io = Box::pin(supervise(s, commands, events, &io_stop));
+    let mut worker = Box::pin(consume(s, connection, session, &link, received, stop));
+    tokio::select! {
+        result = &mut io => result,
+        result = &mut worker => {
+            io_stop.cancel();
+            let shutdown = io.await;
+            result.and(shutdown)
+        }
+    }
+}
+
+/// Only this future uses the Luau session. Network control frames and command
+/// flushing continue in supervise while a capability waits for HTTP/authority.
+async fn consume(
+    s: &Service,
+    connection: &Connection,
+    session: &mut Session,
+    link: &Link,
+    mut events: mpsc::Receiver<QueuedEvent>,
+    stop: &CancellationToken,
+) -> Result<()> {
+    let mut next = QueuedEvent {
+        value: json!({ "type": "start", "instance": connection.id, "settings": connection.settings }),
+        deadline: None,
+        _bytes: None,
+    };
+    loop {
+        let QueuedEvent {
+            value,
+            deadline,
+            _bytes,
+        } = next;
+        let result = tokio::select! {
+            biased;
+            () = stop.cancelled() => return Ok(()),
+            () = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
+                // Dropping an in-flight dispatch makes the session unusable. End
+                // this transport; run stops its worker before the manager retries.
+                return Err(Error::gateway_timeout("The socket message handler exceeded its deadline."));
+            }
+            result = deliver(s, connection, session, link, value) => result,
+        };
+        drop(_bytes);
+        match result {
+            Err(error) if matches!(error.status, 401 | 403) => return Err(error),
+            _ if !session.alive() => return Err(Error::bad_gateway("Plugin worker stopped.")),
+            _ => {}
+        }
+        next = tokio::select! {
+            () = stop.cancelled() => return Ok(()),
+            event = events.recv() => event.ok_or_else(|| Error::bad_gateway("The socket stopped."))?,
+        };
+    }
+}
+
+async fn supervise(
+    s: &Service,
+    mut commands: mpsc::Receiver<Command>,
+    events: mpsc::Sender<QueuedEvent>,
+    stop: &CancellationToken,
+) -> Result<()> {
     let mut state = State {
         socket: None,
         timers: BTreeMap::new(),
@@ -624,41 +872,25 @@ async fn serve(
         oversized: Vec::new(),
         last_attempt: None,
         backoff: Duration::from_secs(1),
+        event_timeout: None,
+        heartbeat: None,
     };
-    let mut events = VecDeque::from([json!({
-        "type": "start",
-        "instance": connection.id,
-        "settings": connection.settings,
-    })]);
+    let result = tokio::select! {
+        () = stop.cancelled() => Ok(()),
+        result = drive(s, &mut state, &mut commands, &events, stop) => result,
+    };
+    state.shutdown().await;
+    result
+}
+
+async fn drive(
+    s: &Service,
+    state: &mut State,
+    commands: &mut mpsc::Receiver<Command>,
+    events: &mpsc::Sender<QueuedEvent>,
+    stop: &CancellationToken,
+) -> Result<()> {
     loop {
-        // A completion handler may immediately enqueue its next completion. Check
-        // cancellation even when that FIFO never becomes empty.
-        if stop.is_cancelled() {
-            state.shutdown().await;
-            return Ok(());
-        }
-        if let Some(value) = events.pop_front() {
-            match deliver(s, connection, session, &link, value).await {
-                Err(error) if matches!(error.status, 401 | 403) => {
-                    if let Some(mut socket) = state.socket.take() {
-                        let _ = socket.close(None).await;
-                    }
-                    return Err(error);
-                }
-                _ if !session.alive() => {
-                    return Err(Error::bad_gateway("Plugin worker stopped."));
-                }
-                _ => {}
-            }
-            while let Ok(command) = commands.try_recv() {
-                if let Some(value) = state.apply(command).await {
-                    events.push_back(value);
-                }
-            }
-            if events.len() > 128 {
-                return Err(Error::bad_gateway("Plugin socket event queue is full."));
-            }
-        }
         let timer_at = state.timers.values().map(|(at, _)| *at).min();
         let connect_at = state.connect.as_ref().map(|pending| pending.at);
         let send_at = state
@@ -666,18 +898,21 @@ async fn serve(
             .iter()
             .filter_map(|message| message.ticket.as_ref().map(pacing::Ticket::at))
             .min();
+        let heartbeat_at = state.heartbeat.as_ref().map(HeartbeatState::next);
         let wake = tokio::select! {
             () = stop.cancelled() => Wake::Stop,
-            () = async {}, if !events.is_empty() => Wake::Queued,
+            command = commands.recv() => Wake::Command(command),
             frame = async { state.socket.as_mut().expect("socket").next().await }, if state.socket.is_some() => Wake::Frame(frame),
             () = tokio::time::sleep_until(timer_at.unwrap_or_else(Instant::now)), if timer_at.is_some() => Wake::Timer,
             () = tokio::time::sleep_until(send_at.unwrap_or_else(Instant::now)), if send_at.is_some() => Wake::Send,
             () = tokio::time::sleep_until(connect_at.unwrap_or_else(Instant::now)), if connect_at.is_some() => Wake::Connect,
+            () = tokio::time::sleep_until(heartbeat_at.unwrap_or_else(Instant::now)), if heartbeat_at.is_some() => Wake::Heartbeat,
         };
+        let received_at = Instant::now();
         let event = match wake {
-            Wake::Queued => None,
+            Wake::Command(Some(command)) => state.apply(command).await,
+            Wake::Command(None) => return Ok(()),
             Wake::Stop => {
-                state.shutdown().await;
                 return Ok(());
             }
             Wake::Timer => {
@@ -704,17 +939,31 @@ async fn serve(
             }
             Wake::Send => state.send_pending().await,
             Wake::Connect => Some(state.open(s).await),
+            Wake::Heartbeat => state.heartbeat().await,
             Wake::Frame(Some(Ok(Message::Text(message)))) => {
                 Some(message_event(message.as_str(), &state.oversized))
             }
             Wake::Frame(Some(Ok(Message::Ping(bytes)))) => {
+                if let Some(heartbeat) = state.heartbeat.as_mut() {
+                    heartbeat.peer_ping();
+                }
                 let socket = state.socket.as_mut().expect("socket");
-                if socket.send(Message::Pong(bytes)).await.is_err() {
+                if !matches!(
+                    tokio::time::timeout(Duration::from_secs(2), socket.send(Message::Pong(bytes)))
+                        .await,
+                    Ok(Ok(()))
+                ) {
                     state.drop_socket();
                     Some(closed(None, "", Some("interrupted")))
                 } else {
                     None
                 }
+            }
+            Wake::Frame(Some(Ok(Message::Pong(bytes)))) => {
+                if let Some(heartbeat) = state.heartbeat.as_mut() {
+                    heartbeat.pong(&bytes);
+                }
+                None
             }
             Wake::Frame(Some(Ok(Message::Close(frame)))) => {
                 state.drop_socket();
@@ -734,7 +983,35 @@ async fn serve(
             }
         };
         if let Some(event) = event {
-            events.push_back(event);
+            let bytes = serde_json::to_vec(&event)?.len();
+            let permit = s
+                .plugins
+                .socket_events
+                .clone()
+                .try_acquire_many_owned(bytes as u32)
+                .map_err(|_| {
+                    Error::bad_gateway("The installation's socket event budget is full.")
+                })?;
+            let queued = events.try_send(QueuedEvent {
+                deadline: if event["type"] == "message" {
+                    state.event_timeout.map(|timeout| received_at + timeout)
+                } else {
+                    None
+                },
+                value: event,
+                _bytes: Some(permit),
+            });
+            match queued {
+                Ok(()) => {}
+                // consume drops its receiver on cancellation. A completion already
+                // in flight is then shutdown cleanup, not a failed transport.
+                Err(mpsc::error::TrySendError::Closed(_)) if stop.is_cancelled() => return Ok(()),
+                Err(_) => {
+                    return Err(Error::bad_gateway(
+                        "The socket event queue is full or its worker stopped.",
+                    ));
+                }
+            }
         }
     }
 }

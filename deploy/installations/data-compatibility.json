@@ -1,31 +1,6 @@
 {
   "schema": 2,
-  "epoch": 12,
-  "databaseVersion": 11,
-  "legacyTree": "a6aae371f1d76cceb2f510180531f0ef17ec3e60",
-  "automaticMigration": {
-    "fromEpochs": [3, 4, 5, 6, 7, 8, 9, 10, 11],
-    "previousDatabaseVersion": 10,
-    "plan": "docs/AUTOMATIC-MIGRATIONS.md",
-    "tests": [
-      "settings::tests::length_limits_are_positive_integers_with_type_specific_caps",
-      "settings::tests::numeric_bounds_are_ordered_and_defaults_are_in_range",
-      "settings::tests::text_defaults_obey_save_constraints",
-      "settings::tests::choice_defaults_obey_type_membership_and_declared_length",
-      "incompatible_restored_session_requires_consent_and_never_restarts_on_its_own",
-      "native_placement_works_without_kvm_or_fuse_and_never_falls_back_to_a_vm",
-      "native::workspace::tests::local_block_migration_preserves_model_cache_and_sessions_without_managed_auth",
-      "native::workspace::tests::interrupted_restore_completes_without_discarding_previous_local_work",
-      "native::workspace::tests::incompatible_native_restore_leaves_existing_files_untouched",
-      "data_saved_before_the_package_moves_into_instances",
-      "upgrades_version_five_without_changing_records_and_fences_older_binaries",
-      "upgrades_version_eight_and_keeps_waiting_missions_in_the_active_slot",
-      "upgrades_version_nine_preserving_native_nodes_and_fences_older_binaries",
-      "upgrades_version_ten_preserving_plugin_packages_and_fences_older_binaries",
-      "native_nodes_admit_six_attempts_only_after_the_configured_budget_is_applied",
-      "wildcard_node_access_still_requires_trusted_contributors",
-      "native::service::tests::native_budget_supports_six_slots_and_rejects_invalid_capacities",
-      "native::service::tests::controller_enforces_all_configured_slots_before_preparing_an_attempt"
-    ]
-  }
+  "epoch": 13,
+  "databaseVersion": 12,
+  "legacyTree": "a6aae371f1d76cceb2f510180531f0ef17ec3e60"
 }

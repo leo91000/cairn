@@ -33,6 +33,7 @@ import {
   withResourceGrants,
   withRun,
 } from '../src/agent-access'
+import { agentPluginPackage } from '../src/agent-plugin-directory'
 
 const gpu = {
   id: 'gpu',
@@ -76,7 +77,7 @@ const context: Context = {
   skills: [],
   mcps: [],
   nodes: [gpu],
-  packages: [onePassword],
+  packages: [agentPluginPackage(onePassword)],
   connections: [production],
 }
 
@@ -266,7 +267,7 @@ it('reports a held grant whose plugin cannot give agents access any more', () =>
   }) as PluginConnection
   const held: Context = {
     ...context,
-    packages: [onePassword, review, broken, withdrawn],
+    packages: [onePassword, review, broken, withdrawn].map(agentPluginPackage),
     connections: [production, instance('queue', 'tickets'), instance('old', 'broken'), instance('memo', 'notes')],
   }
   expect(grantablePackages(held.packages).map(entry => entry.id)).toEqual(['onepassword'])
@@ -278,7 +279,7 @@ it('reports a held grant whose plugin cannot give agents access any more', () =>
   const found = issues(draft, held, false)
   expect(found.map(issue => issue.section)).toEqual(['plugins', 'plugins', 'plugins'])
   expect(found[0]!.text).toBe('Tickets “queue” is unavailable: its plugin needs review or no longer gives agents access.')
-  expect(found[1]!.text).toBe('Plugin “old” is unavailable: its plugin needs review or no longer gives agents access.')
+  expect(found[1]!.text).toBe('broken “old” is unavailable: its plugin needs review or no longer gives agents access.')
 })
 
 it('lists every reduction the Android review lists', () => {
@@ -676,6 +677,7 @@ it('re-reads an instance\'s agents right before sending them back', async () => 
   // Revoked meanwhile from an agent page: the current list is sent, not the editor's snapshot.
   expect(await currentAgentIds([], onePassword, { id: 'prod', agentIds: ['a', 'b'] }, fresh)).toEqual(['b'])
   expect(await currentAgentIds([], onePassword, { id: 'prod', agentIds: ['a'] }, async () => [{ id: 'prod', agentIds: [] }])).toBeUndefined()
+  await expect(currentAgentIds([], onePassword, { id: 'prod', agentIds: ['a'] }, async () => [])).rejects.toThrow('removed')
   // A current installation keeps grants itself: nothing is read nor sent.
   expect(await currentAgentIds([{ grantsOnAgent: true }], onePassword, { id: 'prod', agentIds: ['a'] }, fresh)).toBeUndefined()
   expect(await currentAgentIds([], { manifest: null }, { id: 'prod', agentIds: ['a'] }, fresh)).toBeUndefined()
@@ -690,4 +692,10 @@ it('keeps read-only exclusive reservations when run permissions or the backend c
   expect(withRun(access, ['gpu'], 'other', true)).toEqual({ nodes: ['gpu', 'box', 'other'], exclusiveNodes: ['gpu'] })
   expect(withBackend(['gpu'])).toEqual({ nodes: [], exclusiveNodes: [] })
   expect(withBackend(['gpu'], true)).toEqual({ nodes: [], exclusiveNodes: ['gpu'] })
+})
+
+it('keeps scoped resource rules visible when no whole instance is granted', () => {
+  const agent = { id: 'scoped', plugins: [], access: { projects: [], nodes: ['local'] } } as unknown as Agent
+  expect(accessSummary(agent, { packages: [], connections: [], resourceGrantCounts: { scoped: 2 } })).toContain('2 saved resource rules')
+  expect(agent.plugins).toEqual([])
 })

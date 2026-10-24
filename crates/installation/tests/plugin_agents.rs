@@ -38,6 +38,7 @@ async fn fixture() -> Fixture {
     let mut config = common::config(root.path());
     config.runner_url = "http://runner:4311".into();
     let s = Service::new(config).await.unwrap();
+    common::relay_fixture::claimed(&s).await.unwrap();
     s.plugins
         .use_worker(PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
     let program = root.path().join("op");
@@ -638,8 +639,8 @@ async fn manifest_constraints_are_checked_before_install_and_defaults_can_be_sav
         .is_err()
     );
 
-    // Simulate a previously admitted manifest on disk. Reads must report its
-    // unsupported constraint, without rewriting the package or its approval.
+    // Simulate a previously admitted manifest on disk. Execution refuses this
+    // package; the owner's catalogue retains its exact validation diagnostic.
     let manifest_path = f
         .root
         .path()
@@ -648,7 +649,23 @@ async fn manifest_constraints_are_checked_before_install_and_defaults_can_be_sav
     let legacy_bytes = serde_json::to_vec_pretty(&package["manifest"]).unwrap();
     std::fs::write(&manifest_path, &legacy_bytes).unwrap();
     let error = registry::active(s, "statusboard").await.err().unwrap();
-    assert!(error.to_string().contains("10000"));
+    assert_eq!(error.status, 403);
+    assert!(error.to_string().contains("Review it in Plugins"));
+    let catalog = registry::catalog(s).await.unwrap();
+    let installed = catalog["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|package| package["id"] == "statusboard")
+        .unwrap();
+    assert_eq!(installed["status"], "invalid");
+    let version = installed["versions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|version| version["version"] == "1.0.0")
+        .unwrap();
+    assert!(version["error"].as_str().unwrap().contains("10000"));
     assert_eq!(std::fs::read(&manifest_path).unwrap(), legacy_bytes);
 
     // A corrected version restores access under the same plugin and instance IDs.

@@ -6,6 +6,7 @@ import type {
   Project,
   projectInput,
 } from '../../../../packages/contracts/contracts'
+import type { AgentPluginDirectory } from '../agent-plugin-directory'
 import type { Catalog } from '../plugins'
 import {
   computed,
@@ -16,6 +17,7 @@ import {
 import { providers as codingAgents } from '../../../../packages/contracts/accounts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { accessSummary, olderInstallation } from '../agent-access'
+import { agentPluginDirectory } from '../agent-plugin-directory'
 import {
   api,
   notify,
@@ -98,7 +100,7 @@ const projectMode = ref('local')
 const instance = ref('')
 const picked = ref('')
 
-// Plugin names for the agents' access summary and project sources; members do not see plugins.
+// Agent summaries load compact metadata; importing projects loads the project catalog.
 const catalog = ref<Catalog>({ packages: [], capabilities: [], connections: [] })
 const sources = computed(() => pluginSources(catalog.value, 'projectSources'))
 const importSource = computed(() => editing.value ? undefined : sources.value.find(source => source.key === projectMode.value))
@@ -115,7 +117,23 @@ async function loadCatalog() {
     catalog.value = await api<Catalog>('/plugins').catch(() => catalog.value)
 }
 
-onMounted(loadCatalog)
+const agentCatalog = ref<AgentPluginDirectory>({ packages: [], connections: [] })
+const catalogFailed = ref(false)
+onMounted(async () => {
+  if (state.installationRole !== 'owner')
+    return
+  if (isAgent.value) {
+    try {
+      agentCatalog.value = await agentPluginDirectory(new AbortController().signal)
+    }
+    catch {
+      catalogFailed.value = true
+    }
+  }
+  else {
+    await loadCatalog()
+  }
+})
 
 function chooseSource() {
   instance.value = importSource.value?.instances[0]?.id ?? ''
@@ -285,7 +303,7 @@ async function remove() {
         </div>
         <div v-if="'reasoning' in item" class="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-muted">
           <span class="max-w-full truncate" :title="item.model || 'Provider default'">{{ `${codingAgents[item.provider || 'codex'].label} · ${item.model || 'Provider default'}` }}</span>
-          <span class="inline-flex min-w-0 items-center gap-1.5"><Icon :name="ShieldCheck" :size="13" class="shrink-0" /><span class="min-w-0">{{ accessSummary(item, catalog, olderInstallation(state.agents)) }}</span></span>
+          <span class="inline-flex min-w-0 items-center gap-1.5"><Icon :name="ShieldCheck" :size="13" class="shrink-0" /><span class="min-w-0">{{ accessSummary(item, agentCatalog, olderInstallation(state.agents)) }}{{ catalogFailed ? ' · Plugin access not loaded' : '' }}</span></span>
         </div>
         <div v-else-if="'path' in item" class="flex shrink-0 items-center gap-5 pr-6 text-xs text-muted phone:mt-2 phone:gap-4 phone:pr-0">
           <span class="inline-flex max-w-36 items-center gap-1.5" :title="item.baseBranch"><Icon :name="GitBranch" :size="13" /><span class="truncate">{{ item.baseBranch }}</span></span>

@@ -11,7 +11,7 @@ use cairn_plugin_api::Manifest;
 use cairn_plugin_host::Denied;
 use futures_util::StreamExt;
 use serde_json::{Map, Value, json};
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 /// What a handler acts for: its connection and the event being handled.
 pub struct Context {
@@ -23,6 +23,8 @@ pub struct Context {
     pub link: Option<super::socket::Link>,
     /// An instance being edited: its unsaved credential and secrets.
     pub draft: Option<Arc<super::forms::Draft>>,
+    /// A slow credential renewal must not let a revoked run start a new request.
+    pub resource_grant: Option<Arc<super::grants::Authorization>>,
 }
 
 /// Maps host errors to the short codes scripts may see. Messages stay in the host.
@@ -48,21 +50,80 @@ pub async fn call(
         .map_err(|error| Denied(code(&error)))
 }
 
+/// A worker may outlive the supervisor's next poll after an approval change.
+/// Fence its exact loaded files before effects and after slow results.
+pub(crate) async fn approved(
+    s: &Service,
+    context: &Context,
+    digest: &str,
+    method: &str,
+    args: Value,
+) -> Result<Value> {
+    super::registry::require_digest(s, &context.manifest.id, digest).await?;
+    let result = checked_approval(s, context, Some(digest), method, args).await?;
+    super::registry::require_digest(s, &context.manifest.id, digest).await?;
+    Ok(result)
+}
+
 /// A long-lived worker's call, after rechecking the owner and the instance.
 pub async fn checked(s: &Service, context: &Context, method: &str, args: Value) -> Result<Value> {
+    checked_approval(s, context, None, method, args).await
+}
+
+async fn checked_approval(
+    s: &Service,
+    context: &Context,
+    digest: Option<&str>,
+    method: &str,
+    args: Value,
+) -> Result<Value> {
     ensure_owner(s, &context.connection).await?;
+    if let Some(author) = context.event["authorId"].as_str() {
+        super::routes::require_person(&context.connection, author)?;
+    }
     let expected = context.connection.clone();
     s.store.read(move |db| authorize(db, &expected)).await?;
-    match method {
-        "conversations.submit" => super::work::submit(s, context, &args).await,
+    let execution_digest = match digest {
+        Some(digest) => Some(digest.to_owned()),
+        None if method == "exec.run" => Some(
+            super::registry::active(s, &context.manifest.id)
+                .await?
+                .digest,
+        ),
+        None => None,
+    };
+    let result = match method {
+        "conversations.submit" => super::work::submit_approved(s, context, &args, digest).await,
+        "delivery.checkpoint" => super::work::checkpoint(s, context, &args, digest).await,
         "conversations.check" => super::work::check(s, context, &args).await,
         "conversations.answer" => super::work::answer(s, context, &args).await,
         "conversations.cancel" => super::work::cancel(s, context, &args).await,
-        "inbound.accept" => super::work::inbound(s, context, &args).await,
+        "conversations.reset" => super::work::reset(s, context, &args).await,
+        "inbound.accept" | "inbound.deliver" => {
+            super::work::inbound(s, context, &args, method == "inbound.deliver", digest).await
+        }
         "instance.status" => instance_status(s, context, &args).await,
+        _ if method.starts_with("oauth.") => super::oauth::call(s, context, method, &args).await,
         _ if method.starts_with("socket.") => super::socket::call(s, context, method, &args).await,
-        _ => effect(s, context, method, args).await,
+        _ => {
+            effect(s, context, method, args, || async {
+                ensure_owner(s, &context.connection).await?;
+                if let Some(digest) = &execution_digest {
+                    super::registry::require_digest(s, &context.manifest.id, digest).await?;
+                }
+                let expected = context.connection.clone();
+                s.store.read(move |db| authorize(db, &expected)).await?;
+                Ok(())
+            })
+            .await
+        }
+    }?;
+    if context.connection.routing.is_some() {
+        ensure_owner(s, &context.connection).await?;
+        let expected = context.connection.clone();
+        s.store.read(move |db| authorize(db, &expected)).await?;
     }
+    Ok(result)
 }
 
 /// The package's own view of its connection, shown to the owner.
@@ -89,84 +150,33 @@ async fn instance_status(s: &Service, context: &Context, args: &Value) -> Result
 
 /// Capabilities that act for an instance rather than for a person: shared by
 /// long-lived workers and one-shot handlers once their scope is authorized.
-pub async fn effect(s: &Service, context: &Context, method: &str, args: Value) -> Result<Value> {
+pub async fn effect<F, Fut>(
+    s: &Service,
+    context: &Context,
+    method: &str,
+    args: Value,
+    authorize: F,
+) -> Result<Value>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
     match method {
-        "storage.get" | "storage.set" | "storage.delete" | "storage.list" => {
-            storage(s, context, method, &args).await
+        "storage.get" | "storage.set" | "storage.max" | "storage.delete" | "storage.list" => {
+            super::storage::call(s, context, method, &args).await
         }
-        "http.request" => http(s, context, &args).await,
-        "files.create" | "files.append" | "files.read" | "files.delete" | "files.composeMime" => {
-            s.plugins.files.call(&context.connection, method, &args)
+        "http.request" => http(s, context, &args, authorize).await,
+        "resources.get" | "resources.list" => {
+            super::resources::call(s, context, method, &args).await
         }
         "timers.after" | "timers.cancel" => timers(s, context, method, &args).await,
-        "exec.run" => super::programs::run(s, context, &args).await,
+        "exec.run" => super::programs::run(s, context, &args, authorize).await,
+        "files.create" | "files.append" | "files.read" | "files.delete" | "files.composeMime" => {
+            authorize_management(s, context).await?;
+            s.plugins.files.call(&context.connection, method, &args)
+        }
         _ => Err(Error::forbidden("Unknown plugin capability.")),
     }
-}
-
-fn key(args: &Value) -> Result<String> {
-    let key = text(args, "key");
-    if key.is_empty() || key.chars().count() > 200 || key.chars().any(char::is_control) {
-        return Err(Error::bad("Invalid storage key."));
-    }
-    Ok(key.to_owned())
-}
-
-/// Small connection-scoped values. Removed with the connection.
-async fn storage(s: &Service, context: &Context, method: &str, args: &Value) -> Result<Value> {
-    const KIND: &str = "plugin-storage";
-    let connection = context.connection.id.clone();
-    let management = context.management.clone();
-    let method = method.to_owned();
-    let args = args.clone();
-    s.store
-        .transaction(move |db| {
-            if let Some(authority) = management { authority.authorize(db)?; }
-            let owned = || {
-                db.list(KIND).map(|values| {
-                    values
-                        .into_iter()
-                        .filter(|value| value["connectionId"] == connection)
-                        .collect::<Vec<_>>()
-                })
-            };
-            if method == "storage.list" {
-                let prefix = text(&args, "prefix");
-                let mut keys = owned()?
-                    .iter()
-                    .map(|value| text(value, "key").to_owned())
-                    .filter(|key| key.starts_with(prefix))
-                    .collect::<Vec<_>>();
-                keys.sort();
-                return Ok(json!(keys));
-            }
-            let key = key(&args)?;
-            let record_id = format!("storage:{connection}:{}", crate::auth::hex_digest(&key));
-            match method.as_str() {
-                "storage.get" => Ok(db
-                    .get(KIND, &record_id)?
-                    .map_or(Value::Null, |value| value["value"].clone())),
-                "storage.delete" => {
-                    db.remove(KIND, &record_id)?;
-                    Ok(Value::Null)
-                }
-                _ => {
-                    let value = args.get("value").cloned().unwrap_or(Value::Null);
-                    if serde_json::to_string(&value)?.len() > 65_536 {
-                        return Err(Error::too_large("Stored values are limited to 64 KB."));
-                    }
-                    if db.get(KIND, &record_id)?.is_none() && owned()?.len() >= 1000 {
-                        return Err(Error::too_large("A connection can keep at most 1000 values."));
-                    }
-                    db.put(
-                        KIND,
-                        &json!({ "id": record_id, "connectionId": connection, "key": key, "value": value, "updatedAt": now() }),
-                    )?;
-                    Ok(Value::Null)
-                }
-            }
-        })
-        .await
 }
 
 /// Checks a URL against the hosts the plugin declares: HTTPS (or WSS for sockets),
@@ -274,6 +284,11 @@ pub(crate) async fn authorization(
     context: &Context,
     auth: &Value,
 ) -> Result<Option<(String, String, String)>> {
+    if auth.get("oauth").is_some() {
+        return Err(Error::forbidden(
+            "OAuth credentials require a saved resource HTTP request.",
+        ));
+    }
     if *auth == Value::Bool(true) {
         let rule = context
             .manifest
@@ -320,12 +335,34 @@ pub(crate) async fn authorization(
         return Err(Error::bad("Invalid credential header."));
     }
     let key = rule.get("secret").and_then(Value::as_str).unwrap_or("");
-    let secret = secrets(s, context)
-        .await?
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| Error::forbidden("This instance has no such secret."))?;
+    let secret = if let Some(selector) = rule.get("configuration") {
+        let form = context
+            .draft
+            .as_ref()
+            .and_then(|draft| draft.resource.as_ref())
+            .ok_or_else(|| {
+                Error::forbidden("Configuration credentials belong to resource forms.")
+            })?;
+        form.secret(s, selector.as_str().unwrap_or_default(), key)
+            .await?
+    } else if let Some(resource) = rule.get("resource") {
+        if context.draft.is_some() {
+            return Err(Error::forbidden(
+                "Resource credentials are only available to saved HTTP requests.",
+            ));
+        }
+        let resource = resource
+            .as_str()
+            .ok_or_else(|| Error::bad("Name a resource."))?;
+        super::resources::credential(s, context, resource, key).await?
+    } else {
+        secrets(s, context)
+            .await?
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| Error::forbidden("This instance has no such secret."))?
+    };
     Ok(Some((header.to_owned(), prefix.to_owned(), secret)))
 }
 
@@ -339,7 +376,11 @@ pub(crate) async fn secrets(s: &Service, context: &Context) -> Result<Map<String
 
 /// HTTPS to hosts the manifest lists. With `auth = true`, the host adds the
 /// connection's credential using the manifest's rule; scripts never see it.
-async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
+async fn http<F, Fut>(s: &Service, context: &Context, args: &Value, authorize: F) -> Result<Value>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
     let invalid = |message: &str| Error::bad(message.to_owned());
     let method = match args["method"].as_str().unwrap_or("GET") {
         "GET" => reqwest::Method::GET,
@@ -350,6 +391,38 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
         _ => return Err(invalid("Unsupported HTTP method.")),
     };
     let target = target(s, &context.manifest, text(args, "url"), "https")?;
+    let configuration = args["auth"].get("configuration");
+    if configuration.is_some()
+        && args["auth"].as_object().is_none_or(|auth| {
+            auth.keys().any(|key| {
+                !["configuration", "secret", "header", "prefix", "oauth"].contains(&key.as_str())
+            })
+        })
+    {
+        return Err(invalid("Invalid configuration authentication."));
+    }
+    let resource = if let Some(selector) = configuration {
+        let form = context
+            .draft
+            .as_ref()
+            .and_then(|draft| draft.resource.as_ref())
+            .ok_or_else(|| {
+                Error::forbidden("Configuration credentials belong to resource forms.")
+            })?;
+        form.selected(selector.as_str().unwrap_or_default())?
+            .cloned()
+            .map(|resource| super::resources::Access::Configuration {
+                form: form.clone(),
+                resource,
+            })
+    } else {
+        match args["auth"].get("resource") {
+            Some(value) => Some(super::resources::Access::Operational(
+                super::resources::reference(s, context, value.as_str().unwrap_or_default()).await?,
+            )),
+            None => None,
+        }
+    };
     let mut request = s
         .plugins
         .http
@@ -370,7 +443,25 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
             request = request.header(name, value);
         }
     }
-    if let Some(spec) = args.get("bodyFile").filter(|value| value.is_object()) {
+    if let Some(form) = args.get("form").filter(|value| !value.is_null()) {
+        if !form
+            .as_object()
+            .is_some_and(|form| form.len() <= 50 && form.values().all(Value::is_string))
+            || ["json", "body", "multipart", "bodyFile"]
+                .iter()
+                .any(|key| args.get(*key).is_some_and(|value| !value.is_null()))
+        {
+            return Err(invalid(
+                "Use form text fields without another request body.",
+            ));
+        }
+        let fields: BTreeMap<String, String> = serde_json::from_value(form.clone())?;
+        let encoded = serde_urlencoded::to_string(&fields).map_err(Error::internal)?;
+        if encoded.len() > 262_144 {
+            return Err(Error::too_large("Request body is too large."));
+        }
+        request = request.form(&fields);
+    } else if let Some(spec) = args.get("bodyFile").filter(|value| value.is_object()) {
         if !context.manifest.permits_capability("files") {
             return Err(Error::forbidden("File transfers are not approved."));
         }
@@ -421,20 +512,54 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
         }
         request = request.body(body.to_owned());
     }
-    if let Some((header, prefix, secret)) = authorization(s, context, &args["auth"]).await? {
+    let oauth = if let Some(name) = args["auth"].get("oauth") {
+        if (context.draft.is_some() && configuration.is_none())
+            || !context.manifest.permits_capability("oauth")
+            || args["auth"].as_object().is_none_or(|auth| auth.len() != 2)
+        {
+            return Err(Error::forbidden(
+                "Use an OAuth provider and resource on a saved instance.",
+            ));
+        }
+        let resource = resource
+            .as_ref()
+            .ok_or_else(|| Error::bad("Save the OAuth resource or select its parent first."))?;
+        let (token, reference) =
+            super::oauth::credential_for(s, context, resource, name.as_str().unwrap_or("")).await?;
+        request = request.bearer_auth(token);
+        Some(reference)
+    } else {
+        None
+    };
+    if oauth.is_none()
+        && let Some((header, prefix, secret)) = authorization(s, context, &args["auth"]).await?
+    {
         request = request.header(header, format!("{prefix}{secret}"));
     }
+    if let Some(grant) = &context.resource_grant {
+        super::grants::recheck(s, grant).await?;
+    }
+    if let Some(oauth) = &oauth {
+        super::oauth::recheck(s, oauth).await?;
+    }
+    // Credential renewal and owner verification can both wait on the network.
+    // Retire the caller's proof after that I/O, before starting another request.
+    authorize().await?;
+    recheck_http_access(s, context, resource.as_ref(), oauth.as_ref()).await?;
     let file_response = args.get("responseFile").filter(|v| v.is_object());
     if file_response.is_some() && !context.manifest.permits_capability("files") {
         return Err(Error::forbidden("File transfers are not approved."));
     }
     authorize_management(s, context).await?;
     let claim =
-        super::idempotency::claim(s, &context.connection, args, context.management.as_ref())
-            .await?;
+        super::idempotency::claim(s, context, args, resource.as_ref(), oauth.as_ref()).await?;
     if let Some(super::idempotency::Claim::Cached(response)) = &claim {
+        authorize().await?;
+        recheck_http_access(s, context, resource.as_ref(), oauth.as_ref()).await?;
         return Ok(response.clone());
     }
+    authorize().await?;
+    recheck_http_access(s, context, resource.as_ref(), oauth.as_ref()).await?;
     let response = request
         .send()
         .await
@@ -466,6 +591,8 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
         }
         body.extend_from_slice(&chunk);
     }
+    authorize().await?;
+    recheck_http_access(s, context, resource.as_ref(), oauth.as_ref()).await?;
     if let Some(spec) = file_response
         && (200..300).contains(&status)
     {
@@ -480,6 +607,10 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
         return Ok(json!({ "status": status, "headers": headers, "file": file }));
     }
     let json = serde_json::from_slice::<Value>(&body).ok();
+    if let Some(oauth) = &oauth {
+        super::oauth::recheck(s, oauth).await?;
+    }
+    recheck_http_access(s, context, resource.as_ref(), oauth.as_ref()).await?;
     let response = json!({
         "status": status,
         "headers": headers,
@@ -493,10 +624,71 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
             &id,
             &response,
             context.management.as_ref(),
+            http_access_check(s, context, resource.as_ref(), oauth.as_ref()),
         )
         .await?;
     }
     Ok(response)
+}
+
+/// After awaited authority checks, inspect the resource chain and credential
+/// together. A separate OAuth lookup must not outlive a resource-only snapshot.
+async fn recheck_http_access(
+    s: &Service,
+    context: &Context,
+    resource: Option<&super::resources::Access>,
+    oauth: Option<&super::oauth::Reference>,
+) -> Result<()> {
+    let checked = resource.is_some()
+        || oauth.is_some()
+        || context.resource_grant.is_some()
+        || context
+            .draft
+            .as_ref()
+            .is_some_and(|draft| draft.resource.is_some() || draft.root.is_some());
+    if checked {
+        let check = http_access_check(s, context, resource, oauth);
+        s.store.transaction(move |db| check(db)).await?;
+    }
+    Ok(())
+}
+
+/// The final publication fence also runs inside a receipt's completion transaction.
+/// No awaited write may separate an OAuth/resource snapshot from publication.
+fn http_access_check(
+    s: &Service,
+    context: &Context,
+    resource: Option<&super::resources::Access>,
+    oauth: Option<&super::oauth::Reference>,
+) -> impl FnOnce(&crate::store::Db<'_>) -> Result<()> + Send + 'static {
+    let form = context
+        .draft
+        .as_ref()
+        .and_then(|draft| draft.resource.clone());
+    let root = context.draft.as_ref().and_then(|draft| draft.root.clone());
+    let connection = context.connection.clone();
+    let resource = resource.cloned();
+    let oauth = oauth.cloned();
+    let grant = context.resource_grant.clone();
+    let vault = s.vault.clone();
+    move |db| {
+        if let Some(grant) = &grant {
+            super::grants::recheck_in(db, grant)?;
+        }
+        if let Some(resource) = &resource {
+            resource.current(db, &connection)?;
+        }
+        if let Some(form) = &form {
+            form.current(db)?;
+        }
+        if let Some(root) = &root {
+            root.current(db)?;
+        }
+        if let Some(oauth) = &oauth {
+            super::oauth::recheck_in(&vault, db, oauth)?;
+        }
+        Ok(())
+    }
 }
 
 /// Durable timers delivered later as `timer` events.
@@ -561,8 +753,7 @@ async fn timers(s: &Service, context: &Context, method: &str, args: &Value) -> R
 
 pub(crate) async fn authorize_management(s: &Service, context: &Context) -> Result<()> {
     if let Some(authority) = &context.management {
-        let authority = authority.clone();
-        s.store.read(move |db| authority.authorize(db)).await?;
+        authority.recheck(s).await?;
     }
     Ok(())
 }

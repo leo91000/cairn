@@ -1,12 +1,16 @@
 package build.cairn.app.data
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -37,6 +41,8 @@ data class PluginSetting(
     val options: List<PluginOption> = emptyList(),
     /** Choices come from the package's form handler while the owner edits. */
     val dynamic: Boolean = false,
+    /** Bounded query/cursor lookups, independent of the full form. */
+    val remote: Boolean = false,
     /** Changing this field asks the package's form handler again. */
     val refresh: Boolean = false,
     /** How much a switch lets agents do: `low`, `medium` or `high`. */
@@ -51,7 +57,29 @@ data class PluginForm(
     val values: JsonObject = JsonObject(emptyMap()),
     val errors: Map<String, String> = emptyMap(),
     val view: JsonArray = JsonArray(emptyList()),
+    val pages: Map<String, PluginChoicePage>? = null,
+    val lookup: PluginFormLookup? = null,
 )
+
+@Serializable data class PluginChoicePage(val nextCursor: String?)
+
+/** Host-owned echo proves this was evaluated as a choice-only request. */
+@Serializable
+data class PluginFormLookup(val field: String, val query: String, val cursor: String? = null)
+
+private val pluginFormJson = Json(wireJson) { coerceInputValues = true }
+
+/** Optional/null guidance is successful; null fields use their declared defaults. */
+fun decodePluginForm(value: JsonElement): PluginForm =
+    if (value == JsonNull) PluginForm() else pluginFormJson.decodeFromJsonElement(value)
+
+/** Errors without an inline control still need an explanation in the form. */
+fun PluginManifest.unshownFormErrors(errors: Map<String, String>): List<String> {
+    val inline = settings.filterNot { it.hidden }.map { it.key }.toMutableSet()
+    inline += "form"
+    if (credential != null) inline += "credential"
+    return errors.filterKeys { it !in inline }.values.toList()
+}
 
 @Serializable
 data class PluginCredential(
@@ -155,6 +183,133 @@ data class PluginCommand(
 @Serializable data class PluginTool(val name: String = "", val description: String = "")
 
 @Serializable
+enum class PluginAccessProfile(val label: String) {
+    @SerialName("read") Read("Lecture"),
+    @SerialName("contribute") Contribute("Contribution"),
+    @SerialName("manage") Manage("Gestion"),
+}
+
+@Serializable
+data class PluginOperation(
+    val name: String = "",
+    val collection: String = "",
+    val profile: PluginAccessProfile = PluginAccessProfile.Read,
+    val scopes: List<String> = emptyList(),
+)
+
+@Serializable
+data class PluginResourceGrant(
+    val id: String = "",
+    val resourceId: String = "",
+    val agentId: String = "",
+    val profile: PluginAccessProfile? = null,
+    val operations: List<String> = emptyList(),
+    val deniedOperations: List<String> = emptyList(),
+    val scopes: Map<String, List<String>> = emptyMap(),
+    val revision: String = "",
+) {
+    /** Other saved rules may independently grant access; this previews only this rule. */
+    fun permits(operation: PluginOperation): Boolean =
+        operation.name !in deniedOperations &&
+            ((profile != null && profile >= operation.profile) || operation.name in operations) &&
+            scopes.keys.all { it in operation.scopes }
+}
+
+@Serializable
+data class PluginResourceCollection(
+    val name: String = "",
+    val title: String = "",
+    val singular: String = "",
+    val parent: String? = null,
+    val delegation: Boolean = false,
+    val form: Boolean = false,
+    val settings: List<PluginSetting> = emptyList(),
+)
+
+@Serializable
+data class PluginResource(
+    val id: String = "",
+    val connectionId: String = "",
+    val collection: String = "",
+    val parentId: String? = null,
+    val name: String = "",
+    val enabled: Boolean = true,
+    val revision: String = "",
+    val settings: JsonObject = JsonObject(emptyMap()),
+    val secretKeys: List<String> = emptyList(),
+)
+
+@Serializable data class PluginOAuthPersonal(val subject: String = "")
+
+/** Safe authorization summary: provider credentials never reach either client. */
+@Serializable
+data class PluginOAuthStatus(
+    val status: String = "disconnected",
+    val scopes: List<String> = emptyList(),
+    val requestedScopes: List<String> = emptyList(),
+    val expiresAt: Long? = null,
+    val subject: String? = null,
+)
+
+/** A short-lived sign-in held only in the current screen's memory. */
+@Serializable
+data class PluginOAuthConsent(
+    val state: String,
+    val url: String,
+    val expiresAt: Long,
+    val redirectUri: String? = null,
+)
+
+/** The member directory exposes labels and only the current person's status. */
+@Serializable
+data class PluginPersonalAuthorization(
+    val id: String = "",
+    val pluginId: String = "",
+    val pluginName: String = "",
+    val instanceId: String = "",
+    val instanceName: String = "",
+    val collection: String = "",
+    val resourceId: String = "",
+    val resourceName: String = "",
+    val providerName: String = "",
+    val title: String = "",
+    val scopes: List<String> = emptyList(),
+    val enabled: Boolean = false,
+    val authorization: PluginOAuthStatus = PluginOAuthStatus(),
+) {
+    val path: String
+        get() =
+            "/plugins/${segment(pluginId)}/connections/${segment(instanceId)}/resources/${segment(collection)}/${segment(resourceId)}/oauth/${segment(providerName)}"
+}
+
+@Serializable
+data class PluginOAuthProvider(
+    val name: String = "",
+    val title: String = "",
+    val collection: String = "",
+    val scopes: List<String> = emptyList(),
+    val personal: PluginOAuthPersonal? = null,
+)
+
+@Serializable data class PluginWebhook(val name: String = "")
+
+@Serializable
+data class PluginSetupDraft(
+    val id: String = "",
+    val pluginId: String = "",
+    val name: String = "",
+    val status: String = "setup",
+    val settings: JsonObject = JsonObject(emptyMap()),
+    val secretKeys: List<String> = emptyList(),
+    val credential: Boolean = false,
+    val revision: String = "",
+    val createdAt: Long = 0,
+    val expiresAt: Long = 0,
+)
+
+@Serializable data class PluginPage<T>(val items: List<T>, val nextCursor: String? = null)
+
+@Serializable
 data class PluginManifest(
     val id: String = "",
     val name: String = "",
@@ -174,6 +329,10 @@ data class PluginManifest(
     val instanceView: Boolean = false,
     val instanceTest: Boolean = false,
     val instanceForm: Boolean = false,
+    val resources: List<PluginResourceCollection> = emptyList(),
+    val operations: List<PluginOperation> = emptyList(),
+    val oauth: List<PluginOAuthProvider> = emptyList(),
+    val webhooks: List<PluginWebhook> = emptyList(),
     /** Where its enabled instances import projects from. */
     val projectSources: List<PluginProjectSource> = emptyList(),
     /** Where its enabled instances import skills from. */
@@ -185,7 +344,10 @@ data class PluginManifest(
 ) {
     /** Instances answer external people through a dedicated agent. */
     val delegates
-        get() = "conversations.submit" in capabilities
+        get() = "conversations.submit" in capabilities && resources.none { it.delegation }
+
+    val hasSetup
+        get() = resources.isNotEmpty() || oauth.isNotEmpty() || webhooks.isNotEmpty()
 
     /** Packages that react to people, connections or timers keep a worker running. */
     val needsWorker
@@ -323,6 +485,26 @@ data class PluginCatalog(
     val packages: List<PluginEntry> = emptyList(),
     val capabilities: List<PluginCapability> = emptyList(),
     val connections: List<PluginConnection> = emptyList(),
+    val resourceGrantCounts: Map<String, Int>? = null,
+    /** The host supports owner setup drafts; absent on earlier installations. */
+    val setupDrafts: Boolean = false,
+)
+
+/** Owner-only saved resource rules; they do not imply an instance-wide grant. */
+@Serializable
+data class AgentResourceGrant(
+    val id: String = "",
+    val agentId: String = "",
+    val connectionId: String = "",
+    val resourceId: String = "",
+    val pluginId: String? = null,
+    val collection: String? = null,
+    val instanceName: String? = null,
+    val resourceName: String? = null,
+    val profile: PluginAccessProfile? = null,
+    val operations: List<String> = emptyList(),
+    val deniedOperations: List<String> = emptyList(),
+    val scopes: Map<String, List<String>> = emptyMap(),
 )
 
 enum class PluginTone {
@@ -335,13 +517,15 @@ enum class PluginTone {
 data class PluginBadge(val label: String, val tone: PluginTone)
 
 /** What an instance is doing now, as the web shows it. */
-fun PluginConnection.state(): PluginBadge =
+fun PluginConnection.state(): PluginBadge = pluginConnectionState(enabled, status.state)
+
+internal fun pluginConnectionState(enabled: Boolean, state: String): PluginBadge =
     when {
         !enabled -> PluginBadge("En pause", PluginTone.MUTED)
-        status.state == "ready" -> PluginBadge("Prêt", PluginTone.OK)
-        status.state == "connected" -> PluginBadge("En ligne", PluginTone.OK)
-        status.state == "connecting" -> PluginBadge("Connexion…", PluginTone.MUTED)
-        status.state == "needs_review" -> PluginBadge("À vérifier", PluginTone.ATTENTION)
+        state == "ready" -> PluginBadge("Prêt", PluginTone.OK)
+        state == "connected" -> PluginBadge("En ligne", PluginTone.OK)
+        state == "connecting" -> PluginBadge("Connexion…", PluginTone.MUTED)
+        state == "needs_review" -> PluginBadge("À vérifier", PluginTone.ATTENTION)
         else -> PluginBadge("Hors ligne", PluginTone.ATTENTION)
     }
 
@@ -404,6 +588,9 @@ fun capabilityLabel(name: String) =
         "storage" -> "Stockage"
         "timers" -> "Minuteurs"
         "exec" -> "Exécute des programmes"
+        "resources" -> "Ressources"
+        "oauth" -> "Autorisations de comptes"
+        "webhooks" -> "Reçoit des requêtes web"
         else -> name
     }
 
@@ -425,12 +612,12 @@ fun Agent.eligibleForPlugins() =
  * Why an agent can't answer anyone who reaches an instance, or null when it can. Mirrors the
  * server: read-only sandbox, one project at most, no installation, MCP or plugin grants.
  */
-fun Agent.publicProblem(connections: List<PluginConnection>): String? =
+fun Agent.publicProblem(pluginAccess: Boolean): String? =
     when {
         !eligibleForPlugins() -> "Trop large"
         access.sandbox != "read-only" -> "Pas en lecture seule"
         access.mcps == null || access.mcps.isNotEmpty() -> "A des MCP"
-        connections.any { id in it.agentIds } -> "A des plugins"
+        pluginAccess -> "A des plugins"
         else -> null
     }
 
@@ -535,6 +722,46 @@ fun PluginCatalog.grantsOf(agentId: String): List<String> =
             val plugin = packages.find { it.id == connection.pluginId }?.name ?: connection.pluginId
             "$plugin · ${connection.name}"
         }
+
+@Serializable
+data class RouteEligibility(
+    val agentId: String = "",
+    val eligible: Boolean = false,
+    val reason: String = "",
+)
+
+@Serializable
+data class PluginRoute(
+    val id: String = "",
+    val resourceId: String = "",
+    val name: String = "",
+    val enabled: Boolean = true,
+    val match: Map<String, String> = emptyMap(),
+    val agentId: String = "",
+    val projectId: String? = null,
+    val accessMode: String = "allowlist",
+    val userIds: List<String> = emptyList(),
+    val people: List<PluginLabel> = emptyList(),
+    val maxMessagesPerHour: Int = 20,
+    val maxPerPersonPerHour: Int = 5,
+    val revision: String = "",
+    val summary: PluginRouteSummary? = null,
+)
+
+@Serializable
+data class PluginRouteSummary(
+    val hourStartedAt: Long,
+    val messagesThisHour: Long,
+    val pendingRequests: Int,
+)
+
+@Serializable
+data class PluginRouteRequest(
+    val id: String = "",
+    val userId: String = "",
+    val name: String = "",
+    val status: String = "",
+)
 
 /**
  * The grants an edited instance must send back unchanged, or null to omit them. An older

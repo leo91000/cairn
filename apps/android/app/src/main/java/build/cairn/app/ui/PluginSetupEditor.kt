@@ -65,10 +65,10 @@ internal fun InstanceEditor(
     vm: CairnViewModel,
     state: Workspace,
     pluginId: String,
-    entry: PluginEntry,
+    entry: PluginConfigurationEntry,
     manifest: PluginManifest,
     initial: PluginConnection,
-    connections: List<PluginConnection>,
+    configuration: PluginConfiguration?,
     close: () -> Unit,
     openAgents: () -> Unit,
     saved: suspend () -> Unit,
@@ -80,6 +80,7 @@ internal fun InstanceEditor(
     val setup = remember(entry) { entry.resolvedSetup() }
     // A package with nothing to enter still gets one step, for its name.
     val steps = setup.steps.ifEmpty { listOf(SetupStep("details", "settings", "Details")) }
+    val connections = configuration?.connections.orEmpty()
     val mine = connections.filter { it.pluginId == pluginId }
     val sources = sharedSources(steps, manifest.settings, mine, initial.id.takeIf { !creating })
     val sharedKeys = steps.filter { it.shared }.flatMap { it.settings }
@@ -151,9 +152,9 @@ internal fun InstanceEditor(
     var completing by remember(initial.id) { mutableStateOf(manifest.instanceForm) }
     // Each change asks the package again; a newer question cancels the older one.
     var asking by remember(initial.id) { mutableStateOf(0 to listOf<String?>(null)) }
-    val others = connections.filter { it.id != initial.id }
     fun problem(agent: Agent): String? =
-        if (accessMode == "everyone") agent.publicProblem(others)
+        if (accessMode == "everyone")
+            agent.publicProblem(configuration?.hasPluginAccess(agent.id) == true)
         else if (agent.eligibleForPlugins()) null else "Trop large"
     fun refresh(key: String?) {
         asking = (asking.first + 1) to listOf(key)
@@ -168,6 +169,20 @@ internal fun InstanceEditor(
         secrets = secrets - sharedKeys.toSet()
         refresh(null)
     }
+    fun formBody() = buildJsonObject {
+        if (!creating) put("instance", initial.id)
+        put("settings", pluginSettings(stored, values))
+        put("secrets", pluginSecrets(secrets))
+        sharing()
+        credentialInput(token, signIn)?.let { (key, value) -> put(key, value) }
+    }
+    val lookup =
+        PluginChoiceLookup(
+            vm.api,
+            "/plugins/${segment(pluginId)}/form",
+            formBody(),
+            manifest.version,
+        )
     val scope = rememberCoroutineScope()
     /** Forgets the sign-in, on the installation too unless a save consumed it. */
     fun cancelSignIn() {
@@ -302,7 +317,7 @@ internal fun InstanceEditor(
                                 changed?.let { put("changed", it) }
                             },
                         )
-                    wireJson.decodeFromJsonElement<PluginForm>(result)
+                    decodePluginForm(result)
                 }
                     .onSuccess { form ->
                         val derived =
@@ -407,11 +422,12 @@ internal fun InstanceEditor(
             if (creating) null
             else
                 initial.agentIdsToSend(state.agents, manifest) {
-                    wireJson
-                        .decodeFromString<PluginCatalog>(api.request("GET", "/plugins"))
-                        .connections
-                        .find { it.id == initial.id }
-                        ?.agentIds
+                    api.pluginInstance(
+                            pluginId,
+                            initial.id,
+                            configuration?.exactInstanceReads == true,
+                        )
+                        .agentIds
                 }
         api.pluginOperation(
             "/plugins/${segment(pluginId)}/connections" +
@@ -575,6 +591,7 @@ internal fun InstanceEditor(
                 if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                 state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 completion?.errors?.get("form")?.let { FormError(it) }
+                manifest.unshownFormErrors(completion?.errors.orEmpty()).forEach { FormError(it) }
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     if (steps.size > 1) Eyebrow("Étape ${index + 1} sur ${steps.size}")
                     Text(
@@ -646,6 +663,7 @@ internal fun InstanceEditor(
                         options = completion?.options.orEmpty(),
                         errors = formErrors,
                         refresh = ::refresh,
+                        lookup = lookup,
                     )
                     if (current.presets.isNotEmpty() && switches.isNotEmpty())
                         FineTune(current.matchingPreset(fields, values).isEmpty(), current.id) {
@@ -658,6 +676,7 @@ internal fun InstanceEditor(
                                 enabled = !state.busy,
                                 errors = formErrors,
                                 refresh = ::refresh,
+                                lookup = lookup,
                             )
                         }
                 }

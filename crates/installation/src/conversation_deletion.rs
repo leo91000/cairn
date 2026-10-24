@@ -220,10 +220,20 @@ async fn files(s: &Service, chat: &Value) -> Result<()> {
 
 /// Deletes every record of a conversation and its run, including share tokens.
 fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
+    for delivery in db.list(crate::plugins::work::DELIVERIES)? {
+        if delivery["chatId"] == cid {
+            crate::plugins::work::remove_delivery(db, &delivery)?;
+        }
+    }
     for prefix in [
         format!("artifact:{run}:"),
         crate::chats::question_prefix(cid),
         format!("chat-attachment:{cid}:"),
+        crate::plugins::requesters::prefix(cid),
+        crate::plugins::requesters::control_prefix(cid),
+        crate::plugins::turns::prefix(cid),
+        crate::plugins::turns::abandoned_prefix(cid),
+        format!("plugin-reset:{cid}:"),
     ] {
         for (key, value) in db.keys(&prefix)? {
             if let Some(token) = value["publicToken"].as_str() {

@@ -1,0 +1,247 @@
+{
+  "host": {
+    "cpuMax": null,
+    "memoryMax": null,
+    "parallelism": 7,
+    "architecture": "x86_64",
+    "kernel": "6.12.109",
+    "memoryTotalKiB": 19462272
+  },
+  "readerCache": "fresh per implementation; sample0 cold reader/statement caches then5warm; OS cache retained",
+  "reads": [
+    {
+      "case": "present",
+      "implementation": "complete-record-scan",
+      "materializedJsonBytes": 4746001,
+      "processCpuMs": 1073.1754500000002,
+      "sample": 0,
+      "wallMs": 1073.025436
+    },
+    {
+      "case": "present",
+      "implementation": "complete-record-scan",
+      "materializedJsonBytes": 4746001,
+      "processCpuMs": 1224.5835700000002,
+      "sample": 1,
+      "wallMs": 1224.661935
+    },
+    {
+      "case": "present",
+      "implementation": "complete-record-scan",
+      "materializedJsonBytes": 4746001,
+      "processCpuMs": 892.8019759999997,
+      "sample": 2,
+      "wallMs": 892.780956
+    },
+    {
+      "case": "present",
+      "implementation": "complete-record-scan",
+      "materializedJsonBytes": 4746001,
+      "processCpuMs": 876.2343850000007,
+      "sample": 3,
+      "wallMs": 876.244114
+    },
+    {
+      "case": "present",
+      "implementation": "complete-record-scan",
+      "materializedJsonBytes": 4746001,
+      "processCpuMs": 1021.3740969999999,
+      "sample": 4,
+      "wallMs": 1021.368968
+    },
+    {
+      "case": "present",
+      "implementation": "complete-record-scan",
+      "materializedJsonBytes": 4746001,
+      "processCpuMs": 980.5102930000003,
+      "sample": 5,
+      "wallMs": 980.458646
+    },
+    {
+      "case": "present",
+      "implementation": "existence-projection",
+      "materializedJsonBytes": 4,
+      "processCpuMs": 1.3850320000001375,
+      "sample": 0,
+      "wallMs": 0.844406
+    },
+    {
+      "case": "present",
+      "implementation": "existence-projection",
+      "materializedJsonBytes": 4,
+      "processCpuMs": 0.7730170000004364,
+      "sample": 1,
+      "wallMs": 0.7449359999999999
+    },
+    {
+      "case": "present",
+      "implementation": "existence-projection",
+      "materializedJsonBytes": 4,
+      "processCpuMs": 0.8257359999997789,
+      "sample": 2,
+      "wallMs": 0.793815
+    },
+    {
+      "case": "present",
+      "implementation": "existence-projection",
+      "materializedJsonBytes": 4,
+      "processCpuMs": 0.7032229999995252,
+      "sample": 3,
+      "wallMs": 0.7352259999999999
+    },
+    {
+      "case": "present",
+      "implementation": "existence-projection",
+      "materializedJsonBytes": 4,
+      "processCpuMs": 0.30939699999998993,
+      "sample": 4,
+      "wallMs": 0.277512
+    },
+    {
+      "case": "present",
+      "implementation": "existence-projection",
+      "materializedJsonBytes": 4,
+      "processCpuMs": 0.26357699999971373,
+      "sample": 5,
+      "wallMs": 0.238446
+    },
+    {
+      "case": "absent",
+      "implementation": "complete-record-scan",
+      "materializedJsonBytes": 4746001,
+      "processCpuMs": 971.8352540000005,
+      "sample": 0,
+      "wallMs": 971.7456060000001
+    },
+    {
+      "case": "absent",
+      "implementation": "complete-record-scan",
+      "materializedJsonBytes": 4746001,
+      "processCpuMs": 935.0055080000002,
+      "sample": 1,
+      "wallMs": 935.490864
+    },
+    {
+      "case": "absent",
+      "implementation": "complete-record-scan",
+      "materializedJsonBytes": 4746001,
+      "processCpuMs": 1009.4492420000006,
+      "sample": 2,
+      "wallMs": 1009.367777
+    },
+    {
+      "case": "absent",
+      "implementation": "complete-record-scan",
+      "materializedJsonBytes": 4746001,
+      "processCpuMs": 1096.465329999999,
+      "sample": 3,
+      "wallMs": 1096.471988
+    },
+    {
+      "case": "absent",
+      "implementation": "complete-record-scan",
+      "materializedJsonBytes": 4746001,
+      "processCpuMs": 967.5378760000003,
+      "sample": 4,
+      "wallMs": 967.654271
+    },
+    {
+      "case": "absent",
+      "implementation": "complete-record-scan",
+      "materializedJsonBytes": 4746001,
+      "processCpuMs": 1020.3899459999993,
+      "sample": 5,
+      "wallMs": 1020.366315
+    },
+    {
+      "case": "absent",
+      "implementation": "existence-projection",
+      "materializedJsonBytes": 5,
+      "processCpuMs": 34.02915899999971,
+      "sample": 0,
+      "wallMs": 33.81188
+    },
+    {
+      "case": "absent",
+      "implementation": "existence-projection",
+      "materializedJsonBytes": 5,
+      "processCpuMs": 40.01779400000123,
+      "sample": 1,
+      "wallMs": 39.977892000000004
+    },
+    {
+      "case": "absent",
+      "implementation": "existence-projection",
+      "materializedJsonBytes": 5,
+      "processCpuMs": 37.85566300000028,
+      "sample": 2,
+      "wallMs": 37.75544
+    },
+    {
+      "case": "absent",
+      "implementation": "existence-projection",
+      "materializedJsonBytes": 5,
+      "processCpuMs": 39.52600999999959,
+      "sample": 3,
+      "wallMs": 39.531322
+    },
+    {
+      "case": "absent",
+      "implementation": "existence-projection",
+      "materializedJsonBytes": 5,
+      "processCpuMs": 49.003836000001684,
+      "sample": 4,
+      "wallMs": 48.946417
+    },
+    {
+      "case": "absent",
+      "implementation": "existence-projection",
+      "materializedJsonBytes": 5,
+      "processCpuMs": 54.31922200000008,
+      "sample": 5,
+      "wallMs": 54.219643
+    }
+  ],
+  "recordShape": "synthetic inactive reference rows with32channels/32people; scan payload, not provider authority fixtures",
+  "rows": 2000,
+  "scope": "actual merge existence predicate versus complete JSON-record scan; not a whole merge, HTTP or production network measurement",
+  "storedJsonBytes": 4744000,
+  "writes": "existing same-value record write path; unchanged by predicate",
+  "writesSamples": [
+    {
+      "processCpuMs": 0.9357430000000022,
+      "sample": 0,
+      "wallMs": 0.896298
+    },
+    {
+      "processCpuMs": 0.6705569999994623,
+      "sample": 1,
+      "wallMs": 0.656543
+    },
+    {
+      "processCpuMs": 0.5015449999991688,
+      "sample": 2,
+      "wallMs": 0.49343399999999993
+    },
+    {
+      "processCpuMs": 0.5673490000008314,
+      "sample": 3,
+      "wallMs": 0.558799
+    },
+    {
+      "processCpuMs": 0.5289169999996375,
+      "sample": 4,
+      "wallMs": 0.5163709999999999
+    },
+    {
+      "processCpuMs": 0.5425020000002405,
+      "sample": 5,
+      "wallMs": 0.522964
+    }
+  ],
+  "sourceSha256": {
+    "crates/installation/src/agent_merge.rs": "47762b671ddfa0e788c8f0222bc26081677f0ef1c6b7f37da58a4e85a9bf65d7",
+    "crates/installation/src/agent_merge/measurement.rs": "5023b56d8dc70f705ab0bb8a4f0455085b935c1a54978e68498796df9ea65159",
+    "crates/installation/src/store.rs": "b9c6e1862674e4f7d6e2e14aefe7c95ac11ade929f659289d4624704e01f4767"
+  }
+}

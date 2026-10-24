@@ -162,10 +162,11 @@ pub fn validate_settings_schema(settings: &[Value]) -> Result<(), &'static str> 
         // Dynamic choices come from the package's `form` handler while the owner edits.
         let dynamic = field["dynamic"] == true;
         let needs_options = choice && !dynamic;
-        let flags_ok = ["required", "hidden", "dynamic", "refresh"]
+        let flags_ok = ["required", "hidden", "dynamic", "remote", "refresh"]
             .iter()
             .all(|flag| field.get(*flag).is_none_or(|value| value.is_boolean()))
-            && (!dynamic || choice);
+            && (!dynamic || choice)
+            && (field["remote"] != true || dynamic);
         validate_limits(field, kind)?;
         let pattern_ok = match field.get("pattern") {
             None | Some(Value::Null) => true,

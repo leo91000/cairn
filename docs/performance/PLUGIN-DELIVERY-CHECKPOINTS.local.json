@@ -1,0 +1,182 @@
+{
+  "cache": "fresh Store after seed; one read actor/connection runs sample0 cold then5warm reads; OS page cache retained; per-query times exclude actor scheduling",
+  "cases": [
+    {
+      "afterSettlement": 1000,
+      "beforeSettlement": 1000,
+      "case": "permanent-plugin-receipts",
+      "encodedJsonBytes": 300000,
+      "reads": [
+        {
+          "processCpuMs": 1.663548999999989,
+          "returnedJsonBytes": 300,
+          "sample": 0,
+          "wallMs": 1.082874
+        },
+        {
+          "processCpuMs": 0.0992029999999886,
+          "returnedJsonBytes": 300,
+          "sample": 1,
+          "wallMs": 0.092991
+        },
+        {
+          "processCpuMs": 0.07375600000000304,
+          "returnedJsonBytes": 300,
+          "sample": 2,
+          "wallMs": 0.067684
+        },
+        {
+          "processCpuMs": 0.07524399999999787,
+          "returnedJsonBytes": 300,
+          "sample": 3,
+          "wallMs": 0.069742
+        },
+        {
+          "processCpuMs": 0.08006000000000313,
+          "returnedJsonBytes": 300,
+          "sample": 4,
+          "wallMs": 0.073395
+        },
+        {
+          "processCpuMs": 0.07983200000001034,
+          "returnedJsonBytes": 300,
+          "sample": 5,
+          "wallMs": 0.07363800000000001
+        }
+      ],
+      "records": 1000,
+      "seedCpuMs": 70.86021499999998,
+      "seedWallMs": 70.77383800000001,
+      "settlementCpuMs": 0.006123999999999796,
+      "settlementWallMs": 0.0006050000000000001,
+      "writes": [
+        {
+          "processCpuMs": 0.585677000000004,
+          "sample": 0,
+          "wallMs": 0.5729920000000001
+        },
+        {
+          "processCpuMs": 0.2691599999999994,
+          "sample": 1,
+          "wallMs": 0.253873
+        },
+        {
+          "processCpuMs": 0.22286199999999212,
+          "sample": 2,
+          "wallMs": 0.20682099999999998
+        },
+        {
+          "processCpuMs": 0.27083399999997937,
+          "sample": 3,
+          "wallMs": 0.274492
+        },
+        {
+          "processCpuMs": 0.21035599999999022,
+          "sample": 4,
+          "wallMs": 0.199552
+        },
+        {
+          "processCpuMs": 0.1977719999999863,
+          "sample": 5,
+          "wallMs": 0.18024600000000002
+        }
+      ]
+    },
+    {
+      "afterSettlement": 0,
+      "beforeSettlement": 50,
+      "case": "pending-delivery-checkpoints",
+      "encodedJsonBytes": 11100,
+      "reads": [
+        {
+          "processCpuMs": 0.7599939999999776,
+          "returnedJsonBytes": 222,
+          "sample": 0,
+          "wallMs": 0.732144
+        },
+        {
+          "processCpuMs": 0.05091999999999075,
+          "returnedJsonBytes": 222,
+          "sample": 1,
+          "wallMs": 0.047327
+        },
+        {
+          "processCpuMs": 0.044566000000003214,
+          "returnedJsonBytes": 222,
+          "sample": 2,
+          "wallMs": 0.041142
+        },
+        {
+          "processCpuMs": 0.04359800000000291,
+          "returnedJsonBytes": 222,
+          "sample": 3,
+          "wallMs": 0.040258
+        },
+        {
+          "processCpuMs": 0.048221999999981335,
+          "returnedJsonBytes": 222,
+          "sample": 4,
+          "wallMs": 0.044955
+        },
+        {
+          "processCpuMs": 0.07760500000000548,
+          "returnedJsonBytes": 222,
+          "sample": 5,
+          "wallMs": 0.073955
+        }
+      ],
+      "records": 50,
+      "seedCpuMs": 4.49282199999999,
+      "seedWallMs": 3.4440109999999997,
+      "settlementCpuMs": 1.2588690000000042,
+      "settlementWallMs": 1.240681,
+      "writes": [
+        {
+          "processCpuMs": 0.3472280000000012,
+          "sample": 0,
+          "wallMs": 0.33049
+        },
+        {
+          "processCpuMs": 0.20402700000002483,
+          "sample": 1,
+          "wallMs": 0.186199
+        },
+        {
+          "processCpuMs": 0.1917190000000062,
+          "sample": 2,
+          "wallMs": 0.18249600000000002
+        },
+        {
+          "processCpuMs": 0.2193759999999827,
+          "sample": 3,
+          "wallMs": 0.18989899999999998
+        },
+        {
+          "processCpuMs": 0.22117200000002413,
+          "sample": 4,
+          "wallMs": 0.198035
+        },
+        {
+          "processCpuMs": 0.2127930000000049,
+          "sample": 5,
+          "wallMs": 0.203221
+        }
+      ]
+    }
+  ],
+  "host": {
+    "cpuMax": null,
+    "memoryMax": null,
+    "parallelism": 7
+  },
+  "workload": "1000 historical permanent receipts versus 50 concurrently pending reply checkpoints; synthetic one-instance record-shape comparison, not a throughput A/B",
+  "writes": "six same-value replacements; settlement reference keeps history and checkpoint case deletes only its selected records; no network, provider, authority or whole-delivery latency claim",
+  "sourceSha256": {
+    "crates/installation/tests/slack/checkpoints.rs": "bfcb092e016d8cf9b2157f386932812d72d84eafa1edcb570b909733a16d5e84",
+    "crates/installation/src/plugins/work.rs": "71a9921657eb13bfdc01439e911b4940beaf430c4429f6d8faa3005d17af983c",
+    "crates/installation/src/plugins/runtime.rs": "4dc21339db4d048914f74dcb50542d0f538f7531f9e2db91558d792c035bd9e0",
+    "crates/installation/src/plugins/capabilities.rs": "419d6ba2f2cea18b66fcec73933b31c7986c3524d259e2bb7b3de116c11c5ea8"
+  },
+  "command": "mise exec -- pnpm test:backend -p cairn-installation --test slack checkpoints::measure_reply_checkpoint_storage -- --ignored --exact --nocapture --test-threads=1",
+  "recordedAt": "2026-10-21T19:50:12.239980+00:00"
+}

@@ -81,7 +81,9 @@ Beacon's memory and logs; it is not end-to-end encryption against it.
   Beacon tunnel no longer tracks them for revocation. Clients fall back to the
   relay and negotiate fresh direct grants, applying the switching rules below
   to avoid loss or duplication. Agent executions are never stopped by transport
-  changes.
+  changes. Ordinary authenticated chat mutations do not require live personal
+  OAuth proof from Beacon. If that proof is unavailable, the new input receives
+  no personal OAuth authority for its turn; it is never granted retroactively.
 - The installation never accepts anonymous local access and no local password is
   reintroduced.
 
