@@ -1416,6 +1416,8 @@ async fn node_preparations_isolate_conversations_and_coalesce_duplicate_attempts
         let root = data.join("runs").join(&run);
         std::fs::create_dir_all(root.join("workspace/project")).unwrap();
         std::fs::create_dir_all(root.join("home")).unwrap();
+        std::fs::create_dir_all(root.join("chat-input")).unwrap();
+        std::fs::write(root.join("chat-input/messages.json"), b"[]").unwrap();
         std::fs::write(
             root.join("workspace/project/source"),
             "unneeded bootstrap source",
@@ -1441,23 +1443,35 @@ async fn node_preparations_isolate_conversations_and_coalesce_duplicate_attempts
         attempts.push((run, attempt));
     }
     let entered = Arc::new(tokio::sync::Notify::new());
+    let inbox_seeded = Arc::new(tokio::sync::Notify::new());
     let release = CancellationToken::new();
     let seeds = Arc::new(AtomicUsize::new(0));
     let slow_seed = format!("/internal/node-workspace/{}/seed", attempts[0].1);
     let app = owner.app.clone().layer(axum::middleware::from_fn({
         let entered = entered.clone();
+        let inbox_seeded = inbox_seeded.clone();
         let release = release.clone();
         let seeds = seeds.clone();
-        move |request: Request<Body>, next: axum::middleware::Next| {
+        move |mut request: Request<Body>, next: axum::middleware::Next| {
             let blocked = request.uri().path() == slow_seed;
             let entered = entered.clone();
+            let inbox_seeded = inbox_seeded.clone();
             let release = release.clone();
             let seeds = seeds.clone();
             async move {
                 if blocked {
-                    seeds.fetch_add(1, Ordering::SeqCst);
-                    entered.notify_one();
-                    release.cancelled().await;
+                    let (parts, body) = request.into_parts();
+                    let bytes = to_bytes(body, 16384).await.unwrap();
+                    let selection: Value = serde_json::from_slice(&bytes).unwrap();
+                    request = Request::from_parts(parts, Body::from(bytes));
+                    if selection["kind"] == "inbox" {
+                        inbox_seeded.notify_one();
+                    } else {
+                        assert_eq!(selection["kind"], "initial");
+                        seeds.fetch_add(1, Ordering::SeqCst);
+                        entered.notify_one();
+                        release.cancelled().await;
+                    }
                 }
                 next.run(request).await
             }
@@ -1525,6 +1539,11 @@ async fn node_preparations_isolate_conversations_and_coalesce_duplicate_attempts
     release.cancel();
     assert_eq!(slow.await.unwrap().status(), StatusCode::OK);
     assert_eq!(duplicate.await.unwrap().status(), StatusCode::OK);
+    // Inbox refresh shares this endpoint but is independent of preparation
+    // coalescing. Include it deterministically without counting it as a bootstrap.
+    tokio::time::timeout(Duration::from_secs(5), inbox_seeded.notified())
+        .await
+        .unwrap();
     assert_eq!(seeds.load(Ordering::SeqCst), 1);
     connector.kill().await.unwrap();
     manager.abort();
