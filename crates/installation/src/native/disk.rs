@@ -5,36 +5,6 @@ use std::{path::Path, time::Duration};
 
 pub(crate) const MIB: u64 = 1_048_576;
 
-/// Shared sealed base segments are charged once to the node, never credited to
-/// several active promises. Symlinks and racing deletions receive no credit.
-pub(super) fn exclusive_bytes(path: &Path, physical: bool) -> Result<u64> {
-    use std::os::unix::fs::MetadataExt;
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(error.into()),
-    };
-    if metadata.is_file() {
-        return Ok(if metadata.nlink() != 1 {
-            0
-        } else if physical {
-            metadata.blocks() * 512
-        } else {
-            // Pool accounting charges tmp by logical length. Only already
-            // allocated bytes can reduce the host's future-space promise.
-            metadata.len().min(metadata.blocks().saturating_mul(512))
-        });
-    }
-    if !metadata.is_dir() {
-        return Ok(0);
-    }
-    let mut bytes = 0u64;
-    for entry in std::fs::read_dir(path)? {
-        bytes = bytes.saturating_add(exclusive_bytes(&entry?.path(), physical)?);
-    }
-    Ok(bytes)
-}
-
 const METADATA_RESERVE: u64 = MIB;
 
 pub(crate) fn available(limit: u64, used: u64) -> u64 {
@@ -221,12 +191,18 @@ mod tests {
         let file = std::fs::File::create(&path).unwrap();
         file.set_len(16 * MIB).unwrap();
         file.sync_all().unwrap();
-        assert_eq!(exclusive_bytes(&path, false).unwrap(), 0);
+        assert_eq!(
+            super::super::workspace::credit_bytes(root.path()).unwrap(),
+            0
+        );
         std::fs::write(&path, vec![1; MIB as usize]).unwrap();
         std::fs::File::open(&path).unwrap().sync_all().unwrap();
-        assert!(exclusive_bytes(&path, false).unwrap() > 0);
+        assert!(super::super::workspace::credit_bytes(root.path()).unwrap() > 0);
         std::fs::hard_link(&path, root.path().join("shared")).unwrap();
-        assert_eq!(exclusive_bytes(&path, false).unwrap(), 0);
+        assert_eq!(
+            super::super::workspace::credit_bytes(root.path()).unwrap(),
+            0
+        );
     }
 
     #[test]

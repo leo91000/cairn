@@ -626,8 +626,20 @@ pub async fn bytes(root: &Path) -> Result<u64> {
 
 /// Descriptor-relative traversal is shared by synchronous block admission and
 /// asynchronous status sampling. It never follows workload links or opens FIFOs.
+#[derive(Clone, Copy)]
+enum Measurement {
+    Logical,
+    Allocated,
+    ExclusiveCredit,
+}
+
 pub(crate) fn measure(root: &Path, physical: bool) -> Result<u64> {
-    measure_with_seen(root, physical, None)
+    let basis = if physical {
+        Measurement::Allocated
+    } else {
+        Measurement::Logical
+    };
+    measure_with_seen(root, basis, None)
 }
 
 pub(crate) fn measure_unique(
@@ -635,19 +647,34 @@ pub(crate) fn measure_unique(
     physical: bool,
     seen: &mut std::collections::HashSet<(u64, u64)>,
 ) -> Result<u64> {
-    measure_with_seen(root, physical, Some(seen))
+    let basis = if physical {
+        Measurement::Allocated
+    } else {
+        Measurement::Logical
+    };
+    measure_with_seen(root, basis, Some(seen))
+}
+
+/// Future-space credit uses pinned ancestry, unique inodes and allocated bytes
+/// capped by logical tmp usage. Unknown paths never create a reservation credit.
+pub(super) fn credit_bytes(root: &Path) -> Result<u64> {
+    let mut seen = std::collections::HashSet::new();
+    measure_with_seen(root, Measurement::ExclusiveCredit, Some(&mut seen))
 }
 
 fn measure_with_seen(
     root: &Path,
-    physical: bool,
+    basis: Measurement,
     mut seen: Option<&mut std::collections::HashSet<(u64, u64)>>,
 ) -> Result<u64> {
     use std::{
         ffi::CString,
         os::{
             fd::{AsRawFd, FromRawFd},
-            unix::{ffi::OsStrExt, fs::OpenOptionsExt},
+            unix::{
+                ffi::OsStrExt,
+                fs::{MetadataExt, OpenOptionsExt},
+            },
         },
     };
     let directory = std::fs::OpenOptions::new()
@@ -687,20 +714,30 @@ fn measure_with_seen(
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
         let metadata = file.metadata()?;
         if metadata.is_dir() {
+            if matches!(basis, Measurement::ExclusiveCredit)
+                && seen
+                    .as_mut()
+                    .is_some_and(|seen| !seen.insert((metadata.dev(), metadata.ino())))
+            {
+                continue;
+            }
             let entries = std::fs::read_dir(format!("/proc/self/fd/{}", file.as_raw_fd()))?;
             stack.push((file, entries));
         } else if metadata.is_file() {
-            use std::os::unix::fs::MetadataExt;
             if seen
                 .as_mut()
                 .is_some_and(|seen| !seen.insert((metadata.dev(), metadata.ino())))
             {
                 continue;
             }
-            let size = if physical {
-                metadata.blocks().saturating_mul(512)
-            } else {
-                metadata.len()
+            let allocated = metadata.blocks().saturating_mul(512);
+            let size = match basis {
+                Measurement::Logical => metadata.len(),
+                Measurement::Allocated => allocated,
+                Measurement::ExclusiveCredit if metadata.nlink() == 1 => {
+                    metadata.len().min(allocated)
+                }
+                Measurement::ExclusiveCredit => 0,
             };
             total = total.saturating_add(size);
         }
@@ -1164,6 +1201,52 @@ mod tests {
         );
         assert!(!root.join("restore.pending.json").exists());
         assert!(!root.join("restore-test").exists());
+    }
+
+    #[test]
+    fn temporary_credit_counts_a_concurrently_renamed_inode_at_most_once() {
+        use std::{
+            os::unix::fs::MetadataExt,
+            sync::{
+                Arc, Barrier,
+                atomic::{AtomicBool, Ordering},
+            },
+        };
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let (first, last) = (root.path().join("first"), root.path().join("last"));
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&last).unwrap();
+        let original = first.join("payload");
+        std::fs::write(&original, vec![1; 4 * 1024 * 1024]).unwrap();
+        std::fs::File::open(&original).unwrap().sync_all().unwrap();
+        let metadata = std::fs::metadata(&original).unwrap();
+        let backing = metadata.len().min(metadata.blocks() * 512);
+        std::fs::write(outside.path().join("unrelated"), vec![1; 8 * 1024 * 1024]).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("escape")).unwrap();
+        let running = Arc::new(AtomicBool::new(true));
+        let barrier = Arc::new(Barrier::new(2));
+        let thread = std::thread::spawn({
+            let (running, barrier) = (running.clone(), barrier.clone());
+            move || {
+                barrier.wait();
+                while running.load(Ordering::Relaxed) {
+                    std::fs::rename(first.join("payload"), last.join("payload")).unwrap();
+                    std::fs::rename(last.join("payload"), first.join("payload")).unwrap();
+                }
+            }
+        });
+        barrier.wait();
+        let mut maximum = 0;
+        for _ in 0..512 {
+            maximum = maximum.max(credit_bytes(root.path()).unwrap_or(u64::MAX));
+        }
+        running.store(false, Ordering::Relaxed);
+        thread.join().unwrap();
+        assert!(
+            maximum <= backing,
+            "credited {maximum} bytes for {backing} allocated bytes"
+        );
     }
 
     #[tokio::test]

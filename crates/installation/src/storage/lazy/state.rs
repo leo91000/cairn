@@ -54,7 +54,7 @@ impl LazyDisk {
         }
         // Withhold uncertain credit rather than delaying a lease heartbeat.
         let manifest = stored_manifest(directory, std::time::Duration::ZERO)?;
-        let referenced = manifest["blocks"]
+        let mut referenced = manifest["blocks"]
             .as_array()
             .unwrap()
             .iter()
@@ -68,14 +68,14 @@ impl LazyDisk {
         for entry in std::fs::read_dir(cache)? {
             let entry = entry?;
             let name = entry.file_name();
-            let Some(size) = name.to_str().and_then(|name| referenced.get(name)) else {
+            let Some(size) = name.to_str().and_then(|name| referenced.remove(name)) else {
                 continue;
             };
             let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else {
                 continue;
             };
-            if metadata.is_file() && metadata.nlink() == 1 && metadata.len() == *size {
-                bytes = bytes.saturating_add(metadata.blocks().saturating_mul(512).min(*size));
+            if metadata.is_file() && metadata.nlink() == 1 && metadata.len() == size {
+                bytes = bytes.saturating_add(metadata.blocks().saturating_mul(512).min(size));
             }
         }
         Ok(bytes)

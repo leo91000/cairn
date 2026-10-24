@@ -157,7 +157,7 @@ impl Capacity {
                 // current backing, even below the logical consumption cap.
                 let owned = local
                     .min(attempt.workspace_bytes)
-                    .saturating_add(super::disk::exclusive_bytes(&temporary, false)?);
+                    .saturating_add(super::workspace::credit_bytes(&temporary).unwrap_or(0));
                 owned_bytes.insert(id.clone(), owned);
                 if attempt.requested {
                     requests.push(GrowthRequest {
@@ -255,7 +255,7 @@ fn retained_credits(state: &Path, active: &HashSet<String>) -> Result<HashMap<St
         let owned = crate::storage::LazyDisk::cached_backing_bytes(&directory)
             .unwrap_or(0)
             .min(workspace)
-            .saturating_add(super::disk::exclusive_bytes(&root.join("tmp"), false)?);
+            .saturating_add(super::workspace::credit_bytes(&root.join("tmp")).unwrap_or(0));
         credits.insert(run, owned);
     }
     Ok(credits)
@@ -341,7 +341,7 @@ mod tests {
             disk.write_at(0, &vec![byte; MIB as usize]).unwrap();
         }
         disk.sync().unwrap();
-        assert!(super::super::disk::exclusive_bytes(&directory, true).unwrap() > 8 * MIB);
+        assert!(disk.accounting().unwrap()["journalBytes"].as_u64().unwrap() > 8 * MIB);
         let temporary = super::super::workspace::directory(state.path(), &run)
             .unwrap()
             .join("tmp");
