@@ -214,12 +214,12 @@ timeouts and assertions. It passed 19 cases and still failed three; 53 cases
 were skipped (one selected parameterized name also matches its second variant).
 The remaining failures are:
 
-* `scripts/tests/codex-accounts.test.ts`: “waits on exhaustion when all accounts
+* Historical Node `codex-accounts` suite (since removed): “waits on exhaustion when all accounts
   are unavailable and remains cancellable” (`toMatch` receives a non-string
   while polling).
-* `scripts/tests/restart.test.ts`: “recovers after a real manager process receives
+* Historical Node `restart` suite (since removed): “recovers after a real manager process receives
   SIGTERM” (the expected `preserved before restart` file content stays empty).
-* `scripts/tests/restart.test.ts`: “preserves an incomplete workspace preparation
+* Historical Node `restart` suite (since removed): “preserves an incomplete workspace preparation
   and uses a new generation” (the run remains `running` instead of `succeeded`).
 
 These tests and their TypeScript legacy fixture inputs are unchanged by this
