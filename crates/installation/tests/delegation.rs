@@ -811,3 +811,70 @@ async fn older_profile_updates_keep_delegation() {
         .unwrap();
     assert_eq!(saved["access"]["delegation"], true);
 }
+
+#[tokio::test]
+async fn deleting_a_task_redacts_recorded_group_progress_and_final_results() {
+    for finalized in [false, true] {
+        let f = Fixture::new(true).await;
+        let parent = f.conversation(MAIN_AGENT_ID).await;
+        let first = f
+            .delegate(&parent, json!({ "task": "Review backend" }))
+            .await
+            .unwrap();
+        let second = f
+            .delegate(&parent, json!({ "task": "Review UI" }))
+            .await
+            .unwrap();
+        let first_chat = text(&first, "chatId");
+        let second_chat = text(&second, "chatId");
+        wait_for::schedule(
+            &f.s,
+            &parent.token,
+            &json!({
+                "conditions": [
+                    { "type": "task_finished", "chatId": first_chat },
+                    { "type": "task_finished", "chatId": second_chat },
+                ],
+                "mode": "all", "reason": "Collect reviews", "timeoutSeconds": 3600,
+            }),
+        )
+        .await
+        .unwrap();
+        f.finish(&parent).await;
+        let first_turn = f.running(first_chat).await;
+        let second_turn = f.running(second_chat).await;
+        let diagnostic = "Private diagnostic from a deleted task";
+        f.s.store
+            .patch_run(
+                &first_turn.run,
+                json!({ "status": "failed", "error": diagnostic }),
+            )
+            .await
+            .unwrap();
+        wait_for::tick_groups(&f.s, &HashSet::new()).await.unwrap();
+        let partial = f.s.chat_detail(&parent.chat).await.unwrap();
+        assert_eq!(
+            partial["wakeup"]["members"][0]["observation"]["error"],
+            diagnostic
+        );
+        if finalized {
+            f.finish(&second_turn).await;
+            wait_for::tick_groups(&f.s, &HashSet::new()).await.unwrap();
+            assert_eq!(
+                f.s.chat_detail(&parent.chat).await.unwrap()["wakeup"]["observation"]["state"],
+                "completed"
+            );
+        }
+        f.s.chat_trash(first_chat, true).await.unwrap();
+        if !finalized {
+            f.finish(&second_turn).await;
+        }
+        f.s.chat_tick(&HashSet::new()).await.unwrap();
+        let resumed = f.s.chat_detail(&parent.chat).await.unwrap();
+        assert_eq!(resumed["run"]["status"], "queued");
+        let prompt = text(&resumed["run"]["chatExecution"], "text");
+        assert!(prompt.contains(r#""status":"deleted""#));
+        assert!(prompt.contains(r#""error":null"#));
+        assert!(!prompt.contains(diagnostic));
+    }
+}

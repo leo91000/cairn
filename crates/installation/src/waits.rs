@@ -697,20 +697,32 @@ pub(crate) fn member_results(db: &Db<'_>, run: &Value, wakeup: &Value) -> Vec<Op
         .into_iter()
         .enumerate()
         .map(|(index, condition)| {
+            let final_snapshot = wakeup["observation"].is_object();
+            let recorded = if final_snapshot {
+                &wakeup["observation"]["members"][index]["result"]
+            } else {
+                &wakeup["members"][index]["observation"]
+            };
+            // An unused member of a resolved any group stays unused, even if access
+            // changes later. There is no result to disclose or replace in that slot.
+            if final_snapshot && !recorded.is_object() {
+                return None;
+            }
             let unavailable =
                 |error: Error| json!({ "state": "unavailable", "message": error.message });
             if let Err(error) = access(db, run, condition) {
                 return Some(unavailable(error));
             }
-            // Once the group has resolved, preserve its snapshot (including nulls for
-            // any's remaining members), while still rechecking each member's access.
-            if wakeup["observation"].is_object() {
-                return wakeup["observation"]["members"][index]["result"]
-                    .as_object()
-                    .map(|_| wakeup["observation"]["members"][index]["result"].clone());
-            }
-            let recorded = &wakeup["members"][index]["observation"];
             if recorded.is_object() {
+                // Deleting a delegated conversation withdraws access to its contents,
+                // including errors retained by an earlier group progress/result snapshot.
+                if condition["type"] == "task_finished" {
+                    match native_result(db, condition) {
+                        Ok(Some(result)) if result["status"] == "deleted" => return Some(result),
+                        Err(error) => return Some(unavailable(error)),
+                        _ => {}
+                    }
+                }
                 return Some(recorded.clone());
             }
             if !native(condition) {

@@ -170,7 +170,7 @@ Host: shared native Linux 7.2.9-arch1-1 x86_64, Intel Core i9-14900K, 32 logical
 CPUs and about 94 GiB RAM; temporary SQLite databases under `/tmp` on ext4. Rust
 1.97.1, dev/test profile with debug info enabled and incremental compilation
 disabled. Compilation and this task's other tests finished before timing; other
-host workloads were not controlled (starting load averages 14.70 / 20.17 / 20.60).
+host workloads were not controlled (starting load averages 10.91 / 12.05 / 16.07).
 Fresh pools reset SQLite connection/statement/page caches; OS caches stay warm.
 Process CPU uses `CLOCK_PROCESS_CPUTIME_ID` across all manager threads. The native
 run workloads make no external queries or child processes during timing.
@@ -178,18 +178,18 @@ run workloads make no external queries or child processes during timing.
 | Metric | Single run reference | `all`, 2 runs | `all`, 8 runs |
 | --- | ---: | ---: | ---: |
 | Pending wakeup JSON bytes | 276 | 410 | 854 |
-| Pending conversation JSON bytes | 797 | 927 | 1,374 |
+| Pending conversation JSON bytes | 795 | 930 | 1,373 |
 | Wakeup bytes after first progress tick | 276 | 600 | 1,044 |
 | Wakeup bytes after final progress tick | 277 | 1,409 | 4,619 |
-| Registration/write median / p95, ms | 6.320 / 10.048 | 6.402 / 9.282 | 9.999 / 13.574 |
-| Process CPU for 100 registrations, ms | 322.848 | 308.050 | 662.472 |
-| Warm read median / p95, ms | 0.061 / 0.086 | 0.064 / 0.078 | 0.041 / 0.063 |
-| First read, fresh pool median / p95, ms | 0.580 / 0.649 | 0.511 / 0.597 | 0.508 / 0.623 |
-| Fresh pool open median, ms | 4.750 | 4.480 | 4.201 |
-| Idle group scan median / p95, ms | 0.114 / 0.249 | 0.513 / 0.855 | 1.603 / 2.441 |
-| Process CPU for 100 idle scans, ms | 15.074 | 56.930 | 171.629 |
-| Progress group tick median / p95, ms | 0.286 / 0.308 | 5.033 / 9.016 | 6.729 / 10.195 |
-| Process CPU per progress tick, ms | 0.294 | 1.692 | 3.336 |
+| Registration/write median / p95, ms | 5.913 / 6.980 | 6.568 / 7.780 | 12.173 / 16.491 |
+| Process CPU for 100 registrations, ms | 289.417 | 332.688 | 852.993 |
+| Warm read median / p95, ms | 0.048 / 0.067 | 0.065 / 0.080 | 0.085 / 0.114 |
+| First read, fresh pool median / p95, ms | 0.546 / 0.589 | 0.515 / 0.584 | 0.631 / 0.690 |
+| Fresh pool open median, ms | 4.482 | 4.517 | 168.489 |
+| Idle group scan median / p95, ms | 0.189 / 0.271 | 0.583 / 0.884 | 1.679 / 2.744 |
+| Process CPU for 100 idle scans, ms | 19.585 | 66.785 | 194.471 |
+| Progress group tick median / p95, ms | 0.264 / 0.329 | 5.074 / 6.646 | 7.381 / 87.214 |
+| Process CPU per progress tick, ms | 0.279 | 1.668 | 3.616 |
 
 The reference progress tick only scans: single conditions keep their previous
 storage contract, so this new observer does not write their results. Its actual
@@ -198,6 +198,11 @@ byte because the measured reason has a longer sequence number. Group sizes after
 completion include the per-member results and the complete group observation;
 the 8-run wakeup remains below 5 KiB in this workload. Conversation sizes also
 include variable-length generated slugs.
+
+The 8-run phase has much larger pool-open and progress-tail latency. This single
+shared-host sequence does not isolate workload costs from host contention; the
+observed samples are retained, and no controlled performance conclusion follows
+from that spike.
 
 These are local metadata costs against an in-build single-condition reference,
 not a comparison with the different hosts used in the earlier sections. They do

@@ -531,3 +531,24 @@ async fn measure_group_metadata() {
         );
     }
 }
+
+#[tokio::test]
+async fn an_unused_any_member_stays_null_when_its_grant_is_revoked_after_resolution() {
+    let f = Fixture::new().await;
+    let target = f.target().await;
+    f.group("any", vec![f.github_condition(), run_condition(&target)])
+        .await
+        .unwrap();
+    f.finish().await;
+    f.set_status(&target, "succeeded").await;
+    f.record_groups().await;
+    assert!(f.wakeup().await["observation"]["members"][0]["result"].is_null());
+    connections::set_enabled(&f.s, "github", &f.instance, &json!({ "enabled": false }))
+        .await
+        .unwrap();
+    let resumed = f.tick().await;
+    let prompt = text(&resumed["run"]["chatExecution"], "text");
+    assert!(prompt.contains(r#""result":null"#));
+    assert!(prompt.contains(r#""status":"succeeded""#));
+    assert!(!prompt.contains("unavailable"));
+}
