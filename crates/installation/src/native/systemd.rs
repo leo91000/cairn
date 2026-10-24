@@ -383,6 +383,11 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
     property(format!("Slice={}", workload_slice()?));
     if !administrator {
         property(format!("RootDirectory={}", path_property(launch.root)?));
+    } else {
+        // The entrypoint exists only after BindReadOnlyPaths is applied. Tell
+        // systemd-run to leave executable resolution to the service manager,
+        // as it already does for protected units with RootDirectory.
+        property("ExecSearchPath=/run/cairn-entrypoint".into());
     }
     property(format!(
         "WorkingDirectory={}",
