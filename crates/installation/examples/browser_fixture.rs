@@ -3,7 +3,7 @@ use cairn_installation::{
     config::Config,
     error::{Error, Result},
     service::Service,
-    store::Store,
+    store::{Db, Store},
     validation::text,
     vault::Vault,
 };
@@ -12,6 +12,10 @@ use std::io::Read;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(std::io::stderr)
+        .init();
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     let request: Value = serde_json::from_str(&input)?;
@@ -25,7 +29,7 @@ async fn main() -> Result<()> {
     let string = |index: usize| args.get(index).and_then(Value::as_str).unwrap_or("");
     let result = match operation {
         "agent" | "project" | "task" | "enqueue" | "skill" | "detail" => {
-            let service = Service::new(config).await?;
+            let service = open_service(config).await?;
             let existing = args.get(1).and_then(Value::as_str);
             match operation {
                 "agent" => service.agent(arg(0), existing).await?,
@@ -37,63 +41,97 @@ async fn main() -> Result<()> {
             }
         }
         "vault" => {
-            let store = Store::open(&config.data_dir)?;
+            let store = open_store(&config.data_dir).await?;
             Vault::new(store, &config.data_dir)?
                 .set(string(0), &arg(1))
                 .await?;
             Value::Null
         }
         _ => {
-            let store = Store::open(&config.data_dir)?;
-            let operation = operation.to_owned();
-            store
-                .transaction(move |db| {
-                    let string =
-                        |index: usize| args.get(index).and_then(Value::as_str).unwrap_or("");
-                    let arg = |index: usize| args.get(index).cloned().unwrap_or(Value::Null);
-                    Ok(match operation.as_str() {
-                        "get" => db.get(string(0), string(1))?.unwrap_or(Value::Null),
-                        "list" => db.list(string(0))?.into(),
-                        "put" => db.put(string(0), &arg(1))?,
-                        "run" => db.run(string(0))?.unwrap_or(Value::Null),
-                        "runs" => db.runs(None, None, 10000, 0, true)?.into(),
-                        "addRun" => db.add_run(&arg(0), None)?,
-                        "updateRun" => db.patch_run(string(0), &arg(1))?,
-                        "events" => db
-                            .events(
-                                string(0),
-                                arg(1).as_i64().unwrap_or(0),
-                                arg(2).as_i64().unwrap_or(10000),
-                            )?
-                            .into(),
-                        "chatMessages" => db.messages(string(0))?.into(),
-                        "event" => {
-                            db.event(
-                                string(0),
-                                string(1),
-                                string(2),
-                                args.get(3).filter(|v| !v.is_null()),
-                            )?;
-                            Value::Null
-                        }
-                        "set" => {
-                            db.set(string(0), &arg(1), arg(2).as_i64())?;
-                            Value::Null
-                        }
-                        "delete" => {
-                            db.delete(string(0))?;
-                            Value::Null
-                        }
-                        "clearEvents" => {
-                            db.0.execute("DELETE FROM events WHERE run_id=?", [string(0)])?;
-                            Value::Null
-                        }
-                        _ => return Err(Error::bad("Unknown browser fixture operation")),
-                    })
-                })
-                .await?
+            // The server owns schema initialization. Opening the native Store here
+            // would rerun migrations while its worker writes to the same database.
+            let mut connection = rusqlite::Connection::open_with_flags(
+                config.data_dir.join("manager.db"),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+            )?;
+            connection.busy_timeout(std::time::Duration::from_secs(5))?;
+            connection.execute_batch("PRAGMA foreign_keys=ON;")?;
+            let transaction =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let db = Db(&transaction);
+            let string = |index: usize| args.get(index).and_then(Value::as_str).unwrap_or("");
+            let arg = |index: usize| args.get(index).cloned().unwrap_or(Value::Null);
+            let result = match operation {
+                "get" => db.get(string(0), string(1))?.unwrap_or(Value::Null),
+                "list" => db.list(string(0))?.into(),
+                "put" => db.put(string(0), &arg(1))?,
+                "run" => db.run(string(0))?.unwrap_or(Value::Null),
+                "runs" => db.runs(None, None, 10000, 0, true)?.into(),
+                "addRun" => db.add_run(&arg(0), None)?,
+                "updateRun" => db.patch_run(string(0), &arg(1))?,
+                "events" => db
+                    .events(
+                        string(0),
+                        arg(1).as_i64().unwrap_or(0),
+                        arg(2).as_i64().unwrap_or(10000),
+                    )?
+                    .into(),
+                "chatMessages" => db.messages(string(0))?.into(),
+                "event" => {
+                    db.event(
+                        string(0),
+                        string(1),
+                        string(2),
+                        args.get(3).filter(|v| !v.is_null()),
+                    )?;
+                    Value::Null
+                }
+                "set" => {
+                    db.set(string(0), &arg(1), arg(2).as_i64())?;
+                    Value::Null
+                }
+                "delete" => {
+                    db.delete(string(0))?;
+                    Value::Null
+                }
+                "clearEvents" => {
+                    db.0.execute("DELETE FROM events WHERE run_id=?", [string(0)])?;
+                    Value::Null
+                }
+                _ => return Err(Error::bad("Unknown browser fixture operation")),
+            };
+            transaction.commit()?;
+            result
         }
     };
     println!("{}", json!({ "result": result }));
     Ok(())
+}
+
+// Startup's schema transaction can lose its WAL read snapshot to the real worker.
+// Retry only initialization, never an action that could already have committed.
+async fn open_service(config: Config) -> Result<std::sync::Arc<Service>> {
+    for attempt in 0..20 {
+        match Service::new(config.clone()).await {
+            Ok(service) => return Ok(service),
+            Err(error) if error.status == 500 && attempt < 19 => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
+}
+
+async fn open_store(directory: &std::path::Path) -> Result<Store> {
+    for attempt in 0..20 {
+        match Store::open(directory) {
+            Ok(store) => return Ok(store),
+            Err(error) if error.status == 500 && attempt < 19 => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
 }
