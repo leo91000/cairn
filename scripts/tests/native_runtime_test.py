@@ -664,7 +664,7 @@ def main():
                 point = manager('publish', run=vm_run)
                 encoded = [obj for page in s3.get_paginator('list_objects_v2').paginate(Bucket='cairn-node-test') for obj in page.get('Contents', []) if obj['Key'] not in before_objects]
                 status = api('/disks/' + vm_run + '/storage-status')
-                receipt = dict(backupId=point['backupId'], generation=point['generation'], grantId=status['grantId'])
+                receipt = dict(attempt=first, backupId=point['backupId'], generation=point['generation'], grantId=status['grantId'])
                 assert api('/disks/' + vm_run + '/evict', receipt)['evictedBytes'] > 0
                 command('systemctl', 'stop', supervisor)
                 start_controller()
