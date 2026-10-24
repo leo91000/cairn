@@ -298,7 +298,11 @@ where
                     let _ = to_remote.shutdown().await;
                 }
                 Ok(read) => {
-                    if to_remote.write_all(&local_buffer[..read]).await.is_err() {
+                    // TLS holds records back until flushed: the end of a
+                    // body would otherwise wait for a write that never comes.
+                    if to_remote.write_all(&local_buffer[..read]).await.is_err()
+                        || to_remote.flush().await.is_err()
+                    {
                         break;
                     }
                     active = tokio::time::Instant::now();
@@ -308,7 +312,9 @@ where
             read = from_remote.read(&mut remote_buffer) => match read {
                 Ok(0) | Err(_) => break,
                 Ok(read) => {
-                    if to_local.write_all(&remote_buffer[..read]).await.is_err() {
+                    if to_local.write_all(&remote_buffer[..read]).await.is_err()
+                        || to_local.flush().await.is_err()
+                    {
                         break;
                     }
                     active = tokio::time::Instant::now();
@@ -354,6 +360,8 @@ mod tests {
     ) {
         let (client, local) = tokio::io::duplex(1024);
         let (manager, remote) = tokio::io::duplex(1024);
+        // Like TLS, the remote side holds bytes back until it is flushed.
+        let remote = tokio::io::BufWriter::new(remote);
         let task = tokio::spawn(relayed(local, remote, available.subscribe()));
         (client, manager, task)
     }
@@ -364,7 +372,11 @@ mod tests {
         let (mut client, mut manager, task) = relay_pair(&available);
         let mut buffer = [0; 16];
         client.write_all(b"request").await.unwrap();
-        manager.read_exact(&mut buffer[..7]).await.unwrap();
+        // Bounded: a request held back unflushed fails here.
+        tokio::time::timeout(IDLE, manager.read_exact(&mut buffer[..7]))
+            .await
+            .expect("the request reaches the manager")
+            .unwrap();
         manager.write_all(b"answer").await.unwrap();
         client.read_exact(&mut buffer[..6]).await.unwrap();
         // Without a direct connection, an idle connection stays.
