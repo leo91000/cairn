@@ -249,8 +249,8 @@ async fn default_model_labels_survive_missing_metadata_without_pinning() {
 }
 
 /// Optional native qualification: the real Claude Code release answers the control
-/// protocol Cairn's model discovery and usage use, with synthetic credentials and no
-/// inference.
+/// protocol Cairn's model discovery and usage use, and the authentication status
+/// account refresh reads, with synthetic credentials and no inference.
 /// Run with CLAUDE_NATIVE_BIN set via the credential-isolated backend launcher.
 #[tokio::test]
 #[ignore = "requires a native Claude Code binary"]
@@ -296,6 +296,11 @@ async fn native_cli_lists_its_model_catalog_without_inference() {
         usage.get("rate_limits_available").is_some() && usage.get("rate_limits").is_some(),
         "{usage}"
     );
+    // Account refresh reads `claude auth status` JSON, then usage. A changed status
+    // format would mark the account as failed.
+    s.accounts.refresh(&s, &id).await.unwrap();
+    let account = view(&s, &id).await;
+    assert_eq!(account["state"], "ready", "{account}");
 }
 
 #[tokio::test]
@@ -440,17 +445,46 @@ async fn native_cli_executes_and_resumes_a_session_against_a_local_model() {
             post(move |body: Bytes| async move {
                 let request: Value = serde_json::from_slice(&body).unwrap();
                 recorded.lock().unwrap().push(request.clone());
-                let event = |name: &str, data: Value| format!("event: {name}\ndata: {data}\n\n");
-                let message = json!({ "id": "msg_local", "type": "message", "role": "assistant", "model": request["model"], "content": [], "stop_reason": null, "usage": { "input_tokens": 10, "output_tokens": 0 } });
+                // A streamed Messages API reply, as Server-Sent Events named by their type.
                 let body = [
-                    event("message_start", json!({ "type": "message_start", "message": message })),
-                    event("content_block_start", json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text", "text": "" } })),
-                    event("content_block_delta", json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": REPLY } })),
-                    event("content_block_stop", json!({ "type": "content_block_stop", "index": 0 })),
-                    event("message_delta", json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" }, "usage": { "output_tokens": 8 } })),
-                    event("message_stop", json!({ "type": "message_stop" })),
+                    json!({
+                        "type": "message_start",
+                        "message": {
+                            "id": "msg_local",
+                            "type": "message",
+                            "role": "assistant",
+                            "model": request["model"],
+                            "content": [],
+                            "stop_reason": null,
+                            "usage": { "input_tokens": 10, "output_tokens": 0 },
+                        },
+                    }),
+                    json!({
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": { "type": "text", "text": "" },
+                    }),
+                    json!({
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": { "type": "text_delta", "text": REPLY },
+                    }),
+                    json!({ "type": "content_block_stop", "index": 0 }),
+                    json!({
+                        "type": "message_delta",
+                        "delta": { "stop_reason": "end_turn" },
+                        "usage": { "output_tokens": 8 },
+                    }),
+                    json!({ "type": "message_stop" }),
                 ]
-                .concat();
+                .iter()
+                .map(|event| {
+                    format!(
+                        "event: {}\ndata: {event}\n\n",
+                        event["type"].as_str().unwrap()
+                    )
+                })
+                .collect::<String>();
                 ([("content-type", "text/event-stream")], body)
             }),
         )

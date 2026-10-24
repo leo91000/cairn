@@ -21,6 +21,8 @@ const config = {
     claude: '2.1.308',
     opencode: '1.19.4',
   },
+  // The engine releases production serves, which rollbacks were qualified against.
+  served: { claude: '2.1.280', opencode: '1.19.0' },
 }
 const beaconDigest = `sha256:${'c'.repeat(64)}`
 const digest = `sha256:${'b'.repeat(64)}`
@@ -54,7 +56,7 @@ function evidenceFor(run, commit, changes = {}) {
     digest,
     runId: run.id,
     tools: config.tools,
-    served: { claude: '2.1.280', opencode: '1.19.0' },
+    served: config.served,
     ...changes,
   }
 }
@@ -173,13 +175,19 @@ describe('release validation reuse', () => {
     }
   })
 
-  it('never reuses a validation that could not qualify a rollback to the served release', async () => {
-    for (const served of [null, undefined]) {
-      expect(await resolveRelease(config, {
-        gh: github({ runs: () => [mainRun], evidence: { [mainRun.id]: evidenceFor(mainRun, config.commit, { served }) } }),
-        wait: false,
-      })).toBeNull()
-    }
+  it('reuses only validations whose rollbacks were qualified against the release served now', async () => {
+    const reuse = (current, recorded) => resolveRelease({ ...config, served: current }, {
+      gh: github({ runs: () => [mainRun], evidence: { [mainRun.id]: evidenceFor(mainRun, config.commit, { served: recorded }) } }),
+      wait: false,
+    })
+    // Validation could not find the served release, so it skipped rollback checks.
+    for (const recorded of [null, undefined])
+      expect(await reuse(config.served, recorded)).toBeNull()
+    // Production deployed another release since validation.
+    expect(await reuse({ ...config.served, claude: '2.1.308' }, config.served)).toBeNull()
+    // The served release is unknown now.
+    expect(await reuse(null, config.served)).toBeNull()
+    expect(await reuse(config.served, config.served)).toMatchObject({ runId: mainRun.id })
   })
 
   it('rejects evidence that contradicts its artifact', async () => {

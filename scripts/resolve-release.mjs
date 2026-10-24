@@ -67,9 +67,10 @@ async function validatedImage(config, gh) {
       // Every resolved tool must match exactly. Older evidence that omits a tool
       // (such as Claude Code or OpenCode) is skipped, so the release rebuilds.
       const currentTools = !config.tools || Object.entries(config.tools).every(([tool, version]) => evidence.tools?.[tool] === version)
-      // A validation that could not find the served release skipped its rollback
-      // checks, so it never vouches for a release.
-      const servedQualified = typeof evidence.served === 'object' && evidence.served !== null
+      // Rollbacks were qualified against the release production served then. It must
+      // still be the one served now; a validation that could not find it never vouches.
+      const servedQualified = !config.tools || (!!config.served && !!evidence.served
+        && Object.entries(config.served).every(([tool, version]) => evidence.served[tool] === version))
       if (currentTools && servedQualified)
         return { ...image, runId: run.id }
     }
@@ -134,6 +135,7 @@ if (import.meta.main) {
     commit: process.env.GITHUB_SHA,
     tree: process.env.GIT_TREE,
     tools,
+    served: process.env.SERVED_FOUND === 'true' ? { claude: process.env.SERVED_CLAUDE, opencode: process.env.SERVED_OPENCODE } : null,
   }
   let result = null
   // Pull requests always validate. Main reuses an identical pull request tree;

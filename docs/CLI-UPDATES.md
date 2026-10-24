@@ -69,8 +69,10 @@ adapters, without credentials or inference against a vendor:
   on the resolved one.
 - Claude Code answers the `initialize` and `get_usage` control requests that model
   discovery and account usage use, with synthetic credentials, and lists a catalog
-  with its `default` alias. It executes a turn through the adapter against a local
-  Messages API with a synthetic API key, and its session resumes with its history.
+  with its `default` alias. An account refresh reads its `auth status` JSON. It
+  executes a turn through the adapter against a local Messages API with a
+  synthetic API key, and its session resumes with its history. Sessions created by
+  its `legacy` release resume on the resolved one.
 - For both engines, sessions move both ways between the resolved release and the
   release production serves, as after an update or a rollback.
 
@@ -85,8 +87,8 @@ the rollback checks are skipped with a warning, and the evidence records
 again. The served release runs through the candidate's adapter, while a real
 rollback runs its own image's adapter. When an adapter change needs a newer
 engine release, set that engine's `minimum`: an older served release is then
-skipped, with a warning. A served release that changes after validation is not
-checked again when main or a tag reuses that evidence.
+skipped, with a warning. Main and tags reuse evidence only when its served
+versions still match the release production serves.
 
 Validation evidence (`image.json`, schema 3) records all four versions under
 `tools`, and the served versions the rollback checks used under `served`. An image
@@ -106,8 +108,9 @@ checks above. A release that fails them blocks validation. There is no hold or
 override setting: the remedy is a reviewed change that adapts the adapter or makes
 `scripts/cli-updates.mjs` select a working release for that engine. Claude Code
 behavior those checks cannot reach without a subscription relies on Anthropic's
-stable channel between qualifications: quota values from `get_usage`, the OAuth
-client and token endpoint, and subscription inference. A change in an adapter
+stable channel between qualifications: the `auth login --claudeai` flow, quota
+values from `get_usage`, the OAuth client and token endpoint, and subscription
+inference. A change in an adapter
 that depends on engine behavior, or a reported engine regression, needs the
 following checks before merge:
 
@@ -120,7 +123,8 @@ following checks before merge:
   `initialize` response with the current release's: the model catalog fields and
   aliases, and whether stored agent models remain valid `--model` values. Check
   the OAuth client and token endpoint in `accounts/claude.rs`. With a test
-  account, check `get_usage` quota values and resuming a subscription session.
+  account, check `claude auth login --claudeai`, `get_usage` quota values and
+  resuming a subscription session.
 - All engines: keep their autoupdaters disabled at runtime. Engine session state
   in account homes is persisted installation data. The
   [installation data compatibility contract](PRODUCTION-CAIRN.md#installation-data-compatibility)

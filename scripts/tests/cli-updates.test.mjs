@@ -101,9 +101,13 @@ describe('application image tool versions', () => {
     // production was unknown, which prevents its reuse.
     const record = jobs.publish.steps.find(step => step.name === 'Record the validated image')
     expect(record.run).toContain(`served: process.env.SERVED_FOUND === 'true' ? { claude: process.env.SERVED_CLAUDE, opencode: process.env.SERVED_OPENCODE } : null`)
+    // Reuse compares recorded rollback targets with the release served now.
+    const reuse = jobs.resolve.steps.find(step => step.id === 'resolve')
+    expect(jobs.resolve.steps.indexOf(served)).toBeLessThan(jobs.resolve.steps.indexOf(reuse))
     for (const output of ['found', 'claude', 'opencode']) {
       expect(jobs.resolve.outputs[`served-${output}`]).toBe(expression(`steps.served.outputs.${output}`))
       expect(record.env[`SERVED_${output.toUpperCase()}`]).toBe(expression(`needs.resolve.outputs.served-${output}`))
+      expect(reuse.env[`SERVED_${output.toUpperCase()}`]).toBe(expression(`steps.served.outputs.${output}`))
     }
 
     for (const step of ['OpenCode', 'Claude Code']) {

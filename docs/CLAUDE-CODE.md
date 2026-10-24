@@ -131,4 +131,5 @@ native tests against a local Messages API, including session resumption with the
 release production serves (see [tool versions](CLI-UPDATES.md)). Model-scoped
 quota windows, such as "Weekly · Opus", cover the models of the current catalog.
 An agent saved with an alias the catalog no longer lists, such as `opus[1m]`,
-still runs, but only account-wide windows limit it until another model is chosen.
+still runs, but only account-wide windows limit it until another model is chosen
+([#390](https://github.com/leo91000/cairn/issues/390)).

@@ -51,6 +51,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/cli-updates.mjs build-versions
+      - name: Find the agent tools of the served release
+        id: served
+        env:
+          CAIRN_BEACON_ORIGIN: ${{ vars.CAIRN_BEACON_ORIGIN }}
+        run: node scripts/served-tools.mjs
       - id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
@@ -58,12 +63,10 @@ jobs:
           GH_VERSION: ${{ steps.tools.outputs.gh }}
           CLAUDE_VERSION: ${{ steps.tools.outputs.claude }}
           OPENCODE_VERSION: ${{ steps.tools.outputs.opencode }}
+          SERVED_FOUND: ${{ steps.served.outputs.found }}
+          SERVED_CLAUDE: ${{ steps.served.outputs.claude }}
+          SERVED_OPENCODE: ${{ steps.served.outputs.opencode }}
         run: GIT_TREE="$(git rev-parse 'HEAD^{tree}')" node scripts/resolve-release.mjs
-      - name: Find the agent tools of the served release
-        id: served
-        env:
-          CAIRN_BEACON_ORIGIN: ${{ vars.CAIRN_BEACON_ORIGIN }}
-        run: node scripts/served-tools.mjs
   build:
     # Browser tests need only these binaries and the frontend, not the whole quality job.
     needs: resolve
@@ -222,9 +225,11 @@ jobs:
           CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
           SERVED_CLAUDE: ${{ needs.resolve.outputs.served-claude }}
         run: |
-          # The resolved release answers model discovery and usage, runs a turn against a
-          # local Messages API and resumes it. Sessions also move both ways with the served
-          # release, as after an update or a rollback.
+          # The resolved release answers model discovery, usage and authentication status,
+          # runs a turn against a local Messages API and resumes it. Sessions created by the
+          # legacy release resume on it, and sessions move both ways with the served release,
+          # as after an update or a rollback.
+          legacy=$(node --input-type=module -e "import { engines } from './scripts/cli-updates.mjs'; console.log(engines.claude.legacy)")
           served=$(node scripts/served-tools.mjs rollback-target claude "$SERVED_CLAUDE" "$CLAUDE_VERSION")
           # Command substitutions do not inherit errexit, so installation failures return explicitly.
           install() {
@@ -241,6 +246,10 @@ jobs:
           resolved=$(install "$CLAUDE_VERSION")
           CLAUDE_NATIVE_BIN="$resolved" native native_cli_lists_its_model_catalog_without_inference
           qualify "$resolved" "$resolved"
+          if test "$legacy" != "$CLAUDE_VERSION" && test "$legacy" != "$served"; then
+            oldest=$(install "$legacy")
+            qualify "$oldest" "$resolved"
+          fi
           if test -n "$served"; then
             served=$(install "$served")
             qualify "$served" "$resolved"
