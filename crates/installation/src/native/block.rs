@@ -403,8 +403,9 @@ impl Handle {
 
 pub struct Mounted {
     pub volume: Arc<Volume>,
-    /// Mounted filesystem roots, unmounted in reverse order.
+    /// Filesystems still mounted, removed in reverse order after each success.
     targets: Vec<PathBuf>,
+    root: PathBuf,
     jail: PathBuf,
     mounted: bool,
     completed: bool,
@@ -662,6 +663,7 @@ pub async fn mount(
         Ok(Mounted {
             volume,
             targets,
+            root,
             jail,
             mounted: true,
             completed: false,
@@ -687,16 +689,10 @@ impl Mounted {
 
     pub async fn close(&mut self) -> Result<()> {
         if self.mounted {
-            for target in self.targets.iter().rev() {
-                if !self.aborted {
-                    sync(target).await?;
-                }
-                unmount(target).await?;
-            }
+            unmount_remaining(&mut self.targets, self.aborted).await?;
             self.mounted = false;
         }
-        let root = self.targets[0].parent().unwrap();
-        if !self.completed && root.join("block-initialized").exists() {
+        if !self.completed && self.root.join("block-initialized").exists() {
             self.volume.seal_completed().await?;
             self.completed = true;
         }
@@ -719,6 +715,19 @@ impl Mounted {
         retire_attachment(&self.jail).await?;
         Ok(())
     }
+}
+
+/// Remember partial progress so a later flush/unmount failure can be retried
+/// without attempting to detach an already unmounted filesystem.
+async fn unmount_remaining(targets: &mut Vec<PathBuf>, aborted: bool) -> Result<()> {
+    while let Some(target) = targets.last() {
+        if !aborted {
+            sync(target).await?;
+        }
+        unmount(target).await?;
+        targets.pop();
+    }
+    Ok(())
 }
 
 /// Removing the private path never retires a kernel device by its numeric ID.
@@ -1308,6 +1317,49 @@ pub fn used_bytes(path: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Run inside `unshare -Urm`: a nested mount holds the system filesystem
+    /// busy after the paired workspace has already been detached.
+    #[tokio::test]
+    #[ignore = "requires a private user and mount namespace"]
+    async fn paired_unmount_retries_only_filesystems_still_attached() {
+        use std::os::unix::ffi::OsStrExt;
+
+        fn tmpfs(path: &Path) {
+            std::fs::create_dir(path).unwrap();
+            let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+            assert_eq!(
+                unsafe {
+                    libc::mount(
+                        c"tmpfs".as_ptr(),
+                        path.as_ptr(),
+                        c"tmpfs".as_ptr(),
+                        libc::MS_NODEV | libc::MS_NOSUID,
+                        std::ptr::null(),
+                    )
+                },
+                0,
+                "{}",
+                std::io::Error::last_os_error(),
+            );
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let system = root.path().join("data");
+        let workspace = root.path().join("conversation");
+        let busy = system.join("busy");
+        tmpfs(&system);
+        tmpfs(&workspace);
+        tmpfs(&busy);
+        let mut targets = vec![system.clone(), workspace];
+
+        assert!(unmount_remaining(&mut targets, false).await.is_err());
+        assert_eq!(targets, vec![system]);
+        unmount(&busy).await.unwrap();
+        unmount_remaining(&mut targets, false).await.unwrap();
+        assert!(targets.is_empty());
+        unmount_remaining(&mut targets, false).await.unwrap();
+    }
 
     #[test]
     fn host_recovery_selects_only_conversation_mounts_and_rejects_stacked_or_foreign_filesystems() {
