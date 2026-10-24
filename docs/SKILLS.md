@@ -223,7 +223,8 @@ may use the live skill folder. Reads and saves share a lock so an export or
 freeze sees one complete saved version.
 
 The prompt lists each selected skill by name, description and `SKILL.md` path.
-The agent reads `SKILL.md` and its supporting files when it uses the skill.
+The agent reads `SKILL.md` and its supporting files when it uses the skill. The list appears once
+per run, with paths inside the run; see [run instruction measurements](RUN-INSTRUCTIONS-MEASUREMENTS.md).
 
 ## Local storage measurements
 

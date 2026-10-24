@@ -517,7 +517,7 @@ pub fn chat_plan(
     let mut plan = json!({
         "provider": provider,
         "execution": run["chatExecution"],
-        "instructions": prompt(&context, true),
+        "instructions": prompt(&context, interactive(run)),
         "inputDirectory": input_directory,
         "output": prepared["output"],
         "cwd": prepared["cwd"],
@@ -531,6 +531,25 @@ pub fn chat_plan(
         plan["sessionId"] = session.into();
     }
     Ok(plan)
+}
+
+/// Only chat turns can answer questions. Scheduled work also uses the chat
+/// protocol, without a conversation to deliver them to.
+fn interactive(run: &Value) -> bool {
+    run["chatExecution"].is_object()
+}
+
+/// The first turn of scheduled work sent through the chat protocol. The
+/// instructions already carry the Cairn frame, so a fresh turn sends only the
+/// task brief; a resumed turn sends its resume prompt.
+pub fn scheduled_turn(run: &Value, resume_prompt: Option<&str>) -> Value {
+    let brief = resume_prompt.unwrap_or_else(|| text(&run["snapshot"]["task"], "prompt"));
+    json!({
+        "messageId": run["missionTurnId"].as_str().unwrap_or_else(|| text(run, "id")),
+        "text": brief,
+        "recovery": resume_prompt.is_some(),
+        "attachments": [],
+    })
 }
 
 /// One line per selected skill: name, description and `SKILL.md` path. The
@@ -565,7 +584,7 @@ pub(crate) fn native_chat_privileges(chat: &mut Value, run: &Value, mode: &Value
     context["nativeMode"] = mode.clone();
     context["snapshot"]["task"]["prompt"] = "".into();
     let notice = native_privileges(mode);
-    chat["instructions"] = format!("{notice}\n\n{}", prompt(&context, true)).into();
+    chat["instructions"] = format!("{notice}\n\n{}", prompt(&context, interactive(run))).into();
     chat["execution"]["text"] = format!("{notice}\n\n{}", text(&chat["execution"], "text")).into();
 }
 
@@ -673,6 +692,56 @@ mod tests {
             skill_index(&skills),
             "- review: Review a change.\n  /home/node/.agents/skills/0/review/SKILL.md\n- legacy: Older snapshot\n  /skills/1/legacy/SKILL.md"
         );
+    }
+
+    #[test]
+    fn chat_protocol_runs_receive_one_frame_matching_their_interaction() {
+        let guest = "/home/node/.agents/skills/0/review/SKILL.md";
+        let host = "/installation/skills/review/SKILL.md";
+        for provider in ["codex", "claude", "opencode"] {
+            let mut run = json!({
+                "id": "run", "isolated": true, "missionTurnId": "turn",
+                "pluginInstructions": "Mail: never print credentials.",
+                "snapshot": {
+                    "agent": { "provider": provider, "instructions": "Agent rules." },
+                    "task": { "prompt": "Check the deployment." },
+                    "skills": [{ "name": "review", "description": "Review a change.", "path": host }],
+                },
+            });
+            let prepared = json!({
+                "isolated": true,
+                "output": "/run/output/result.md",
+                "skills": [{ "name": "review", "description": "Review a change.", "path": guest }],
+            });
+            let plan = chat_plan(&run, &prepared, Path::new("/tmp"), &json!({}), None).unwrap();
+            let instructions = text(&plan, "instructions");
+            for expected in [
+                "Agent rules.",
+                "Mail: never print credentials.",
+                guest,
+                "This unattended task",
+            ] {
+                assert!(instructions.contains(expected), "{provider}: {expected}");
+            }
+            assert!(!instructions.contains(host));
+            assert!(!instructions.contains("This is an interactive chat"));
+
+            let turn = scheduled_turn(&run, None);
+            assert_eq!(turn["messageId"], "turn");
+            assert_eq!(turn["text"], "Check the deployment.");
+            assert_eq!(turn["recovery"], false);
+            let resumed = scheduled_turn(&run, Some("Continue."));
+            assert_eq!(resumed["text"], "Continue.");
+            assert_eq!(resumed["recovery"], true);
+
+            run["chatExecution"] = json!({ "messageId": "message", "text": "Hello" });
+            let plan = chat_plan(&run, &prepared, Path::new("/tmp"), &json!({}), None).unwrap();
+            let instructions = text(&plan, "instructions");
+            assert!(instructions.contains("This is an interactive chat"));
+            assert!(instructions.contains("Mail: never print credentials."));
+            assert!(!instructions.contains("This unattended task"));
+            assert_eq!(plan["execution"]["text"], "Hello");
+        }
     }
 
     #[test]
