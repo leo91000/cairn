@@ -59,7 +59,10 @@ return {
         if remaining then
             return { retryAfter = remaining }
         end
-        local chunks = text.chunks(event.text)
+        -- Main may retain unfinished native text after cancellation. The Slack
+        -- conversation slice confirms Stop; partial output stays in Cairn.
+        local answer = if event.status == "cancelled" then "Stopped. Write again to continue." else event.text
+        local chunks = text.chunks(answer)
         local index = if state and state.nextChunk then state.nextChunk else 1
         assert(type(index) == "number" and index == math.floor(index) and index >= 1 and index <= #chunks,
             "The Slack reply checkpoint is invalid; check the thread before retrying.")

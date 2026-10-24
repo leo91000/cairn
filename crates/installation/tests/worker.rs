@@ -280,10 +280,42 @@ async fn transient_agent_failure_resumes_same_session_and_workspace_after_restar
 }
 
 #[tokio::test]
+async fn agent_failure_without_a_message_keeps_its_code_for_the_retry() {
+    let mut fixture = Fixture::new().await;
+    let prompt = "fixture:agent-failures:[{\"codexErrorInfo\":\"serverOverloaded\"}]";
+    let chat_id = fixture.start_chat(message(prompt)).await;
+    let run_id = fixture.chat_run(&chat_id).await;
+    let waiting = fixture
+        .until(&run_id, |run| run["retry"].is_object() || finished(run))
+        .await;
+    assert_eq!(waiting["status"], RunStatus::Queued, "{waiting}");
+    assert_eq!(waiting["retry"]["cause"]["kind"], "server");
+    let id = run_id.clone();
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.events(&id, 0, 1000))
+        .await
+        .unwrap();
+    let failures = events
+        .iter()
+        .filter(|event| event["type"] == "turn.failed")
+        .map(|event| event["payload"]["error"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        failures,
+        [json!({ "codexErrorInfo": "serverOverloaded", "message": "Conversation interrupted." })]
+    );
+    fixture.stop(false).await;
+}
+
+#[tokio::test]
 async fn agent_retries_stop_after_three_attempts_or_when_the_error_becomes_terminal() {
     for terminal in [false, true] {
         let mut fixture = Fixture::new().await;
-        let transient = json!({ "code": "server_error", "message": "Temporary upstream error" });
+        // Codex's report for a model at capacity.
+        let capacity = "Selected model is at capacity. Please try a different model.";
+        let transient = json!({ "codexErrorInfo": "serverOverloaded", "message": capacity });
         let failures = if terminal {
             vec![
                 transient,
@@ -320,9 +352,27 @@ async fn agent_retries_stop_after_three_attempts_or_when_the_error_becomes_termi
         let expected = if terminal {
             "Reconnect account"
         } else {
-            "Temporary upstream error"
+            capacity
         };
         assert_eq!(failed["summary"], expected);
+        let id = run_id.clone();
+        let events = fixture
+            .service
+            .store
+            .read(move |db| db.events(&id, 0, 1000))
+            .await
+            .unwrap();
+        let failures = events
+            .iter()
+            .filter(|event| event["type"] == "turn.failed")
+            .map(|event| text(&event["payload"]["error"], "message"))
+            .collect::<Vec<_>>();
+        let mut reported = vec![capacity; attempts as usize];
+        reported.push(expected);
+        assert_eq!(
+            failures, reported,
+            "Each failed attempt reports its reason once"
+        );
         let marker: Value = serde_json::from_slice(
             &tokio::fs::read(Path::new(text(&failed, "workspace")).join("fixture-retry-work.json"))
                 .await
@@ -352,6 +402,21 @@ async fn cancellation_during_retry_wait_does_not_launch_another_agent() {
     fixture
         .until(&run_id, |run| run["status"] == RunStatus::Cancelled)
         .await;
+    // The conversation shows the stop: it ends the retry Cairn had scheduled.
+    let id = run_id.clone();
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.events(&id, 0, 1000))
+        .await
+        .unwrap();
+    let after_retry = events
+        .iter()
+        .skip_while(|event| event["type"] != "retry.scheduled")
+        .filter(|event| event["type"] == "status")
+        .map(|event| text(event, "text"))
+        .collect::<Vec<_>>();
+    assert_eq!(after_retry, ["cancelled"], "{events:?}");
     let marker: Value = serde_json::from_slice(
         &tokio::fs::read(Path::new(text(&waiting, "workspace")).join("fixture-retry-work.json"))
             .await
@@ -2463,6 +2528,34 @@ async fn unlimited_runs_can_be_cancelled_and_finite_checkpoints_still_expire() {
     fixture
         .until(id, |r| r["status"] == RunStatus::Cancelled)
         .await;
+    // The worker records the final status event right after settling the run.
+    let events = eventually(
+        Duration::from_secs(5),
+        Duration::from_millis(30),
+        async || {
+            let id = id.to_owned();
+            let events = s
+                .store
+                .read(move |db| db.events(&id, 0, 1000))
+                .await
+                .unwrap();
+            events
+                .iter()
+                .any(|event| event["type"] == "status" && event["text"] == "cancelled")
+                .then_some(events)
+        },
+    )
+    .await;
+    assert!(
+        events.iter().all(|event| event["type"] != "turn.failed"),
+        "A stop Cairn requested does not fail the turn: {events:?}"
+    );
+    // "Run cancelled" says it all: the status repeats no reason.
+    let cancelled = events
+        .iter()
+        .find(|event| event["type"] == "status" && event["text"] == "cancelled")
+        .unwrap();
+    assert!(cancelled["payload"].is_null(), "{cancelled}");
     eventually(
         Duration::from_secs(5),
         Duration::from_millis(30),

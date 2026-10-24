@@ -978,13 +978,18 @@ impl Chat<'_> {
         }
         let turn = self.completed.take().unwrap();
         if turn["status"] != "completed" {
-            let error = turn
+            // Keep the provider's error codes: they decide retries and account switches.
+            let mut error = turn
                 .get("error")
+                .filter(|error| error.is_object())
                 .cloned()
-                .unwrap_or_else(|| json!({ "message": "Conversation interrupted." }));
+                .unwrap_or_else(|| json!({}));
+            if text(&error, "message").is_empty() {
+                error["message"] = "Conversation interrupted.".into();
+            }
             self.emit(json!({ "type": "turn.failed", "error": error }))
                 .await?;
-            return Err(Error::conflict("Conversation interrupted."));
+            return Err(Error::conflict(text(&error, "message")));
         }
         self.finish(plan).await
     }

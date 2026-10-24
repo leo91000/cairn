@@ -552,6 +552,7 @@ fn node_state(directory: &Path) -> Option<&Path> {
     }
 }
 
+mod clone;
 mod generations;
 mod journal;
 mod memory;

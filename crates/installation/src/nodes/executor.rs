@@ -89,6 +89,7 @@ impl Executor {
             return Ok(());
         }
         timing.next("seed");
+        let mut pin = crate::native::bases::PendingPin::new(&data.join("runs").join(run), attempt)?;
         let plan = stage_plan(&session, &data, descriptor).await?;
         let root = data.join("runs").join(text(&plan, "runId"));
         timing.next("lease");
@@ -118,6 +119,7 @@ impl Executor {
         );
         tokio::spawn(mcp);
         tokio::spawn(refresh_inbox(session, root, stop));
+        pin.keep();
         timing.finish();
         Ok(())
     }
@@ -126,6 +128,15 @@ impl Executor {
         if let Some(stop) = self.attempts.lock().await.remove(attempt) {
             stop.cancel();
         }
+        let (data, attempt) = (super::node_data_dir(), attempt.to_owned());
+        tokio::spawn(async move {
+            if let Err(error) = crate::native::bases::release_attempt(&data, &attempt).await {
+                tracing::debug!(
+                    status = error.status,
+                    "Cancelled native preparation pin cleanup deferred"
+                );
+            }
+        });
     }
 
     pub async fn close(&self) -> Vec<String> {
@@ -235,14 +246,60 @@ async fn stage_plan(session: &Session, data: &Path, descriptor: Value) -> Result
         }
     }
     let root = data.join("runs").join(text(&plan, "runId"));
-    let seed_workspace = crate::native::enabled() || plan["resumeWorkspace"] != true;
+    let archive_health = if crate::native::enabled() && descriptor.get("projectArchives").is_some()
+    {
+        let health = super::local_client()?
+            .get("http://localhost/health")
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await;
+        match health {
+            Ok(response) if response.status().is_success() => {
+                response.json::<Value>().await.unwrap_or_default()
+            }
+            _ => Value::Null,
+        }
+    } else {
+        Value::Null
+    };
+    let archive_controller = archive_health["projectArchives"] == 1;
+    let archives: Option<Vec<crate::project_archives::Archive>> = if archive_controller {
+        descriptor
+            .get("projectArchives")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()?
+    } else {
+        None
+    };
+    let mut seed_workspace =
+        (crate::native::enabled() || plan["resumeWorkspace"] != true) && archives.is_none();
     session
         .seed(
-            json!({ "kind": "initial", "workspace": seed_workspace }),
+            json!({ "kind": "initial", "workspace": seed_workspace, "projectArchives": archives.is_some(),
+                "keepArchives": archives.as_ref().map(|archives| archives.iter().map(|archive| &archive.hash).collect::<Vec<_>>()) }),
             &root,
         )
         .await?;
     plan["workspaceSeeded"] = seed_workspace.into();
+    if let Some(archives) = archives {
+        let base_size = (archive_health["nativeProjectBases"] == 1)
+            .then(|| plan["resources"]["diskMiB"].as_u64())
+            .flatten();
+        match crate::project_archives::stage(session, &root, &archives, base_size).await {
+            Ok(base) => {
+                if let Some(key) = base {
+                    plan["nativeProjectBase"] = key.into();
+                }
+                plan["nativeProjectArchives"] = serde_json::to_value(archives)?;
+            }
+            Err(error) => {
+                fallback_seed(session, &root, error).await?;
+                seed_workspace = true;
+                plan["workspaceSeeded"] = true.into();
+            }
+        }
+    }
     if !seed_workspace {
         resume_import_directories(&plan, &root).await?;
     }
@@ -262,6 +319,20 @@ async fn stage_plan(session: &Session, data: &Path, descriptor: Value) -> Result
     )
     .await?;
     Ok(plan)
+}
+
+async fn fallback_seed(session: &Session, root: &Path, error: Error) -> Result<()> {
+    if matches!(error.status, 401 | 403) {
+        return Err(error);
+    }
+    tracing::warn!(
+        status = error.status,
+        "Archive staging unavailable; requesting the complete legacy seed"
+    );
+    crate::project_archives::abandon_stage(root, error.status == 507, &session.attempt).await?;
+    session
+        .seed(json!({ "kind": "initial", "workspace": true }), root)
+        .await
 }
 
 /// Keep mount-source validation intact without copying the projects held by the
@@ -355,6 +426,72 @@ async fn refresh_inbox(session: Session, root: PathBuf, stop: CancellationToken)
 mod tests {
     use super::*;
     use axum::{Json, Router, body::Body, routing::post};
+
+    #[tokio::test]
+    async fn failed_archive_staging_requests_full_legacy_files_but_never_bypasses_revocation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        tokio::fs::create_dir_all(source.join("workspace/project"))
+            .await
+            .unwrap();
+        tokio::fs::write(source.join("workspace/project/file"), "fresh project")
+            .await
+            .unwrap();
+        let mut frames = Vec::new();
+        crate::nodes::files::send(&source, &mut frames)
+            .await
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let app = Router::new().route(
+            "/internal/node-workspace/{attempt}/seed",
+            post(move |Json(selection): Json<Value>| {
+                let (frames, observed) = (frames.clone(), observed.clone());
+                async move {
+                    assert_eq!(selection["workspace"], true);
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    Body::from(frames)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let master = format!("http://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session = Session {
+            client: reqwest::Client::new(),
+            master,
+            token: "fixture".into(),
+            attempt: crate::config::id(),
+        };
+        let target = root.path().join("run");
+        tokio::fs::create_dir_all(target.join("project-archives"))
+            .await
+            .unwrap();
+        tokio::fs::write(target.join("project-archives/partial.zip"), "partial")
+            .await
+            .unwrap();
+        assert!(
+            fallback_seed(&session, &target, Error::forbidden("revoked"))
+                .await
+                .is_err()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        fallback_seed(&session, &target, Error::bad("archive checksum mismatch"))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            tokio::fs::read_to_string(target.join("workspace/project/file"))
+                .await
+                .unwrap(),
+            "fresh project"
+        );
+        assert!(!target.join("project-archives").exists());
+        server.abort();
+    }
 
     #[tokio::test]
     async fn resume_import_directories_reject_symlinks_and_parent_traversal() {

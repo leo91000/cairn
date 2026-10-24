@@ -489,7 +489,7 @@ fn finish_recovery(db: &Db<'_>, id: &str, checkpoint: Option<&RunCheckpoint>) ->
         .run(id)?
         .ok_or_else(|| Error::not_found("Run not found"))?;
     if !current["cancelRequestedAt"].is_null() {
-        db.patch_run(id, &cancelled_recovery())?;
+        cancel_recovery(db, id, &current)?;
         return Ok(false);
     }
     if let Some(checkpoint) = checkpoint {
@@ -540,16 +540,24 @@ fn finish_recovery(db: &Db<'_>, id: &str, checkpoint: Option<&RunCheckpoint>) ->
     Ok(true)
 }
 
-/// Settles a recovering run whose cancellation was requested.
-fn cancelled_recovery() -> Value {
-    json!({
-        "status": RunStatus::Cancelled,
-        "finishedAt": now(),
-        "accountWaitReason": null,
-        "recoveryPending": false,
-        "retry": null,
-        "wakeup": null,
-    })
+/// Settles a recovering run whose cancellation was requested. One waiting for an automatic
+/// retry shows the stop in its conversation; a wait's own card already shows its cancellation.
+fn cancel_recovery(db: &Db<'_>, id: &str, run: &Value) -> Result<()> {
+    db.patch_run(
+        id,
+        &json!({
+            "status": RunStatus::Cancelled,
+            "finishedAt": now(),
+            "accountWaitReason": null,
+            "recoveryPending": false,
+            "retry": null,
+            "wakeup": null,
+        }),
+    )?;
+    if run["retry"]["nextAttemptAt"].is_number() {
+        db.event(id, "status", RunStatus::Cancelled.as_str(), None)?;
+    }
+    Ok(())
 }
 
 /// Hands a run whose execution failed unexpectedly back to recovery.

@@ -2,7 +2,13 @@ import type { RunEvent } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
 import sample from '../../../tests/fixtures/activity-events.json'
 import { redactPayload } from '../../../tests/fixtures/legacy/server/worker.ts'
-import { activityEntries, ActivityGroups, teamEntries } from '../src/activity'
+import {
+  activityEntries,
+  ActivityGroups,
+  sameReason,
+  stopEcho,
+  teamEntries,
+} from '../src/activity'
 
 const events: RunEvent[] = sample.slice(0, 15).map((payload, index) => ({
   id: index + 1,
@@ -190,9 +196,115 @@ describe('conversation activity', () => {
     expect(chat[0]).toMatchObject({ artifacts: [{ status: 'error' }] })
     expect(chat[1]).toMatchObject({ artifact: { blocks: [{ code: 'Validation failed' }] } })
     expect(chat[2]).toMatchObject({ artifacts: [{ status: 'running' }] })
-    expect(chat[3]).toMatchObject({ artifact: { title: 'Interrupted' } })
+    expect(chat[3]).toMatchObject({ artifact: { title: 'Run interrupted' } })
     for (const text of ['failed', 'cancelled', 'interrupted'])
       expect(activityEntries([{ ...input[4], text }], true)).toHaveLength(1)
+  })
+  it('shows one card per failed attempt and marks it when Cairn retries', () => {
+    const capacity = 'Selected model is at capacity. Please try a different model.'
+    const event = (id: number, type: string, text: string, payload?: Record<string, unknown>): RunEvent => ({
+      id,
+      runId: 'chat',
+      createdAt: id,
+      type,
+      text,
+      ...(payload ? { payload } : {}),
+    })
+    const attempt = (start: number) => [
+      event(start, 'turn.started', ''),
+      event(start + 1, 'turn.failed', capacity, { type: 'turn.failed', error: { message: capacity, codexErrorInfo: 'serverOverloaded' } }),
+      event(start + 2, 'turn.failed', 'Conversation interrupted.', { type: 'turn.failed', error: { message: 'Conversation interrupted.' } }),
+    ]
+    const failed = [...attempt(1), event(4, 'status', 'failed', { error: { message: capacity } })]
+    const notices = (events: RunEvent[]) => activityEntries(events, true).flatMap(entry => entry.kind === 'notice' ? [entry.artifact] : [])
+
+    expect(notices(failed)).toEqual([expect.objectContaining({ title: 'The agent ran into an error', status: 'error', blocks: [{ label: 'Details', code: capacity, language: 'plaintext' }] })])
+    expect(notices([...attempt(1), event(4, 'error', capacity)])).toHaveLength(1)
+
+    const retried = [
+      ...attempt(1),
+      event(4, 'retry.scheduled', 'Temporary agent error. Retrying in 33 seconds (attempt 1/3).', { retry: { attempt: 1, limit: 3, nextAttemptAt: 40_000 } }),
+      ...attempt(5),
+      event(8, 'error', capacity),
+    ]
+    expect(notices(retried.slice(0, 4)).map(notice => [notice.title, notice.status])).toEqual([
+      ['Temporary error — automatic retry 1/3', 'info'],
+    ])
+    // The next attempt's card replaces the retried one: the chain shows a single card.
+    expect(notices(retried).map(notice => [notice.title, notice.status])).toEqual([
+      ['The agent ran into an error after 1 automatic retry', 'error'],
+    ])
+    const again = [...retried, event(9, 'retry.scheduled', '', { retry: { attempt: 2, limit: 3 } }), ...attempt(10)]
+    expect(notices(again).map(notice => notice.title)).toEqual(['The agent ran into an error after 2 automatic retries'])
+    const other = [...retried.slice(0, 5), event(6, 'turn.failed', 'Reconnect account', { error: { message: 'Reconnect account' } })]
+    expect(notices(other)).toHaveLength(2)
+    // A run that ends, or is stopped during the wait, ends the chain: a resume is not a retry.
+    expect(notices([...retried, ...attempt(9)]).map(notice => notice.title)).toEqual(['The agent ran into an error after 1 automatic retry', 'The agent ran into an error'])
+    const cancelledWait = [...retried.slice(0, 4), event(5, 'status', 'cancelled'), ...attempt(6)]
+    expect(notices(cancelledWait).map(notice => notice.title)).toEqual(['The agent ran into an error', 'Run cancelled', 'The agent ran into an error'])
+    // Without attempt markers (older Claude histories), a new request after a failed turn gets its own card.
+    const unmarked = [event(1, 'chat.user', 'hi'), event(2, 'turn.failed', capacity, { error: { message: capacity } }), event(3, 'status', 'failed', { error: { message: capacity } }), event(4, 'status', 'Resume requested'), event(5, 'chat.user', 'again'), event(6, 'turn.failed', capacity, { error: { message: capacity } }), event(7, 'status', 'failed', { error: { message: capacity } })]
+    expect(notices(unmarked)).toHaveLength(2)
+    // A retry that succeeds ends the chain: a later message failing for the same reason gets its own card.
+    const answered = [...retried.slice(0, 5), event(6, 'turn.completed', ''), event(7, 'chat.user', 'Next'), ...attempt(8)]
+    expect(notices(answered).map(notice => notice.title)).toEqual(['Temporary error — automatic retry 1/3', 'The agent ran into an error'])
+
+    for (const stop of ['Conversation stopped.', 'Claude execution stopped.', 'OpenCode execution stopped.']) {
+      const cancelled = [event(1, 'turn.started', ''), event(2, 'turn.failed', stop, { error: { message: stop } }), event(3, 'status', 'cancelled')]
+      expect(notices(cancelled).map(notice => notice.title)).toEqual(['Run cancelled'])
+    }
+
+    expect(stopEcho(event(2, 'turn.failed', 'Claude execution stopped.'))).toBe(true)
+    expect(stopEcho(event(2, 'status', 'failed', { error: { message: 'Claude execution stopped.' } }))).toBe(false)
+    // Only an adapter's report is an echo; a run that failed with that reason still says so.
+    expect(notices([event(1, 'turn.started', ''), event(2, 'status', 'failed', { error: { message: 'Conversation stopped.' } })]).map(notice => notice.title)).toEqual(['Run failed'])
+
+    const connection = 'WebSocket connection failed: 503 Service Unavailable'
+    const reconnected = [
+      event(1, 'turn.started', ''),
+      event(2, 'error', connection),
+      event(3, 'item.completed', '', { item: { id: 'answer', type: 'agent_message', text: 'Still here' } }),
+      event(4, 'turn.failed', connection, { error: { message: connection } }),
+      event(5, 'status', 'failed', { error: { message: connection } }),
+    ]
+    expect(notices(reconnected)).toEqual([expect.objectContaining({ title: 'The agent ran into an error' })])
+    // A turn's reconnect attempts share one card; the failure that ends the turn replaces it.
+    const reconnect = (id: number, step: number) => event(id, 'error', `Reconnecting... ${step}/5`, { willRetry: true, error: { message: `Reconnecting... ${step}/5`, codexErrorInfo: 'other' } })
+    const reconnecting = [event(1, 'turn.started', ''), reconnect(2, 1), reconnect(3, 2)]
+    expect(notices(reconnecting)).toEqual([expect.objectContaining({ title: 'Connection interrupted', blocks: [expect.objectContaining({ code: 'Reconnecting... 2/5' })] })])
+    // The worker's final error after the last retry repeats the failure, even when it reads like a connection error.
+    const websocket = 'WebSocket connection failed: 503 Service Unavailable'
+    const websocketAttempt = (start: number) => [event(start, 'turn.started', ''), event(start + 1, 'turn.failed', websocket, { error: { message: websocket } })]
+    const exhausted = [...websocketAttempt(1), event(3, 'retry.scheduled', '', { retry: { attempt: 1, limit: 1 } }), ...websocketAttempt(4), event(6, 'error', websocket)]
+    expect(notices(exhausted).map(notice => notice.title)).toEqual(['The agent ran into an error after 1 automatic retry'])
+    // The older event stream reports its reconnect attempts as plain errors.
+    const plainReconnects = [event(1, 'turn.started', ''), event(2, 'error', 'Reconnecting... 1/5'), event(3, 'error', 'Reconnecting... 2/5')]
+    expect(notices(plainReconnects)).toEqual([expect.objectContaining({ title: 'Connection interrupted', blocks: [expect.objectContaining({ code: 'Reconnecting... 2/5' })] })])
+    const disconnected = 'stream disconnected before completion'
+    expect(notices([...plainReconnects, event(4, 'turn.failed', disconnected, { error: { message: disconnected } })]).map(notice => notice.title)).toEqual(['The agent ran into an error'])
+    expect(notices([...reconnecting, event(4, 'turn.failed', disconnected, { error: { message: disconnected } })]).map(notice => notice.title)).toEqual(['The agent ran into an error'])
+
+    // Run diagnostics keep the final status without repeating the reason already reported.
+    const diagnostics = activityEntries(failed).flatMap(entry => entry.kind === 'group' ? entry.artifacts : [])
+    expect(diagnostics.filter(artifact => artifact.blocks.some(block => block.code === capacity))).toHaveLength(1)
+    expect(diagnostics.find(artifact => artifact.title === 'Run failed')?.blocks).toEqual([])
+
+    const stopped = [event(1, 'turn.started', ''), event(2, 'status', 'failed', { error: { message: 'Run exceeded its time limit.' } })]
+    expect(activityEntries(stopped).flatMap(entry => entry.kind === 'group' ? entry.artifacts : []).find(artifact => artifact.title === 'Run failed')?.blocks).toEqual([expect.objectContaining({ code: 'Run exceeded its time limit.' })])
+    expect(notices(stopped)).toEqual([expect.objectContaining({ title: 'Run failed', blocks: [expect.objectContaining({ code: 'Run exceeded its time limit.' })] })])
+    // After an error report, the generic adapter error says the turn ended.
+    const interrupted = { error: { message: 'Conversation interrupted.' } }
+    const reportedThenInterrupted = [event(1, 'turn.started', ''), event(2, 'error', 'Validation needs attention.'), event(3, 'turn.failed', 'Conversation interrupted.', interrupted), event(4, 'status', 'failed', interrupted)]
+    expect(notices(reportedThenInterrupted).map(notice => notice.title)).toEqual(['Worker reported an error', 'The agent ran into an error'])
+    // A run records at most 10,000 characters of its error; the truncated reason still repeats it.
+    const long = `Upstream error: ${'x'.repeat(10_050)}`
+    expect(notices([event(1, 'turn.started', ''), event(2, 'turn.failed', long, { error: { message: long } }), event(3, 'status', 'failed', { error: { message: long.slice(0, 10_000) } })])).toHaveLength(1)
+    expect(sameReason(long, long.slice(0, 10_000))).toBe(true)
+    expect(sameReason(long, '')).toBe(false)
+    // A final status with a reason not shown yet tells why the run ended.
+    const deniedThenTimedOut = [stopped[0], event(3, 'error', 'Access denied'), { ...stopped[1], id: 4 }]
+    expect(notices(deniedThenTimedOut).map(notice => notice.title)).toEqual(['Worker reported an error', 'Run failed'])
+    expect(notices([...attempt(1).slice(0, 2), event(4, 'runner.failed', 'Controller cleanup failed', { error: { message: 'Controller cleanup failed' } })])).toHaveLength(2)
   })
   it('hides recovered connection retries but keeps unresolved ones visible in chat', () => {
     const connection: RunEvent = {

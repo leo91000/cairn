@@ -16,6 +16,14 @@ impl Drop for Guard {
 }
 
 pub fn exclusive(path: &Path, busy: &str) -> Result<Guard> {
+    acquire(path, busy, libc::LOCK_EX)
+}
+
+pub(crate) fn shared(path: &Path, busy: &str) -> Result<Guard> {
+    acquire(path, busy, libc::LOCK_SH)
+}
+
+fn acquire(path: &Path, busy: &str, operation: libc::c_int) -> Result<Guard> {
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -23,7 +31,7 @@ pub fn exclusive(path: &Path, busy: &str) -> Result<Guard> {
         .truncate(false)
         .mode(0o600)
         .open(path)?;
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+    if unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } != 0 {
         return Err(Error::conflict(busy));
     }
     Ok(Guard(file))

@@ -633,12 +633,17 @@ async fn fail_transfer(s: &Service, current: &Value, error: &Error) -> Result<()
             let current = db
                 .run(&owner)?
                 .ok_or_else(|| Error::not_found("Conversation removed."))?;
-            if !current["cancelRequestedAt"].is_null() {
+            let cancelled = !current["cancelRequestedAt"].is_null();
+            if cancelled {
                 patch["status"] = RunStatus::Cancelled.into();
                 patch["recoveryPending"] = false.into();
                 patch["nodeState"] = Value::Null;
             }
             db.patch_run(&owner, &patch)?;
+            // A run waiting for an automatic retry shows the stop in its conversation.
+            if cancelled && current["retry"]["nextAttemptAt"].is_number() {
+                db.event(&owner, "status", RunStatus::Cancelled.as_str(), None)?;
+            }
             Ok(())
         })
         .await?;

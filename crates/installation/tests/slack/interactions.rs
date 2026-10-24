@@ -357,6 +357,18 @@ async fn ordinary_progress_stop(socket_mode: bool, boundary: ProgressBoundary) {
         },
     )
     .await;
+    let posted = live.slack.posts.lock().await;
+    assert!(
+        posted
+            .iter()
+            .all(|post| !post["text"].contains("PRIVATE_PROVIDER_PROGRESS_DO_NOT_EXPORT"))
+    );
+    assert!(
+        posted
+            .iter()
+            .all(|post| !post["text"].contains("PRIVATE_NATIVE_REQUEST_DO_NOT_EXPORT"))
+    );
+    drop(posted);
     common::eventually(
         Duration::from_secs(5),
         Duration::from_millis(20),

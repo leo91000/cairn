@@ -102,6 +102,21 @@ internal fun conversationError(chat: Chat?): String? {
         ?: "La réponse s’est arrêtée avant la fin. Reprenez la conversation pour continuer."
 }
 
+/** The conversation already shows a failed run's reason as its failure notice. */
+internal fun failureShown(chat: Chat?, events: List<RunEvent>): Boolean {
+    if (!chat?.error.isNullOrBlank()) return false
+    val run = chat?.run?.takeIf { it.status == "failed" } ?: return false
+    val error = run.error?.takeIf { it.isNotBlank() } ?: return false
+    // Quota bookkeeping hides some failures from the conversation: they show nothing.
+    val hidden = quotaHiddenEvents(events)
+    return events.any {
+        it.runId == run.id &&
+            it.id !in hidden &&
+            sameReason(failureReason(it).orEmpty(), error) &&
+            !stopEcho(it)
+    }
+}
+
 @Composable
 internal fun ChatWaitingNotice(
     notice: ChatWaitNotice,
@@ -265,6 +280,8 @@ internal fun ConversationHeader(
     agentKey: String,
     status: String,
     live: String?,
+    /** The coding agent of the latest turn, marked on the avatar. */
+    harness: String? = null,
     liveSince: Long?,
     route: ConnectionRoute,
     back: () -> Unit,
@@ -285,7 +302,12 @@ internal fun ConversationHeader(
                     onClick = choose,
                     modifier =
                         Modifier.weight(1f).semantics {
-                            contentDescription = "Changer de conversation : $title"
+                            contentDescription =
+                                listOfNotNull(
+                                        "Changer de conversation : $title",
+                                        harness?.let { "Dernier harness : ${providerLabel(it)}" },
+                                    )
+                                    .joinToString(" · ")
                         },
                     color = MaterialTheme.colorScheme.background,
                     shape = RoundedCornerShape(12.dp),
@@ -295,8 +317,8 @@ internal fun ConversationHeader(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         // The comet ring turns while the agent is running this conversation.
-                        if (live != null) WorkingAvatar(agent, agentKey, 36.dp)
-                        else AgentAvatar(agent, agentKey, 36.dp)
+                        if (live != null) WorkingAvatar(agent, agentKey, 36.dp, harness)
+                        else AgentAvatar(agent, agentKey, 36.dp, harness = harness)
                         Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {

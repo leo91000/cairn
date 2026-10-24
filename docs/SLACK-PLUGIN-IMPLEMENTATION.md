@@ -1800,3 +1800,62 @@ These results retain their exact reviewed/tested source identities. The two
 earlier 67/68 Slack suites remain unexplained. All accepted Q1–Q20, full parity,
 live Slack, and epoch-13 / SQLite-12 forward-transition/recovery gates remain
 open. PR #226 stays draft and unmerged.
+
+## Main retry integration and frozen predecessor replies
+
+Main `bd0ffa40` is integrated with the root-consent/workspace-identity checkpoint
+`4ed0d69a`. GitHub Storage run 40069051567 first failed while compiling its
+automatic merge `e001f4a8`: one Slack predecessor constructor still passed
+`failed` after Main changed the terminal state to a canonical `status`. The
+identical synthetic merge reproduces E0559 locally; no CI rerun can correct that
+source mismatch.
+
+A scoped native/Luau regression then reproduced a behavioral mismatch: after a
+failed attempt, automatic retry and final cancellation, an old delivery retained
+the first failed attempt instead of its last attempt and cancelled status. Live
+replies and predecessor markers now share Main's retry/account/stop selector.
+The marker freezes its selected status and end before another requester starts;
+reply reading never rescans the next person's output. Existing boolean markers
+remain readable, while new markers retain that boolean plus canonical status.
+The tests use the actual worker and scheduler fencing with synthetic agent events;
+they are distinct from full-provider Slack exchanges.
+
+The [three-shape storage observation](performance/SLACK-RETRY-REPLY-RANGE.md)
+records bytes, cold/warm reads, writes, CPU and host limits. It excludes SQL
+selection and provider/network latency and makes no speedup claim. Root OAuth,
+requester grants, native waits and both client implementations remain required in
+merged-tree qualification. All Q1–Q20, management mutation parity, guided inert
+setup, live Slack and forward-transition/recovery gates remain open. PR #226 stays
+draft/unmerged; this integration does not authorize deployment.
+
+The first merged-tree Slack run passed 67 cases but failed six real cancellation
+scenarios. A focused replay and temporary test probe confirmed that the process
+was stopped and the cleanup said `Work stopped.`, while the final post contained
+unfinished provider progress. Main intentionally preserves partial native replies
+after cancellation. Slack's current conversation slice now sends the Stop
+confirmation for cancelled work and leaves unfinished content in Cairn; other
+native reply consumers retain Main's partial-response behavior. The six existing
+HTTP/WSS scenarios pass with unchanged deadlines, including explicit checks that
+provider progress and private request text are absent from Slack posts. Temporary
+probes were removed. The complete current-tree Slack suite and fresh full review
+remain required before qualification of this additional package correction.
+
+The separate Android CI device failure in run 40069051562 remains unexplained:
+the native-node editor saved `nativeEnabled: false` where its unchanged test
+expected `true`. Replays used the exact CI application and test APKs: five isolated
+passes with inherited device preferences, five with the keyboard and animations
+enabled, then the four NodePlacement methods together all passed. The task-owned
+API36 AOSP emulator used software acceleration; CI used Google APIs and KVM.
+These results establish neither the cause nor a product correction. No Android
+source or assertion changed for this diagnosis, and the failed workflow stays
+failed. The original AVD was preserved and the test clone was stopped.
+
+The first merged-browser selection passed 23 cases but Chromium's scheduled-Stop
+test read a still-present wakeup immediately after observing the earlier pause
+step. Its isolated unchanged repeat reproduced that assertion. The test now
+waits for its existing visible completion assertion (the wait card disappearing)
+before checking the final pause and wakeup state. Its assertions and deadlines
+are unchanged; no production Stop handler changed. A temporary HTTP-response
+probe also exposed why HTTP-only synchronization is unsuitable here: the direct
+transport can complete Stop without an HTTP response on the page. That probe
+failure is separate from the original assertion and its instrumentation is removed.

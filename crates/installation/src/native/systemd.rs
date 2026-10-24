@@ -178,12 +178,16 @@ fn budget_properties(budget: &crate::microvm::budget::Budget) -> Vec<String> {
 /// separately so a task blocked in that I/O can exit after the device is stopped.
 pub(super) async fn request_stop(attempt: &str) -> Result<()> {
     let unit = unit(attempt)?;
+    let _ = output("/usr/bin/systemctl", &["thaw", &unit]).await?;
     let _ = output("/usr/bin/systemctl", &["--no-block", "stop", &unit]).await?;
     Ok(())
 }
 
 pub async fn stop_workload(attempt: &str) -> Result<()> {
     let unit = unit(attempt)?;
+    // systemd refuses stop jobs for frozen units. Protection/lease fencing can
+    // leave an owned workload frozen; restore signal delivery before stopping.
+    let _ = output("/usr/bin/systemctl", &["thaw", &unit]).await?;
     let stopped = output("/usr/bin/systemctl", &["stop", &unit]).await?;
     // A collected or never-started transient unit has no processes to fence.
     let state = output(
@@ -539,7 +543,7 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
     args.extend([
         "--setenv=HOME=/home/node",
         "--setenv=CAIRN_AUTH_SOCKET=/run/cairn-auth.sock",
-        "--setenv=PATH=/opt/cairn-native-tools/bin:/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin",
+        "--setenv=PATH=/opt/cairn-native-tools/bin:/run/cairn-entrypoint:/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin",
         "--",
         "/run/cairn-entrypoint/cairn",
         "runner-entry",

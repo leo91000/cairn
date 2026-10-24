@@ -4,6 +4,16 @@ Status: implementation review for draft PR #226, **not deployment approval**. Th
 Slack package and final qualification remain unfinished. Do not merge or deploy
 this draft. This inventory must be revisited as later lots add persistent data.
 
+The integration with Main's retry-aware replies retains an optional canonical
+`reply.status` (`completed`, `failed`, `cancelled`) in a frozen predecessor range.
+The existing `reply.failed` boolean is retained, and an earlier marker without
+`status` still reads through that boolean without searching later turns. New
+ranges use the same terminal selector as live replies before the next requester
+can start; they retain the final attempt and its stop status. This adds no key,
+table, index or envelope and remains inside the unqualified epoch-13 / SQLite-12
+boundary below. The higher boundary, forward transition and recovery gates stay
+required; no deployment or downgrade is qualified by this change.
+
 ## Compatibility boundary
 
 The plugin foundations introduce an incompatible persisted plugin contract. A

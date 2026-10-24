@@ -249,9 +249,10 @@ test('stopping a scheduled wait cancels its wakeup and pauses the conversation',
   const card = page.locator('.chat-wait')
   await expect(card).toContainText(/Resumes at .+Wait for review/)
   await page.getByRole('button', { name: 'Cancel scheduled wait', exact: true }).click()
+  // Pause is the first step of Stop; wait for its visible completion before reading the final state.
+  await expect(card).toHaveCount(0)
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).paused).toBe(true)
   expect((await workspace.api(`/api/chats/${chat.id}`)).wakeup).toBeNull()
-  await expect(card).toHaveCount(0)
 })
 
 test('a durable condition wait follows a dependency across restart and queue pause', async ({ page, workspace }) => {
@@ -590,6 +591,10 @@ test('a transient agent error shows a retry countdown and resumes without user i
   await authenticateWorkspace(page)
   const notice = page.getByRole('status').filter({ hasText: /Temporary agent error\. Retrying in \d+ seconds \(attempt 1\/3\)\./ })
   await expect(notice).toBeVisible()
+  // The failed attempt shows one card, marked as a temporary error Cairn retries itself.
+  const failure = page.getByRole('note').filter({ hasText: 'workspace routing discovery timed out' })
+  await expect(failure).toHaveCount(1)
+  await expect(failure).toContainText('Temporary error — automatic retry 1/3')
   await expect(page.locator('.agent-waiting')).toHaveCount(0)
   await expect(page.getByText('Background task', { exact: true })).toHaveCount(0)
   const before = await notice.textContent()
@@ -600,6 +605,7 @@ test('a transient agent error shows a retry countdown and resumes without user i
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
   await expect(page.getByText('Ready for the next step.', { exact: false }).last()).toBeVisible()
   await expect(notice).toHaveCount(0)
+  await expect(failure).toHaveCount(1)
 })
 
 test('native Codex reconnect notices remain visible until work continues', async ({ page, workspace }) => {
@@ -849,6 +855,7 @@ test('phone headers carry the installation, its route and the conversation conne
   await page.goto(workspacePath(`/chats/${chat.id}`))
   const header = page.locator('.chat-header')
   await expect(header.getByRole('button', { name: 'Conversations', exact: true })).toContainText('Browser workspace')
+  await expect(header.getByRole('button', { name: 'Conversations', exact: true })).toHaveAccessibleDescription('Latest harness: Codex')
   expect(Math.round((await header.boundingBox())!.height)).toBeLessThanOrEqual(60)
   await expect(header.getByRole('button', { name: /^Files: \d+$/ })).toBeVisible()
   await expect(page.getByRole('link', { name: 'New chat', exact: true })).toBeHidden()
@@ -862,6 +869,7 @@ test('phone headers carry the installation, its route and the conversation conne
   // Desktop starts conversations from the navigation rail, and keeps its installation bar on the Fil.
   await page.setViewportSize({ width: 1280, height: 800 })
   await expect(header.getByRole('heading', { name: 'Check the phone header.', exact: true })).toBeVisible()
+  await expect(header.getByRole('img', { name: 'Latest harness: Codex', exact: true })).toBeVisible()
   await expect(page.getByRole('link', { name: 'New chat', exact: true })).toHaveCount(0)
   await expect(header.getByRole('button', { name: /^Files: / })).toBeHidden()
   await page.goto(workspacePath('/'))
@@ -1083,8 +1091,9 @@ test('failed replies show the current error instead of an old answer and can be 
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:disconnect' })
   await expect.poll(() => workspace.service.chats.detail(chat.id).run?.status).toBe('failed')
   await page.goto(workspacePath(`/chats/${chat.id}`))
-  await expect(page.getByRole('alert')).toContainText('Codex')
-  await expect(page.getByRole('alert')).not.toContainText('A successful first reply')
+  // The failure card gives the reason once; the banner above the composer does not repeat it.
+  await expect(page.getByRole('note').filter({ hasText: 'Codex' })).toHaveCount(1)
+  await expect(page.getByRole('alert')).toHaveCount(0)
   for (const colorScheme of ['dark', 'light'] as const) {
     await page.emulateMedia({ colorScheme })
     await page.setViewportSize({ width: 390, height: 844 })
@@ -1092,15 +1101,15 @@ test('failed replies show the current error instead of an old answer and can be 
     await page.screenshot({ path: test.info().outputPath(`chat-failure-${colorScheme}.png`), animations: 'disabled' })
   }
 
-  await page.getByRole('button', { name: 'Dismiss error' }).click()
-  await expect(page.getByRole('alert')).toHaveCount(0)
-  await page.reload()
-  await expect(page.getByRole('alert')).toContainText('Codex')
   const run = workspace.service.chats.detail(chat.id).run!
   workspace.service.store.updateRun(run.id, { error: null, summary: 'An old **successful** reply' })
   await page.reload()
   await expect(page.getByRole('alert')).toContainText('The response stopped before finishing')
   await expect(page.getByRole('alert')).not.toContainText('successful')
+  await page.getByRole('button', { name: 'Dismiss error' }).click()
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await page.reload()
+  await expect(page.getByRole('alert')).toContainText('The response stopped before finishing')
 })
 
 test('starts project chats, steers, edits the queue and preserves a compact mobile composer', async ({ page, workspace }) => {

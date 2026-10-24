@@ -223,6 +223,11 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
             "retry": null,
         });
         db.patch_run(id, &patch)?;
+        // A run waiting for an automatic retry shows the stop in its conversation; a wait's
+        // own card already shows its cancellation.
+        if run["retry"]["nextAttemptAt"].is_number() {
+            db.event(id, "status", RunStatus::Cancelled.as_str(), None)?;
+        }
     }
     db.audit("run.cancelled", &json!({ "id": id }))
 }

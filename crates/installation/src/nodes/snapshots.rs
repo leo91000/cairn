@@ -87,7 +87,15 @@ fn next_data(file: &std::fs::File, offset: u64) -> std::io::Result<u64> {
 }
 
 pub async fn index(path: &Path) -> Result<Value> {
+    index_with_stop(path, &tokio_util::sync::CancellationToken::new()).await
+}
+
+pub(crate) async fn index_with_stop(
+    path: &Path,
+    stop: &tokio_util::sync::CancellationToken,
+) -> Result<Value> {
     let path = path.to_owned();
+    let stop = stop.clone();
     tokio::task::spawn_blocking(move || -> Result<Value> {
         let file = std::fs::OpenOptions::new()
             .read(true)
@@ -98,6 +106,9 @@ pub async fn index(path: &Path) -> Result<Value> {
         let mut buffer = vec![0; BLOCK as usize];
         let (mut offset, mut read, mut data) = (0, 0u64, next_data(&file, 0)?);
         while offset < size {
+            if stop.is_cancelled() {
+                return Err(Error::unavailable("Disk indexing stopped."));
+            }
             let length = (size - offset).min(BLOCK) as usize;
             if data < offset {
                 data = next_data(&file, offset)?;

@@ -37,23 +37,27 @@ pub(crate) fn abandon(
     message: &str,
     failed: bool,
 ) -> Result<()> {
-    let reply: Option<Value> =
-        db.0.query_row(
-            "SELECT start.id, terminal.id, terminal.type FROM events AS start
-         JOIN events AS terminal ON terminal.run_id=start.run_id AND terminal.id>start.id
-         WHERE start.run_id=?1 AND start.type IN ('chat.user','chat.wakeup.delivered')
-         AND json_extract(start.payload,'$.messageId')=?2
-         AND terminal.type IN ('turn.completed','turn.failed') ORDER BY terminal.id LIMIT 1",
-            rusqlite::params![run, message],
-            |row| {
-                Ok(json!({
-                    "delivered": row.get::<_, i64>(0)?,
-                    "end": row.get::<_, i64>(1)?,
-                    "failed": row.get::<_, String>(2)? == "turn.failed",
-                }))
-            },
-        )
-        .optional()?;
+    let delivered: Option<i64> = db.0.query_row(
+        "SELECT id FROM events WHERE run_id=?1 AND type IN ('chat.user','chat.wakeup.delivered')
+         AND json_extract(payload,'$.messageId')=?2 ORDER BY id LIMIT 1",
+        rusqlite::params![run, message], |row| row.get(0),
+    ).optional()?;
+    let record = db.run(run)?;
+    let reply = match delivered {
+        Some(delivered) => {
+            super::work::finished_turn(db, run, message, delivered, record.as_ref())?.map(
+                |(end, status)| {
+                    json!({
+                        "delivered": delivered,
+                        "end": end,
+                        "failed": status == "failed",
+                        "status": status,
+                    })
+                },
+            )
+        }
+        None => None,
+    };
     let mut ended = json!({"runId": run, "failed": failed});
     if let Some(reply) = reply {
         ended["reply"] = reply;

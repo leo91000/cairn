@@ -1529,6 +1529,439 @@ async fn replies_export_only_the_correlated_completed_turn_and_revoke_immediatel
     assert!(s.get("chats", text(&receipt, "chatId")).await.is_ok());
 }
 
+/// Dates the run's last event back, as if it was recorded `ms` ago.
+async fn age_last_event(s: &Service, run_id: &str, ms: i64) {
+    let statement = format!(
+        "UPDATE events SET created_at=created_at-{ms} WHERE id=(SELECT MAX(id) FROM events WHERE run_id='{run_id}')"
+    );
+    s.store
+        .transaction(move |db| Ok(db.0.execute_batch(&statement)?))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn replies_answer_a_retried_turn_with_its_last_attempt() {
+    let (_root, s, connection) = fixture().await;
+    let event = json!({
+        "name": "message",
+        "revision": connection.revision,
+        "authorId": "300",
+        "payload": { "id": "500", "author": { "id": "300", "name": "Sarah" } },
+    });
+    let receipt = work::submit(
+        &s,
+        &context(&connection, &event),
+        &json!({ "text": "hello" }),
+    )
+    .await
+    .unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+    let run_id = text(&chat, "runId");
+    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
+        let store = s.store.clone();
+        let run_id = run_id.to_owned();
+        async move { store.event(&run_id, kind, text, payload).await.unwrap() }
+    };
+
+    event(
+        "chat.user",
+        "hello",
+        Some(json!({ "messageId": receipt["messageId"] })),
+    )
+    .await;
+    // Claude Code says an API error as a reply before the turn fails.
+    let overloaded = "API Error: 529 Overloaded";
+    let echo = json!({ "item": { "type": "agent_message", "text": overloaded } });
+    event("item.completed", overloaded, Some(echo)).await;
+    event(
+        "turn.failed",
+        overloaded,
+        Some(json!({ "error": { "message": overloaded } })),
+    )
+    .await;
+    let retry = json!({ "retry": { "attempt": 1, "limit": 3 } });
+    event("retry.scheduled", "Temporary agent error.", Some(retry)).await;
+    event("turn.started", "", None).await;
+    event("turn.completed", "", None).await;
+
+    let reply = work::reply(&s, &connection, &delivery)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.status, "completed");
+    assert!(!reply.text.contains(overloaded), "{}", reply.text);
+}
+
+#[tokio::test]
+async fn replies_answer_a_retried_turn_stopped_by_cairn_with_its_last_attempt() {
+    let (_root, s, connection) = fixture().await;
+    let event = json!({
+        "name": "message",
+        "revision": connection.revision,
+        "authorId": "300",
+        "payload": { "id": "500", "author": { "id": "300", "name": "Sarah" } },
+    });
+    let receipt = work::submit(
+        &s,
+        &context(&connection, &event),
+        &json!({ "text": "hello" }),
+    )
+    .await
+    .unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+    let run_id = text(&chat, "runId");
+    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
+        let store = s.store.clone();
+        let run_id = run_id.to_owned();
+        async move { store.event(&run_id, kind, text, payload).await.unwrap() }
+    };
+
+    event(
+        "chat.user",
+        "hello",
+        Some(json!({ "messageId": receipt["messageId"] })),
+    )
+    .await;
+    // Claude Code says an API error as a reply before the turn fails.
+    let overloaded = "API Error: 529 Overloaded";
+    let echo = json!({ "item": { "type": "agent_message", "text": overloaded } });
+    event("item.completed", overloaded, Some(echo)).await;
+    event(
+        "turn.failed",
+        overloaded,
+        Some(json!({ "error": { "message": overloaded } })),
+    )
+    .await;
+    let retry = json!({ "retry": { "attempt": 1, "limit": 3 } });
+    event("retry.scheduled", "Temporary agent error.", Some(retry)).await;
+    event("turn.started", "", None).await;
+    let partial = json!({ "item": { "type": "agent_message", "text": "partial retry" } });
+    event("item.completed", "partial retry", Some(partial)).await;
+    // Cairn stops the retried attempt at its time limit: no turn end, only the status.
+    event("status", "failed", None).await;
+    s.store
+        .patch_run(run_id, json!({ "status": "failed" }))
+        .await
+        .unwrap();
+
+    let reply = work::reply(&s, &connection, &delivery)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (reply.text.as_str(), reply.status),
+        ("partial retry", "failed")
+    );
+}
+
+#[tokio::test]
+async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
+    let (_root, s, connection) = fixture().await;
+    let event = json!({
+        "name": "message",
+        "revision": connection.revision,
+        "authorId": "300",
+        "payload": { "id": "500", "author": { "id": "300", "name": "Sarah" } },
+    });
+    let receipt = work::submit(
+        &s,
+        &context(&connection, &event),
+        &json!({ "text": "hello" }),
+    )
+    .await
+    .unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+    let run_id = text(&chat, "runId");
+    let run = s.store.run(run_id).await.unwrap();
+    assert_eq!(run["chatExecution"]["messageId"], receipt["messageId"]);
+    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let reply = async || work::reply(&s, &connection, &delivery).await.unwrap();
+
+    s.store
+        .event(
+            run_id,
+            "chat.user",
+            "hello",
+            Some(json!({ "messageId": receipt["messageId"] })),
+        )
+        .await
+        .unwrap();
+    let capacity = "Selected model is at capacity. Please try a different model.";
+    let failure = json!({ "error": { "message": capacity, "codexErrorInfo": "serverOverloaded" } });
+    s.store
+        .event(run_id, "turn.failed", capacity, Some(failure))
+        .await
+        .unwrap();
+    assert!(reply().await.is_none(), "The attempt has not settled yet");
+    // An account wait that just started continues the message.
+    s.store
+        .patch_run(
+            run_id,
+            json!({ "accountWaitReason": "Usage exhausted. Waiting for an available Codex account to resume." }),
+        )
+        .await
+        .unwrap();
+    assert!(reply().await.is_none());
+    // Waiting for an account can last hours: once it lasts, the failure answers meanwhile.
+    s.store
+        .event(
+            run_id,
+            "status",
+            "Usage exhausted. Saving this session and restoring capacity or switching accounts.",
+            None,
+        )
+        .await
+        .unwrap();
+    age_last_event(&s, run_id, 3 * 60_000).await;
+    assert_eq!(reply().await.unwrap().status, "failed");
+    // A switch to another account that just started continues the message.
+    s.store
+        .event(
+            run_id,
+            "status",
+            "Usage exhausted. Saving this session and restoring capacity or switching accounts.",
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(reply().await.is_none());
+    // Recovering the controller continues the message.
+    s.store
+        .patch_run(
+            run_id,
+            json!({ "accountWaitReason": "Recovering after worker restart." }),
+        )
+        .await
+        .unwrap();
+    assert!(reply().await.is_none());
+    s.store
+        .patch_run(run_id, json!({ "accountWaitReason": null }))
+        .await
+        .unwrap();
+    assert!(reply().await.is_none());
+
+    s.store
+        .patch_run(run_id, json!({ "status": "failed" }))
+        .await
+        .unwrap();
+    let failed = reply().await.unwrap();
+    assert_eq!(failed.status, "failed");
+
+    // Cairn retries the same message: the failure was not the final answer.
+    s.store
+        .patch_run(run_id, json!({ "status": "queued" }))
+        .await
+        .unwrap();
+    let retry = json!({ "retry": { "attempt": 1, "limit": 3 } });
+    s.store
+        .event(
+            run_id,
+            "retry.scheduled",
+            "Temporary agent error.",
+            Some(retry),
+        )
+        .await
+        .unwrap();
+    assert!(reply().await.is_none());
+    // The retry then waits for an account: once it lasts, the failure answers meanwhile.
+    let wait = "Waiting for a Codex account with available usage.";
+    s.store
+        .patch_run(run_id, json!({ "accountWaitReason": wait }))
+        .await
+        .unwrap();
+    s.store.event(run_id, "status", wait, None).await.unwrap();
+    assert!(reply().await.is_none());
+    age_last_event(&s, run_id, 3 * 60_000).await;
+    assert_eq!(reply().await.unwrap().status, "failed");
+    s.store
+        .patch_run(run_id, json!({ "accountWaitReason": null }))
+        .await
+        .unwrap();
+    assert!(reply().await.is_none());
+    s.store
+        .event(run_id, "turn.started", "", None)
+        .await
+        .unwrap();
+    let answer = json!({ "item": { "type": "agent_message", "text": "hello back" } });
+    s.store
+        .event(run_id, "item.completed", "hello back", Some(answer))
+        .await
+        .unwrap();
+    s.store
+        .event(run_id, "turn.completed", "", None)
+        .await
+        .unwrap();
+    let completed = reply().await.unwrap();
+    assert_eq!(
+        (completed.text.as_str(), completed.status),
+        ("hello back", "completed")
+    );
+
+    // The run moves on to the next message before the reply is sent: the retry still answered.
+    s.store
+        .patch_run(
+            run_id,
+            json!({ "status": "running", "chatExecution": { "messageId": "next" } }),
+        )
+        .await
+        .unwrap();
+    let completed = reply().await.unwrap();
+    assert_eq!(
+        (completed.text.as_str(), completed.status),
+        ("hello back", "completed")
+    );
+}
+
+#[tokio::test]
+async fn replies_do_not_follow_a_retry_stopped_before_it_ran() {
+    let (_root, s, connection) = fixture().await;
+    let event = json!({
+        "name": "message",
+        "revision": connection.revision,
+        "authorId": "300",
+        "payload": { "id": "500", "author": { "id": "300", "name": "Sarah" } },
+    });
+    let receipt = work::submit(
+        &s,
+        &context(&connection, &event),
+        &json!({ "text": "hello" }),
+    )
+    .await
+    .unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+    let run_id = text(&chat, "runId");
+    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
+        let store = s.store.clone();
+        let run_id = run_id.to_owned();
+        async move { store.event(&run_id, kind, text, payload).await.unwrap() }
+    };
+
+    event(
+        "chat.user",
+        "hello",
+        Some(json!({ "messageId": receipt["messageId"] })),
+    )
+    .await;
+    let capacity = "Selected model is at capacity. Please try a different model.";
+    let failure = json!({ "error": { "message": capacity, "codexErrorInfo": "serverOverloaded" } });
+    event("turn.failed", capacity, Some(failure)).await;
+    let retry = json!({ "retry": { "attempt": 1, "limit": 3 } });
+    event("retry.scheduled", "Temporary agent error.", Some(retry)).await;
+    // The owner stops the run during the wait, then the conversation answers another message.
+    event("status", "cancelled", None).await;
+    event(
+        "chat.user",
+        "something else",
+        Some(json!({ "messageId": "next" })),
+    )
+    .await;
+    event("turn.started", "", None).await;
+    let answer = json!({ "item": { "type": "agent_message", "text": "the other answer" } });
+    event("item.completed", "the other answer", Some(answer)).await;
+    event("turn.completed", "", None).await;
+    s.store
+        .patch_run(
+            run_id,
+            json!({ "status": "succeeded", "chatExecution": { "messageId": "next" } }),
+        )
+        .await
+        .unwrap();
+
+    let reply = work::reply(&s, &connection, &delivery)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.status, "cancelled");
+    assert!(!reply.text.contains("the other answer"), "{}", reply.text);
+}
+
+#[tokio::test]
+async fn replies_to_a_stopped_turn_do_not_carry_the_next_answer() {
+    for (status, reply_status) in [("cancelled", "cancelled"), ("failed", "failed")] {
+        let (_root, s, connection) = fixture().await;
+        let event = json!({
+            "name": "message",
+            "revision": connection.revision,
+            "authorId": "300",
+            "payload": { "id": "500", "author": { "id": "300", "name": "Sarah" } },
+        });
+        let receipt = work::submit(
+            &s,
+            &context(&connection, &event),
+            &json!({ "text": "hello" }),
+        )
+        .await
+        .unwrap();
+        s.chat_tick(&std::collections::HashSet::new())
+            .await
+            .unwrap();
+        let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+        let run_id = text(&chat, "runId");
+        let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+        let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
+            let store = s.store.clone();
+            let run_id = run_id.to_owned();
+            async move { store.event(&run_id, kind, text, payload).await.unwrap() }
+        };
+
+        event(
+            "chat.user",
+            "hello",
+            Some(json!({ "messageId": receipt["messageId"] })),
+        )
+        .await;
+        event("turn.started", "", None).await;
+        let partial = json!({ "item": { "type": "agent_message", "text": "partial answer" } });
+        event("item.completed", "partial answer", Some(partial)).await;
+        // Cairn stops the turn (Stop or the time limit), then the conversation answers another
+        // message.
+        event("status", status, None).await;
+        event(
+            "chat.user",
+            "something else",
+            Some(json!({ "messageId": "next" })),
+        )
+        .await;
+        event("turn.started", "", None).await;
+        let answer = json!({ "item": { "type": "agent_message", "text": "the other answer" } });
+        event("item.completed", "the other answer", Some(answer)).await;
+        event("turn.completed", "", None).await;
+        s.store
+            .patch_run(
+                run_id,
+                json!({ "status": "succeeded", "chatExecution": { "messageId": "next" } }),
+            )
+            .await
+            .unwrap();
+
+        let reply = work::reply(&s, &connection, &delivery)
+            .await
+            .unwrap()
+            .unwrap();
+        // The reply keeps what the agent said before the stop, never the next answer.
+        assert_eq!(
+            (reply.text.as_str(), reply.status),
+            ("partial answer", reply_status)
+        );
+    }
+}
+
 #[tokio::test]
 async fn revoked_and_deleted_deliveries_do_not_stop_other_people() {
     let (_root, s, connection) = fixture().await;

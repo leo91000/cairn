@@ -19,8 +19,10 @@ import {
   watch,
 } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { providers } from '../../../../packages/contracts/accounts'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
+import { failureReason, sameReason, stopEcho } from '../activity'
 import { api, apiUpload, state } from '../api'
 import { reuseAttachmentKey } from '../attachment-media'
 import {
@@ -31,7 +33,7 @@ import {
 } from '../attachments'
 import { chatDelivery, chatWaitNotice, scheduledWakeup } from '../chat-delivery'
 import { chatListCarried, chatList as chats, publishChats } from '../chat-list'
-import { chatQuota, isQuotaMessage } from '../chat-quota'
+import { chatQuota, isQuotaMessage, quotaHiddenEvents } from '../chat-quota'
 import { liveWakeup, waitStatus } from '../chat-wait'
 import ActivityFeed from '../components/ActivityFeed.vue'
 import AgentAvatar from '../components/AgentAvatar.vue'
@@ -224,6 +226,16 @@ const visibleError = computed(() => {
   return chatError || (failedRun ? failedRun.error || 'The response stopped before finishing. Resume the conversation to continue.' : '')
 })
 const openCodeRegionBlocked = computed(() => visibleError.value.startsWith('OpenCode Go requires Global regions for this model.'))
+// The conversation already shows a failed run's reason as its failure card.
+const errorShown = computed(() => {
+  const run = detail.value?.run
+  const reason = run?.status === 'failed' ? run.error : undefined
+  if (error.value || detail.value?.error || !reason)
+    return false
+  // Quota bookkeeping hides some failures from the conversation: they show nothing.
+  const hidden = quotaHiddenEvents(events.value)
+  return events.value.some(event => event.runId === run?.id && !hidden.has(`${event.runId}:${event.id}`) && sameReason(failureReason(event) ?? '', reason) && !stopEcho(event))
+})
 watch(() => [visibleError.value, detail.value?.id, detail.value?.run?.finishedAt], () => {
   dismissedError.value = false
 })
@@ -828,6 +840,7 @@ function key(event: KeyboardEvent) {
           ref="historyButton"
           class="hidden min-w-0 flex-1 items-center justify-start px-0.5 py-1 phone:flex"
           aria-label="Conversations"
+          :aria-description="heading?.provider ? `Latest harness: ${providers[heading.provider].label}` : undefined"
           aria-haspopup="dialog"
           :aria-expanded="history"
           @click="history = true"
@@ -837,6 +850,7 @@ function key(event: KeyboardEvent) {
               :name="heading?.agentName || selectedAgent?.name || 'Main agent'"
               :identity="heading?.agentId || selectedAgent?.id"
               :size="34"
+              :harness="heading?.provider"
             />
             <span class="min-w-0 text-left">
               <span class="flex min-w-0 items-center gap-1 text-[14px] font-semibold leading-tight text-ink">
@@ -855,6 +869,7 @@ function key(event: KeyboardEvent) {
             :name="heading.agentName"
             :identity="heading.agentId"
             :size="36"
+            :harness="heading.provider"
             :working="detail?.run?.status === 'running' && !detail.paused && !suspended && !quota"
           />
           <div class="min-w-0 flex-1">
@@ -1069,7 +1084,7 @@ function key(event: KeyboardEvent) {
                 </RouterLink>. This conversation and its files stay saved.
               </p>
             </section>
-            <UiAlert v-else-if="visibleError && !dismissedError" class="mb-3 flex items-start gap-2">
+            <UiAlert v-else-if="visibleError && !dismissedError && !errorShown" class="mb-3 flex items-start gap-2">
               <span class="min-w-0 flex-1">{{ visibleError }}</span><button
                 :class="iconButton"
                 class="shrink-0"

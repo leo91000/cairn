@@ -3874,7 +3874,21 @@ async fn pending_new_turn_scenarios(scenarios: &[&str]) {
 
 #[tokio::test]
 async fn abandoned_deliveries_never_collect_the_next_requesters_answer_or_files() {
-    for (acknowledged, failed) in [(true, false), (false, false), (true, true)] {
+    abandoned_delivery_scenarios(&[
+        (true, false, false),
+        (false, false, false),
+        (true, true, false),
+    ])
+    .await;
+}
+
+#[tokio::test]
+async fn abandoned_retried_deliveries_keep_their_last_attempt_and_terminal_status() {
+    abandoned_delivery_scenarios(&[(true, false, true), (true, true, true)]).await;
+}
+
+async fn abandoned_delivery_scenarios(scenarios: &[(bool, bool, bool)]) {
+    for &(acknowledged, failed, retried) in scenarios {
         let (replies, mut received) = tokio::sync::mpsc::unbounded_channel();
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
@@ -4015,6 +4029,42 @@ async fn abandoned_deliveries_never_collect_the_next_requesters_answer_or_files(
                 .await
                 .unwrap();
         }
+        if retried {
+            s.store
+                .event(
+                    &run_id,
+                    "item.completed",
+                    "First failed attempt",
+                    Some(json!({
+                        "item": { "type": "agent_message", "text": "First failed attempt" },
+                    })),
+                )
+                .await
+                .unwrap();
+            s.store
+                .event(&run_id, "turn.failed", "Temporary failure", None)
+                .await
+                .unwrap();
+            s.store
+                .event(&run_id, "retry.scheduled", "", None)
+                .await
+                .unwrap();
+            s.store
+                .event(&run_id, "turn.started", "", None)
+                .await
+                .unwrap();
+            s.store
+                .event(
+                    &run_id,
+                    "item.completed",
+                    "Alice's last attempt",
+                    Some(json!({
+                        "item": { "type": "agent_message", "text": "Alice's last attempt" },
+                    })),
+                )
+                .await
+                .unwrap();
+        }
         assert_eq!(
             deliver(&app, &instance, request("bob")).await.1["status"],
             "accepted"
@@ -4059,6 +4109,19 @@ async fn abandoned_deliveries_never_collect_the_next_requesters_answer_or_files(
                 .await
                 .unwrap();
         }
+        if retried {
+            // A final native stop may follow a retried provider failure. It ends
+            // this author's last attempt before the next request can start.
+            s.store
+                .event(
+                    &run_id,
+                    "status",
+                    if failed { "failed" } else { "cancelled" },
+                    None,
+                )
+                .await
+                .unwrap();
+        }
         // The event handler is still awaiting platform I/O, so the reply pump
         // misses the predecessor's terminal state entirely.
         s.chat_tick(&std::collections::HashSet::new())
@@ -4066,6 +4129,25 @@ async fn abandoned_deliveries_never_collect_the_next_requesters_answer_or_files(
             .unwrap();
         let next = s.chat_detail(text(&chat, "id")).await.unwrap();
         assert_eq!(next["run"]["chatExecution"]["text"], "Request from bob");
+        if failed && !retried {
+            // A marker written before canonical terminal statuses still keeps
+            // its own frozen range. It must never search Bob's later events.
+            let key = format!(
+                "plugin-turn-abandoned:{}:{}",
+                text(&chat, "id"),
+                old_delivery.as_str().unwrap()
+            );
+            let lookup = key.clone();
+            let mut legacy = s
+                .store
+                .read(move |db| db.kv(&lookup))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(legacy["reply"]["status"], "failed");
+            legacy["reply"].as_object_mut().unwrap().remove("status");
+            s.store.set(&key, legacy, None).await.unwrap();
+        }
         assert!(
             next["run"]["retry"].is_null(),
             "the independent request inherited its predecessor's spent retry budget"
@@ -4159,6 +4241,9 @@ async fn abandoned_deliveries_never_collect_the_next_requesters_answer_or_files(
             "the abandoned delivery consumed a later completion"
         );
         assert!(!text(alice, "text").contains("Bob"));
+        if retried {
+            assert_eq!(alice["text"], "Alice's last attempt");
+        }
         assert_eq!(alice["files"], json!([]));
         let bob = replies
             .iter()

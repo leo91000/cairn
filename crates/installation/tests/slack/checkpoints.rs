@@ -389,11 +389,14 @@ async fn measure_reply_checkpoint_storage() {
 async fn measure_ended_reply_range_storage() {
     use cairn_installation::store::Store;
     let mut cases = Vec::new();
-    for frozen in [false, true] {
+    for shape in ["unfrozen", "legacyRange", "terminalRange"] {
         let root = TempDir::new().unwrap();
         let mut value = json!({"runId": "00000000-0000-4000-8000-000000000001", "failed": true});
-        if frozen {
+        if shape != "unfrozen" {
             value["reply"] = json!({"delivered": 1000, "end": 1002, "failed": true});
+        }
+        if shape == "terminalRange" {
+            value["reply"]["status"] = json!("failed");
         }
         let rows: Vec<_> = (0..1000).map(|index| {
             (format!("plugin-turn-abandoned:00000000-0000-4000-8000-000000000002:{index:08}-0000-4000-8000-000000000000"), value.clone())
@@ -438,16 +441,20 @@ async fn measure_ended_reply_range_storage() {
                 "processCpuMs": cpu_ms()-cpu}),
             );
         }
-        cases.push(
-            json!({"frozenRange": frozen, "records": rows.len(), "encodedKeyAndJsonBytes": bytes,
-            "reads": reads, "writes": writes}),
-        );
+        cases.push(json!({
+            "shape": shape,
+            "frozenRange": shape != "unfrozen",
+            "records": rows.len(),
+            "encodedKeyAndJsonBytes": bytes,
+            "reads": reads,
+            "writes": writes,
+        }));
     }
     eprintln!(
         "ENDED_REPLY_RANGE_STORAGE {}",
         json!({
             "cases": cases,
-            "workload": "1000 private KV markers of the prior shape versus the same keys with an optional already-ended range; six reads and six same-value writes per case",
+            "workload": "1000 private KV markers without a range, with the legacy range, and with that same range plus canonical failed status; six reads and six same-value writes per case",
             "cache": "fresh Store after seeding; one read actor executes the first connection-cold and five warm reads; OS page cache retained",
             "limits": "key and serialized JSON bytes exclude SQLite pages, WAL and index overhead; reads exclude actor scheduling, writes include it; no provider/network/whole-turn/SQL-range-selection performance claim",
             "host": {"parallelism": std::thread::available_parallelism().ok().map(std::num::NonZero::get),

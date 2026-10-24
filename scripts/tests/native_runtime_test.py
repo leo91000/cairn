@@ -24,6 +24,7 @@ import threading
 import time
 import urllib.error
 import uuid
+import zipfile
 
 SPEC = importlib.util.spec_from_file_location('native_host', Path(__file__).resolve().parents[2] / 'deploy/nodes/native-host.py')
 host = importlib.util.module_from_spec(SPEC)
@@ -177,13 +178,17 @@ def main():
 
         contexts = {}
         started_runs = set()
+        base_projects, base_archives, base_keys = {}, {}, {}
 
         def seed(run, legacy=False):
             stage = data / 'runs' / run
             for directory in (stage / 'workspace', stage / 'home/.codex', stage / 'home/.claude', stage / 'home/.agents/skills/frozen', stage / 'output'):
                 directory.mkdir(parents=True, mode=0o700, exist_ok=True)
-            (stage / 'workspace/seed').write_text('initial project')
-            (stage / 'workspace/asset').write_bytes(asset)
+            if run in base_projects:
+                (stage / 'workspace' / base_projects[run]).mkdir(exist_ok=True)
+            else:
+                (stage / 'workspace/seed').write_text('initial project')
+                (stage / 'workspace/asset').write_bytes(asset)
             (stage / 'home/.codex/auth.json').write_text(SECRET)
             (stage / 'home/.agents/skills/frozen/SKILL.md').write_text('frozen fixture skill')
             if legacy:
@@ -208,7 +213,8 @@ def main():
 
         def managed(run):
             pid = command('systemctl', 'show', supervisor, '--property=MainPID', '--value').stdout.strip()
-            return Path('/proc') / pid / 'root' / str(state).lstrip('/') / 'native' / run / 'data/workspaces'
+            path = Path('/proc') / pid / 'root' / str(state).lstrip('/') / 'native' / run / 'data/workspaces'
+            return path / base_projects[run] if run in base_projects else path
 
         def start_controller():
             # A stopped workload can still reference the transient supervisor.
@@ -226,6 +232,31 @@ def main():
             api('/node-budget', dict(limits=dict(diskMiB=4096, cpu=2, memoryMiB=1024), slots=1))
             api('/storage-policy', contexts[runs[0]]['policy'])
 
+        def prepare_base(run):
+            project = str(uuid.uuid4())
+            cache = data / 'project-archives'
+            cache.mkdir(exist_ok=True)
+            archive = cache / 'fixture.zip'
+            with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1) as output:
+                output.writestr('seed', 'initial project')
+                output.writestr('asset', asset)
+            checksum = manager('archive-hash', path=str(archive))['hash']
+            descriptor = dict(projectId=project, revision='a'*40, key='b'*64, hash=checksum,
+                              bytes=archive.stat().st_size, logicalBytes=len(asset)+len('initial project'))
+            cached = cache / (checksum + '.zip')
+            archive.rename(cached)
+            request = dict(archives=[descriptor], diskMiB=256)
+            api('/native-bases/warm', request)
+            ready = eventually(lambda: api('/native-bases/lookup', request)['base'])
+            base_projects[run], base_archives[run], base_keys[run] = project, [descriptor], ready['key']
+            stage = seed(run)
+            for name in ('seed', 'asset'):
+                (stage / 'workspace' / name).unlink(missing_ok=True)
+            # A prepared conversation must not require the original ZIP or an
+            # expanded transfer tree after warming has completed.
+            cached.unlink()
+            metrics['preparedBaseMetadataBytes'] = ready['metadataBytes']
+
         def start(run, long=True, lease=90000, expected='changed', legacy=False, measure=None):
             seed(run)
             attempt = str(uuid.uuid4())
@@ -242,6 +273,7 @@ def main():
             if run in started_runs:
                 script += 'test "$(cat /home/node/.claude/user-state.json)" = "new user state"\n'
             script += 'printf "new user state" > /home/node/.claude/user-state.json\n'
+            script += 'test "$(cat /run/cairn-chat/attachments/native-image/image.png)" = "synthetic image bytes"\n'
             script += 'test -f /home/node/.agents/skills/frozen/SKILL.md\n'
             script += 'if touch /home/node/.agents/skills/bad 2>/dev/null; then exit 83; fi\n'
             if legacy:
@@ -260,9 +292,16 @@ def main():
             (tools / 'bin/codex').write_text(script)
             (tools / 'bin/codex').chmod(0o555)
             plan = dict(id=attempt, runId=run, backend='native', runtimeId='synthetic', nodeLeaseRequired=True,
-                expires=None, cwd=str(workspace), projectRoot=str(workspace), sandbox='workspace-write',
+                expires=None, cwd=str(workspace / base_projects[run] if run in base_projects else workspace), projectRoot=str(workspace), sandbox='workspace-write',
                 resources=dict(cpu=1, memoryMiB=512, diskMiB=256), args=[], prompt='synthetic input', storage=contexts[run],
                 imports=[dict(source=str(workspace), target=str(workspace)), dict(source=str(data / 'runs' / run / 'home'), target='/home/node')])
+            if run in base_archives:
+                plan.update(nativeProjectArchives=base_archives[run], nativeProjectBase=base_keys[run])
+                os.link(state / 'native-bases' / base_keys[run] / 'pin', data / 'runs' / run / ('native-base-' + attempt + '.pin'))
+            image = data / 'runs' / run / 'chat-input/attachments/native-image/image.png'
+            image.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            image.write_text('synthetic image bytes')
+            image.chmod(0o600)
             (data / 'runner-plans' / (attempt + '.json')).write_text(json.dumps(plan))
             manager('checkpoint', run=run, attempt=attempt)
             api('/runs/' + attempt + '/lease', {'remainingMs': lease})
@@ -365,7 +404,9 @@ def main():
                 assert error.code == 409
             else:
                 raise AssertionError('Eviction accepted a stale/mismatched S3 receipt.')
+            prepare_base(other)
             second_run_attempt = start(other)
+            assert not (data / 'runs' / other / ('native-base-' + second_run_attempt + '.pin')).exists(), 'Completed clone retained its cache pin.'
             api('/runs/' + second_run_attempt, method='DELETE')
             fenced(other, second_run_attempt)
             other_before = api('/disks/' + other + '/storage-status')
@@ -410,8 +451,13 @@ def main():
             receipt = dict(attempt=resumed, backupId=point['backupId'], generation=point['generation'], grantId=status['grantId'])
             api('/storage-policy', contexts[run]['policy'])
             (managed(run) / 'persisted').write_text('unpublished mutation')
+            # Stopping a protected workload must thaw its owned unit before
+            # systemd can deliver termination signals. No manual thaw in this test.
+            api('/storage-policy', policy)
+            eventually(lambda: api('/disks/' + run + '/storage-status')['paused'] is True, timeout=25)
             api('/runs/' + resumed, method='DELETE')
             fenced(run, resumed)
+            api('/storage-policy', contexts[run]['policy'])
             assert api('/disks/' + run + '/storage-status')['dirtyBytes'] > 0
             try:
                 api('/disks/' + run + '/evict', receipt)

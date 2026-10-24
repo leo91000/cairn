@@ -1,0 +1,245 @@
+{
+  "cache": "fresh Store after seeding; one read actor executes the first connection-cold and five warm reads; OS page cache retained",
+  "cases": [
+    {
+      "encodedKeyAndJsonBytes": 157000,
+      "frozenRange": false,
+      "reads": [
+        {
+          "processCpuMs": 0.7137330000000013,
+          "returnedJsonBytes": 62,
+          "sample": 0,
+          "wallMs": 0.554962
+        },
+        {
+          "processCpuMs": 0.01755500000000154,
+          "returnedJsonBytes": 62,
+          "sample": 1,
+          "wallMs": 0.016974
+        },
+        {
+          "processCpuMs": 0.009126999999999441,
+          "returnedJsonBytes": 62,
+          "sample": 2,
+          "wallMs": 0.008457999999999999
+        },
+        {
+          "processCpuMs": 0.008476000000001704,
+          "returnedJsonBytes": 62,
+          "sample": 3,
+          "wallMs": 0.007997
+        },
+        {
+          "processCpuMs": 0.009129999999998972,
+          "returnedJsonBytes": 62,
+          "sample": 4,
+          "wallMs": 0.008634000000000001
+        },
+        {
+          "processCpuMs": 0.007900999999996827,
+          "returnedJsonBytes": 62,
+          "sample": 5,
+          "wallMs": 0.007461000000000001
+        }
+      ],
+      "records": 1000,
+      "shape": "unfrozen",
+      "writes": [
+        {
+          "processCpuMs": 0.1333779999999969,
+          "sample": 0,
+          "wallMs": 0.124735
+        },
+        {
+          "processCpuMs": 0.09471299999999871,
+          "sample": 1,
+          "wallMs": 0.078691
+        },
+        {
+          "processCpuMs": 0.03471700000000055,
+          "sample": 2,
+          "wallMs": 0.029179999999999998
+        },
+        {
+          "processCpuMs": 0.08157099999999673,
+          "sample": 3,
+          "wallMs": 0.071456
+        },
+        {
+          "processCpuMs": 0.07505600000000001,
+          "sample": 4,
+          "wallMs": 0.065957
+        },
+        {
+          "processCpuMs": 0.053072999999997705,
+          "sample": 5,
+          "wallMs": 0.046679
+        }
+      ]
+    },
+    {
+      "encodedKeyAndJsonBytes": 209000,
+      "frozenRange": true,
+      "reads": [
+        {
+          "processCpuMs": 0.834975,
+          "returnedJsonBytes": 114,
+          "sample": 0,
+          "wallMs": 0.571152
+        },
+        {
+          "processCpuMs": 0.02496800000000121,
+          "returnedJsonBytes": 114,
+          "sample": 1,
+          "wallMs": 0.023654
+        },
+        {
+          "processCpuMs": 0.01994400000000951,
+          "returnedJsonBytes": 114,
+          "sample": 2,
+          "wallMs": 0.01895
+        },
+        {
+          "processCpuMs": 0.02189599999999814,
+          "returnedJsonBytes": 114,
+          "sample": 3,
+          "wallMs": 0.020761
+        },
+        {
+          "processCpuMs": 0.01912299999999334,
+          "returnedJsonBytes": 114,
+          "sample": 4,
+          "wallMs": 0.018104000000000002
+        },
+        {
+          "processCpuMs": 0.01897099999999341,
+          "returnedJsonBytes": 114,
+          "sample": 5,
+          "wallMs": 0.017886000000000003
+        }
+      ],
+      "records": 1000,
+      "shape": "legacyRange",
+      "writes": [
+        {
+          "processCpuMs": 0.18704499999999769,
+          "sample": 0,
+          "wallMs": 0.168465
+        },
+        {
+          "processCpuMs": 0.05922999999999945,
+          "sample": 1,
+          "wallMs": 0.050364
+        },
+        {
+          "processCpuMs": 0.04218000000000188,
+          "sample": 2,
+          "wallMs": 0.036029
+        },
+        {
+          "processCpuMs": 0.037751999999997565,
+          "sample": 3,
+          "wallMs": 0.032028
+        },
+        {
+          "processCpuMs": 0.03763099999999042,
+          "sample": 4,
+          "wallMs": 0.03191
+        },
+        {
+          "processCpuMs": 0.03890400000000227,
+          "sample": 5,
+          "wallMs": 0.033016
+        }
+      ]
+    },
+    {
+      "encodedKeyAndJsonBytes": 227000,
+      "frozenRange": true,
+      "reads": [
+        {
+          "processCpuMs": 0.5756110000000092,
+          "returnedJsonBytes": 132,
+          "sample": 0,
+          "wallMs": 0.540554
+        },
+        {
+          "processCpuMs": 0.025642000000004828,
+          "returnedJsonBytes": 132,
+          "sample": 1,
+          "wallMs": 0.024312999999999998
+        },
+        {
+          "processCpuMs": 0.02112699999999279,
+          "returnedJsonBytes": 132,
+          "sample": 2,
+          "wallMs": 0.020031
+        },
+        {
+          "processCpuMs": 0.020920000000003824,
+          "returnedJsonBytes": 132,
+          "sample": 3,
+          "wallMs": 0.019772
+        },
+        {
+          "processCpuMs": 0.019947000000001935,
+          "returnedJsonBytes": 132,
+          "sample": 4,
+          "wallMs": 0.018865999999999997
+        },
+        {
+          "processCpuMs": 0.019547000000002868,
+          "returnedJsonBytes": 132,
+          "sample": 5,
+          "wallMs": 0.018524000000000002
+        }
+      ],
+      "records": 1000,
+      "shape": "terminalRange",
+      "writes": [
+        {
+          "processCpuMs": 0.15578899999999862,
+          "sample": 0,
+          "wallMs": 0.143353
+        },
+        {
+          "processCpuMs": 0.042018999999996254,
+          "sample": 1,
+          "wallMs": 0.046795
+        },
+        {
+          "processCpuMs": 0.0050280000000100245,
+          "sample": 2,
+          "wallMs": 0.034171999999999994
+        },
+        {
+          "processCpuMs": 0.005440000000007217,
+          "sample": 3,
+          "wallMs": 0.032352
+        },
+        {
+          "processCpuMs": 0.08268200000000547,
+          "sample": 4,
+          "wallMs": 0.037427
+        },
+        {
+          "processCpuMs": 0.042335999999991714,
+          "sample": 5,
+          "wallMs": 0.036276
+        }
+      ]
+    }
+  ],
+  "host": {
+    "cpuMax": null,
+    "memoryMax": null,
+    "parallelism": 12
+  },
+  "limits": "key and serialized JSON bytes exclude SQLite pages, WAL and index overhead; reads exclude actor scheduling, writes include it; no provider/network/whole-turn/SQL-range-selection performance claim",
+  "workload": "1000 private KV markers without a range, with the legacy range, and with that same range plus canonical failed status; six reads and six same-value writes per case",
+  "platform": "Linux-7.2.9-arch1-1-x86_64-with-glibc2.44",
+  "cpuModel": "Intel(R) Core(TM) i9-14900K",
+  "ioPressureAtCapture": "some avg10=33.27 avg60=37.67 avg300=34.20 total=337068424086\nfull avg10=25.57 avg60=28.99 avg300=26.74 total=302585751906\n",
+  "source": "Main bd0ffa40 merged with pushed4ed0d69a plus native631 selector/status correction",
+  "command": "mise exec pnpm@12.3.4 -- pnpm test:backend -p cairn-installation --test slack checkpoints::measure_ended_reply_range_storage -- --ignored --exact --nocapture --test-threads=1"
+}

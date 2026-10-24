@@ -282,13 +282,7 @@ pub async fn capture(
         ));
     }
     let needed = logical.saturating_mul(2).saturating_add(16 * 1024 * 1024);
-    let path = std::ffi::CString::new(snapshots_root.as_os_str().as_encoded_bytes())
-        .map_err(Error::internal)?;
-    let mut capacity = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    if unsafe { libc::statvfs(path.as_ptr(), capacity.as_mut_ptr()) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let capacity = unsafe { capacity.assume_init() };
+    let capacity = filesystem(&snapshots_root)?;
     let free = capacity.f_bavail.saturating_mul(capacity.f_frsize);
     if free < needed.saturating_add(256 * 1024 * 1024) {
         return Err(Error::unavailable(
@@ -592,8 +586,20 @@ async fn finish_restore(root: &Path, pending: &Value) -> Result<Value> {
 
 /// No symlink traversal, device reads or directory deletion through workload paths.
 pub async fn own_tree(root: &Path, uid: u32, gid: u32) -> Result<()> {
+    own_tree_with_stop(root, uid, gid, &tokio_util::sync::CancellationToken::new()).await
+}
+
+pub(crate) async fn own_tree_with_stop(
+    root: &Path,
+    uid: u32,
+    gid: u32,
+    stop: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
     let mut pending = vec![root.to_owned()];
     while let Some(path) = pending.pop() {
+        if stop.is_cancelled() {
+            return Err(Error::unavailable("Native base ownership stopped."));
+        }
         let metadata = tokio::fs::symlink_metadata(&path).await?;
         std::os::unix::fs::lchown(&path, Some(uid), Some(gid))?;
         if metadata.is_dir() && !metadata.file_type().is_symlink() {
@@ -621,6 +627,22 @@ pub async fn bytes(root: &Path) -> Result<u64> {
 /// Descriptor-relative traversal is shared by synchronous block admission and
 /// asynchronous status sampling. It never follows workload links or opens FIFOs.
 pub(crate) fn measure(root: &Path, physical: bool) -> Result<u64> {
+    measure_with_seen(root, physical, None)
+}
+
+pub(crate) fn measure_unique(
+    root: &Path,
+    physical: bool,
+    seen: &mut std::collections::HashSet<(u64, u64)>,
+) -> Result<u64> {
+    measure_with_seen(root, physical, Some(seen))
+}
+
+fn measure_with_seen(
+    root: &Path,
+    physical: bool,
+    mut seen: Option<&mut std::collections::HashSet<(u64, u64)>>,
+) -> Result<u64> {
     use std::{
         ffi::CString,
         os::{
@@ -669,6 +691,12 @@ pub(crate) fn measure(root: &Path, physical: bool) -> Result<u64> {
             stack.push((file, entries));
         } else if metadata.is_file() {
             use std::os::unix::fs::MetadataExt;
+            if seen
+                .as_mut()
+                .is_some_and(|seen| !seen.insert((metadata.dev(), metadata.ino())))
+            {
+                continue;
+            }
             let size = if physical {
                 metadata.blocks().saturating_mul(512)
             } else {
@@ -678,6 +706,17 @@ pub(crate) fn measure(root: &Path, physical: bool) -> Result<u64> {
         }
     }
     Ok(total)
+}
+
+/// Host extraction and sparse images use this filesystem's allocation unit.
+pub(crate) fn filesystem(path: &Path) -> Result<libc::statvfs> {
+    let path =
+        std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).map_err(Error::internal)?;
+    let mut capacity = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(path.as_ptr(), capacity.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(unsafe { capacity.assume_init() })
 }
 
 #[cfg(test)]

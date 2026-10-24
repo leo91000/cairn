@@ -372,3 +372,12 @@ restart. Definite access/visibility denials continue
 to refuse import/export. Transport exceptions and all final lifecycle/qualification
 requirements remain subject to the complete contract; this is not an exactly-once
 provider-write guarantee or a real Slack workspace result.
+
+### Stopped-work replies
+
+In the current plain-text conversation slice, cancelled work posts a Stop
+confirmation to its original Slack thread. Unfinished native output remains in
+Cairn, including provider progress that is not a completed answer. Progress/
+question controls still retire under the original requester and live channel
+checks. Other native consumers keep Cairn's partial reply after cancellation;
+Slack's complete native-session/streaming surfaces remain accepted future work.
