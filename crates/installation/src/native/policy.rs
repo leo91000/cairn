@@ -42,10 +42,6 @@ pub fn caller() -> Option<String> {
     CALLER.try_with(Clone::clone).ok().flatten()
 }
 
-pub fn native(agent: &Value) -> bool {
-    policy(agent)["backend"] == "native"
-}
-
 pub fn node_native(node: &Value) -> bool {
     node["capabilities"]["backend"] == "native"
 }
@@ -169,7 +165,7 @@ pub(crate) fn task_grant(
             if grant["nativeParentRunId"].is_string()
                 && grant["nativeParentRunId"] != previous["nativeParentRunId"]
             {
-                if native(&agent) {
+                if starts_natively(db, &agent)? {
                     return Err(Error::forbidden(
                         "A task cannot combine unrelated native delegation grants.",
                     ));
@@ -210,8 +206,8 @@ pub fn allows(db: &Db<'_>, run: &Value, node: &Value) -> Result<bool> {
     allows_agent(db, run, node, &agent, Admission::Execution)
 }
 
-/// Only the fenced migration read path can substitute the saved backend for the
-/// current profile. All principal, node-owner and parent revocations still apply.
+/// Only the fenced conversion read path can read a native source the agent no
+/// longer grants. All principal, node-owner and parent revocations still apply.
 pub(crate) fn allows_migration_source(db: &Db<'_>, run: &Value, node: &Value) -> Result<bool> {
     if run["backendMigration"]["sourceReadReady"] != true {
         return Ok(false);
@@ -219,7 +215,6 @@ pub(crate) fn allows_migration_source(db: &Db<'_>, run: &Value, node: &Value) ->
     let mut agent = db
         .get("agents", crate::nodes::run_agent(run))?
         .unwrap_or_default();
-    agent["access"]["backend"] = "native".into();
     agent["access"]["nodes"] = json!([node["id"]]);
     let mut source = run.clone();
     apply(&mut source, &run["backendMigration"]["grant"]);
@@ -247,14 +242,11 @@ fn allows_agent(
     agent: &Value,
     admission: Admission,
 ) -> Result<bool> {
-    if !native(agent)
-        || !native(&run["snapshot"]["agent"])
-        || !node_native(node)
+    if !node_native(node)
         || node["nativeEnabled"] != true
         || node["revoked"] == true
         || !matches!(admission, Admission::Authority) && !crate::nodes::native_mode::applied(node)
         // A fenced migration reads existing storage; it never launches a workload.
-        // Switching backend revokes the agent's administrator execution review.
         || !matches!(admission, Admission::MigrationSource)
             && !crate::nodes::native_mode::reviewed(node, agent)
         || !crate::service::allowed(&policy(agent)["nodes"], text(node, "id"))
@@ -318,9 +310,24 @@ fn allows_agent(
     Ok(false)
 }
 
+/// Whether new conversations of `agent` start natively: only native nodes are allowed.
+fn starts_natively(db: &Db<'_>, agent: &Value) -> Result<bool> {
+    Ok(crate::nodes::backend::default_for_agent(db, agent)? == crate::nodes::backend::NATIVE)
+}
+
+/// Whether the chat's environment runs natively, or will when it starts.
+fn chat_runs_natively(db: &Db<'_>, run: &Value, agent: &Value) -> Result<bool> {
+    if run["id"].is_string() {
+        return Ok(crate::nodes::backend::of_run_in(db, run)? == crate::nodes::backend::NATIVE);
+    }
+    starts_natively(db, agent)
+}
+
+/// Every origin is recorded. Conversations starting on a native node also need
+/// one it currently authorizes; VM conversations are checked again on a move.
 pub(crate) fn authorize_origin(db: &Db<'_>, agent: &Value, source: &Origin) -> Result<Value> {
     let grant = provenance(db, source)?;
-    if !native(agent) {
+    if !starts_natively(db, agent)? {
         return Ok(grant);
     }
 
@@ -357,11 +364,7 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
             "Wait for the backend migration to finish before directing this conversation.",
         ));
     }
-    if native(&run["snapshot"]["agent"]) != native(&agent) && run["id"].is_string() {
-        return Err(Error::conflict(
-            "Execution backend changed. Migrate this conversation from its execution-node details before continuing.",
-        ));
-    }
+    let native = chat_runs_natively(db, &run, &agent)?;
     let incoming = authorize_origin(db, &agent, source)?;
     let legacy = chat["id"].is_string()
         && run["id"].is_string()
@@ -390,7 +393,7 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
         && incoming["nativeParentRunId"].is_string()
         && chat["nativeParentRunId"] != incoming["nativeParentRunId"]
     {
-        if native(&agent) {
+        if native {
             return Err(Error::forbidden(
                 "A native conversation cannot combine unrelated delegation grants.",
             ));
@@ -433,7 +436,7 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
         },
         "nativeProvenanceUnknown": unknown,
     });
-    if native(&agent) {
+    if native {
         let mut combined = json!({ "snapshot": { "agent": agent } });
         apply(&mut combined, &grant);
         if !db.list("nodes")?.iter().any(|node| {
@@ -531,10 +534,18 @@ pub async fn refresh(s: &Service) -> Result<()> {
 }
 
 pub async fn refresh_agent(s: &Service, agent: &str) -> Result<()> {
-    if native(&s.get("agents", agent).await?) {
+    if may_use_native(s, &s.get("agents", agent).await?).await? {
         refresh(s).await?;
     }
     Ok(())
+}
+
+/// Agents granted a native node need fresh human authority on every request,
+/// even while a conversation runs in a VM: it may move to that node.
+async fn may_use_native(s: &Service, agent: &Value) -> Result<bool> {
+    let access = policy(agent);
+    let nodes = s.store.list("nodes").await?;
+    Ok(crate::nodes::backend::may_use_native(&access, &nodes))
 }
 
 pub async fn refresh_chat(s: &Service, chat: &str) -> Result<()> {
@@ -571,14 +582,11 @@ pub async fn authorize_request(s: &Service, input: &crate::http::Input) -> Resul
         }
         ["runs", id, ..] | ["nodes", "placement", id, ..] => {
             let run = s.store.run(id).await?;
-            if !native(&run["snapshot"]["agent"]) {
-                return Ok(());
-            }
             s.get("agents", crate::nodes::run_agent(&run)).await?
         }
         _ => return Ok(()),
     };
-    if !native(&agent) {
+    if !may_use_native(s, &agent).await? {
         return Ok(());
     }
     refresh(s).await?;
@@ -592,8 +600,15 @@ pub async fn authorize_request(s: &Service, input: &crate::http::Input) -> Resul
         ["runs", id, ..] | ["nodes", "placement", id, ..] => ((*id).to_owned(), false),
         _ => return Ok(()),
     };
+    let move_destination = match parts.as_slice() {
+        ["nodes", "placement", _, "move" | "backend-migration"] if input.method == "POST" => {
+            input.body["nodeId"].as_str().map(str::to_owned)
+        }
+        _ => None,
+    };
     s.store
         .read(move |db| {
+            let human = caller.is_some();
             let origin = caller.map_or(Origin::Unknown, Origin::Human);
             authorize_origin(db, &agent, &origin)?;
             if chat_target {
@@ -601,7 +616,21 @@ pub async fn authorize_request(s: &Service, input: &crate::http::Input) -> Resul
                 chat_grant(db, &chat, &origin)?;
             } else {
                 let run = crate::error::required(db.run(&target)?, "Run not found")?;
-                run_grant(db, &run, &origin)?;
+                let destination = move_destination
+                    .as_deref()
+                    .map(|node| db.get("nodes", node))
+                    .transpose()?
+                    .flatten();
+                let adopting = human
+                    && destination.as_ref().is_some_and(|node| {
+                        crate::nodes::backend::of_run_in(db, &run)
+                            .is_ok_and(|backend| backend != crate::nodes::backend::of_node(node))
+                    });
+                // The move transaction validates and records the owner's new
+                // authority. Retained delegation must not block that adoption.
+                if !adopting {
+                    run_grant(db, &run, &origin)?;
+                }
             }
             Ok(())
         })

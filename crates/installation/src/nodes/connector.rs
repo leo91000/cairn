@@ -234,6 +234,7 @@ pub fn capabilities(path: &Path) -> Result<Value> {
         kvm,
         fuse: device_opens("/dev/fuse").is_some(),
         ublk: device_opens("/dev/ublk-control").is_some(),
+        vm_disks: crate::native::enabled() && crate::native::idmap::supported(),
         native_mode_protocol: u32::from(crate::native::enabled()),
         cpu: u32::try_from(cpu).unwrap_or(u32::MAX),
         memory_mi_b: memory,

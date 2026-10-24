@@ -681,7 +681,11 @@ pub(crate) async fn invoke(
     let authorize = crate::installation_mcp::management_authorization(bearer);
     match name {
         "get_chat_backend_migration" => {
-            crate::backend_migration::preview(s, text(&args, "chatId"), authorize).await
+            if let Some(run) = args["runId"].as_str() {
+                crate::backend_migration::preview_run(s, run, authorize).await
+            } else {
+                crate::backend_migration::preview(s, text(&args, "chatId"), authorize).await
+            }
         }
         "migrate_chat_backend" => s.migrate_chat_backend(args, authorize).await,
         "list_nodes"

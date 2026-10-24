@@ -6,6 +6,7 @@ mod bases_warmer;
 pub(crate) mod block;
 pub(crate) mod disk;
 mod home;
+pub(crate) mod idmap;
 mod mode;
 pub mod policy;
 mod protection;

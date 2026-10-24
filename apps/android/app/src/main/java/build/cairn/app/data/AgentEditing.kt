@@ -84,7 +84,6 @@ fun newAgent() =
                 mcpTools = emptyMap(),
                 installation = false,
                 sandbox = "yolo",
-                backend = VM_BACKEND,
             ),
         exclusiveNodes = emptyList(),
         plugins = emptyList(),
@@ -179,7 +178,6 @@ fun agentChanges(original: Agent, draft: AgentDraft): List<AgentSection> {
                 before.withGrantedTools().mcpTools.mapValues { it.value.toSet() }
         if (after.mcps != before.mcps || toolsChanged) add(AgentSection.Mcp)
         if (edited.plugins.toSet() != original.plugins.toSet()) add(AgentSection.Plugins)
-        if (after.backend != before.backend) add(AgentSection.Nodes)
         if (after.nodes?.toSet() != before.nodes?.toSet()) add(AgentSection.Nodes)
         if (edited.exclusiveNodes.toSet() != original.exclusiveNodes.toSet())
             add(AgentSection.Nodes)
@@ -242,11 +240,10 @@ fun selectionSummary(selected: List<String>?, total: Int, feminine: Boolean = fa
     }
 
 /**
- * The node list of the agent page: the current runner first, then enrolled machines. With a
- * [backend], only machines of that execution backend (the server refuses the others); the current
- * runner is a VM runner.
+ * The node list of the agent page: the current runner first, then enrolled VM and native machines
+ * alike. Each conversation keeps the backend it started on.
  */
-fun agentNodeChoices(nodes: List<ExecutionNode>, backend: String? = null): List<ExecutionNode> {
+fun agentNodeChoices(nodes: List<ExecutionNode>): List<ExecutionNode> {
     val local =
         nodes.find { it.local || it.id == LOCAL_NODE_ID }
             ?: ExecutionNode(
@@ -256,57 +253,28 @@ fun agentNodeChoices(nodes: List<ExecutionNode>, backend: String? = null): List<
                 accepting = true,
                 status = "online",
             )
-    val runner =
-        listOf(local.copy(id = LOCAL_NODE_ID, name = "Runner actuel")).filter {
-            backend == null || backend != NATIVE_BACKEND
-        }
-    return runner +
-        nodes.filter {
-            !it.local &&
-                it.id != LOCAL_NODE_ID &&
-                !it.revoked &&
-                (backend == null ||
-                    (it.capabilities.backend == NATIVE_BACKEND) == (backend == NATIVE_BACKEND))
-        }
+    val runner = listOf(local.copy(id = LOCAL_NODE_ID, name = "Runner actuel"))
+    return runner + nodes.filter { !it.local && it.id != LOCAL_NODE_ID && !it.revoked }
 }
 
-/** A run permission the agent holds on a node it cannot use. */
-data class HeldNode(val id: String, val name: String?, val otherBackend: Boolean)
+/** A run permission the agent holds on a node that is gone or revoked. */
+data class HeldNode(val id: String, val name: String?)
 
-/**
- * Run permissions on nodes that are gone, revoked or of the other execution backend: kept by the
- * server until removed, they never let the agent run there.
- */
+/** Run permissions on nodes that are gone or revoked: kept by the server until removed. */
 fun Agent.unusableNodes(nodes: List<ExecutionNode>): List<HeldNode> {
     val held = access.nodes ?: return emptyList()
     val usable = nodeChoices(nodes).map { it.id }.toSet()
-    val known = agentNodeChoices(nodes)
     return held
         .filter { it !in usable }
-        .map { id ->
-            val node = known.find { it.id == id }
-            HeldNode(id, node?.name, otherBackend = node != null)
-        }
+        .map { id -> HeldNode(id, nodes.find { it.id == id }?.name) }
 }
 
-/** The node list for this agent's execution backend. */
-fun Agent.nodeChoices(nodes: List<ExecutionNode>) = agentNodeChoices(nodes, access.backend)
+/** The machines this agent can be granted. */
+fun Agent.nodeChoices(nodes: List<ExecutionNode>) = agentNodeChoices(nodes)
 
-/**
- * Switches between a VM and native execution on the host. Nodes of the other backend no longer
- * apply, so node execution and exclusive reservations start again from none.
- */
-fun Agent.withBackend(native: Boolean, readOnlyGrants: Boolean = false): Agent {
-    val backend = if (native) NATIVE_BACKEND else VM_BACKEND
-    if (backend == access.backend) return this
-    return copy(
-        access = access.copy(backend = backend, nodes = emptyList()),
-        exclusiveNodes = if (readOnlyGrants) exclusiveNodes else emptyList(),
-    )
-}
-
-/** "VM" or "Native", as the overview shows the execution backend. */
-fun backendLabel(backend: String) = if (backend == NATIVE_BACKEND) "Exécution native" else "VM"
+/** Native machines this agent may run on: conversations moved there run as host processes. */
+fun Agent.nativeNodes(nodes: List<ExecutionNode>) =
+    agentNodeChoices(nodes).filter { it.backend == NATIVE_BACKEND && access.runsOn(it.id) }
 
 fun AccessPolicy.runsOn(node: String) = nodes == null || node in nodes
 
@@ -342,7 +310,7 @@ fun AccessPolicy.withAllNodes(
         else ->
             copy(
                 nodes =
-                    agentNodeChoices(nodes, backend)
+                    agentNodeChoices(nodes)
                         .filter {
                             it.nativeModeRequest?.mode != "administrator" ||
                                 agentId in it.nativeReviewedAgents
@@ -429,7 +397,11 @@ fun sandboxLabel(value: String) =
 
 val SANDBOX_CHOICES =
     listOf(
-        Triple("yolo", "YOLO", "VM privée avec sudo et Docker."),
+        Triple(
+            "yolo",
+            "YOLO",
+            "VM privée avec sudo et Docker ; sur une node native, un compte géré de l’hôte avec GPU et outils système. Les privilèges suivent le mode confirmé de la node.",
+        ),
         Triple(
             "workspace-write",
             "Écriture limitée",
@@ -452,8 +424,7 @@ fun nodesSummary(agent: Agent, nodes: List<ExecutionNode>): String {
         }
     val exclusive = agent.effectiveExclusive(nodes).size
     val summary = if (exclusive > 0) "$run · exclusivité sur $exclusive" else run
-    return if (access.backend == NATIVE_BACKEND) "${backendLabel(access.backend)} · $summary"
-    else summary
+    return if (agent.nativeNodes(nodes).isNotEmpty()) "$summary · nodes natives" else summary
 }
 
 fun timeoutSummary(minutes: Int) =
@@ -476,7 +447,8 @@ fun agentAccessSummary(
     return buildList {
             add(access.projects?.let { plural(it.size, "projet") } ?: "Tous les projets")
             add(access.nodes?.let { plural(it.size, "node") } ?: "Toutes les nodes")
-            if (access.backend == NATIVE_BACKEND) add(backendLabel(access.backend))
+            // Only when the machine list says so; without it, no native node is claimed.
+            if (nodes != null && agent.nativeNodes(nodes).isNotEmpty()) add("Nodes natives")
             if (shown.plugins.isNotEmpty())
                 if (catalog == null) add(plural(shown.plugins.size, "plugin"))
                 else
@@ -537,9 +509,7 @@ fun agentIssues(agent: Agent, resources: AgentResources): List<AgentIssue> = bui
             add(
                 AgentIssue(
                     AgentSection.Nodes,
-                    if (held.otherBackend)
-                        "« ${held.name} » utilise un autre mode d’exécution : l’agent ne peut pas s’y exécuter."
-                    else "Une node autorisée n’existe plus ou a été révoquée.",
+                    "Une node autorisée n’existe plus ou a été révoquée.",
                 )
             )
         }
@@ -717,7 +687,6 @@ fun agentReductions(
         .forEach { id -> add(pluginGrantLabel(id, resources.catalog)) }
     if (before.installation && !after.installation) add("gestion de l’installation")
     if (before.delegation == true && after.delegation != true) add("délégation de tâches")
-    if (before.backend == NATIVE_BACKEND && after.backend != NATIVE_BACKEND) add("exécution native")
     if ((sandboxStrictness[after.sandbox] ?: 0) > (sandboxStrictness[before.sandbox] ?: 0))
         add("mode d’exécution « ${sandboxLabel(after.sandbox)} »")
 }
@@ -745,7 +714,7 @@ private fun runsSentence(runs: AgentPreviewRuns): String {
 
 /** The review shown before saving: powers and secrets added, and work a reduction stops. */
 fun Agent.nativeReviewNodes(resources: AgentResources): List<String> =
-    if (access.backend != NATIVE_BACKEND || access.nodes == null) emptyList()
+    if (access.nodes == null) emptyList()
     else
         resources.nodes
             .filter {
@@ -773,13 +742,25 @@ fun agentReview(
             )
         )
     }
-    if (after.backend == NATIVE_BACKEND && before.backend != NATIVE_BACKEND)
+    // Native machines run moved conversations as host processes: each new one is a power.
+    val nativeBefore = original.nativeNodes(resources.nodes).map { it.id }.toSet()
+    val nativeAdded = edited.nativeNodes(resources.nodes).filter { it.id !in nativeBefore }
+    if (after.nodes == null && before.nodes != null && nativeAdded.isNotEmpty())
         add(
             ReviewLine(
                 ReviewKind.Power,
-                "Ajout : exécution native sur l’hôte. Cet agent partagera le GPU et les outils de l’hôte, avec une isolation plus faible qu’une VM.",
+                "Ajout : toutes les nodes, y compris natives. Les conversations déplacées sur une node native s’exécutent comme processus de l’hôte, avec son GPU et une isolation plus faible ; chaque node native doit faire confiance aux personnes qui dirigent cet agent.",
             )
         )
+    else
+        nativeAdded.forEach {
+            add(
+                ReviewLine(
+                    ReviewKind.Power,
+                    "Ajout : node native ${it.name}. Les conversations déplacées sur cette node s’exécutent comme processus de l’hôte, avec son GPU et une isolation plus faible ; la node doit faire confiance aux personnes qui dirigent cet agent.",
+                )
+            )
+        }
     edited.exclusiveNodes
         .filter { it !in original.exclusiveNodes }
         .forEach { id ->
@@ -880,17 +861,9 @@ fun rebaseAgent(
         mergeToolChoices(a.mcpTools, m.mcpTools, t.mcpTools).filterKeys {
             mcpIds == null || it in mcpIds
         }
-    // Node lists only make sense for one backend: a side that switched backend wins them whole,
-    // the owner first, so entries of the other backend are never merged in.
-    val (nodes, exclusive) =
-        when {
-            m.backend != a.backend -> m.nodes to mine.exclusiveNodes
-            t.backend != a.backend -> t.nodes to theirs.exclusiveNodes
-            else ->
-                mergeList(a.nodes, m.nodes, t.nodes) to
-                    mergeList(base.exclusiveNodes, mine.exclusiveNodes, theirs.exclusiveNodes)
-                        .orEmpty()
-        }
+    val nodes = mergeList(a.nodes, m.nodes, t.nodes)
+    val exclusive =
+        mergeList(base.exclusiveNodes, mine.exclusiveNodes, theirs.exclusiveNodes).orEmpty()
     return theirs.copy(
         name = pick(base.name, mine.name, theirs.name),
         description = pick(base.description, mine.description, theirs.description),
@@ -911,7 +884,6 @@ fun rebaseAgent(
                 installation = pick(a.installation, m.installation, t.installation),
                 delegation = pick(a.delegation, m.delegation, t.delegation),
                 sandbox = pick(a.sandbox, m.sandbox, t.sandbox),
-                backend = pick(a.backend, m.backend, t.backend),
             ),
     )
 }

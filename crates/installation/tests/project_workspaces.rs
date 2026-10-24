@@ -140,7 +140,7 @@ async fn managed_resume_does_not_depend_on_unopened_project_sources() {
                 Value::Null
             };
             let mut run = run(&s, project, MAIN_AGENT_ID).await;
-            run["snapshot"]["agent"]["access"]["backend"] = backend.into();
+            run["executionBackend"] = backend.into();
             let prepared =
                 execution::prepare(&run, &s.config, &RunCredentials::default(), None, None)
                     .await

@@ -54,3 +54,8 @@ durable generation handshake stops managed workloads before changing mode.
 Returning to protected restricts new runs but does not restore the host or defend
 against root that altered its supervisor. Epoch 13 / SQLite 12 and a strict native
 budget marker fence older readers; unknown/unconfirmed modes fail closed.
+
+Update, 2026-10-24: agents no longer select a backend; each conversation keeps the
+backend of its environment and native nodes mount VM disks in place. Node-side
+opt-in, trusted people, provenance and delegation rules are unchanged. See
+[ADR 0059](0059-per-conversation-backend-and-in-place-vm-disks.md).

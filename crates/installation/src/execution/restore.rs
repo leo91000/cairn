@@ -42,12 +42,7 @@ pub(super) async fn restore(
     credentials: &RunCredentials,
 ) -> Result<Value> {
     let microvm = uses_vm(run, config);
-    let native = crate::native::policy::native(&run["snapshot"]["agent"]);
-    if prepared["backend"] == "native" && !native || native && prepared["backend"] != "native" {
-        return Err(Error::conflict(
-            "Execution backend changed; start a new conversation.",
-        ));
-    }
+    let native = prepared["backend"] == Backend::Native.as_str();
     if microvm && !native && !is_firecracker(&prepared) {
         let migrated = migrate_to_vm(run, &prepared, config, credentials).await?;
         return Ok(serde_json::to_value(migrated)?);

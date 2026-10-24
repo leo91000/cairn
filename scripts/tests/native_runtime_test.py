@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import pwd
 import random
 import resource
 import select
@@ -168,6 +169,7 @@ def main():
             return response['value']
 
         contexts = {}
+        vm_layouts = {}
         started_runs = set()
         current_mode = dict(mode="protected", generation=None)
         host_marker = Path("/etc/cairn-native-qualification-" + identifier)
@@ -206,6 +208,9 @@ def main():
 
         def managed(run):
             pid = command('systemctl', 'show', supervisor, '--property=MainPID', '--value').stdout.strip()
+            if run in vm_layouts:
+                view = json.loads((state / 'native' / run / 'view.json').read_text())
+                return Path('/proc') / pid / 'root' / view['workspace'].lstrip('/')
             path = Path('/proc') / pid / 'root' / str(state).lstrip('/') / 'native' / run / 'data/workspaces'
             return path / base_projects[run] if run in base_projects else path
 
@@ -279,6 +284,8 @@ def main():
             script += 'test "$(cat /run/cairn-chat/attachments/native-image/image.png)" = "synthetic image bytes"\n'
             script += 'test -f /home/node/.agents/skills/frozen/SKILL.md\n'
             script += 'if touch /home/node/.agents/skills/bad 2>/dev/null; then exit 83; fi\n'
+            if run in vm_layouts:
+                script += 'mkdir -p /home/node/.local/bin\ntest "$(stat -c %u /home/node/root-owned)" = 0\nif echo bad > /home/node/root-owned 2>/dev/null; then exit 84; fi\n'
             if legacy:
                 script += 'test "$(cat /home/node/.cache/models/keep)" = "model cache"\n'
                 script += 'test "$(cat /home/node/.claude/plugins/user/tool)" = "legacy installed plugin"\n'
@@ -298,6 +305,10 @@ def main():
                 expires=None, cwd=str(workspace / base_projects[run] if run in base_projects else workspace), projectRoot=str(workspace), sandbox='workspace-write',
                 resources=dict(cpu=1, memoryMiB=512, diskMiB=256), args=[], prompt='synthetic input', storage=contexts[run],
                 imports=[dict(source=str(workspace), target=str(workspace)), dict(source=str(data / 'runs' / run / 'home'), target='/home/node')])
+            if run in vm_layouts:
+                guest_workspace = '/data/runs/' + run + '/workspace'
+                plan.update(guestDataRoot='/data', cwd=guest_workspace, projectRoot=guest_workspace)
+                plan['imports'][0]['target'] = guest_workspace
             if run in base_archives:
                 plan.update(nativeProjectArchives=base_archives[run], nativeProjectBase=base_keys[run])
                 os.link(state / 'native-bases' / base_keys[run] / 'pin', data / 'runs' / run / ('native-base-' + attempt + '.pin'))
@@ -306,7 +317,7 @@ def main():
             image.write_text('synthetic image bytes')
             image.chmod(0o600)
             (data / 'runner-plans' / (attempt + '.json')).write_text(json.dumps(plan))
-            manager('checkpoint', run=run, attempt=attempt)
+            manager('checkpoint', run=run, attempt=attempt, vm=run in vm_layouts)
             api('/runs/' + attempt + '/lease', {'remainingMs': lease})
             api('/runs/' + attempt)
             def execution_ready():
@@ -378,7 +389,16 @@ def main():
             assert active not in ('active', 'activating'), 'Descendant escaped cgroup fencing.'
             assert not (state / 'native' / run / 'data/workspaces/seed').exists(), 'Stopped conversation filesystem is still mounted.'
             snapshot = api('/disks/' + run + '/snapshot-completed')
-            assert snapshot['manifest']['kind'] == 'native-ext4-v1'
+            if run in vm_layouts:
+                pid = command('systemctl', 'show', supervisor, '--property=MainPID', '--value').stdout.strip()
+                mounted = {line.split()[4] for line in Path('/proc', pid, 'mountinfo').read_text().splitlines()}
+                view = json.loads((state / 'native' / run / 'view.json').read_text())
+                assert not any(path in mounted for path in view['filesystems']), 'Stopped VM disk remains mounted.'
+                assert snapshot['manifest'].get('kind') is None
+                assert snapshot['manifest']['runtime']['disk'] == 'vm'
+                assert snapshot['manifest']['runtime']['vmRuntimeId'] == 'fixture-vm'
+            else:
+                assert snapshot['manifest']['kind'] == 'native-ext4-v1'
             assert snapshot['manifest']['onDemand'] is True
             return snapshot
 
@@ -574,6 +594,97 @@ def main():
             metrics['encodedS3Objects'] = len(objects)
             for current in runs:
                 manager('purge', run=current)
+            # Real VM-layout ext4 on ublk, with nonidentity ownership in both
+            # directions; repeat through remote restore for flat and paired disks.
+            workload_uid = pwd.getpwnam(user).pw_uid
+            assert workload_uid != 1000, 'Qualification needs a nonidentity workload UID.'
+            metrics['vmWorkloadUid'] = workload_uid
+            metrics['vmDisks'] = []
+            for paired in (False, True):
+                vm_run = create()
+                vm_layouts[vm_run] = paired
+                system_tree = root / (vm_run + '-system')
+                workspace_tree = root / (vm_run + '-workspace')
+                home = system_tree / 'upper/home/node'
+                workspace_tree.mkdir()
+                guest_workspace = Path('data/runs') / vm_run / 'workspace'
+                workspace = workspace_tree / Path('runs') / vm_run / 'workspace' if paired else system_tree / 'upper' / guest_workspace
+                workspace.mkdir(parents=True)
+                (workspace / 'seed').write_text('initial project')
+                (workspace / 'asset').write_bytes(asset)
+                for name, content in {
+                    '.codex/sessions/keep': 'session state',
+                    '.claude/plugins/user/tool': 'legacy installed plugin',
+                    '.claude/CLAUDE.md': 'legacy user instructions',
+                }.items():
+                    target = home / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(content)
+                if paired:
+                    for name in ('home-cache', 'home-share', 'android'):
+                        (workspace_tree / '.cairn-system' / name).mkdir(parents=True)
+                    cache = workspace_tree / '.cairn-system/home-cache/models/keep'
+                else:
+                    cache = home / '.cache/models/keep'
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                cache.write_text('model cache')
+                for tree in (system_tree, workspace_tree):
+                    for path in [tree, *tree.rglob('*')]:
+                        os.chown(path, 1000, 1000)
+                root_owned = home / 'root-owned'
+                root_owned.write_text('root stays root')
+                root_owned.chmod(0o444)
+                os.chown(root_owned, 0, 0)
+                raw = root / (vm_run + '.ext4')
+                with raw.open('wb') as image:
+                    image.truncate(256 * 1024 * 1024)
+                if paired:
+                    system_image, workspace_image = root / (vm_run + '-system.ext4'), root / (vm_run + '-workspace.ext4')
+                    for image, size, tree in ((system_image, 64, system_tree), (workspace_image, 192, workspace_tree)):
+                        with image.open('wb') as output:
+                            output.truncate(size * 1024 * 1024)
+                        command('mkfs.ext4', '-q', '-F', '-d', str(tree), str(image))
+                    with raw.open('r+b') as output:
+                        for image in (system_image, workspace_image):
+                            with image.open('rb') as source:
+                                while block := source.read(4 * 1024 * 1024):
+                                    output.write(block)
+                else:
+                    command('mkfs.ext4', '-q', '-F', '-d', str(system_tree), str(raw))
+                manager('seed-vm', run=vm_run, paired=paired, context=contexts[vm_run])
+                retained_key = 'vmPairedRetained' if paired else 'vmFlatRetained'
+                resumed_key = 'vmPairedRemote' if paired else 'vmFlatRemote'
+                first = start(vm_run, legacy=True, measure=retained_key)
+                view = json.loads((state / 'native' / vm_run / 'view.json').read_text())
+                assert (managed(vm_run) / 'persisted').stat().st_uid == workload_uid
+                assert len(view['filesystems']) == (2 if paired else 1)
+                api('/runs/' + first, method='DELETE')
+                fenced(vm_run, first)
+                before_objects = {obj['Key'] for page in s3.get_paginator('list_objects_v2').paginate(Bucket='cairn-node-test') for obj in page.get('Contents', [])}
+                point = manager('publish', run=vm_run)
+                encoded = [obj for page in s3.get_paginator('list_objects_v2').paginate(Bucket='cairn-node-test') for obj in page.get('Contents', []) if obj['Key'] not in before_objects]
+                status = api('/disks/' + vm_run + '/storage-status')
+                receipt = dict(attempt=first, backupId=point['backupId'], generation=point['generation'], grantId=status['grantId'])
+                assert api('/disks/' + vm_run + '/evict', receipt)['evictedBytes'] > 0
+                command('systemctl', 'stop', supervisor)
+                start_controller()
+                manager('restore', run=vm_run, backupId=point['backupId'])
+                resumed = start(vm_run, legacy=True, measure=resumed_key)
+                api('/runs/' + resumed, method='DELETE')
+                fenced(vm_run, resumed)
+                exported = Path(manager('export-vm', run=vm_run)['path'])
+                filesystem = exported
+                path = '/' + str(Path('runs') / vm_run / 'workspace/persisted') if paired else '/upper/' + str(guest_workspace / 'persisted')
+                if paired:
+                    filesystem = root / (vm_run + '-export-workspace.ext4')
+                    command('dd', 'if=' + str(exported), 'of=' + str(filesystem), 'bs=1048576', 'skip=64', 'status=none')
+                ownership = command('debugfs', '-R', 'stat ' + path, str(filesystem)).stdout
+                assert 'User:  1000' in ownership and 'Group:  1000' in ownership, ownership
+                assert 'changed' in command('debugfs', '-R', 'cat ' + path, str(filesystem)).stdout
+                metrics['vmDisks'].append(dict(layout='paired' if paired else 'flat',
+                    encodedNewS3Bytes=sum(obj['Size'] for obj in encoded), encodedNewS3Objects=len(encoded),
+                    nativeWritesStoredAsUid=1000, retained=metrics.pop(retained_key), remote=metrics.pop(resumed_key)))
+                manager('purge', run=vm_run)
             metrics['harnessCpuSeconds'] = resource.getrusage(resource.RUSAGE_SELF).ru_utime
             evidence = Path(os.environ.get('NATIVE_STORAGE_EVIDENCE_DIR', str(root / 'evidence')))
             evidence.mkdir(parents=True, exist_ok=True)

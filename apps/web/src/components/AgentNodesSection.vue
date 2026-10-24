@@ -1,13 +1,11 @@
 <script setup lang="ts">
 import type { ExecutionNode } from '../../../../packages/contracts/nodes'
-import type { AgentAccess, Backend, ChipTone } from '../agent-access'
+import type { AgentAccess, ChipTone } from '../agent-access'
 import { computed, ref } from 'vue'
 import { formatMiB } from '../../../../packages/contracts/nodes'
 import {
-  backendOf,
-  backendOptions,
+  backendLabels,
   effectiveExclusive,
-  nativeHelp,
   nodeBackend,
   nodeName,
   nodesFor,
@@ -16,7 +14,6 @@ import {
   runsOn,
   supportsExclusive,
   unknownNode,
-  withBackend,
   withRun,
 } from '../agent-access'
 import { Info, Search, X } from '../icons'
@@ -24,7 +21,6 @@ import AccessChip from './AccessChip.vue'
 import Icon from './Icon.vue'
 import UiButton from './UiButton.vue'
 import UiSwitch from './UiSwitch.vue'
-import VirtualSelect from './VirtualSelect.vue'
 
 // Per node: may the agent run there, and may it reserve the node exclusively.
 // `readOnlyGrants` says why exclusive reservations cannot be changed here (an older installation).
@@ -35,9 +31,8 @@ const exclusiveNodes = defineModel<string[]>('exclusiveNodes', { required: true 
 const query = ref('')
 const selectedOnly = ref(false)
 const unavailableOnly = ref(false)
-const backend = computed(() => backendOf(access.value))
-// Only nodes of the agent's backend: the server never grants an agent a node of another backend.
-const available = computed(() => nodesFor(props.nodes, backend.value))
+// VM and native nodes alike: each conversation keeps the backend it started on.
+const available = computed(() => nodesFor(props.nodes))
 const searchable = computed(() => available.value.length >= 8)
 const visible = computed(() => {
   const words = query.value.trim().toLowerCase()
@@ -45,10 +40,8 @@ const visible = computed(() => {
     && (!selectedOnly.value || runsOn(access.value, node.id) || exclusiveNodes.value.includes(node.id))
     && (!unavailableOnly.value || (!unknownNode(node) && nodeState(node).state !== 'online')))
 })
-// Run permissions on nodes revoked, deleted or of the other backend: kept until removed.
-const strayRuns = computed(() => (access.value.nodes ?? [])
-  .map(id => ({ id, problem: runProblem(id, access.value, props.nodes), node: props.nodes.find(node => node.id === id) }))
-  .filter(item => item.problem))
+// Run permissions on nodes revoked or deleted: kept until removed.
+const strayRuns = computed(() => (access.value.nodes ?? []).filter(id => runProblem(id, props.nodes)))
 // Exclusive grants whose node was revoked or deleted.
 const missing = computed(() => exclusiveNodes.value.filter(id => !available.value.some(node => node.id === id)))
 const exclusiveCount = computed(() => effectiveExclusive({ access: access.value, exclusiveNodes: exclusiveNodes.value }, props.nodes).length)
@@ -58,19 +51,6 @@ const stateTones: Record<string, ChipTone> = {
   paused: 'unavailable',
   update: 'unavailable',
 }
-
-// A different backend runs elsewhere: the node choices and exclusive reservations start over.
-const backendChoice = computed({
-  get: () => backend.value,
-  set: (value: string) => {
-    if (value === backend.value)
-      return
-    const next = withBackend(exclusiveNodes.value, Boolean(props.readOnlyGrants))
-    access.value.backend = value as Backend
-    access.value.nodes = next.nodes
-    exclusiveNodes.value = next.exclusiveNodes
-  },
-})
 
 const allNodes = computed({
   get: () => access.value.nodes === null,
@@ -117,20 +97,13 @@ function exclusiveBlocked(node: ExecutionNode) {
 
 <template>
   <div class="grid min-w-0 gap-5">
-    <div class="grid gap-2">
-      <VirtualSelect v-model="backendChoice" label="Agent execution backend" :options="[...backendOptions]" />
-      <p v-if="backend === 'native'" class="rounded-xl bg-power-surface px-5 py-3 text-xs text-power" role="note">
-        {{ nativeHelp }}
-      </p>
-    </div>
-
     <div class="flex items-center justify-between gap-4 rounded-xl border border-line bg-surface px-5 py-4 phone:px-4">
       <div class="min-w-0">
         <p class="text-sm font-semibold">
           All nodes, including future
         </p>
         <p class="text-xs text-muted">
-          {{ backend === 'native' ? 'Native machines must also enable execution and trust everyone directing the conversation. Administrator nodes require explicit owner review on that node; all-node grants never silently grant host root.' : 'New VM machines become usable by this agent as soon as they are enrolled.' }}
+          New VM machines become usable as soon as they are enrolled; native machines must also enable execution and trust everyone directing the conversation. Administrator nodes require explicit owner review on that node; all-node grants never silently grant host root.
         </p>
       </div>
       <UiSwitch v-model="allNodes" label="All nodes, including future" />
@@ -181,6 +154,9 @@ function exclusiveBlocked(node: ExecutionNode) {
           <p class="truncate text-2xs text-muted">
             {{ details(node) }}
           </p>
+          <p class="truncate text-2xs" :class="nodeBackend(node) === 'native' ? 'text-power' : 'text-subtle'">
+            {{ backendLabels[nodeBackend(node)] }}
+          </p>
         </div>
         <div>
           <AccessChip v-if="!unknownNode(node)" :tone="stateTones[nodeState(node).state]!">
@@ -226,17 +202,17 @@ function exclusiveBlocked(node: ExecutionNode) {
         </div>
       </div>
       <div
-        v-for="item in strayRuns"
-        :key="`run-${item.id}`"
+        v-for="id in strayRuns"
+        :key="`run-${id}`"
         role="listitem"
         class="flex flex-wrap items-center gap-3 border-b border-line px-1 py-3.5"
-        :aria-label="item.problem === 'missing' ? 'Removed node' : nodeName(item.node, item.id)"
+        aria-label="Removed node"
       >
-        <span class="min-w-0 flex-1 text-sm text-muted">{{ item.problem === 'missing' ? 'Removed node' : `${nodeName(item.node, item.id)} · other execution backend` }} · can run its conversations</span>
-        <AccessChip :tone="item.problem === 'missing' ? 'missing' : 'unavailable'">
-          {{ item.problem === 'missing' ? 'Not found' : 'Unavailable' }}
+        <span class="min-w-0 flex-1 text-sm text-muted">Removed node · can run its conversations</span>
+        <AccessChip tone="missing">
+          Not found
         </AccessChip>
-        <UiButton size="small" :aria-label="`Remove permission to run on ${item.problem === 'missing' ? 'a removed node' : nodeName(item.node, item.id)}`" @click="setRun(item.id, false)">
+        <UiButton size="small" aria-label="Remove permission to run on a removed node" @click="setRun(id, false)">
           <Icon :name="X" :size="13" />Remove
         </UiButton>
       </div>
@@ -259,11 +235,6 @@ function exclusiveBlocked(node: ExecutionNode) {
           <Icon :name="X" :size="13" />Remove
         </UiButton>
       </div>
-      <p v-if="backend === 'native' && !available.length" class="py-4 text-sm text-muted">
-        No native node enrolled yet. <RouterLink to="/nodes" class="text-accent hover:underline">
-          Add one in Nodes ›
-        </RouterLink>
-      </p>
       <p v-if="!visible.length && available.length" class="py-4 text-sm text-muted">
         No node matches these filters.
       </p>

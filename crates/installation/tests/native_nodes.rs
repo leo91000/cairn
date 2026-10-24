@@ -319,7 +319,13 @@ impl Fixture {
             "slots": 1,
         });
         service.store.put("nodes", node.clone()).await.unwrap();
-        let agent = service.agent(json!({ "name": "Trusted native", "access": { "backend": "native", "nodes": [node["id"]] } }), None).await.unwrap();
+        let agent = service
+            .agent(
+                json!({ "name": "Trusted native", "access": { "nodes": [node["id"]] } }),
+                None,
+            )
+            .await
+            .unwrap();
         Self {
             _root: root,
             service,
@@ -472,6 +478,32 @@ async fn delegated_native_administration_requires_the_requesters_current_review(
         .await
         .unwrap();
     let token = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+
+    // A mixed target defaults to a VM but can later move its task to this host.
+    // Its administrator approval must still be covered by the requester.
+    let vm_id = id();
+    f.service
+        .store
+        .put(
+            "nodes",
+            json!({
+                "id": vm_id, "name": "VM host", "capabilities": { "backend": "firecracker" },
+            }),
+        )
+        .await
+        .unwrap();
+    let mut target = target;
+    target["access"]["nodes"] = json!([administrator["id"], vm_id]);
+    f.service.store.put("agents", target.clone()).await.unwrap();
+    let mixed = target.clone();
+    assert_eq!(
+        f.service
+            .store
+            .read(move |db| { cairn_installation::nodes::backend::default_for_agent(db, &mixed) })
+            .await
+            .unwrap(),
+        "firecracker"
+    );
 
     let generation = id();
     administrator["capabilities"]["nativeModeProtocol"] = 1.into();
@@ -973,12 +1005,10 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
         node["capabilities"]["kvm"] = (!native).into();
         node["capabilities"]["fuse"] = (!native).into();
         f.service.store.put("nodes", node.clone()).await.unwrap();
-        let mut agent = f.agent.clone();
-        agent["access"]["backend"] = backend.into();
-        f.service.store.put("agents", agent.clone()).await.unwrap();
 
+        // The conversation, not its agent, records the backend it runs on.
         let mut run = f.run();
-        run["snapshot"]["agent"] = agent;
+        run["executionBackend"] = backend.into();
         run["placementTransition"] = true.into();
         run["targetNodeId"] = node["id"].clone();
         common::add_run(&f.service.store, &run).await;

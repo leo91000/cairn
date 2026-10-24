@@ -757,7 +757,7 @@ async fn startup_drops_reservations_an_older_release_left_without_node_access() 
 }
 
 #[tokio::test]
-async fn grants_follow_the_agent_execution_backend() {
+async fn agents_run_on_vm_and_native_nodes_but_reserve_only_vm_nodes() {
     let owner = Owner::new().await;
     owner.add_node().await;
     let native = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d";
@@ -774,44 +774,38 @@ async fn grants_follow_the_agent_execution_backend() {
         )
         .await
         .unwrap();
-    let agent = owner.create_agent("VM agent").await;
+    let agent = owner.create_agent("Mixed agent").await;
 
-    // A Firecracker agent cannot run on, nor reserve, a native node.
-    let mut cross = agent.clone();
-    cross["access"]["nodes"] = json!([LOCAL_NODE_ID, native]);
-    let (status, _) = owner.send("PUT", &path(&agent), cross).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    let mut reserve = agent.clone();
-    reserve["access"]["nodes"] = Value::Null;
+    // Each conversation keeps its own backend: one agent may hold both kinds of node.
+    let mut mixed = agent.clone();
+    mixed["access"]["nodes"] = json!([LOCAL_NODE_ID, NODE, native]);
+    // A profile from an earlier release may still send the removed backend setting.
+    mixed["access"]["backend"] = "native".into();
+    let (status, saved) = owner.send("PUT", &path(&agent), mixed).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(
+        saved["access"]["nodes"],
+        json!([LOCAL_NODE_ID, NODE, native])
+    );
+    let stored = owner.stored("agents", text(&agent, "id")).await;
+    assert!(stored["access"].get("backend").is_none());
+
+    // Exclusive reservations suspend VMs: a native node cannot be reserved.
+    let mut reserve = stored.clone();
     reserve["exclusiveNodes"] = json!([native]);
-    let (status, _) = owner.send("PUT", &path(&agent), reserve).await;
+    let (status, _) = owner.send("PUT", &path(&stored), reserve).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
         owner.stored("nodes", native).await["exclusiveAgents"],
         Value::Null
     );
 
-    // A node held before (for example from before the backend check) still saves.
-    let mut held = owner.stored("agents", text(&agent, "id")).await;
-    held["access"]["nodes"] = json!([LOCAL_NODE_ID, native]);
-    owner
-        .service
-        .store
-        .put("agents", held.clone())
-        .await
-        .unwrap();
-    let mut renamed = owner.stored("agents", text(&agent, "id")).await;
-    renamed["description"] = "Unrelated edit".into();
-    let (status, error) = owner.send("PUT", &path(&renamed), renamed).await;
-    assert_eq!(status, StatusCode::OK, "{error}");
-    let agent = owner.stored("agents", text(&agent, "id")).await;
-
-    // A Firecracker node it may run on stays reservable.
-    let mut vm = agent.clone();
-    vm["access"]["nodes"] = json!([LOCAL_NODE_ID, NODE]);
+    // A Firecracker node it may run on stays reservable beside its native node.
+    let mut vm = owner.stored("agents", text(&agent, "id")).await;
     vm["exclusiveNodes"] = json!([NODE]);
-    let (status, saved) = owner.send("PUT", &path(&agent), vm).await;
+    let (status, saved) = owner.send("PUT", &path(&vm), vm.clone()).await;
     assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["exclusiveNodes"], json!([NODE]));
 }
 
 #[tokio::test]
@@ -843,7 +837,7 @@ async fn a_save_without_grants_never_restores_a_concurrent_revocation() {
 }
 
 #[tokio::test]
-async fn native_agents_cannot_newly_get_the_current_runner_and_drop_reservations() {
+async fn removing_a_node_drops_its_reservation_and_nodes_of_both_backends_mix() {
     let owner = Owner::new().await;
     owner.add_node().await;
     let mut agent = owner.create_agent("Switching").await;
@@ -852,7 +846,7 @@ async fn native_agents_cannot_newly_get_the_current_runner_and_drop_reservations
     let (_, agent) = owner.send("PUT", &path(&agent), agent).await;
     assert_eq!(agent["exclusiveNodes"], json!([NODE]));
 
-    // A native switch (here with a native node) drops the reservation it cannot keep.
+    // Replacing the VM node by a native one drops the reservation it cannot keep.
     let desk = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d";
     owner
         .service
@@ -868,7 +862,6 @@ async fn native_agents_cannot_newly_get_the_current_runner_and_drop_reservations
         .await
         .unwrap();
     let mut native = agent.clone();
-    native["access"]["backend"] = "native".into();
     native["access"]["nodes"] = json!([desk]);
     native.as_object_mut().unwrap().remove("exclusiveNodes");
     let (status, saved) = owner.send("PUT", &path(&agent), native).await;
@@ -879,24 +872,11 @@ async fn native_agents_cannot_newly_get_the_current_runner_and_drop_reservations
         json!([])
     );
 
-    // Switching backend never keeps nodes of the previous backend.
-    let mut kept = owner.create_agent("Kept").await;
-    kept["access"]["nodes"] = json!([LOCAL_NODE_ID, NODE]);
-    let (_, kept) = owner.send("PUT", &path(&kept), kept).await;
-    let mut switched = kept.clone();
-    switched["access"]["backend"] = "native".into();
-    let (status, _) = owner.send("PUT", &path(&kept), switched).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-
-    // A native agent cannot newly be given the current runner.
-    let mut fresh = owner.create_agent("Fresh").await;
-    fresh["access"]["nodes"] = json!([NODE]);
-    let (_, fresh) = owner.send("PUT", &path(&fresh), fresh).await;
-    let mut local = fresh.clone();
-    local["access"]["backend"] = "native".into();
-    local["access"]["nodes"] = json!([LOCAL_NODE_ID]);
-    let (status, _) = owner.send("PUT", &path(&fresh), local).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // The current runner can be added beside a native node.
+    let mut local = owner.stored("agents", text(&agent, "id")).await;
+    local["access"]["nodes"] = json!([desk, LOCAL_NODE_ID]);
+    let (status, saved) = owner.send("PUT", &path(&local), local.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
 }
 
 #[tokio::test]

@@ -50,8 +50,7 @@ sudo. Agent saves supply transient `nativeNodeReviews` node IDs from that inform
 review; node grants and trusted-person edits require transient
 `confirmNativeAdministration: true`. Neither is a persisted agent privilege
 mode. An owner tool call can review selected node IDs while preserving wildcard
-placement access; other administrative nodes remain unreviewed. A wildcard alone does not approve administrator admission. Removing access
-or changing backend removes that node's review; regranting a wildcard cannot
+placement access; other administrative nodes remain unreviewed. A wildcard alone does not approve administrator admission. Removing node access removes that node's review; regranting a wildcard cannot
 revive it. Adding trusted people on an administrator node requires the existing
 node editor's informed owner confirmation. Native provenance, trusted people,
 current membership, node access and delegation ceilings remain mandatory.

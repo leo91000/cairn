@@ -6,8 +6,9 @@ export const id = z.string().uuid()
 // Codex exposes effort names as strings, so new catalog levels need no app release.
 export const reasoningEffort = z.string().max(40).regex(/^(?:[a-z][a-z0-9_-]*)?$/)
 export { MAIN_AGENT_ID } from './constants'
+// Agents grant nodes of either backend; each conversation keeps the backend its
+// environment was created on, and moves between backends explicitly.
 export const accessPolicy = z.object({
-  backend: z.enum(['firecracker', 'native']).default('firecracker'),
   nodes: z.array(id).max(100).nullable().default(() => [LOCAL_NODE_ID]),
   projects: z.array(id).max(100).nullable().default(null),
   skills: z.array(z.string().max(160)).max(100).nullable().default(null),
@@ -48,7 +49,6 @@ export const agentUpdate = z.object({
   access: accessPolicy.extend({
     // A partial update from an older client must not restore local-runner access.
     nodes: accessPolicy.shape.nodes.removeDefault().optional(),
-    backend: accessPolicy.shape.backend.removeDefault().optional(),
     installation: accessPolicy.shape.installation.removeDefault().optional(),
     delegation: accessPolicy.shape.delegation.removeDefault().optional(),
   }).optional(),

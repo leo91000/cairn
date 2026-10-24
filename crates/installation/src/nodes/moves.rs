@@ -1,8 +1,12 @@
 //! Durable pause/copy/resume coordination. Never changes a destination before fencing.
-use super::NodeState;
+use super::{
+    NodeState,
+    backend::{self, DiskFormat},
+};
 use crate::{
     config::{id, now},
     error::{Error, Result},
+    native::policy::Origin,
     run_status::RunStatus,
     service::Service,
     store::Db,
@@ -12,8 +16,8 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::time::Duration;
 
-const MOVE_DESCRIPTION: &str = "Move this conversation to an authorized node. Call list_nodes first to see ids, tags, shared budgets and free slots. Failure leaves the current conversation running. Success saves, pauses and resumes on the destination, interrupting running commands. Optional waitSeconds respects the configured wait limit.";
-const LIST_NODES_DESCRIPTION: &str = "List authorized execution nodes with their tags, shared CPU/RAM/disk budgets, slot availability and current resource pressure. Use a returned node id with move_to_node. Resources are shared automatically; agents do not request allocations.";
+const MOVE_DESCRIPTION: &str = "Move this conversation to an authorized node. Call list_nodes first to see ids, backends, tags, shared budgets and free slots. Failure leaves the current conversation running. Success saves, pauses and resumes on the destination, interrupting running commands. A node of the other backend changes how this conversation runs: a native node mounts the same files directly as a host process with its GPU and installed tools, a Firecracker node runs them in a VM again; system packages installed in the other backend and running processes do not follow. An environment created on a native node needs a one-time conversion before a VM can run it: that stops the current turn. A chat waits for the next message to start a fresh engine session; a mission resumes automatically in a fresh session with its visible history. Optional waitSeconds respects the configured wait limit.";
+const LIST_NODES_DESCRIPTION: &str = "List authorized execution nodes with their backend (firecracker VM or native host process), tags, shared CPU/RAM/disk budgets, slot availability and current resource pressure. Use a returned node id with move_to_node. Resources are shared automatically; agents do not request allocations.";
 /// A requested move waits this long for the conversation to settle before pausing it.
 const PAUSE_DELAY_MS: i64 = 2000;
 const MAX_WAIT_SECONDS: u64 = 3600;
@@ -57,6 +61,7 @@ pub fn list_tool() -> Value {
 struct NodeSummary<'a> {
     id: &'a Value,
     name: &'a Value,
+    backend: &'static str,
     tags: Vec<&'a Value>,
     status: &'a Value,
     accepting_work: &'a Value,
@@ -79,6 +84,7 @@ struct MoveRequest<'a> {
     reservation: &'a str,
     node_id: &'a Value,
     resources: &'a Value,
+    runtime_id: &'a Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     requested_at: Option<i64>,
     /// Recovery from an unavailable node, rather than a requested move.
@@ -89,6 +95,9 @@ struct MoveRequest<'a> {
     required_tags: Option<&'a Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     backup_id: Option<&'a Value>,
+    /// The backend the conversation runs on at the destination, when it changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backend: Option<&'static str>,
 }
 
 async fn run_agent(s: &Service, run: &Value) -> Result<Value> {
@@ -111,6 +120,7 @@ pub async fn list(s: &Service, run: &Value) -> Result<Value> {
             serde_json::to_value(NodeSummary {
                 id: &node["id"],
                 name: &node["name"],
+                backend: backend::of_node(node),
                 tags: super::node_tags(node).collect(),
                 status: &node["status"],
                 accepting_work: &node["accepting"],
@@ -137,13 +147,31 @@ pub async fn list(s: &Service, run: &Value) -> Result<Value> {
 
 /// Owner-initiated move from the web or Android conversation controls.
 pub async fn request(s: &Service, run: &Value, args: &Value) -> Result<Value> {
-    requested(s, run, args, false).await
+    requested(s, run, args, Some(crate::native::policy::origin()), |_| {
+        Ok(())
+    })
+    .await
+}
+
+/// An owner's move through the public MCP or the installation tool, rechecking
+/// management access in each transaction that records it.
+pub(crate) async fn request_authorized<F>(
+    s: &Service,
+    run: &Value,
+    args: &Value,
+    source: Origin,
+    authorize: F,
+) -> Result<Value>
+where
+    F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
+{
+    requested(s, run, args, Some(source), authorize).await
 }
 
 /// Agents choose a node; the runtime owns all resource sharing.
 pub async fn request_by_agent(s: &Service, run: &Value, args: &Value) -> Result<Value> {
     crate::validation::uuid(text(args, "nodeId"))?;
-    requested(s, run, args, true).await.map_err(|mut error| {
+    requested(s, run, args, None, |_| Ok(())).await.map_err(|mut error| {
         if super::placement::is_no_capacity(&error) {
             error.message.push_str(" The current conversation keeps running. Retry move_to_node with waitSeconds or choose another node.");
         }
@@ -171,7 +199,18 @@ fn validate_destination(args: &Value) -> Result<()> {
     Ok(())
 }
 
-async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Result<Value> {
+/// A move by the conversation's owner carries their origin; an agent moving
+/// itself keeps the conversation's existing provenance.
+async fn requested<F>(
+    s: &Service,
+    run: &Value,
+    args: &Value,
+    source: Option<Origin>,
+    authorize: F,
+) -> Result<Value>
+where
+    F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
+{
     if ["cpu", "memoryMiB", "diskMiB"]
         .iter()
         .any(|key| args.get(key).is_some())
@@ -188,13 +227,29 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
         return Err(Error::bad("Capacity wait exceeds the configured maximum."));
     }
     validate_destination(args)?;
-    let source = (!by_agent).then(crate::native::policy::origin);
+    let by_agent = source.is_none();
+    let checkpoint = super::checkpoint(s, text(run, "id")).await?;
+    let change = backend_change(s, run, &checkpoint, args).await?;
+    if let Some(BackendChange { convert: true, .. }) = change {
+        // The rare natively created disk needs a full copy before a VM boots it.
+        crate::native::policy::refresh(s).await?;
+        return s
+            .convert_for_vm(text(run, "id"), args, source, authorize)
+            .await;
+    }
+    if change
+        .as_ref()
+        .is_some_and(|change| change.to == backend::NATIVE)
+    {
+        crate::native::policy::refresh(s).await?;
+    }
     let mut proposed = run.clone();
     if let Some(source) = &source {
         let (record, source) = (run.clone(), source.clone());
+        let adopting = change.is_some();
         let grant = s
             .store
-            .read(move |db| crate::native::policy::run_grant(db, &record, &source))
+            .read(move |db| grant_for_move(db, &record, &source, adopting))
             .await?;
         crate::native::policy::apply(&mut proposed, &grant);
     }
@@ -203,7 +258,6 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
     if run["moveRequest"].is_object() {
         return Err(Error::conflict("A movement is already pending."));
     }
-    let checkpoint = super::checkpoint(s, run_id).await?;
     let deadline =
         (now() + wait as i64 * 1000).min(checkpoint["deadline"].as_i64().unwrap_or(i64::MAX));
     // A finished conversation with a VM session moves without being resumed.
@@ -221,38 +275,132 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
         .get("requiredTags")
         .unwrap_or(&run["requiredTags"])
         .clone();
+    if let Some(change) = &change {
+        selecting["targetBackend"] = change.to.into();
+        selecting["requiredRuntime"] = change.runtime.clone().map_or(Value::Null, Value::from);
+    }
     let selected = wait_for_capacity(s, run_id, &selecting, &reservation, idle, deadline).await?;
     let move_request = serde_json::to_value(MoveRequest {
         reservation: &reservation,
         node_id: &selected["nodeId"],
         resources: &selected["resources"],
+        runtime_id: &selected["runtimeId"],
         requested_at: Some(now()),
         automatic: false,
         idle: Some(idle),
         required_tags: Some(&selecting["requiredTags"]),
         backup_id: None,
+        backend: change.as_ref().map(|change| change.to),
     })?;
     let expected = if idle {
         RunStatus::Succeeded
     } else {
         RunStatus::Running
     };
-    if let Err(error) = record_request(s, run_id, move_request, idle, expected, source).await {
+    let adopting = change.is_some();
+    if let Err(error) = record_request(
+        s,
+        run_id,
+        move_request,
+        idle,
+        expected,
+        source,
+        adopting,
+        authorize,
+    )
+    .await
+    {
         super::placement::release(s, &reservation).await?;
         return Err(error);
     }
     let destination = destination_name(s, selected["nodeId"].as_str()).await?;
     // The owner sees in the conversation that the agent moved itself, and what it asked for.
-    let message = if by_agent {
-        format!("The agent is moving to {destination}. Running commands are interrupted.")
-    } else {
-        format!("Moving the conversation to {destination}. Running commands are interrupted.")
+    let message = match (by_agent, &change) {
+        (true, Some(change)) => format!(
+            "The agent is moving to {destination} and will run there {}. Running commands are interrupted.",
+            backend_label(change.to)
+        ),
+        (false, Some(change)) => format!(
+            "Moving the conversation to {destination}, where it runs {}. Running commands are interrupted.",
+            backend_label(change.to)
+        ),
+        (true, None) => {
+            format!("The agent is moving to {destination}. Running commands are interrupted.")
+        }
+        (false, None) => {
+            format!("Moving the conversation to {destination}. Running commands are interrupted.")
+        }
     };
     s.store.event(run_id, "status", &message, None).await?;
-    Ok(json!({
+    let mut result = json!({
         "status": "moving",
         "nodeId": selected["nodeId"],
+    });
+    if let Some(change) = change {
+        result["backend"] = change.to.into();
+    }
+    Ok(result)
+}
+
+fn backend_label(backend: &str) -> &'static str {
+    if backend == backend::NATIVE {
+        "as a native host process"
+    } else {
+        "in a Firecracker VM"
+    }
+}
+
+/// A move to the other backend: its destination backend, whether the disk must
+/// be converted first, and the VM image a VM destination must boot it with.
+struct BackendChange {
+    to: &'static str,
+    convert: bool,
+    runtime: Option<String>,
+}
+
+async fn backend_change(
+    s: &Service,
+    run: &Value,
+    checkpoint: &Value,
+    args: &Value,
+) -> Result<Option<BackendChange>> {
+    let Some(current) = backend::recorded(run, checkpoint) else {
+        return Ok(None);
+    };
+    let Some(node) = args["nodeId"].as_str() else {
+        return Ok(None);
+    };
+    let to = match s.store.get("nodes", node).await? {
+        Some(record) => backend::of_node(&record),
+        None if node == super::LOCAL_NODE_ID => backend::FIRECRACKER,
+        None => return Err(Error::not_found("Destination node not found.")),
+    };
+    if to == current {
+        return Ok(None);
+    }
+    let format = DiskFormat::of(checkpoint);
+    let runtime = match (&format, to) {
+        (DiskFormat::Vm { runtime }, backend::FIRECRACKER) => runtime.clone(),
+        _ => None,
+    };
+    Ok(Some(BackendChange {
+        to,
+        convert: !format.runs_on(to),
+        runtime,
     }))
+}
+
+/// The provenance a requested move records. An owner moving a conversation to
+/// the other backend explicitly adopts its existing work, as when they start a
+/// new conversation; other moves merge the owner into the retained callers.
+fn grant_for_move(db: &Db<'_>, run: &Value, source: &Origin, adopting: bool) -> Result<Value> {
+    if adopting && matches!(source, Origin::Human(_)) {
+        let agent = db
+            .get("agents", super::run_agent(run))?
+            .unwrap_or_else(|| run["snapshot"]["agent"].clone());
+        return crate::native::policy::authorize_origin(db, &agent, source);
+    }
+    crate::native::policy::run_grant(db, run, source)
 }
 
 async fn set_capacity_wait(s: &Service, run_id: &str, until: Option<i64>) -> Result<()> {
@@ -302,17 +450,24 @@ async fn wait_for_capacity(
 }
 
 /// Records the move unless the conversation changed while capacity was reserved.
-async fn record_request(
+#[allow(clippy::too_many_arguments)]
+async fn record_request<F>(
     s: &Service,
     run_id: &str,
     move_request: Value,
     idle: bool,
     expected: RunStatus,
-    source: Option<crate::native::policy::Origin>,
-) -> Result<()> {
+    source: Option<Origin>,
+    adopting: bool,
+    authorize: F,
+) -> Result<()>
+where
+    F: Fn(&Db<'_>) -> Result<()> + Send + 'static,
+{
     let owner = run_id.to_owned();
     s.store
         .transaction(move |db| {
+            authorize(db)?;
             let current = db
                 .run(&owner)?
                 .ok_or_else(|| Error::not_found("Conversation removed."))?;
@@ -335,6 +490,7 @@ async fn record_request(
                 ));
             }
             if current["moveRequest"].is_object()
+                || current["backendMigration"].is_object()
                 || !current["cancelRequestedAt"].is_null()
                 || current["status"] != expected
                 || (expected == RunStatus::Queued && current["pinnedNodeId"].is_string())
@@ -344,18 +500,30 @@ async fn record_request(
                 ));
             }
             if let Some(source) = source {
-                crate::native::policy::authorize_run_in(db, &owner, &source)?;
-                let directed = db.run(&owner)?.unwrap_or_default();
-                if crate::native::policy::native(&directed["snapshot"]["agent"]) {
-                    let node = db
-                        .get("nodes", text(&move_request, "nodeId"))?
-                        .unwrap_or_default();
-                    if !crate::native::policy::allows(db, &directed, &node)? {
-                        return Err(Error::forbidden(
-                            "Destination native authorization changed.",
-                        ));
+                let grant = grant_for_move(db, &current, &source, adopting)?;
+                if adopting {
+                    // The adopted provenance replaces the conversation's history.
+                    if let Some(mut chat) = crate::chats::chat_for_run(db, &owner)? {
+                        crate::native::policy::apply(&mut chat, &grant);
+                        db.put("chats", &chat)?;
                     }
+                    db.patch_run(&owner, &grant)?;
+                } else {
+                    crate::native::policy::authorize_run_in(db, &owner, &source)?;
                 }
+            }
+            // Every native destination needs the conversation's current authority,
+            // whether its owner or the agent itself asked for the move.
+            let directed = db.run(&owner)?.unwrap_or_default();
+            let node = db
+                .get("nodes", text(&move_request, "nodeId"))?
+                .unwrap_or_default();
+            if crate::native::policy::node_native(&node)
+                && !crate::native::policy::allows(db, &directed, &node)?
+            {
+                return Err(Error::forbidden(
+                    "Destination native authorization changed.",
+                ));
             }
             let mut patch = json!({
                 "movementError": null,
@@ -492,6 +660,7 @@ pub async fn queue_capacity_move(s: &Service, run: &Value) -> Result<bool> {
         reservation: &reservation,
         node_id: &selected["nodeId"],
         resources: &selected["resources"],
+        runtime_id: &selected["runtimeId"],
         requested_at: None,
         // Healthy source: capture all current writes after fencing, rather than
         // restoring an older published recovery point.
@@ -499,8 +668,20 @@ pub async fn queue_capacity_move(s: &Service, run: &Value) -> Result<bool> {
         idle: None,
         required_tags: None,
         backup_id: None,
+        backend: None,
     })?;
-    if let Err(error) = record_request(s, run_id, movement, false, RunStatus::Queued, None).await {
+    if let Err(error) = record_request(
+        s,
+        run_id,
+        movement,
+        false,
+        RunStatus::Queued,
+        None,
+        false,
+        |_| Ok(()),
+    )
+    .await
+    {
         super::placement::release(s, &reservation).await?;
         return Err(error);
     }
@@ -572,11 +753,13 @@ async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
         reservation: &reservation,
         node_id: &selected["nodeId"],
         resources: &selected["resources"],
+        runtime_id: &selected["runtimeId"],
         requested_at: None,
         automatic: true,
         idle: None,
         required_tags: None,
         backup_id: Some(&backup["id"]),
+        backend: None,
     })?;
     Ok(Recovery::Planned(movement))
 }
@@ -746,7 +929,9 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
     let manifest = super::publication::manifest(s, backup)
         .await
         .unwrap_or_default();
-    let patch = json!({
+    let changed_backend = movement["backend"].as_str().map(str::to_owned);
+    let destination_runtime = movement["runtimeId"].clone();
+    let mut patch = json!({
         "storage": { "mode": restored_storage_mode(&manifest) },
         "movementError": null,
         "accountWaitReason": null,
@@ -761,6 +946,10 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
         "recoveryPending": !idle,
         "status": status,
     });
+    if let Some(changed) = &changed_backend {
+        patch["executionBackend"] = changed.as_str().into();
+        patch["requiredRuntime"] = Value::Null;
+    }
     let owner = run_id.clone();
     s.store
         .transaction(move |db| {
@@ -774,6 +963,22 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
             if !current["cancelRequestedAt"].is_null() {
                 return Err(Error::conflict("Conversation cancelled during restore."));
             }
+            if let Some(changed) = &changed_backend {
+                // The same disk now runs on the other backend. Its format and VM
+                // image stay recorded so a later move back can boot it again.
+                let format = DiskFormat::of(&checkpoint);
+                if !format.runs_on(changed) {
+                    return Err(Error::conflict("This environment must be converted first."));
+                }
+                if let DiskFormat::Vm { runtime } = format {
+                    checkpoint["diskFormat"] = "vm".into();
+                    checkpoint["diskRuntimeId"] = runtime.map_or(Value::Null, Value::from);
+                }
+                checkpoint["prepared"]["backend"] = changed.as_str().into();
+                // Idle moves release the reservation. Keep its selected image
+                // for the next turn as well as for immediate resumption.
+                checkpoint["runtimeId"] = destination_runtime;
+            }
             checkpoint["nodeId"] = node;
             checkpoint["process"] = Value::Null;
             checkpoint["settled"] = Value::Null;
@@ -786,6 +991,14 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
                 "Restoring conversation from a dated recovery point; newer chat remains visible. Verify external effects before repeating actions.",
                 Some(&json!({ "capturedAt": captured_at })),
             )?;
+            if let Some(changed) = &changed_backend {
+                let message = if changed == backend::NATIVE {
+                    "Execution backend changed: the same files now run as a native host process. System packages installed in the VM and running processes were not kept."
+                } else {
+                    "Execution backend changed: the same files now run in a Firecracker VM. Tools installed on the native host and running processes were not kept."
+                };
+                db.event(&owner, "status", message, None)?;
+            }
             Ok(())
         })
         .await?;

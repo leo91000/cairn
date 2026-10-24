@@ -131,7 +131,7 @@ pub(crate) fn review_agent(
             .as_array()
             .cloned()
             .unwrap_or_default();
-        let allowed = crate::native::policy::native(agent) && super::agent_allows(agent, &id);
+        let allowed = super::agent_allows(agent, &id);
         reviewed.retain(|saved| saved != &agent["id"] || allowed);
         let explicit = access["nodes"]
             .as_array()
@@ -179,7 +179,7 @@ fn snapshot(db: &Db<'_>, node: &Value, mode: Mode) -> Result<Value> {
     let agents = db
         .list("agents")?
         .into_iter()
-        .filter(|agent| crate::native::policy::native(agent) && super::agent_allows(agent, node_id))
+        .filter(|agent| super::agent_allows(agent, node_id))
         .map(|agent| json!({ "id": agent["id"], "name": agent["name"], "revision": agent["revision"], "access": policy(&agent) }))
         .collect::<Vec<_>>();
     let authority = db.kv("native-authority")?.unwrap_or_default();
@@ -221,9 +221,10 @@ fn snapshot(db: &Db<'_>, node: &Value, mode: Mode) -> Result<Value> {
             && agents
                 .iter()
                 .any(|agent| agent["id"] == super::run_agent(&run));
-        if crate::native::policy::native(&run["snapshot"]["agent"])
-            && (already_associated || unplaced_candidate)
-        {
+        let native = super::backend::of_run_in(db, &run)? == super::backend::NATIVE;
+        let moving_here = run["moveRequest"]["nodeId"] == node_id
+            && run["moveRequest"]["backend"] == super::backend::NATIVE;
+        if (native || moving_here) && (already_associated || unplaced_candidate) {
             conversations.push(json!({
                 "id": run["id"], "agentId": super::run_agent(&run),
                 "name": run["snapshot"]["task"]["name"], "status": run["status"],
@@ -453,5 +454,26 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn mixed_vm_native_grants_still_require_owner_review_for_host_administration() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store.transaction(|db| {
+            let (agent_id, native_id) = (id(), id());
+            let vm_id = super::super::LOCAL_NODE_ID;
+            let node = json!({ "id": native_id, "capabilities": { "backend": "native" }, "nativeModeRequest": { "mode": "administrator", "generation": id() } });
+            db.put("nodes", &node)?;
+            db.put("nodes", &json!({ "id": vm_id, "capabilities": { "backend": "firecracker" } }))?;
+            let previous = json!({ "id": agent_id, "access": { "nodes": [vm_id] } });
+            let mixed = json!({ "id": agent_id, "access": { "nodes": [vm_id, native_id] } });
+            assert_eq!(super::super::backend::default_for_agent(db, &mixed)?, "firecracker");
+            assert!(review_agent(db, &mixed, Some(&previous), false, &[]).is_err());
+            assert!(review_agent(db, &mixed, Some(&previous), true, &[]).is_err());
+            review_agent(db, &mixed, Some(&previous), true, std::slice::from_ref(&native_id))?;
+            assert!(reviewed(&db.get("nodes", &native_id)?.unwrap(), &mixed));
+            Ok(())
+        }).await.unwrap();
     }
 }

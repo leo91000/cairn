@@ -26,7 +26,6 @@ describe('agent access and task inheritance', () => {
   it('creates a default main agent and allows project-free tasks', async () => {
     const main = ctx.service.store.get('agents', MAIN_AGENT_ID)!
     expect(main.access).toEqual({
-      backend: 'firecracker',
       nodes: [LOCAL_NODE_ID],
       projects: null,
       skills: null,

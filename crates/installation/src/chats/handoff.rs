@@ -76,7 +76,7 @@ fn first_user_request(db: &Db<'_>, run: &str) -> Result<String> {
 // Transfer the visible transcript, never native session state or private answers.
 // Recent exchanges are bounded so a long-running chat cannot exhaust the new
 // provider's context before it receives the user's next request.
-pub(super) fn handoff_context(db: &Db<'_>, run: &str) -> Result<String> {
+pub(crate) fn handoff_context(db: &Db<'_>, run: &str) -> Result<String> {
     let mut statement = db.0.prepare_cached(TRANSCRIPT)?;
     let entries = statement
         .query_map([run], |row| {

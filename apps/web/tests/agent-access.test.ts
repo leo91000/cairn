@@ -6,7 +6,6 @@ import { expect, it } from 'vitest'
 import { LOCAL_NODE_ID } from '../../../packages/contracts/nodes'
 import {
   accessSummary,
-  backendOf,
   changes,
   currentAgentIds,
   draftOf,
@@ -24,13 +23,12 @@ import {
   olderInstallation,
   rebaseDraft,
   reviewLines,
-  sandboxOptionsFor,
+  sandboxOptions,
   savedDraft,
   selectionSummary,
   sentDraft,
   skillLabel,
   unknownNode,
-  withBackend,
   withResourceGrants,
   withRun,
 } from '../src/agent-access'
@@ -145,7 +143,6 @@ it('summarizes an agent for the list and places server errors in their section',
 
 it('starts new agents restricted until the owner widens their access', () => {
   expect(newAgentDraft().access).toEqual({
-    backend: 'firecracker',
     nodes: [LOCAL_NODE_ID],
     projects: [],
     skills: [],
@@ -455,8 +452,9 @@ it('saves tool choices only for granted MCP connections', () => {
   expect(draft.access.mcpTools).toEqual({ m1: ['echo'], m2: [] })
 })
 
-it('runs agents in Firecracker VMs unless native execution is chosen, and only on nodes of their backend', () => {
-  expect(backendOf(draftOf({ id: 'a', name: 'Agent', access: {} } as unknown as Agent).access)).toBe('firecracker')
+it('lets an agent run on VM and native nodes, reviewing each native node like a power', () => {
+  // Profiles saved before conversations kept their own backend never send it back.
+  expect(draftOf({ id: 'a', name: 'Agent', access: { backend: 'native' } } as unknown as Agent).access).not.toHaveProperty('backend')
   const local = {
     ...gpu,
     id: LOCAL_NODE_ID,
@@ -471,49 +469,49 @@ it('runs agents in Firecracker VMs unless native execution is chosen, and only o
   } as ExecutionNode
   const revoked = { ...desktop, id: 'old', revoked: true } as ExecutionNode
   const nodes = [local, gpu, desktop, revoked]
-  expect(nodesFor(nodes, 'firecracker').map(node => node.id)).toEqual([LOCAL_NODE_ID, 'gpu'])
-  // The current runner is a VM runner: native agents choose native nodes one by one.
-  expect(nodesFor(nodes, 'native').map(node => node.id)).toEqual(['desktop'])
+  expect(nodesFor(nodes).map(node => node.id)).toEqual([LOCAL_NODE_ID, 'gpu', 'desktop'])
 
   const saved = newAgentDraft()
   const native = structuredClone(saved)
-  native.access.backend = 'native'
-  native.access.nodes = ['desktop']
+  native.access.nodes = [LOCAL_NODE_ID, 'desktop']
   const withNodes = { ...context, nodes }
-  // The backend, the current runner removed and the native node added.
-  expect(changes(saved, native)).toEqual(['nodes', 'nodes', 'nodes'])
-  // Weaker isolation is reviewed like a power; going back to VMs is a reduction.
+  expect(changes(saved, native)).toEqual(['nodes'])
+  // Weaker isolation is reviewed like a power; removing the node is a reduction.
   expect(reviewLines(saved, native, withNodes)[0]).toEqual({
     kind: 'power',
     section: 'nodes',
-    text: 'Added: native execution. Uses the host GPU and OS tools with weaker isolation. Each native node must enable execution and authorize the people directing this agent.',
+    text: 'Added: native node Native desktop. Conversations moved there run as host processes with its GPU and weaker isolation; the node must trust the people directing this agent.',
   })
-  expect(reviewLines(native, saved, withNodes).map(line => line.text)).toEqual(['Removed: node Native desktop, native execution.'])
-  const agent = { id: 'a', name: 'Agent', access: { projects: [], backend: 'native', nodes: ['desktop'] } } as unknown as Agent
-  expect(accessSummary(agent, context)).toBe('No projects · 1 node · Native process')
+  expect(reviewLines(native, saved, withNodes).map(line => line.text)).toEqual(['Removed: node Native desktop.'])
+  const all = structuredClone(saved)
+  all.access.nodes = null
+  expect(reviewLines(saved, all, withNodes)[0]!.text).toMatch(/^Added: all nodes, including native nodes\./)
+  const agent = { id: 'a', name: 'Agent', access: { projects: [], nodes: ['desktop'] } } as unknown as Agent
+  expect(accessSummary(agent, withNodes)).toBe('No projects · 1 node · Native nodes')
+  // Without the node list, no native node is claimed.
+  expect(accessSummary(agent, context)).toBe('No projects · 1 node')
 })
 
-it('always offers the current runner to Firecracker agents, with an unknown state when unreported', () => {
+it('always offers the current runner, with an unknown state when unreported', () => {
   const desktop = {
     ...gpu,
     id: 'desktop',
     name: 'Native desktop',
     capabilities: { ...gpu.capabilities, backend: 'native' },
   } as ExecutionNode
-  const offered = nodesFor([gpu, desktop], 'firecracker')
-  expect(offered.map(node => node.id)).toEqual([LOCAL_NODE_ID, 'gpu'])
+  const offered = nodesFor([gpu, desktop])
+  expect(offered.map(node => node.id)).toEqual([LOCAL_NODE_ID, 'gpu', 'desktop'])
   expect(offered[0]).toMatchObject({ name: 'Current runner', local: true })
   expect(unknownNode(offered[0]!)).toBe(true)
   expect(unknownNode(gpu)).toBe(false)
-  // A reported runner is used as is; native agents never get it.
+  // A reported runner is used as is.
   const reported = {
     ...gpu,
     id: LOCAL_NODE_ID,
     name: 'local',
     local: true,
   } as ExecutionNode
-  expect(nodesFor([reported, gpu], 'firecracker')).toEqual([reported, gpu])
-  expect(nodesFor([gpu, desktop], 'native').map(node => node.id)).toEqual(['desktop'])
+  expect(nodesFor([reported, gpu])).toEqual([reported, gpu])
 })
 
 it('merges list edits with grants made elsewhere, entry by entry', () => {
@@ -555,7 +553,7 @@ it('rebases every list of the agent, tool choices included', () => {
   expect(rebased.exclusiveNodes).toEqual(['gpu'])
 })
 
-it('flags run permissions on removed nodes or nodes of the other backend', () => {
+it('flags run permissions on removed nodes only', () => {
   const desktop = {
     ...gpu,
     id: 'desktop',
@@ -566,19 +564,12 @@ it('flags run permissions on removed nodes or nodes of the other backend', () =>
   draft.access.nodes = [LOCAL_NODE_ID, 'gpu', 'gone', 'desktop']
   expect(issues(draft, { ...context, nodes: [gpu, desktop] }, false).map(issue => issue.text)).toEqual([
     'A node this agent can run on no longer exists.',
-    'Native desktop uses another execution backend: this agent cannot run there.',
-  ])
-  draft.access.backend = 'native'
-  draft.access.nodes = [LOCAL_NODE_ID, 'desktop']
-  expect(issues(draft, { ...context, nodes: [gpu, desktop] }, false).map(issue => issue.text)).toEqual([
-    'Current runner uses another execution backend: this agent cannot run there.',
   ])
   expect(issues(draft, { ...context, nodes: [], nodesUnavailable: true }, false)).toEqual([])
 })
 
-it('describes execution modes for what is known', () => {
-  expect(sandboxOptionsFor('firecracker')[0]!.description).toBe('Private VM with sudo and Docker. Default.')
-  expect(sandboxOptionsFor('native')[0]!.description).toBe('Native process under a managed account. Host privileges follow the node’s confirmed protected or administrator mode. Default.')
+it('describes execution modes for both backends', () => {
+  expect(sandboxOptions[0]!.description).toBe('Private VM with sudo and Docker; on a native node, a managed host account with GPU and system tools. Host privileges follow the node’s confirmed mode. Default.')
 })
 
 it('never sends tool choices of deleted MCP connections', () => {
@@ -616,26 +607,16 @@ it('recognizes an older installation and reads its grants from the resources', (
   } as unknown as Agent)).not.toHaveProperty('grantsOnAgent')
 })
 
-it('never merges node grants across execution backends', () => {
+it('merges VM and native node grants made elsewhere like any list', () => {
   const base = newAgentDraft()
   base.access.nodes = ['gpu']
   base.exclusiveNodes = ['gpu']
   const mine = structuredClone(base)
-  mine.access.backend = 'native'
-  mine.access.nodes = ['desktop']
-  mine.exclusiveNodes = []
+  mine.access.nodes = ['gpu', 'desktop']
   const theirs = structuredClone(base)
   theirs.access.nodes = ['gpu', 'other']
   theirs.exclusiveNodes = ['gpu', 'other']
-  expect(rebaseDraft(base, mine, theirs)).toMatchObject({ access: { backend: 'native', nodes: ['desktop'] }, exclusiveNodes: [] })
-  // Changed elsewhere: their backend's lists, without the owner's VM additions.
-  const vm = structuredClone(base)
-  vm.access.nodes = ['gpu', 'box']
-  const native = structuredClone(base)
-  native.access.backend = 'native'
-  native.access.nodes = ['desktop']
-  native.exclusiveNodes = []
-  expect(rebaseDraft(base, vm, native)).toMatchObject({ access: { backend: 'native', nodes: ['desktop'] }, exclusiveNodes: [] })
+  expect(rebaseDraft(base, mine, theirs)).toMatchObject({ access: { nodes: ['gpu', 'other', 'desktop'] }, exclusiveNodes: ['gpu', 'other'] })
 })
 
 it('reports no missing project or skill until the workspace lists load', () => {
@@ -698,14 +679,12 @@ it('re-reads an instance\'s agents right before sending them back', async () => 
   expect(reads).toBe(1)
 })
 
-it('keeps read-only exclusive reservations when run permissions or the backend change', () => {
+it('keeps read-only exclusive reservations when run permissions change', () => {
   const access = { ...newAgentDraft().access, nodes: ['gpu', 'box'] }
   expect(withRun(access, ['gpu'], 'gpu', false)).toEqual({ nodes: ['box'], exclusiveNodes: [] })
   // An older installation keeps them on its nodes and never receives them: nothing to remove.
   expect(withRun(access, ['gpu'], 'gpu', false, true)).toEqual({ nodes: ['box'], exclusiveNodes: ['gpu'] })
   expect(withRun(access, ['gpu'], 'other', true)).toEqual({ nodes: ['gpu', 'box', 'other'], exclusiveNodes: ['gpu'] })
-  expect(withBackend(['gpu'])).toEqual({ nodes: [], exclusiveNodes: [] })
-  expect(withBackend(['gpu'], true)).toEqual({ nodes: [], exclusiveNodes: ['gpu'] })
 })
 
 it('reviews administrator node admission as a power even after converting a wildcard grant', () => {
@@ -717,7 +696,6 @@ it('reviews administrator node admission as a power even after converting a wild
   }
   const ownContext = { ...context, agentId: 'future', nodes: [administrator] }
   const before = newAgentDraft()
-  before.access.backend = 'native'
   before.access.nodes = null
   const draft = structuredClone(before)
   draft.access.nodes = [administrator.id]

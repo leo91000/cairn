@@ -27,8 +27,7 @@ pub async fn maintain(s: Arc<Service>) {
              AND status IN ('succeeded','failed','cancelled','interrupted')
              AND json_extract(r.data,'$.finishedAt')<=?2
              AND json_extract(r.data,'$.storage.mode')='on-demand'
-             AND (json_extract(r.data,'$.executionBackend')='native'
-                  OR json_extract(r.data,'$.snapshot.agent.access.backend')='native')
+             AND json_extract(r.data,'$.executionBackend')='native'
              AND EXISTS(SELECT 1 FROM records v WHERE v.kind='node-volumes'
                 AND json_extract(v.data,'$.runId')=r.id
                 AND json_extract(v.data,'$.materialized')=1
@@ -141,7 +140,7 @@ pub(crate) async fn evict_idle(s: &Service, run: &str, time: i64) -> Result<bool
         return Ok(false);
     };
     let manifest = super::publication::manifest(s, &point).await?;
-    if manifest["kind"] != crate::native::block::KIND
+    if !crate::native::block::mounts_block(&manifest)
         || manifest["onDemand"] != true
         || manifest["generation"] != expected["generation"]
     {

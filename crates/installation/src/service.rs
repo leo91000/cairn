@@ -545,8 +545,8 @@ impl Service {
         let mut task = parse("task", input)?;
         let agent = self.get("agents", text(&task, "agentId")).await?;
         let origin = crate::native::policy::origin();
-        if crate::native::policy::native(&agent) && !reduces_execution {
-            crate::native::policy::refresh(self).await?;
+        if !reduces_execution {
+            crate::native::policy::refresh_agent(self, text(&agent, "id")).await?;
         }
         task_projects(&agent, &task, &self.store.list("projects").await?)?;
         if let Some(cron) = task["cron"].as_str() {
@@ -798,9 +798,7 @@ impl Service {
         } else {
             crate::native::policy::origin()
         };
-        if crate::native::policy::native(&run["snapshot"]["agent"]) {
-            crate::native::policy::refresh(self).await?;
-        }
+        crate::native::policy::refresh_agent(self, text(&run["snapshot"]["agent"], "id")).await?;
         let result = self
             .store
             .transaction(move |db| {
@@ -1090,7 +1088,7 @@ fn inherit_agent_settings(input: &mut Value, existing: &Value) {
     if !input["access"].is_object() {
         return;
     }
-    for key in ["nodes", "installation", "delegation", "backend"] {
+    for key in ["nodes", "installation", "delegation"] {
         if input["access"].get(key).is_none() {
             input["access"][key] = policy(existing)[key].clone();
         }
@@ -1151,27 +1149,11 @@ fn save_agent(
     owner_review: bool,
     native_reviews: &[String],
 ) -> Result<Value> {
-    // Nodes held before stay accepted only while the execution backend is unchanged.
-    let previous_nodes = db
-        .get("agents", text(&agent, "id"))?
-        .filter(|saved| policy(saved)["backend"] == access["backend"])
-        .and_then(|saved| policy(&saved)["nodes"].as_array().cloned());
     // Serialize grants with revocation; a concurrent editor must never
-    // restore a grant that the revocation transaction just removed.
-    // Nodes the agent already held stay accepted, so unrelated edits still save.
-    let held = |node: &Value| {
-        previous_nodes
-            .as_ref()
-            .is_some_and(|nodes| nodes.iter().any(|held| held == node))
-    };
+    // restore a grant that the revocation transaction just removed. Agents may
+    // hold VM and native nodes together: each conversation keeps its backend.
     for node in access["nodes"].as_array().into_iter().flatten() {
         if node == crate::nodes::LOCAL_NODE_ID {
-            // The current runner only runs Firecracker VMs.
-            if access["backend"] == "native" && !held(node) {
-                return Err(Error::bad(
-                    "Native agents need explicit native nodes: the current runner only runs Firecracker VMs.",
-                ));
-            }
             continue;
         }
         let record = required(
@@ -1181,13 +1163,11 @@ fn save_agent(
         if record["revoked"] == true {
             return Err(Error::bad("A revoked node cannot be authorized."));
         }
-        if !held(node)
-            && crate::native::policy::node_native(&record) != (access["backend"] == "native")
-        {
-            return Err(Error::bad(
-                "Choose nodes that use this agent's execution backend.",
-            ));
-        }
+    }
+    // Profiles no longer select an execution backend; drop the setting earlier
+    // releases saved so it cannot be mistaken for a conversation's backend.
+    if let Some(access) = agent["access"].as_object_mut() {
+        access.remove("backend");
     }
     // Read the latest portrait inside the save transaction: editing an agent
     // must not overwrite an upload or background generation that just finished.
@@ -1220,7 +1200,6 @@ pub fn policy(agent: &Value) -> Value {
         "delegation": false,
         "sandbox": "yolo",
         "nodes": [crate::nodes::LOCAL_NODE_ID],
-        "backend": "firecracker",
     });
     merge(&mut value, &agent["access"]);
     // Agents restricted before MCP permissions existed get no MCP connection. Their
@@ -1235,9 +1214,11 @@ pub fn policy(agent: &Value) -> Value {
     if legacy_restricted {
         value["mcps"] = json!([]);
     }
-    // Snapshots of runs queued before the GitHub plugin still carry the setting.
+    // Snapshots of runs queued before the GitHub plugin still carry the setting,
+    // and profiles saved before conversations kept their own execution backend.
     if let Some(access) = value.as_object_mut() {
         access.remove("github");
+        access.remove("backend");
     }
     value
 }
@@ -1250,9 +1231,6 @@ pub fn covers(current: &Value, granted: &Value) -> bool {
     let current = policy(current);
     let granted = policy(granted);
 
-    if current["backend"] != granted["backend"] {
-        return false;
-    }
     let scopes = ["projects", "skills", "mcps"]
         .iter()
         .all(|key| within(&granted[*key], &current[*key]));

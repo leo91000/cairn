@@ -54,15 +54,20 @@ fn merge(db: &Db<'_>, input: &Value, executing: &[String]) -> Result<Value> {
     }
     let source = required(db.get("agents", source_id)?, "Source agent not found")?;
     let target = required(db.get("agents", target_id)?, "Destination agent not found")?;
-    if crate::native::policy::native(&source) || crate::native::policy::native(&target) {
-        return Err(Error::conflict(
-            "Native agents cannot be merged. Their execution approvals are tied to the agent.",
-        ));
-    }
     if !covers(&target, &source) || !nodes_covered(&target, &source) {
         return Err(Error::conflict(
             "The destination must already cover all source access, including nodes.",
         ));
+    }
+    for node in db.list("nodes")? {
+        let source_reviewed = node["revoked"] != true
+            && crate::nodes::agent_allows(&source, text(&node, "id"))
+            && crate::nodes::native_mode::reviewed(&node, &source);
+        if source_reviewed && !crate::nodes::native_mode::reviewed(&node, &target) {
+            return Err(Error::conflict(
+                "Confirm the destination's administrative host access before merging.",
+            ));
+        }
     }
     for grants in [
         crate::agent_grants::plugins,
@@ -104,6 +109,7 @@ fn merge(db: &Db<'_>, input: &Value, executing: &[String]) -> Result<Value> {
     if runs.iter().any(|run| {
         crate::run_status::RunStatus::of(run).is_some_and(crate::run_status::RunStatus::is_active)
             || run["recoveryPending"] == true
+            || crate::backend_migration::pending(run)
             || executing.iter().any(|id| run["id"] == *id)
     }) {
         return Err(Error::conflict(

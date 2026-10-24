@@ -1,5 +1,6 @@
 //! Trusted node identities. Enrollment and revocation are serialized with heartbeats.
 pub mod alerts;
+pub mod backend;
 pub mod checkpoint;
 pub mod connector;
 pub mod coordination;
@@ -256,6 +257,9 @@ struct Capabilities {
     fuse: bool,
     #[serde(default)]
     ublk: bool,
+    /// Native nodes able to mount VM disks in place through idmapped mounts.
+    #[serde(default)]
+    vm_disks: bool,
     #[serde(default)]
     native_mode_protocol: u32,
     cpu: u32,
@@ -433,12 +437,7 @@ impl Usage<'_> {
         let id = text(node, "id");
         self.agents
             .iter()
-            .filter(|agent| {
-                agent_allows(agent, id)
-                    && native_mode::reviewed(node, agent)
-                    && crate::native::policy::native(agent)
-                        == crate::native::policy::node_native(node)
-            })
+            .filter(|agent| agent_allows(agent, id) && native_mode::reviewed(node, agent))
             .map(|agent| AgentGrant {
                 id: &agent["id"],
                 name: &agent["name"],
@@ -524,16 +523,14 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
             moves::request(s, &s.store.run(run).await?, &input.body).await
         }
         ("GET", ["nodes", "placement", run, "backend-migration"]) => {
-            let chat = crate::backend_migration::chat_id(s, run).await?;
-            crate::backend_migration::preview(s, &chat, |_| Ok(())).await
+            crate::backend_migration::preview_run(s, run, |_| Ok(())).await
         }
         ("POST", ["nodes", "placement", run, "backend-migration"]) => {
-            let chat = crate::backend_migration::chat_id(s, run).await?;
             let mut args = input.body.clone();
             if !args.is_object() {
                 return Err(Error::bad("Confirm the destination backend and node."));
             }
-            args["chatId"] = chat.into();
+            args["runId"] = (*run).into();
             s.migrate_chat_backend(args, |_| Ok(())).await
         }
         ("POST", ["nodes", node, "native-mode"]) => {
@@ -910,14 +907,6 @@ async fn grant_agents(s: &Service, node: &str, body: Value) -> Result<Value> {
                 let granted = request.agent_ids.iter().any(|id| agent["id"] == *id);
                 if request.add && !granted {
                     continue;
-                }
-                if granted
-                    && crate::native::policy::native(&agent)
-                        != crate::native::policy::node_native(&record)
-                {
-                    return Err(Error::bad(
-                        "Choose agents configured for this node's execution backend.",
-                    ));
                 }
                 if native_mode::administrator(&record) {
                     let mut reviewed = record["nativeReviewedAgents"]

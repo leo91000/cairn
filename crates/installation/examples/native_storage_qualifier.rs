@@ -6,10 +6,11 @@ use cairn_installation::{
     http, nodes,
     nodes::{disk_grants, publication, restore},
     service::Service,
+    storage::{self, Disk, LazyDisk, layout::Layout, remote::RemoteSource},
 };
 use serde_json::{Value, json};
 use std::{
-    io::Write,
+    io::{Read, Write},
     os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::{
@@ -18,6 +19,7 @@ use std::{
     },
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio_util::sync::CancellationToken;
 
 const TRUSTED: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 
@@ -36,8 +38,7 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
             let mut agent = s.agent(json!({ "name": "Fixture" }), None).await?;
             // The reserved local ID is a VM runner in production. Only this
             // disposable manager seeds it as native to route through the private
-            // fixture bridge; do not weaken the real agent-save prohibition.
-            agent["access"]["backend"] = "native".into();
+            // fixture bridge; the run records its native backend directly.
             agent["access"]["nodes"] = json!([nodes::LOCAL_NODE_ID]);
             s.store.put("agents", agent.clone()).await?;
             let run = json!({
@@ -63,9 +64,76 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
         "checkpoint" => {
             s.store.set(&format!("run-checkpoint:{run_id}"), json!({
                 "runnerId": command["attempt"], "nodeId": nodes::LOCAL_NODE_ID,
-                "prepared": { "backend": "native", "isolated": true }, "runtimeId": "synthetic"
+                "prepared": { "backend": "native", "isolated": true }, "runtimeId": "synthetic",
+                "diskFormat": if command["vm"] == true { json!("vm") } else { Value::Null },
+                "diskRuntimeId": if command["vm"] == true { json!("fixture-vm") } else { Value::Null },
             }), None).await?;
             Ok(json!({ "ok": true }))
+        }
+        "seed-vm" => {
+            let root = s.config.data_dir.parent().unwrap();
+            let raw = root.join(format!("{run_id}.ext4"));
+            let state = root.join("state");
+            let directory = storage::environment::directory(&state, run_id)?;
+            tokio::fs::create_dir_all(&directory).await?;
+            let size = tokio::fs::metadata(&raw).await?.len();
+            if size != 256 * 1024 * 1024 {
+                return Err(Error::bad("Expected a 256 MiB fixture disk."));
+            }
+            let mut manifest = json!({
+                "size": size, "blockSize": nodes::snapshots::BLOCK,
+                "blocks": (0..64).map(|i| json!({ "offset": i * nodes::snapshots::BLOCK, "size": nodes::snapshots::BLOCK, "hash": null })).collect::<Vec<_>>()
+            });
+            let layout = if command["paired"] == true {
+                Layout::paired(size)?
+            } else {
+                Layout::Flat
+            };
+            layout.store(&mut manifest)?;
+            let context = command["context"].clone();
+            let remote = Arc::new(RemoteSource::new(
+                &context,
+                tokio::runtime::Handle::current(),
+                CancellationToken::new(),
+            )?);
+            let journal = LazyDisk::create(&directory.join("lazy"), &manifest, remote)?;
+            journal.set_context(&context)?;
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                let mut source = std::fs::File::open(raw)?;
+                let mut bytes = vec![0; nodes::snapshots::BLOCK as usize];
+                for i in 0..64 {
+                    source.read_exact(&mut bytes)?;
+                    if bytes.iter().any(|byte| *byte != 0) {
+                        journal.write_at(i * nodes::snapshots::BLOCK, &bytes)?;
+                    }
+                }
+                journal.sync()?;
+                Ok(())
+            })
+            .await
+            .map_err(Error::internal)??;
+            let runtime = json!({ "backend": "native", "storage": "ublk", "os": "linux", "arch": "x86_64", "runtimeId": "synthetic", "disk": "vm", "vmRuntimeId": "fixture-vm" });
+            tokio::fs::write(
+                directory.join("runtime.json"),
+                serde_json::to_vec(&runtime)?,
+            )
+            .await?;
+            let native = state.join("native").join(run_id);
+            tokio::fs::create_dir_all(&native).await?;
+            tokio::fs::write(native.join("block-initialized"), b"1").await?;
+            tokio::fs::write(native.join("runtime.json"), serde_json::to_vec(&runtime)?).await?;
+            Ok(json!({ "ok": true }))
+        }
+        "export-vm" => {
+            let root = s.config.data_dir.parent().unwrap();
+            let directory = storage::environment::directory(&root.join("state"), run_id)?;
+            let volume = storage::runtime::load(&directory).await?;
+            let target = root.join(format!("{run_id}-export.ext4"));
+            let path = target.clone();
+            tokio::task::spawn_blocking(move || storage::export(volume.as_ref(), &path))
+                .await
+                .map_err(Error::internal)??;
+            Ok(json!({ "path": target }))
         }
         "publish" | "live-publish" => {
             if command["op"] == "live-publish" {
@@ -85,7 +153,8 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
                 .get("node-backups", published["id"].as_str().unwrap_or(""))
                 .await?;
             let manifest = publication::manifest(s, &point).await?;
-            if manifest["kind"] != "native-ext4-v1" || manifest["onDemand"] != true {
+            let vm = manifest["runtime"]["disk"] == "vm";
+            if (!vm && manifest["kind"] != "native-ext4-v1") || manifest["onDemand"] != true {
                 return Err(Error::bad("Expected a native journal recovery point."));
             }
             // Inspect decoded real S3 blocks, not just the file view: generated
@@ -216,7 +285,7 @@ async fn main() -> Result<()> {
     s.store.put("nodes", json!({
         "id": nodes::LOCAL_NODE_ID, "local": true, "name": "Disposable fixture", "accepting": true,
         "nativeEnabled": true, "nativeAccounts": [TRUSTED], "lastSeen": now(),
-        "capabilities": { "backend": "native", "ublk": true, "os": "linux", "arch": "x86_64" },
+        "capabilities": { "backend": "native", "ublk": true, "vmDisks": true, "os": "linux", "arch": "x86_64" },
         "storage": { "reserveMiB": 64, "reservePercent": 1, "memoryCacheMiB": 4, "cacheMiB": 128 }
     })).await?;
     let requests = Arc::new(AtomicU64::new(0));

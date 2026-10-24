@@ -48,7 +48,6 @@ data class AccessPolicy(
      */
     val delegation: Boolean? = null,
     val sandbox: String = "yolo",
-    val backend: String = "firecracker",
 )
 
 @Serializable

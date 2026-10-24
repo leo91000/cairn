@@ -54,22 +54,21 @@ pub fn plugins(agent: &Value) -> Vec<String> {
 }
 
 /// Stores both grant lists without duplicates. Exclusive reservations need permission
-/// to run on the node and a Firecracker agent, so losing either also removes them.
+/// to run on the node, so losing it also removes them.
 pub(crate) fn normalize(agent: &mut Value) {
     let access = crate::service::policy(agent);
-    let native = crate::native::policy::native(agent);
     let exclusive = exclusive_nodes(agent)
         .into_iter()
-        .filter(|node| !native && crate::service::allowed(&access["nodes"], node))
+        .filter(|node| crate::service::allowed(&access["nodes"], node))
         .collect::<Vec<_>>();
     agent[EXCLUSIVE_NODES] = json!(exclusive);
     agent[PLUGINS] = json!(plugins(agent));
 }
 
-/// Exclusive reservations suspend Firecracker VMs, so only a Firecracker agent can
-/// reserve a Firecracker node.
-fn reservable(agent: &Value, node: &Value) -> bool {
-    !crate::native::policy::native(agent) && !crate::native::policy::node_native(node)
+/// Exclusive reservations suspend Firecracker VMs, so only a Firecracker node can
+/// be reserved. The reserving conversation itself must also run in a VM there.
+fn reservable(node: &Value) -> bool {
+    !crate::native::policy::node_native(node)
 }
 
 /// Checks the grants an owner selected: existing, not revoked, and only on plugin
@@ -94,9 +93,9 @@ pub(crate) fn validate(db: &Db<'_>, agent: &Value, accepts_agents: &[String]) ->
         if record["revoked"] == true {
             return Err(Error::bad("A revoked node cannot be reserved."));
         }
-        if !reservable(agent, &record) {
+        if !reservable(&record) {
             return Err(Error::bad(
-                "Exclusive reservations need a Firecracker VM node used by a Firecracker agent.",
+                "Exclusive reservations need a Firecracker VM node.",
             ));
         }
     }
@@ -183,7 +182,7 @@ pub(crate) fn set_node_agents(db: &Db<'_>, node: &mut Value, agents: &[String]) 
     for agent in agents {
         let may_run = db.get("agents", agent)?.is_some_and(|saved| {
             crate::service::allowed(&crate::service::policy(&saved)["nodes"], &node_id)
-                && reservable(&saved, node)
+                && reservable(node)
         });
         if may_run {
             runnable.push(agent.clone());
@@ -274,7 +273,7 @@ pub(crate) fn reconcile(db: &Db<'_>) -> Result<()> {
             .partition(|node| {
                 let record = nodes.iter().find(|record| record["id"] == *node);
                 crate::service::allowed(&access["nodes"], node.as_str().unwrap_or(""))
-                    && record.is_some_and(|record| reservable(&agent, record))
+                    && record.is_some_and(reservable)
             });
         // A previous release can remove node access without the reservation.
         for node in &unrunnable {

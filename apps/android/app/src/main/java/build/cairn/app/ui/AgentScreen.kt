@@ -894,7 +894,8 @@ private fun AgentOverview(
             error = AgentSection.Nodes in errors,
             changed = AgentSection.Nodes in changed,
             chips = {
-                if (access.backend == NATIVE_BACKEND) PowerChip(backendLabel(access.backend))
+                if (resources.nodesLoaded && agent.nativeNodes(resources.nodes).isNotEmpty())
+                    PowerChip("Nodes natives")
             },
         ) {
             open(AgentSection.Nodes)
@@ -1723,41 +1724,21 @@ private fun NodesSection(
         }
     var explain by remember { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
-    val native = access.backend == NATIVE_BACKEND
-    // Only machines of the agent's backend can run it; the current runner is a VM runner.
+    // VM and native machines alike: each conversation keeps the backend it started on.
     val choices = agent.nodeChoices(nodes)
     SwitchRow(
-        "Exécution native sur l’hôte",
-        if (native)
-            "Partage le GPU et les outils de l’hôte, avec une isolation plus faible qu’une VM. Chaque node doit aussi autoriser les personnes qui dirigent cet agent."
-        else "Dans une VM Firecracker isolée.",
-        native,
-        enabled = editable,
-        power = true,
-    ) { on ->
-        change { it.withBackend(on, locked) }
-    }
-    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-    SwitchRow(
-        if (native) "Toutes les nodes natives, y compris futures"
-        else "Toutes les nodes VM, y compris futures",
-        if (native)
-            "Chaque node doit aussi activer l’exécution native et autoriser toutes les personnes qui dirigent la conversation."
-        else "Les nouvelles machines seront utilisables par cet agent dès leur inscription.",
+        "Toutes les nodes, y compris futures",
+        "Les nouvelles machines VM sont utilisables dès leur inscription ; les nodes natives doivent aussi activer l’exécution native et faire confiance à toutes les personnes qui dirigent la conversation.",
         access.nodes == null,
         enabled = editable,
     ) { all ->
         change { it.copy(access = it.access.withAllNodes(all, nodes, agent.id)) }
     }
-    if (native && loaded && choices.isEmpty())
-        Note("Aucune node native. Inscrivez une machine en exécution native depuis Nodes.")
     if (!loaded) {
         // The machines are unknown: what the agent holds is listed as saved, read-only.
         Note(
             when {
-                access.nodes == null ->
-                    if (native) "Exécution autorisée sur toutes les nodes natives de confiance."
-                    else "Exécution autorisée sur toutes les nodes VM."
+                access.nodes == null -> "Exécution autorisée sur toutes les nodes."
                 access.nodes.isEmpty() -> "Exécution autorisée sur aucune node."
                 else -> "Exécution autorisée sur : ${access.nodes.joinToString(", ")}"
             }
@@ -1768,15 +1749,8 @@ private fun NodesSection(
     if (loaded)
         agent.unusableNodes(nodes).forEach { held ->
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    if (held.otherBackend) "« ${held.name} » · autre mode d’exécution"
-                    else "Node supprimée ou révoquée",
-                    Modifier.weight(1f),
-                )
-                ToneChip(
-                    if (held.otherBackend) PluginBadge("Indisponible", PluginTone.ATTENTION)
-                    else PluginBadge("Introuvable", PluginTone.ATTENTION)
-                )
+                Text("Node supprimée ou révoquée", Modifier.weight(1f))
+                ToneChip(PluginBadge("Introuvable", PluginTone.ATTENTION))
                 TextButton(
                     onClick = { change { it.withNodeRun(held.id, false, locked) } },
                     modifier =
@@ -1816,7 +1790,8 @@ private fun NodesSection(
                     ToneChip(nodeStatus(node))
                 }
                 val facts =
-                    (node.tags +
+                    (listOf(backendLabel(node.backend)) +
+                            node.tags +
                             listOfNotNull(
                                 node.capabilities.os.ifBlank { null },
                                 if (node.local) null else "${node.capabilities.cpu} CPU",

@@ -344,7 +344,7 @@ fun NodesScreen(
         ) {
             Text(
                 replacing?.let {
-                    "Installez le runtime ${if (backend == NATIVE_BACKEND) "natif" else "VM Firecracker"} sur la machine de ${it.name}. Il s’inscrit comme une nouvelle node ; une fois connectée et configurée, Cairn propose de révoquer ${it.name}. Les conversations gardent leur backend d’exécution, et celui de chaque agent se choisit sur sa fiche."
+                    "Installez le runtime ${if (backend == NATIVE_BACKEND) "natif" else "VM Firecracker"} sur la machine de ${it.name}. Il s’inscrit comme une nouvelle node ; une fois connectée et configurée, Cairn propose de révoquer ${it.name}. Les conversations gardent leur backend d’exécution jusqu’à ce que vous les déplaciez vers la nouvelle node depuis leurs détails d’exécution."
                 } ?: "Connectez une machine Linux, puis choisissez qui peut l’utiliser.",
                 style = MaterialTheme.typography.bodyMedium,
             )
@@ -601,10 +601,10 @@ internal fun RetireNode(
         )
         if (agents.isNotEmpty())
             Text(
-                "Agents autorisés sur l’ancienne node : ${agents.joinToString(", ")}. Pour les faire tourner sur la nouvelle, passez-les en ${if (nextNative) "exécution native" else "VM Firecracker"} sur leur fiche et autorisez-la."
+                "Agents autorisés sur l’ancienne node : ${agents.joinToString(", ")}. Pour les faire tourner sur la nouvelle, autorisez-la sur leur fiche."
             )
         Text(
-            "Les conversations fixées sur l’ancienne node ou qui la préfèrent reviennent au placement automatique. Les conversations gardent leur backend d’exécution : les existantes continuent sur d’autres nodes ${if (previousNative) "natives" else "VM"}."
+            "Les conversations fixées sur l’ancienne node ou qui la préfèrent reviennent au placement automatique. Chaque conversation garde son backend d’exécution jusqu’à son déplacement : déplacez-la vers la nouvelle node depuis ses détails d’exécution pour y continuer."
         )
         if (previous.occupiedSlots > 0)
             Text(
@@ -689,36 +689,30 @@ private fun FirstAgents(
         if (node.nativeModeRequest?.mode == "administrator") Text(NATIVE_ADMIN_WARNING)
         val granted = node.grantedAgents(state.agents)
         state.agents.forEach { agent ->
-            // The server refuses an agent on a node of another execution backend.
-            val mismatch = !node.accepts(agent)
+            // Any agent may use this node; host administration needs its own review.
             val everywhere =
-                !mismatch &&
-                    agent.access.nodes == null &&
+                agent.access.nodes == null &&
                     (node.nativeModeRequest?.mode != "administrator" ||
                         agent.id in node.nativeReviewedAgents)
-            val already = !mismatch && !everywhere && agent.id in granted
+            val already = !everywhere && agent.id in granted
             val locked = everywhere || already
-            val checked = locked || (!mismatch && agent.id in selected)
+            val checked = locked || agent.id in selected
             Row(
                 Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(
                     value = checked,
-                    enabled = !locked && !mismatch && !state.busy,
+                    enabled = !locked && !state.busy,
                     role = androidx.compose.ui.semantics.Role.Checkbox,
                 ) {
                     selected = if (it) selected + agent.id else selected - agent.id
                 },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Checkbox(checked, null, enabled = !locked && !mismatch)
+                Checkbox(checked, null, enabled = !locked)
                 Spacer(Modifier.width(8.dp))
                 Column(Modifier.weight(1f)) {
                     Text(agent.name)
                     val reason =
                         when {
-                            mismatch ->
-                                if (agent.access.backend == NATIVE_BACKEND)
-                                    "Agent en exécution native : réservé aux nodes natives"
-                                else "Agent en VM : réservé aux nodes VM"
                             everywhere -> "Autorisé sur toutes les nodes"
                             already -> "Déjà autorisé sur cette machine"
                             else -> null
@@ -746,9 +740,7 @@ private fun FirstAgents(
             TextButton(onClick = later, enabled = !state.busy) { Text("Plus tard") }
             Button(
                 onClick = {
-                    finish(
-                        state.agents.filter { it.id in selected && node.accepts(it) }.map { it.id }
-                    )
+                    finish(state.agents.filter { it.id in selected }.map { it.id })
                 },
                 enabled = !state.busy,
             ) {

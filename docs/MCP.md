@@ -351,12 +351,19 @@ Consumed code digests and bindings remain linked to their grant for detection
 beyond the initial five-minute code expiry; deleting the grant removes them.
 Wrong client or PKCE attempts cannot revoke another client's grant.
 
-Conversation backend migration is available on both public MCP and
-`cairn_installation`: `get_chat_backend_migration` previews the destination after
-an agent profile backend change; `migrate_chat_backend` requires management access,
-`chatId`, `nodeId`, `backend` and `confirm: true`. It returns immediately while the
-owned migration task runs. Poll the preview for `pending`, `required` and `error`.
-An explicit owner may adopt the existing conversation into their native grant;
+Moving a conversation to the other execution backend is available on both public
+MCP and `cairn_installation`: `get_chat_backend_migration` reports a conversation's
+backend, disk format and authorized destinations of the other backend, with
+whether each needs a one-time conversion; `migrate_chat_backend` requires
+management access, exactly one of `chatId` or mission `runId`, `nodeId` and
+`confirm: true` (`backend` is optional
+and checked against the node). A VM disk moves to a native node in place, like any
+node move; a disk created natively is converted once for a VM, which returns
+`status: "migrating"` while the owned task runs. Poll the preview for `pending` and
+`error`; the preview accepts the same `chatId`/`runId` choice. A native-born
+mission resumes automatically with its visible history in a fresh engine session
+after conversion. An explicit owner adopts the conversation into their native grant;
 installation agents retain their bounded parent grant. Web and Android expose the
-same confirmed operation from execution-node details. See
-[the migration decision](adr/0054-explicit-conversation-backend-migration.md).
+same confirmed operation from execution-node details, and agents can move their
+own conversation with `move_to_node`. See
+[the decision](adr/0059-per-conversation-backend-and-in-place-vm-disks.md).

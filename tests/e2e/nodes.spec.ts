@@ -274,8 +274,9 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await panel.getByRole('button', { name: 'Move…' }).click()
   const move = page.getByRole('dialog', { name: 'Move to another node', exact: true })
   await move.getByRole('combobox', { name: 'Destination', exact: true }).click()
-  await move.getByRole('option', { name: 'Destination server', exact: true }).click()
-  await expect(move.getByRole('combobox', { name: 'Destination', exact: true })).toHaveValue('Destination server')
+  // Each destination names the backend the conversation would run on there.
+  await move.getByRole('option', { name: 'Destination server · Firecracker VM', exact: true }).click()
+  await expect(move.getByRole('combobox', { name: 'Destination', exact: true })).toHaveValue('Destination server · Firecracker VM')
   await expect(move.getByRole('button', { name: 'Move now' })).toBeEnabled()
   await expect(move.getByRole('spinbutton')).toHaveCount(0)
   await page.keyboard.press('Escape')
@@ -320,8 +321,8 @@ test('conversation placement distinguishes a preference from a strict pin and sh
 test('finishing the first step keeps an agent allowed while it was open', async ({ page, workspace }) => {
   test.setTimeout(60000)
   const nightShift = await workspace.api('/api/agents', 'POST', { name: 'Night shift', access: { nodes: [] } })
-  // The server only grants agents of the node's backend: a native agent is shown, but cannot be chosen.
-  // Native agents need a native node, so this one is only listed by the page.
+  // Agents profiles saved before conversations kept their own backend still list it: it no longer
+  // restricts which machines they may be granted.
   await page.route('**/api/agents', async (route) => {
     if (route.request().method() !== 'GET') {
       await route.continue()
@@ -376,9 +377,8 @@ test('finishing the first step keeps an agent allowed while it was open', async 
   await expect(night).not.toBeChecked()
   await expect(night).toBeEnabled()
   const native = grant.getByRole('checkbox', { name: /^Native helper/ })
-  await expect(native).toBeDisabled()
+  await expect(native).toBeEnabled()
   await expect(native).not.toBeChecked()
-  await expect(grant.locator('label').filter({ hasText: 'Native helper' })).toContainText('Uses native execution: only native nodes can run it')
 
   // Meanwhile, the owner allows Night shift on this machine from its agent page in another window.
   const agent = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === nightShift.id)
@@ -397,7 +397,7 @@ test('finishing the first step keeps an agent allowed while it was open', async 
   expect(saved.agents.map((item: { id: string }) => item.id).sort()).toEqual([MAIN_AGENT_ID, nightShift.id].sort())
 })
 
-test('native enrollment requires explicit people and native agent grants', async ({ page, workspace }) => {
+test('native enrollment requires explicit people, then grants agents like any node', async ({ page, workspace }) => {
   test.setTimeout(90000)
   const nativeCapabilities = {
     backend: 'native',
@@ -409,7 +409,7 @@ test('native enrollment requires explicit people and native agent grants', async
     kvm: false,
     fuse: false,
   }
-  // A native agent already runs on another native machine.
+  // An agent already runs on another native machine.
   const laptopInvitation = await workspace.api('/api/nodes/enrollments', 'POST', { name: 'Native laptop', backend: 'native' })
   const laptop = await page.request.post(`${workspace.installationUrl}/internal/nodes/enroll`, {
     data: {
@@ -421,7 +421,7 @@ test('native enrollment requires explicit people and native agent grants', async
     },
   })
   expect(laptop.ok()).toBe(true)
-  const agent = await workspace.api('/api/agents', 'POST', { name: 'Native worker', access: { backend: 'native', nodes: [(await laptop.json()).nodeId] } })
+  const agent = await workspace.api('/api/agents', 'POST', { name: 'Native worker', access: { nodes: [(await laptop.json()).nodeId] } })
   await useRelayForHttpMocks(page)
   await page.goto(workspacePath('/nodes'))
   await authenticateWorkspace(page)
@@ -468,9 +468,10 @@ test('native enrollment requires explicit people and native agent grants', async
 
   const grant = page.getByRole('dialog', { name: 'Who can use “Native desktop”?' })
   await expect(grant).toBeVisible()
+  // Any agent may be granted the machine; its conversations still start in a VM when they can.
   const main = grant.getByRole('checkbox', { name: /^Main agent/ })
-  await expect(main).toBeDisabled()
-  await expect(grant.locator('label').filter({ hasText: 'Main agent' })).toContainText('Runs in a Firecracker VM: set it to native execution on its page first')
+  await expect(main).toBeEnabled()
+  await expect(main).not.toBeChecked()
   const finishing = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/nodes/${desktop}/agents`))
   await grant.getByRole('checkbox', { name: /^Native worker/ }).check()
   await grant.getByRole('button', { name: 'Finish', exact: true }).click()
@@ -653,50 +654,78 @@ test('switching a machine to native enrolls it again and retires the previous no
   expect((await workspace.api(`/api/nodes/placement/${detail.run.id}`)).pinnedNodeId).toBeNull()
 })
 
-test('existing conversation explicitly confirms backend migration and follows its progress', async ({ page, workspace }) => {
-  test.setTimeout(60000)
-  await useRelayForHttpMocks(page)
-  const chat = await workspace.api('/api/chats', 'POST', {})
-  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Keep this conversation' })
-  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
-  await page.route('**/nodes/placement/*', route => route.fulfill({ json: { nodes: [{ id: 'native-fixture', name: 'Desktop GPU' }], pinnedNodeId: null, preferredNodeId: null } }))
-  let phase = 'ready'
-  let requestBody: unknown
-  await page.route('**/nodes/placement/*/backend-migration', async (route) => {
-    if (route.request().method() === 'POST') {
-      requestBody = route.request().postDataJSON()
-      phase = 'pending'
-      await route.fulfill({ json: { status: 'migrating' } })
-      return
-    }
-
-    await route.fulfill({
+for (const nativeStatus of ['failed', 'cancelled'] as const) {
+  test(`moving a conversation remounts files and converts a ${nativeStatus} native environment`, async ({ page, workspace }) => {
+    test.setTimeout(60000)
+    await useRelayForHttpMocks(page)
+    const chat = await workspace.api('/api/chats', 'POST', {})
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Keep this conversation' })
+    // Only a finished turn matters here; its saved environment is described below.
+    await expect.poll(async () => ['succeeded', 'failed'].includes((await workspace.api(`/api/chats/${chat.id}`)).run?.status), { timeout: 20000 }).toBe(true)
+    const run = (await workspace.api(`/api/chats/${chat.id}`)).run
+    workspace.service.store.updateRun(run.id, { status: 'succeeded', executionBackend: 'firecracker', sessionId: 'session-fixture' } as any)
+    const vm = { id: randomUUID(), name: 'Build VM', capabilities: { backend: 'firecracker' } }
+    const gpu = { id: randomUUID(), name: 'Desktop GPU', capabilities: { backend: 'native', vmDisks: true } }
+    await page.route('**/nodes/placement/*', route => route.fulfill({ json: { nodes: [vm, gpu], pinnedNodeId: null, preferredNodeId: null } }))
+    let diskFormat = 'vm'
+    let phase = 'ready'
+    await page.route('**/nodes/placement/*/backend-migration', route => route.fulfill({
       json: {
         chatId: chat.id,
-        required: phase !== 'complete',
-        fromBackend: 'firecracker',
-        toBackend: 'native',
+        backend: diskFormat === 'vm' ? 'firecracker' : 'native',
+        diskFormat,
+        nodes: [],
         pending: phase === 'pending',
-        nodes: [{ id: 'native-fixture', name: 'Desktop GPU' }],
+        error: phase === 'failed' ? 'Previous conversion restore failed.' : null,
       },
+    }))
+    const moves: unknown[] = []
+    await page.route('**/nodes/placement/*/move', async (route) => {
+      moves.push(route.request().postDataJSON())
+      if (diskFormat === 'native') {
+        phase = 'pending'
+        await route.fulfill({ json: { status: 'migrating', chatId: chat.id } })
+        return
+      }
+
+      await route.fulfill({ json: { status: 'moving', nodeId: gpu.id, backend: 'native' } })
     })
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+    await page.getByRole('button', { name: 'Execution node', exact: true }).filter({ visible: true }).click()
+    const panel = page.getByRole('dialog', { name: 'Execution node', exact: true })
+    // Pinning stays within the conversation's backend; moving switches it explicitly.
+    await expect(panel).toContainText('Only Firecracker VM nodes are listed; use Move… to switch backend.')
+    await panel.getByRole('button', { name: 'Move…', exact: true }).click()
+    const move = page.getByRole('dialog', { name: 'Move to another node', exact: true })
+    await move.getByRole('combobox', { name: 'Destination' }).click()
+    await page.getByRole('option', { name: 'Desktop GPU · Native process', exact: true }).click()
+    await expect(move.getByRole('note')).toContainText('will run as a native host process on Desktop GPU, using the same files in place')
+    await move.getByRole('button', { name: 'Move and switch backend', exact: true }).click()
+    await expect(page.getByRole('status').filter({ hasText: 'switches backend at the destination' })).toBeVisible()
+    expect(moves).toEqual([{ nodeId: gpu.id }])
+
+    // A natively created environment is copied once before a VM can run it.
+    workspace.service.store.updateRun(run.id, { executionBackend: 'native', status: nativeStatus, sessionId: null } as any)
+    diskFormat = 'native'
+    // First conversion after an engine failure, and retry after a conversion failure.
+    phase = nativeStatus === 'cancelled' ? 'failed' : 'ready'
+    await page.reload()
+    await page.getByRole('button', { name: 'Execution node', exact: true }).filter({ visible: true }).click()
+    await panel.getByRole('button', { name: 'Move…', exact: true }).click()
+    await move.getByRole('combobox', { name: 'Destination' }).click()
+    await page.getByRole('option', { name: 'Build VM · Firecracker VM', exact: true }).click()
+    await expect(move.getByRole('note')).toContainText('Its files are copied once for a VM')
+    await page.screenshot({ path: `test-results/backend-conversion-${nativeStatus}-confirm.png` })
+    await expect(move.getByRole('button', { name: 'Move and switch backend', exact: true })).toBeEnabled()
+    await move.getByRole('button', { name: 'Move and switch backend', exact: true }).click()
+    await expect(page.getByRole('status').filter({ hasText: 'Converting this natively created environment' })).toBeVisible()
+    expect(moves).toEqual([{ nodeId: gpu.id }, { nodeId: vm.id }])
+    phase = 'complete'
+    await expect(page.getByRole('status').filter({ hasText: 'Conversion complete' })).toBeVisible()
+    await expect(page).toHaveURL(/\/chats\//)
   })
-  await page.goto(workspacePath(`/chats/${chat.id}`))
-  await authenticateWorkspace(page)
-  await page.getByRole('button', { name: 'Execution node', exact: true }).click()
-  await page.getByRole('button', { name: 'Migrate this conversation…', exact: true }).click()
-  const confirm = page.getByRole('dialog', { name: 'Migrate this conversation?', exact: true })
-  await expect(confirm).toContainText('fresh engine session')
-  await expect(confirm).toContainText('original environment is retained')
-  expect(requestBody).toBeUndefined()
-  await page.screenshot({ path: 'test-results/backend-migration-confirm.png' })
-  await confirm.getByRole('button', { name: 'Stop and migrate', exact: true }).click()
-  await expect(page.getByRole('status').filter({ hasText: 'Migrating to native execution' })).toBeVisible()
-  expect(requestBody).toEqual({ nodeId: 'native-fixture', backend: 'native', confirm: true })
-  phase = 'complete'
-  await expect(page.getByRole('status').filter({ hasText: 'Migration complete' })).toBeVisible()
-  await expect(page).toHaveURL(/\/chats\//)
-})
+}
 
 test('previews node administrator powers and keeps failed transitions visibly blocked', async ({ page, workspace: _workspace }) => {
   await useRelayForHttpMocks(page)

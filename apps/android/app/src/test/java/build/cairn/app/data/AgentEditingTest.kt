@@ -503,38 +503,42 @@ class AgentEditingTest {
     }
 
     @Test
-    fun aBackendSwitchOnEitherSideKeepsThatSidesNodesWhole() {
+    fun vmAndNativeNodeGrantsMergeLikeAnyList() {
         val base = agent.withExclusive("gpu", true)
-        // I switched to native and chose desk; they added mac meanwhile.
-        val mine = base.withBackend(native = true).withNodeRun("desk", true)
+        // I allowed the native desk; they added mac meanwhile: both are kept.
+        val mine = base.withNodeRun("desk", true)
         val theirs =
             base.copy(
                 revision = "r2",
                 access = base.access.copy(nodes = base.access.nodes!! + "mac"),
             )
         val rebased = rebaseAgent(base, mine, theirs)
-        assertEquals(NATIVE_BACKEND, rebased.access.backend)
-        assertEquals(listOf("desk"), rebased.access.nodes)
-        assertEquals(emptyList<String>(), rebased.exclusiveNodes)
-
-        // They switched; I only added a VM node: their native nodes win, mine is not merged in.
-        val theirsNative = base.withBackend(native = true).withNodeRun("desk", true)
-        val mineVm = base.withNodeRun("mac", true)
-        val kept = rebaseAgent(base, mineVm, theirsNative.copy(revision = "r2"))
-        assertEquals(NATIVE_BACKEND, kept.access.backend)
-        assertEquals(listOf("desk"), kept.access.nodes)
+        assertEquals(listOf(LOCAL_NODE_ID, "gpu", "mac", "desk"), rebased.access.nodes)
+        assertEquals(listOf("gpu"), rebased.exclusiveNodes)
     }
 
     @Test
-    fun cardsAndReviewsNameTheBackendAndOnlyEffectiveExclusivity() {
-        val native = agent.withBackend(native = true).withNodeRun("desk", true)
+    fun cardsAndReviewsNameNativeNodesAndOnlyEffectiveExclusivity() {
+        val desk =
+            ExecutionNode(
+                "desk",
+                "desk-native",
+                status = "online",
+                capabilities = NodeCapabilities(backend = NATIVE_BACKEND),
+            )
+        val native = agent.withNodeRun("desk", true)
         assertEquals(
-            listOf("exécution native"),
-            agentReductions(native, native.withBackend(native = false), resources).filter {
-                it == "exécution native"
+            listOf("node « desk-native »"),
+            agentReductions(native, agent, resources.copy(nodes = nodes + desk)).filter {
+                "desk" in it
             },
         )
-        assertEquals("2 projets · 1 node · Exécution native", agentAccessSummary(native))
+        assertEquals(
+            "2 projets · 3 nodes · Nodes natives",
+            agentAccessSummary(native, nodes = nodes + desk),
+        )
+        // Without the machine list, no native node is claimed.
+        assertEquals("2 projets · 3 nodes", agentAccessSummary(native))
 
         val granted = agent.copy(plugins = listOf("prod", "staging")).withExclusive("mac", true)
         // Without the catalog or machines: counts, and no exclusivity that may not apply.
@@ -562,7 +566,7 @@ class AgentEditingTest {
     }
 
     @Test
-    fun runPermissionsOnUnusableNodesAreReportedAndNativeSupportsAllNodes() {
+    fun runPermissionsOnRemovedNodesAreReportedAndNativeNodesAreUsable() {
         val desk =
             ExecutionNode(
                 "desk",
@@ -571,19 +575,15 @@ class AgentEditingTest {
                 capabilities = NodeCapabilities(backend = NATIVE_BACKEND),
             )
         val holder = agent.copy(access = agent.access.copy(nodes = listOf("gpu", "desk", "gone")))
-        val unusable = holder.unusableNodes(nodes + desk)
-        assertEquals(listOf("desk", "gone"), unusable.map { it.id })
-        assertEquals(listOf(true, false), unusable.map { it.otherBackend })
+        assertEquals(listOf("gone"), holder.unusableNodes(nodes + desk).map { it.id })
         val issues = agentIssues(holder, resources.copy(nodes = nodes + desk))
-        assertTrue(issues.any { "« desk-native » utilise un autre mode d’exécution" in it.text })
-        assertTrue(issues.any { it.text == "Une node autorisée n’existe plus ou a été révoquée." })
-
-        val native = agent.withBackend(native = true)
-        assertFalse(AgentSection.Nodes in agentErrors(AgentDraft(native)))
-        val allNative = native.copy(access = native.access.withAllNodes(true, nodes + desk))
-        assertNull(allNative.access.nodes)
-        assertFalse(AgentSection.Nodes in agentErrors(AgentDraft(allNative)))
-        assertFalse(AgentSection.Nodes in agentErrors(AgentDraft(native.withNodeRun("desk", true))))
+        assertEquals(
+            listOf("Une node autorisée n’existe plus ou a été révoquée."),
+            issues.filter { it.section == AgentSection.Nodes }.map { it.text },
+        )
+        val all = holder.copy(access = holder.access.withAllNodes(true, nodes + desk))
+        assertNull(all.access.nodes)
+        assertFalse(AgentSection.Nodes in agentErrors(AgentDraft(all)))
     }
 
     @Test
@@ -610,7 +610,7 @@ class AgentEditingTest {
     }
 
     @Test
-    fun nativeExecutionUsesOnlyNativeNodesAndIsReviewed() {
+    fun nativeNodesAreOfferedBesideVmNodesAndReviewedLikePowers() {
         val desk =
             ExecutionNode(
                 "desk",
@@ -620,50 +620,41 @@ class AgentEditingTest {
             )
         val all = nodes + desk
         val reserved = agent.withExclusive("gpu", true)
-
-        // New agents and existing ones default to a VM.
-        assertEquals(VM_BACKEND, newAgent().access.backend)
-        assertEquals(listOf(LOCAL_NODE_ID, "gpu", "mac"), reserved.nodeChoices(all).map { it.id })
-
-        // Switching starts again from no node and no exclusive reservation.
-        val native = reserved.withBackend(native = true)
-        assertEquals(NATIVE_BACKEND, native.access.backend)
-        assertEquals(emptyList<String>(), native.access.nodes)
-        assertEquals(emptyList<String>(), native.exclusiveNodes)
-        assertEquals(listOf("desk"), native.nodeChoices(all).map { it.id })
-        assertEquals(native, native.withBackend(native = true))
-        // An older installation keeps reservations on its nodes: they stay as shown.
         assertEquals(
-            listOf("gpu"),
-            reserved.withBackend(native = true, readOnlyGrants = true).exclusiveNodes,
+            listOf(LOCAL_NODE_ID, "gpu", "mac", "desk"),
+            reserved.nodeChoices(all).map { it.id },
         )
+        // An older installation keeps reservations on its nodes: they stay as shown.
         assertEquals(
             listOf("gpu"),
             reserved.withNodeRun("gpu", false, readOnlyGrants = true).exclusiveNodes,
         )
         assertEquals(emptyList<String>(), reserved.withNodeRun("gpu", false).exclusiveNodes)
 
-        val running = native.withNodeRun("desk", true)
-        assertEquals("Exécution native · 1 sur 1", nodesSummary(running, all))
+        val running = agent.withNodeRun("desk", true)
+        assertEquals("3 sur 4 · nodes natives", nodesSummary(running, all))
         assertEquals(
             listOf(AgentSection.Nodes),
             agentChanges(agent, AgentDraft(running)).distinct(),
         )
         val lines = agentReview(agent, running, resources.copy(nodes = all), null)
         assertEquals(ReviewKind.Power, lines.first().kind)
-        assertTrue(lines.first().text.startsWith("Ajout : exécution native sur l’hôte."))
+        assertTrue(lines.first().text.startsWith("Ajout : node native desk-native."))
         assertTrue(needsReview(lines, null))
+        // Every node, native ones included, is one power line.
+        val everywhere = agent.copy(access = agent.access.withAllNodes(true, all))
+        assertTrue(
+            agentReview(agent, everywhere, resources.copy(nodes = all), null)
+                .first()
+                .text
+                .startsWith("Ajout : toutes les nodes, y compris natives.")
+        )
 
-        // Back to a VM: no power added, the native machines are no longer offered.
-        val vm = running.withBackend(native = false)
-        assertEquals(VM_BACKEND, vm.access.backend)
-        assertEquals(emptyList<String>(), vm.access.nodes)
-        assertTrue(agentReview(running, vm, resources, null).none { it.kind == ReviewKind.Power })
-
-        // A reload keeps a backend switch made on top of the newer version.
-        assertEquals(
-            NATIVE_BACKEND,
-            rebaseAgent(agent, running, agent.copy(revision = "r2")).access.backend,
+        // Removing the native node adds no power.
+        assertTrue(
+            agentReview(running, agent, resources.copy(nodes = all), null).none {
+                it.kind == ReviewKind.Power
+            }
         )
     }
 
@@ -1010,9 +1001,9 @@ class AgentEditingTest {
                 capabilities = gpu.capabilities.copy(backend = NATIVE_BACKEND),
                 nativeModeRequest = NativeModeState("administrator", "generation"),
             )
-        val native = agent.copy(access = agent.access.copy(backend = NATIVE_BACKEND, nodes = null))
+        val native = agent.copy(access = agent.access.copy(nodes = null))
         assertEquals(
-            emptyList<String>(),
+            listOf(LOCAL_NODE_ID),
             native.access.withAllNodes(false, listOf(administrator), agent.id).nodes,
         )
         val edited = native.copy(access = native.access.copy(nodes = listOf(administrator.id)))
@@ -1028,7 +1019,7 @@ class AgentEditingTest {
         )
         val reviewed = administrator.copy(nativeReviewedAgents = listOf(agent.id))
         assertEquals(
-            listOf(administrator.id),
+            listOf(LOCAL_NODE_ID, administrator.id),
             native.access.withAllNodes(false, listOf(reviewed), agent.id).nodes,
         )
         assertTrue(edited.nativeReviewNodes(resources.copy(nodes = listOf(reviewed))).isEmpty())

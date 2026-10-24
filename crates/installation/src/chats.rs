@@ -17,7 +17,7 @@ use crate::{
     store::Db,
     validation::{parse, parse_as, string_enum, text},
 };
-use handoff::handoff_context;
+pub(crate) use handoff::handoff_context;
 use questions::{find_question, questions, save_question};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

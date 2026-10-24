@@ -111,7 +111,7 @@ async fn saved_session(
         Ok(session) => Ok(Some(session)),
         Err(error)
             if error.status == 409
-                && crate::native::policy::native(&run["snapshot"]["agent"])
+                && crate::execution::runs_natively(run)
                 && run["nativeModeInterruption"].is_string()
                 && text(run, "sessionId").is_empty() =>
         {
@@ -325,7 +325,7 @@ impl Execution<'_> {
 
     /// Prepares the workspace, or restores the one saved before a restart.
     async fn prepare_execution(
-        &self,
+        &mut self,
         existing: bool,
     ) -> Result<(Value, crate::plugins::run_credentials::RunCredentials)> {
         let s = self.s;
@@ -342,9 +342,21 @@ impl Execution<'_> {
         let credentials = crate::plugins::run_credentials::for_run(s, agent_id, &projects).await?;
         let prepared = match saved.prepared() {
             Some(prepared) => {
+                // The saved environment, not the agent profile, keeps the backend.
+                if let Some(backend) = prepared["backend"].as_str() {
+                    self.run["executionBackend"] = backend.into();
+                }
                 execution::restore(self.run, prepared.clone(), &s.config, &credentials).await?
             }
             None => {
+                // A new environment fixes its backend from an explicit target or
+                // the agent's nodes. Later changes need an explicit move.
+                let run = self.run.clone();
+                let backend = s
+                    .store
+                    .read(move |db| nodes::backend::of_run_in(db, &run))
+                    .await?;
+                self.run["executionBackend"] = backend.into();
                 let account_home = self.account.as_ref().map(|a| a.home.as_path());
                 execution::prepare(
                     self.run,
@@ -1154,7 +1166,7 @@ impl Execution<'_> {
 }
 
 fn controller_name(run: &Value) -> &'static str {
-    if crate::native::policy::native(&run["snapshot"]["agent"]) {
+    if crate::execution::runs_natively(run) {
         "Native controller"
     } else {
         "VM controller"
@@ -1172,15 +1184,11 @@ mod tests {
     #[test]
     fn controller_messages_follow_the_execution_backend() {
         assert_eq!(
-            controller_name(
-                &json!({ "snapshot": { "agent": { "access": { "backend": "native" } } } })
-            ),
+            controller_name(&json!({ "executionBackend": "native" })),
             "Native controller"
         );
         assert_eq!(
-            controller_name(
-                &json!({ "snapshot": { "agent": { "access": { "backend": "firecracker" } } } })
-            ),
+            controller_name(&json!({ "executionBackend": "firecracker" })),
             "VM controller"
         );
         assert_eq!(controller_name(&json!({})), "VM controller");
@@ -1210,7 +1218,7 @@ mod tests {
         .unwrap();
         for provider in ["codex", "claude", "opencode"] {
             let mut run = json!({
-                "isolated": true, "nativeModeInterruption": crate::config::id(),
+                "isolated": true, "executionBackend": "native", "nativeModeInterruption": crate::config::id(),
                 "snapshot": { "agent": { "provider": provider, "access": { "backend": "native" } } },
             });
             assert!(
@@ -1243,7 +1251,7 @@ mod tests {
                 "{provider}"
             );
             run["nativeModeInterruption"] = crate::config::id().into();
-            run["snapshot"]["agent"]["access"]["backend"] = "firecracker".into();
+            run["executionBackend"] = "firecracker".into();
             assert!(
                 saved_session(&s, &run, root.path(), root.path())
                     .await

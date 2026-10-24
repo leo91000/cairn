@@ -370,7 +370,11 @@ impl SealedCapture {
         timing.next("persist_snapshot");
         manifest["runtime"] =
             serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
-        if manifest["runtime"]["backend"] == "native" && manifest["runtime"]["storage"] == "ublk" {
+        // A VM disk mounted natively keeps its VM layout and image identity.
+        if manifest["runtime"]["backend"] == "native"
+            && manifest["runtime"]["storage"] == "ublk"
+            && manifest["runtime"]["disk"] != "vm"
+        {
             manifest["kind"] = "native-ext4-v1".into();
         }
         manifest["capturedAt"] = captured_at.into();

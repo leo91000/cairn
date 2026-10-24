@@ -515,13 +515,16 @@ pub(crate) fn mount_named_disk(
 /// Host consumers must not share the backend's mount namespace: namespace exit
 /// could otherwise flush a filesystem through the very backend that is exiting.
 /// The backend unshares before the caller mounts its new block device.
-pub(crate) fn mount_host_disk(
+/// Each attachment `name` is one filesystem: a whole native disk, or a view of
+/// a paired VM disk.
+pub(crate) fn mount_host_named(
     disk: Arc<dyn Disk>,
     state: &Path,
     jail: &Path,
     inherited_mounts: Vec<PathBuf>,
+    name: &str,
 ) -> stdio::Result<MountedDisk> {
-    mount_named(disk, state, jail, 0, "disk.blk", Some(inherited_mounts))
+    mount_named(disk, state, jail, 0, name, Some(inherited_mounts))
 }
 
 pub(crate) fn private_mount_namespace(inherited_mounts: &[PathBuf]) -> stdio::Result<()> {

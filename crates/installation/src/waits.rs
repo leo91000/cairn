@@ -368,6 +368,9 @@ fn run_result(db: &Db<'_>, condition: &Value) -> Result<Option<Value>> {
         .ok_or_else(|| Error::not_found("The target run no longer exists."))?;
     let status =
         RunStatus::of(&target).ok_or_else(|| Error::bad_gateway("Unknown target run state."))?;
+    if crate::backend_migration::pending(&target) {
+        return Ok(None);
+    }
     if status == RunStatus::Succeeded
         && target["trigger"] == "chat"
         && let Some(chat) = chat_for_run(db, text(&target, "id"))?

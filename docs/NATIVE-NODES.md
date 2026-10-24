@@ -1,6 +1,6 @@
 # Operating a native node
 
-Native execution is for selected agents used by trusted people. It runs host GPU
+Native execution is for conversations directed by trusted people. It runs host GPU
 APIs under a managed account while the owner continues using the computer. It
 provides less isolation than Firecracker. GPU memory exhaustion, desktop slowdown
 and driver bugs remain possible; no software boundary can promise a GPU job will
@@ -21,15 +21,28 @@ As the installation owner, open Nodes, add a machine and choose Native process.
 Use the generated installer on that node and enter the single-use code when asked.
 The installer creates `cairn-workload`, installs a root-owned systemd controller,
 and leaves native execution disabled. In Configure, explicitly enable native work,
-select trusted people and conservative CPU/RAM/disk limits. Configure a native
-agent and select this node. Other agents retain their Firecracker backend.
+select trusted people and conservative CPU/RAM/disk limits. Then allow agents to
+use this node, beside their VM nodes if they have some: agents no longer choose a
+backend, each conversation keeps the backend of its environment.
 
-Start a new conversation as a trusted person. An authorized coordinator can also
-start a conversation with that native agent through its installation tools. Each
-follow-up, resume, scheduled dispatch and delegated run retains and rechecks its
-originating permission. Previously unattributed conversations and external plugin
-origins cannot silently gain host access. When changing an existing agent's backend,
-start a new conversation; environments cannot switch backend in place.
+A new conversation starts in a VM whenever its agent may use a VM node. It starts
+natively when the agent is granted native nodes only, or when a native node is
+pinned or preferred before its first start. An existing conversation moves to the
+native node from its execution details (**Move…**), through `migrate_chat_backend`,
+or by itself with the agent's `move_to_node` tool. The native node mounts the
+conversation's VM disk in place with an idmapped mount: no file is copied, the
+engine session resumes, and running commands and system packages installed in the
+VM do not follow. Moving back to a VM node boots the same disk again. A disk
+created natively is converted once before a VM can run it; that stops the current
+turn. Chats wait for the next message to start a fresh engine session; missions
+resume automatically with their visible history in a fresh session. Only native nodes whose
+controller reports the `vmDisks` capability receive VM disks.
+
+Each move, follow-up, resume, scheduled dispatch and delegated run retains and
+rechecks its originating permission: every person directing the conversation must
+be trusted on the native node. An owner moving a conversation adopts it; an agent
+moving itself keeps its conversation's provenance. Previously unattributed
+conversations and external plugin origins cannot silently gain host access.
 
 ## Switching an existing machine
 
@@ -45,18 +58,16 @@ remain consumable; installations without identity tracking keep the previous nod
 and ask for an update before completing a guided switch.
 Revoking it from there also returns conversations fixed
 to or preferring that node to automatic placement; a plain revocation keeps those
-explicit choices waiting. Switch each agent's backend on its page and allow the
-new node. Existing conversations show **Migrate this conversation…** in their
-execution-node details on web and Android. Confirm the destination to preserve the
-same conversation, history, private home, workspace and output. Execution stops;
-the next message opens a fresh engine session with the conversation context.
-System packages and running processes do not transfer; dependencies may need
-reinstalling. Migration needs a coherent source capture, S3 access, temporary
-manager disk space (including the logical destination disk budget), fakeroot and e2fsprogs. An interrupted or
-failed migration retains the source and stays paused; retry from the same action.
-Legacy native file archives must resume once on their original node first.
-Finally run the uninstall command shown for the previous runtime after the
-conversations you want to keep have migrated.
+explicit choices waiting. Allow the new node on each agent's page, then move
+existing conversations to it from their execution details on web and Android. The
+same conversation, history, private home, workspace and output are kept. Moving a
+VM disk to a native node, or back, needs no copy. Converting a disk created
+natively for a VM needs a coherent source capture, S3 access, temporary manager
+disk space (including the logical destination disk budget), fakeroot and
+e2fsprogs; an interrupted or failed conversion retains the source and stays
+paused, and moving again retries it. Legacy native file archives must resume once
+on their original node first. Finally run the uninstall command shown for the
+previous runtime after the conversations you want to keep have moved.
 
 The public Cairn MCP and the `cairn_installation` agent tool expose the same setup
 and retirement controls: `list_nodes`, `list_native_callers`,
@@ -67,21 +78,21 @@ mutation transaction. Enroll the other backend, wait for the returned `nodeId`,
 configure its native trust when applicable, and grant agents through `update_agent`.
 Only after the replacement is ready, revoke the old identity with
 `releasePlacements: true`. Plain revocation preserves existing placement choices.
-`get_chat_backend_migration` previews the saved/profile backend difference and
-authorized destinations. `migrate_chat_backend` requires `chatId`, `nodeId`, the
-profile's current `backend` and `confirm: true`; it returns `status: "migrating"`.
-Poll the preview until `pending` is false and `required` is false. An `error` with
-`required: true` means the source remains and migration can be retried. These tools
-neither install nor uninstall a runtime on the host.
+`get_chat_backend_migration` reports a conversation's backend, disk format and
+authorized destinations of the other backend, with whether each needs a
+conversion. `migrate_chat_backend` requires `chatId`, `nodeId` and `confirm: true`;
+it moves the conversation like any node move, or returns `status: "migrating"` for
+a conversion. Poll the preview until `pending` is false; an `error` means the
+source remains and the move can be retried. These tools neither install nor
+uninstall a runtime on the host.
 
 ## Daily use
 
-An agent can use all nodes, including future ones, or an explicit selection.
-New conversations use its selected execution backend. Existing environments keep
-their saved backend; after an agent changes backend, migrate its existing
-conversations before resuming them. An all-node grant does not replace that
-migration. Native execution still requires the node owner's opt-in, trust
-in every originating person, and fresh membership and delegation evidence.
+An agent can use all nodes, including future ones, or an explicit selection of VM
+and native nodes. Each conversation keeps the backend of its environment until it
+is moved to a node of the other backend. Native execution still requires the node
+owner's opt-in, trust in every originating person, and fresh membership and
+delegation evidence.
 
 The controller defaults to one slot and supports configurable concurrent executions.
 All slots share the configured CPU/RAM ceiling through a systemd workload slice,
@@ -196,10 +207,20 @@ point is acknowledged. Displaced recovery copies remain under `stale-*` for expl
 prune/delete. Restore staging is journaled; retry that same recovery point after an
 interruption. A failed restore cannot silently fall back to an original seed.
 
+A VM disk running natively keeps its guest layout: the controller mounts each of
+its filesystems (`data`, and `conversation` for a paired disk) on ublk with an
+idmapped mount under `state/native/<run>/`, records the bound paths in `view.json`,
+and binds the guest home, workspace and output from the overlay upper layer or the
+workspace filesystem. Its runtime identity records `"disk": "vm"` and the VM image
+in `vmRuntimeId`, so its checkpoints stay VM disks. Idmapped ext4 mounts need Linux
+5.12 or later, which ublk already implies, and user namespaces available to root.
+
 Cross-node recovery requires native Linux x86-64, ublk and the pinned coding-engine
 runtime on the destination. Different installed application dependencies can still
-prevent a project from running. Native-to-VM and cross-OS environment conversion
-remain unsupported. This storage change advances installation data epoch 6 to 7;
+prevent a project from running. VM disks move between native and VM nodes in
+place; native-born disks convert once when moved to a VM. Cross-OS environment
+conversion remains unsupported. The earlier native block-storage change advanced
+installation data epoch 6 to 7;
 the [reviewed automatic transition to epoch 9](AUTOMATIC-MIGRATIONS.md) qualifies its
 conversion and recovery tests alongside the rules in
 [ADR 0052](adr/0052-native-ublk-workspaces-and-idle-eviction.md).

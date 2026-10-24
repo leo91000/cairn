@@ -68,7 +68,7 @@ master cache is discarded and rebuilt from the currently authorized remote. Node
 archive staging errors remove partial pins and request a complete legacy seed;
 authorization failures remain failures. An unavailable archive catalogue never
 invalidates node leases. Invalid or interrupted downloads never become cache hits. Archive distribution checks
-current agent project/node grants, backend, node admission and trusted native
+current agent project/node grants, node admission and trusted native
 people; run-scoped downloads also retain the existing attempt/provenance checks.
 
 ## Reproducible local measurements
