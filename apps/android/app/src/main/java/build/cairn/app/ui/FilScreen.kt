@@ -791,7 +791,11 @@ private fun FeedRow(
                                 if (item.preview != null)
                                     Modifier.align(Alignment.Top).padding(top = 4.dp)
                                 else Modifier
-                            Box(line.padding(end = 5.dp).testTag("harness-$it")) {
+                            Box(
+                                line.padding(end = 5.dp).testTag("harness-$it").semantics {
+                                    contentDescription = "Dernier harness : ${providerLabel(it)}"
+                                }
+                            ) {
                                 ProviderMark(it, 13.dp)
                             }
                         }

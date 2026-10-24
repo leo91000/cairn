@@ -19,6 +19,7 @@ import {
   watch,
 } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { providers } from '../../../../packages/contracts/accounts'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { failureReason, sameReason, stopEcho } from '../activity'
@@ -839,6 +840,7 @@ function key(event: KeyboardEvent) {
           ref="historyButton"
           class="hidden min-w-0 flex-1 items-center justify-start px-0.5 py-1 phone:flex"
           aria-label="Conversations"
+          :aria-description="heading?.provider ? `Latest harness: ${providers[heading.provider].label}` : undefined"
           aria-haspopup="dialog"
           :aria-expanded="history"
           @click="history = true"

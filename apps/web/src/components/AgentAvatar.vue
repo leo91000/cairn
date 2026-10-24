@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { Provider } from '../../../../packages/contracts/accounts'
 import { computed, ref, watch } from 'vue'
+import { providers } from '../../../../packages/contracts/accounts'
 import { brands } from '../accounts'
 import { apiResourceUrl, state } from '../api'
 import {
@@ -42,7 +43,13 @@ const mark = computed(() => Math.max(14, Math.round(props.size * 0.44)))
 </script>
 
 <template>
-  <span class="agent-avatar relative inline-grid shrink-0 place-items-center" :style="{ 'width': `${size}px`, 'height': `${size}px`, '--avatar-radius': `${radius}px` }" aria-hidden="true">
+  <span
+    class="agent-avatar relative inline-grid shrink-0 place-items-center"
+    :style="{ 'width': `${size}px`, 'height': `${size}px`, '--avatar-radius': `${radius}px` }"
+    :aria-hidden="harness ? undefined : true"
+    :role="harness ? 'img' : undefined"
+    :aria-label="harness ? `Latest harness: ${providers[harness].label}` : undefined"
+  >
     <span v-if="working" class="avatar-orbit" />
     <span class="grid size-full overflow-hidden select-none place-items-center font-heading font-bold text-white" :style="{ background: identityColor(identity || name), borderRadius: `${radius}px`, fontSize: `${Math.round(size * 0.42)}px` }">
       <img

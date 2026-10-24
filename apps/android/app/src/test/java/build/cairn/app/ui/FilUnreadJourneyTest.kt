@@ -194,6 +194,12 @@ class FilUnreadJourneyTest {
                         .isNotEmpty()
                 }
                 compose.onNodeWithText("Le changelog est prêt", substring = true).assertExists()
+                compose
+                    .onNode(
+                        hasText("Rédiger le changelog 0.53") and
+                            hasContentDescription("Dernier harness : Claude Code")
+                    )
+                    .assertExists()
                 capture("fil-unread-dark")
                 theme = "light"
                 capture("fil-unread-light")
@@ -202,6 +208,11 @@ class FilUnreadJourneyTest {
                     .onNodeWithTag("fil")
                     .performScrollToNode(hasText("Mission terminée", substring = true))
                 compose.onNodeWithText("Trois nouveautés", substring = true).assertExists()
+                compose
+                    .onNode(
+                        hasText(notes.name) and hasContentDescription("Dernier harness : Codex")
+                    )
+                    .assertExists()
                 capture("fil-unread-dark-scrolled")
                 compose.onNodeWithTag("fil").performScrollToIndex(0)
 

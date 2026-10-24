@@ -302,7 +302,12 @@ internal fun ConversationHeader(
                     onClick = choose,
                     modifier =
                         Modifier.weight(1f).semantics {
-                            contentDescription = "Changer de conversation : $title"
+                            contentDescription =
+                                listOfNotNull(
+                                        "Changer de conversation : $title",
+                                        harness?.let { "Dernier harness : ${providerLabel(it)}" },
+                                    )
+                                    .joinToString(" · ")
                         },
                     color = MaterialTheme.colorScheme.background,
                     shape = RoundedCornerShape(12.dp),

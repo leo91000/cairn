@@ -216,6 +216,11 @@ abstract class UnifiedHeaderCases {
                 // Conversation: a single row right under the status bar.
                 compose.onNodeWithText(chat.title).performClick()
                 waitDescription("Fichiers · 4")
+                compose
+                    .onNodeWithContentDescription(
+                        "Changer de conversation : ${chat.title} · Dernier harness : Claude Code"
+                    )
+                    .assertExists()
                 capture("chat")
                 val header = compose.onNodeWithTag("conversation-header")
                 assertTopsUnderSystemInsets(header)

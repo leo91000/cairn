@@ -13,6 +13,8 @@ withDefaults(defineProps<{ provider: Provider, size?: number }>(), { size: 12 })
     class="inline-grid shrink-0 place-items-center"
     :class="brands[provider].text"
     :title="providers[provider].label"
+    role="img"
+    :aria-label="`Latest harness: ${providers[provider].label}`"
     :data-harness="provider"
   >
     <Icon :name="brands[provider].icon" :size="size" />
