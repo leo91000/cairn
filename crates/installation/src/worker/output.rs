@@ -335,6 +335,8 @@ async fn handle_chat_control(s: &Service, id: &str, event: &Value) -> Result<boo
                 s.chat_acknowledge(id, message).await?;
             }
         }
+        "chat.side.available" => s.side_questions_available(id).await?,
+        "chat.side.answered" | "chat.side.failed" => s.side_question_settle(id, event).await?,
         _ => return Ok(false),
     }
     Ok(true)

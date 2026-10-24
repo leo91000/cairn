@@ -35,6 +35,8 @@ fn summary(chat: &Value) -> Value {
         "pendingQuestions",
         "requestedBy",
         "requester",
+        "pendingSideQuestions",
+        "canAskSideQuestion",
     ] {
         result[key] = chat[key].clone();
     }
@@ -189,7 +191,11 @@ pub(super) async fn invoke(
     };
     if matches!(
         name,
-        "list_chats" | "get_chat" | "list_chat_questions" | "read_chat_content"
+        "list_chats"
+            | "get_chat"
+            | "list_chat_questions"
+            | "list_chat_side_questions"
+            | "read_chat_content"
     ) {
         let operation = name.to_owned();
         return s
@@ -205,6 +211,16 @@ pub(super) async fn invoke(
                     "list_chats" => list(db, &args)?,
                     "get_chat" => detail(db, &args)?,
                     "read_chat_content" => content(db, &args)?,
+                    "list_chat_side_questions" => {
+                        let detail = chats::detail(db, text(&args, "chatId"))?;
+                        let mut result = page(
+                            detail["sideQuestions"].as_array().unwrap(),
+                            &args,
+                            "sideQuestions",
+                        )?;
+                        result["canAskSideQuestion"] = detail["canAskSideQuestion"].clone();
+                        result
+                    }
                     _ => {
                         let detail = chats::detail(db, text(&args, "chatId"))?;
                         page(detail["questions"].as_array().unwrap(), &args, "questions")?
@@ -243,6 +259,24 @@ pub(super) async fn invoke(
                 text(&args, "chatId"),
                 text(&args, "questionId"),
                 args["answer"].clone(),
+                commit_authority,
+            )
+            .await;
+    }
+    if name == "ask_chat_side_question" {
+        return s
+            .side_question_ask_authorized(
+                text(&args, "chatId"),
+                args["question"].clone(),
+                commit_authority,
+            )
+            .await;
+    }
+    if name == "cancel_chat_side_question" {
+        return s
+            .side_question_cancel_authorized(
+                text(&args, "chatId"),
+                text(&args, "sideQuestionId"),
                 commit_authority,
             )
             .await;

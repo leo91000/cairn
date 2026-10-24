@@ -146,6 +146,8 @@ internal class MarkdownBlocks(private val markwon: Markwon) {
 internal class MarkdownTextView(context: Context, copyText: (() -> String)? = null) :
     TextView(context) {
     private var bound: MarkdownBlock? = null
+    /** Asks a side question about the selected passage, while the agent works on a reply. */
+    var askAbout: ((String) -> Unit)? = null
 
     init {
         textSize = 16f
@@ -167,8 +169,11 @@ internal class MarkdownTextView(context: Context, copyText: (() -> String)? = nu
             customSelectionActionModeCallback =
                 object : ActionMode.Callback {
                     private val copyAll = View.generateViewId()
+                    private val askSelection = View.generateViewId()
 
                     override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
+                        if (askAbout != null)
+                            menu.add(Menu.NONE, askSelection, Menu.NONE, "Demander à côté")
                         menu.add(Menu.NONE, copyAll, Menu.NONE, "Copier tout le texte")
                         return true
                     }
@@ -176,6 +181,14 @@ internal class MarkdownTextView(context: Context, copyText: (() -> String)? = nu
                     override fun onPrepareActionMode(mode: ActionMode, menu: Menu) = false
 
                     override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
+                        if (item.itemId == askSelection) {
+                            val start = minOf(selectionStart, selectionEnd).coerceAtLeast(0)
+                            val end = maxOf(selectionStart, selectionEnd).coerceAtMost(text.length)
+                            val quote = text.subSequence(start, end).toString().trim()
+                            mode.finish()
+                            if (quote.isNotEmpty()) askAbout?.invoke(quote)
+                            return true
+                        }
                         if (item.itemId != copyAll) return false
                         context
                             .getSystemService(ClipboardManager::class.java)

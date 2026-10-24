@@ -1931,6 +1931,117 @@
     }
   },
   {
+    "name": "list_chat_side_questions",
+    "description": "List side questions of a conversation with pagination: explanations the running agent answered from its context, beside the main reply. Includes canAskSideQuestion for the current reply.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "chatId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "offset": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "limit": {
+          "type": "integer",
+          "default": 50,
+          "minimum": 1,
+          "maximum": 100
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "chatId"
+      ]
+    }
+  },
+  {
+    "name": "ask_chat_side_question",
+    "description": "Ask the running agent a side question about the conversation, optionally about a quoted passage of one of its replies. The agent answers from its current context without tools, without changing its work, queue or history. Requires canAskSideQuestion (Codex or Claude Code, while a reply runs). Supply a fresh UUID question.id; identical retries are safe. Read the answer with list_chat_side_questions.",
+    "scope": "run",
+    "destructive": true,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "chatId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "question": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4000
+            },
+            "quote": {
+              "default": "",
+              "type": "string",
+              "maxLength": 4000
+            },
+            "itemId": {
+              "default": "",
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          "required": [
+            "id",
+            "text",
+            "quote",
+            "itemId"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "chatId",
+        "question"
+      ]
+    }
+  },
+  {
+    "name": "cancel_chat_side_question",
+    "description": "Withdraw a side question that has not been answered yet. The main reply is unaffected.",
+    "scope": "run",
+    "destructive": true,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "chatId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "sideQuestionId": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "chatId",
+        "sideQuestionId"
+      ]
+    }
+  },
+  {
     "name": "resume_chat",
     "description": "Resume a failed or stopped agent execution using its saved session, subject to existing recovery rules. Use set_chat_paused(false) to resume queued follow-ups.",
     "scope": "run",

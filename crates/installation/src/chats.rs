@@ -1,11 +1,13 @@
 pub(crate) mod continuation;
 mod handoff;
 pub(crate) mod questions;
+pub(crate) mod side_questions;
 
 pub use crate::waits as wait_for;
 
 pub use handoff::{execution_text, with_invoked_skills};
 pub use questions::{Question, QuestionField, QuestionStatus, question_prefix};
+pub use side_questions::side_question_prefix;
 
 use crate::{
     config::{id, now},
@@ -150,6 +152,7 @@ pub(crate) fn view(db: &Db<'_>, mut chat: Value) -> Result<Value> {
         record_name(db, &chat, "projects", "projectName", "Deleted project")?
     };
     let run = db.run(text(&chat, "runId"))?;
+    side_questions::view(db, &mut chat, run.as_ref())?;
     chat["canRequestNewSession"] =
         crate::conversation_lifecycle::can_request_new_session(&chat, run.as_ref()).into();
     let queued_delegation = run.is_none()
@@ -202,12 +205,14 @@ pub(crate) fn detail(db: &Db<'_>, id: &str) -> Result<Value> {
     let mut result = view(db, chat(db, id)?)?;
     if !is_active(&result) {
         result["questions"] = json!([]);
+        result["sideQuestions"] = json!([]);
         result["messages"] = json!([]);
         result["run"] = Value::Null;
         result["pendingQuestions"] = 0.into();
         return Ok(result);
     }
     result["questions"] = serde_json::to_value(questions(db, id)?)?;
+    result["sideQuestions"] = side_questions::detail(db, id)?;
     result["messages"] = db.messages(id)?.into();
     result["run"] = db.run(text(&result, "runId"))?.unwrap_or(Value::Null);
     Ok(result)
@@ -497,6 +502,11 @@ fn claim_steering(
             }));
         }
     }
+    // Side questions are not chat messages: the queue, pause and steering never
+    // hold them, and the adapter answers them beside the turn.
+    if let Some(run) = db.run(run_id)? {
+        steering.extend(side_questions::deliveries(db, chat_id, &run)?);
+    }
     Ok(steering)
 }
 
@@ -636,6 +646,8 @@ fn continue_run(
             "cancelRequestedAt": null,
             "recoveryPending": true,
             "chatExecution": serde_json::to_value(execution)?,
+            // The next turn's adapter announces again whether it can answer side questions.
+            "sideQuestions": null,
         }),
     )?;
     Ok(())
@@ -987,6 +999,7 @@ impl Service {
     }
 
     pub async fn chat_tick(&self, active: &HashSet<String>) -> Result<()> {
+        let side_pending = self.side_question_chats().await?;
         for chat in self.store.list("chats").await? {
             if !is_active(&chat) {
                 continue;
@@ -998,6 +1011,12 @@ impl Service {
             if let Some(run) = run.as_ref().filter(|run| run_is_active(run)) {
                 self.publish_steering(&chat, run).await?;
                 continue;
+            }
+            if side_pending.contains(text(&chat, "id")) {
+                let chat_id = text(&chat, "id").to_owned();
+                self.store
+                    .transaction(move |db| side_questions::expire(db, &chat_id))
+                    .await?;
             }
             let busy = run.as_ref().is_some_and(|run| {
                 active.contains(text(run, "id")) || run["recoveryPending"] == true
@@ -1059,6 +1078,13 @@ impl Service {
         Ok(())
     }
 
+    /// Conversations with a side question still waiting for an answer.
+    async fn side_question_chats(&self) -> Result<HashSet<String>> {
+        self.store
+            .read(|db| side_questions::pending_chats(db))
+            .await
+    }
+
     /// Writes steering messages where the running agent turn reads them.
     async fn publish_steering(&self, chat: &Value, run: &Value) -> Result<()> {
         let chat_id = text(chat, "id").to_owned();
@@ -1071,6 +1097,11 @@ impl Service {
             .await?;
         let skills = &run["snapshot"]["skills"];
         for message in &mut steering {
+            let side =
+                message["sideQuestion"].is_object() || message["sideQuestionCancelled"] == true;
+            if side {
+                continue;
+            }
             self.prepare_chat_files(text(run, "id"), &message["attachments"])
                 .await?;
             message["text"] = with_invoked_skills(text(message, "text"), skills).into();

@@ -99,6 +99,7 @@ else {
   out({ type: 'system', subtype: 'init', session_id: session })
   let question
   let serial = 0
+  const sides = new Map()
   const complete = (text = 'Claude fixture completed', thinking = false, correlation = {}) => {
     const id = `assistant-${process.pid}-${++serial}`
     out({ type: 'stream_event', event: { type: 'message_start', message: { id } } })
@@ -127,6 +128,39 @@ else {
     const value = JSON.parse(line)
     if (value.type === 'user')
       appendFileSync(path.join(home, 'user-messages.jsonl'), `${JSON.stringify(value)}\n`)
+    if (value.type === 'control_cancel_request') {
+      appendFileSync(path.join(home, 'side-cancellations.jsonl'), `${JSON.stringify(value)}\n`)
+      const pending = sides.get(value.request_id)
+      if (pending) {
+        clearTimeout(pending)
+        sides.delete(value.request_id)
+        out({ type: 'control_response', response: { subtype: 'error', request_id: value.request_id, error: 'Side question cancelled' } })
+      }
+
+      return
+    }
+
+    if (value.type === 'control_request' && value.request.subtype === 'side_question') {
+      // Like Claude Code 2.1.280: answered beside the turn, never written to the transcript.
+      appendFileSync(path.join(home, 'side-questions.jsonl'), `${JSON.stringify(value)}\n`)
+      out({
+        type: 'system',
+        subtype: 'control_request_progress',
+        request_id: value.request_id,
+        status: 'started',
+      })
+      const asked = value.request.question
+      const delay = asked.includes('fixture:side-slow') ? 3000 : 200
+      sides.set(value.request_id, setTimeout(() => {
+        sides.delete(value.request_id)
+        const response = asked.includes('fixture:side-fail')
+          ? { response: null, synthetic: false }
+          : { response: `Side answer: ${asked}`, synthetic: false }
+        out({ type: 'control_response', response: { subtype: 'success', request_id: value.request_id, response } })
+      }, delay))
+      return
+    }
+
     if (value.type === 'control_request') {
       if (value.request.subtype === 'get_usage') {
         appendFileSync(path.join(home, 'usage-requests.jsonl'), `${JSON.stringify(value.request)}\n`)

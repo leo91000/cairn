@@ -329,6 +329,11 @@ impl Turn<'_> {
             {
                 continue;
             }
+            // OpenCode never announces side questions, so none should arrive. Never
+            // mistake one for steering if the inbox carries it anyway.
+            if message["sideQuestion"].is_object() || message["sideQuestionCancelled"] == true {
+                continue;
+            }
             let question_id = text(&message, "questionId");
             if message["questionCancelled"] == true {
                 if let Some((native_id, _)) = self.questions.get(question_id) {

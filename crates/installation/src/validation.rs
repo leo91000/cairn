@@ -94,6 +94,7 @@ fn trim_text(kind: &str, value: &mut Value) {
         "agent" | "project" => &["name"],
         "task" => &["name", "prompt"],
         "message" => &["text", "model"],
+        "sideQuestion" => &["text", "quote"],
         "mcp" => &["name", "command", "clientId", "scopes"],
         _ => &[],
     };

@@ -172,9 +172,9 @@ A message starts work with the target agent's permissions.
 
 | Scope | Conversation operations |
 | --- | --- |
-| `read` | `list_chats`, `get_chat`, `read_chat_content`, `list_chat_questions`, `list_chat_artifacts`, `read_chat_artifact`, `list_chat_attachments`, `read_chat_attachment` |
+| `read` | `list_chats`, `get_chat`, `read_chat_content`, `list_chat_questions`, `list_chat_side_questions`, `list_chat_artifacts`, `read_chat_artifact`, `list_chat_attachments`, `read_chat_attachment` |
 | `manage` | `create_chat`, `rename_chat`, `delete_chat`, `restore_chat`, `upload_chat_attachment`, `set_chat_artifact_visibility` |
-| `run` | `send_chat_message`, `edit_chat_message`, `delete_chat_message`, `set_chat_paused`, `stop_chat`, `resume_chat`, `restart_chat_session`, `answer_chat_question` |
+| `run` | `send_chat_message`, `edit_chat_message`, `delete_chat_message`, `set_chat_paused`, `stop_chat`, `resume_chat`, `restart_chat_session`, `answer_chat_question`, `ask_chat_side_question`, `cancel_chat_side_question` |
 
 `list_chats` supports agent/project filters and active/trash views. Lists and
 `get_chat` take `offset` and `limit` (default 50, maximum 100); follow `nextOffset`
@@ -200,6 +200,15 @@ the first message or later automatic title evaluation can update it.
 `list_chat_questions` exposes fields and status; `answer_chat_question` accepts
 an idempotent UUID in `answer.id` and one answer per field in `answer.answers`.
 Suggested options are never submitted automatically.
+
+`ask_chat_side_question` asks the running agent a [side question](chats.md#side-questions)
+about the conversation, optionally quoting a passage (`question.quote`) of one of
+its replies (`question.itemId`, the agent message's item ID). It requires
+`canAskSideQuestion`, reported by `get_chat`, `list_chats` and
+`list_chat_side_questions`: Codex or Claude Code must be working on a reply. Supply
+a UUID in `question.id`; identical retries are safe. The answer, or why there is
+none, appears in `list_chat_side_questions`. `cancel_chat_side_question` withdraws
+one that is still pending. Neither steers the reply or changes the queue.
 
 `delete_chat` uses the apps' deletion lifecycle. Busy chats require `confirm: true`
 to stop execution and cancel messages/questions. Existing cleanup rules may

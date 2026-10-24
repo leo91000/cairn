@@ -27,6 +27,10 @@ const STOPPED: &str = "Claude execution stopped.";
 const MAX_LINE: usize = 32_000_000;
 const MAX_IMAGE: usize = 10_000_000;
 
+/// How long a finished turn waits for side questions it is still answering.
+const SIDE_GRACE: Duration = Duration::from_secs(90);
+const SIDE_UNANSWERED: &str = "The reply finished before this side question was answered. Ask it again during a reply, or ask in the conversation.";
+
 const DENIED: &str =
     "This tool is outside the agent's access policy. Ask the user in your response.";
 
@@ -409,6 +413,10 @@ struct Turn<'a> {
     background_replayed: bool,
     /// The agent finished responding and only its background tasks keep the run open.
     waiting_for_background: bool,
+    /// Side questions Claude Code is answering, by control request ID.
+    sides: HashMap<String, String>,
+    /// When the request completed while side questions were still being answered.
+    finishing: Option<tokio::time::Instant>,
 }
 
 impl Turn<'_> {
@@ -463,6 +471,20 @@ impl Turn<'_> {
             if self.submitted.contains(id) {
                 continue;
             }
+            if message["sideQuestionCancelled"] == true {
+                self.withdraw_side(text(&message, "sideQuestionId")).await?;
+                self.submitted.insert(id.into());
+                continue;
+            }
+            // A finished request delivers nothing new: the next turn takes these.
+            if self.finishing.is_some() {
+                continue;
+            }
+            if message["sideQuestion"].is_object() {
+                self.ask_side(&message["sideQuestion"]).await?;
+                self.submitted.insert(id.into());
+                continue;
+            }
             if message["questionCancelled"] == true {
                 if let Some(question) = self.questions.remove(text(&message, "questionId")) {
                     send(&mut self.stdin, control_response(&question.request_id, &json!({
@@ -488,6 +510,95 @@ impl Turn<'_> {
             self.waiting_for_background = false;
         }
         Ok(())
+    }
+
+    /// Claude Code's native side question: answered from the live conversation,
+    /// including the running turn, with every tool denied and nothing written to
+    /// the session transcript. The main turn continues meanwhile.
+    async fn ask_side(&mut self, side: &Value) -> Result<()> {
+        let question = text(side, "id").to_owned();
+        let request_id = format!("side-question-{question}");
+        let request = json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {
+                "subtype": "side_question",
+                "question": side["text"],
+            },
+        });
+        send(&mut self.stdin, request).await?;
+        self.sides.insert(request_id, question);
+        Ok(())
+    }
+
+    async fn withdraw_side(&mut self, question: &str) -> Result<()> {
+        let request = self
+            .sides
+            .iter()
+            .find(|(_, id)| *id == question)
+            .map(|(request, _)| request.clone());
+        if let Some(request) = request {
+            self.sides.remove(&request);
+            let cancel = json!({ "type": "control_cancel_request", "request_id": request });
+            send(&mut self.stdin, cancel).await?;
+        }
+        Ok(())
+    }
+
+    /// The reply to a side question. Claude reports a missing or synthetic answer
+    /// (its own fallback text) when it could not answer.
+    async fn on_control_response(&mut self, value: &Value) -> Result<()> {
+        let response = &value["response"];
+        let Some(question) = self.sides.remove(text(response, "request_id")) else {
+            return Ok(());
+        };
+        let answer = &response["response"];
+        let answered = response["subtype"] == "success"
+            && answer["synthetic"] != true
+            && !text(answer, "response").trim().is_empty();
+        if answered {
+            return self
+                .emit(json!({
+                    "type": "chat.side.answered",
+                    "sideQuestionId": question,
+                    "text": answer["response"],
+                }))
+                .await;
+        }
+        let error = if response["subtype"] == "error" && !text(response, "error").is_empty() {
+            text(response, "error")
+        } else {
+            "Claude Code could not answer this side question."
+        };
+        self.side_failed(&question, error).await
+    }
+
+    async fn side_failed(&self, question: &str, error: &str) -> Result<()> {
+        self.emit(json!({
+            "type": "chat.side.failed",
+            "sideQuestionId": question,
+            "error": error,
+        }))
+        .await
+    }
+
+    /// Completes a finished request once its side questions are answered, or after
+    /// waiting long enough for them. Answers whether the request is complete.
+    async fn settle_finishing(&mut self) -> Result<bool> {
+        let Some(finished) = self.finishing else {
+            return Ok(false);
+        };
+        if !self.sides.is_empty() && finished.elapsed() < SIDE_GRACE {
+            return Ok(false);
+        }
+        let sides = std::mem::take(&mut self.sides);
+        for (request, question) in sides {
+            let cancel = json!({ "type": "control_cancel_request", "request_id": request });
+            send(&mut self.stdin, cancel).await?;
+            self.side_failed(&question, SIDE_UNANSWERED).await?;
+        }
+        self.complete().await?;
+        Ok(true)
     }
 
     async fn answer(&mut self, question: Question, message: &Value) -> Result<()> {
@@ -529,6 +640,7 @@ impl Turn<'_> {
                 crate::validation::uuid(session)?;
                 self.emit(json!({ "type": "thread.started", "thread_id": session }))
                     .await?;
+                self.emit(json!({ "type": "chat.side.available" })).await?;
             }
             "system" if value["subtype"] == "background_tasks_changed" => {
                 self.background_tasks(value).await?;
@@ -547,6 +659,7 @@ impl Turn<'_> {
                 self.on_stream_event(&value["event"]).await?;
             }
             "control_request" => self.on_control_request(value).await?,
+            "control_response" => self.on_control_response(value).await?,
             "result" => return self.on_result(value).await,
             _ => {}
         }
@@ -952,20 +1065,32 @@ impl Turn<'_> {
             }
             return Ok(false);
         }
+        if !self.sides.is_empty() {
+            // Keep answering side questions before the process stops with the request.
+            // The request itself is finished: a restart meanwhile must not repeat it.
+            self.save_receipt().await?;
+            self.finishing = Some(tokio::time::Instant::now());
+            return Ok(false);
+        }
         self.complete().await?;
         Ok(true)
     }
 
-    async fn complete(&self) -> Result<()> {
+    /// Saves the finished request, so a restart replays it instead of repeating it.
+    async fn save_receipt(&self) -> Result<()> {
         let receipt = Receipt {
             message_id: Some(self.initial_id.into()),
             delivered: self.delivered.iter().cloned().collect(),
             text: Some(self.last.clone()),
             item_id: Some(self.last_id.clone()),
         };
-        // Save the receipt before completion so restart cannot repeat a finished request.
         atomic_write(&self.receipt, &serde_json::to_vec(&receipt)?).await?;
-        atomic_write(Path::new(text(self.plan, "output")), self.last.as_bytes()).await?;
+        atomic_write(Path::new(text(self.plan, "output")), self.last.as_bytes()).await
+    }
+
+    async fn complete(&self) -> Result<()> {
+        // Save the receipt before completion so restart cannot repeat a finished request.
+        self.save_receipt().await?;
         self.emit(json!({ "type": "chat.question.closed" })).await?;
         self.emit(json!({ "type": "turn.completed" })).await
     }
@@ -992,7 +1117,12 @@ impl Turn<'_> {
                         result = client.sync() => result?,
                     }
                 }
-                _ = timer.tick() => self.poll_inbox().await?,
+                _ = timer.tick() => {
+                    self.poll_inbox().await?;
+                    if self.settle_finishing().await? {
+                        return Ok(());
+                    }
+                }
                 bytes = stdout.fill_buf() => {
                     let (count, complete) = take_line(bytes?, &mut buffer)?;
                     stdout.consume(count);
@@ -1003,7 +1133,7 @@ impl Turn<'_> {
                         Error::bad_gateway("Claude Code returned an invalid streaming event.")
                     })?;
                     buffer.clear();
-                    if self.handle(&value).await? {
+                    if self.handle(&value).await? || self.settle_finishing().await? {
                         return Ok(());
                     }
                 }
@@ -1120,6 +1250,8 @@ pub async fn run(
         awaiting_background: HashSet::new(),
         background_replayed: false,
         waiting_for_background: false,
+        sides: HashMap::new(),
+        finishing: None,
     };
     let operation = turn.execute(&mut stdout, auth.as_mut(), &cancel).await;
     // Closes Claude Code's stdin.

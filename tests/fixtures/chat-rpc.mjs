@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -18,6 +19,14 @@ export function chatFixture() {
   let hold = false
   let questionRequest
   let asked = false
+  // Ephemeral side-question forks, by thread ID. Like Codex 0.164, they share the
+  // conversation's history but never write to its saved conversation.
+  const forks = new Map()
+  const sideLog = (name, value) => {
+    mkdirSync(process.env.CODEX_HOME, { recursive: true })
+    appendFileSync(path.join(process.env.CODEX_HOME, name), `${JSON.stringify(value)}\n`)
+  }
+
   const save = () => {
     mkdirSync(process.env.CODEX_HOME, { recursive: true })
     writeFileSync(file, JSON.stringify(thread))
@@ -51,6 +60,87 @@ export function chatFixture() {
       notify('serverRequest/resolved', { threadId: thread.id, requestId: questionRequest })
       questionRequest = undefined
       finish()
+      return true
+    }
+
+    if (method === 'thread/fork') {
+      const fork = {
+        id: `fork-${forks.size + 1}`,
+        parent: params.threadId,
+        items: [],
+        params,
+      }
+      forks.set(fork.id, fork)
+      sideLog('side-forks.jsonl', params)
+      emit({
+        id: request.id,
+        result: {
+          thread: {
+            id: fork.id,
+            ephemeral: true,
+            forkedFromId: params.threadId,
+            turns: [],
+          },
+        },
+      })
+      return true
+    }
+
+    const fork = forks.get(params?.threadId)
+    if (fork && method === 'thread/inject_items') {
+      fork.items.push(...params.items)
+      emit({ id: request.id, result: {} })
+      return true
+    }
+
+    if (fork && method === 'turn/start') {
+      const question = params.input[0].text
+      const turn = { id: `${fork.id}-turn`, status: 'inProgress', items: [] }
+      fork.turn = turn
+      sideLog('side-turns.jsonl', { threadId: fork.id, injected: fork.items, input: params.input })
+      emit({ id: request.id, result: { turn } })
+      notify('turn/started', { threadId: fork.id, turn })
+      notify('item/completed', { threadId: fork.id, turnId: turn.id, item: { id: 'side-user', type: 'userMessage', content: params.input } })
+      if (question.includes('fixture:side-tool')) {
+        // A fork keeps its subagent tools; trying one must stop the side question.
+        notify('item/started', {
+          threadId: fork.id,
+          turnId: turn.id,
+          item: {
+            id: 'side-spawn',
+            type: 'collabAgentToolCall',
+            tool: 'spawnAgent',
+            status: 'inProgress',
+          },
+        })
+        return true
+      }
+
+      fork.timer = setTimeout(() => {
+        const item = { id: 'side-answer', type: 'agentMessage', text: `Side answer: ${question}` }
+        notify('item/completed', { threadId: fork.id, turnId: turn.id, item })
+        notify('turn/completed', { threadId: fork.id, turn: { ...turn, status: 'completed' } })
+      }, question.includes('fixture:side-slow') ? 2000 : 100)
+      return true
+    }
+
+    if (fork && method === 'turn/interrupt') {
+      clearTimeout(fork.timer)
+      sideLog('side-interrupts.jsonl', params)
+      emit({ id: request.id, result: {} })
+      if (fork.turn?.status === 'inProgress') {
+        fork.turn.status = 'interrupted'
+        notify('turn/completed', { threadId: fork.id, turn: fork.turn })
+      }
+
+      return true
+    }
+
+    if (fork && method === 'thread/unsubscribe') {
+      clearTimeout(fork.timer)
+      forks.delete(fork.id)
+      sideLog('side-releases.jsonl', params)
+      emit({ id: request.id, result: { status: 'unsubscribed' } })
       return true
     }
 
