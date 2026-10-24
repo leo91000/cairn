@@ -48,7 +48,7 @@ function parts(version) {
   return version.split('.').map(Number)
 }
 
-function newer(left, right) {
+export function newer(left, right) {
   const [a, b] = [parts(left), parts(right)]
   const index = a.findIndex((part, i) => part !== b[i])
   return index >= 0 && a[index] > b[index]

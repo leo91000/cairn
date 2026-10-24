@@ -54,6 +54,7 @@ function evidenceFor(run, commit, changes = {}) {
     digest,
     runId: run.id,
     tools: config.tools,
+    served: { claude: '2.1.280', opencode: '1.19.0' },
     ...changes,
   }
 }
@@ -167,6 +168,15 @@ describe('release validation reuse', () => {
     ]) {
       expect(await resolveRelease(config, {
         gh: github({ runs: () => [mainRun], evidence: { [mainRun.id]: evidenceFor(mainRun, config.commit, { tools }) } }),
+        wait: false,
+      })).toBeNull()
+    }
+  })
+
+  it('never reuses a validation that could not qualify a rollback to the served release', async () => {
+    for (const served of [null, undefined]) {
+      expect(await resolveRelease(config, {
+        gh: github({ runs: () => [mainRun], evidence: { [mainRun.id]: evidenceFor(mainRun, config.commit, { served }) } }),
         wait: false,
       })).toBeNull()
     }

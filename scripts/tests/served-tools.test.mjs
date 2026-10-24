@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
-import { servedTools } from '../served-tools.mjs'
+import { rollbackTarget, rollbackTargets, servedTools } from '../served-tools.mjs'
 
 const digestOf = body => `sha256:${createHash('sha256').update(body).digest('hex')}`
 
@@ -59,5 +59,21 @@ describe('served release tools', () => {
   it('names the source when production is unavailable', async () => {
     const fetch = async () => new Response('unavailable', { status: 503 })
     await expect(servedTools('https://cairn.example', { fetch })).rejects.toThrow('Request to https://cairn.example/install/release failed: HTTP 503')
+  })
+})
+
+describe('rollback targets', () => {
+  it('uses each engine\'s legacy release for images built before it was resolved', () => {
+    expect(rollbackTargets({ codex: '0.164.0', gh: '2.103.2' })).toEqual({ claude: '2.1.280', opencode: '1.19.0' })
+    expect(rollbackTargets({ claude: '2.1.308', opencode: '1.19.4' })).toEqual({ claude: '2.1.308', opencode: '1.19.4' })
+  })
+
+  it('qualifies the served release only when it is known, supported and different', () => {
+    expect(rollbackTarget('claude', '2.1.280', '2.1.308')).toEqual({ target: '2.1.280', reason: '' })
+    expect(rollbackTarget('opencode', '1.19.4', '1.19.4')).toEqual({ target: null, reason: '' })
+    // No version is guessed when production or its image could not be read.
+    expect(rollbackTarget('claude', '', '2.1.308')).toMatchObject({ target: null, reason: expect.stringContaining('unknown') })
+    // A rollback runs the served image's own adapter.
+    expect(rollbackTarget('opencode', '1.18.35', '1.19.4')).toMatchObject({ target: null, reason: expect.stringContaining('older than this adapter\'s minimum 1.19.0') })
   })
 })

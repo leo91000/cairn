@@ -47,8 +47,8 @@ an unreachable registry, malformed metadata, a prerelease, or a deprecated chann
 release fails the `resolve` job before any build, and its error names the source
 that failed. No fallback version is guessed. When a vendor moves a channel back to
 an older release, builds follow it, because the vendor withdrew the newer one.
-For OpenCode, CI also tests that sessions of the release production serves resume
-on the older resolved one, and back.
+CI also tests that sessions of the release production serves resume on the older
+resolved one, and back.
 
 There are no default agent tool versions in the Dockerfile. CI passes the resolved
 `CODEX_VERSION`, `GH_VERSION`, `CLAUDE_VERSION` and `OPENCODE_VERSION` build
@@ -79,10 +79,14 @@ installation image production reports at `CAIRN_BEACON_ORIGIN/install/release`
 (`scripts/served-tools.mjs`), and checks registry content against its digest.
 Images built before an engine was resolved record no version; they shipped its
 `legacy` release in `scripts/cli-updates.mjs` (Claude Code 2.1.280, OpenCode
-1.19.0). The same fallback applies, with a warning, when production or the
-registry is unavailable. The evidence records the served versions found, or
-`null`. A served OpenCode release older than the adapter's minimum is skipped,
-because a rollback runs that image's own adapter.
+1.19.0). When production or the registry cannot be read, no version is guessed:
+the rollback checks are skipped with a warning, and the evidence records
+`served: null`. Such evidence is never reused, so main or the release validates
+again. The served release runs through the candidate's adapter, while a real
+rollback runs its own image's adapter. When an adapter change needs a newer
+engine release, set that engine's `minimum`: an older served release is then
+skipped, with a warning. A served release that changes after validation is not
+checked again when main or a tag reuses that evidence.
 
 Validation evidence (`image.json`, schema 3) records all four versions under
 `tools`, and the served versions the rollback checks used under `served`. An image

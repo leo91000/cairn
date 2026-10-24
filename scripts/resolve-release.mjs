@@ -67,7 +67,10 @@ async function validatedImage(config, gh) {
       // Every resolved tool must match exactly. Older evidence that omits a tool
       // (such as Claude Code or OpenCode) is skipped, so the release rebuilds.
       const currentTools = !config.tools || Object.entries(config.tools).every(([tool, version]) => evidence.tools?.[tool] === version)
-      if (currentTools)
+      // A validation that could not find the served release skipped its rollback
+      // checks, so it never vouches for a release.
+      const servedQualified = typeof evidence.served === 'object' && evidence.served !== null
+      if (currentTools && servedQualified)
         return { ...image, runId: run.id }
     }
     finally {

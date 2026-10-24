@@ -128,4 +128,7 @@ lists `opus` and `fable` instead of `opus[1m]` and `claude-fable-5-1`. Both rema
 documented `--model` values, so saved agents keep working. It ships the same OAuth
 client and token endpoint. CI now runs every resolved release through the adapter's
 native tests against a local Messages API, including session resumption with the
-release production serves (see [tool versions](CLI-UPDATES.md)).
+release production serves (see [tool versions](CLI-UPDATES.md)). Model-scoped
+quota windows, such as "Weekly · Opus", cover the models of the current catalog.
+An agent saved with an alias the catalog no longer lists, such as `opus[1m]`,
+still runs, but only account-wide windows limit it until another model is chosen.

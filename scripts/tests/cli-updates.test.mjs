@@ -97,12 +97,18 @@ describe('application image tool versions', () => {
     const served = jobs.resolve.steps.find(step => step.id === 'served')
     expect(served.run).toBe('node scripts/served-tools.mjs')
     expect(served.env.CAIRN_BEACON_ORIGIN).toBe(expression('vars.CAIRN_BEACON_ORIGIN'))
-    for (const tool of ['claude', 'opencode']) {
-      expect(jobs.resolve.outputs[`served-${tool}`]).toBe(expression(`steps.served.outputs.${tool}`))
-      // Evidence records which served release the rollback checks used; null when unknown.
-      const record = jobs.publish.steps.find(step => step.name === 'Record the validated image')
-      expect(record.env[`SERVED_${tool.toUpperCase()}`]).toBe(expression(`needs.resolve.outputs.served-${tool}`))
-      expect(record.run).toContain(`${tool}: process.env.SERVED_${tool.toUpperCase()} || null`)
+    // Evidence records the served releases the rollback checks used, or null when
+    // production was unknown, which prevents its reuse.
+    const record = jobs.publish.steps.find(step => step.name === 'Record the validated image')
+    expect(record.run).toContain(`served: process.env.SERVED_FOUND === 'true' ? { claude: process.env.SERVED_CLAUDE, opencode: process.env.SERVED_OPENCODE } : null`)
+    for (const output of ['found', 'claude', 'opencode']) {
+      expect(jobs.resolve.outputs[`served-${output}`]).toBe(expression(`steps.served.outputs.${output}`))
+      expect(record.env[`SERVED_${output.toUpperCase()}`]).toBe(expression(`needs.resolve.outputs.served-${output}`))
+    }
+
+    for (const step of ['OpenCode', 'Claude Code']) {
+      const run = jobs.backend.steps.find(candidate => candidate.name === `Qualify the resolved ${step} release against its native adapter`).run
+      expect(run).toMatch(/served=\$\(node scripts\/served-tools\.mjs rollback-target (opencode|claude) /)
     }
 
     const opencode = jobs.backend.steps.find(step => step.name === 'Qualify the resolved OpenCode release against its native adapter')
