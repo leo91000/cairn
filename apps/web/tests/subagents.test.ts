@@ -54,6 +54,39 @@ describe('subagents', () => {
     expect(team?.kind === 'team' && team.agents[0]?.subagent).toMatchObject({ state: 'running', result: '', message: '' })
   })
 
+  it('keeps a resumed subagent in its row with its steps and new report', () => {
+    const [team] = activityEntries([
+      subagent('item.started', 'reviewer'),
+      item('item.completed', {
+        id: 'first',
+        type: 'subagent_message',
+        text: 'Looks good.',
+        parent_id: 'reviewer',
+      }),
+      subagent('item.completed', 'reviewer', {
+        status: 'completed',
+        result: 'Looks good.',
+        task_id: 'task-review',
+        run_id: 'run-1',
+      }),
+      subagent('item.updated', 'reviewer', { resumed: true, run_id: 'run-2', result: null }),
+      item('item.completed', {
+        id: 'second',
+        type: 'subagent_message',
+        text: 'Docs are fine too.',
+        parent_id: 'reviewer',
+      }),
+      subagent('item.updated', 'reviewer', { status: 'completed', result: 'Docs are fine too.', run_id: 'run-2' }),
+    ], true)
+    expect(team?.kind === 'team' && team.agents).toHaveLength(1)
+    expect(team?.kind === 'team' && team.agents[0]?.subagent).toMatchObject({
+      state: 'done',
+      resumed: true,
+      result: 'Docs are fine too.',
+      taskId: 'task-review',
+    })
+  })
+
   it('folds early lifecycle activity into its spawn without losing metadata or steps', () => {
     const entries = activityEntries([
       subagent('item.started', 'spawn'),

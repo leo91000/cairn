@@ -111,6 +111,7 @@ function toggle(id: string) {
               <span class="max-w-full shrink-0 truncate text-base font-semibold text-ink">{{ agent.title }}</span>
               <span v-if="agent.subagent!.type" class="min-w-0 truncate text-2xs text-muted phone:hidden">{{ agent.subagent!.type }}</span>
               <span v-if="agent.subagent!.background" class="shrink-0 text-2xs text-muted phone:hidden">· background</span>
+              <span v-if="agent.subagent!.resumed" class="shrink-0 text-2xs text-muted phone:hidden">· resumed</span>
             </span>
             <span class="block truncate text-2xs text-muted">{{ summary(agent) }}</span>
           </span>

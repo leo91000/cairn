@@ -203,6 +203,9 @@ fn compact_activity_preview(event: &Value, secrets: Option<&[String]>) -> Value 
         "name",
         "agent_type",
         "background",
+        "run_id",
+        "parent_task_id",
+        "resumed",
     ] {
         if let Some(value) = source
             .get(key)

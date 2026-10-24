@@ -277,7 +277,11 @@ private fun SubagentRow(agent: Subagent, active: Boolean, now: Long, open: () ->
                         overflow = TextOverflow.Ellipsis,
                     )
                     val kind =
-                        listOf(agent.type, if (agent.background) "arrière-plan" else "")
+                        listOf(
+                                agent.type,
+                                if (agent.background) "arrière-plan" else "",
+                                if (agent.resumed) "relancé" else "",
+                            )
                             .filter { it.isNotBlank() }
                             .joinToString(" · ")
                     // Phones keep the room for the name; the sheet names the type.
@@ -532,7 +536,8 @@ internal fun SubagentSheet(
                             listOf(
                                     agent.type,
                                     if (agent.background) "arrière-plan" else "",
-                                    "lancé par l’agent",
+                                    if (agent.resumed) "relancé par l’agent"
+                                    else "lancé par l’agent",
                                 )
                                 .filter { it.isNotBlank() }
                                 .joinToString(" · "),

@@ -1177,6 +1177,205 @@ async fn task_updates_during_a_streamed_response_do_not_announce_an_idle_agent()
 }
 
 #[tokio::test]
+async fn engine_retries_limits_and_notices_are_reported_without_ending_the_turn() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let started = now();
+    let events = run_events(&c, plan(&root, "fixture:engine-retry")).await;
+    let of = |kind: &str| {
+        events
+            .iter()
+            .filter(|event| event["type"] == kind)
+            .collect::<Vec<_>>()
+    };
+
+    // A retry the engine makes itself is not a failure: the turn completes with its reply.
+    let retries = of("engine.retry");
+    assert_eq!(retries.len(), 2, "{events:#?}");
+    assert_eq!(retries[0]["attempt"], 1);
+    assert_eq!(retries[0]["maxRetries"], 10);
+    assert_eq!(retries[0]["delayMs"], 600);
+    assert_eq!(retries[0]["status"], 529);
+    assert_eq!(retries[0]["reason"], "overloaded");
+    assert!(retries[0]["retryAt"].as_i64().unwrap() >= started + 600);
+    assert!(retries[0].get("noResponse").is_none());
+    assert!(retries[1]["status"].is_null());
+    assert_eq!(
+        retries[1]["noResponse"],
+        json!({ "waitedMs": 30000, "retryWaitMs": 60000 })
+    );
+    assert!(of("turn.failed").is_empty());
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("result.md")).unwrap(),
+        "Answered after the retries"
+    );
+
+    // Only changes of the usage limit are shown: the warning once, then its end.
+    let limits: Vec<_> = of("provider.limit")
+        .into_iter()
+        .map(|event| (event["status"].clone(), event["resetsAt"].clone()))
+        .collect();
+    assert_eq!(
+        limits,
+        vec![
+            (json!("allowed_warning"), json!(1_893_499_200_000_i64)),
+            (json!("allowed"), json!(1_893_517_200_000_i64)),
+        ]
+    );
+    assert_eq!(of("provider.limit")[0]["window"], "five_hour");
+    assert_eq!(of("provider.limit")[0]["blocked"], false);
+
+    // Blank notices and frames this adapter does not know are ignored.
+    let notices = of("engine.notice");
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0]["level"], "warning");
+    assert_eq!(notices[0]["message"], "Context is almost full.");
+    let known = [
+        "thread.started",
+        "chat.delivered",
+        "engine.retry",
+        "provider.limit",
+        "engine.notice",
+        "item.started",
+        "item.updated",
+        "item.completed",
+        "chat.question.closed",
+        "turn.completed",
+    ];
+    for event in &events {
+        assert!(known.contains(&kind(event)), "{event}");
+    }
+}
+
+fn kind(event: &Value) -> &str {
+    event["type"].as_str().unwrap_or_default()
+}
+
+#[tokio::test]
+async fn a_usage_limit_that_stops_requests_fails_the_turn_with_its_reset() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let (result, events) = run_to_end(&c, plan(&root, "fixture:usage-limit")).await;
+    assert!(result.is_err());
+    assert!(!completes(&events));
+    let limit = events
+        .iter()
+        .find(|event| event["type"] == "provider.limit")
+        .unwrap();
+    assert_eq!(limit["status"], "rejected");
+    assert_eq!(limit["blocked"], true);
+
+    // The engine said why; its wording does not need to be recognized.
+    let failure = events
+        .iter()
+        .find(|event| event["type"] == "turn.failed")
+        .unwrap();
+    assert_eq!(
+        failure["error"],
+        json!({
+            "message": "Your usage allowance is used up for now.",
+            "code": "usage_limit_reached",
+            "window": "five_hour",
+            "resetsAt": 1_893_499_200_000_i64,
+        })
+    );
+    assert!(cairn_installation::run_output::exhausted(failure));
+    assert!(!root.path().join("result.claude-receipt.json").exists());
+
+    // Extra usage takes over: the limit is shown, and the turn goes on.
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let events = run_events(&c, plan(&root, "fixture:usage-limit extra-usage")).await;
+    let limit = events
+        .iter()
+        .find(|event| event["type"] == "provider.limit")
+        .unwrap();
+    assert_eq!(limit["blocked"], false);
+    assert_eq!(limit["usingExtraUsage"], true);
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("result.md")).unwrap(),
+        "Finished on extra usage"
+    );
+}
+
+#[tokio::test]
+async fn nested_and_resumed_subagents_keep_their_identity_and_the_parent_reply() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let events = run_events(&c, plan(&root, "fixture:subagents-resumed")).await;
+    let updates = |id: &str| {
+        events
+            .iter()
+            .filter(|event| event["item"]["type"] == "subagent" && event["item"]["id"] == id)
+            .map(|event| event["item"].clone())
+            .collect::<Vec<_>>()
+    };
+
+    let nested = updates("agent-nested");
+    let nested = nested.last().unwrap();
+    assert_eq!(nested["parent_id"], "agent-review");
+    assert_eq!(nested["parent_task_id"], "task-review");
+    assert_eq!(nested["status"], "completed");
+
+    // The first run reports back, then the resumed run reopens the same subagent.
+    let review = updates("agent-review");
+    let first = review
+        .iter()
+        .find(|item| item["status"] == "completed")
+        .unwrap();
+    assert_eq!(first["run_id"], "run-1");
+    assert_eq!(first["result"], "Looks good.");
+    assert!(first.get("resumed").is_none());
+    let reopened = review.iter().find(|item| item["resumed"] == true).unwrap();
+    assert_eq!(reopened["status"], "in_progress");
+    assert_eq!(reopened["run_id"], "run-2");
+    let last = review.last().unwrap();
+    assert_eq!(last["status"], "completed");
+    assert_eq!(last["task_id"], "task-review");
+    assert_eq!(last["run_id"], "run-2");
+    assert_eq!(last["result"], "Docs are fine too.");
+    assert_eq!(last["tokens"], 700);
+    // A late frame of the first run changes nothing.
+    assert!(
+        review
+            .iter()
+            .all(|item| item["activity"] != "Late progress of the first run")
+    );
+
+    // The resumed subagent's message is one of its steps, never the agent's reply.
+    let steps: Vec<_> = events
+        .iter()
+        .filter(|event| event["item"]["type"] == "subagent_message")
+        .map(|event| {
+            (
+                event["item"]["parent_id"].as_str().unwrap(),
+                event["item"]["text"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        steps,
+        vec![
+            ("agent-nested", "Tests pass."),
+            ("agent-review", "Looks good."),
+            ("agent-review", "Docs are fine too."),
+        ]
+    );
+    let replies: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            event["item"]["type"] == "agent_message" && event["type"] == "item.completed"
+        })
+        .map(|event| event["item"]["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(replies, vec!["Review resumed and finished"]);
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("result.md")).unwrap(),
+        "Review resumed and finished"
+    );
+}
+
+#[tokio::test]
 async fn ambient_watchers_do_not_keep_the_run_alive() {
     for prompt in [
         "fixture:background-ambient",

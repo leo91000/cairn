@@ -26,6 +26,8 @@ use tokio_util::sync::CancellationToken;
 const STOPPED: &str = "Claude execution stopped.";
 const MAX_LINE: usize = 32_000_000;
 const MAX_IMAGE: usize = 10_000_000;
+/// Claude Code's notices are status lines; a longer one is cut.
+const NOTICE_LIMIT: usize = 4_000;
 
 const DENIED: &str =
     "This tool is outside the agent's access policy. Ask the user in your response.";
@@ -368,6 +370,64 @@ impl Receipt {
     }
 }
 
+/// The subscription usage limit Claude Code reports in a `rate_limit_event`.
+#[derive(Debug, PartialEq)]
+struct UsageLimit {
+    status: &'static str,
+    window: Option<String>,
+    /// Milliseconds since the epoch.
+    resets_at: Option<i64>,
+    extra_usage: Option<&'static str>,
+    using_extra_usage: bool,
+}
+
+impl UsageLimit {
+    fn from(info: &Value) -> Option<Self> {
+        let status = |value: &Value| match value.as_str()? {
+            "allowed" => Some("allowed"),
+            "allowed_warning" => Some("allowed_warning"),
+            "rejected" => Some("rejected"),
+            _ => None,
+        };
+        let window = text(info, "rateLimitType");
+        let window = (!window.is_empty()
+            && window.len() <= 64
+            && window
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_'))
+        .then(|| window.to_owned());
+        // Claude Code reports seconds; accept milliseconds from a future CLI too.
+        let resets_at = info["resetsAt"]
+            .as_f64()
+            .filter(|reset| reset.is_finite() && *reset > 0.0)
+            .map(|reset| if reset < 1e12 { reset * 1000.0 } else { reset } as i64);
+        Some(Self {
+            status: status(&info["status"])?,
+            window,
+            resets_at,
+            extra_usage: status(&info["overageStatus"]),
+            using_extra_usage: info["isUsingOverage"] == true || info["overageInUse"] == true,
+        })
+    }
+
+    /// Requests stop until the window resets: extra usage cannot take over.
+    fn blocks(&self) -> bool {
+        self.status == "rejected"
+            && !matches!(self.extra_usage, Some("allowed" | "allowed_warning"))
+    }
+
+    fn event(&self) -> Value {
+        json!({
+            "type": "provider.limit",
+            "status": self.status,
+            "window": self.window,
+            "resetsAt": self.resets_at,
+            "blocked": self.blocks(),
+            "usingExtraUsage": self.using_extra_usage,
+        })
+    }
+}
+
 /// An AskUserQuestion permission request waiting for the user's answers.
 struct Question {
     request_id: Value,
@@ -396,6 +456,12 @@ struct Turn<'a> {
     tools: HashMap<String, Value>,
     /// Subagents still working, by the ID of the tool use that started them.
     subagents: HashMap<String, Value>,
+    /// Subagents that reported back, by the same ID, until a new run resumes them.
+    settled: HashMap<String, Value>,
+    /// The ID of each subagent, by the task ID Claude Code keeps across its runs.
+    tasks: HashMap<String, String>,
+    /// The usage limit Claude Code last reported, unless requests run normally.
+    limit: Option<UsageLimit>,
     /// Streamed blocks of the current message, by index.
     streams: HashMap<usize, Value>,
     /// Content blocks seen per assistant message.
@@ -541,6 +607,12 @@ impl Turn<'_> {
             {
                 self.subagent_task(value).await?;
             }
+            "system" if value["subtype"] == "api_retry" => self.engine_retry(value).await?,
+            "system" if value["subtype"] == "informational" => self.engine_notice(value).await?,
+            // Opt-in (CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS) and not enabled: completion stays
+            // correlated with results, and Cairn answers permission requests itself.
+            "system" if value["subtype"] == "session_state_changed" => {}
+            "rate_limit_event" => self.rate_limit(&value["rate_limit_info"]).await?,
             "user" => self.on_user(value).await?,
             "assistant" => self.on_assistant(value).await?,
             "stream_event" if value["parent_tool_use_id"].is_null() => {
@@ -551,6 +623,74 @@ impl Turn<'_> {
             _ => {}
         }
         Ok(false)
+    }
+
+    /// Claude Code retries a failed API request itself. The turn goes on: this is not a failure,
+    /// and nothing for Cairn to retry or wait for.
+    async fn engine_retry(&self, value: &Value) -> Result<()> {
+        let delay = value["retry_delay_ms"].as_u64().unwrap_or(0);
+        let reason = text(value, "error");
+        let reason = if reason.len() <= 64
+            && reason
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        {
+            reason
+        } else {
+            "unknown"
+        };
+        let mut retry = json!({
+            "type": "engine.retry",
+            "attempt": value["attempt"].as_u64(),
+            "maxRetries": value["max_retries"].as_u64(),
+            "delayMs": delay,
+            "retryAt": crate::config::now().saturating_add_unsigned(delay),
+            "status": value["error_status"].as_u64(),
+            "reason": reason,
+        });
+        let no_response = &value["no_response"];
+        if no_response.is_object() {
+            retry["noResponse"] = json!({
+                "waitedMs": no_response["waited_ms"].as_u64(),
+                "retryWaitMs": no_response["retry_wait_ms"].as_u64(),
+            });
+        }
+        self.emit(retry).await
+    }
+
+    /// A warning or notice Claude Code raised during the turn (CLI 2.1.283 and later).
+    async fn engine_notice(&self, value: &Value) -> Result<()> {
+        let message = text(value, "content");
+        if message.trim().is_empty() {
+            return Ok(());
+        }
+        let level = match text(value, "level") {
+            level @ ("info" | "notice" | "suggestion" | "warning") => level,
+            _ => "notice",
+        };
+        let message = &message[..message.floor_char_boundary(NOTICE_LIMIT)];
+        let mut notice = json!({ "type": "engine.notice", "level": level, "message": message });
+        if value["prevent_continuation"] == true {
+            notice["stopsTurn"] = true.into();
+        }
+        self.emit(notice).await
+    }
+
+    /// The subscription's usage-limit state. Only changes are shown: a warning, a limit that
+    /// stops requests, or a return to normal after either.
+    async fn rate_limit(&mut self, info: &Value) -> Result<()> {
+        let Some(limit) = UsageLimit::from(info) else {
+            return Ok(());
+        };
+        if limit.status == "allowed" && self.limit.is_none() {
+            return Ok(());
+        }
+        if self.limit.as_ref() == Some(&limit) {
+            return Ok(());
+        }
+        self.emit(limit.event()).await?;
+        self.limit = (limit.status != "allowed").then_some(limit);
+        Ok(())
     }
 
     async fn background_tasks(&mut self, value: &Value) -> Result<()> {
@@ -669,11 +809,25 @@ impl Turn<'_> {
         Ok(())
     }
 
+    /// The subagent a message comes from, or None for the agent's own. Claude Code names the
+    /// tool use that started it and, from 2.1.292, its agent ID: the task ID it keeps when it is
+    /// resumed, so a resumed subagent's steps stay with it.
+    fn parent(&self, value: &Value) -> Option<String> {
+        let agent = text(value, "agent_id");
+        if let Some(id) = self.tasks.get(agent) {
+            return Some(id.clone());
+        }
+        let tool_use = value["parent_tool_use_id"].as_str();
+        tool_use
+            .or_else(|| (!agent.is_empty()).then_some(agent))
+            .map(str::to_owned)
+    }
+
     // Claude Code emits one assistant event per content block, all sharing the message id.
-    // Count blocks per message so ids match the streamed block index. A subagent's messages name
-    // the tool use that started it: they show as its steps, never as the agent's own reply.
+    // Count blocks per message so ids match the streamed block index. A subagent's messages
+    // show as its steps, never as the agent's own reply.
     async fn on_assistant(&mut self, value: &Value) -> Result<()> {
-        let parent = value["parent_tool_use_id"].as_str();
+        let parent = self.parent(value);
         if parent.is_none() {
             // The agent responds again, so it no longer only waits for background tasks.
             self.waiting_for_background = false;
@@ -686,8 +840,8 @@ impl Turn<'_> {
             let Some(mut item) = item(block, &message, index) else {
                 continue;
             };
-            if let Some(parent) = parent {
-                item["parent_id"] = parent.into();
+            if let Some(parent) = &parent {
+                item["parent_id"] = parent.as_str().into();
                 if item["type"] == "agent_message" {
                     item["type"] = "subagent_message".into();
                 }
@@ -723,6 +877,15 @@ impl Turn<'_> {
     async fn subagent_result(&mut self, item: Value, block: &Value, outcome: &Value) -> Result<()> {
         let id = text(&item, "id").to_owned();
         let mut item = self.subagents.remove(&id).unwrap_or(item);
+        if let Some(agent) = outcome["agentId"]
+            .as_str()
+            .filter(|agent| !agent.is_empty())
+        {
+            self.tasks.insert(agent.to_owned(), id.clone());
+            if item["task_id"].is_null() {
+                item["task_id"] = agent.into();
+            }
+        }
         let launched = matches!(
             text(outcome, "status"),
             "async_launched" | "remote_launched"
@@ -751,27 +914,69 @@ impl Turn<'_> {
         // call is complete but the subagent is still working.
         if launched && item["status"] == "in_progress" {
             self.subagents.insert(id, item.clone());
+        } else {
+            self.settled.insert(id, item.clone());
         }
         self.emit(json!({ "type": "item.completed", "item": item }))
             .await
     }
 
-    /// Progress and completion that Claude Code reports for a subagent while it works.
+    /// Progress and completion that Claude Code reports for a subagent while it works. A resumed
+    /// subagent keeps its task ID, while its frames may name another tool use, or none.
     async fn subagent_task(&mut self, value: &Value) -> Result<()> {
-        let id = text(value, "tool_use_id");
-        let Some(item) = self.subagents.get_mut(id) else {
+        let task = text(value, "task_id");
+        let tool_use = text(value, "tool_use_id");
+        let id = if self.subagents.contains_key(tool_use) || self.settled.contains_key(tool_use) {
+            tool_use.to_owned()
+        } else if let Some(id) = self.tasks.get(task) {
+            id.clone()
+        } else {
             return Ok(());
         };
+        if !task.is_empty() {
+            self.tasks.insert(task.to_owned(), id.clone());
+        }
+        let started = value["subtype"] == "task_started";
+        if !self.subagents.contains_key(&id) {
+            // Only a new run reopens a subagent that reported back; other frames are late.
+            let Some(item) = self.settled.remove(&id).filter(|_| started) else {
+                return Ok(());
+            };
+            self.subagents.insert(id.clone(), item);
+        }
+        let item = self.subagents.get_mut(&id).unwrap();
+
+        // Run IDs sort in the order a task's runs opened: a frame of an earlier run is late.
+        let run = text(value, "run_id");
+        let current = text(item, "run_id").to_owned();
+        if !run.is_empty() && !current.is_empty() && run < current.as_str() {
+            return Ok(());
+        }
         let before = item.clone();
-        if !text(value, "task_id").is_empty() {
-            item["task_id"] = value["task_id"].clone();
+        if !task.is_empty() {
+            item["task_id"] = task.into();
+        }
+        if !run.is_empty() {
+            item["run_id"] = run.into();
         }
         let usage = &value["usage"];
         match text(value, "subtype") {
             "task_started" => {
+                let resumed = before["status"] != "in_progress"
+                    || (!current.is_empty() && !run.is_empty() && run != current);
+                if resumed {
+                    item["status"] = "in_progress".into();
+                    item["resumed"] = true.into();
+                    // Its new run reports again; until then the earlier report stays shown.
+                    item["activity"] = Value::Null;
+                    item["result"] = Value::Null;
+                }
                 item["background"] = (value["is_backgrounded"] == true).into();
                 if item["agent_type"].is_null() {
                     item["agent_type"] = value["subagent_type"].clone();
+                }
+                if !text(value, "parent_task_id").is_empty() {
+                    item["parent_task_id"] = value["parent_task_id"].clone();
                 }
             }
             "task_progress" => {
@@ -804,8 +1009,9 @@ impl Turn<'_> {
         }
         let item = item.clone();
         // A foreground subagent's tool result follows its notification and completes it.
-        if item["status"] != "in_progress" && !self.tools.contains_key(id) {
-            self.subagents.remove(id);
+        if item["status"] != "in_progress" && !self.tools.contains_key(&id) {
+            self.subagents.remove(&id);
+            self.settled.insert(id, item.clone());
         }
         self.emit(json!({ "type": "item.updated", "item": item }))
             .await
@@ -924,6 +1130,20 @@ impl Turn<'_> {
             } else {
                 result
             };
+            // Claude Code said the usage limit stops requests: report it as such rather than
+            // leaving its wording to be recognized.
+            if let Some(limit) = self.limit.as_ref().filter(|limit| limit.blocks()) {
+                self.emit(json!({
+                    "type": "turn.failed",
+                    "error": {
+                        "message": message,
+                        "code": "usage_limit_reached",
+                        "window": limit.window,
+                        "resetsAt": limit.resets_at,
+                    },
+                }))
+                .await?;
+            }
             return Err(Error::bad_gateway(message));
         }
         if !result.is_empty() {
@@ -1111,6 +1331,9 @@ pub async fn run(
         questions: HashMap::new(),
         tools: HashMap::new(),
         subagents: HashMap::new(),
+        settled: HashMap::new(),
+        tasks: HashMap::new(),
+        limit: None,
         streams: HashMap::new(),
         blocks: HashMap::new(),
         stream_message: String::new(),

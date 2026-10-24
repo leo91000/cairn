@@ -138,6 +138,39 @@ class SubagentsTest {
     }
 
     @Test
+    fun `a resumed subagent keeps its row, steps and new report`() {
+        val (agent) =
+            teams(
+                    listOf(
+                        subagent("item.started", "reviewer"),
+                        message("first", "Looks good.", parent = "reviewer"),
+                        subagent("item.completed", "reviewer") {
+                            put("status", "completed")
+                            put("result", "Looks good.")
+                            put("task_id", "task-review")
+                            put("run_id", "run-1")
+                        },
+                        subagent("item.updated", "reviewer") {
+                            put("resumed", true)
+                            put("run_id", "run-2")
+                        },
+                        message("second", "Docs are fine too.", parent = "reviewer"),
+                        subagent("item.updated", "reviewer") {
+                            put("status", "completed")
+                            put("result", "Docs are fine too.")
+                            put("run_id", "run-2")
+                        },
+                    )
+                )
+                .single()
+        assertEquals("run:reviewer", agent.id)
+        assertTrue(agent.resumed)
+        assertEquals(SubagentState.DONE, agent.state)
+        assertEquals("Docs are fine too.", agent.result)
+        assertEquals("task-review", agent.taskId)
+    }
+
+    @Test
     fun `clears the previous report and message when a subagent starts a follow-up`() {
         val (agent) =
             teams(
