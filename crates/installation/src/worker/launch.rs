@@ -612,8 +612,9 @@ impl Execution<'_> {
         private_dir(&self.directory.join("chat-input")).await?;
         s.prepare_chat_files(&self.id, &self.run["chatExecution"]["attachments"])
             .await?;
+        let run = crate::plugins::agents::with_instructions(s, self.run).await;
         let mut chat = run_output::chat_plan(
-            self.run,
+            &run,
             &workspace.prepared,
             &self.directory,
             &workspace.mcp,
@@ -625,12 +626,8 @@ impl Execution<'_> {
         if !chat_execution {
             // Scheduled work uses the same authenticated protocol as
             // chats, while retaining its own task brief and session.
-            chat["execution"] = json!({
-                "messageId": self.run["missionTurnId"].as_str().unwrap_or(&self.id),
-                "text": launch.prompt,
-                "recovery": resume.is_some(),
-                "attachments": [],
-            });
+            let resume_prompt = resume.map(|_| launch.prompt.as_str());
+            chat["execution"] = run_output::scheduled_turn(self.run, resume_prompt);
         }
         adapter
             .configure_plan(s, &mut chat, self.account.as_ref())
