@@ -172,6 +172,18 @@ describe('the Fil', () => {
     expect(fil.forYou[1]).toMatchObject({ to: '/chats/question', subtitle: 'Needs your answer' })
   })
 
+  it('marks each conversation and mission with the coding agent of its latest turn', () => {
+    const fil = filOf([
+      chat('switched', { status: 'running', provider: 'claude' }),
+      chat('new', { provider: null }),
+    ], [task('audit')], [run('audit-run', 'audit', { status: 'running', finishedAt: null, provider: 'opencode' })])
+    expect([...fil.live, ...fil.recent].map(item => [item.title, item.harness])).toEqual([
+      ['switched', 'claude'],
+      ['audit', 'opencode'],
+      ['new', undefined],
+    ])
+  })
+
   it('reports each mission from its latest run and leaves chat runs to their conversation', () => {
     const fil = filOf([], [task('audit'), task('triage'), task('digest'), task('old', { archived: true }), task('never')], [
       run('audit-1', 'audit', { status: 'failed', createdAt: 10, error: 'Tests failed\nstack' }),

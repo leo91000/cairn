@@ -24,6 +24,7 @@ fn summary(chat: &Value) -> Value {
         "agentName",
         "projectId",
         "projectName",
+        "provider",
         "runId",
         "paused",
         "status",

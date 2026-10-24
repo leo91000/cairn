@@ -543,7 +543,7 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
     args.extend([
         "--setenv=HOME=/home/node",
         "--setenv=CAIRN_AUTH_SOCKET=/run/cairn-auth.sock",
-        "--setenv=PATH=/opt/cairn-native-tools/bin:/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin",
+        "--setenv=PATH=/opt/cairn-native-tools/bin:/run/cairn-entrypoint:/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin",
         "--",
         "/run/cairn-entrypoint/cairn",
         "runner-entry",

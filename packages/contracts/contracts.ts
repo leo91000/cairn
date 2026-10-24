@@ -308,6 +308,7 @@ export interface RunEvent {
 export type RunListItem = Omit<Run, 'snapshot' | 'summary'> & {
   taskName: string
   agentName: string
+  provider?: import('./accounts').Provider
   /** A mission run that finished after the signed-in account last opened its mission. */
   unread?: boolean
   /** The opening of the agent's final message, while unread. */

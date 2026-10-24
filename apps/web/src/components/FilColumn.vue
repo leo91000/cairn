@@ -42,6 +42,7 @@ import {
   tomorrowMorning,
 } from '../signal'
 import AgentAvatar from './AgentAvatar.vue'
+import HarnessMark from './HarnessMark.vue'
 import Icon from './Icon.vue'
 import InstallationHeader from './InstallationHeader.vue'
 import MenuButton from './MenuButton.vue'
@@ -349,7 +350,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                       />
                       <span class="transition-colors duration-500" :class="tone(item)">{{ read(item) ? 'Read' : label(item) }}</span>
                       <span class="text-subtle">·</span>
-                      <span class="truncate font-medium text-muted">{{ [item.agent, item.project].filter(Boolean).join(' · ') }}</span>
+                      <span class="flex min-w-0 items-center gap-1 font-medium text-muted"><span class="truncate">{{ item.agent }}</span><template v-if="item.harness || item.project"> · <HarnessMark v-if="item.harness" :provider="item.harness" /> <span v-if="item.project" class="truncate">{{ item.project }}</span></template></span>
                       <span class="ml-auto shrink-0 font-medium text-subtle">{{ shortAge(item.at, now) }}</span>
                     </span>
                     <span class="mt-1 line-clamp-2 block font-heading text-[14.5px] font-bold leading-snug text-ink">{{ item.title }}</span>
@@ -467,26 +468,26 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                     <template v-if="item.kind === 'running'">
                       <span class="shrink-0 font-semibold text-accent">{{ item.taskId ? 'Mission running' : 'Working' }}</span>
                       <span class="working-wave text-accent"><i /><i /><i /></span>
-                      <span v-if="item.project" class="ml-2 truncate text-muted">{{ item.project }}</span>
+                      <span v-if="item.harness || item.project" class="ml-2 flex min-w-0 items-center gap-1 text-muted"><HarnessMark v-if="item.harness" :provider="item.harness" /> <span v-if="item.project" class="truncate">{{ item.project }}</span></span>
                     </template>
                     <template v-else-if="item.kind === 'queued'">
                       <span class="shrink-0 font-semibold text-muted">Queued</span>
-                      <span class="ml-1.5 truncate text-subtle">· {{ item.subtitle }}</span>
+                      <span class="ml-1.5 flex min-w-0 items-center gap-1 text-subtle">· <HarnessMark v-if="item.harness" :provider="item.harness" /> <span class="truncate">{{ item.subtitle }}</span></span>
                     </template>
                     <template v-else-if="item.kind === 'waiting'">
                       <span class="truncate font-medium text-accent">{{ item.subtitle }}</span>
-                      <span v-if="item.project" class="ml-1.5 truncate text-subtle">· {{ item.project }}</span>
+                      <span v-if="item.harness || item.project" class="ml-1.5 flex min-w-0 items-center gap-1 text-subtle">· <HarnessMark v-if="item.harness" :provider="item.harness" /> <span v-if="item.project" class="truncate">{{ item.project }}</span></span>
                     </template>
                     <template v-else-if="item.kind === 'snoozed' || item.kind === 'set-aside'">
                       <span class="shrink-0 font-medium" :class="item.kind === 'snoozed' ? 'text-accent' : 'text-warning'">{{ item.kind === 'snoozed' ? 'Snoozed' : outcomeLabels[item.outcome!] }}</span>
-                      <span class="ml-1.5 truncate text-subtle">· {{ item.kind === 'snoozed' ? outcomeLabels[item.outcome!] : item.subtitle }}</span>
+                      <span class="ml-1.5 flex min-w-0 items-center gap-1 text-subtle">· <HarnessMark v-if="item.harness" :provider="item.harness" /> <span class="truncate">{{ item.kind === 'snoozed' ? outcomeLabels[item.outcome!] : item.subtitle }}</span></span>
                     </template>
                     <template v-else-if="item.kind === 'suspended'">
-                      <span class="truncate font-medium text-muted">{{ item.subtitle }}</span>
+                      <span class="flex min-w-0 items-center gap-1 font-medium text-muted"><HarnessMark v-if="item.harness" :provider="item.harness" /> <span class="truncate">{{ item.subtitle }}</span></span>
                     </template>
                     <template v-else>
                       <span class="shrink-0 font-medium text-muted">{{ item.agent }}</span>
-                      <span class="ml-1.5 truncate text-subtle">· {{ item.kind === 'paused' ? 'Paused' : item.project || 'No project' }}</span>
+                      <span class="ml-1.5 flex min-w-0 items-center gap-1 text-subtle">· <HarnessMark v-if="item.harness" :provider="item.harness" /> <span class="truncate">{{ item.kind === 'paused' ? 'Paused' : item.project || 'No project' }}</span></span>
                     </template>
                   </span>
                 </span>

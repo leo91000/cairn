@@ -822,6 +822,7 @@ internal fun ChatPage(
                             openChat(it)
                         },
                         live = conversation.live,
+                        harness = chat?.provider,
                         liveSince = waitingTasks?.since ?: chat?.run?.startedAt,
                         route = connectionRoute(state.installation, state.transportRoute),
                         back = {

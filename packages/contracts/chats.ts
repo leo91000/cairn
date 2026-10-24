@@ -1,3 +1,4 @@
+import type { Provider } from './accounts'
 import type { Run } from './contracts'
 import { z } from 'zod'
 import { MAIN_AGENT_ID } from './constants'
@@ -106,6 +107,8 @@ export interface ChatView extends Chat {
   agentName: string
   projectName: string | null
   status: Run['status'] | 'idle'
+  /** The coding agent of the latest turn; a message may switch it from the agent's own. */
+  provider?: Provider | null
   /** When the agent's latest turn ended. */
   finishedAt?: number | null
   /** The agent finished a turn the signed-in account has not opened since. */

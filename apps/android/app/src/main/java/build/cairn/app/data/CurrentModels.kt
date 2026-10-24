@@ -87,6 +87,8 @@ data class Chat(
     val agentName: String = "",
     val projectName: String? = null,
     val status: String = "idle",
+    /** The coding agent of the latest turn; a message may switch it from the agent's own. */
+    val provider: String? = null,
     /** When the agent's latest turn ended. */
     val finishedAt: Long? = null,
     /** The agent finished a turn this account has not opened since. */

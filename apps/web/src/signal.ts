@@ -1,3 +1,4 @@
+import type { Provider } from '../../../packages/contracts/accounts'
 import type { ChatView } from '../../../packages/contracts/chats'
 import type { RunEvent, RunListItem, Task } from '../../../packages/contracts/contracts'
 import type { ActivityEntry } from './activity'
@@ -32,6 +33,8 @@ export interface FilItem {
   subtitle: string
   agent: string
   agentKey: string
+  /** The coding agent of its latest turn. */
+  harness?: Provider
   project: string | null
   at: number
   to: string
@@ -103,6 +106,7 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
       title: chat.title || 'New conversation',
       agent: chat.agentName,
       agentKey: chat.agentId,
+      harness: chat.provider ?? undefined,
       project: chat.projectName,
       at: chat.updatedAt,
       to: chatPath(chat),
@@ -184,6 +188,7 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
       title: task.name,
       agent: run.agentName,
       agentKey: task.agentId,
+      harness: run.provider,
       project: null,
       at: run.finishedAt ?? run.startedAt ?? run.createdAt,
       to: filRunPath(run.id),

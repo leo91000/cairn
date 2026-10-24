@@ -178,6 +178,8 @@ data class Run(
     val workspace: String? = null,
     val workspaceCleanedAt: Long? = null,
     val snapshot: Snapshot = Snapshot(),
+    /** The run's coding agent, as run lists report it without the snapshot. */
+    val provider: String? = null,
     val usage: Map<String, JsonElement>? = null,
     val recoveryPending: Boolean = false,
     val resumeAvailable: Boolean = false,
