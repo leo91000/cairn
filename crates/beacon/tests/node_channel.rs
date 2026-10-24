@@ -84,6 +84,22 @@ async fn create_enrollment(relay: &RelayedInstallation, body: Value) -> Value {
     response.json().await.unwrap()
 }
 
+/// Gateway and manager node logs, shown with a failing test.
+fn logs() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("cairn_node_gateway=debug,cairn_installation::relay::nodes=debug")
+        .with_test_writer()
+        .try_init();
+}
+
+/// Every request is bounded, so a stalled path fails here instead of hanging.
+fn client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .unwrap()
+}
+
 /// The pin at the end of a Beacon install command.
 fn pin(enrollment: &Value) -> String {
     let command = enrollment["installCommand"].as_str().unwrap();
@@ -112,7 +128,7 @@ async fn echoing_installation() -> (RelayedInstallation, String) {
 /// and that only node routes answer. Returns the node token.
 async fn exercise(relay: &RelayedInstallation, gateway: &Gateway) -> String {
     let invitation = create_enrollment(relay, json!({ "name": "Office" })).await;
-    let client = reqwest::Client::new();
+    let client = client();
     let response = client
         .post(format!("{}/internal/nodes/enroll", gateway.origin))
         .json(&json!({
@@ -187,9 +203,13 @@ async fn exercise(relay: &RelayedInstallation, gateway: &Gateway) -> String {
             .await
             .unwrap();
         let mut response = String::new();
-        tokio::io::AsyncReadExt::read_to_string(&mut stream, &mut response)
-            .await
-            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            tokio::io::AsyncReadExt::read_to_string(&mut stream, &mut response),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{route}: no answer"))
+        .unwrap();
         assert!(response.starts_with("HTTP/1.1 404"), "{route}: {response}");
     }
     token
@@ -197,6 +217,7 @@ async fn exercise(relay: &RelayedInstallation, gateway: &Gateway) -> String {
 
 #[tokio::test]
 async fn a_node_without_a_manager_address_connects_directly_after_beacon_introduces_it() {
+    logs();
     let (relay, installation) = echoing_installation().await;
 
     let native = create_enrollment(&relay, json!({ "name": "Desktop", "backend": "native" })).await;
@@ -241,7 +262,7 @@ async fn a_node_without_a_manager_address_connects_directly_after_beacon_introdu
 
     let gateway = Gateway::start(&relay.app.url, &installation, &pin, true).await;
     // Connections use Beacon until the direct connection is up.
-    let client = reqwest::Client::new();
+    let client = client();
     tokio::time::timeout(Duration::from_secs(60), async {
         while gateway.carried().0 == 0 {
             let _ = client
@@ -266,6 +287,7 @@ async fn a_node_without_a_manager_address_connects_directly_after_beacon_introdu
 
 #[tokio::test]
 async fn without_a_direct_connection_beacon_carries_tls_to_the_pinned_manager() {
+    logs();
     let (relay, installation) = echoing_installation().await;
     let pin =
         pin(&create_enrollment(&relay, json!({ "name": "Office", "backend": "native" })).await);
@@ -278,7 +300,7 @@ async fn without_a_direct_connection_beacon_carries_tls_to_the_pinned_manager() 
     // Another certificate is refused on both paths: Beacon cannot pose as
     // the manager, and the node is told why.
     let impostor = Gateway::start(&relay.app.url, &installation, &"0".repeat(64), true).await;
-    let refused = reqwest::Client::new()
+    let refused = client()
         .post(format!("{}/internal/nodes/heartbeat", impostor.origin))
         .bearer_auth(&token)
         .json(&json!({}))
@@ -298,7 +320,7 @@ async fn without_a_direct_connection_beacon_carries_tls_to_the_pinned_manager() 
 
     // Channels end with the installation's tunnel; the node is told why.
     relay.stop.cancel();
-    let client = reqwest::Client::new();
+    let client = client();
     let offline = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let response = client

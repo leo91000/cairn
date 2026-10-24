@@ -254,15 +254,22 @@ async fn carry(
 ) {
     if let Some(channel) = direct.channel().await {
         statistics.direct.fetch_add(1, Ordering::Relaxed);
+        tracing::debug!("Connection carried directly");
         direct::splice(local, channel).await;
+        tracing::debug!("Direct connection ended");
         return;
     }
     match relay::open(config).await {
         Ok(remote) => {
             statistics.relay.fetch_add(1, Ordering::Relaxed);
+            tracing::debug!("Connection carried through Beacon");
             relayed(local, remote, direct.available()).await;
+            tracing::debug!("Connection through Beacon ended");
         }
-        Err(refused) => fail(local, refused.status, &refused.message).await,
+        Err(refused) => {
+            tracing::debug!(status = refused.status, reason = %refused.message, "Connection refused");
+            fail(local, refused.status, &refused.message).await;
+        }
     }
 }
 
