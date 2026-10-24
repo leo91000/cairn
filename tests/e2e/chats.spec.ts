@@ -854,6 +854,7 @@ test('phone headers carry the installation, its route and the conversation conne
   await page.goto(workspacePath(`/chats/${chat.id}`))
   const header = page.locator('.chat-header')
   await expect(header.getByRole('button', { name: 'Conversations', exact: true })).toContainText('Browser workspace')
+  await expect(header.getByRole('button', { name: 'Conversations', exact: true })).toHaveAccessibleDescription('Latest harness: Codex')
   expect(Math.round((await header.boundingBox())!.height)).toBeLessThanOrEqual(60)
   await expect(header.getByRole('button', { name: /^Files: \d+$/ })).toBeVisible()
   await expect(page.getByRole('link', { name: 'New chat', exact: true })).toBeHidden()
@@ -867,6 +868,7 @@ test('phone headers carry the installation, its route and the conversation conne
   // Desktop starts conversations from the navigation rail, and keeps its installation bar on the Fil.
   await page.setViewportSize({ width: 1280, height: 800 })
   await expect(header.getByRole('heading', { name: 'Check the phone header.', exact: true })).toBeVisible()
+  await expect(header.getByRole('img', { name: 'Latest harness: Codex', exact: true })).toBeVisible()
   await expect(page.getByRole('link', { name: 'New chat', exact: true })).toHaveCount(0)
   await expect(header.getByRole('button', { name: /^Files: / })).toBeHidden()
   await page.goto(workspacePath('/'))

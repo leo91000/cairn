@@ -19,6 +19,7 @@ import {
   watch,
 } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { providers } from '../../../../packages/contracts/accounts'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { failureReason, sameReason, stopEcho } from '../activity'
@@ -839,6 +840,7 @@ function key(event: KeyboardEvent) {
           ref="historyButton"
           class="hidden min-w-0 flex-1 items-center justify-start px-0.5 py-1 phone:flex"
           aria-label="Conversations"
+          :aria-description="heading?.provider ? `Latest harness: ${providers[heading.provider].label}` : undefined"
           aria-haspopup="dialog"
           :aria-expanded="history"
           @click="history = true"
@@ -848,6 +850,7 @@ function key(event: KeyboardEvent) {
               :name="heading?.agentName || selectedAgent?.name || 'Main agent'"
               :identity="heading?.agentId || selectedAgent?.id"
               :size="34"
+              :harness="heading?.provider"
             />
             <span class="min-w-0 text-left">
               <span class="flex min-w-0 items-center gap-1 text-[14px] font-semibold leading-tight text-ink">
@@ -866,6 +869,7 @@ function key(event: KeyboardEvent) {
             :name="heading.agentName"
             :identity="heading.agentId"
             :size="36"
+            :harness="heading.provider"
             :working="detail?.run?.status === 'running' && !detail.paused && !suspended && !quota"
           />
           <div class="min-w-0 flex-1">
