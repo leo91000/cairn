@@ -1,4 +1,4 @@
-//! OpenCode 1.19's native HTTP session protocol. Each execution gets a private
+//! OpenCode's native HTTP session protocol, as of 1.19. Each execution gets a private
 //! server, state, and credentials; engine and model-provider identifiers stay separate.
 mod turn;
 
@@ -24,10 +24,10 @@ use tokio::{
     task::JoinHandle,
 };
 
-/// Release series whose HTTP protocol this adapter was qualified against. Builds
-/// resolve its newest stable patch (scripts/cli-updates.mjs); a new minor or major
-/// release needs a reviewed qualification before it is accepted here.
-pub const SERIES: &str = "1.19";
+/// The oldest release whose HTTP session protocol this adapter speaks. Each image
+/// build installs OpenCode's latest release, which CI runs through this adapter's
+/// native test before validation (scripts/cli-updates.mjs).
+pub const MINIMUM: &str = "1.19.0";
 const LIMIT: usize = 16_000_000;
 
 const API_PROVIDERS: &[&str] = &[
@@ -210,7 +210,9 @@ impl Server {
             .build()
             .map_err(Error::internal)?;
         let mut child = cmd.spawn().map_err(|_| {
-            Error::unavailable("Unable to start OpenCode. Install OpenCode 1.19 on the server.")
+            Error::unavailable(
+                "Unable to start OpenCode. Install OpenCode 1.19.0 or newer on the server.",
+            )
         })?;
         let stdout = child.stdout.take().unwrap();
         let mut stderr = child.stderr.take().unwrap();
@@ -233,7 +235,7 @@ impl Server {
         let health = server.get("/global/health").await?;
         if !supported_version(health["version"].as_str().unwrap_or_default()) {
             return Err(Error::bad(
-                "This integration requires OpenCode 1.19. Update OPENCODE_BIN or the runner image.",
+                "This integration requires OpenCode 1.19.0 or newer. Update OPENCODE_BIN or the runner image.",
             ));
         }
         Ok(server)
@@ -760,12 +762,21 @@ fn group(raw: &Value, connected: &[String]) -> Vec<Value> {
     entries
 }
 
-/// A stable patch release of the qualified series; prereleases never qualify.
+/// A plain `MAJOR.MINOR.PATCH` release.
+fn release(version: &str) -> Option<[u64; 3]> {
+    let mut parts = version.split('.').map(|part| {
+        (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| part.parse().ok())
+            .flatten()
+    });
+    let release = [parts.next()??, parts.next()??, parts.next()??];
+    parts.next().is_none().then_some(release)
+}
+
+/// A stable release at or after [`MINIMUM`]; prereleases and snapshots never qualify.
 fn supported_version(version: &str) -> bool {
-    version
-        .strip_prefix(SERIES)
-        .and_then(|rest| rest.strip_prefix('.'))
-        .is_some_and(|patch| !patch.is_empty() && patch.bytes().all(|b| b.is_ascii_digit()))
+    release(version)
+        .is_some_and(|version| release(MINIMUM).is_some_and(|minimum| version >= minimum))
 }
 
 fn provider_name(provider: &Value) -> &str {
@@ -781,18 +792,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_stable_patches_of_the_qualified_series_are_supported() {
-        for version in ["1.19.0", "1.19.4", "1.19.12"] {
+    fn only_stable_releases_from_the_minimum_are_supported() {
+        for version in ["1.19.0", "1.19.4", "1.19.12", "1.20.0", "1.190.0", "2.0.0"] {
             assert!(supported_version(version), "{version}");
         }
         for version in [
             "",
             "1.19",
             "1.19.",
-            "1.20.0",
-            "1.190.0",
-            "2.0.0",
             "1.18.9",
+            "0.99.99",
+            "1.19.4.1",
+            "+1.19.4",
             "1.19.5-beta.1",
             "0.0.0-dev-202610221304",
             "1.19.4 ",

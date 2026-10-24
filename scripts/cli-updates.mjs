@@ -6,38 +6,35 @@ const registry = 'https://registry.npmjs.org'
 
 // Coding engines installed from their official npm packages. Each build takes the
 // version currently published on the vendor's named release channel (an npm
-// dist-tag). A series bounds an engine whose adapter only accepts the releases it
-// was qualified against: leaving it requires a reviewed change here and in the
-// adapter, never a silent upgrade. See docs/CLI-UPDATES.md.
+// dist-tag), like Codex; CI then runs it through its adapter before an image can
+// be validated. See docs/CLI-UPDATES.md.
 export const engines = {
   codex: { name: 'Codex', package: '@openai/codex', channel: 'latest' },
   // Anthropic's documented stable channel: about a week old, skipping releases
   // with major regressions. Its `latest` channel is not used.
   claude: { name: 'Claude Code', package: '@anthropic-ai/claude-code', channel: 'stable' },
-  // crates/installation/src/opencode/mod.rs accepts only this series.
+  // The oldest release whose protocol the adapter speaks (opencode::MINIMUM).
   opencode: {
     name: 'OpenCode',
     package: 'opencode-ai',
     channel: 'latest',
-    series: '1.19',
+    minimum: '1.19.0',
   },
 }
 
 async function json(url, options = {}) {
-  let response
   try {
-    response = await fetch(url, { ...options, redirect: 'error', signal: AbortSignal.timeout(15000) })
+    const response = await fetch(url, { ...options, redirect: 'error', signal: AbortSignal.timeout(15000) })
+    if (!response.ok) {
+      await response.body?.cancel()
+      throw new Error(`HTTP ${response.status}`)
+    }
+
+    return await response.json()
   }
   catch (error) {
     throw new Error(`Request to ${url} failed: ${error.message}`)
   }
-
-  if (!response.ok) {
-    await response.body?.cancel()
-    throw new Error(`Request to ${url} failed (HTTP ${response.status}).`)
-  }
-
-  return response.json()
 }
 
 function parts(version) {
@@ -50,39 +47,38 @@ function newer(left, right) {
   return index >= 0 && a[index] > b[index]
 }
 
-function inSeries(version, series) {
-  return !series || version.startsWith(`${series}.`)
-}
-
-async function engineVersion(engine, { request, notice }) {
+async function engineVersion(engine, { request }) {
   const release = await request(`${registry}/${engine.package}/${engine.channel}`)
   const version = release?.version
   if (typeof version !== 'string' || !stable.test(version))
     throw new Error(`${engine.name} ${engine.channel} channel is not a stable release.`)
   if (release.deprecated)
     throw new Error(`${engine.name} ${version} on the ${engine.channel} channel is deprecated.`)
-  if (inSeries(version, engine.series))
-    return version
-
-  // Keep building the newest qualified release until the new series is reviewed.
-  const { versions } = await request(`${registry}/${engine.package}`, { headers: { Accept: 'application/vnd.npm.install-v1+json' } })
-  const qualified = Object.entries(versions ?? {})
-    .filter(([candidate, metadata]) => stable.test(candidate) && inSeries(candidate, engine.series)
-      && !metadata?.deprecated && !newer(candidate, version))
-    .map(([candidate]) => candidate)
-    .reduce((best, candidate) => !best || newer(candidate, best) ? candidate : best, null)
-  if (!qualified)
-    throw new Error(`${engine.name} ${version} is outside the qualified ${engine.series} series, which has no stable release.`)
-  notice(`${engine.name} ${version} on the ${engine.channel} channel is outside the qualified ${engine.series} series; building ${qualified}. Qualify the adapter before widening the series.`)
-  return qualified
+  if (engine.minimum && newer(engine.minimum, version))
+    throw new Error(`${engine.name} ${version} on the ${engine.channel} channel is older than ${engine.minimum}, the oldest release its adapter supports.`)
+  return version
 }
 
-export async function buildVersions({ request = json, githubToken, notice = () => {} } = {}) {
+// The newest stable, non-deprecated release older than `version` that the
+// engine's adapter supports, such as the one an installation rolls back to.
+export async function previousRelease(tool, version, { request = json } = {}) {
+  const engine = engines[tool]
+  if (!engine || !stable.test(version ?? ''))
+    throw new Error('Usage: cli-updates.mjs previous-release <codex|claude|opencode> <version>')
+  const { versions } = await request(`${registry}/${engine.package}`, { headers: { Accept: 'application/vnd.npm.install-v1+json' } })
+  return Object.entries(versions ?? {})
+    .filter(([candidate, metadata]) => stable.test(candidate) && !metadata?.deprecated && newer(version, candidate)
+      && !(engine.minimum && newer(engine.minimum, candidate)))
+    .map(([candidate]) => candidate)
+    .reduce((best, candidate) => !best || newer(candidate, best) ? candidate : best, null)
+}
+
+export async function buildVersions({ request = json, githubToken } = {}) {
   const githubRelease = request('https://api.github.com/repos/cli/cli/releases/latest', { headers: { Accept: 'application/vnd.github+json', ...(githubToken ? { authorization: `Bearer ${githubToken}` } : {}) } })
   const [codex, claude, opencode, github] = await Promise.all([
-    engineVersion(engines.codex, { request, notice }),
-    engineVersion(engines.claude, { request, notice }),
-    engineVersion(engines.opencode, { request, notice }),
+    engineVersion(engines.codex, { request }),
+    engineVersion(engines.claude, { request }),
+    engineVersion(engines.opencode, { request }),
     githubRelease,
   ])
   if (github.draft || github.prerelease)
@@ -104,14 +100,18 @@ export async function buildVersions({ request = json, githubToken, notice = () =
 
 if (import.meta.main) {
   try {
-    if (process.argv[2] !== 'build-versions')
+    if (process.argv[2] === 'previous-release') {
+      console.log(await previousRelease(process.argv[3], process.argv[4]) ?? '')
+    }
+    else if (process.argv[2] === 'build-versions') {
+      const versions = await buildVersions({ githubToken: process.env.GH_TOKEN })
+      if (process.env.GITHUB_OUTPUT)
+        await appendFile(process.env.GITHUB_OUTPUT, Object.entries(versions).map(([tool, version]) => `${tool}=${version}\n`).join(''))
+      console.log(JSON.stringify(versions))
+    }
+    else {
       throw new Error('Usage: cli-updates.mjs build-versions')
-
-    const notice = message => console.error(process.env.GITHUB_ACTIONS ? `::warning title=Agent tool series::${message}` : message)
-    const versions = await buildVersions({ githubToken: process.env.GH_TOKEN, notice })
-    if (process.env.GITHUB_OUTPUT)
-      await appendFile(process.env.GITHUB_OUTPUT, Object.entries(versions).map(([tool, version]) => `${tool}=${version}\n`).join(''))
-    console.log(JSON.stringify(versions))
+    }
   }
   catch (error) {
     console.error(error.message)

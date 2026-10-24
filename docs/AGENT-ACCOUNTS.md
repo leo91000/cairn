@@ -46,7 +46,7 @@ Requires a Codex CLI with `account/read`, `account/rateLimits/read`, `account/ra
 
 Sign-in runs `claude auth login --claudeai` in a private temporary home. Open Anthropic's page, then paste the authorization code it shows. Passwords are entered only on Anthropic's page. The account is connected once `claude auth status` confirms the identity, which must not already belong to another Claude account. Its CLI files then move into the account's private home, `DATA_DIR/claude-accounts/<id>`. Include that directory in encrypted server backups. The link expires after 15 minutes, and a server restart ends an unfinished sign-in.
 
-The manager rotates each account's OAuth login with the refresh endpoint and client ID of the pinned CLI (or the one saved with the login), under the account lock, and persists rotated state before replying. Runs keep an access-only credential snapshot next to their session and refresh it every 30 seconds. A temporary broker outage keeps a conversation alive while its token is valid; an expired login produces an explicit recoverable error and the account is marked **Reconnect**.
+The manager rotates each account's OAuth login with the refresh endpoint and client ID of the official CLI (or the one saved with the login), under the account lock, and persists rotated state before replying. Runs keep an access-only credential snapshot next to their session and refresh it every 30 seconds. A temporary broker outage keeps a conversation alive while its token is valid; an expired login produces an explicit recoverable error and the account is marked **Reconnect**.
 
 Usage is read every five minutes per account with the CLI's `get_usage` control response (`skip_behaviors: true`), without sending a prompt, including while the account runs. Claude Code 2.1.280, against which this protocol was qualified, reports utilization as a percentage and reset dates as ISO 8601 timestamps. Five-hour and weekly windows limit every model. Opus, Sonnet and model-scoped weekly windows only limit the models of their family, including catalog aliases that run it, such as `default` when it resolves to Opus. This protocol is experimental: when usage is unavailable, the last known windows stay visible, and runs can still use the account. Only allowlisted quota fields are exposed, and a quota error never changes the account's connection.
 
@@ -81,9 +81,9 @@ or the first model request checks authentication. A provider rejection asks you 
 limit enters the shared exhaustion flow and retries the account after five minutes
 when no readable quota is available.
 
-Install an **OpenCode 1.19** release on the manager and runners, or set `OPENCODE_BIN`
-to its executable. Each image build installs the newest stable 1.19 release (see
-[tool versions](CLI-UPDATES.md)), and startup rejects other series. Initial OpenCode agents require **YOLO** access because the native
+Install **OpenCode 1.19.0 or later** on the manager and runners, or set `OPENCODE_BIN`
+to its executable. Each image build installs OpenCode's latest release after CI
+qualifies it (see [tool versions](CLI-UPDATES.md)), and startup rejects older releases. Initial OpenCode agents require **YOLO** access because the native
 engine does not implement Cairn's read-only/workspace-write sandbox. Production
 runner isolation still applies. OAuth, custom endpoints and quota reporting are
 outside this first integration. See [ADR 0042](adr/0042-opencode-api-key-integration.md).

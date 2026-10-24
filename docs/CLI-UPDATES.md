@@ -13,12 +13,16 @@ before deciding whether to reuse an image. This command remains available at its
 existing path. It prints JSON and, when `GITHUB_OUTPUT` is set, appends the exact
 `codex`, `gh`, `claude` and `opencode` outputs consumed by `ci.yaml`.
 
-| Tool | Official source | Channel | Qualified series |
+| Tool | Official source | Channel | Native check in CI |
 | --- | --- | --- | --- |
-| Codex | npm `@openai/codex` | dist-tag `latest` | any |
-| Claude Code | npm `@anthropic-ai/claude-code` | dist-tag `stable` | any |
-| OpenCode | npm `opencode-ai` | dist-tag `latest` | `1.19.x` |
-| GitHub CLI | GitHub `cli/cli` latest release | not draft or prerelease | any |
+| Codex | npm `@openai/codex` | dist-tag `latest` | none |
+| Claude Code | npm `@anthropic-ai/claude-code` | dist-tag `stable` | `initialize` model catalog |
+| OpenCode | npm `opencode-ai` | dist-tag `latest` | turn and session resumption |
+| GitHub CLI | GitHub `cli/cli` latest release | not draft or prerelease | none |
+
+Every tool follows its channel into new minor and major releases. There is no
+version range to widen by hand: a release that breaks its adapter fails CI
+instead of shipping.
 
 Claude Code follows Anthropic's
 [stable release channel](https://code.claude.com/docs/en/setup#configure-release-channel):
@@ -27,30 +31,24 @@ regressions", published as the npm `stable` dist-tag. Its `latest` channel is
 never used. On 24 October 2026 they differed: `stable` was 2.1.308 and `latest`
 2.1.310; builds chose 2.1.308. Anthropic notes that a newly launched model can
 require a version newer than the stable channel serves. Such a model becomes
-available to Cairn when the stable channel reaches that version. Like Codex,
-Claude Code has no series bound: builds only install a release the stable channel
-serves, including a new major release, and CI checks it against the adapter.
+available to Cairn when the stable channel reaches that version. Builds only
+install a release the stable channel serves.
 
 OpenCode documents its npm package `opencode-ai` as the install path and
 publishes releases on the `latest` dist-tag. Only that dist-tag is read; the
-others carry `0.0.0-*` development snapshots or older release lines.
+others carry `0.0.0-*` development snapshots or older release lines. The adapter
+speaks the HTTP session protocol of OpenCode 1.19.0 and later, and rejects older
+releases at startup (`opencode::MINIMUM`). A `latest` release older than that
+fails resolution.
 
 Each resolved version must be a plain `MAJOR.MINOR.PATCH` release, so prereleases
 and snapshots are rejected, and must not be deprecated on npm. A missing channel,
 an unreachable registry, malformed metadata, a prerelease, or a deprecated channel
 release fails the `resolve` job before any build, and its error names the source
 that failed. No fallback version is guessed. When a vendor moves a channel back to
-an older release, builds follow it: the vendor withdrew the newer one, and
-resumption is tested in both directions.
-
-A qualified series bounds an engine whose adapter only accepts the releases it was
-qualified against. Only OpenCode has one: its adapter speaks OpenCode 1.19's HTTP
-session protocol and rejects other series at startup (`opencode::SERIES`). When a channel moves outside
-its series, builds install the newest stable, non-deprecated release inside the
-series that is not newer than the channel. The `resolve` job then emits a
-warning naming both versions. If the series has no such release, resolution fails.
-Widening a series is a reviewed change to `scripts/cli-updates.mjs` and the
-adapter, after qualification as described below.
+an older release, builds follow it, because the vendor withdrew the newer one.
+For OpenCode, CI also tests resuming sessions from the newer release on the older
+one.
 
 There are no default agent tool versions in the Dockerfile. CI passes the resolved
 `CODEX_VERSION`, `GH_VERSION`, `CLAUDE_VERSION` and `OPENCODE_VERSION` build
@@ -66,8 +64,10 @@ The `backend` job also runs the real engine releases it resolved through their
 adapters, without credentials or inference against a vendor:
 
 - OpenCode executes a turn against a local model server, without loading global
-  config. Its session then resumes with the history it stored, from the series'
-  first release to the resolved one and back, as after an update or a rollback.
+  config. Its session then resumes with the history it stored. Sessions created
+  by the oldest supported release resume on the resolved one. Sessions also move
+  both ways between the resolved release and the previous supported release
+  (`cli-updates.mjs previous-release`), as after an update or a rollback.
 - Claude Code answers the `initialize` control request that model discovery uses,
   with synthetic credentials, and lists a catalog with its `default` alias.
 
@@ -83,13 +83,14 @@ Direct Docker builds must pass these build arguments too; see
 
 ### Qualifying an engine change
 
-A new channel release, inside its series for OpenCode, ships through the normal
-validated build and its automated checks above. Claude Code behavior those checks cannot reach
+A new channel release ships through the normal validated build and its automated
+checks above. A release that fails them blocks validation until a reviewed change
+adapts the adapter, or bounds the engine in `scripts/cli-updates.mjs` with an
+explanation. Claude Code behavior those checks cannot reach
 without a subscription — `get_usage` quota fields, the OAuth client and token
 endpoint, and resuming a real session — relies on Anthropic's stable channel
-between qualifications. Widening a series, a change in an adapter that depends on
-engine behavior, or a reported engine regression needs the following checks
-before merge:
+between qualifications. A change in an adapter that depends on engine behavior,
+or a reported engine regression, needs the following checks before merge:
 
 - OpenCode: run the native adapter test with the candidate binary:
   `OPENCODE_NATIVE_BIN=/path/to/opencode pnpm test:backend -p cairn-installation --test opencode -- --include-ignored`.

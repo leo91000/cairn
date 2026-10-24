@@ -10,7 +10,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
-import { buildVersions, engines } from '../cli-updates.mjs'
+import { buildVersions, engines, previousRelease } from '../cli-updates.mjs'
 
 // Registry responses as observed on 2026-10-24: Claude Code's stable channel
 // trails its latest channel, and OpenCode publishes dev snapshots between releases.
@@ -62,9 +62,9 @@ describe('application image tool versions', () => {
     expect(engines.claude).toMatchObject({ package: '@anthropic-ai/claude-code', channel: 'stable' })
   })
 
-  it('keeps OpenCode in the series its adapter accepts', () => {
+  it('shares the oldest OpenCode release its adapter supports', () => {
     const adapter = readFileSync(new URL('../../crates/installation/src/opencode/mod.rs', import.meta.url), 'utf8')
-    expect(adapter).toContain(`pub const SERIES: &str = "${engines.opencode.series}";`)
+    expect(adapter).toContain(`pub const MINIMUM: &str = "${engines.opencode.minimum}";`)
   })
 
   it('passes the resolved exact versions into the CI image that is smoke-tested', () => {
@@ -127,55 +127,52 @@ describe('application image tool versions', () => {
 
   it.each([
     ['a prerelease', { version: '2.2.0-beta.1' }, 'Claude Code stable channel is not a stable release.'],
-    ['missing', new Error('Request to https://registry.npmjs.org/@anthropic-ai/claude-code/stable failed (HTTP 404).'), 'failed (HTTP 404).'],
+    ['missing', new Error('Request to https://registry.npmjs.org/@anthropic-ai/claude-code/stable failed: HTTP 404'), 'failed: HTTP 404'],
     ['malformed', { name: '@anthropic-ai/claude-code' }, 'Claude Code stable channel is not a stable release.'],
     ['deprecated', { version: '2.1.308', deprecated: 'Use 2.1.309' }, 'Claude Code 2.1.308 on the stable channel is deprecated.'],
   ])('fails when the Claude Code stable channel is %s', async (_, response, message) => {
     await expect(buildVersions({ request: fixture({ 'https://registry.npmjs.org/@anthropic-ai/claude-code/stable': response }) })).rejects.toThrow(message)
   })
 
-  it('builds the newest qualified OpenCode release when latest leaves its series', async () => {
-    const notices = []
+  it('follows each engine\'s channel into new minor and major releases like Codex', async () => {
     const versions = await buildVersions({
-      notice: message => notices.push(message),
       request: fixture({
+        'https://registry.npmjs.org/@anthropic-ai/claude-code/stable': { version: '3.0.0' },
         'https://registry.npmjs.org/opencode-ai/latest': { version: '1.20.0' },
-        'https://registry.npmjs.org/opencode-ai': {
-          'dist-tags': { latest: '1.20.0' },
-          'versions': {
-            '1.19.4': {},
-            '1.19.5-beta.1': {},
-            '1.19.6': { deprecated: 'Broken release' },
-            '1.20.0': {},
-            '1.190.0': {},
-            '0.0.0-dev-202610221304': {},
-          },
+      }),
+    })
+    // Only channel releases are built; the package lists are never consulted.
+    expect(versions).toMatchObject({ claude: '3.0.0', opencode: '1.20.0' })
+  })
+
+  it('fails when OpenCode latest moves below the oldest release its adapter supports', async () => {
+    await expect(buildVersions({ request: fixture({ 'https://registry.npmjs.org/opencode-ai/latest': { version: '1.18.35' } }) }))
+      .rejects
+      .toThrow('OpenCode 1.18.35 on the latest channel is older than 1.19.0, the oldest release its adapter supports.')
+  })
+
+  it('finds the supported release an installation rolls back to', async () => {
+    const packages = fixture({
+      'https://registry.npmjs.org/opencode-ai': {
+        versions: {
+          '1.18.35': {},
+          '1.19.0': {},
+          '1.19.3': {},
+          '1.19.4': {},
+          '1.19.5-beta.1': {},
+          '1.19.6': { deprecated: 'Broken release' },
+          '1.20.0': {},
+          '1.190.0': {},
+          '0.0.0-dev-202610221304': {},
         },
-      }),
+      },
     })
-    expect(versions.opencode).toBe('1.19.4')
-    expect(notices).toEqual(['OpenCode 1.20.0 on the latest channel is outside the qualified 1.19 series; building 1.19.4. Qualify the adapter before widening the series.'])
-  })
-
-  it('fails instead of guessing when the qualified series has no stable release', async () => {
-    await expect(buildVersions({
-      request: fixture({
-        'https://registry.npmjs.org/opencode-ai/latest': { version: '2.0.0' },
-        'https://registry.npmjs.org/opencode-ai': { versions: { '2.0.0': {}, '1.19.5-beta.1': {}, '1.19.3': { deprecated: 'Broken release' } } },
-      }),
-    })).rejects.toThrow('OpenCode 2.0.0 is outside the qualified 1.19 series, which has no stable release.')
-  })
-
-  it('follows Claude Code\'s stable channel into a new major release like Codex', async () => {
-    const notices = []
-    const versions = await buildVersions({
-      notice: message => notices.push(message),
-      request: fixture({ 'https://registry.npmjs.org/@anthropic-ai/claude-code/stable': { version: '3.0.0' } }),
-    })
-    // The package list is never consulted: only releases the stable channel serves are built.
-    expect(versions.claude).toBe('3.0.0')
-    expect(engines.claude.series).toBeUndefined()
-    expect(notices).toEqual([])
+    expect(await previousRelease('opencode', '1.20.0', { request: packages })).toBe('1.19.4')
+    expect(await previousRelease('opencode', '1.19.4', { request: packages })).toBe('1.19.3')
+    // Nothing older is supported by the adapter.
+    expect(await previousRelease('opencode', '1.19.0', { request: packages })).toBeNull()
+    await expect(previousRelease('opencode', '1.19.4-beta', { request: packages })).rejects.toThrow('Usage')
+    await expect(previousRelease('gh', '2.0.0', { request: packages })).rejects.toThrow('Usage')
   })
 })
 
@@ -211,8 +208,9 @@ describe('build-versions command', () => {
       writeFileSync(output, 'existing=value\n')
       const stable = 'https://registry.npmjs.org/@anthropic-ai/claude-code/stable'
       for (const [failure, message] of [
-        ['new Response("unavailable", { status: 503 })', `Request to ${stable} failed (HTTP 503).`],
+        ['new Response("unavailable", { status: 503 })', `Request to ${stable} failed: HTTP 503`],
         ['Promise.reject(new TypeError("fetch failed"))', `Request to ${stable} failed: fetch failed`],
+        ['new Response("<html>proxy</html>")', `Request to ${stable} failed: Unexpected token '<', "<html>proxy</html>" is not valid JSON`],
       ]) {
         const result = run(['build-versions'], { GITHUB_OUTPUT: output }, `globalThis.fetch = async (url) => url === ${JSON.stringify(stable)} ? ${failure} : Response.json(${JSON.stringify(registry)}[url]);`)
         expect(result.status).toBe(1)
@@ -224,6 +222,17 @@ describe('build-versions command', () => {
     }
     finally {
       rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('prints the previous supported release, or nothing', () => {
+    const packages = { 'https://registry.npmjs.org/opencode-ai': { versions: { '1.19.0': {}, '1.19.3': {}, '1.19.4': {} } } }
+    const setup = `globalThis.fetch = async (url) => Response.json(${JSON.stringify(packages)}[url]);`
+    for (const [version, output] of [['1.19.4', '1.19.3\n'], ['1.19.0', '\n']]) {
+      const result = run(['previous-release', 'opencode', version], {}, setup)
+      expect(result.stderr).toBe('')
+      expect(result.status).toBe(0)
+      expect(result.stdout).toBe(output)
     }
   })
 

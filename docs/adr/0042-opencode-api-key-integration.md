@@ -2,11 +2,12 @@
 
 Date: 2026-10-13.
 
-The exact OpenCode 1.19.0 pin is relaxed by the
-[agent tool version policy](../CLI-UPDATES.md): each image build resolves the
-newest stable 1.19.x release, and the adapter accepts only that series. CI runs
-the resolved release through the native adapter test, which checks the
-`OPENCODE_TEST_HOME` isolation below and session resumption across releases.
+The exact OpenCode 1.19.0 pin is replaced by the
+[agent tool version policy](../CLI-UPDATES.md): each image build resolves
+OpenCode's latest release, and the adapter accepts releases from 1.19.0. Before
+an image is validated, CI runs the resolved release through the native adapter
+test. That test checks the `OPENCODE_TEST_HOME` isolation below and session
+resumption across releases.
 
 ## Context
 

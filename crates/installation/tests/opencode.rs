@@ -501,7 +501,7 @@ async fn cancellation_stops_a_busy_native_turn() {
 /// one taking over sessions an installation already holds, or an older one after
 /// a rollback.
 #[tokio::test]
-#[ignore = "requires a native OpenCode 1.19 binary"]
+#[ignore = "requires a native OpenCode binary"]
 async fn pinned_native_cli_executes_and_resumes_without_global_plugins() {
     use axum::{Router, http::HeaderMap, routing::post};
     let binary = std::env::var("OPENCODE_NATIVE_BIN").expect("set OPENCODE_NATIVE_BIN");
