@@ -111,6 +111,8 @@ jobs:
           git diff --exit-code -- crates/installation/schemas/
       - name: Check the C3 candidate-selection snapshot model
         run: python3 -m unittest discover -s scripts/tests -p test_chat_candidates_study.py -v
+      - name: Check native reference selection for all workflow events
+        run: python3 -m unittest discover -s scripts/tests -p test_native_reference.py -v
   rust-check:
     needs: resolve
     if: needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main'
@@ -263,10 +265,11 @@ jobs:
       - name: Identify the exact reference build
         id: native-reference-key
         env:
-          REFERENCE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          EVENT_REFERENCE_SHA: ${{ github.event.pull_request.base.sha || (github.ref == 'refs/heads/main' && github.event.before) || '' }}
         run: |
-          echo "sha=$REFERENCE_SHA" >> "$GITHUB_OUTPUT"
-          echo "key=native-reference-v1-$REFERENCE_SHA-$ImageOS-$ImageVersion-rust1.97.1-dev0-ublk" >> "$GITHUB_OUTPUT"
+          native_reference_sha="$(python3 scripts/native_reference.py)"
+          echo "sha=$native_reference_sha" >> "$GITHUB_OUTPUT"
+          echo "key=native-reference-v1-$native_reference_sha-$ImageOS-$ImageVersion-rust1.97.1-dev0-ublk" >> "$GITHUB_OUTPUT"
       - uses: actions/cache/restore@v6.1.0
         id: native-reference-cache
         with:

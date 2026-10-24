@@ -149,6 +149,8 @@ Primary references: [Docker rootless requirements](https://docs.docker.com/engin
 The `native-runtime` CI job uses a disposable Linux host, synthetic credentials
 and loopback Moto S3. It executes the shipped native controller and entrypoint,
 the real systemd/ublk/ext4 stack and the managed Docker tools. Reference binaries
+use the PR base or main push's previous commit; manual runs and tags use the
+checked-out candidate's first parent, fetching shallow history when needed. They
 may be reused only for the same exact base, pinned Rust/profile/features and runner
 image, with recorded binary checksums and original build run. The complete reference
 qualification still runs on the current host before candidate measurements. No qualification
