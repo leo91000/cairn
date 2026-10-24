@@ -59,6 +59,16 @@ fn merge(db: &Db<'_>, input: &Value, executing: &[String]) -> Result<Value> {
             "The destination must already cover all source access, including nodes.",
         ));
     }
+    for node in db.list("nodes")? {
+        let source_reviewed = node["revoked"] != true
+            && crate::nodes::agent_allows(&source, text(&node, "id"))
+            && crate::nodes::native_mode::reviewed(&node, &source);
+        if source_reviewed && !crate::nodes::native_mode::reviewed(&node, &target) {
+            return Err(Error::conflict(
+                "Confirm the destination's administrative host access before merging.",
+            ));
+        }
+    }
     for grants in [
         crate::agent_grants::plugins,
         crate::agent_grants::exclusive_nodes,

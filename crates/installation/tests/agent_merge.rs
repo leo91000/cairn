@@ -53,6 +53,96 @@ async fn mcp(s: &Arc<Service>, endpoint: &str, token: &str, args: Value) -> (Sta
 }
 
 #[tokio::test]
+async fn merge_requires_the_destinations_own_administrator_node_review() {
+    let (_root, s, source) = fixture().await;
+    let task = task(&s, &source).await;
+    let run = s
+        .enqueue(task["id"].as_str().unwrap(), "manual", None)
+        .await
+        .unwrap();
+    let run_id = run["id"].as_str().unwrap();
+    let node_id = id();
+    s.store
+        .put(
+            "nodes",
+            json!({
+                "id": cairn_installation::nodes::LOCAL_NODE_ID, "name": "VM host",
+                "capabilities": { "backend": "firecracker" },
+            }),
+        )
+        .await
+        .unwrap();
+    s.store
+        .put(
+            "nodes",
+            json!({
+                "id": node_id, "name": "Administrative host", "nativeEnabled": true,
+                "capabilities": { "backend": "native", "nativeModeProtocol": 1 },
+                "nativeModeRequest": { "mode": "administrator", "generation": id() },
+                "nativeReviewedAgents": [],
+            }),
+        )
+        .await
+        .unwrap();
+    let source = cairn_installation::native::policy::CALLER.scope(Some("fixture-owner".into()), s.agent(json!({
+        "name": source["name"], "access": { "nodes": [cairn_installation::nodes::LOCAL_NODE_ID, node_id] },
+        "nativeNodeReviews": [node_id],
+    }), source["id"].as_str())).await.unwrap();
+    s.agent(
+        json!({ "name": "Omni", "access": { "nodes": null } }),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
+    s.store
+        .patch_run(
+            run_id,
+            json!({ "status": "failed", "executionBackend": "native" }),
+        )
+        .await
+        .unwrap();
+
+    let error = s.merge_agents(input(&source)).await.unwrap_err();
+    assert_eq!(error.status, 409);
+    assert!(error.message.contains("administrative"), "{error}");
+    assert_eq!(
+        s.store.run(run_id).await.unwrap()["snapshot"]["agent"]["id"],
+        source["id"]
+    );
+    assert_eq!(
+        s.get("agents", source["id"].as_str().unwrap())
+            .await
+            .unwrap(),
+        source
+    );
+    let node = s.get("nodes", &node_id).await.unwrap();
+    assert_eq!(node["nativeReviewedAgents"], json!([source["id"]]));
+
+    cairn_installation::native::policy::CALLER
+        .scope(
+            Some("fixture-owner".into()),
+            s.agent(
+                json!({ "name": "Omni", "nativeNodeReviews": [node_id] }),
+                Some(MAIN_AGENT_ID),
+            ),
+        )
+        .await
+        .unwrap();
+    let result = s.merge_agents(input(&source)).await.unwrap();
+    assert_eq!(result["transferred"]["runs"], 1);
+    let transferred = s.store.run(run_id).await.unwrap();
+    assert_eq!(transferred["snapshot"]["agent"]["id"], MAIN_AGENT_ID);
+    assert_eq!(transferred["executionBackend"], "native");
+    let node = s.get("nodes", &node_id).await.unwrap();
+    assert!(
+        node["nativeReviewedAgents"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(MAIN_AGENT_ID))
+    );
+}
+
+#[tokio::test]
 async fn merge_transfers_archived_tasks_trash_chats_and_resumable_run_identities() {
     let (root, s, source) = fixture().await;
     let target = s.get("agents", MAIN_AGENT_ID).await.unwrap();

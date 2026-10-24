@@ -217,8 +217,10 @@ in `vmRuntimeId`, so its checkpoints stay VM disks. Idmapped ext4 mounts need Li
 
 Cross-node recovery requires native Linux x86-64, ublk and the pinned coding-engine
 runtime on the destination. Different installed application dependencies can still
-prevent a project from running. Native-to-VM and cross-OS environment conversion
-remain unsupported. This storage change advances installation data epoch 6 to 7;
+prevent a project from running. VM disks move between native and VM nodes in
+place; native-born disks convert once when moved to a VM. Cross-OS environment
+conversion remains unsupported. The earlier native block-storage change advanced
+installation data epoch 6 to 7;
 the [reviewed automatic transition to epoch 9](AUTOMATIC-MIGRATIONS.md) qualifies its
 conversion and recovery tests alongside the rules in
 [ADR 0052](adr/0052-native-ublk-workspaces-and-idle-eviction.md).

@@ -238,7 +238,6 @@ fn allows_agent(
         || node["revoked"] == true
         || !matches!(admission, Admission::Authority) && !crate::nodes::native_mode::applied(node)
         // A fenced migration reads existing storage; it never launches a workload.
-        // Switching backend revokes the agent's administrator execution review.
         || !matches!(admission, Admission::MigrationSource)
             && !crate::nodes::native_mode::reviewed(node, agent)
         || !crate::service::allowed(&policy(agent)["nodes"], text(node, "id"))
