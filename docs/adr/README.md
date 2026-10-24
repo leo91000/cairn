@@ -78,6 +78,8 @@ for current behavior.
 | 0067 | [Durable conditions for conversation continuation](0067-durable-condition-waits.md) |
 | 0068 | [Owner-chosen agents for bot delegation](0068-owner-chosen-agents-for-bot-delegation.md) |
 
+| 0069 | [Nodes mises en relation par Beacon, sans adresse](0069-nodes-introduced-by-beacon.md) |
+
 ## Renumbered collisions
 
 The duplicate filenames below were assigned unused numbers. No ADR was deleted.
@@ -93,3 +95,4 @@ Earlier links in issues and PRs can be resolved with this table.
 | `0037-readable-workspace-urls.md` | [ADR-0066](0066-readable-workspace-urls.md) |
 | `0038-durable-condition-waits.md` | [ADR-0067](0067-durable-condition-waits.md) |
 | `0059-owner-chosen-agents-for-bot-delegation.md` | [ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md) |
+| `0059-nodes-introduced-by-beacon.md` | [ADR-0069](0069-nodes-introduced-by-beacon.md) |

@@ -115,7 +115,7 @@ For deployment migration, interrupted claims and recovery after losing the
 private identity file, follow [DEPLOYMENT.md](DEPLOYMENT.md). Execution nodes
 keep their own node credentials on every request, whatever path carries them.
 Beacon introduces a node enrolled without an address to its manager (protocol 5,
-[ADR-0059](adr/0059-nodes-introduced-by-beacon.md)):
+[ADR-0069](adr/0069-nodes-introduced-by-beacon.md)):
 
 - **Direct.** The node's gateway posts a complete WebRTC offer to
   `/api/relay/{installation}/nodes/direct`. Beacon sends `NodeOffer { id, sdp,

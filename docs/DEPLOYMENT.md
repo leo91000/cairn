@@ -27,7 +27,7 @@ No manager address, certificate or open port is needed. The command installs the
 `/var/lib/cairn-gateway`), a static binary checksum-verified from Beacon, which
 serves `http://127.0.0.1:4319` on the machine. It then downloads and runs the
 manager’s usual node installer through that origin
-([ADR-0059](adr/0059-nodes-introduced-by-beacon.md)):
+([ADR-0069](adr/0069-nodes-introduced-by-beacon.md)):
 
 - Beacon introduces the gateway to the manager: it forwards one WebRTC offer and
   one answer. The machine and the manager then exchange UDP **directly**, on the
