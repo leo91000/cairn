@@ -85,8 +85,9 @@ appears only after a second. See [web parity](../apps/android/docs/WEB-PARITY.md
 
 Web (IndexedDB) and Android (encrypted atomic files) retain loaded history pages
 within the existing byte budget instead of discarding everything except the last
-200 events. Reopening displays saved output immediately and resumes the stream
-from its validated cursor. The web client skips its initial full HTTP history read
+200 events. Reopening displays saved output immediately when it is current or
+the connection is unavailable; otherwise the reader waits for the first stream
+snapshot under the freshness rule above. Resumption uses the validated cursor. The web client skips its initial full HTTP history read
 when a saved snapshot exists. Revalidation preserves the earliest loaded page;
 a history reset replaces that boundary.
 

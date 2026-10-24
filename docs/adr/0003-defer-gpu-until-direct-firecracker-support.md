@@ -1,3 +1,5 @@
+> Statut : Remplacée par [ADR-0050](0050-trusted-native-execution.md) pour l’accès GPU via une node native de confiance ; le GPU direct dans Firecracker reste différé.
+
 # Conserver Firecracker et différer le GPU
 
 L’accès GPU attendu doit être directement visible dans la VM de l’agent. Face à

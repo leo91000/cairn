@@ -1,4 +1,4 @@
-> Statut : Remplacée par [ADR-0055](0055-ublk-only-vm-storage.md) pour le transport FUSE ; le stockage S3 obligatoire reste applicable.
+> Statut : Remplacée par [ADR-0055](0055-ublk-only-vm-storage.md) pour le transport FUSE et [ADR-0019](0019-booted-vms-with-ready-codex.md) pour le retrait du préchauffage anonyme ; le stockage S3 obligatoire reste applicable.
 
 # Disques S3 obligatoires sur toutes les nodes
 

@@ -77,7 +77,6 @@ for current behavior.
 | 0066 | [Slugs lisibles pour les installations et les conversations](0066-readable-workspace-urls.md) |
 | 0067 | [Durable conditions for conversation continuation](0067-durable-condition-waits.md) |
 | 0068 | [Owner-chosen agents for bot delegation](0068-owner-chosen-agents-for-bot-delegation.md) |
-
 | 0069 | [Nodes mises en relation par Beacon, sans adresse](0069-nodes-introduced-by-beacon.md) |
 
 ## Renumbered collisions
