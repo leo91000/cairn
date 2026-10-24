@@ -73,7 +73,9 @@ pub(crate) fn usage_sync(data: &Path, state: &Path) -> Result<u64> {
                 if block {
                     for file in std::fs::read_dir(&root)? {
                         let file = file?;
-                        if file.file_name() != "data" {
+                        // Both flat and paired VM views refer to the same
+                        // journal/cache bytes counted under disks/environments.
+                        if !matches!(file.file_name().to_str(), Some("data" | "conversation")) {
                             used = used.saturating_add(size(&file.path(), false, &mut seen)?);
                         }
                     }
@@ -227,14 +229,19 @@ mod tests {
             tokio::fs::write(root.join("block-initialized"), b"1")
                 .await
                 .unwrap();
-            let view = root.join("data/virtual-model");
-            tokio::fs::File::create(&view)
-                .await
-                .unwrap()
-                .set_len(20 * 1024 * MIB)
-                .await
-                .unwrap();
-            assert_eq!(std::fs::metadata(view).unwrap().blocks(), 0);
+            for filesystem in ["data", "conversation"] {
+                crate::skills::private_dir(&root.join(filesystem))
+                    .await
+                    .unwrap();
+                let view = root.join(filesystem).join("virtual-model");
+                tokio::fs::File::create(&view)
+                    .await
+                    .unwrap()
+                    .set_len(20 * 1024 * MIB)
+                    .await
+                    .unwrap();
+                assert_eq!(std::fs::metadata(view).unwrap().blocks(), 0);
+            }
         }
         let retained = used(&data, &state).await.unwrap();
         assert!((40 * MIB..41 * MIB).contains(&retained));

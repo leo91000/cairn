@@ -102,7 +102,8 @@ const switching = computed(() => !!target.value && !!props.run.executionBackend 
 const migration = ref<BackendMigrationState>()
 const conversion = computed(() => switching.value && nodeBackend(target.value!) === 'firecracker' && migration.value?.diskFormat === 'native')
 const migrationKey = ref(0)
-const canMove = computed(() => !!props.run.sessionId && !busy.value && !!destination.value && destination.value !== props.run.nodeId && ['running', 'succeeded'].includes(props.run.status) && !props.run.nodeState)
+const retryingConversion = computed(() => conversion.value && !!migration.value?.error && !migration.value.pending)
+const canMove = computed(() => !busy.value && !!destination.value && destination.value !== props.run.nodeId && (retryingConversion.value || (!!props.run.sessionId && ['running', 'succeeded'].includes(props.run.status) && !props.run.nodeState)))
 const changed = computed(() => mode.value !== savedPlacement.value.mode || (mode.value !== 'automatic' && selection.value !== savedPlacement.value.selection))
 const dirtyBytes = computed(() => props.run.storage?.dirtyBytes || 0)
 const localBytes = computed(() => props.run.storage?.localBytes)
@@ -212,7 +213,7 @@ function move() {
 }
 
 watch(moving, async (value) => {
-  if (!value || migration.value)
+  if (!value)
     return
   try {
     migration.value = await api<BackendMigrationState>(`/nodes/placement/${props.run.id}/backend-migration`)
@@ -487,7 +488,9 @@ onUnmounted(() => {
           Reserves the destination, pauses the conversation, transfers its environment and resumes it there. Running commands are interrupted. The disk cannot shrink.
         </p>
         <p v-if="conversion" role="note" class="m-0! rounded-lg bg-warning-surface px-3 py-2 text-warning">
-          This environment was created on a native node. Its files are copied once for a VM; the current turn stops and the next message starts a fresh engine session. The original is kept if this fails.
+          This environment was created on a native node. Its files are copied once for a VM; the current turn stops.
+          {{ migration?.mission ? 'The mission resumes automatically in a fresh engine session.' : 'The next message starts a fresh engine session.' }}
+          The original is kept if this fails.
         </p>
         <p v-else-if="switching && target && nodeBackend(target) === 'native'" role="note" class="m-0! rounded-lg bg-power-surface px-3 py-2 text-power">
           This conversation will run as a native host process on {{ target.name }}, using the same files in place. Running commands stop; system packages installed in the VM are not available there. Isolation is weaker than a VM.

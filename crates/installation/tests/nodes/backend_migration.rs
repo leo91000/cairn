@@ -64,12 +64,13 @@ async fn seed_ext4(owner: &Owner, record: &Value, node: &str, master: &str, nati
         std::fs::remove_dir_all(&directory).unwrap();
     }
     std::fs::create_dir_all(&directory).unwrap();
-    let runtime: &[u8] = if native {
-        br#"{"backend":"native","storage":"ublk","os":"linux","arch":"x86_64","runtimeId":"fixture"}"#
+    let runtime = if native {
+        let node = owner.stored("nodes", node).await.unwrap();
+        json!({ "backend": "native", "storage": "ublk", "os": "linux", "arch": "x86_64", "runtimeId": node["runtimeId"] })
     } else {
-        br#"{"runtimeId":"fixture","backend":"firecracker","storage":"ublk"}"#
+        json!({ "runtimeId": "fixture", "backend": "firecracker", "storage": "ublk" })
     };
-    std::fs::write(directory.join("runtime.json"), runtime).unwrap();
+    std::fs::write(directory.join("runtime.json"), runtime.to_string()).unwrap();
     let grant = disk_grants::new_disk(&owner.service, record, node)
         .await
         .unwrap();
@@ -227,7 +228,17 @@ async fn backend_moves_remount_vm_disks_and_convert_native_ones_once() {
     for node in [&vm_node, &native_node] {
         tasks.extend(connect_node(&owner, &record, node, address, &faults, &stop, false).await);
     }
+    let native_image = owner
+        .root()
+        .join(&native_node)
+        .join("images/native-fixture");
+    std::fs::create_dir_all(&native_image).unwrap();
+    std::fs::write(native_image.join("root.ext4"), b"fixture native tools").unwrap();
+    std::fs::write(native_image.join("vmlinux"), b"fixture transport").unwrap();
     let mut native = owner.stored("nodes", &native_node).await.unwrap();
+    native["runtimeId"] = "native-fixture".into();
+    native["runtimeIds"] = json!(["native-fixture"]);
+    native["runtimes"] = json!(["native-fixture"]);
     native["capabilities"]["backend"] = "native".into();
     native["capabilities"]["ublk"] = true.into();
     native["capabilities"]["vmDisks"] = true.into();
@@ -236,6 +247,7 @@ async fn backend_moves_remount_vm_disks_and_convert_native_ones_once() {
     owner.put("nodes", native).await;
     let mut vm_record = owner.stored("nodes", &vm_node).await.unwrap();
     vm_record["capabilities"]["backend"] = "firecracker".into();
+    vm_record["tags"] = json!(["cpu"]);
     owner.put("nodes", vm_record).await;
     seed_ext4(
         &owner,
@@ -274,6 +286,20 @@ async fn backend_moves_remount_vm_disks_and_convert_native_ones_once() {
             .unwrap()
             .unwrap();
         assert_eq!(checkpoint["prepared"]["backend"], backend);
+        assert_eq!(
+            checkpoint["runtimeId"],
+            if backend == "native" {
+                "native-fixture"
+            } else {
+                "fixture"
+            }
+        );
+        let next = id();
+        let placement = placement::reserve(&owner.service, &settled, &next)
+            .await
+            .unwrap();
+        assert_eq!(placement["runtimeId"], checkpoint["runtimeId"]);
+        placement::release(&owner.service, &next).await.unwrap();
         assert_eq!(checkpoint["diskFormat"], "vm");
         assert_eq!(checkpoint["diskRuntimeId"], "fixture");
         let identity = runtime(&owner, destination, &run).await;
@@ -301,7 +327,7 @@ async fn backend_moves_remount_vm_disks_and_convert_native_ones_once() {
     .await;
     let mut native_prepared = prepared.clone();
     native_prepared["backend"] = "native".into();
-    owner.set_checkpoint(&run, json!({ "nodeId": native_node, "runnerId": run, "runtimeId": "fixture", "completed": true, "prepared": native_prepared })).await;
+    owner.set_checkpoint(&run, json!({ "nodeId": native_node, "runnerId": run, "runtimeId": "native-fixture", "completed": true, "prepared": native_prepared.clone() })).await;
     owner
         .service
         .store
@@ -333,6 +359,19 @@ async fn backend_moves_remount_vm_disks_and_convert_native_ones_once() {
         })
         .await
         .unwrap();
+    let parent = id();
+    let mut parent_run = run_record(&parent, RunStatus::Cancelled);
+    parent_run["cancelRequestedAt"] = now().into();
+    owner.add_run(&parent_run).await;
+    owner
+        .service
+        .store
+        .patch_run(&run, json!({ "nativeParentRunId": parent }))
+        .await
+        .unwrap();
+    let mut delegated_chat = owner.stored("chats", &chat).await.unwrap();
+    delegated_chat["nativeParentRunId"] = parent.clone().into();
+    owner.put("chats", delegated_chat).await;
     let before = owner.run(&run).await;
     let resume_chat = || async {
         let mut current = owner.stored("chats", &chat).await.unwrap();
@@ -388,6 +427,8 @@ async fn backend_moves_remount_vm_disks_and_convert_native_ones_once() {
     assert!(converted["backendMigrationError"].is_null(), "{converted}");
     assert_eq!(converted["nodeId"], vm_node, "{converted}");
     assert_eq!(converted["executionBackend"], "firecracker");
+    assert!(converted["nativeParentRunId"].is_null());
+    assert_eq!(converted["nativePrincipals"], json!(["fixture-owner"]));
     assert!(converted["sessionId"].is_null());
     let checkpoint = owner
         .service
@@ -403,6 +444,7 @@ async fn backend_moves_remount_vm_disks_and_convert_native_ones_once() {
     assert_eq!(saved_chat["title"], "same conversation");
     assert_eq!(saved_chat["paused"], false);
     assert_eq!(saved_chat["sessionRestartRequested"], true);
+    assert!(saved_chat["nativeParentRunId"].is_null());
     let key = chat.clone();
     let messages = owner
         .service
@@ -413,6 +455,116 @@ async fn backend_moves_remount_vm_disks_and_convert_native_ones_once() {
     let mut cancelled = sending.clone();
     cancelled["status"] = "cancelled".into();
     assert_eq!(messages, vec![message.clone(), cancelled, queued.clone()]);
+    assert_files(&owner, &vm_node, &run, false).await;
+    // The VM image constraint from conversion must not poison the next native
+    // admission, including an idle move whose reservation has been released.
+    owner
+        .service
+        .store
+        .patch_run(&run, json!({ "sessionId": "converted-session" }))
+        .await
+        .unwrap();
+    for destination in [&native_node, &vm_node] {
+        let response = moves::request_by_agent(
+            &owner.service,
+            &owner.run(&run).await,
+            &json!({ "nodeId": destination }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response["status"], "moving");
+        moves::advance(&owner.service, &owner.run(&run).await)
+            .await
+            .unwrap();
+        let settled = owner.run(&run).await;
+        assert!(settled["movementError"].is_null(), "{settled}");
+        assert_eq!(settled["nodeId"], *destination);
+        assert!(settled["requiredRuntime"].is_null());
+        let next = id();
+        let selected = placement::reserve(&owner.service, &settled, &next)
+            .await
+            .unwrap();
+        assert_eq!(
+            selected["runtimeId"],
+            if destination == &native_node {
+                "native-fixture"
+            } else {
+                "fixture"
+            }
+        );
+        placement::release(&owner.service, &next).await.unwrap();
+    }
+
+    // Missions have no chats record. An agent's native-born mission converts
+    // and continues automatically in a fresh session with its visible history.
+    let key = chat.clone();
+    owner
+        .service
+        .store
+        .transaction(move |db| db.remove("chats", &key))
+        .await
+        .unwrap();
+    seed_ext4(
+        &owner,
+        &record,
+        &native_node,
+        &format!("http://{address}/"),
+        true,
+    )
+    .await;
+    owner.set_checkpoint(&run, json!({ "nodeId": native_node, "runnerId": run, "runtimeId": "native-fixture", "completed": false, "prepared": native_prepared })).await;
+    let mut snapshot = owner.run(&run).await["snapshot"].clone();
+    snapshot["task"] = json!({ "prompt": "Continue the original mission" });
+    owner.service.store.patch_run(&run, json!({ "nodeId": native_node, "executionBackend": "native", "status": RunStatus::Running, "trigger": "manual", "chatExecution": null, "requiredRuntime": null, "snapshot": snapshot })).await.unwrap();
+    owner.service.store.event(&run, "item.completed", "mission progress", Some(json!({ "item": { "id": "progress", "type": "agent_message", "text": "Already completed the first step" } }))).await.unwrap();
+    let (status, preview) = owner
+        .get(&format!("/api/nodes/placement/{run}/backend-migration"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(preview["mission"], true);
+    assert_eq!(preview["diskFormat"], "native");
+    let refused = moves::request_by_agent(
+        &owner.service,
+        &owner.run(&run).await,
+        &json!({ "nodeId": vm_node, "requiredTags": ["missing"] }),
+    )
+    .await
+    .unwrap_err();
+    assert!(refused.message.contains("required tags"));
+    assert_eq!(owner.run(&run).await["status"], RunStatus::Running);
+    faults.failed.store(true, Ordering::SeqCst);
+    let response = moves::request_by_agent(
+        &owner.service,
+        &owner.run(&run).await,
+        &json!({ "nodeId": vm_node }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response["status"], "migrating");
+    let interrupted = wait_migration(&owner, &run).await;
+    assert!(interrupted["backendMigrationError"].is_string());
+    assert_eq!(interrupted["status"], RunStatus::Cancelled);
+    assert!(interrupted["backendMigration"].is_null());
+    faults.failed.store(false, Ordering::SeqCst);
+    let (status, response) = owner
+        .send(
+            "POST",
+            &format!("/api/nodes/placement/{run}/move"),
+            json!({ "nodeId": vm_node, "requiredTags": ["cpu"], "waitSeconds": 1 }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["status"], "migrating");
+    let mission = wait_migration(&owner, &run).await;
+    assert!(mission["backendMigrationError"].is_null(), "{mission}");
+    assert_eq!(mission["status"], RunStatus::Queued);
+    assert_eq!(mission["executionBackend"], "firecracker");
+    assert!(mission["sessionId"].is_null());
+    assert_eq!(mission["recoveryPending"], true);
+    assert_eq!(mission["requiredTags"], json!(["cpu"]));
+    let prompt = cairn_installation::run_output::prompt(&mission, false);
+    assert!(prompt.contains("Continue the original mission"));
+    assert!(prompt.contains("Already completed the first step"));
     assert_files(&owner, &vm_node, &run, false).await;
     stop.cancel();
     for task in tasks {

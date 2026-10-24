@@ -324,8 +324,9 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
         target != null && run.executionBackend != null && target.backend != run.executionBackend
     val conversion =
         switching && target?.backend == VM_BACKEND && migration?.diskFormat == NATIVE_BACKEND
+    val retryingConversion = conversion && migration?.error != null && migration?.pending == false
     LaunchedEffect(run.id, moving) {
-        if (moving && migration == null)
+        if (moving)
             migration =
                 try {
                     vm.api.get<BackendMigrationState>(
@@ -350,7 +351,11 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
             when {
                 conversion ->
                     Text(
-                        "Cet environnement a été créé sur une node native. Ses fichiers sont copiés une fois pour une VM ; le tour en cours s’arrête et le prochain message ouvre une nouvelle session du moteur. L’original est conservé en cas d’échec.",
+                        "Cet environnement a été créé sur une node native. Ses fichiers sont copiés une fois pour une VM ; le tour en cours s’arrête. " +
+                            (if (migration?.mission == true)
+                                "La mission reprend automatiquement dans une nouvelle session du moteur. "
+                            else "Le prochain message ouvre une nouvelle session du moteur. ") +
+                            "L’original est conservé en cas d’échec.",
                         color = MaterialTheme.colorScheme.tertiary,
                     )
                 switching && target?.backend == NATIVE_BACKEND ->
@@ -370,8 +375,9 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
                 enabled =
                     !busy &&
                         destination.isNotEmpty() &&
-                        run.status in listOf("running", "succeeded") &&
-                        run.sessionId != null &&
+                        (retryingConversion ||
+                            (run.status in listOf("running", "succeeded") &&
+                                run.sessionId != null)) &&
                         run.nodeState == null,
                 onClick = {
                     request(

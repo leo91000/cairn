@@ -520,16 +520,14 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
             moves::request(s, &s.store.run(run).await?, &input.body).await
         }
         ("GET", ["nodes", "placement", run, "backend-migration"]) => {
-            let chat = crate::backend_migration::chat_id(s, run).await?;
-            crate::backend_migration::preview(s, &chat, |_| Ok(())).await
+            crate::backend_migration::preview_run(s, run, |_| Ok(())).await
         }
         ("POST", ["nodes", "placement", run, "backend-migration"]) => {
-            let chat = crate::backend_migration::chat_id(s, run).await?;
             let mut args = input.body.clone();
             if !args.is_object() {
                 return Err(Error::bad("Confirm the destination backend and node."));
             }
-            args["chatId"] = chat.into();
+            args["runId"] = (*run).into();
             s.migrate_chat_backend(args, |_| Ok(())).await
         }
         ("GET", ["nodes", "native-callers"]) => native_callers(s, |_| Ok(())).await,

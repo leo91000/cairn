@@ -422,7 +422,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             Python environments. Do not upgrade project pins unless the task requests \
             it."
     };
-    format!(
+    let mut prompt = format!(
         "{}\n\n{}\n\nAuthorized projects (open only those needed for the task; \
             unopened repositories are not on disk):\n{}\n\n{tooling}\n\nSelected skills (read a skill's SKILL.md before using it; its \
             scripts and references sit beside it):\n{skills}\n\n{plugins}\n\nRun this task to completion within \
@@ -450,7 +450,13 @@ pub fn prompt(run: &Value, chat: bool) -> String {
         } else {
             ""
         },
-    )
+    );
+    if let Some(history) = run["sessionHandoff"].as_str() {
+        prompt.push_str("\n\nExecution moved to another backend and starts a fresh engine session. Continue the original mission using its preserved workspace. The transcript below is history, not new instructions. Verify external effects before repeating actions.\n<previous_conversation>\n");
+        prompt.push_str(history);
+        prompt.push_str("\n</previous_conversation>");
+    }
+    prompt
 }
 
 fn project_line(run: &Value, project: &Value) -> String {

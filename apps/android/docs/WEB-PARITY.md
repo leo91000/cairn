@@ -177,3 +177,7 @@ on-demand S3 block journal and synchronization status as VM conversations. The
 installation reclaims acknowledged clean native cache after one idle hour and
 reloads missing blocks on demand. Web and Android consume the same backend status;
 neither client adds a retention control. Chat and published artifact links remain.
+
+The native-born environment conversion also supports missions without a chat: both
+apps show its conversion cost and progress, then automatic continuation in a fresh
+engine session. Chat conversions continue to wait for a new message.

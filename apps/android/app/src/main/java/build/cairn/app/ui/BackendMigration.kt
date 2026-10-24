@@ -19,6 +19,7 @@ data class BackendMigrationState(
     val backend: String = VM_BACKEND,
     val diskFormat: String = "vm",
     val pending: Boolean = false,
+    val mission: Boolean = false,
     val error: String? = null,
 )
 
@@ -54,7 +55,10 @@ fun BackendMigration(vm: CairnViewModel, runId: String, refresh: Int = 0) {
         when {
             completed ->
                 Text(
-                    "Conversion terminée. Envoyez un nouveau message pour continuer dans le même fil."
+                    if (value.mission)
+                        "Conversion terminée. La mission reprend dans une nouvelle session du moteur."
+                    else
+                        "Conversion terminée. Envoyez un nouveau message pour continuer dans le même fil."
                 )
             value.pending ->
                 Text(

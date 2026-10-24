@@ -2724,6 +2724,45 @@ async fn backend_migration_tools_match_and_recheck_management_grants() {
         assert_eq!(denied["result"]["isError"], true, "{denied}");
         assert!(s.store.run(&run).await.unwrap()["backendMigration"].is_null());
     }
+    let key = chat.clone();
+    s.store
+        .transaction(move |db| db.remove("chats", &key))
+        .await
+        .unwrap();
+    for (endpoint, token) in [
+        ("/mcp", owner_token.as_str()),
+        ("/mcp-installation", agent_token),
+    ] {
+        let (_, preview) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "get_chat_backend_migration",
+            json!({ "runId": run }),
+        )
+        .await;
+        assert_eq!(result(&preview)["mission"], true);
+        assert_eq!(result(&preview)["runId"], run);
+        assert_eq!(result(&preview)["diskFormat"], "vm");
+        let (_, denied) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "migrate_chat_backend",
+            json!({ "runId": run, "nodeId": node, "confirm": true }),
+        )
+        .await;
+        assert_eq!(denied["result"]["isError"], true, "{denied}");
+        let (_, ambiguous) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "get_chat_backend_migration",
+            json!({ "runId": run, "chatId": chat }),
+        )
+        .await;
+        assert_eq!(ambiguous["result"]["isError"], true, "{ambiguous}");
+    }
     let read = common::relay_fixture::grant(&s, &["read"]).await;
     let (_, denied) = node_management_call(
         &app,

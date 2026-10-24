@@ -347,11 +347,14 @@ Moving a conversation to the other execution backend is available on both public
 MCP and `cairn_installation`: `get_chat_backend_migration` reports a conversation's
 backend, disk format and authorized destinations of the other backend, with
 whether each needs a one-time conversion; `migrate_chat_backend` requires
-management access, `chatId`, `nodeId` and `confirm: true` (`backend` is optional
+management access, exactly one of `chatId` or mission `runId`, `nodeId` and
+`confirm: true` (`backend` is optional
 and checked against the node). A VM disk moves to a native node in place, like any
 node move; a disk created natively is converted once for a VM, which returns
 `status: "migrating"` while the owned task runs. Poll the preview for `pending` and
-`error`. An explicit owner adopts the conversation into their native grant;
+`error`; the preview accepts the same `chatId`/`runId` choice. A native-born
+mission resumes automatically with its visible history in a fresh engine session
+after conversion. An explicit owner adopts the conversation into their native grant;
 installation agents retain their bounded parent grant. Web and Android expose the
 same confirmed operation from execution-node details, and agents can move their
 own conversation with `move_to_node`. See

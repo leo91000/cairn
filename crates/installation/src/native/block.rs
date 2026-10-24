@@ -135,6 +135,10 @@ impl View {
             let root = self.filesystem_of(path)?;
             directory_beneath(root, path, Some((uid, gid))).await?;
         }
+        // A VM may have inherited .local from its read-only base image rather
+        // than copied it into the upper layer. It remains a user-owned parent
+        // for local installs as well as for the paired share binding.
+        directory_beneath(&self.home, &self.home.join(".local"), Some((uid, gid))).await?;
         let mut bindings = Vec::new();
         for (source, target) in &self.caches {
             let root = self.filesystem_of(source)?;

@@ -1,5 +1,46 @@
 # Native storage measurements
 
+## Direct VM disks on native nodes
+
+The `native-runtime` job in `.github/workflows/ci.yaml` now runs the direct
+VM-disk qualification in `scripts/tests/native_runtime_test.py` as part of the
+existing disposable systemd/ublk/Moto host fixture. Its
+`native-storage-evidence/native-storage.json` artifact records the run's host
+conditions, direct-host reference, native-born reference and `vmDisks` samples
+for both flat and paired VM ext4 layouts. This section describes the reproducible
+protocol; the artifact from the checked commit is the numerical evidence.
+
+Each VM image contains the same random42 8 MiB asset and uses the same 128 fsynced
+4 KiB writes and cold-hinted/warm reads as the references below. VM files start
+with UID/GID 1000. The controller mounts them on real ublk with a distinct system
+workload account, checks that user files appear owned by that account while root
+stays root, and writes through that view. The test publishes the journal,
+evicts acknowledged blocks, restarts the controller, restores through loopback
+S3, and repeats the workload. An offline ext4 inspection verifies that new files
+are still owned by UID/GID 1000 and retain their contents; this checks the return
+to the VM ownership convention without booting a Firecracker guest.
+
+The per-layout record contains `retained` and `remote` write/read wall time and
+workload CPU, remote-read counts, `encodedNewS3Bytes` and
+`encodedNewS3Objects` for its first publication. Those byte counts are new encrypted
+objects plus manifest/metadata bytes in the isolated bucket, not raw payload size
+or total traffic. The process CPU excludes controller, encryption and Moto CPU.
+The host is shared hosted CI, not quiesced; advisory cold reads are not proof of
+cold physical storage. These are local loopback observations, not production
+S3 latency or a statistical performance guarantee.
+
+Reproduce only on an explicitly designated disposable root/systemd/ublk host,
+using the same pinned Python dependencies and debug-info-disabled binaries as
+`native-runtime`:
+
+```sh
+sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 \
+  NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" \
+  .native-s3-test/bin/python scripts/tests/node_s3_test.py \
+  --native-runtime target/debug/cairn \
+  --qualifier target/debug/examples/native_storage_qualifier
+```
+
 ## Host ublk and lazy S3 resume
 
 Measured on 2026-10-20, 15:52–15:53 UTC, at

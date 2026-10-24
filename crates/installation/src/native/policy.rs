@@ -207,7 +207,9 @@ pub(crate) fn allows_migration_source(db: &Db<'_>, run: &Value, node: &Value) ->
         .get("agents", crate::nodes::run_agent(run))?
         .unwrap_or_default();
     agent["access"]["nodes"] = json!([node["id"]]);
-    allows_agent(db, run, node, &agent)
+    let mut source = run.clone();
+    apply(&mut source, &run["backendMigration"]["grant"]);
+    allows_agent(db, &source, node, &agent)
 }
 
 fn allows_agent(db: &Db<'_>, run: &Value, node: &Value, agent: &Value) -> Result<bool> {
@@ -542,8 +544,15 @@ pub async fn authorize_request(s: &Service, input: &crate::http::Input) -> Resul
         ["runs", id, ..] | ["nodes", "placement", id, ..] => ((*id).to_owned(), false),
         _ => return Ok(()),
     };
+    let move_destination = match parts.as_slice() {
+        ["nodes", "placement", _, "move" | "backend-migration"] if input.method == "POST" => {
+            input.body["nodeId"].as_str().map(str::to_owned)
+        }
+        _ => None,
+    };
     s.store
         .read(move |db| {
+            let human = caller.is_some();
             let origin = caller.map_or(Origin::Unknown, Origin::Human);
             authorize_origin(db, &agent, &origin)?;
             if chat_target {
@@ -551,7 +560,21 @@ pub async fn authorize_request(s: &Service, input: &crate::http::Input) -> Resul
                 chat_grant(db, &chat, &origin)?;
             } else {
                 let run = crate::error::required(db.run(&target)?, "Run not found")?;
-                run_grant(db, &run, &origin)?;
+                let destination = move_destination
+                    .as_deref()
+                    .map(|node| db.get("nodes", node))
+                    .transpose()?
+                    .flatten();
+                let adopting = human
+                    && destination.as_ref().is_some_and(|node| {
+                        crate::nodes::backend::of_run_in(db, &run)
+                            .is_ok_and(|backend| backend != crate::nodes::backend::of_node(node))
+                    });
+                // The move transaction validates and records the owner's new
+                // authority. Retained delegation must not block that adoption.
+                if !adopting {
+                    run_grant(db, &run, &origin)?;
+                }
             }
             Ok(())
         })

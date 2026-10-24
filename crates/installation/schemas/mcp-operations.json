@@ -2411,7 +2411,7 @@
   },
   {
     "name": "get_chat_backend_migration",
-    "description": "Inspect a conversation's execution backend before moving it to a node of the other backend. Returns its current backend (firecracker VM or native host process), its disk format, authorized destination nodes of the other backend with whether a one-time conversion is needed and whether native authority is already confirmed, plus any pending conversion and its error. Native nodes mount a VM disk in place; only a disk created natively needs conversion before a VM can run it.",
+    "description": "Choose exactly one of chatId or runId (for a mission). Inspect a conversation's execution backend before moving it to a node of the other backend. Returns its current backend (firecracker VM or native host process), its disk format, authorized destination nodes of the other backend with whether a one-time conversion is needed and whether native authority is already confirmed, plus any pending conversion and its error. Native nodes mount a VM disk in place; only a disk created natively needs conversion before a VM can run it.",
     "scope": "read",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2420,17 +2420,32 @@
         "chatId": {
           "type": "string",
           "format": "uuid"
+        },
+        "runId": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Target a mission by run ID instead of a chat ID."
         }
       },
-      "required": [
-        "chatId"
-      ],
-      "additionalProperties": false
+      "required": [],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "chatId"
+          ]
+        },
+        {
+          "required": [
+            "runId"
+          ]
+        }
+      ]
     }
   },
   {
     "name": "migrate_chat_backend",
-    "description": "Move an existing conversation to an authorized node of the other execution backend, keeping the same chat, history and files. A VM disk moves to a native node without copying: execution pauses, the same files are mounted in place and the conversation resumes there; system packages installed in the VM and running processes do not follow. Moving back to a VM is the same. A disk created on a native node is converted once before a VM can run it: that stops the active turn, keeps the original until the converted copy is restored, and the next message starts a fresh engine session. Moving to a native node records the caller as the conversation's native authority and requires that node to trust them. Returns immediately; poll get_chat_backend_migration for conversions. Requires explicit confirmation and installation management access.",
+    "description": "Choose exactly one of chatId or runId (for a mission). Move an existing conversation to an authorized node of the other execution backend, keeping the same chat, history and files. A VM disk moves to a native node without copying: execution pauses, the same files are mounted in place and the conversation resumes there; system packages installed in the VM and running processes do not follow. Moving back to a VM is the same. A disk created on a native node is converted once before a VM can run it: that stops the active turn, keeps the original until the converted copy is restored, and a chat waits for the next message to start a fresh engine session; a running mission resumes automatically with its visible history in a fresh session. Moving to a native node records the caller as the conversation's native authority and requires that node to trust them. Returns immediately; poll get_chat_backend_migration for conversions. Requires explicit confirmation and installation management access.",
     "scope": "manage",
     "destructive": true,
     "inputSchema": {
@@ -2456,14 +2471,30 @@
         "confirm": {
           "type": "boolean",
           "const": true
+        },
+        "runId": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Target a mission by run ID instead of a chat ID."
         }
       },
       "required": [
-        "chatId",
         "nodeId",
         "confirm"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "chatId"
+          ]
+        },
+        {
+          "required": [
+            "runId"
+          ]
+        }
+      ]
     }
   },
   {

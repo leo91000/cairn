@@ -647,7 +647,7 @@ test('moving a conversation to the other backend remounts its files or converts 
       diskFormat,
       nodes: [],
       pending: phase === 'pending',
-      error: null,
+      error: phase === 'failed' ? 'Previous conversion restore failed.' : null,
     },
   }))
   const moves: unknown[] = []
@@ -677,8 +677,9 @@ test('moving a conversation to the other backend remounts its files or converts 
   expect(moves).toEqual([{ nodeId: gpu.id }])
 
   // A natively created environment is copied once before a VM can run it.
-  workspace.service.store.updateRun(run.id, { executionBackend: 'native' } as any)
+  workspace.service.store.updateRun(run.id, { executionBackend: 'native', status: 'cancelled', sessionId: null } as any)
   diskFormat = 'native'
+  phase = 'failed'
   await page.reload()
   await page.getByRole('button', { name: 'Execution node', exact: true }).filter({ visible: true }).click()
   await panel.getByRole('button', { name: 'Move…', exact: true }).click()
@@ -686,6 +687,7 @@ test('moving a conversation to the other backend remounts its files or converts 
   await page.getByRole('option', { name: 'Build VM · Firecracker VM', exact: true }).click()
   await expect(move.getByRole('note')).toContainText('Its files are copied once for a VM')
   await page.screenshot({ path: 'test-results/backend-conversion-confirm.png' })
+  await expect(move.getByRole('button', { name: 'Move and switch backend', exact: true })).toBeEnabled()
   await move.getByRole('button', { name: 'Move and switch backend', exact: true }).click()
   await expect(page.getByRole('status').filter({ hasText: 'Converting this natively created environment' })).toBeVisible()
   expect(moves).toEqual([{ nodeId: gpu.id }, { nodeId: vm.id }])

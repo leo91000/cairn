@@ -34,7 +34,8 @@ conversation's VM disk in place with an idmapped mount: no file is copied, the
 engine session resumes, and running commands and system packages installed in the
 VM do not follow. Moving back to a VM node boots the same disk again. A disk
 created natively is converted once before a VM can run it; that stops the current
-turn and the next message starts a fresh engine session. Only native nodes whose
+turn. Chats wait for the next message to start a fresh engine session; missions
+resume automatically with their visible history in a fresh session. Only native nodes whose
 controller reports the `vmDisks` capability receive VM disks.
 
 Each move, follow-up, resume, scheduled dispatch and delegated run retains and

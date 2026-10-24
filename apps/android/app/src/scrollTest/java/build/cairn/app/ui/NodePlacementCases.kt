@@ -725,8 +725,11 @@ abstract class NodePlacementCases {
         }
     }
 
-    @Test
-    fun movingToANativeNodeExplainsTheBackendSwitchBeforeConfirming() {
+    @Test fun movingToANativeNodeExplainsTheBackendSwitchBeforeConfirming() = backendMove(false)
+
+    @Test fun aCancelledConversionCanBeRetriedWithoutAProviderSession() = backendMove(true)
+
+    private fun backendMove(retry: Boolean) {
         MockWebServer().use { server ->
             val moves = CopyOnWriteArrayList<JsonObject>()
             server.dispatcher =
@@ -743,7 +746,10 @@ abstract class NodePlacementCases {
                                     """{"status":"moving","nodeId":"gpu","backend":"native"}"""
                                 }
                                 path.endsWith("/backend-migration") ->
-                                    """{"backend":"firecracker","diskFormat":"vm","pending":false}"""
+                                    if (retry)
+                                        """{"backend":"native","diskFormat":"native","pending":false,"error":"Previous conversion restore failed."}"""
+                                    else
+                                        """{"backend":"firecracker","diskFormat":"vm","pending":false}"""
                                 path.endsWith("/nodes/placement/run") ->
                                     """{"nodes":[{"id":"vm","name":"Build VM","status":"online","capabilities":{"backend":"firecracker"}},{"id":"gpu","name":"Desktop GPU","status":"online","capabilities":{"backend":"native","ublk":true,"vmDisks":true}}]}"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
@@ -769,40 +775,47 @@ abstract class NodePlacementCases {
                                 vm,
                                 Run(
                                     id = "run",
-                                    status = "succeeded",
-                                    nodeId = "vm",
-                                    sessionId = "engine-session",
-                                    executionBackend = "firecracker",
+                                    status = if (retry) "cancelled" else "succeeded",
+                                    nodeId = if (retry) "gpu" else "vm",
+                                    sessionId = if (retry) null else "engine-session",
+                                    executionBackend = if (retry) "native" else "firecracker",
                                     storage = RunStorage(mode = "on-demand", dirtyBytes = 0),
                                 ),
                             )
                         }
                 }
             }
+            val sourceName = if (retry) "Node : Desktop GPU" else "Node : Build VM"
             compose.waitUntil(20000) {
-                compose.onAllNodesWithText("Node : Build VM").fetchSemanticsNodes().isNotEmpty()
+                compose.onAllNodesWithText(sourceName).fetchSemanticsNodes().isNotEmpty()
             }
-            compose.onNodeWithText("Node : Build VM").performClick()
+            compose.onNodeWithText(sourceName).performClick()
             // Pinning stays within the conversation's backend; moving switches it.
             compose
                 .onNodeWithText("utilisez Déplacer… pour changer de backend", substring = true)
                 .assertExists()
             compose.onNodeWithText("Déplacer…").performScrollTo().performClick()
-            compose.onNodeWithText("Desktop GPU · Processus natif").assertExists()
+            compose
+                .onNodeWithText(
+                    if (retry) "Build VM · VM Firecracker" else "Desktop GPU · Processus natif"
+                )
+                .assertExists()
             compose.waitUntil(10000) {
                 compose
                     .onAllNodesWithText(
-                        "tournera comme processus natif de l’hôte",
+                        if (retry) "Ses fichiers sont copiés une fois pour une VM"
+                        else "tournera comme processus natif de l’hôte",
                         substring = true,
                     )
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
-            capture("backend-switch-confirm")
+            capture(if (retry) "backend-conversion-retry" else "backend-switch-confirm")
             assertTrue(moves.isEmpty())
             compose
                 .onNodeWithText("Déplacer et changer de backend")
                 .performScrollTo()
+                .assertIsEnabled()
                 .performClick()
             compose.waitUntil(10000) {
                 moves.isNotEmpty() &&
@@ -811,12 +824,19 @@ abstract class NodePlacementCases {
                         .fetchSemanticsNodes()
                         .isNotEmpty()
             }
-            assertEquals("gpu", moves.single()["nodeId"]?.jsonPrimitive?.content)
+            assertEquals(
+                if (retry) "vm" else "gpu",
+                moves.single()["nodeId"]?.jsonPrimitive?.content,
+            )
         }
     }
 
     @Test
-    fun aNativeEnvironmentConversionShowsItsProgressUntilCompletion() {
+    fun aNativeEnvironmentConversionShowsItsProgressUntilCompletion() = conversionProgress(false)
+
+    @Test fun aNativeMissionConversionExplainsItsAutomaticContinuation() = conversionProgress(true)
+
+    private fun conversionProgress(mission: Boolean) {
         MockWebServer().use { server ->
             val completed = AtomicBoolean(false)
             server.dispatcher =
@@ -826,7 +846,7 @@ abstract class NodePlacementCases {
                         val body =
                             when {
                                 path.endsWith("/backend-migration") ->
-                                    """{"backend":"native","diskFormat":"native","pending":${!completed.get()}}"""
+                                    """{"backend":"native","diskFormat":"native","mission":$mission,"pending":${!completed.get()}}"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path.endsWith("/overview") -> "{}"
@@ -859,6 +879,12 @@ abstract class NodePlacementCases {
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
+            if (mission)
+                compose.onNodeWithText("La mission reprend", substring = true).assertExists()
+            else
+                compose
+                    .onNodeWithText("Envoyez un nouveau message", substring = true)
+                    .assertExists()
         }
     }
 

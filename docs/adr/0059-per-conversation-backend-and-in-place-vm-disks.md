@@ -49,8 +49,9 @@ idmapped mounts) receive VM disks.
 
 A disk created natively (`native-ext4-v1`) cannot boot in a VM. Moving it to a VM
 node runs the existing conversion once: the active turn stops, the chat is paused
-until the converted point is restored, and the next message starts a fresh engine
-session. The converted disk is a VM disk, so later moves are ordinary.
+until the converted point is restored. The next chat message starts a fresh engine
+session; a running mission resumes automatically with its visible history in a
+fresh session, and waits on that mission remain pending during conversion. The converted disk is a VM disk, so later moves are ordinary.
 
 ## Interfaces
 

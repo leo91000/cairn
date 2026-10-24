@@ -16,7 +16,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::time::Duration;
 
-const MOVE_DESCRIPTION: &str = "Move this conversation to an authorized node. Call list_nodes first to see ids, backends, tags, shared budgets and free slots. Failure leaves the current conversation running. Success saves, pauses and resumes on the destination, interrupting running commands. A node of the other backend changes how this conversation runs: a native node mounts the same files directly as a host process with its GPU and installed tools, a Firecracker node runs them in a VM again; system packages installed in the other backend and running processes do not follow. An environment created on a native node needs a one-time conversion before a VM can run it: that stops the current turn, and the next message starts a fresh engine session. Optional waitSeconds respects the configured wait limit.";
+const MOVE_DESCRIPTION: &str = "Move this conversation to an authorized node. Call list_nodes first to see ids, backends, tags, shared budgets and free slots. Failure leaves the current conversation running. Success saves, pauses and resumes on the destination, interrupting running commands. A node of the other backend changes how this conversation runs: a native node mounts the same files directly as a host process with its GPU and installed tools, a Firecracker node runs them in a VM again; system packages installed in the other backend and running processes do not follow. An environment created on a native node needs a one-time conversion before a VM can run it: that stops the current turn. A chat waits for the next message to start a fresh engine session; a mission resumes automatically in a fresh session with its visible history. Optional waitSeconds respects the configured wait limit.";
 const LIST_NODES_DESCRIPTION: &str = "List authorized execution nodes with their backend (firecracker VM or native host process), tags, shared CPU/RAM/disk budgets, slot availability and current resource pressure. Use a returned node id with move_to_node. Resources are shared automatically; agents do not request allocations.";
 /// A requested move waits this long for the conversation to settle before pausing it.
 const PAUSE_DELAY_MS: i64 = 2000;
@@ -84,6 +84,7 @@ struct MoveRequest<'a> {
     reservation: &'a str,
     node_id: &'a Value,
     resources: &'a Value,
+    runtime_id: &'a Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     requested_at: Option<i64>,
     /// Recovery from an unavailable node, rather than a requested move.
@@ -233,7 +234,7 @@ where
         // The rare natively created disk needs a full copy before a VM boots it.
         crate::native::policy::refresh(s).await?;
         return s
-            .convert_for_vm(text(run, "id"), text(args, "nodeId"), authorize)
+            .convert_for_vm(text(run, "id"), args, source, authorize)
             .await;
     }
     if change
@@ -283,6 +284,7 @@ where
         reservation: &reservation,
         node_id: &selected["nodeId"],
         resources: &selected["resources"],
+        runtime_id: &selected["runtimeId"],
         requested_at: Some(now()),
         automatic: false,
         idle: Some(idle),
@@ -634,6 +636,7 @@ pub async fn queue_capacity_move(s: &Service, run: &Value) -> Result<bool> {
         reservation: &reservation,
         node_id: &selected["nodeId"],
         resources: &selected["resources"],
+        runtime_id: &selected["runtimeId"],
         requested_at: None,
         // Healthy source: capture all current writes after fencing, rather than
         // restoring an older published recovery point.
@@ -723,6 +726,7 @@ async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
         reservation: &reservation,
         node_id: &selected["nodeId"],
         resources: &selected["resources"],
+        runtime_id: &selected["runtimeId"],
         requested_at: None,
         automatic: true,
         idle: None,
@@ -879,6 +883,7 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
         .await
         .unwrap_or_default();
     let changed_backend = movement["backend"].as_str().map(str::to_owned);
+    let destination_runtime = movement["runtimeId"].clone();
     let mut patch = json!({
         "storage": { "mode": restored_storage_mode(&manifest) },
         "movementError": null,
@@ -896,6 +901,7 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
     });
     if let Some(changed) = &changed_backend {
         patch["executionBackend"] = changed.as_str().into();
+        patch["requiredRuntime"] = Value::Null;
     }
     let owner = run_id.clone();
     s.store
@@ -922,8 +928,9 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
                     checkpoint["diskRuntimeId"] = runtime.map_or(Value::Null, Value::from);
                 }
                 checkpoint["prepared"]["backend"] = changed.as_str().into();
-                // The destination's reservation selects the runtime for its backend.
-                checkpoint["runtimeId"] = Value::Null;
+                // Idle moves release the reservation. Keep its selected image
+                // for the next turn as well as for immediate resumption.
+                checkpoint["runtimeId"] = destination_runtime;
             }
             checkpoint["nodeId"] = node;
             checkpoint["process"] = Value::Null;

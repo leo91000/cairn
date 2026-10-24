@@ -4,7 +4,9 @@ import { api } from '../api'
 
 /** A conversation's backend and, for an environment created natively, its one-time conversion for a VM. */
 export interface BackendMigrationState {
-  chatId: string
+  chatId?: string | null
+  runId?: string
+  mission?: boolean
   backend: 'native' | 'firecracker'
   diskFormat: 'vm' | 'native'
   nodes: {
@@ -58,7 +60,7 @@ void load()
       Moving to a VM
     </h3>
     <p v-if="completed" role="status">
-      Conversion complete. Send a new message to continue in the same conversation.
+      {{ state?.mission ? 'Conversion complete. The mission resumes in a fresh engine session.' : 'Conversion complete. Send a new message to continue in the same conversation.' }}
     </p>
     <p v-else-if="state?.pending" role="status">
       Converting this natively created environment for a VM. Execution is stopped while its files are copied and restored. You can leave this screen.
