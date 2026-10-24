@@ -106,15 +106,17 @@ test('selects installations, remembers the last one and honours deep workspace U
     await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
     await page.reload()
     await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
-    // Without an address, the machine reaches the manager through the beacon.
+    // Without an address, the beacon introduces the machine to the manager. The
+    // command pins the manager's certificate, so relayed traffic stays encrypted.
     await page.getByRole('link', { name: 'Nodes', exact: true }).click()
     await page.getByRole('button', { name: 'Add a machine', exact: true }).click()
     const nodeDialog = page.getByRole('dialog', { name: 'Add a machine' })
     await expect(nodeDialog).toContainText('no manager address, certificate or open port is needed')
+    await expect(nodeDialog).toContainText('encrypted end to end')
     await nodeDialog.getByLabel('Machine name').fill('Office node')
     await nodeDialog.getByRole('button', { name: 'Create enrollment code' }).click()
     const beaconScript = `${url}/install/node.sh`.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    await expect(nodeDialog.getByLabel('Node installation command')).toHaveText(new RegExp(`^curl --fail --silent --show-error '${beaconScript}' \\| sudo bash -s -- '[0-9a-f-]{36}' firecracker$`))
+    await expect(nodeDialog.getByLabel('Node installation command')).toHaveText(new RegExp(`^curl --fail --silent --show-error '${beaconScript}' \\| sudo bash -s -- '[0-9a-f-]{36}' firecracker [0-9a-f]{64}$`))
     await nodeDialog.getByRole('button', { name: 'Hide code' }).click()
     // A LAN or VPN address remains available to keep node traffic off the beacon.
     await nodeDialog.getByLabel('Machine name').fill('VPN node')

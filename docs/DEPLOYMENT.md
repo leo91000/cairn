@@ -153,25 +153,38 @@ trusted Linux x86-64 machine and enter the single-use code when asked:
 
 ```sh
 curl --fail --silent --show-error 'https://cairn.build/install/node.sh' \
-  | sudo bash -s -- '<installation-id>' firecracker
+  | sudo bash -s -- '<installation-id>' firecracker '<manager-certificate-pin>'
 ```
 
 No manager address, certificate or open port is needed. The command installs the
 **node gateway** (`cairn-node-gateway.service`, `/opt/cairn-gateway`,
-`/var/lib/cairn-gateway`), checksum-verified from Beacon, which serves
-`http://127.0.0.1:4319` on the machine. It then downloads and runs the manager’s
-usual node installer through that origin. Every node connection becomes a
-WebSocket to Beacon, paired with one the installation opens on demand
-([ADR-0059](adr/0059-nodes-reach-their-manager-through-beacon.md)). Node traffic,
-including conversation disks, transits Beacon in memory. Requests keep their
-enrollment code, node token or disk grant, checked by the manager; only node
-routes are served on these channels. Firecracker containers reach the gateway
-through its socket under `/var/lib/cairn-gateway/socket`. The installation and
-Beacon must both support relay protocol 5; otherwise the command reports that
-the installation is offline or must be updated.
+`/var/lib/cairn-gateway`), a static binary checksum-verified from Beacon, which
+serves `http://127.0.0.1:4319` on the machine. It then downloads and runs the
+manager’s usual node installer through that origin
+([ADR-0059](adr/0059-nodes-introduced-by-beacon.md)):
+
+- Beacon introduces the gateway to the manager: it forwards one WebRTC offer and
+  one answer. The machine and the manager then exchange UDP **directly**, on the
+  same LAN or across NATs, without Beacon.
+- When the networks prevent that (UDP blocked, symmetric NATs on both sides),
+  each connection goes **through Beacon** in a WebSocket, as TLS that Beacon
+  cannot read.
+- Both paths end on the manager’s node certificate. The last argument of the
+  command is its SHA-256 pin, so neither Beacon nor anyone on the way can
+  impersonate the manager.
+
+Requests keep their enrollment code, node token or disk grant, checked by the
+manager; only node routes are served to these connections. Firecracker
+containers reach the gateway through its socket under
+`/var/lib/cairn-gateway/socket`. The installation and Beacon must both support
+relay protocol 5; otherwise the command reports that the installation is offline
+or must be updated. The gateway logs which path it uses; to keep every
+connection on Beacon, for example on a network that drops UDP silently, set
+`"direct": false` in `/var/lib/cairn-gateway/config.json` and restart it.
 
 Rerunning the command is safe: it refreshes the gateway and the node supervisor
-without re-enrolling, and does not restart a running node. Restart `cairn-node`
+without re-enrolling, and does not restart a running node. It is also how the
+gateway is updated. Restart `cairn-node`
 or `cairn-native-node` when idle to load a refreshed supervisor.
 
 ```sh
@@ -182,7 +195,8 @@ sudo journalctl -u cairn-node-gateway
 ### Direct manager address
 
 Under **Connect directly instead**, supply a **Direct manager address** reachable
-from that machine to keep node traffic off Beacon: a LAN address, VPN hostname or
+from that machine to keep node traffic off Beacon even when a direct connection
+is impossible: a LAN address, VPN hostname or
 optional public HTTPS origin, including its port. The browser continues to use
 the beacon relay; the node connects directly to this address. The manager needs a
 listener or reverse proxy reachable from that LAN/VPN. The one-command
@@ -194,7 +208,7 @@ Self-signed certificates are not silently trusted.
 
 HTTPS remains mandatory outside loopback, even on a private network or VPN.
 HTTP on loopback is the existing development/test exception, also used by the
-node gateway, which does not send credentials across the network unencrypted.
+node gateway, which encrypts everything it sends across the network.
 Node identities and enrollment codes remain stored as hashes on the manager;
 enrollment codes expire and can be consumed only once. The address is connection
 configuration, not authorization.

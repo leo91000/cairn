@@ -24,12 +24,15 @@ COPY crates/protocol/Cargo.toml ./crates/protocol/Cargo.toml
 COPY crates/plugin-api/Cargo.toml ./crates/plugin-api/Cargo.toml
 COPY crates/plugin-host/Cargo.toml ./crates/plugin-host/Cargo.toml
 COPY crates/plugin-runtime/Cargo.toml ./crates/plugin-runtime/Cargo.toml
+COPY crates/node-gateway/Cargo.toml ./crates/node-gateway/Cargo.toml
 # A separate dependency layer survives application edits in remote BuildKit
 # caches. Cargo cache mounts alone do not persist on fresh GitHub runners.
 # Cargo's package lock lives outside this mount. Serialize registry writers
 # across build stages, including the independently pinned Firecracker toolchain.
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    mkdir -p crates/installation/src crates/installation/examples crates/beacon/src crates/protocol/src crates/plugin-api/src crates/plugin-host/src crates/plugin-runtime/src \
+    mkdir -p crates/installation/src crates/installation/examples crates/beacon/src crates/protocol/src crates/plugin-api/src crates/plugin-host/src crates/plugin-runtime/src crates/node-gateway/src \
+    && printf '' > crates/node-gateway/src/lib.rs \
+    && printf 'fn main() {}\n' > crates/node-gateway/src/main.rs \
     && printf '' > crates/plugin-api/src/lib.rs \
     && printf '' > crates/plugin-host/src/lib.rs \
     && printf '' > crates/plugin-runtime/src/lib.rs \
@@ -58,7 +61,14 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharin
 
 # Beacon builds independently: no worker CLI, VM or kernel layers.
 FROM rust:1.97.1-bookworm AS beacon-backend
-ENV CARGO_BUILD_JOBS=4
+ENV CARGO_BUILD_JOBS=4 CC_x86_64_unknown_linux_musl=musl-gcc
+# The node gateway Beacon serves is static: it runs on any x86-64 Linux node.
+RUN apt-get update && apt-get install -y --no-install-recommends musl-tools \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s /usr/include/linux /usr/include/x86_64-linux-musl/linux \
+    && ln -s /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic \
+    && ln -s /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm \
+    && rustup target add x86_64-unknown-linux-musl
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY vendor ./vendor
@@ -68,8 +78,11 @@ COPY crates/protocol/Cargo.toml ./crates/protocol/Cargo.toml
 COPY crates/plugin-api/Cargo.toml ./crates/plugin-api/Cargo.toml
 COPY crates/plugin-host/Cargo.toml ./crates/plugin-host/Cargo.toml
 COPY crates/plugin-runtime/Cargo.toml ./crates/plugin-runtime/Cargo.toml
+COPY crates/node-gateway/Cargo.toml ./crates/node-gateway/Cargo.toml
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    mkdir -p crates/installation/src crates/installation/examples crates/beacon/src crates/protocol/src crates/plugin-api/src crates/plugin-host/src crates/plugin-runtime/src \
+    mkdir -p crates/installation/src crates/installation/examples crates/beacon/src crates/protocol/src crates/plugin-api/src crates/plugin-host/src crates/plugin-runtime/src crates/node-gateway/src \
+    && printf '' > crates/node-gateway/src/lib.rs \
+    && printf 'fn main() {}\n' > crates/node-gateway/src/main.rs \
     && printf '' > crates/plugin-api/src/lib.rs \
     && printf '' > crates/plugin-host/src/lib.rs \
     && printf '' > crates/plugin-runtime/src/lib.rs \
@@ -80,17 +93,23 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharin
     && printf 'fn main() {}\n' > crates/beacon/src/main.rs \
     && printf '' > crates/beacon/src/lib.rs \
     && printf '' > crates/protocol/src/lib.rs \
-    && cargo build --locked --release --bin cairn-beacon
+    && cargo build --locked --release --bin cairn-beacon \
+    && cargo build --locked --release --target x86_64-unknown-linux-musl --bin cairn-node-gateway
 COPY .cargo/config.toml ./.cargo/config.toml
 COPY --chmod=755 scripts/rust-release-inline75-v1.sh ./scripts/rust-release-inline75-v1.sh
 COPY crates/beacon ./crates/beacon
 COPY crates/protocol ./crates/protocol
+COPY crates/node-gateway ./crates/node-gateway
 COPY deploy/installations ./deploy/installations
 COPY deploy/nodes ./deploy/nodes
+# Beacon serves the node gateway to machines added without a manager address.
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     touch crates/beacon/src/main.rs crates/beacon/src/lib.rs crates/protocol/src/lib.rs \
+    crates/node-gateway/src/main.rs crates/node-gateway/src/lib.rs \
     && cargo build --locked --release --bin cairn-beacon \
-    && cp target/release/cairn-beacon /usr/local/bin/cairn-beacon
+    && cargo build --locked --release --target x86_64-unknown-linux-musl --bin cairn-node-gateway \
+    && cp target/release/cairn-beacon /usr/local/bin/cairn-beacon \
+    && install -D -m 0755 target/x86_64-unknown-linux-musl/release/cairn-node-gateway /usr/local/lib/cairn/cairn-node-gateway
 
 FROM debian:bookworm-slim AS beacon
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
@@ -98,6 +117,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && groupadd --gid 1000 cairn && useradd --uid 1000 --gid cairn cairn
 WORKDIR /app
 COPY --from=beacon-backend /usr/local/bin/cairn-beacon /usr/local/bin/cairn-beacon
+COPY --from=beacon-backend /usr/local/lib/cairn/cairn-node-gateway /usr/local/lib/cairn/cairn-node-gateway
 COPY --from=build /app/dist ./dist
 ARG VCS_REF=development
 ENV APP_COMMIT=$VCS_REF APP_RUNTIME_ID=$VCS_REF CAIRN_BEACON_LISTEN=0.0.0.0:4311 CAIRN_BEACON_WEB_DIR=/app/dist

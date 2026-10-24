@@ -814,11 +814,21 @@ pub(crate) async fn invite(
         Some(value) => Some(connector::master(value.trim())?),
         None => None,
     };
-    // Without an address, a claimed installation is reached through Beacon:
-    // no address, certificate or incoming port on the manager.
+    // Without an address, Beacon introduces the node to a claimed
+    // installation: no address, certificate or incoming port on the manager.
+    // The node pins the manager's node certificate from its command.
     let beacon = match direct {
         Some(_) => None,
-        None => crate::relay::node_channel_route(&s.config.data_dir).await?,
+        None => match crate::relay::node_channel_route(&s.config.data_dir).await? {
+            Some((beacon, installation)) => {
+                let certificate = crate::relay::nodes::NodeCertificate::load(
+                    &s.config.data_dir.join("installation-relay"),
+                )
+                .await?;
+                Some((beacon, installation, certificate.pin.clone()))
+            }
+            None => None,
+        },
     };
     let origin = match (direct, &beacon) {
         (Some(direct), _) => Some(direct),
@@ -843,10 +853,10 @@ pub(crate) async fn invite(
     let route = if beacon.is_some() { "beacon" } else { "direct" };
     let install = match (installable, beacon, origin) {
         (false, _, _) => None,
-        (true, Some((beacon, installation)), _) => {
+        (true, Some((beacon, installation, pin)), _) => {
             let script = format!("{beacon}/install/node.sh").replace('\'', "'\\''");
             Some(format!(
-                "curl --fail --silent --show-error '{script}' | sudo bash -s -- '{installation}' {backend}"
+                "curl --fail --silent --show-error '{script}' | sudo bash -s -- '{installation}' {backend} {pin}"
             ))
         }
         (true, None, Some(origin)) => {

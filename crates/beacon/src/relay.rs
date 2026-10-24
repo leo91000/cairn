@@ -67,6 +67,8 @@ struct Tunnel {
     node_requests: mpsc::Sender<Frame>,
     // Node sockets waiting for the installation to open its side.
     node_channels: Mutex<HashMap<String, oneshot::Sender<WebSocket>>>,
+    // Node offers waiting for the installation's answer.
+    node_offers: Mutex<HashMap<String, oneshot::Sender<Option<String>>>>,
     node_slots: Arc<Semaphore>,
     node_address_slots: Mutex<HashMap<String, Weak<Semaphore>>>,
     // Replacing a connection closes the old generation and its pending replies.
@@ -358,6 +360,7 @@ async fn serve_socket(
         public_slots: Arc::new(Semaphore::new(MAX_PUBLIC_IN_FLIGHT)),
         node_requests,
         node_channels: Mutex::new(HashMap::new()),
+        node_offers: Mutex::new(HashMap::new()),
         node_slots: Arc::new(Semaphore::new(MAX_NODE_CHANNELS)),
         node_address_slots: Mutex::new(HashMap::new()),
         stop,
@@ -735,6 +738,12 @@ async fn serve_socket(
                             }
                             Frame::DirectSignal { id, signal, .. } if version >= DIRECT_VERSION => {
                                 direct::receive_signal(&tunnel, &id, signal);
+                                None
+                            }
+                            Frame::NodeAnswer { id, sdp } if version >= NODE_CHANNEL_VERSION => {
+                                if let Some(reply) = tunnel.node_offers.lock().unwrap().remove(&id) {
+                                    let _ = reply.send(sdp);
+                                }
                                 None
                             }
                             Frame::Response(response) => {

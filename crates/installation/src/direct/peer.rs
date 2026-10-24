@@ -271,7 +271,9 @@ struct Negotiation {
     dependencies: Option<PeerDependencies>,
 }
 
-fn udp_bindings(addresses: impl IntoIterator<Item = IpAddr>) -> Vec<(&'static str, NetworkType)> {
+pub(crate) fn udp_bindings(
+    addresses: impl IntoIterator<Item = IpAddr>,
+) -> Vec<(&'static str, NetworkType)> {
     let (mut ipv4, mut ipv6) = (false, false);
     for address in addresses {
         if !cairn_protocol::direct::usable_candidate_address(address) {

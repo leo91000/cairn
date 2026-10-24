@@ -35,7 +35,7 @@ fun NodesScreen(
     var storage by remember { mutableStateOf<ExecutionNode?>(null) }
     var name by remember { mutableStateOf("") }
     var backend by remember { mutableStateOf("firecracker") }
-    // Optional: without it, the machine reaches the manager through Cairn.
+    // Optional: without it, Beacon introduces the machine to the manager.
     var directAddress by remember { mutableStateOf<String?>(null) }
     var nativeCallers by remember { mutableStateOf<List<NativeCaller>>(emptyList()) }
     // Never persist enrollment secrets in saved instance state.
@@ -352,7 +352,7 @@ fun NodesScreen(
                 style = MaterialTheme.typography.bodyMedium,
             )
             Text(
-                "La machine se connecte à Cairn en sortie : aucune adresse du manager, aucun certificat ni port ouvert n’est nécessaire. Ses échanges avec le manager, disques des conversations compris, transitent par les serveurs de Cairn sans y être conservés.",
+                "Cairn met la machine en relation avec le manager : aucune adresse du manager, aucun certificat ni port ouvert n’est nécessaire. Ils se connectent directement quand les réseaux le permettent. Sinon, leurs échanges, disques des conversations compris, transitent par les serveurs de Cairn chiffrés de bout en bout : Cairn ne peut pas les lire.",
                 style = MaterialTheme.typography.bodySmall,
             )
             Field("Nom de la machine", name, { name = it })
@@ -377,7 +377,7 @@ fun NodesScreen(
                     keyboardOptions = InputKeyboards.Uri,
                 )
                 Text(
-                    "Facultatif. Une adresse sur le réseau local ou un VPN évite que le trafic de la node passe par Cairn. Utilisez HTTPS avec un certificat reconnu par la node ; HTTP n’est accepté qu’en boucle locale pour les tests. C’est l’adresse du manager, pas celle de l’application.",
+                    "Facultatif. Une adresse sur le réseau local ou un VPN évite que le trafic de la node passe par Cairn, même quand les réseaux empêchent une connexion directe. Utilisez HTTPS avec un certificat reconnu par la node ; HTTP n’est accepté qu’en boucle locale pour les tests. C’est l’adresse du manager, pas celle de l’application.",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }

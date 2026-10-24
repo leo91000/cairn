@@ -4,51 +4,53 @@ use common::RelayedInstallation;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use std::{sync::atomic::Ordering, time::Duration};
 
-const GATEWAY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/nodes/gateway.py");
-
-/// The node gateway, started like its systemd unit on a free loopback port.
+/// The node gateway, run in-process like its systemd unit on a free port.
 struct Gateway {
     origin: String,
-    _process: tokio::process::Child,
+    statistics: std::sync::Arc<cairn_node_gateway::Statistics>,
+    stop: tokio_util::sync::CancellationToken,
     _root: tempfile::TempDir,
 }
 
 impl Gateway {
-    async fn start(beacon: &str, installation: &str) -> Self {
+    async fn start(beacon: &str, installation: &str, pin: &str, direct: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
-        let port = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.local_addr().unwrap().port()
+        let config = cairn_node_gateway::Config {
+            beacon: beacon.to_owned(),
+            installation_id: installation.to_owned(),
+            pin: pin.to_owned(),
+            port: 0,
+            direct,
         };
-        std::fs::write(
-            root.path().join("config.json"),
-            json!({ "beacon": beacon, "installationId": installation, "port": port }).to_string(),
-        )
-        .unwrap();
-        let mut process = tokio::process::Command::new("python3")
-            .arg(GATEWAY)
-            .arg("run")
-            .env("CAIRN_GATEWAY_ROOT", root.path())
-            .stdout(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
-        let mut lines = BufReader::new(process.stdout.take().unwrap()).lines();
-        let ready = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+        let gateway = cairn_node_gateway::Gateway::bind(config, root.path())
             .await
-            .unwrap()
-            .unwrap()
             .unwrap();
-        assert!(ready.contains("listening"), "{ready}");
         assert!(root.path().join("socket/gateway.sock").exists());
+        let origin = format!("http://{}", gateway.local_addr().unwrap());
+        let statistics = gateway.statistics();
+        let stop = tokio_util::sync::CancellationToken::new();
+        tokio::spawn(gateway.serve(stop.clone()));
         Self {
-            origin: format!("http://127.0.0.1:{port}"),
-            _process: process,
+            origin,
+            statistics,
+            stop,
             _root: root,
         }
+    }
+
+    fn carried(&self) -> (u64, u64) {
+        (
+            self.statistics.direct.load(Ordering::Relaxed),
+            self.statistics.relay.load(Ordering::Relaxed),
+        )
+    }
+}
+
+impl Drop for Gateway {
+    fn drop(&mut self) {
+        self.stop.cancel();
     }
 }
 
@@ -82,9 +84,16 @@ async fn create_enrollment(relay: &RelayedInstallation, body: Value) -> Value {
     response.json().await.unwrap()
 }
 
-#[tokio::test]
-async fn a_node_without_a_manager_address_enrolls_and_transfers_through_beacon() {
-    // Node routes the manager serves; this one echoes large bodies.
+/// The pin at the end of a Beacon install command.
+fn pin(enrollment: &Value) -> String {
+    let command = enrollment["installCommand"].as_str().unwrap();
+    let pin = command.rsplit(' ').next().unwrap().to_owned();
+    assert!(cairn_protocol::nodes::valid_pin(&pin), "{command}");
+    pin
+}
+
+/// A relayed installation whose manager also echoes large bodies on a node route.
+async fn echoing_installation() -> (RelayedInstallation, String) {
     let echo = axum::Router::new()
         .route(
             "/internal/nodes/fixture-echo",
@@ -96,28 +105,13 @@ async fn a_node_without_a_manager_address_enrolls_and_transfers_through_beacon()
         .as_str()
         .unwrap()
         .to_owned();
+    (relay, installation)
+}
 
-    let native = create_enrollment(&relay, json!({ "name": "Desktop", "backend": "native" })).await;
-    assert_eq!(native["route"], "beacon");
-    assert_eq!(native["managerUrl"], Value::Null);
-    assert_eq!(
-        native["installCommand"],
-        format!(
-            "curl --fail --silent --show-error '{}/install/node.sh' | sudo bash -s -- '{installation}' native",
-            relay.app.url
-        )
-    );
-    // A direct address stays available and keeps the node off Beacon.
-    let direct = create_enrollment(
-        &relay,
-        json!({ "name": "VPN", "managerUrl": "https://manager.vpn.example" }),
-    )
-    .await;
-    assert_eq!(direct["route"], "direct");
-    assert_eq!(direct["managerUrl"], "https://manager.vpn.example");
-
-    let invitation = create_enrollment(&relay, json!({ "name": "Office" })).await;
-    let gateway = Gateway::start(&relay.app.url, &installation).await;
+/// Enrolls through `gateway`, then checks heartbeats, a disk-sized transfer
+/// and that only node routes answer. Returns the node token.
+async fn exercise(relay: &RelayedInstallation, gateway: &Gateway) -> String {
+    let invitation = create_enrollment(relay, json!({ "name": "Office" })).await;
     let client = reqwest::Client::new();
     let response = client
         .post(format!("{}/internal/nodes/enroll", gateway.origin))
@@ -141,13 +135,13 @@ async fn a_node_without_a_manager_address_enrolls_and_transfers_through_beacon()
     assert_eq!(response.status(), StatusCode::OK);
     let node: Value = response.json().await.unwrap();
     assert_eq!(node["nodeId"], invitation["nodeId"]);
-    let token = node["token"].as_str().unwrap();
+    let token = node["token"].as_str().unwrap().to_owned();
 
     // Several requests reuse one local connection, and so one channel.
     for _ in 0..3 {
         let heartbeat = client
             .post(format!("{}/internal/nodes/heartbeat", gateway.origin))
-            .bearer_auth(token)
+            .bearer_auth(&token)
             .json(&json!({}))
             .send()
             .await
@@ -162,7 +156,7 @@ async fn a_node_without_a_manager_address_enrolls_and_transfers_through_beacon()
         .unwrap();
     assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
 
-    // Disk-sized bodies cross many channel messages in both directions.
+    // Disk-sized bodies cross many messages in both directions.
     let body: Vec<u8> = (0..8_000_000u32).map(|index| (index % 251) as u8).collect();
     let echoed = client
         .post(format!("{}/internal/nodes/fixture-echo", gateway.origin))
@@ -198,14 +192,118 @@ async fn a_node_without_a_manager_address_enrolls_and_transfers_through_beacon()
             .unwrap();
         assert!(response.starts_with("HTTP/1.1 404"), "{route}: {response}");
     }
+    token
+}
+
+#[tokio::test]
+async fn a_node_without_a_manager_address_connects_directly_after_beacon_introduces_it() {
+    let (relay, installation) = echoing_installation().await;
+
+    let native = create_enrollment(&relay, json!({ "name": "Desktop", "backend": "native" })).await;
+    assert_eq!(native["route"], "beacon");
+    assert_eq!(native["managerUrl"], Value::Null);
+    let pin = pin(&native);
+    assert_eq!(
+        native["installCommand"],
+        format!(
+            "curl --fail --silent --show-error '{}/install/node.sh' | sudo bash -s -- '{installation}' native {pin}",
+            relay.app.url
+        )
+    );
+    // The pin is the manager's node certificate, kept across enrollments.
+    let stored: Value = serde_json::from_slice(
+        &std::fs::read(
+            relay
+                .installation
+                .config
+                .data_dir
+                .join("installation-relay/node-certificate.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let certificate = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        stored["certificate"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(pin, hex::encode(Sha256::digest(&certificate)));
+    let again = create_enrollment(&relay, json!({ "name": "Again", "backend": "native" })).await;
+    assert_eq!(pin, self::pin(&again));
+    // A direct address stays available and keeps the node off Beacon.
+    let direct = create_enrollment(
+        &relay,
+        json!({ "name": "VPN", "managerUrl": "https://manager.vpn.example" }),
+    )
+    .await;
+    assert_eq!(direct["route"], "direct");
+    assert_eq!(direct["managerUrl"], "https://manager.vpn.example");
+
+    let gateway = Gateway::start(&relay.app.url, &installation, &pin, true).await;
+    // Connections use Beacon until the direct connection is up.
+    let client = reqwest::Client::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while gateway.carried().0 == 0 {
+            let _ = client
+                .post(format!("{}/internal/nodes/heartbeat", gateway.origin))
+                .timeout(Duration::from_secs(5))
+                .json(&json!({}))
+                .send()
+                .await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .expect("direct connection");
+    let (_, relayed) = gateway.carried();
+    exercise(&relay, &gateway).await;
+    // Every connection after that went direct: Beacon carried none.
+    assert_eq!(gateway.carried().1, relayed);
+
+    drop(gateway);
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn without_a_direct_connection_beacon_carries_tls_to_the_pinned_manager() {
+    let (relay, installation) = echoing_installation().await;
+    let pin =
+        pin(&create_enrollment(&relay, json!({ "name": "Office", "backend": "native" })).await);
+
+    let gateway = Gateway::start(&relay.app.url, &installation, &pin, false).await;
+    let token = exercise(&relay, &gateway).await;
+    assert_eq!(gateway.carried().0, 0);
+    assert!(gateway.carried().1 > 0);
+
+    // Another certificate is refused on both paths: Beacon cannot pose as
+    // the manager, and the node is told why.
+    let impostor = Gateway::start(&relay.app.url, &installation, &"0".repeat(64), true).await;
+    let refused = reqwest::Client::new()
+        .post(format!("{}/internal/nodes/heartbeat", impostor.origin))
+        .bearer_auth(&token)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_GATEWAY);
+    let refused: Value = refused.json().await.unwrap();
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("certificate does not match"),
+        "{refused}"
+    );
+    assert_eq!(impostor.carried(), (0, 0));
 
     // Channels end with the installation's tunnel; the node is told why.
     relay.stop.cancel();
+    let client = reqwest::Client::new();
     let offline = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let response = client
                 .post(format!("{}/internal/nodes/heartbeat", gateway.origin))
-                .bearer_auth(token)
+                .bearer_auth(&token)
                 .json(&json!({}))
                 .send()
                 .await;
@@ -226,18 +324,18 @@ async fn a_node_without_a_manager_address_enrolls_and_transfers_through_beacon()
             .contains("offline or must be updated")
     );
 
-    drop(gateway);
+    drop((gateway, impostor));
     relay.close().await;
 }
 
 #[tokio::test]
-async fn beacon_accepts_node_channels_only_for_current_installations() {
+async fn beacon_accepts_node_channels_and_offers_only_for_current_installations() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     let identity = identity(&relay);
     let installation = identity["installationId"].as_str().unwrap();
     let ws = relay.app.url.replace("http:", "ws:");
 
-    // An unknown installation has no tunnel to carry the channel.
+    // An unknown installation has no tunnel to carry the channel or the offer.
     let unknown = uuid::Uuid::new_v4();
     let refused =
         tokio_tungstenite::connect_async(format!("{ws}/api/relay/{unknown}/nodes/connect"))
@@ -247,6 +345,63 @@ async fn beacon_accepts_node_channels_only_for_current_installations() {
         panic!("expected an HTTP refusal, got {refused:?}");
     };
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let offer = relay
+        .app
+        .client
+        .post(format!(
+            "{}/api/relay/{unknown}/nodes/direct",
+            relay.app.url
+        ))
+        .json(&json!({ "sdp": "v=0" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(offer.status(), StatusCode::SERVICE_UNAVAILABLE);
+    // Oversized offers never reach the installation.
+    let oversized = relay
+        .app
+        .client
+        .post(format!(
+            "{}/api/relay/{installation}/nodes/direct",
+            relay.app.url
+        ))
+        .json(&json!({ "sdp": "a".repeat(cairn_protocol::nodes::MAX_SDP + 1) }))
+        .send()
+        .await
+        .unwrap();
+    assert!(oversized.status().is_client_error());
+    // An invalid offer gets no answer, so the node uses Beacon.
+    let invalid = relay
+        .app
+        .client
+        .post(format!(
+            "{}/api/relay/{installation}/nodes/direct",
+            relay.app.url
+        ))
+        .json(&json!({ "sdp": "v=0" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let ice: Value = relay
+        .app
+        .client
+        .get(format!(
+            "{}/api/relay/{installation}/nodes/direct",
+            relay.app.url
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        ice["iceServers"][0]["urls"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("stun:")
+    );
 
     // Only the installation's own identity may accept a channel.
     for token in ["", "wrong"] {
@@ -285,31 +440,44 @@ async fn beacon_accepts_node_channels_only_for_current_installations() {
 }
 
 #[tokio::test]
-async fn beacon_serves_the_node_bootstrap_with_the_gateway_checksum() {
-    let app = common::Fixture::new().await;
-    let script = app
-        .client
-        .get(format!("{}/install/node.sh", app.url))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(script.status(), 200);
-    assert_eq!(script.headers()["cache-control"], "no-store");
-    let script = script.text().await.unwrap();
+async fn beacon_serves_the_node_gateway_with_its_checksum_in_the_bootstrap() {
+    let get = |router: axum::Router, path: &'static str| async move {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}{path}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let response = reqwest::get(url).await.unwrap();
+        let status = response.status();
+        let cache = response.headers()["cache-control"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let body = response.bytes().await.unwrap();
+        server.abort();
+        (status, cache, body)
+    };
+    let binary = b"\x7fELF node gateway".to_vec();
+    let router =
+        cairn_beacon::installer::gateway_router("https://cairn.example", Some(binary.clone()));
+    let (status, cache, script) = get(router.clone(), "/install/node.sh").await;
+    assert_eq!(status, 200);
+    assert_eq!(cache, "no-store");
+    let script = String::from_utf8(script.to_vec()).unwrap();
     assert!(script.starts_with("#!/usr/bin/env bash"));
-    assert!(script.contains(&format!("CAIRN_BEACON_ORIGIN='{}'", app.url)));
+    assert!(script.contains("CAIRN_BEACON_ORIGIN='https://cairn.example'"));
+    assert!(script.contains(&format!(
+        "CAIRN_GATEWAY_SHA256={}",
+        hex::encode(Sha256::digest(&binary))
+    )));
     assert!(!script.contains("__CAIRN_"));
+    let (status, _, served) = get(router, "/install/node-gateway").await;
+    assert_eq!(status, 200);
+    assert_eq!(served.as_ref(), binary.as_slice());
 
-    let gateway = app
-        .client
-        .get(format!("{}/install/node-gateway.py", app.url))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(gateway.status(), 200);
-    let gateway = gateway.bytes().await.unwrap();
-    assert_eq!(gateway.as_ref(), std::fs::read(GATEWAY).unwrap().as_slice());
-    let checksum = hex::encode(Sha256::digest(&gateway));
-    assert!(script.contains(&format!("CAIRN_GATEWAY_SHA256={checksum}")));
-    app.close().await;
+    // A Beacon without the gateway says so instead of installing half a node.
+    let router = cairn_beacon::installer::gateway_router("https://cairn.example", None);
+    let (status, _, script) = get(router, "/install/node.sh").await;
+    assert_eq!(status, 200);
+    let script = String::from_utf8(script.to_vec()).unwrap();
+    assert!(script.contains("does not provide the node gateway"));
+    assert!(script.contains("exit 1"));
 }

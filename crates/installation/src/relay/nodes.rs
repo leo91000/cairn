@@ -1,7 +1,14 @@
-//! The installation side of a node channel. Beacon pairs a node's connection
-//! with a WebSocket opened here; the manager answers the node routes on it as
-//! if the node had connected directly. Each request still carries the node's
-//! own enrollment code, token or disk grant.
+//! Nodes added without a manager address. They connect directly when the
+//! networks allow it ([`direct`]); otherwise Beacon pairs the node's
+//! connection with a WebSocket opened here and carries TLS between them. Both
+//! end on the manager's [`NodeCertificate`], and the manager answers only the
+//! node routes, each request still carrying the node's own code, token or grant.
+mod certificate;
+mod direct;
+
+pub(crate) use certificate::NodeCertificate;
+pub(crate) use direct::NodePeers;
+
 use crate::error::{Error, Result};
 use axum::{
     Router,
@@ -55,7 +62,9 @@ pub(super) async fn accept(
     id: &str,
     address: Option<&str>,
     router: Router,
+    certificate: std::sync::Arc<NodeCertificate>,
 ) -> Result<()> {
+    let tls = certificate.tls()?;
     crate::validation::uuid(id)?;
     let mut url = beacon
         .join(&format!("api/relay/{installation}/nodes/{id}/accept"))
@@ -90,17 +99,21 @@ pub(super) async fn accept(
     let address = address
         .and_then(|value| value.parse::<IpAddr>().ok())
         .unwrap_or(IpAddr::from([0, 0, 0, 0]));
-    serve(socket, router, SocketAddr::new(address, 0)).await;
+    serve(socket, router, SocketAddr::new(address, 0), tls).await;
     Ok(())
 }
 
-/// Answers HTTP/1.1 carried as binary messages on `socket`. `peer` is the
-/// node's address as Beacon saw it, used for rate limiting.
-pub(crate) async fn serve<S>(socket: WebSocketStream<S>, router: Router, peer: SocketAddr)
-where
+/// Answers HTTP/1.1 over TLS carried as binary messages on `socket`. `peer`
+/// is the node's address as Beacon saw it, used for rate limiting.
+async fn serve<S>(
+    socket: WebSocketStream<S>,
+    router: Router,
+    peer: SocketAddr,
+    tls: tokio_rustls::TlsAcceptor,
+) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let (http_side, channel_side) = tokio::io::duplex(BUFFER);
+    let (tls_side, channel_side) = tokio::io::duplex(BUFFER);
     let (mut from_channel, mut to_http) = tokio::io::split(channel_side);
     let (mut sink, mut stream) = socket.split();
 
@@ -137,6 +150,22 @@ where
         let _ = sink.send(Message::Close(None)).await;
     };
 
+    let connection = async move {
+        // A node that cannot complete the handshake pinned another certificate.
+        match tokio::time::timeout(SILENCE, tls.accept(tls_side)).await {
+            Ok(Ok(stream)) => serve_connection(stream, router, peer).await,
+            _ => tracing::debug!("Node channel TLS handshake failed"),
+        }
+    };
+
+    tokio::join!(connection, inbound, outbound);
+}
+
+/// Serves node routes over HTTP/1.1 on one connection of a node.
+async fn serve_connection<I>(io: I, router: Router, peer: SocketAddr)
+where
+    I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let service = tower::service_fn(move |mut request: Request<hyper::body::Incoming>| {
         let router = router.clone();
         async move {
@@ -145,7 +174,7 @@ where
                     .status(StatusCode::NOT_FOUND)
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"error":"Only node routes are available through Beacon."}"#,
+                        r#"{"error":"Only node routes are available to nodes without a manager address."}"#,
                     ))
                     .unwrap();
                 return Ok::<_, Infallible>(refused);
@@ -154,15 +183,12 @@ where
             router.oneshot(request.map(Body::new)).await
         }
     });
-    let connection = http1::Builder::new()
-        .serve_connection(TokioIo::new(http_side), TowerToHyperService::new(service));
-    let connection = async move {
-        if let Err(error) = connection.await {
-            tracing::debug!(%error, "Node channel connection closed");
-        }
-    };
-
-    tokio::join!(connection, inbound, outbound);
+    if let Err(error) = http1::Builder::new()
+        .serve_connection(TokioIo::new(io), TowerToHyperService::new(service))
+        .await
+    {
+        tracing::debug!(%error, "Node connection closed");
+    }
 }
 
 #[cfg(test)]
@@ -170,7 +196,7 @@ mod tests {
     use super::node_route;
 
     #[test]
-    fn only_node_routes_cross_beacon() {
+    fn only_node_routes_are_served() {
         for path in [
             "/internal/nodes/enroll",
             "/internal/nodes/heartbeat",

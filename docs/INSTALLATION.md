@@ -33,7 +33,8 @@ its local runner, which then reads conversation disks from exactly this origin.
 Every other controller keeps the HTTPS rule: remote nodes enroll, connect and
 read disks over HTTPS, HTTP being accepted only on loopback. A node added without
 an address uses that loopback exception: its local gateway carries each connection
-to the manager through Beacon, so this installation still publishes no port. See
+to the manager, directly or through Beacon, encrypted to the manager's pinned node
+certificate, so this installation still publishes no port. See
 [additional execution nodes](DEPLOYMENT.md#additional-execution-nodes).
 
 Agents never use this origin: their VMs cannot resolve or reach it. Inside a VM,

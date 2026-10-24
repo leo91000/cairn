@@ -52,8 +52,12 @@ La mise en relation par Beacon d’une interface et d’une installation pour é
 La permission signée par Beacon, limitée à une installation, un compte, une session et quelques minutes, sans laquelle l’installation refuse une connexion directe. Sa révocation ou son échéance ferme la connexion.
 
 **Passerelle de node** :
-Service local d’une machine ajoutée sans adresse du manager, par lequel sa node joint le manager à travers Beacon. Elle ne détient aucun droit : la node et le manager s’authentifient toujours entre eux.
+Service local d’une machine ajoutée sans adresse du manager, par lequel sa node joint le manager : directement quand les réseaux le permettent après une mise en relation par Beacon, sinon par Beacon, toujours chiffré jusqu’au **certificat de node** du manager. Elle ne détient aucun droit : la node et le manager s’authentifient toujours entre eux.
 _Avoid_ : proxy, tunnel de node
+
+**Certificat de node** :
+Certificat persistant du manager sur lequel se terminent les connexions des nodes ajoutées sans adresse. Son empreinte figure dans la commande d’installation, et la passerelle refuse tout autre certificat.
+_Avoid_ : certificat TLS du manager
 
 **Node d’exécution** :
 Machine rattachée à une installation pour y effectuer le travail d’un agent, selon ses capacités et les autorisations accordées. Une node peut être disponible de manière intermittente.
