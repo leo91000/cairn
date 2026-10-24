@@ -146,6 +146,12 @@ async function main() {
           isDefault: true,
           defaultReasoningEffort: 'low',
           supportedReasoningEfforts: [{ reasoningEffort: 'low', description: 'Quick responses' }, { reasoningEffort: 'high', description: 'Think through complex changes' }],
+          // Speeds depend on the account: only `all-models` offers the fixture's Ultrafast.
+          serviceTiers: [
+            { id: 'priority', name: 'Fast', description: '1.5x speed, increased usage' },
+            ...(id === 'all-models' ? [{ id: 'ultrafast', name: 'Ultrafast', description: 'Fastest speed, highest usage' }] : []),
+          ],
+          defaultServiceTier: null,
         }
         const deep = {
           id: 'deep-id',
@@ -156,6 +162,8 @@ async function main() {
           isDefault: false,
           defaultReasoningEffort: 'medium',
           supportedReasoningEfforts: [{ reasoningEffort: 'medium', description: 'Balanced depth' }, { reasoningEffort: 'ultra', description: 'Take time for the hardest problems' }],
+          serviceTiers: [],
+          defaultServiceTier: null,
         }
         result = request.params.cursor
           ? {

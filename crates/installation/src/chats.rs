@@ -120,6 +120,7 @@ fn same_content(a: &Value, b: &Value) -> bool {
         && text(a, "provider") == text(b, "provider")
         && a["model"] == b["model"]
         && text(a, "reasoning") == text(b, "reasoning")
+        && text(a, "speed") == text(b, "speed")
         && crate::attachments::same(a, b)
 }
 
@@ -210,15 +211,28 @@ pub(crate) fn history_run(db: &Db<'_>, id: &str) -> Result<String> {
     })
 }
 
-/// Steering joins the running turn, whose provider, model and reasoning are fixed.
+/// Steering joins the running turn, whose provider, model, reasoning and speed are fixed.
 fn changes_running_agent(message: &Value, run: &Value) -> Result<bool> {
     let agent = &run["snapshot"]["agent"];
     let provider = Value::from(Provider::of_run(run)?.as_str());
-    let differs =
-        |key: &str, current: &Value| !text(message, key).is_empty() && message[key] != *current;
+    let differs = |key: &str, current: &Value| {
+        !text(message, key).is_empty() && text(message, key) != current.as_str().unwrap_or("")
+    };
     Ok(differs("provider", &provider)
         || differs("model", &agent["model"])
-        || differs("reasoning", &agent["reasoning"]))
+        || differs("reasoning", &agent["reasoning"])
+        || differs("speed", &agent["speed"]))
+}
+
+/// Only Codex offers a speed choice. A message naming another coding agent cannot ask for one.
+fn validate_speed(message: &Value) -> Result<()> {
+    let provider = text(message, "provider");
+    if !text(message, "speed").is_empty() && !provider.is_empty() && provider != "codex" {
+        return Err(Error::bad(
+            "Speed applies only to Codex. Remove it or choose Codex for this message.",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_steer(db: &Db<'_>, chat: &Value, message: &Value) -> Result<()> {
@@ -230,7 +244,7 @@ fn validate_steer(db: &Db<'_>, chat: &Value, message: &Value) -> Result<()> {
     };
     if run_is_active(&run) && changes_running_agent(message, &run)? {
         return Err(Error::conflict(
-            "Queue this message to change provider, model or reasoning on the next turn.",
+            "Queue this message to change provider, model, reasoning or speed on the next turn.",
         ));
     }
     Ok(())
@@ -317,6 +331,7 @@ pub(crate) fn send(
         return Ok(existing.clone());
     }
     require_sendable(db, &chat, &messages, text(&values, "id"))?;
+    validate_speed(&values)?;
     validate_steer(db, &chat, &values)?;
     if messages.is_empty() {
         let private_answer = answer
@@ -399,6 +414,7 @@ pub(crate) fn edit_as(
         return Err(Error::conflict("A submitted answer cannot be edited."));
     }
     crate::attachments::message(db, chat_id, &mut values)?;
+    validate_speed(&values)?;
     validate_steer(db, &chat, &values)?;
     crate::store::merge(&mut current, &values);
     db.put_message(&current)
@@ -508,7 +524,8 @@ fn needs_attention(chat: &Value, run: Option<&Value>) -> bool {
         && chat["sessionRestartRequested"] != true
 }
 
-/// Applies the provider, model and reasoning chosen for this message.
+/// Applies the provider, model, reasoning and speed chosen for this message. The speed is
+/// independent of the model: it carries over model changes, not a change of coding agent.
 fn select_agent(snapshot: &mut Value, run: Option<&Value>, message: &Value) -> Result<()> {
     let previous = run.map_or(
         &snapshot["snapshot"]["agent"],
@@ -523,6 +540,7 @@ fn select_agent(snapshot: &mut Value, run: Option<&Value>, message: &Value) -> R
     .to_owned();
     let inherited_model = text(previous, "model").to_owned();
     let inherited_reasoning = text(previous, "reasoning").to_owned();
+    let inherited_speed = text(previous, "speed").to_owned();
 
     let switched = provider != Provider::of_run(snapshot)?.as_str();
     let agent = &mut snapshot["snapshot"]["agent"];
@@ -541,8 +559,15 @@ fn select_agent(snapshot: &mut Value, run: Option<&Value>, message: &Value) -> R
             String::new()
         }
         .into();
+        set_speed(
+            agent,
+            if implicit_provider {
+                &inherited_speed
+            } else {
+                ""
+            },
+        );
     }
-    agent["provider"] = provider.into();
     if !text(message, "model").is_empty() {
         agent["model"] = message["model"].clone();
         agent["reasoning"] = text(message, "reasoning").into();
@@ -550,7 +575,24 @@ fn select_agent(snapshot: &mut Value, run: Option<&Value>, message: &Value) -> R
     if !text(message, "reasoning").is_empty() {
         agent["reasoning"] = message["reasoning"].clone();
     }
+    if !text(message, "speed").is_empty() {
+        set_speed(agent, text(message, "speed"));
+    }
+    // Another coding agent's run has no speed to keep, even one inherited from its profile.
+    if provider != Provider::Codex.as_str() {
+        set_speed(agent, "");
+    }
+    agent["provider"] = provider.into();
     Ok(())
+}
+
+/// Snapshots without a speed, including every earlier one, inherit Codex's own.
+fn set_speed(agent: &mut Value, speed: &str) {
+    if !speed.is_empty() {
+        agent["speed"] = speed.into();
+    } else if let Some(agent) = agent.as_object_mut() {
+        agent.remove("speed");
+    }
 }
 
 /// Reuses the chat's run for the next turn, handing the transcript to a fresh
@@ -1355,11 +1397,77 @@ mod tests {
         message["provider"] = "codex".into();
         message["model"] = "gpt-6-sol".into();
         validate_steer(&db, &chat, &message).unwrap();
+
+        // The running turn keeps its speed; the run has none, so only an explicit one differs.
+        message["speed"] = "priority".into();
+        assert_eq!(
+            validate_steer(&db, &chat, &message).unwrap_err().status,
+            409
+        );
+        message["speed"] = "".into();
+        validate_steer(&db, &chat, &message).unwrap();
+
         let unknown = json!({
             "id": id(),
             "text": "Continue",
             "provider": "unknown"
         });
         assert!(parse("message", unknown).is_err());
+    }
+
+    #[test]
+    fn speed_is_independent_of_the_model_but_belongs_to_codex() {
+        let codex = |speed: Option<&str>| {
+            let mut agent =
+                json!({ "provider": "codex", "model": "gpt-6-sol", "reasoning": "high" });
+            if let Some(speed) = speed {
+                agent["speed"] = speed.into();
+            }
+            json!({ "snapshot": { "agent": agent } })
+        };
+        let select = |previous: &Value, message: Value| {
+            let mut snapshot = codex(None);
+            select_agent(&mut snapshot, Some(previous), &message).unwrap();
+            snapshot["snapshot"]["agent"].clone()
+        };
+
+        // A model change resets the reasoning level, not the speed.
+        let previous = codex(Some("priority"));
+        let agent = select(&previous, json!({ "model": "gpt-6-astra" }));
+        assert_eq!(agent["model"], "gpt-6-astra");
+        assert_eq!(agent["reasoning"], "");
+        assert_eq!(agent["speed"], "priority");
+
+        // Reasoning changes keep it too, and an explicit speed replaces it.
+        let agent = select(&previous, json!({ "reasoning": "low" }));
+        assert_eq!(agent["speed"], "priority");
+        let agent = select(&previous, json!({ "speed": "standard" }));
+        assert_eq!(agent["speed"], "standard");
+        assert_eq!(agent["reasoning"], "high");
+
+        // Earlier runs and messages without a speed keep none.
+        let agent = select(&codex(None), json!({ "text": "Continue" }));
+        assert!(agent.get("speed").is_none());
+
+        // Another coding agent has no speed, and returning to Codex starts from its default.
+        let agent = select(&previous, json!({ "provider": "claude" }));
+        assert!(agent.get("speed").is_none());
+        let claude = json!({ "snapshot": { "agent": { "provider": "claude", "model": "opus", "speed": "priority" } } });
+        let agent = select(&claude, json!({ "text": "Continue" }));
+        assert!(agent.get("speed").is_none());
+        let agent = select(&claude, json!({ "provider": "codex" }));
+        assert!(agent.get("speed").is_none());
+        let agent = select(&claude, json!({ "provider": "codex", "speed": "priority" }));
+        assert_eq!(agent["speed"], "priority");
+
+        assert!(validate_speed(&json!({ "provider": "codex", "speed": "priority" })).is_ok());
+        assert!(validate_speed(&json!({ "speed": "priority" })).is_ok());
+        assert!(validate_speed(&json!({ "provider": "opencode", "speed": "" })).is_ok());
+        assert_eq!(
+            validate_speed(&json!({ "provider": "claude", "speed": "priority" }))
+                .unwrap_err()
+                .status,
+            400
+        );
     }
 }

@@ -27,6 +27,8 @@ data class ChatMessage(
     val attachments: List<ChatAttachment> = emptyList(),
     val questionId: String? = null,
     val provider: String = "",
+    /** The Codex speed this message asked for; empty on earlier messages. */
+    val speed: String = "",
 )
 
 @Serializable data class QuestionOption(val label: String, val description: String = "")
@@ -172,6 +174,16 @@ data class HistoryPage(
 
 @Serializable data class ReasoningOption(val reasoningEffort: String, val description: String = "")
 
+/** A speed Codex offers for a model. [description] is Codex's own wording of its usage. */
+@Serializable
+data class ServiceTier(
+    val id: String,
+    val name: String = "",
+    val description: String = "",
+    /** Offered by some enabled accounts only; runs asking for it use one of those. */
+    val limited: Boolean = false,
+)
+
 /** One connected provider offering a model, as `provider/model`. */
 @Serializable
 data class ModelRoute(
@@ -195,6 +207,10 @@ data class CodingAgentModel(
     val supportedReasoningEfforts: List<ReasoningOption> = emptyList(),
     /** Models offered by several providers. [model] then runs on the first available route. */
     val routes: List<ModelRoute> = emptyList(),
+    /** Codex speeds besides standard; null in catalogs cached before speeds were listed. */
+    val serviceTiers: List<ServiceTier>? = null,
+    /** The tier Codex uses when no speed is chosen, when its catalog names one. */
+    val defaultServiceTier: String? = null,
 )
 
 fun CodingAgentModel.route(value: String): ModelRoute? = routes.find { it.model == value }

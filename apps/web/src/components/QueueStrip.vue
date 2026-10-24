@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import type { ChatMessage } from '../../../../packages/contracts/chats'
+import type { ServiceTier } from '../../../../packages/contracts/models'
 import { computed, ref } from 'vue'
+import { speedLabel } from '../../../../packages/contracts/models'
 import {
   Clock,
   Pause,
@@ -16,12 +18,14 @@ import Modal from './Modal.vue'
 
 // Follow-ups waiting for the agent, drawn at the top of the composer as on Android. The next
 // message can be sent now; any message opens its actions (send now, edit, pause, remove).
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   pending: ChatMessage[]
   paused: boolean
   working: boolean
   busy: boolean
-}>()
+  /** Codex speeds, to name a queued message's speed. */
+  tiers?: ServiceTier[]
+}>(), { tiers: () => [] })
 const emit = defineEmits<{
   steer: [message: ChatMessage]
   edit: [message: ChatMessage]
@@ -41,7 +45,9 @@ function note(message: ChatMessage) {
   if (message.mode === 'steer')
     return 'Delivered as soon as possible'
   const files = message.attachments?.length ?? 0
-  return files ? `${files} attachment${files > 1 ? 's' : ''}` : ''
+  // Each queued message keeps the speed chosen when it was written.
+  const speed = message.speed ? `${speedLabel(message.speed, props.tiers)} speed` : ''
+  return [files ? `${files} attachment${files > 1 ? 's' : ''}` : '', speed].filter(Boolean).join(' · ')
 }
 
 // Close the sheet, then act on the message it showed.

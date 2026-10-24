@@ -12,6 +12,29 @@
     }
   },
   {
+    "name": "list_models",
+    "description": "List the models a coding agent offers on its enabled accounts: reasoning levels and, for Codex, the speeds (service tiers) each model offers with Codex's own description of their usage. Use a serviceTiers id, or \"standard\", as an agent or message speed. A tier marked limited is missing from some accounts; runs that ask for it go to an account that offers it.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "codex",
+            "claude",
+            "opencode"
+          ],
+          "default": "codex"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "save_agent",
     "description": "Create an agent profile. Execution access is explicit.",
     "scope": "manage",
@@ -46,6 +69,12 @@
         },
         "reasoning": {
           "default": "high",
+          "type": "string",
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
+        },
+        "speed": {
+          "default": "",
           "type": "string",
           "maxLength": 40,
           "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
@@ -214,6 +243,7 @@
         "description",
         "model",
         "reasoning",
+        "speed",
         "instructions",
         "timeoutMinutes",
         "access"
@@ -260,6 +290,11 @@
               "maxLength": 100
             },
             "reasoning": {
+              "type": "string",
+              "maxLength": 40,
+              "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
+            },
+            "speed": {
               "type": "string",
               "maxLength": 40,
               "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
@@ -1604,6 +1639,12 @@
               "type": "string",
               "maxLength": 40,
               "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
+            },
+            "speed": {
+              "default": "",
+              "type": "string",
+              "maxLength": 40,
+              "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
             }
           },
           "required": [
@@ -1613,7 +1654,8 @@
             "mode",
             "provider",
             "model",
-            "reasoning"
+            "reasoning",
+            "speed"
           ],
           "additionalProperties": false
         }
@@ -1690,6 +1732,12 @@
               "type": "string",
               "maxLength": 40,
               "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
+            },
+            "speed": {
+              "default": "",
+              "type": "string",
+              "maxLength": 40,
+              "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
             }
           },
           "required": [
@@ -1698,7 +1746,8 @@
             "mode",
             "provider",
             "model",
-            "reasoning"
+            "reasoning",
+            "speed"
           ],
           "additionalProperties": false
         }

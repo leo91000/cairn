@@ -1,0 +1,61 @@
+import type { CodingAgentModel } from '../../../packages/contracts/models'
+import { describe, expect, it } from 'vitest'
+import { speedLabel } from '../../../packages/contracts/models'
+import {
+  effectiveSpeed,
+  offersSpeed,
+  showsSpeed,
+  speedTier,
+} from '../src/speeds'
+
+function model(fields: Partial<CodingAgentModel>): CodingAgentModel {
+  return {
+    model: 'gpt-6-astra',
+    displayName: 'GPT-6 Astra',
+    description: '',
+    hidden: false,
+    isDefault: true,
+    defaultReasoningEffort: 'medium',
+    supportedReasoningEfforts: [],
+    ...fields,
+  }
+}
+
+const fast = { id: 'priority', name: 'Fast', description: '2x speed, increased usage' }
+const astra = model({ serviceTiers: [fast], defaultServiceTier: null })
+
+describe('codex speeds', () => {
+  it('uses the chosen speed, then the inherited one, then the model default', () => {
+    expect(effectiveSpeed('', '', astra)).toBe('standard')
+    expect(effectiveSpeed('', '', model({ serviceTiers: [fast], defaultServiceTier: 'priority' }))).toBe('priority')
+    expect(effectiveSpeed('', 'priority', astra)).toBe('priority')
+    expect(effectiveSpeed('standard', 'priority', astra)).toBe('standard')
+    expect(effectiveSpeed('', '', undefined)).toBe('standard')
+  })
+
+  it('treats catalogs without speeds as unknown rather than unsupported', () => {
+    expect(offersSpeed(astra, 'priority')).toBe(true)
+    expect(offersSpeed(astra, 'ultrafast')).toBe(false)
+    expect(offersSpeed(model({ serviceTiers: [] }), 'priority')).toBe(false)
+    expect(offersSpeed(model({}), 'priority')).toBe(true)
+    expect(offersSpeed(undefined, 'priority')).toBe(true)
+    expect(offersSpeed(model({ serviceTiers: [] }), 'standard')).toBe(true)
+  })
+
+  it('offers speeds only for Codex models listing them, or to keep a saved choice', () => {
+    expect(showsSpeed('codex', astra, '')).toBe(true)
+    expect(showsSpeed('codex', model({ serviceTiers: [] }), '')).toBe(false)
+    expect(showsSpeed('codex', model({}), 'priority')).toBe(true)
+    expect(showsSpeed('claude', astra, 'priority')).toBe(false)
+    expect(showsSpeed('opencode', astra, '')).toBe(false)
+  })
+
+  it('names speeds with Codex\'s own words', () => {
+    expect(speedLabel('priority', [fast])).toBe('Fast')
+    expect(speedLabel('standard')).toBe('Standard')
+    expect(speedLabel('ultra_fast')).toBe('Ultra fast')
+    expect(speedLabel('')).toBe('Default')
+    expect(speedTier(astra, 'priority')?.description).toBe('2x speed, increased usage')
+    expect(speedTier(astra, 'standard')).toBeUndefined()
+  })
+})
