@@ -13,6 +13,7 @@ pub(super) struct Allowance {
     pub requested: bool,
     pub reason: String,
     notice: Option<(u64, u8, String)>,
+    last_notice_at: i64,
 }
 
 #[derive(Clone, Default)]
@@ -31,6 +32,7 @@ impl Capacity {
                 requested: false,
                 reason: String::new(),
                 notice: None,
+                last_notice_at: 0,
             },
         );
     }
@@ -88,12 +90,19 @@ impl Capacity {
             tier,
             format!("{}:{}", self.negotiated, attempt.reason),
         );
+        let now = crate::config::now();
+        let immediate = attempt.notice.as_ref().is_none_or(|previous| {
+            previous.0 != state.0 || previous.2 != state.2 || tier > previous.1
+        });
+        let recovering = !immediate && now.saturating_sub(attempt.last_notice_at) < 60_000;
         let notice = if attempt.notice.as_ref() == Some(&state)
             || tier == 0 && attempt.notice.is_none()
+            || recovering
         {
             None
         } else {
             attempt.notice = Some(state);
+            attempt.last_notice_at = now;
             let gib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0 * 1024.0);
             let outcome = if !self.negotiated {
                 "Automatic growth is not negotiated with this installation; the current allowance remains in effect."
@@ -159,6 +168,43 @@ impl Capacity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn threshold_oscillation_does_not_flood_the_coding_agent() {
+        let mut capacity = Capacity::default();
+        capacity.register("attempt", "run", 100 * MIB);
+        assert!(
+            capacity
+                .observe("attempt", 81 * MIB, 0, 100 * MIB)
+                .unwrap()
+                .1
+                .is_some()
+        );
+        for used in [79, 81, 79, 81] {
+            assert!(
+                capacity
+                    .observe("attempt", used * MIB, 0, 100 * MIB)
+                    .unwrap()
+                    .1
+                    .is_none()
+            );
+        }
+        assert!(
+            capacity
+                .observe("attempt", 91 * MIB, 0, 100 * MIB)
+                .unwrap()
+                .1
+                .is_some()
+        );
+        capacity.attempts.get_mut("attempt").unwrap().last_notice_at -= 60_001;
+        assert!(
+            capacity
+                .observe("attempt", 70 * MIB, 0, 100 * MIB)
+                .unwrap()
+                .1
+                .is_some()
+        );
+    }
 
     #[test]
     fn warnings_count_tmp_preserve_user_authority_and_deduplicate_until_state_changes() {

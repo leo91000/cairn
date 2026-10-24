@@ -26,6 +26,16 @@ pub fn exists(state: &Path, run: &str) -> Result<bool> {
     )?))
 }
 
+/// Resume the retained journal as-is even if a manager grant arrived before a
+/// stop. The supervision path applies any outstanding allowance lazily after
+/// mount, without bootstrap's legacy whole-image materialization.
+fn preparation_size(directory: &Path, requested: u64) -> Result<u64> {
+    if storage::runtime::exists(directory) {
+        return Ok(storage::LazyDisk::geometry(&directory.join("lazy"))?.0);
+    }
+    Ok(requested)
+}
+
 fn ext4_bytes(superblock: &[u8; 1024]) -> Result<u64> {
     if u16::from_le_bytes(superblock[56..58].try_into().unwrap()) != 0xef53 {
         return Err(Error::conflict("Invalid native ext4 geometry."));
@@ -261,20 +271,13 @@ pub async fn mount(
         // file backend invalidates restored.json when it acquires its writer.
         remove(&directory.join("recovery.json")).await?;
         tokio::fs::File::open(directory).await?.sync_all().await?;
-        // A manager grant is durable before online growth. Retained geometry is
-        // authoritative if an older plan or a replay reaches this mount.
         let requested = plan["resources"]["diskMiB"]
             .as_u64()
             .ok_or_else(|| Error::bad("Missing native disk size."))?
             .saturating_mul(super::disk::MIB);
-        let retained = if storage::runtime::exists(directory) {
-            storage::LazyDisk::geometry(&directory.join("lazy"))?.0
-        } else {
-            0
-        };
         storage::bootstrap::prepare_native(
             directory,
-            requested.max(retained),
+            preparation_size(directory, requested)?,
             &plan["storage"],
             stop,
         )
@@ -1133,6 +1136,41 @@ pub fn used_bytes(path: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unapplied_grant_resumes_retained_journal_without_materializing_it() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join(crate::config::id());
+        let size = 4 * 1024 * 1024;
+        let manifest = json!({ "version": 1, "size": size, "blockSize": size,
+            "blocks": [{ "offset": 0, "size": size, "hash": null }] });
+        let context = json!({ "master": "http://127.0.0.1:1/", "grant": "synthetic", "policy": storage::policy::Policy::default() });
+        let disk = storage::runtime::create(&directory.join("lazy"), &manifest, &context)
+            .await
+            .unwrap();
+        disk.write_at(0, b"retained").unwrap();
+        disk.sync().unwrap();
+        drop(disk);
+        let requested = 2 * size;
+        let prepare = preparation_size(&directory, requested).unwrap();
+        assert_eq!(prepare, size);
+        storage::bootstrap::prepare_native(
+            &directory,
+            prepare,
+            &context,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            storage::LazyDisk::geometry(&directory.join("lazy"))
+                .unwrap()
+                .0,
+            size
+        );
+        assert!(!directory.join("data.ext4").exists());
+        assert!(!directory.join("bootstrap.pending").exists());
+    }
 
     #[test]
     fn host_recovery_selects_only_conversation_mounts_and_rejects_stacked_or_foreign_filesystems() {

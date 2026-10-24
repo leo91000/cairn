@@ -12,10 +12,12 @@ through their authenticated heartbeat. The coding agent needs no new tool and ga
 no permission to allocate storage. At 80% combined usage (or workspace capacity),
 the controller asks the manager for another 8 GiB. It waits until the previous
 allowance has reached ext4 before asking again. At 90% it emits another notice.
-Notices also describe denied capacity, successful grants, and installations that
+Recovery notices wait at least one minute to avoid threshold oscillation; increases
+in pressure, grants and capacity decisions are delivered immediately. Notices also
+describe denied capacity, successful grants, and installations that
 cannot negotiate growth. They enter each coding agent's steering channel as runtime
 information, never as user authorization or a delivered user message. Generic status
-events and `run.storage.capacity` carry the same information to existing clients.
+events and `run.diskCapacity` carry the same information to existing clients.
 
 The manager grants space in the same serialized database transaction used for
 admission. It counts measured local usage plus every unreleased attempt's unused

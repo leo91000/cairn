@@ -1,10 +1,5 @@
 use super::checkpoint::{Checkpoint, RunCheckpoint};
-use crate::{
-    error::{Error, Result},
-    run_output,
-    service::Service,
-    validation::text,
-};
+use crate::{error::Result, run_output, service::Service, validation::text};
 use serde_json::Value;
 use std::sync::LazyLock;
 use tokio::{
@@ -246,20 +241,10 @@ pub(super) async fn record(
     if event["type"] == "runtime.disk_notice" {
         let event = run_output::payload(&event, secrets);
         let message = text(&event, "text").to_owned();
-        let (run_id, capacity) = (id.to_owned(), event["capacity"].clone());
+        // Capacity is runtime diagnostic state, separate from the controller's
+        // authoritative storage document refreshed by the publication monitor.
         s.store
-            .transaction(move |db| {
-                let mut storage = db
-                    .run(&run_id)?
-                    .ok_or_else(|| Error::not_found("Run removed."))?["storage"]
-                    .clone();
-                if !storage.is_object() {
-                    storage = serde_json::json!({});
-                }
-                storage["capacity"] = capacity;
-                db.patch_run(&run_id, &serde_json::json!({ "storage": storage }))?;
-                Ok(())
-            })
+            .patch_run(id, serde_json::json!({ "diskCapacity": event["capacity"] }))
             .await?;
         s.store.event(id, "status", &message, Some(event)).await?;
         return Ok(false);

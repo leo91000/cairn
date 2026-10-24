@@ -995,15 +995,14 @@ impl Controller {
         };
         if let Some(notice) = notice {
             let directory = self.data.join("runs").join(run).join("chat-input");
-            private_dir(&directory).await?;
-            atomic_write(
-                &directory.join("disk-notice.json"),
+            crate::nodes::workspace::publish_native_notice(
+                &directory,
                 &serde_json::to_vec(&notice)?,
             )
             .await?;
             let event = json!({
                 "type": "runtime.disk_notice", "text": notice["text"],
-                "capacity": { "workspaceBytes": workspace, "temporaryBytes": temporary,
+                "capacity": { "capturedAt": crate::config::now(), "workspaceBytes": workspace, "temporaryBytes": temporary,
                     "allowanceBytes": allowance, "filesystemBytes": filesystem },
             });
             self.append(id, false, format!("{event}\n").as_bytes())

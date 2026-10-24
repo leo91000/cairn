@@ -123,9 +123,23 @@ async fn runtime_disk_notice_preserves_publication_metadata_and_redacts_all_payl
         )
         .await;
     let run = fixture.service.store.run(&fixture.id).await.unwrap();
-    let mut expected = storage;
-    expected["capacity"] = json!({ "allowanceBytes": 34359738368u64, "note": "[redacted]" });
-    assert_eq!(run["storage"], expected);
+    let expected = json!({ "allowanceBytes": 34359738368u64, "note": "[redacted]" });
+    assert_eq!(run["storage"], storage);
+    assert_eq!(run["diskCapacity"], expected);
+    // Ordinary storage polling replaces its own authoritative document.
+    fixture
+        .service
+        .store
+        .patch_run(
+            &fixture.id,
+            json!({ "storage": { "mode": "on-demand", "dirtyBytes": 0 } }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.service.store.run(&fixture.id).await.unwrap()["diskCapacity"],
+        expected
+    );
     let id = fixture.id.clone();
     let events = fixture
         .service

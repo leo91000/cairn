@@ -130,7 +130,7 @@ async fn pressure(s: &Service) -> Result<()> {
         for run in &runs {
             // Keep all publication/ownership guards; only the idle age changes.
             // A dirty or temporarily unavailable cache must not starve others.
-            match evict_clean(s, text(run, "id"), now()).await {
+            match evict_clean(s, text(run, "id"), now(), Some(&node)).await {
                 Ok(true) => {
                     reclaimed = true;
                     break;
@@ -159,7 +159,12 @@ async fn pressure(s: &Service) -> Result<()> {
     Ok(())
 }
 
-fn candidate(db: &mut Db<'_>, run: &str, cutoff: i64) -> Result<Option<(Value, Value, Value)>> {
+fn candidate(
+    db: &mut Db<'_>,
+    run: &str,
+    cutoff: i64,
+    expected_node: Option<&str>,
+) -> Result<Option<(Value, Value, Value)>> {
     let Some(current) = db.run(run)? else {
         return Ok(None);
     };
@@ -178,6 +183,9 @@ fn candidate(db: &mut Db<'_>, run: &str, cutoff: i64) -> Result<Option<(Value, V
     }
     let checkpoint = db.kv(&checkpoint::key(run))?.unwrap_or_default();
     let node_id = text(&checkpoint, "nodeId");
+    if expected_node.is_some_and(|expected| expected != node_id) {
+        return Ok(None);
+    }
     let Some(node) = db.get("nodes", node_id)? else {
         return Ok(None);
     };
@@ -233,10 +241,15 @@ fn candidate(db: &mut Db<'_>, run: &str, cutoff: i64) -> Result<Option<(Value, V
 }
 
 pub(crate) async fn evict_idle(s: &Service, run: &str, time: i64) -> Result<bool> {
-    evict_clean(s, run, time.saturating_sub(IDLE_MS)).await
+    evict_clean(s, run, time.saturating_sub(IDLE_MS), None).await
 }
 
-async fn evict_clean(s: &Service, run: &str, cutoff: i64) -> Result<bool> {
+async fn evict_clean(
+    s: &Service,
+    run: &str,
+    cutoff: i64,
+    expected_node: Option<&str>,
+) -> Result<bool> {
     let preparation = s.worker.run_preparation_lock(run).await;
     let Ok(_preparation) = preparation.try_lock() else {
         return Ok(false);
@@ -246,7 +259,11 @@ async fn evict_clean(s: &Service, run: &str, cutoff: i64) -> Result<bool> {
     }
     let _publication = s.node_backup_operation.lock(run).await;
     let id = run.to_owned();
-    let Some((node, point, expected)) = s.store.read(move |db| candidate(db, &id, cutoff)).await?
+    let expected_node = expected_node.map(str::to_owned);
+    let Some((node, point, expected)) = s
+        .store
+        .read(move |db| candidate(db, &id, cutoff, expected_node.as_deref()))
+        .await?
     else {
         return Ok(false);
     };
@@ -375,6 +392,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pressure_never_evicts_the_current_cache_on_another_node_after_a_move() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let (run, time, previous) = (id(), now(), id());
+                records(db, &run, time)?;
+                db.put(
+                    "node-volumes",
+                    &json!({ "id": format!("{run}:{previous}"),
+                "runId": run, "nodeId": previous, "materialized": true }),
+                )?;
+                assert_eq!(pressure_page(db, &previous)?[0]["id"], run);
+                assert!(candidate(db, &run, time, Some(&previous))?.is_none());
+                assert!(candidate(db, &run, time, Some(super::super::LOCAL_NODE_ID))?.is_some());
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn pressure_paginates_past_ineligible_old_caches_and_waits_for_post_eviction_observation()
     {
         let root = tempfile::tempdir().unwrap();
@@ -399,7 +438,7 @@ mod tests {
                 let page = pressure_page(db, node_id)?;
                 assert_eq!(page.len(), BATCH);
                 for run in &page {
-                    assert!(candidate(db, text(run, "id"), time)?.is_none());
+                    assert!(candidate(db, text(run, "id"), time, None)?.is_none());
                 }
                 let last = page.last().unwrap();
                 db.set(
@@ -410,7 +449,7 @@ mod tests {
                 let page = pressure_page(db, node_id)?;
                 assert_eq!(page.len(), 1);
                 assert_eq!(page[0]["id"], final_run);
-                assert!(candidate(db, &final_run, time)?.is_some());
+                assert!(candidate(db, &final_run, time, None)?.is_some());
                 let mut node = db.get("nodes", node_id)?.unwrap();
                 node["diskCapacity"] = json!({ "capturedAt": time - 2_000 });
                 db.set(
@@ -443,15 +482,15 @@ mod tests {
                 let mut attempt = db.get("node-attempts", text(&saved, "runnerId"))?.unwrap();
                 attempt["releasedAt"] = time.into();
                 db.put("node-attempts", &attempt)?;
-                assert!(candidate(db, &run, time - IDLE_MS)?.is_none());
-                assert!(candidate(db, &run, time)?.is_some());
+                assert!(candidate(db, &run, time - IDLE_MS, None)?.is_none());
+                assert!(candidate(db, &run, time, None)?.is_some());
                 attempt["released"] = false.into();
                 db.put("node-attempts", &attempt)?;
-                assert!(candidate(db, &run, time)?.is_none());
+                assert!(candidate(db, &run, time, None)?.is_none());
                 attempt["released"] = true.into();
                 db.put("node-attempts", &attempt)?;
                 db.patch_run(&run, &json!({ "backup": { "requestedRevision": 3 } }))?;
-                assert!(candidate(db, &run, time)?.is_none());
+                assert!(candidate(db, &run, time, None)?.is_none());
                 Ok(())
             })
             .await
@@ -465,8 +504,8 @@ mod tests {
         store.transaction(|db| {
             let (run, time) = (id(), now());
             records(db, &run, time)?;
-            assert!(candidate(db, &run, time - IDLE_MS - 1)?.is_none());
-            assert!(candidate(db, &run, time - IDLE_MS)?.is_some());
+            assert!(candidate(db, &run, time - IDLE_MS - 1, None)?.is_none());
+            assert!(candidate(db, &run, time - IDLE_MS, None)?.is_some());
             let original = db.run(&run)?.unwrap();
             for patch in [
                 json!({ "status": "queued" }), json!({ "status": "running" }),
@@ -475,14 +514,14 @@ mod tests {
                 json!({ "backup": { "status": "ready", "requestedRevision": 3, "acknowledgedRevision": 2 } }),
             ] {
                 db.patch_run(&run, &patch)?;
-                assert!(candidate(db, &run, time - IDLE_MS)?.is_none(), "{patch}");
+                assert!(candidate(db, &run, time - IDLE_MS, None)?.is_none(), "{patch}");
                 db.patch_run(&run, &original)?;
             }
             let saved = db.kv(&checkpoint::key(&run))?.unwrap();
             let mut execution = db.get("node-attempts", text(&saved, "runnerId"))?.unwrap();
             execution["releasedAt"] = (time - IDLE_MS + 1).into();
             db.put("node-attempts", &execution)?;
-            assert!(candidate(db, &run, time - IDLE_MS)?.is_none());
+            assert!(candidate(db, &run, time - IDLE_MS, None)?.is_none());
             execution["releasedAt"] = (time - IDLE_MS).into();
             db.put("node-attempts", &execution)?;
             // A real consumed destination reservation has no release timestamp.
@@ -490,14 +529,14 @@ mod tests {
                 "id": id(), "role": "destination", "runId": run, "nodeId": super::super::LOCAL_NODE_ID,
                 "released": true,
             }))?;
-            assert!(candidate(db, &run, time - IDLE_MS)?.is_some());
+            assert!(candidate(db, &run, time - IDLE_MS, None)?.is_some());
             execution["released"] = false.into();
             db.put("node-attempts", &execution)?;
-            assert!(candidate(db, &run, time - IDLE_MS)?.is_none());
+            assert!(candidate(db, &run, time - IDLE_MS, None)?.is_none());
             execution["released"] = true.into();
             execution["releasedAt"] = Value::Null;
             db.put("node-attempts", &execution)?;
-            assert!(candidate(db, &run, time - IDLE_MS)?.is_none());
+            assert!(candidate(db, &run, time - IDLE_MS, None)?.is_none());
             Ok(())
         }).await.unwrap();
     }
