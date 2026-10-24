@@ -13,6 +13,7 @@ use crate::{
     validation::{text, uuid},
 };
 use chrono::{DateTime, SecondsFormat, Utc};
+use futures_util::{StreamExt, stream};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
@@ -36,8 +37,8 @@ pub const INSTRUCTIONS: &str = "When waiting before continuing the current task,
     deletion cancels it. At wakeup, continue the original authorized task and verify external \
     effects before repeating actions. In a mission, stopping its run cancels its wait; pausing its schedule only affects future runs.";
 
-/// Conditions one wait can group, so a wakeup stays small and quick to evaluate.
-const MAX_GROUP: usize = 8;
+/// Probe one observer-sized batch on registration; the durable observer checks the rest.
+const INITIAL_PLUGIN_CHECKS: usize = 4;
 
 fn run_finished() -> Value {
     json!({
@@ -141,10 +142,9 @@ pub fn tool(plugin_conditions: &[Value], delegates: bool) -> Value {
             "properties": {
                 "conditions": {
                     "type": "array",
-                    "description": format!("One condition, or 2 to {MAX_GROUP} different external conditions."),
+                    "description": "One condition, or several different external conditions. No condition-count limit.",
                     "items": { "oneOf": conditions },
                     "minItems": 1,
-                    "maxItems": MAX_GROUP,
                 },
                 "mode": {
                     "enum": ["all", "any"],
@@ -190,7 +190,6 @@ async fn input(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
                 "type": "array",
                 "items": { "type": "object" },
                 "minItems": 1,
-                "maxItems": MAX_GROUP,
             },
             "mode": { "enum": ["all", "any"] },
             "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
@@ -238,6 +237,7 @@ async fn input(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
         return Err(invalid());
     };
     let mut members: Vec<Value> = Vec::with_capacity(conditions.len());
+    let mut seen = HashSet::with_capacity(conditions.len());
     for condition in &conditions {
         if temporal(condition) {
             return Err(Error::bad(
@@ -245,7 +245,7 @@ async fn input(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
             ));
         }
         let condition = external(s, agent_id, condition).await?;
-        if members.contains(&condition) {
+        if !seen.insert(condition.clone()) {
             return Err(Error::bad("Each grouped condition must be different."));
         }
         members.push(condition);
@@ -427,9 +427,6 @@ fn check_dependencies(db: &Db<'_>, caller: &str, targets: Vec<String>) -> Result
         if !visited.insert(target.clone()) {
             continue;
         }
-        if visited.len() > 32 {
-            return Err(Error::bad("Wait dependencies are limited to 32 runs."));
-        }
         let Some(run) = db.run(&target)? else {
             continue;
         };
@@ -532,30 +529,44 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
     if same_request(&owner.record["wakeup"], &run, &input) {
         return Ok(json!({ "deferred": true, "wakeup": owner.record["wakeup"] }));
     }
-    // Each plugin condition is checked once before registering, in parallel for a group.
+    // Probe only one bounded batch before yielding. Large groups register without waiting
+    // through every remote check; unprobed members are followed by the durable observer.
     let grouped = is_group(&input["condition"]);
-    let checks = members(&input["condition"]).into_iter().map(|condition| {
+    let sources = members(&input["condition"]);
+    let count = sources.len();
+    let initial_sources = sources
+        .into_iter()
+        .enumerate()
+        .filter(|(_, condition)| conditions::is_condition(condition))
+        .take(INITIAL_PLUGIN_CHECKS)
+        .map(|(index, condition)| (index, condition.clone()))
+        .collect::<Vec<_>>();
+    let checks = stream::iter(initial_sources).map(|(index, condition)| {
         let run = &run;
         async move {
-            if !conditions::is_condition(condition) {
-                return Ok(None);
-            }
-            let observed = conditions::observe(s, run, condition).await?;
-            // Keep the single-condition refusal contract. In a group, unavailable is a
-            // result too: all still awaits the others, and any may return it immediately.
+            let observed = conditions::observe(s, run, &condition).await?;
+            // Keep the single-condition refusal contract. In a group, unavailable is
+            // a result too: all awaits the others, and any may return it immediately.
             if !grouped
                 && let Some(result) = &observed.result
                 && result["state"] == "unavailable"
             {
                 return Err(Error::conflict(text(result, "message").to_owned()));
             }
-            Ok(Some(observed))
+            Ok((index, observed))
         }
     });
-    let checked = futures_util::future::join_all(checks)
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>>>()?;
+    let initial = checks
+        .buffer_unordered(INITIAL_PLUGIN_CHECKS)
+        .collect::<Vec<Result<_>>>()
+        .await;
+    let mut checked = std::iter::repeat_with(|| None)
+        .take(count)
+        .collect::<Vec<_>>();
+    for observed in initial {
+        let (index, observed) = observed?;
+        checked[index] = Some(observed);
+    }
     let token = bearer.to_owned();
     let result = s
         .store

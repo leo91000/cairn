@@ -1,6 +1,8 @@
 package build.cairn.app.ui
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
@@ -193,6 +195,58 @@ class WaitGroupViewsTest {
         compose.onNodeWithText("La tâche a échoué · Review failed").assertIsDisplayed()
         compose.onAllNodesWithTag("wait-member")[0].performClick()
         assertEquals(listOf(chatId), opened)
+    }
+
+    @Test
+    fun `large groups page through every condition and open runs beyond the first page`() {
+        val conditions = (0 until 23).map { run("run-$it") }
+        val waiting = wakeup(group("any", *conditions.toTypedArray()))
+        val result = buildJsonObject {
+            put("state", "completed")
+            put("type", "group")
+            put("mode", "any")
+            putJsonArray("members") {
+                conditions.forEachIndexed { index, condition ->
+                    addJsonObject {
+                        put("condition", condition)
+                        put(
+                            "result",
+                            if (index == 22) finished("run-22", "succeeded") else JsonNull,
+                        )
+                    }
+                }
+            }
+        }
+        val opened = mutableListOf<String>()
+        compose.setContent {
+            CairnTheme("light") {
+                Surface {
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                        CompositionLocalProvider(
+                            LocalLiveWait provides
+                                LiveWait(waiting, false, openRun = { opened += it })
+                        ) {
+                            WaitCard(ActivityWait(waiting, result, observed = true))
+                        }
+                    }
+                }
+            }
+        }
+        compose.onNodeWithText("1/23").assertExists()
+        compose.onAllNodesWithTag("wait-member").assertCountEquals(10)
+        compose.onNodeWithText("1–10 sur 23").assertExists()
+        compose.onNodeWithText("Précédent").assertIsNotEnabled()
+        compose.onNodeWithText("Suivant").performScrollTo().performClick()
+        compose.onNodeWithText("11–20 sur 23").assertExists()
+        compose.onAllNodesWithTag("wait-member")[0].performScrollTo().performClick()
+        assertEquals(listOf("run-10"), opened)
+        compose.onNodeWithText("Suivant").performScrollTo().performClick()
+        compose.onAllNodesWithTag("wait-member").assertCountEquals(3)
+        compose.onNodeWithText("21–23 sur 23").assertExists()
+        compose.onNodeWithText("Premier").assertExists()
+        compose.onNodeWithText("Suivant").assertIsNotEnabled()
+        compose.onNodeWithText("Précédent").performScrollTo().performClick()
+        compose.onNodeWithText("11–20 sur 23").assertExists()
     }
 
     private fun shot(name: String) {

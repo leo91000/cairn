@@ -980,9 +980,24 @@ private fun WaitMembers(
     modifier: Modifier = Modifier,
 ) {
     var open by rememberSaveable(folded) { mutableStateOf(!folded) }
-    val received = members.count { it.outcome != null }
+    val received = remember(members) { members.count { it.outcome != null } }
+    val pageSize = 10
+    var selectedPage by rememberSaveable { mutableIntStateOf(0) }
+    val pageCount = (members.size - 1) / pageSize + 1
+    val page = selectedPage.coerceIn(0, pageCount - 1)
+    val start = page * pageSize
+    val visible = members.subList(start, minOf(start + pageSize, members.size))
+    // Small groups retain individual segments; large groups aggregate by outcome.
+    val segments =
+        remember(members) {
+            if (members.size <= pageSize) members.map { it.outcome?.tone to 1 }
+            else members.groupingBy { it.outcome?.tone }.eachCount().map { it.key to it.value }
+        }
     // With `any`, the first result in the agent's order is the one that resumed the conversation.
-    val first = if (mode == "any" && finished) members.indexOfFirst { it.outcome != null } else -1
+    val first =
+        remember(members, mode, finished) {
+            if (mode == "any" && finished) members.indexOfFirst { it.outcome != null } else -1
+        }
     val pulse by
         rememberInfiniteTransition(label = "wait-members")
             .animateFloat(
@@ -1014,9 +1029,9 @@ private fun WaitMembers(
                     MaterialTheme.colorScheme.onPrimaryContainer,
                 )
             Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                members.forEachIndexed { index, member ->
+                segments.forEachIndexed { index, (tone, count) ->
                     val color =
-                        when (member.outcome?.tone) {
+                        when (tone) {
                             WaitTone.OK -> signal.success
                             WaitTone.ERROR -> MaterialTheme.colorScheme.error
                             WaitTone.WARNING -> signal.warning
@@ -1026,12 +1041,12 @@ private fun WaitMembers(
                                 else MaterialTheme.colorScheme.surfaceContainerHighest
                         }
                     Box(
-                        Modifier.weight(1f)
+                        Modifier.weight(count.toFloat())
                             .height(6.dp)
                             .clip(CircleShape)
                             .background(color)
                             .then(
-                                if (index == first)
+                                if (members.size <= pageSize && index == first)
                                     Modifier.border(1.dp, signal.attention, CircleShape)
                                 else Modifier
                             )
@@ -1063,7 +1078,7 @@ private fun WaitMembers(
                     ),
             ) {
                 Column {
-                    members.forEachIndexed { index, member ->
+                    visible.forEachIndexed { index, member ->
                         if (index > 0)
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         WaitMemberRow(
@@ -1071,11 +1086,33 @@ private fun WaitMembers(
                             live,
                             finished,
                             timedOut,
-                            index == first,
+                            start + index == first,
                             now,
                             openRun,
                             openChat,
                         )
+                    }
+                    if (pageCount > 1) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            TextButton(onClick = { selectedPage = page - 1 }, enabled = page > 0) {
+                                Text("Précédent")
+                            }
+                            Text(
+                                "${start + 1}–${minOf(start + pageSize, members.size)} sur ${members.size}",
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                            TextButton(
+                                onClick = { selectedPage = page + 1 },
+                                enabled = page + 1 < pageCount,
+                            ) {
+                                Text("Suivant")
+                            }
+                        }
                     }
                 }
             }
