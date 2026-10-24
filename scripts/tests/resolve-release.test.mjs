@@ -5,7 +5,6 @@ import {
   evidenceArtifact,
   ImageValidationPendingError,
   resolveRelease,
-  servedTools,
   trustedRun,
   verifiedImage,
 } from '../resolve-release.mjs'
@@ -127,7 +126,6 @@ describe('release validation reuse', () => {
       beaconDigest,
       commit: pullRequestCommit,
       runId: pullRequestRun.id,
-      tools: config.tools,
     })
   })
 
@@ -200,7 +198,6 @@ describe('release validation reuse', () => {
       beaconDigest,
       commit: config.commit,
       runId: mainRun.id,
-      tools: config.tools,
     })
   })
 
@@ -223,32 +220,5 @@ describe('release validation reuse', () => {
       timeoutMs: 10000,
       wait: true,
     })).rejects.toBeInstanceOf(ImageValidationPendingError)
-  })
-})
-
-describe('served release tools', () => {
-  const served = { repository, publicUrl: 'https://cairn.example' }
-  const health = body => async (url) => {
-    expect(String(url)).toBe('https://cairn.example/health')
-    return Response.json(body)
-  }
-
-  it('reads the tools from the validation evidence of the commit production serves', async () => {
-    // Production reports the tested commit, which can be a pull request's merge commit.
-    const gh = github({ runs: () => [pullRequestRun], evidence: { [pullRequestRun.id]: evidenceFor(pullRequestRun, pullRequestCommit) } })
-    expect(await servedTools(served, { gh, fetchHealth: health({ status: 'ok', commit: pullRequestCommit }) })).toEqual(config.tools)
-  })
-
-  it('keeps evidence recorded before the engines were resolved, without their versions', async () => {
-    const tools = { codex: config.tools.codex, gh: config.tools.gh }
-    const gh = github({ runs: () => [mainRun], evidence: { [mainRun.id]: evidenceFor(mainRun, config.commit, { tools }) } })
-    expect(await servedTools(served, { gh, fetchHealth: health({ status: 'ok', commit: config.commit }) })).toEqual(tools)
-  })
-
-  it('is unknown without healthy production identity or trusted evidence', async () => {
-    const gh = github({ runs: () => [{ ...mainRun, conclusion: 'failure' }], evidence: { [mainRun.id]: evidenceFor(mainRun, config.commit) } })
-    expect(await servedTools(served, { gh, fetchHealth: health({ status: 'ok', commit: config.commit }) })).toBeNull()
-    expect(await servedTools(served, { gh, fetchHealth: health({ status: 'ok', commit: 'development' }) })).toBeNull()
-    expect(await servedTools(served, { gh, fetchHealth: async () => new Response('unavailable', { status: 503 }) })).toBeNull()
   })
 })

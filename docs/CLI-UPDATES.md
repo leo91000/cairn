@@ -67,12 +67,14 @@ adapters, without credentials or inference against a vendor:
   config. Its session then resumes with the history it stored. Sessions created
   by the oldest supported release resume on the resolved one. Sessions also move
   both ways between the resolved release and the release production serves, as
-  after an update or a rollback. The `resolve` job reads the served release's
-  versions from that release's own validation evidence
-  (`resolve-release.mjs served-tools`, from `CAIRN_BEACON_ORIGIN/health`). Evidence
-  recorded before OpenCode was resolved names no version; those images shipped
-  1.19.0, the oldest supported release. The same fallback applies when production
-  or its evidence is unavailable, and the job log says so.
+  after an update or a rollback. The `resolve` job reads the served version from
+  the configuration of the installation image production reports at
+  `CAIRN_BEACON_ORIGIN/install/release` (`scripts/served-tools.mjs`). It checks
+  registry content against its digest. Images built before OpenCode was resolved
+  record no version; they shipped 1.19.0, the oldest supported release. The same
+  fallback applies, with a warning, when production or the registry is unavailable.
+  A served release older than the adapter's minimum is skipped, because a rollback
+  runs that image's own adapter.
 - Claude Code answers the `initialize` control request that model discovery uses,
   with synthetic credentials, and lists a catalog with its `default` alias.
 
@@ -89,9 +91,9 @@ Direct Docker builds must pass these build arguments too; see
 ### Qualifying an engine change
 
 A new channel release ships through the normal validated build and its automated
-checks above. A release that fails them blocks validation until a reviewed change
-adapts the adapter, or bounds the engine in `scripts/cli-updates.mjs` with an
-explanation. Claude Code behavior those checks cannot reach
+checks above. A release that fails them blocks validation. There is no hold or
+override setting: the remedy is a reviewed change that adapts the adapter or makes
+`scripts/cli-updates.mjs` select a working release for that engine. Claude Code behavior those checks cannot reach
 without a subscription — `get_usage` quota fields, the OAuth client and token
 endpoint, and resuming a real session — relies on Anthropic's stable channel
 between qualifications. A change in an adapter that depends on engine behavior,

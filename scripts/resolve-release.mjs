@@ -68,7 +68,7 @@ async function validatedImage(config, gh) {
       // (such as Claude Code or OpenCode) is skipped, so the release rebuilds.
       const currentTools = !config.tools || Object.entries(config.tools).every(([tool, version]) => evidence.tools?.[tool] === version)
       if (currentTools)
-        return { ...image, runId: run.id, tools: evidence.tools ?? {} }
+        return { ...image, runId: run.id }
     }
     finally {
       await rm(directory, { recursive: true, force: true })
@@ -76,22 +76,6 @@ async function validatedImage(config, gh) {
   }
 
   return null
-}
-
-// The agent tool versions of the release production serves, read from that
-// release's own validation evidence, so CI can qualify a rollback to it. Null when
-// production, its commit or its evidence is unavailable.
-export async function servedTools(config, { gh, fetchHealth = fetch }) {
-  const response = await fetchHealth(new URL('/health', config.publicUrl), { signal: AbortSignal.timeout(20000) })
-  if (!response.ok)
-    return null
-  const { commit } = await response.json()
-  if (!/^[a-f0-9]{40}$/.test(commit ?? ''))
-    return null
-  const { tree } = JSON.parse(await gh(['api', `repos/${config.repository}/git/commits/${commit}`]))
-  if (!/^[a-f0-9]{40}$/.test(tree?.sha ?? ''))
-    return null
-  return (await validatedImage({ repository: config.repository, tree: tree.sha }, gh))?.tools ?? null
 }
 
 export async function resolveRelease(config, {
@@ -131,32 +115,7 @@ export async function resolveRelease(config, {
   throw new ImageValidationPendingError('Timed out waiting for image validation on main; retry after it finishes')
 }
 
-async function githubCli(args) {
-  return (await exec('gh', args, { timeout: 30000, maxBuffer: 2 * 1024 * 1024 })).stdout
-}
-
-async function printServedTools() {
-  let tools = null
-  try {
-    if (!process.env.CAIRN_BEACON_ORIGIN)
-      throw new Error('CAIRN_BEACON_ORIGIN is not set')
-    tools = await servedTools({ repository: process.env.GITHUB_REPOSITORY, publicUrl: process.env.CAIRN_BEACON_ORIGIN }, { gh: githubCli })
-  }
-  catch (error) {
-    console.log(`The served release is unavailable: ${error.message}`)
-  }
-
-  if (!tools)
-    console.log('The served release\'s tool versions are unknown.')
-  if (process.env.GITHUB_OUTPUT)
-    await appendFile(process.env.GITHUB_OUTPUT, `opencode=${tools?.opencode ?? ''}\n`)
-  console.log(JSON.stringify(tools ?? {}))
-}
-
-if (import.meta.main && process.argv[2] === 'served-tools') {
-  await printServedTools()
-}
-else if (import.meta.main) {
+if (import.meta.main) {
   const tools = {
     codex: process.env.CODEX_VERSION,
     gh: process.env.GH_VERSION,
@@ -179,7 +138,7 @@ else if (import.meta.main) {
   if (process.env.GITHUB_EVENT_NAME === 'push') {
     try {
       result = await resolveRelease(config, {
-        gh: githubCli,
+        gh: async args => (await exec('gh', args, { timeout: 30000, maxBuffer: 2 * 1024 * 1024 })).stdout,
         wait: process.env.GITHUB_REF_TYPE === 'tag',
       })
     }

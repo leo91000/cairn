@@ -100,7 +100,7 @@ Screenshots use synthetic accounts: [desktop](screenshots/agent-accounts/desktop
 | --- | --- |
 | `GET /api/accounts` | `{accounts, signIn, required}`: every account, the sign-in in progress, and the coding agents whose runs wait for you |
 | `POST /api/accounts` | `{provider, name}` starts sign-in; OpenCode additionally requires `{modelProvider, apiKey}` |
-| `GET /api/accounts/providers/opencode` | Supported API-key model providers from the pinned native catalog |
+| `GET /api/accounts/providers/opencode` | Supported API-key model providers from the installed native catalog |
 | `POST /api/accounts/order` | `{provider, ids}` saves the order Auto tries OpenCode connections in; `ids` lists every account once |
 | `POST /api/accounts/{id}/api-key` | `{modelProvider, apiKey}` replaces an OpenCode key when the account is idle |
 | `POST /api/accounts/{id}/sign-in` | Signs an existing account in again |

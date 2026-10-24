@@ -60,9 +60,8 @@ jobs:
       - name: Find the agent tools of the served release
         id: served
         env:
-          GH_TOKEN: ${{ github.token }}
           CAIRN_BEACON_ORIGIN: ${{ vars.CAIRN_BEACON_ORIGIN }}
-        run: node scripts/resolve-release.mjs served-tools
+        run: node scripts/served-tools.mjs
   build:
     # Browser tests need only these binaries and the frontend, not the whole quality job.
     needs: resolve
@@ -189,10 +188,15 @@ jobs:
         run: |
           # The resolved release runs a turn, then resumes sessions an installation can hold:
           # from the oldest supported release, and both ways with the served release, as
-          # after an update or a rollback. Evidence from before OpenCode was resolved
-          # records no version; those images shipped the oldest supported release.
+          # after an update or a rollback. Images built before OpenCode was resolved
+          # record no version; they shipped the oldest supported release.
           minimum=$(node --input-type=module -e "import { engines } from './scripts/cli-updates.mjs'; console.log(engines.opencode.minimum)")
           served=${SERVED_OPENCODE:-$minimum}
+          if test "$(printf '%s\n' "$minimum" "$served" | sort -V | head -n 1)" != "$minimum"; then
+            # A rollback runs the served image's own adapter, which this adapter cannot stand in for.
+            echo "Production serves OpenCode $served, older than this adapter's minimum $minimum; its rollback is not qualified here."
+            served=$OPENCODE_VERSION
+          fi
           # Command substitutions do not inherit errexit, so installation failures return explicitly.
           install() {
             npm install --global --prefix "$RUNNER_TEMP/opencode-$1" --allow-scripts=opencode-ai "opencode-ai@$1" >&2 || return 1

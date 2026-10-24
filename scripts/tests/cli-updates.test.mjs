@@ -95,7 +95,7 @@ describe('application image tool versions', () => {
     const jobs = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8')).jobs
     const expression = value => `\${{ ${value} }}`
     const served = jobs.resolve.steps.find(step => step.id === 'served')
-    expect(served.run).toBe('node scripts/resolve-release.mjs served-tools')
+    expect(served.run).toBe('node scripts/served-tools.mjs')
     expect(served.env.CAIRN_BEACON_ORIGIN).toBe(expression('vars.CAIRN_BEACON_ORIGIN'))
     expect(jobs.resolve.outputs['served-opencode']).toBe(expression('steps.served.outputs.opencode'))
     const opencode = jobs.backend.steps.find(step => step.name === 'Qualify the resolved OpenCode release against its native adapter')
