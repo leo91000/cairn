@@ -49,11 +49,12 @@ Beacon, comme l’interface l’est avec l’installation
 La passerelle tente la connexion directe à son démarrage et y attend jusqu’à
 20 secondes avant de passer par Beacon. Après une coupure, elle retente aussitôt,
 puis de plus en plus rarement (30 secondes à 10 minutes) si les réseaux la
-bloquent. Une connexion passée par Beacon se ferme quand elle reste inactive
-15 secondes après la dernière réponse du manager alors qu’une connexion directe
-existe : le client se reconnecte en direct avant sa requête suivante, et les
-disques ne restent pas sur Beacon. Une requête qui attend sa réponse n’est
-jamais coupée.
+bloquent. Après 15 secondes de connexion directe disponible, la passerelle ferme
+progressivement ses connexions HTTP passées par Beacon : une réponse en cours,
+y compris son corps diffusé en plusieurs parties, se termine intégralement avant
+la fermeture. Le client se reconnecte en direct pour sa requête suivante, et les
+disques ne restent pas sur Beacon. Une pause dans le flux ne suffit jamais à
+considérer une réponse comme terminée.
 
 Beacon borne les offres (30 par minute et par adresse, 32 en attente par
 installation), l’ouverture des canaux par adresse et par minute, et leur nombre

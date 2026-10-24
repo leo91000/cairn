@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 
 pub const PORT: u16 = 4319;
 const MAX_CONNECTIONS: usize = 128;
-// After an answer, before the next request of a pooled connection.
+// Give a recovered direct connection time to settle before retiring fallback.
 const IDLE: std::time::Duration = std::time::Duration::from_secs(15);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -273,60 +273,56 @@ async fn carry(
     }
 }
 
-/// Copies a connection through Beacon. Once a direct connection is up, one
-/// left idle after the manager's last bytes is closed: its client reconnects,
-/// and goes direct, before its next request, so pooled connections do not keep
-/// disks on Beacon. A request still waiting for its answer is never cut.
+/// Forwards HTTP through Beacon. Once direct has been available for `IDLE`,
+/// gracefully retire the local HTTP connection: Hyper finishes any pending
+/// response, including its streaming body, before closing. The next connection
+/// goes direct. Raw byte activity cannot identify an HTTP response boundary.
 async fn relayed<L, R>(local: L, remote: R, mut available: tokio::sync::watch::Receiver<bool>)
 where
-    L: AsyncRead + AsyncWrite + Unpin,
-    R: AsyncRead + AsyncWrite + Unpin,
+    L: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    R: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    use tokio::io::AsyncReadExt;
-    let (mut from_local, mut to_local) = tokio::io::split(local);
-    let (mut from_remote, mut to_remote) = tokio::io::split(remote);
-    let (mut local_buffer, mut remote_buffer) = (vec![0; 65_536], vec![0; 65_536]);
-    let (mut local_open, mut watching, mut answered) = (true, true, false);
-    let mut active = tokio::time::Instant::now();
+    use hyper_util::rt::TokioIo;
+    let Ok((sender, remote_connection)) =
+        hyper::client::conn::http1::handshake(TokioIo::new(remote)).await
+    else {
+        return;
+    };
+    let sender = Arc::new(tokio::sync::Mutex::new(sender));
+    let service = hyper::service::service_fn(move |request| {
+        let sender = sender.clone();
+        async move { sender.lock().await.send_request(request).await }
+    });
+    let local_connection = hyper::server::conn::http1::Builder::new()
+        .auto_date_header(false)
+        .serve_connection(TokioIo::new(local), service);
+    let retire = async move {
+        loop {
+            if available.wait_for(|ready| *ready).await.is_err() {
+                std::future::pending::<()>().await;
+            }
+            tokio::select! {
+                () = tokio::time::sleep(IDLE) => return,
+                changed = available.changed() => {
+                    if changed.is_err() {
+                        std::future::pending::<()>().await;
+                    }
+                }
+            }
+        }
+    };
+    tokio::pin!(local_connection, remote_connection, retire);
+    let (mut remote_finished, mut retiring) = (false, false);
     loop {
-        let idle = tokio::time::sleep_until(active + IDLE);
         tokio::select! {
-            read = from_local.read(&mut local_buffer), if local_open => match read {
-                Ok(0) | Err(_) => {
-                    // The manager answers what it has, then closes.
-                    local_open = false;
-                    let _ = to_remote.shutdown().await;
-                }
-                Ok(read) => {
-                    // TLS holds records back until flushed: the end of a
-                    // body would otherwise wait for a write that never comes.
-                    if to_remote.write_all(&local_buffer[..read]).await.is_err()
-                        || to_remote.flush().await.is_err()
-                    {
-                        break;
-                    }
-                    active = tokio::time::Instant::now();
-                    answered = false;
-                }
-            },
-            read = from_remote.read(&mut remote_buffer) => match read {
-                Ok(0) | Err(_) => break,
-                Ok(read) => {
-                    if to_local.write_all(&remote_buffer[..read]).await.is_err()
-                        || to_local.flush().await.is_err()
-                    {
-                        break;
-                    }
-                    active = tokio::time::Instant::now();
-                    answered = true;
-                }
-            },
-            () = idle, if answered && *available.borrow() => break,
-            changed = available.changed(), if watching => watching = changed.is_ok(),
+            _ = &mut local_connection => break,
+            _ = &mut remote_connection, if !remote_finished => remote_finished = true,
+            () = &mut retire, if !retiring => {
+                local_connection.as_mut().graceful_shutdown();
+                retiring = true;
+            }
         }
     }
-    let _ = to_local.shutdown().await;
-    let _ = to_remote.shutdown().await;
 }
 
 /// Answers the local client with the reason, as JSON like the manager's errors.
@@ -367,22 +363,65 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn direct_recovery_does_not_truncate_a_streaming_response() {
+        for (first, last) in [
+            (
+                &b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\nfirst"[..],
+                &b" last"[..],
+            ),
+            (
+                &b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n5\r\nfirst\r\n"[..],
+                &b"5\r\n last\r\n0\r\n\r\n"[..],
+            ),
+        ] {
+            let (available, _) = tokio::sync::watch::channel(false);
+            let (mut client, mut manager, task) = relay_pair(&available);
+            let request = b"GET /internal/nodes/native-binary HTTP/1.1\r\nHost: manager\r\n\r\n";
+            client.write_all(request).await.unwrap();
+            let mut received = vec![0; request.len()];
+            manager.read_exact(&mut received).await.unwrap();
+            manager.write_all(first).await.unwrap();
+            let mut received = vec![0; first.len()];
+            client.read_exact(&mut received).await.unwrap();
+            assert_eq!(received, first);
+            available.send_replace(true);
+            tokio::time::sleep(IDLE * 4).await;
+            assert!(
+                !task.is_finished(),
+                "an incomplete response must keep flowing"
+            );
+            manager.write_all(last).await.unwrap();
+            let mut remaining = Vec::new();
+            tokio::time::timeout(IDLE, client.read_to_end(&mut remaining))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(remaining, last);
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn relayed_connections_move_direct_only_between_requests() {
         let (available, _) = tokio::sync::watch::channel(false);
         let (mut client, mut manager, task) = relay_pair(&available);
-        let mut buffer = [0; 16];
-        client.write_all(b"request").await.unwrap();
+        let request = b"GET /internal/nodes/health HTTP/1.1\r\nHost: manager\r\n\r\n";
+        let answer = b"HTTP/1.1 200 OK\r\ncontent-length: 6\r\n\r\nanswer";
+        let mut buffer = vec![0; request.len()];
+        client.write_all(request).await.unwrap();
         // Bounded: a request held back unflushed fails here.
-        tokio::time::timeout(IDLE, manager.read_exact(&mut buffer[..7]))
+        tokio::time::timeout(IDLE, manager.read_exact(&mut buffer))
             .await
             .expect("the request reaches the manager")
             .unwrap();
-        manager.write_all(b"answer").await.unwrap();
-        client.read_exact(&mut buffer[..6]).await.unwrap();
+        manager.write_all(answer).await.unwrap();
+        buffer.resize(answer.len(), 0);
+        client.read_exact(&mut buffer).await.unwrap();
+        assert_eq!(buffer, answer);
         // Without a direct connection, an idle connection stays.
         tokio::time::sleep(IDLE * 4).await;
         assert!(!task.is_finished());
-        // With one, it closes once idle after the manager's answer.
+        // With one, it gracefully closes the completed response's connection.
         available.send_replace(true);
         tokio::time::sleep(IDLE + std::time::Duration::from_secs(1)).await;
         assert!(task.is_finished());
@@ -390,13 +429,16 @@ mod tests {
 
         // A request still waiting for its answer is never cut.
         let (mut client, mut manager, task) = relay_pair(&available);
-        client.write_all(b"slow request").await.unwrap();
-        manager.read_exact(&mut buffer[..12]).await.unwrap();
+        client.write_all(request).await.unwrap();
+        buffer.resize(request.len(), 0);
+        manager.read_exact(&mut buffer).await.unwrap();
         tokio::time::sleep(IDLE * 4).await;
         assert!(!task.is_finished());
-        manager.write_all(b"late answer").await.unwrap();
-        client.read_exact(&mut buffer[..11]).await.unwrap();
-        assert_eq!(&buffer[..11], b"late answer");
+        manager.write_all(answer).await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        assert!(response.ends_with(b"answer"));
+        task.await.unwrap();
     }
 
     const INSTALLATION: &str = "0b7d6f2e-8a51-4c43-9c1e-2f4a6b8d0e13";

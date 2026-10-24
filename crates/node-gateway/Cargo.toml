@@ -14,6 +14,12 @@ async-trait = "0.1.92"
 bytes = "1"
 cairn-protocol = { path = "../protocol" }
 futures-util = "0.3"
+hyper = { version = "1", features = [
+  "client",
+  "server",
+  "http1"
+] }
+hyper-util = { version = "0.1", features = [ "tokio" ] }
 reqwest = { version = "0.13", default-features = false, features = [
   "json",
   "rustls"
