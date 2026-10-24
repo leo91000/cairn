@@ -102,6 +102,17 @@ server-enforced grants, and excluded command-MCP tools are denied explicitly.
 Shared/project Claude settings are disabled for the managed invocation. Selected
 Léo skills and instructions are supplied through the existing run context.
 
+A plan turn (see [chats](chats.md#plan-turns)) starts Claude with
+`--permission-mode plan`, never `--dangerously-skip-permissions`, even for YOLO
+agents. Its Bash sandbox is read-only with no network domain, and
+`Edit(//root/**)` rules deny writes to every workspace root before any mode or
+callback applies. The permission callback then allows reads, searches, sandboxed
+Bash, MCP tools already restricted to read-only ones, and only Claude Code's own
+plan file. It denies `ExitPlanMode`, which would let Claude implement in the same
+turn, and shows its plan as a proposed plan. Claude Code 2.1.280 writes that plan
+file itself without asking the callback. Without bubblewrap and socat, Claude Code
+refuses to start and the turn fails with an explicit error.
+
 ## Subscription usage
 
 This is programmatic Claude Code usage. Anthropic’s June 15 update currently says

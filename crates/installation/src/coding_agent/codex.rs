@@ -54,6 +54,10 @@ impl ExecutionAdapter for Codex {
         chat_execution || managed_account
     }
 
+    fn plan_turns(&self) -> bool {
+        true
+    }
+
     fn legacy_args(
         &self,
         run: &Value,

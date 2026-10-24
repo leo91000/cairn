@@ -30,6 +30,12 @@ const MAX_IMAGE: usize = 10_000_000;
 const DENIED: &str =
     "This tool is outside the agent's access policy. Ask the user in your response.";
 
+const PLAN_DENIED: &str = "This is a plan turn: Cairn allows reading, searching and the plan file only. Include this step in your plan; the user starts implementation explicitly.";
+
+const PLAN_RECORDED: &str = "The plan was shown to the user. Stop here and summarize it briefly: the user starts implementation explicitly in a later turn.";
+
+const SANDBOX_UNAVAILABLE: &str = "Plan turns need Claude Code's sandbox, which is unavailable on this node (it requires bubblewrap and socat). Nothing was changed.";
+
 const SHELL_ENVIRONMENT_ERROR: &str = "Claude Code's session environment contains NUL bytes, so shell commands cannot start. Repair the affected .sh file in the Claude session-env directory, then resume this conversation to start a fresh process. The conversation and workspace have been preserved.";
 
 async fn validate_session_environment(directory: &Path, session: &str) -> Result<()> {
@@ -171,7 +177,8 @@ fn strings(value: &Value) -> impl Iterator<Item = &str> {
 
 fn settings(plan: &Value) -> Value {
     let mut settings = json!({ "attribution": { "commit": "" } });
-    if plan["sandbox"] == "yolo" {
+    let planning = plan["planning"] == true;
+    if plan["sandbox"] == "yolo" && !planning {
         return settings;
     }
     let deny_write = if plan["sandbox"] == "read-only" {
@@ -179,12 +186,15 @@ fn settings(plan: &Value) -> Value {
     } else {
         json!([])
     };
+    // A plan turn's shell reaches no network: commands such as `git push` or `gh`
+    // would otherwise act on external services.
+    let domains = if planning { json!([]) } else { json!(["*"]) };
     settings["sandbox"] = json!({
         "enabled": true,
         "failIfUnavailable": true,
         "autoAllowBashIfSandboxed": true,
         "allowUnsandboxedCommands": false,
-        "network": { "allowedDomains": ["*"] },
+        "network": { "allowedDomains": domains },
         "filesystem": { "allowWrite": plan["writableRoots"], "denyWrite": deny_write },
     });
     settings
@@ -225,7 +235,10 @@ pub fn args(plan: &Value, instructions: &Path) -> Vec<String> {
     if let Some(session) = plan["sessionId"].as_str() {
         args.extend(["--resume".into(), session.into()]);
     }
-    if plan["sandbox"] == "yolo" {
+    let planning = plan["planning"] == true;
+    if planning {
+        args.extend(["--permission-mode".into(), "plan".into()]);
+    } else if plan["sandbox"] == "yolo" {
         args.push("--dangerously-skip-permissions".into());
     } else {
         args.extend(["--permission-mode".into(), "default".into()]);
@@ -237,7 +250,12 @@ pub fn args(plan: &Value, instructions: &Path) -> Vec<String> {
     let mut denied = strings(&plan["claudeDeniedTools"])
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    if plan["sandbox"] == "read-only" {
+    if planning {
+        // Claude Code writes its plan file under its own state directory, so the edit
+        // tools stay available; these rules deny every workspace root before any
+        // permission mode or callback applies. The callback denies other paths.
+        denied.extend(strings(&plan["writableRoots"]).map(|root| format!("Edit(/{root}/**)")));
+    } else if plan["sandbox"] == "read-only" {
         denied.extend(["Write", "Edit", "NotebookEdit"].map(str::to_owned));
     }
     if !denied.is_empty() {
@@ -259,6 +277,12 @@ pub fn item(block: &Value, message: &str, index: usize) -> Option<Value> {
         "tool_use" if matches!(text(block, "name"), "Agent" | "Task") => {
             subagent(&id, &block["input"])
         }
+        "tool_use" if block["name"] == "ExitPlanMode" => json!({
+            "id": id,
+            "type": "proposed_plan",
+            "text": block["input"]["plan"],
+            "status": "in_progress",
+        }),
         "tool_use" if block["name"] == "TodoWrite" => {
             let mut plan = crate::agent_plan::todos(&id, &block["input"]);
             plan["status"] = "in_progress".into();
@@ -381,6 +405,8 @@ struct Turn<'a> {
     stdin: ChildStdin,
     inbox: &'a Path,
     receipt: PathBuf,
+    /// Where Claude Code keeps plan files, the only writable path of a plan turn.
+    plans: PathBuf,
     /// The durable chat ID of the request.
     initial_id: &'a str,
     /// The ID Claude Code knows the request by.
@@ -622,6 +648,13 @@ impl Turn<'_> {
                 self.subagent_result(item, block, outcome).await?;
                 continue;
             }
+            if item["type"] == "proposed_plan" {
+                // Cairn declines to leave plan mode; the plan itself is complete.
+                item["status"] = "completed".into();
+                self.emit(json!({ "type": "item.completed", "item": item }))
+                    .await?;
+                continue;
+            }
             let environment_failed = shell_environment_failed(&item, block);
             let status = if block["is_error"] == true {
                 "failed"
@@ -857,10 +890,21 @@ impl Turn<'_> {
         if can_use_tool && request["tool_name"] == "AskUserQuestion" {
             return self.ask(value, request_id).await;
         }
-        let allowed =
-            can_use_tool && allowed_tool(self.plan, text(request, "tool_name"), &request["input"]);
+        let name = text(request, "tool_name");
+        let planning = self.plan["planning"] == true;
+        let allowed = can_use_tool
+            && if planning {
+                plan_tool(self.plan, &self.plans, name, &request["input"])
+            } else {
+                allowed_tool(self.plan, name, &request["input"])
+            };
         let response = if allowed {
             json!({ "behavior": "allow", "updatedInput": request["input"] })
+        } else if planning && name == "ExitPlanMode" {
+            // Approving would let Claude Code implement in this same turn.
+            json!({ "behavior": "deny", "message": PLAN_RECORDED })
+        } else if planning {
+            json!({ "behavior": "deny", "message": PLAN_DENIED })
         } else {
             json!({ "behavior": "deny", "message": DENIED })
         };
@@ -1093,8 +1137,22 @@ pub async fn run(
     let stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     let mut stderr = child.stderr.take().unwrap();
-    let drain = tokio::spawn(async move {
-        let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
+    // Only a fixed sandbox failure is recognized; diagnostics are never reported.
+    let mut drain = tokio::spawn(async move {
+        const NEEDLE: &[u8] = b"sandbox required but unavailable";
+        let mut chunk = [0; 8192];
+        let mut window = Vec::new();
+        let mut sandbox_unavailable = false;
+        while let Ok(count) = stderr.read(&mut chunk).await
+            && count > 0
+        {
+            window.extend_from_slice(&chunk[..count]);
+            sandbox_unavailable |= window.windows(NEEDLE.len()).any(|bytes| bytes == NEEDLE);
+            // Keep only enough bytes to match a phrase split across reads.
+            let keep = window.len().saturating_sub(NEEDLE.len());
+            window.drain(..keep);
+        }
+        sandbox_unavailable
     });
     let mut turn = Turn {
         plan: &plan,
@@ -1102,6 +1160,7 @@ pub async fn run(
         stdin,
         inbox,
         receipt,
+        plans: directory.join("plans"),
         initial_id,
         wire_id,
         submitted: HashSet::from([initial_id.to_owned()]),
@@ -1125,8 +1184,16 @@ pub async fn run(
     // Closes Claude Code's stdin.
     drop(turn);
     stop(&mut child, pid).await;
-    drain.abort();
-    let _ = drain.await;
+    let sandbox_unavailable = match tokio::time::timeout(Duration::from_secs(1), &mut drain).await {
+        Ok(result) => result.unwrap_or(false),
+        Err(_) => {
+            drain.abort();
+            false
+        }
+    };
+    if operation.is_err() && sandbox_unavailable {
+        return Err(Error::unavailable(SANDBOX_UNAVAILABLE));
+    }
     operation
 }
 
@@ -1170,6 +1237,31 @@ fn allowed_tool(plan: &Value, name: &str, input: &Value) -> bool {
         return false;
     };
     strings(&plan["writableRoots"]).any(|root| path.starts_with(root))
+}
+
+/// The callback of a plan turn: reading, searching, the sandboxed shell, MCP tools
+/// already restricted to read-only ones, and Claude Code's own plan file.
+fn plan_tool(plan: &Value, plans: &Path, name: &str, input: &Value) -> bool {
+    match name {
+        "Read" | "Glob" | "Grep" | "WebSearch" | "WebFetch" | "TodoWrite" => true,
+        // The shell runs in the read-only sandbox without network, never outside it.
+        "Bash" => input["dangerouslyDisableSandbox"] != true,
+        "Write" | "Edit" | "NotebookEdit" => {
+            let key = if name == "NotebookEdit" {
+                "notebook_path"
+            } else {
+                "file_path"
+            };
+            let plans = std::fs::canonicalize(plans).unwrap_or_else(|_| plans.to_owned());
+            resolved(Path::new(text(input, key))).is_some_and(|path| path.starts_with(plans))
+        }
+        _ if name.starts_with("mcp__") => strings(&plan["claudePlanTools"]).any(|allowed| {
+            allowed
+                .strip_suffix('*')
+                .map_or(allowed == name, |prefix| name.starts_with(prefix))
+        }),
+        _ => false,
+    }
 }
 
 /// `path` with its symlinks resolved, or its parent's when the file does not exist yet.

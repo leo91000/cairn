@@ -474,6 +474,85 @@ async fn model_and_reasoning_reach_codex_and_model_changes_resolve_the_new_defau
 }
 
 #[tokio::test]
+async fn plan_turns_override_the_thread_sandbox_and_the_next_turn_restores_it() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    let roots = json!([root.path()]);
+
+    // Codex keeps a thread's first sandbox when a later resume asks for another one.
+    let mut first = plan(&root, "Start the work");
+    first["sandbox"] = "workspace-write".into();
+    first["writableRoots"] = roots.clone();
+    first["execution"]["messageId"] = "message-0".into();
+    run_quietly(&config, &home, first).await;
+
+    let mut planning = plan(&root, "Propose an approach");
+    planning["planning"] = true.into();
+    planning["sandbox"] = "read-only".into();
+    planning["writableRoots"] = roots.clone();
+    planning["sessionId"] = "fixture-chat".into();
+    planning["execution"]["messageId"] = "message-1".into();
+    let (tx, mut rx) = mpsc::channel(64);
+    let events = tokio::spawn(async move {
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        events
+    });
+    chat_process::run(&config, &home, planning, tx, CancellationToken::new())
+        .await
+        .unwrap();
+    let events = events.await.unwrap();
+    let proposed = events
+        .iter()
+        .find(|event| event["item"]["type"] == "proposed_plan")
+        .expect("the proposed plan is shown");
+    assert_eq!(
+        proposed["item"]["text"],
+        "1. Read the composer.\n2. Add the toggle."
+    );
+
+    let mut next = plan(&root, "Implement the plan");
+    next["afterPlan"] = true.into();
+    next["sandbox"] = "workspace-write".into();
+    next["writableRoots"] = roots.clone();
+    next["sessionId"] = "fixture-chat".into();
+    next["execution"]["messageId"] = "message-2".into();
+    run_quietly(&config, &home, next).await;
+
+    let thread = conversation(&home);
+    let turns = thread["turns"].as_array().unwrap();
+    assert!(turns[0]["sandboxPolicy"].is_null());
+    assert!(turns[0]["collaborationMode"].is_null());
+
+    assert_eq!(
+        turns[1]["sandboxPolicy"],
+        json!({ "type": "readOnly", "networkAccess": false })
+    );
+    assert_eq!(
+        turns[1]["collaborationMode"],
+        json!({
+            "mode": "plan",
+            "settings": {
+                "model": "fixture-fast",
+                "reasoning_effort": "medium",
+                "developer_instructions": null,
+            },
+        })
+    );
+    assert_eq!(turns[1]["threadConfig"]["features.multi_agent"], false);
+
+    assert_eq!(
+        turns[2]["sandboxPolicy"],
+        json!({ "type": "workspaceWrite", "writableRoots": roots, "networkAccess": true })
+    );
+    assert_eq!(turns[2]["collaborationMode"]["mode"], "default");
+    assert!(turns[2]["threadConfig"]["features.multi_agent"].is_null());
+}
+
+#[tokio::test]
 async fn native_in_flight_question_accepts_answer_and_preserves_receipt() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);

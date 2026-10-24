@@ -2503,6 +2503,58 @@ async fn code_mode_discovers_schemas_and_composes_chat_and_artifact_reads() {
 }
 
 #[tokio::test]
+async fn plan_turns_only_read_the_installation() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (run, _) = active_run(&s, &main).await;
+    let planning = json!({ "messageId": "plan-message", "text": "Plan", "plan": true });
+    let run = s
+        .store
+        .patch_run(
+            run["id"].as_str().unwrap(),
+            json!({ "chatExecution": planning }),
+        )
+        .await
+        .unwrap();
+    let configuration = s.mcps.run_configuration(&s, &run).await.unwrap();
+
+    let names = [
+        "list_agents",
+        "get_chat",
+        "create_chat",
+        "send_chat_message",
+        "create_task",
+        "update_agent",
+    ];
+    let summary = call(&s, &configuration, "search", json!({ "names": names })).await;
+    let operations = result(&summary)["operations"].as_array().unwrap();
+    assert!(operations.iter().any(|op| op["name"] == "list_agents"));
+    assert!(operations.iter().any(|op| op["name"] == "get_chat"));
+    for changing in [
+        "create_chat",
+        "send_chat_message",
+        "create_task",
+        "update_agent",
+    ] {
+        assert!(
+            !operations.iter().any(|op| op["name"] == changing),
+            "{changing}"
+        );
+    }
+
+    let read = call(&s, &configuration, "list_agents", json!({})).await;
+    assert!(
+        result(&read)["agents"].is_array() || result(&read).is_array(),
+        "{read}"
+    );
+    let denied = call(&s, &configuration, "create_chat", json!({})).await;
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    assert!(denied.to_string().contains("plan turn"), "{denied}");
+    assert!(s.chat_list().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn code_mode_checks_each_operations_scopes_and_revocation_without_rolling_back_prior_effects()
 {
     let root = TempDir::new().unwrap();

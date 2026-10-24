@@ -910,6 +910,104 @@ fn provider_defaults_and_sandbox_arguments_preserve_boundaries() {
     assert!(a.contains(&"--strict-mcp-config".into()));
 }
 
+fn plan_turn(root: &TempDir) -> Value {
+    let mut p = plan(root, "fixture:plan-turn");
+    // Chat plans make every plan turn read-only, including YOLO agents' turns.
+    p["planning"] = true.into();
+    p["sandbox"] = "read-only".into();
+    p["claudePlanTools"] = json!(["mcp__cairn_fixture__search", "mcp__cairn_workspace__*"]);
+    p
+}
+
+#[test]
+fn plan_turn_arguments_use_plan_mode_a_networkless_sandbox_and_deny_workspace_edits() {
+    let root = TempDir::new().unwrap();
+    let a = claude_process::args(&plan_turn(&root), &root.path().join("instructions.txt"));
+    let mode = a.iter().position(|arg| arg == "--permission-mode").unwrap();
+    assert_eq!(a[mode + 1], "plan");
+    assert!(!a.contains(&"--dangerously-skip-permissions".into()));
+
+    let settings = a.iter().position(|arg| arg == "--settings").unwrap();
+    let settings: Value = serde_json::from_str(&a[settings + 1]).unwrap();
+    assert_eq!(settings["sandbox"]["enabled"], true);
+    assert_eq!(settings["sandbox"]["failIfUnavailable"], true);
+    assert_eq!(settings["sandbox"]["allowUnsandboxedCommands"], false);
+    assert_eq!(settings["sandbox"]["network"]["allowedDomains"], json!([]));
+    assert_eq!(
+        settings["sandbox"]["filesystem"]["denyWrite"],
+        json!([root.path()])
+    );
+
+    let denied = a.iter().position(|arg| arg == "--disallowedTools").unwrap();
+    let denied = a[denied + 1].split(',').collect::<Vec<_>>();
+    let rule = format!("Edit(/{}/**)", root.path().display());
+    assert_eq!(denied, vec![rule.as_str()]);
+
+    // Outside plan turns, YOLO keeps its existing arguments.
+    let a = claude_process::args(&plan(&root, "test"), &root.path().join("instructions.txt"));
+    assert!(a.contains(&"--dangerously-skip-permissions".into()));
+    assert!(!a.iter().any(|arg| arg.contains("allowedDomains")));
+}
+
+#[tokio::test]
+async fn plan_turns_deny_writes_effects_and_leaving_plan_mode() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let (result, events) = run_to_end(&c, plan_turn(&root)).await;
+    result.unwrap();
+    assert!(completes(&events));
+
+    let responses = std::fs::read_to_string(c.home.join(".claude/plan-responses.jsonl")).unwrap();
+    let decisions = responses
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .map(|response| (response["id"].as_str().unwrap().to_owned(), response))
+        .collect::<std::collections::HashMap<_, _>>();
+    for allowed in [
+        "plan-file",
+        "sandboxed-shell",
+        "read",
+        "read-only-mcp",
+        "gateway-mcp",
+    ] {
+        assert_eq!(decisions[allowed]["behavior"], "allow", "{allowed}");
+    }
+    for denied in [
+        "workspace-write",
+        "workspace-edit",
+        "notebook-edit",
+        "home-write",
+        "escaping-plan-file",
+        "unsandboxed-shell",
+        "excluded-mcp",
+        "scheduler",
+        "exit-plan",
+    ] {
+        assert_eq!(decisions[denied]["behavior"], "deny", "{denied}");
+    }
+    let exit = decisions["exit-plan"]["message"].as_str().unwrap();
+    assert!(exit.contains("plan was shown to the user"), "{exit}");
+    assert!(
+        decisions["workspace-write"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("plan turn")
+    );
+
+    let proposed = events
+        .iter()
+        .filter(|event| event["item"]["type"] == "proposed_plan")
+        .collect::<Vec<_>>();
+    assert_eq!(proposed.len(), 2);
+    assert_eq!(proposed[1]["type"], "item.completed");
+    assert_eq!(proposed[1]["item"]["status"], "completed");
+    assert_eq!(
+        proposed[1]["item"]["text"],
+        "1. Change main.rs\n2. Run the tests"
+    );
+    assert!(proposed[1]["item"].get("result").is_none());
+}
+
 #[tokio::test]
 async fn steering_waits_for_both_responses_and_acknowledges_each_message() {
     let root = TempDir::new().unwrap();

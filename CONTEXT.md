@@ -114,6 +114,13 @@ Le nombre maximal d’exécutions simultanées sur un compte. Le réduire laisse
 **Réinitialisation en réserve** :
 Une remise à zéro de fenêtre d’usage offerte par Codex, utilisée automatiquement quand la capacité restante d’un compte actif tombe à 2 %. Elle n’existe pas pour Claude Code.
 
+**Tour de plan** :
+Un tour de conversation où l’agent explore et propose une approche sans rien modifier :
+Cairn y borne lui-même les fichiers, le réseau du shell et les outils à effets, quels
+que soient les droits de l’agent. L’implémentation commence par un message ordinaire
+dans le même fil, avec les droits habituels de l’agent.
+_Avoid_ : plan de travail (la liste de progression d’un agent qui travaille)
+
 **Demandeur d’une mission** :
 La conversation ou la mission dont l’agent a lancé l’exécution d’une mission. Une mission bloquée qui attend son demandeur lui revient plutôt qu’à l’utilisateur, tant que ce demandeur existe.
 _Avoid_ : parent, orchestrateur

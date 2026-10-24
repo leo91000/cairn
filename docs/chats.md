@@ -47,6 +47,25 @@ The composer options contain searchable model and reasoning selectors for the ne
 
 Model discovery is authenticated and cached for five minutes per enabled Codex account. Usage polling refreshes it using the existing account session. The picker combines available models, hides catalog-hidden entries except a saved selection, and offers the reasoning levels shared by accounts exposing that model. Account selection uses fresh catalogs to avoid routing a known model to an account that does not expose it. Discovery failures keep the last catalog with a visible retry status. Custom provider aliases remain supported by the API. [Codex model discovery protocol](https://learn.chatgpt.com/docs/app-server#models).
 
+## Plan turns
+
+**Plan** in the composer makes the next messages plan turns: the agent explores and
+proposes an approach without changing anything. Each such message shows a **Plan**
+badge. The proposal appears as a **Proposed plan** card; **Implement** on the latest
+one queues an ordinary message in the same conversation, which runs with the agent's
+usual permissions. Turning **Plan** off and writing a message does the same.
+
+Cairn enforces the boundary rather than asking the model to respect it. During a plan
+turn the engine's sandbox is read-only with no shell network access, whatever the
+agent's access; MCP connections only offer tools they declare read-only
+(`readOnlyHint`); `cairn_installation` only offers `read` operations; and
+`cairn_workspace` only offers `open_project`, `list_nodes`, `exclusive_status` and
+`pending_questions`. Plugin tools and commands are unavailable. Builds and tests that
+write files fail. Claude Code runs in its plan permission mode; Codex receives the
+`plan` collaboration preset it lists, without subagents. OpenCode cannot run plan
+turns. A plan request cannot steer a running turn that may change files: queue it.
+See [the plan-turn decision](adr/0059-plan-turns.md).
+
 ## Invoking skills with `$`
 
 Type `$` in the composer to list the skills this chat can use: global skills and those of the chat's project that the agent is allowed to access (all accessible projects when the chat has no project). The list filters as you type, matching the name first, then word starts, substrings, letters in order and the description. Each suggestion shows the name, description and Global/project scope. On the web, ↑/↓ move, Enter or Tab inserts and Escape dismisses; clicking works too. On Android, tap a suggestion; Back dismisses the list. The chosen skill is inserted as `$name ` and highlighted in the draft and in sent messages.

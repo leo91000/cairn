@@ -103,6 +103,50 @@ fn adapters_preserve_native_mcp_permissions_and_thread_credentials() {
 }
 
 #[test]
+fn claude_plan_turns_allow_only_restricted_mcp_tools() {
+    let mut configuration = Configuration::new("synthetic-run-token".into());
+    configuration.servers.insert(
+        "cairn_workspace".into(),
+        Server::Http {
+            url: "http://127.0.0.1:5202/mcp-workspace".into(),
+            timeout: None,
+            enabled_tools: None,
+        },
+    );
+    configuration.servers.insert(
+        "cairn_command".into(),
+        Server::Stdio {
+            command: "fixture-tool".into(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            enabled_tools: Some(vec!["read".into()]),
+            tools: vec!["read".into(), "write".into()],
+        },
+    );
+    let ordinary = Provider::Claude
+        .adapter()
+        .mcp_configuration(&configuration)
+        .unwrap();
+    assert!(ordinary.get("claudePlanTools").is_none());
+
+    configuration.planning = true;
+    let native = Provider::Claude
+        .adapter()
+        .mcp_configuration(&configuration)
+        .unwrap();
+    let chat = Provider::Claude.adapter().chat_mcp(&native);
+    // A command server's tools discovered later are not in this allowlist.
+    assert_eq!(
+        chat["claudePlanTools"],
+        json!(["mcp__cairn_command__read", "mcp__cairn_workspace__*"])
+    );
+    assert_eq!(
+        chat["claudeDeniedTools"],
+        json!(["mcp__cairn_command__write"])
+    );
+}
+
+#[test]
 fn malformed_engine_selection_cannot_produce_a_launch_plan() {
     let root = TempDir::new().unwrap();
     let prepared = json!({ "output": root.path().join("output/result.md") });

@@ -454,6 +454,93 @@ async fn builtin_mcp_endpoint_exposes_scoped_workspace_tools_and_checks_the_run_
     server.abort();
 }
 
+/// Sends one JSON-RPC request to the built-in workspace MCP.
+async fn workspace_rpc(s: &Arc<Service>, token: &str, method: &str, params: Value) -> Value {
+    let app = cairn_installation::http::router(s.clone()).await.unwrap();
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+    let request = common::request("POST", "/mcp-workspace")
+        .header("authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    common::read_json(common::send(&app, request).await).await
+}
+
+fn tool_names(listing: &Value) -> Vec<String> {
+    let mut names = listing["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| text(tool, "name").to_owned())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn plan_turns_list_and_call_only_workspace_tools_without_effects() {
+    let (_root, s, _) = fixture().await;
+    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let planning = json!({ "messageId": "plan-message", "text": "Plan", "plan": true });
+    patch_run(
+        &s,
+        &run,
+        json!({ "status": RunStatus::Running, "chatExecution": planning }),
+    )
+    .await;
+    let run = s.store.run(text(&run, "id")).await.unwrap();
+    let token = run_token(&s, &run).await;
+
+    let listing = workspace_rpc(&s, &token, "tools/list", json!({})).await;
+    assert_eq!(
+        tool_names(&listing),
+        [
+            "exclusive_status",
+            "list_nodes",
+            "open_project",
+            "pending_questions"
+        ]
+    );
+    for (name, arguments) in [
+        ("publish_artifact", json!({ "path": "result.md" })),
+        ("wait_for", json!({ "delay": 60 })),
+        (
+            "report_outcome",
+            json!({ "status": "completed", "reason": "Done" }),
+        ),
+        ("acquire_exclusive", json!({})),
+        ("onepassword", json!({})),
+    ] {
+        let response = workspace_rpc(
+            &s,
+            &token,
+            "tools/call",
+            json!({ "name": name, "arguments": arguments }),
+        )
+        .await;
+        assert_eq!(response["result"]["isError"], true, "{name}: {response}");
+        assert!(
+            response.to_string().contains("plan turn"),
+            "{name}: {response}"
+        );
+    }
+    let pending = workspace_rpc(
+        &s,
+        &token,
+        "tools/call",
+        json!({ "name": "pending_questions", "arguments": {} }),
+    )
+    .await;
+    assert!(!pending.to_string().contains("plan turn"), "{pending}");
+
+    // The next turn's grant offers the whole catalog again.
+    let next = json!({ "messageId": "next-message", "text": "Implement", "afterPlan": true });
+    patch_run(&s, &run, json!({ "chatExecution": next })).await;
+    let run = s.store.run(text(&run, "id")).await.unwrap();
+    let token = run_token(&s, &run).await;
+    let listing = workspace_rpc(&s, &token, "tools/list", json!({})).await;
+    assert_eq!(tool_names(&listing).len(), 13);
+}
+
 #[tokio::test]
 async fn seed_cleanup_does_not_follow_repository_symlinks_outside_its_private_copy() {
     let (root, s, projects) = fixture().await;

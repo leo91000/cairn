@@ -292,3 +292,37 @@ test('Claude default names follow available metadata without pinning the model',
   const saved = (await workspace.api('/api/agents')).find((agent: { name: string }) => agent.name === 'Claude default labels')
   expect(saved).toMatchObject({ provider: 'claude', model: '', reasoning: '' })
 })
+
+test('a plan turn proposes without changes and Implement continues the same chat', async ({ page, workspace }, testInfo) => {
+  test.setTimeout(120000)
+  if (!(await workspace.api('/api/accounts')).accounts.some((a: { provider: string }) => a.provider === 'claude'))
+    expect((await connectClaude(workspace)).state).toBe('complete')
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text: 'Inspect this workspace', provider: 'claude' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
+  const conversation = (await workspace.api(`/api/chats/${chat.id}`)).run.id
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+
+  const toggle = page.getByRole('button', { name: 'Plan first' })
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  await page.getByRole('textbox', { name: 'Message' }).fill('fixture:plan-turn Plan the composer change')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  const proposal = page.getByTestId('proposed-plan')
+  await expect(proposal).toContainText('Change main.rs', { timeout: 30000 })
+  await expect(page.locator('.user-bubble').filter({ hasText: 'fixture:plan-turn' }).getByText('Plan', { exact: true })).toBeVisible()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
+  expect((await workspace.api(`/api/chats/${chat.id}`)).run.chatExecution.plan).toBe(true)
+  await page.screenshot({ path: testInfo.outputPath('plan-turn-web.png'), animations: 'disabled' })
+
+  // Leaving plan mode is an ordinary message in the same chat, with the agent's usual access.
+  await proposal.getByRole('button', { name: 'Implement' }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.chatExecution?.text, { timeout: 30000 }).toBe('Implement the plan you proposed.')
+  const implementation = (await workspace.api(`/api/chats/${chat.id}`)).run
+  expect(implementation.id).toBe(conversation)
+  expect(implementation.chatExecution.plan).toBeUndefined()
+  expect(implementation.chatExecution.afterPlan).toBe(true)
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+  await expect(proposal.getByRole('button', { name: 'Implement' })).toHaveCount(0)
+})
