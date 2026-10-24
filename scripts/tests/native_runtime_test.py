@@ -458,6 +458,10 @@ def main():
 
         def fenced(run, attempt, timeout=90):
             eventually(lambda: (state / (attempt + '.exit')).exists(), timeout=timeout)
+            # Completion writes the exit marker before retiring admission. Use
+            # the runner wait protocol to observe the entire ordered release.
+            result = api('/runs/' + attempt + '/wait')
+            assert result['StatusCode'] == int((state / (attempt + '.exit')).read_text())
             assert not (state / (attempt + '.active')).exists()
             active = command('systemctl', 'show', 'cairn-native-' + attempt + '.service', '--property=ActiveState', '--value').stdout.strip()
             assert active not in ('active', 'activating'), 'Descendant escaped cgroup fencing.'
