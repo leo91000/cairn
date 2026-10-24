@@ -153,7 +153,21 @@ uniquement un succès masquerait les échecs jusqu’à l’expiration du délai
 
 ## Attendre plusieurs résultats
 
-Avec 2 à 8 conditions externes différentes, `mode` choisit quand reprendre :
+Il n’y a pas de plafond fonctionnel sur le nombre de conditions. Les groupes restent
+plats et chaque condition doit être distincte après normalisation. La taille des
+requêtes, la mémoire et le temps de traitement restent des contraintes physiques ;
+les résultats ne sont pas tronqués pour l’agent.
+
+L’enregistrement vérifie au plus quatre conditions de plugin en parallèle, puis
+rend la main. Les autres sont enregistrées immédiatement comme en attente et
+vérifiées par l’observateur durable : au plus 16 cibles distinctes par passage,
+quatre en parallèle, avec déduplication et nouvelle vérification des autorisations.
+Un grand groupe peut donc rendre `deferred: true` même si des résultats distants
+sont déjà disponibles mais pas encore observés. Le délai du groupe reste global.
+Les cartes web et Android affichent dix conditions par page, un compteur global
+et une jauge agrégée par état au-delà de dix conditions.
+
+Avec plusieurs conditions externes différentes, `mode` choisit quand reprendre :
 
 - `all` : quand chaque condition a un résultat ;
 - `any` : au premier résultat.
@@ -217,7 +231,7 @@ carte par attente, avec le mode, une jauge segmentée et une ligne par condition
 (résultat, prochaine vérification ou exécution à ouvrir). Une fois la
 conversation reprise, la liste se replie derrière sa jauge. Le groupe reçoit son
 résultat et un événement `wait_ready` dès qu’il peut reprendre. La détection des
-cycles suit chaque exécution groupée, dans la limite de 32 exécutions.
+cycles parcourt toutes les exécutions accessibles, sans plafond sur leur nombre.
 
 Une condition seule garde exactement l’enregistrement précédent. Un groupe est
 stocké comme `condition: { type: "group", mode, conditions }` avec un tableau
@@ -260,8 +274,8 @@ des VM suivent la politique existante des réveils durables.
 | Nouveau commit sur une PR | Abandonner une attente devenue obsolète et vérifier le nouveau commit | Disponible pour `github_pr_checks`, avec résultat `superseded` explicite |
 | Review GitHub humaine | Reprendre après une décision de review sur le commit attendu | Définir les reviewers requis et traiter les approbations périmées ou révoquées |
 | Review d’un agent indépendant | Reprendre après la fin de la review et lire les findings | Ajouter une source durable de fin de sous-agent et sa délégation d’accès ; les outils natifs de collaboration ne sont pas des runs Cairn |
-| Plusieurs dépendances | Attendre tout un groupe ou la première réponse utile | Disponible avec `mode: all` / `any`, 2 à 8 conditions externes ; les échecs comptent comme résultats |
-| Chaîne de tâches | Construire, vérifier puis publier dans des exécutions distinctes | Les dépendances simples sont disponibles ; les cycles sont rejetés et les chaînes sont bornées à 32 runs |
+| Plusieurs dépendances | Attendre tout un groupe ou la première réponse utile | Disponible avec `mode: all` / `any`, plusieurs conditions externes ; les échecs comptent comme résultats |
+| Chaîne de tâches | Construire, vérifier puis publier dans des exécutions distinctes | Les dépendances simples sont disponibles ; les cycles sont rejetés, sans plafond de longueur |
 | Réponse utilisateur | Suspendre la conversation jusqu’à une réponse, sans garder sa VM active | Prolonger les questions durables existantes et conserver leur état à la fin du tour |
 | Approbation explicite | Reprendre lorsqu’une action préparée est autorisée | Lier la réponse à l’action exacte et à sa version ; le réveil doit transporter la décision vérifiée |
 | Build ou commande longue | Attendre un job qui continue indépendamment du tour | Créer d’abord des jobs gérés avec identifiants, résultat et annulation ; ils gardent leurs propres ressources |

@@ -236,9 +236,6 @@ async fn invalid_groups_are_refused() {
         request
     };
     let both = json!([run_condition(&first), run_condition(&second)]);
-    let nine = (0..9)
-        .map(|_| json!({ "type": "run_finished", "runId": id() }))
-        .collect::<Vec<_>>();
     for (input, status) in [
         (request(both.clone(), json!({ "mode": null })), 400),
         (request(both.clone(), json!({ "mode": "first" })), 400),
@@ -260,7 +257,6 @@ async fn invalid_groups_are_refused() {
             ),
             400,
         ),
-        (request(json!(nine), json!({})), 400),
         (request(json!([]), json!({})), 400),
         (
             request(
@@ -418,7 +414,7 @@ async fn a_recorded_any_result_keeps_its_snapshot_until_the_conversation_resumes
 #[tokio::test]
 #[ignore = "local grouped-wait storage measurements; run explicitly after builds/tests finish"]
 async fn measure_group_metadata() {
-    for count in [1, 2, 8] {
+    for count in [1, 2, 8, 100] {
         let f = Fixture::new().await;
         let mut targets = Vec::new();
         for _ in 0..count {
@@ -551,4 +547,115 @@ async fn an_unused_any_member_stays_null_when_its_grant_is_revoked_after_resolut
     assert!(prompt.contains(r#""result":null"#));
     assert!(prompt.contains(r#""status":"succeeded""#));
     assert!(!prompt.contains("unavailable"));
+}
+
+#[tokio::test]
+async fn a_hundred_conditions_keep_order_and_results_in_both_modes() {
+    assert!(
+        wait_for::tool(&[], false)["inputSchema"]["properties"]["conditions"]
+            .get("maxItems")
+            .is_none()
+    );
+    for mode in ["all", "any"] {
+        let f = Fixture::new().await;
+        let mut targets = Vec::new();
+        for _ in 0..100 {
+            targets.push(f.target().await);
+        }
+        let sources = targets.iter().map(run_condition).collect::<Vec<_>>();
+        let wait = f.group(mode, sources.clone()).await.unwrap();
+        assert_eq!(wait["deferred"], true);
+        assert_eq!(wait["wakeup"]["members"].as_array().unwrap().len(), 100);
+        f.finish().await;
+        f.set_status(&targets[99], "failed").await;
+        f.record_groups().await;
+        if mode == "all" {
+            assert!(f.wakeup().await["observation"].is_null());
+            for target in &targets[..99] {
+                f.set_status(target, "succeeded").await;
+            }
+            f.record_groups().await;
+        }
+        let result = f.wakeup().await["observation"].clone();
+        assert_eq!(result["state"], "completed");
+        let members = result["members"].as_array().unwrap();
+        assert_eq!(members.len(), sources.len());
+        for (index, member) in members.iter().enumerate() {
+            assert_eq!(member["condition"], sources[index]);
+            assert_eq!(member["result"].is_object(), mode == "all" || index == 99);
+        }
+        assert_eq!(members[99]["result"]["status"], "failed");
+    }
+}
+
+#[tokio::test]
+async fn long_dependency_chains_are_allowed_but_cycles_at_the_end_are_rejected() {
+    let f = Fixture::new().await;
+    let mut targets = Vec::new();
+    for _ in 0..40 {
+        targets.push(f.target().await);
+    }
+    for pair in targets.windows(2) {
+        f.s.store
+            .patch_run(
+                text(&pair[0], "id"),
+                json!({
+                    "wakeup": { "condition": run_condition(&pair[1]) },
+                }),
+            )
+            .await
+            .unwrap();
+    }
+    let sources = vec![run_condition(&targets[0]), run_condition(&targets[39])];
+    assert_eq!(
+        f.group("all", sources.clone()).await.unwrap()["deferred"],
+        true
+    );
+    f.s.store
+        .patch_run(
+            text(&targets[39], "id"),
+            json!({
+                "wakeup": { "condition": { "type": "run_finished", "runId": f.run } },
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(f.group("any", sources).await.unwrap_err(), 409);
+}
+
+#[tokio::test]
+async fn large_plugin_groups_probe_one_initial_batch_then_observe_every_member() {
+    let f = Fixture::new().await;
+    let sources = (1..=40).map(|run| {
+        f.github.respond(&format!("repos/fixture/repo/actions/runs/{run}"), &json!({
+            "id": run, "head_sha": SHA, "status": "completed", "conclusion": "success", "run_attempt": 1,
+        }));
+        json!({ "type": "github_workflow", "projectId": f.project, "runId": run, "headSha": SHA })
+    }).collect::<Vec<_>>();
+    let wait = f.group("all", sources).await.unwrap();
+    assert_eq!(wait["deferred"], true);
+    assert_eq!(
+        f.calls().len(),
+        4,
+        "Registration probes only one bounded batch"
+    );
+    f.finish().await;
+    for _ in 0..3 {
+        conditions::poll_once(&f.s).await.unwrap();
+    }
+    let result = f.wakeup().await["observation"].clone();
+    assert_eq!(result["state"], "completed");
+    assert_eq!(result["members"].as_array().unwrap().len(), 40);
+    assert!(
+        result["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|member| member["result"]["conclusion"] == "success")
+    );
+    assert_eq!(
+        f.calls().len(),
+        40,
+        "All members checked without rechecking completed ones"
+    );
 }

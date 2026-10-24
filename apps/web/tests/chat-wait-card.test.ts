@@ -163,3 +163,20 @@ it('identifies delegated tasks, links their conversations and shows task failure
   expect(html).toContain('The task failed · Review failed')
   expect(html).toContain('text-danger')
 })
+
+it('large groups render a bounded list and retain the full result count', async () => {
+  const conditions = Array.from({ length: 100 }, (_, index) => ({ type: 'run_finished' as const, runId: `run-${index}` }))
+  const group: ChatWakeup = {
+    ...wakeup,
+    condition: { type: 'group', mode: 'all', conditions },
+    display: undefined,
+    members: conditions.map((condition, index) => index === 99 ? { observation: { ...condition, state: 'completed', status: 'failed' } } : {}),
+  }
+  const html = await render({ wakeup: group }, { wakeup: group, paused: false })
+  expect(html.match(/data-testid="wait-member"/g)).toHaveLength(10)
+  expect(html).toContain('1/100')
+  expect(html).toContain('1–10 of 100')
+  expect(html).toContain('Next conditions')
+  expect(html).toContain('aria-setsize="100"')
+  expect(html).not.toContain('/runs/run-99')
+})

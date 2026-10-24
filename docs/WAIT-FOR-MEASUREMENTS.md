@@ -209,3 +209,61 @@ not a comparison with the different hosts used in the earlier sections. They do
 not measure cold physical-disk reads, production network latency, plugin response
 sizes, or scans across a large installation. No codec, compression, SQLite schema,
 journal policy or compatibility epoch changes are involved.
+
+## Unbounded group cardinality (2026-10-24)
+
+The same ignored `groups::measure_group_metadata` test now includes 100 native run
+conditions alongside the one-, two- and eight-condition references, all in the
+same candidate build. [Raw results and source hashes](measurements/unbounded-wait-for.json)
+retain all four sizes. Reproduce with:
+
+```sh
+CARGO_INCREMENTAL=0 pnpm test:backend -p cairn-installation --test wait_for \
+  groups::measure_group_metadata -- --ignored --exact --nocapture
+```
+
+Each fixture has one waiting conversation and N distinct queued runs. The test
+measures 100 registrations with different reasons, 500 warm reads, 20 fresh-pool
+first reads, 100 idle group ticks, then 20 sequences where each target finishes
+separately (20 × N progress ticks). Target setup/status writes stay outside timed
+progress ticks. Encoded bytes use `serde_json::to_vec` on the stored wakeup; read
+latency reads the whole conversation. Process CPU includes all manager threads;
+no timed child processes, plugin probes or network calls occur.
+
+Host: shared native Linux 7.2.9-arch1-1, Intel i9-14900K, 32 logical CPUs, about
+94 GiB RAM; `/tmp` on ext4. Rust 1.97.1, dev/test build with debug info and
+incremental compilation disabled. Local Gradle formatting/lint/unit tests and a
+short delegation test run overlapped timing. The host was not reserved. Fresh
+pools reset SQLite connection/statement/page caches, **not OS caches or the
+physical disk cache**. These are local metadata measurements, not production
+network latency or a controlled performance comparison with an earlier commit.
+
+| Metric | Single condition | Eight conditions | 100 conditions |
+| --- | ---: | ---: | ---: |
+| Pending wakeup JSON bytes | 276 | 854 | 7662 |
+| Final wakeup JSON bytes¹ | 277 | 4619 | 53839 |
+| Registration median / p95, ms | 6.551 / 8.667 | 13.500 / 20.146 | 62.134 / 90.323 |
+| CPU for 100 registrations, ms | 361.099 | 798.655 | 5903.304 |
+| Warm read median / p95, ms | 0.065 / 0.092 | 0.080 / 0.105 | 0.242 / 0.289 |
+| Fresh-pool first read median / p95, ms | 0.570 / 0.630 | 0.638 / 0.671 | 0.736 / 0.862 |
+| Fresh pool open median / p95, ms | 4.694 / 8.172 | 15.254 / 23.252 | 8.438 / 20.084 |
+| Idle group tick median / p95, ms | 0.184 / 0.295 | 1.679 / 2.784 | 19.619 / 29.734 |
+| CPU for 100 idle ticks, ms | 20.334 | 194.833 | 2129.722 |
+| Progress tick median / p95, ms | 0.288 / 0.395 | 7.574 / 13.534 | 34.647 / 53.988 |
+| Progress tick samples | 20 | 160 | 2000 |
+| CPU for all progress ticks, ms | 6.362 | 641.871 | 61057.767 |
+
+¹ The extra group tick ignores the single-condition reference; its final stored
+wakeup retains its pending shape. Groups record their complete result snapshots.
+
+The larger record grows with the number of conditions and retained results. The
+100-condition pending wakeup is 7,662 bytes; its final native-result snapshot is
+53,839 bytes. Progress writes still rewrite that snapshot. A workload where every
+result arrives on a different tick therefore does more total work than one where
+many results arrive together. This does not measure a large installation scan,
+large plugin payloads, observer memory, or model context capacity. Full results
+are retained for agents, so their context cost also grows with the group. The
+four-in-flight/16-per-batch observer budgets and UI pagination bound work admitted
+at once; they do not make arbitrarily large groups free or guarantee observation
+of every remote result before the global deadline. No storage format, journal or
+compatibility epoch changes.

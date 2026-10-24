@@ -1,0 +1,207 @@
+{
+  "date": "2026-10-24",
+  "reference": "Single-condition wait and eight-condition group in the same candidate build; base 8f3b61877c33406f9fa28f5e107267bb73f5d601",
+  "sourceSha256": {
+    "crates/installation/src/waits.rs": "8fd4f004f7594ac786ac43eaf28bfe419f070dd2f0024c84f403584a0ed11618",
+    "crates/installation/src/plugins/conditions.rs": "b37d5c59370878e1c5fbadc08be8d69c6da14fffff9bc7c2485c3360c544cc2c",
+    "crates/installation/tests/wait_for/groups.rs": "b6267d3196dbfca4e97e7600fb599709df027f7782f3501b158cc63c9c9f09cd"
+  },
+  "host": {
+    "os": "Linux 7.2.9-arch1-1 x86_64",
+    "cpu": "Intel Core i9-14900K, 32 logical CPUs",
+    "memoryKiB": 98638380,
+    "filesystem": "ext4 (/tmp)",
+    "rust": "1.97.1, dev/test profile with debug info, CARGO_INCREMENTAL=0",
+    "conditions": "Shared native host; local Gradle formatting/lint/unit tests and a short delegation test run overlapped timing. No external network requests; OS page cache not flushed."
+  },
+  "samples": [
+    {
+      "conditions": 1,
+      "externalProbeRequests": 0,
+      "finalWakeupBytes": 277,
+      "firstProgressWakeupBytes": 276,
+      "freshPoolFirstRead": {
+        "meanMs": 0.5741343499999998,
+        "medianMs": 0.569916,
+        "p95Ms": 0.629956,
+        "samples": 20
+      },
+      "freshPoolOpen": {
+        "meanMs": 5.09774985,
+        "medianMs": 4.694437,
+        "p95Ms": 8.172169,
+        "samples": 20
+      },
+      "idleGroupTick": {
+        "meanMs": 0.19357193999999997,
+        "medianMs": 0.183933,
+        "p95Ms": 0.29538600000000004,
+        "samples": 100
+      },
+      "idleGroupTickProcessCpuMs": 20.333635999999956,
+      "pendingChatBytes": 796,
+      "pendingWakeupBytes": 276,
+      "progressGroupTick": {
+        "meanMs": 0.29101014999999997,
+        "medianMs": 0.287778,
+        "p95Ms": 0.39479400000000003,
+        "samples": 20
+      },
+      "progressGroupTickProcessCpuMs": 6.36165399999993,
+      "registration": {
+        "meanMs": 7.071731360000001,
+        "medianMs": 6.551188000000001,
+        "p95Ms": 8.667036,
+        "samples": 100
+      },
+      "registrationProcessCpuMs": 361.098651,
+      "warmRead": {
+        "meanMs": 0.06851099400000002,
+        "medianMs": 0.064626,
+        "p95Ms": 0.09176999999999999,
+        "samples": 500
+      }
+    },
+    {
+      "conditions": 2,
+      "externalProbeRequests": 0,
+      "finalWakeupBytes": 1409,
+      "firstProgressWakeupBytes": 600,
+      "freshPoolFirstRead": {
+        "meanMs": 0.59157065,
+        "medianMs": 0.581694,
+        "p95Ms": 0.646001,
+        "samples": 20
+      },
+      "freshPoolOpen": {
+        "meanMs": 10.864324,
+        "medianMs": 9.513413,
+        "p95Ms": 19.460102,
+        "samples": 20
+      },
+      "idleGroupTick": {
+        "meanMs": 0.66488264,
+        "medianMs": 0.574002,
+        "p95Ms": 0.944557,
+        "samples": 100
+      },
+      "idleGroupTickProcessCpuMs": 67.36896200000001,
+      "pendingChatBytes": 930,
+      "pendingWakeupBytes": 410,
+      "progressGroupTick": {
+        "meanMs": 5.49975955,
+        "medianMs": 5.044924,
+        "p95Ms": 8.732316,
+        "samples": 40
+      },
+      "progressGroupTickProcessCpuMs": 64.58669299999974,
+      "registration": {
+        "meanMs": 9.678812199999998,
+        "medianMs": 9.994114,
+        "p95Ms": 14.547189,
+        "samples": 100
+      },
+      "registrationProcessCpuMs": 381.5887889999999,
+      "warmRead": {
+        "meanMs": 0.06764307399999997,
+        "medianMs": 0.064962,
+        "p95Ms": 0.104091,
+        "samples": 500
+      }
+    },
+    {
+      "conditions": 8,
+      "externalProbeRequests": 0,
+      "finalWakeupBytes": 4619,
+      "firstProgressWakeupBytes": 1044,
+      "freshPoolFirstRead": {
+        "meanMs": 0.6333679999999999,
+        "medianMs": 0.63771,
+        "p95Ms": 0.671072,
+        "samples": 20
+      },
+      "freshPoolOpen": {
+        "meanMs": 15.149553399999999,
+        "medianMs": 15.254223000000001,
+        "p95Ms": 23.252329,
+        "samples": 20
+      },
+      "idleGroupTick": {
+        "meanMs": 1.9594825799999995,
+        "medianMs": 1.678924,
+        "p95Ms": 2.784034,
+        "samples": 100
+      },
+      "idleGroupTickProcessCpuMs": 194.83317899999975,
+      "pendingChatBytes": 1372,
+      "pendingWakeupBytes": 854,
+      "progressGroupTick": {
+        "meanMs": 8.330235499999997,
+        "medianMs": 7.5740169999999996,
+        "p95Ms": 13.534472000000001,
+        "samples": 160
+      },
+      "progressGroupTickProcessCpuMs": 641.8710450000017,
+      "registration": {
+        "meanMs": 14.198801039999996,
+        "medianMs": 13.499591,
+        "p95Ms": 20.146037,
+        "samples": 100
+      },
+      "registrationProcessCpuMs": 798.6546429999999,
+      "warmRead": {
+        "meanMs": 0.07988220400000008,
+        "medianMs": 0.079953,
+        "p95Ms": 0.104613,
+        "samples": 500
+      }
+    },
+    {
+      "conditions": 100,
+      "externalProbeRequests": 0,
+      "finalWakeupBytes": 53839,
+      "firstProgressWakeupBytes": 7852,
+      "freshPoolFirstRead": {
+        "meanMs": 0.7096700499999999,
+        "medianMs": 0.735842,
+        "p95Ms": 0.8622150000000001,
+        "samples": 20
+      },
+      "freshPoolOpen": {
+        "meanMs": 9.596785,
+        "medianMs": 8.437862,
+        "p95Ms": 20.083822,
+        "samples": 20
+      },
+      "idleGroupTick": {
+        "meanMs": 21.343310249999988,
+        "medianMs": 19.618855,
+        "p95Ms": 29.733631,
+        "samples": 100
+      },
+      "idleGroupTickProcessCpuMs": 2129.721560000002,
+      "pendingChatBytes": 8182,
+      "pendingWakeupBytes": 7662,
+      "progressGroupTick": {
+        "meanMs": 38.84037120799995,
+        "medianMs": 34.647193,
+        "p95Ms": 53.988113999999996,
+        "samples": 2000
+      },
+      "progressGroupTickProcessCpuMs": 61057.767382999955,
+      "registration": {
+        "meanMs": 66.88195696000001,
+        "medianMs": 62.133663,
+        "p95Ms": 90.322704,
+        "samples": 100
+      },
+      "registrationProcessCpuMs": 5903.304265,
+      "warmRead": {
+        "meanMs": 0.22706131799999987,
+        "medianMs": 0.242436,
+        "p95Ms": 0.289193,
+        "samples": 500
+      }
+    }
+  ]
+}

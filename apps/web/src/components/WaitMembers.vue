@@ -35,6 +35,13 @@ const received = computed(() => props.members.filter(member => member.outcome).l
 // With `any`, the first result in the agent's order is the one that resumed the conversation.
 const first = computed(() => props.mode === 'any' && props.finished ? props.members.findIndex(member => member.outcome) : -1)
 
+const pageSize = 10
+const selectedPage = ref(0)
+const pageCount = computed(() => Math.ceil(props.members.length / pageSize))
+const page = computed(() => Math.min(selectedPage.value, Math.max(0, pageCount.value - 1)))
+const start = computed(() => page.value * pageSize)
+const visible = computed(() => props.members.slice(start.value, start.value + pageSize))
+
 type State = WaitTone | 'pending' | 'idle'
 
 function state(member: WaitMember): State {
@@ -59,6 +66,19 @@ const segments: Record<State, string> = {
   pending: 'wait-member-shimmer',
   idle: 'bg-variant',
 }
+
+// Small groups keep their individual segments; large groups share one segment per state.
+const meter = computed(() => {
+  if (props.members.length <= pageSize)
+    return props.members.map((member, index) => ({ state: state(member), count: 1, first: index === first.value }))
+  const counts = new Map<State, number>()
+  for (const member of props.members) {
+    const key = state(member)
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+
+  return [...counts].map(([state, count]) => ({ state, count, first: false }))
+})
 
 /** What a condition shows beside its name: its result, or how Cairn follows it. */
 function status(member: WaitMember) {
@@ -103,10 +123,11 @@ const tones: Record<State, string> = {
       >{{ mode === 'any' ? 'Any' : 'All' }}</span>
       <span class="flex min-w-0 flex-1 gap-1" aria-hidden="true">
         <span
-          v-for="(member, index) in members"
+          v-for="(segment, index) in meter"
           :key="index"
-          class="h-1.5 min-w-2 flex-1 rounded-full transition-colors duration-500"
-          :class="[segments[state(member)], index === first ? 'ring-2 ring-coral/30' : '']"
+          class="h-1.5 min-w-0 rounded-full transition-colors duration-500"
+          :style="{ flexGrow: segment.count, flexBasis: 0 }"
+          :class="[segments[segment.state], segment.first ? 'ring-2 ring-coral/30' : '']"
         />
       </span>
       <span class="shrink-0 text-2xs font-semibold tabular-nums text-muted">
@@ -121,8 +142,10 @@ const tones: Record<State, string> = {
     </button>
     <ol v-if="open" :id="listId" class="m-0! mt-2 list-none divide-y divide-line overflow-hidden rounded-xl border border-line bg-inset p-0">
       <li
-        v-for="(member, index) in members"
-        :key="index"
+        v-for="(member, index) in visible"
+        :key="start + index"
+        :aria-posinset="start + index + 1"
+        :aria-setsize="members.length"
         class="wait-member flex items-center gap-2.5 px-3 py-2"
         :class="{ 'opacity-60': finished && !member.outcome }"
         data-testid="wait-member"
@@ -135,7 +158,7 @@ const tones: Record<State, string> = {
           <span class="flex min-w-0 items-center gap-1.5">
             <span class="truncate text-xs font-semibold text-ink">{{ member.title }}</span>
             <span v-for="detail in member.details.slice(0, 2)" :key="detail" class="shrink-0 rounded-full bg-hover px-1.5 font-mono text-[10px] text-muted">{{ detail }}</span>
-            <span v-if="index === first" class="shrink-0 rounded-full bg-coral-soft px-1.5 text-[10px] font-bold text-coral">First</span>
+            <span v-if="start + index === first" class="shrink-0 rounded-full bg-coral-soft px-1.5 text-[10px] font-bold text-coral">First</span>
           </span>
           <span class="block truncate text-2xs" :class="member.lastError && !member.outcome && live ? 'text-warning' : tones[state(member)]">{{ status(member) }}</span>
         </span>
@@ -149,6 +172,27 @@ const tones: Record<State, string> = {
         </RouterLink>
       </li>
     </ol>
+    <nav v-if="open && pageCount > 1" class="mt-2 flex items-center justify-between gap-2 text-2xs text-muted" aria-label="Wait conditions">
+      <button
+        type="button"
+        class="rounded-lg px-3 py-2 hover:bg-hover disabled:opacity-40"
+        :disabled="page === 0"
+        aria-label="Previous conditions"
+        @click="selectedPage = page - 1"
+      >
+        Previous
+      </button>
+      <span class="tabular-nums" aria-live="polite">{{ start + 1 }}–{{ Math.min(start + pageSize, members.length) }} of {{ members.length }}</span>
+      <button
+        type="button"
+        class="rounded-lg px-3 py-2 hover:bg-hover disabled:opacity-40"
+        :disabled="page + 1 >= pageCount"
+        aria-label="Next conditions"
+        @click="selectedPage = page + 1"
+      >
+        Next
+      </button>
+    </nav>
   </div>
 </template>
 
