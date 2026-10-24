@@ -96,9 +96,9 @@ def require_docker_host():
         metadata = Path(path).stat()
         if metadata.st_uid != 0 or not metadata.st_mode & stat.S_ISUID or metadata.st_mode & 0o022:
             raise ValueError('Native Docker requires root-owned, setuid, non-writable UID/GID mapping helpers.')
-    for name in ('iptables', 'ip6tables', 'ip', 'usermod'):
+    for name in ('iptables', 'ip6tables', 'ip', 'usermod', 'useradd', 'groupadd', 'getent'):
         if not shutil.which(name):
-            raise ValueError('Native Docker requires iptables, iproute2 and usermod; install distribution packages before enrollment.')
+            raise ValueError('Native Docker requires iptables, iproute2 and account tools (useradd/groupadd/usermod/getent); install distribution packages before enrollment.')
     for name in ('/etc/subuid', '/etc/subgid'):
         metadata = Path(name).stat()
         if metadata.st_uid != 0 or metadata.st_mode & 0o022:

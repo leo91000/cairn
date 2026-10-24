@@ -12,6 +12,8 @@ pub(super) use reconcile::reconcile;
 use tokio::process::Command;
 
 const COUNT: u32 = 65536;
+const ROOT_FIRST: u32 = 500_000_000;
+const ROOT_END: u32 = ROOT_FIRST + 1_048_576;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(super) struct Identity {
@@ -32,7 +34,7 @@ impl Identity {
     }
 }
 
-async fn run(binary: &str, args: &[&str]) -> Result<String> {
+async fn output(binary: &str, args: &[&str]) -> Result<std::process::Output> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         Command::new(binary)
@@ -45,6 +47,11 @@ async fn run(binary: &str, args: &[&str]) -> Result<String> {
     )
     .await
     .map_err(|_| Error::timeout("Native conversation identity provisioning timed out."))??;
+    Ok(output)
+}
+
+async fn run(binary: &str, args: &[&str]) -> Result<String> {
+    let output = output(binary, args).await?;
     if !output.status.success() {
         return Err(Error::unavailable(format!(
             "Native conversation identity provisioning failed: {}",
@@ -52,6 +59,19 @@ async fn run(binary: &str, args: &[&str]) -> Result<String> {
         )));
     }
     String::from_utf8(output.stdout).map_err(Error::internal)
+}
+
+async fn lookup(database: &str, key: &str) -> Result<Option<String>> {
+    let output = output("/usr/bin/getent", &[database, key]).await?;
+    if output.status.code() == Some(2) {
+        return Ok(None);
+    }
+    if !output.status.success() {
+        return Err(Error::unavailable("Native identity lookup failed."));
+    }
+    Ok(Some(
+        String::from_utf8(output.stdout).map_err(Error::internal)?,
+    ))
 }
 
 fn ranges(text: &str) -> Result<Vec<(String, u32, u32)>> {
@@ -98,19 +118,26 @@ fn selected(user: &str, text: &str) -> Result<Option<u32>> {
     Ok(Some(*start))
 }
 
-fn free_range(uids: &str, gids: &str, passwd: &str, groups: &str) -> Result<u32> {
+fn occupied(uids: &str, gids: &str, passwd: &str, groups: &str) -> Result<Vec<(String, u32, u32)>> {
     let mut occupied = ranges(uids)?;
     occupied.extend(ranges(gids)?);
-    for text in [passwd, groups] {
+    for (text, fields) in [(passwd, &[2usize, 3][..]), (groups, &[2usize][..])] {
         for line in text.lines().filter(|line| !line.is_empty()) {
-            let id = line
-                .split(':')
-                .nth(2)
-                .and_then(|value| value.parse::<u32>().ok())
-                .ok_or_else(|| Error::unavailable("Invalid native identity database."))?;
-            occupied.push((String::new(), id, id.saturating_add(1)));
+            let columns: Vec<_> = line.split(':').collect();
+            for &field in fields {
+                let id = columns
+                    .get(field)
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .ok_or_else(|| Error::unavailable("Invalid native identity database."))?;
+                occupied.push((String::new(), id, id.saturating_add(1)));
+            }
         }
     }
+    Ok(occupied)
+}
+
+fn free_range(uids: &str, gids: &str, passwd: &str, groups: &str) -> Result<u32> {
+    let occupied = occupied(uids, gids, passwd, groups)?;
     (1_000_013_824..4_000_000_000u32)
         .step_by(COUNT as usize)
         .find(|start| {
@@ -121,6 +148,52 @@ fn free_range(uids: &str, gids: &str, passwd: &str, groups: &str) -> Result<u32>
         .ok_or_else(|| {
             Error::unavailable("No disjoint native conversation UID/GID range is available.")
         })
+}
+
+fn free_root_id(next: u32, uids: &str, gids: &str, passwd: &str, groups: &str) -> Result<u32> {
+    if !(ROOT_FIRST..=ROOT_END).contains(&next) {
+        return Err(Error::unavailable(
+            "Native root identity sequence is invalid.",
+        ));
+    }
+    let mut occupied = occupied(uids, gids, passwd, groups)?;
+    occupied.sort_unstable_by_key(|(_, start, _)| *start);
+    let mut candidate = next;
+    for (_, start, end) in occupied {
+        if end <= candidate {
+            continue;
+        }
+        if start > candidate {
+            break;
+        }
+        candidate = end;
+    }
+    if candidate >= ROOT_END {
+        return Err(Error::unavailable(
+            "Managed native root UID/GID pool is exhausted.",
+        ));
+    }
+    Ok(candidate)
+}
+
+/// Advance durably before creating host accounts. Even a crash before account
+/// creation burns the reserved number rather than recycling it into another run.
+async fn reserve_root(
+    registry: &Path,
+    uids: &str,
+    gids: &str,
+    passwd: &str,
+    groups: &str,
+) -> Result<u32> {
+    let path = registry.join("root-sequence");
+    let next = match tokio::fs::read(&path).await {
+        Ok(bytes) => serde_json::from_slice::<u32>(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ROOT_FIRST,
+        Err(error) => return Err(error.into()),
+    };
+    let id = free_root_id(next, uids, gids, passwd, groups)?;
+    atomic_write(&path, &serde_json::to_vec(&(id + 1))?).await?;
+    Ok(id)
 }
 
 /// Called under the controller's disk lock, before exposing any files. Accounts
@@ -139,33 +212,82 @@ pub(super) async fn provision(state: &Path, run_id: &str) -> Result<Identity> {
         "Native identity provisioning is busy.",
     )?;
     let record = registry.join(format!("{user}.json"));
-    if let Ok(bytes) = tokio::fs::read(&record).await {
-        let saved: serde_json::Value = serde_json::from_slice(&bytes)?;
-        if saved["runId"] != run_id {
-            return Err(Error::conflict(
-                "Native conversation account name collision.",
-            ));
+    let mut saved = match tokio::fs::read(&record).await {
+        Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if lookup("passwd", &user).await?.is_some() || lookup("group", &user).await?.is_some() {
+                return Err(Error::conflict(
+                    "Native account exists without its conversation ownership record.",
+                ));
+            }
+            let reservation = serde_json::json!({ "runId": run_id });
+            atomic_write(&record, &serde_json::to_vec(&reservation)?).await?;
+            reservation
         }
-    } else {
-        // Reserve before invoking useradd, so a partial failure cannot let a
-        // second conversation adopt an already created account.
-        if run("/usr/bin/id", &["-u", &user]).await.is_ok() {
-            return Err(Error::conflict(
-                "Native conversation account already exists without its ownership record.",
-            ));
-        }
-        atomic_write(
-            &record,
-            &serde_json::to_vec(&serde_json::json!({ "runId": run_id }))?,
+        Err(error) => return Err(error.into()),
+    };
+    if saved["runId"] != run_id {
+        return Err(Error::conflict(
+            "Native conversation account name collision.",
+        ));
+    }
+    if lookup("passwd", &user).await?.is_none() {
+        let group = lookup("group", &user).await?;
+        let existing_gid = group
+            .as_deref()
+            .map(|group| {
+                let fields: Vec<_> = group.trim().split(':').collect();
+                let gid = fields
+                    .get(2)
+                    .and_then(|id| id.parse::<u32>().ok())
+                    .ok_or_else(|| Error::unavailable("Invalid managed native group."))?;
+                if saved["rootGid"].as_u64() != Some(gid as u64)
+                    || fields.get(3).is_none_or(|members| !members.is_empty())
+                {
+                    return Err(Error::conflict(
+                        "Native group is not a private reserved conversation group.",
+                    ));
+                }
+                Ok(gid)
+            })
+            .transpose()?;
+        let root = reserve_root(
+            &registry,
+            &tokio::fs::read_to_string("/etc/subuid").await?,
+            &tokio::fs::read_to_string("/etc/subgid").await?,
+            &run("/usr/bin/getent", &["passwd"]).await?,
+            &run("/usr/bin/getent", &["group"]).await?,
         )
         .await?;
-    }
-    if run("/usr/bin/id", &["-u", &user]).await.is_err() {
+        // Numeric NSS lookups also protect hosts whose directory service does
+        // not enumerate every identity. Do not override a conflicting account.
+        if lookup("passwd", &root.to_string()).await?.is_some()
+            || lookup("group", &root.to_string()).await?.is_some()
+        {
+            return Err(Error::conflict(
+                "Reserved native root ID is already used by the host identity service.",
+            ));
+        }
+        let gid = existing_gid.unwrap_or(root);
+        saved["rootUid"] = root.into();
+        saved["rootGid"] = gid.into();
+        atomic_write(&record, &serde_json::to_vec(&saved)?).await?;
+        if existing_gid.is_none() {
+            run(
+                "/usr/sbin/groupadd",
+                &["--system", "--gid", &gid.to_string(), &user],
+            )
+            .await?;
+        }
         run(
             "/usr/sbin/useradd",
             &[
                 "--system",
-                "--user-group",
+                "--uid",
+                &root.to_string(),
+                "--gid",
+                &user,
+                "--no-user-group",
                 "--no-create-home",
                 "--shell",
                 "/usr/sbin/nologin",
@@ -187,6 +309,17 @@ pub(super) async fn provision(state: &Path, run_id: &str) -> Result<Identity> {
     if root_uid == 0 || root_gid == 0 {
         return Err(Error::unavailable(
             "Native conversation identity must be unprivileged.",
+        ));
+    }
+    if saved["rootUid"]
+        .as_u64()
+        .is_some_and(|expected| expected != root_uid as u64)
+        || saved["rootGid"]
+            .as_u64()
+            .is_some_and(|expected| expected != root_gid as u64)
+    {
+        return Err(Error::conflict(
+            "Native host account no longer matches its reserved identity.",
         ));
     }
     let uids = tokio::fs::read_to_string("/etc/subuid").await?;
@@ -235,6 +368,33 @@ fn translate(id: u32, old_root: u32, old_start: u32, root: u32, start: u32) -> u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_ids_skip_host_accounts_groups_and_subordinates_beyond_system_pool_limits() {
+        let users = (ROOT_FIRST..ROOT_FIRST + 5000)
+            .map(|id| format!("u{id}:x:{id}:42::/:/bin/false\n"))
+            .collect::<String>();
+        let gid = ROOT_FIRST + 5000;
+        let sub = format!("foreign:{}:65536\n", gid + 1);
+        assert_eq!(
+            free_root_id(ROOT_FIRST, &sub, "", &users, &format!("g:x:{gid}:\n")).unwrap(),
+            gid + 1 + COUNT
+        );
+        assert!(free_root_id(ROOT_END, "", "", "", "").is_err());
+    }
+
+    #[tokio::test]
+    async fn reserved_root_ids_are_not_recycled_after_interrupted_account_creation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first = reserve_root(temporary.path(), "", "", "", "")
+            .await
+            .unwrap();
+        let second = reserve_root(temporary.path(), "", "", "", "")
+            .await
+            .unwrap();
+        assert_eq!(first, ROOT_FIRST);
+        assert_eq!(second, ROOT_FIRST + 1);
+    }
 
     #[test]
     fn ranges_never_overlap_host_users_or_other_subordinates() {

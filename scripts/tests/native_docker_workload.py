@@ -142,6 +142,13 @@ def main():
                 metrics['pulls'].append(dict(image=image, ms=(time.perf_counter() - elapsed) * 1000,
                     digest=command('docker', 'image', 'inspect', '--format', '{{json .RepoDigests}}', image)))
         command(*forbidden, success=False)
+    if phase != 'other':
+        # A recursive home bind cannot unmask frozen credentials or skills,
+        # even for container namespace root with ordinary Docker capabilities.
+        command('docker', 'run', '--rm', '-v', '/home/node:/engine-home', ALPINE, 'sh', '-c',
+                'test -r /engine-home/.codex/auth.json; '
+                '! (printf forbidden >/engine-home/.codex/auth.json); '
+                '! touch /engine-home/.agents/skills/not-allowed')
     if phase == 'oom':
         command('docker', 'run', '-d', '--name', 'node-ceiling', '-v', str(probe) + ':/probe:ro', '-v', 'persistent:/v', ALPINE, '/probe', 'oom', '/v')
     elif phase == 'readonly':

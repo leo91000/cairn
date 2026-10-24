@@ -9,7 +9,10 @@ The host's Docker daemon, personal home and desktop sockets are never mounted.
 ## Boundary and lifecycle
 
 Each conversation has its own nologin host account and non-overlapping 65,536-entry
-subordinate UID and GID ranges. RootlessKit starts a private user, mount, PID, IPC,
+subordinate UID and GID ranges. Namespace-root host UIDs/GIDs are explicitly
+allocated from 500,000,000–501,048,575, outside the host's small system-service
+account pool, skipping host identities and subordinate ranges. A durable sequence
+prevents reuse even after interrupted account creation. RootlessKit starts a private user, mount, PID, IPC,
 UTS and slirp network namespace under that account. The engine runs as namespace
 UID/GID 1000 with an empty capability bounding set and NoNewPrivileges. Namespace
 root is an unprivileged host UID, reserved for the immutable enclave supervisor

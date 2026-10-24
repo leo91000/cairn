@@ -179,7 +179,9 @@ records both mappings and journals original modes/ACLs/file capabilities before
 each ownership batch. Recovery replays pending metadata even when chown already
 completed, finishes that mapping, then applies a new destination mapping if needed;
 neither source work nor the local journal is discarded. Retain the identity registry with the environment, including
-after cache eviction. Do not recycle accounts into another conversation.
+after cache eviction, together with its durable root-ID allocation sequence. Host
+root UID/GID reservations use a managed high-ID pool rather than the finite system
+service account range. Do not recycle accounts into another conversation.
 
 Before activating this runtime on native hosts, refresh the reviewed supervisor,
 provision its managed Docker tools and mapping prerequisites, drain and stop the

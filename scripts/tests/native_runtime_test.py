@@ -584,6 +584,8 @@ def main():
                 parallel = start(docker_other, lease=300000, docker_script=docker_script('other'))
                 owner_a = json.loads((state / 'native' / docker_run / 'data/.cairn-identity.json').read_text())
                 owner_b = json.loads((state / 'native' / docker_other / 'data/.cairn-identity.json').read_text())
+                assert 500000000 <= owner_a['root_uid'] < 501048576
+                assert owner_a['root_uid'] == owner_a['root_gid']
                 assert owner_a['root_uid'] != owner_b['root_uid']
                 assert abs(owner_a['subuid'] - owner_b['subuid']) >= 65536
                 api('/runs/' + parallel, method='DELETE')

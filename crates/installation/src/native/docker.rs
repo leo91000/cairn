@@ -102,6 +102,13 @@ impl Policy {
     }
 
     fn host_config(&self, host: &Value) -> Result<()> {
+        for field in ["MaskedPaths", "ReadonlyPaths"] {
+            if host.get(field).is_some_and(|value| !value.is_null()) {
+                return Err(Error::forbidden(
+                    "Docker must retain its default kernel path masks.",
+                ));
+            }
+        }
         for field in [
             "Privileged",
             "CapAdd",
@@ -113,8 +120,6 @@ impl Policy {
             "UsernsMode",
             "PidMode",
             "UTSMode",
-            "MaskedPaths",
-            "ReadonlyPaths",
             "ContainerIDFile",
             "StorageOpt",
         ] {
@@ -705,6 +710,8 @@ mod tests {
     #[test]
     fn docker_api_cannot_acquire_namespace_mount_device_or_restart_privileges() {
         for host in [
+            json!({ "MaskedPaths": [] }),
+            json!({ "ReadonlyPaths": [] }),
             json!({"Privileged":true}),
             json!({"CapAdd":["SYS_ADMIN"]}),
             json!({"PidMode":"host"}),
