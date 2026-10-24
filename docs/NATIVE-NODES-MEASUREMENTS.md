@@ -41,6 +41,35 @@ sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 \
   --qualifier target/debug/examples/native_storage_qualifier
 ```
 
+### Recorded direct-mount qualification
+
+Measured on 2026-10-24 at commit `8cd44e1d6bce74e5ee40fc1b0091f7a857f7d0c2`
+in the successful [real ext4/ublk qualification](https://github.com/leo91000/cairn/actions/runs/40116314605/job/120940066691).
+The [recorded JSON](measurements/native-storage-8cd44e1d.json) contains every
+reference, layout, encoded-byte count and host condition. The host used Linux
+`6.17.0-1022-azure`, four visible CPUs, AMD EPYC 7763, about 16 GiB RAM and a
+filesystem reported as `ext2/ext3`. The workload account was UID 999; native
+writes in both VM disk layouts were verified offline as UID/GID 1000.
+
+| Path, wall / workload CPU ms | 128 fsynced 4 KiB writes | Cold-hinted 8 MiB read | Following warm read |
+| --- | ---: | ---: | ---: |
+| Direct host reference | 51.82 / 15.50 | 1.74 / 1.74 | 1.90 / 1.91 |
+| Native-born retained | 306.22 / 18.20 | 11.81 / 2.74 | 1.91 / 1.91 |
+| Native-born after eviction | 296.06 / 18.93 | 1588.20 / 2.00 | 1.85 / 1.85 |
+| Flat VM retained | 278.29 / 18.83 | 10.18 / 2.42 | 2.01 / 2.01 |
+| Flat VM after eviction | 272.96 / 18.86 | 798.91 / 2.26 | 1.91 / 1.91 |
+| Paired VM retained | 300.77 / 19.83 | 12.92 / 2.90 | 2.04 / 2.05 |
+| Paired VM after eviction | 302.82 / 20.96 | 851.12 / 3.08 | 2.32 / 2.33 |
+
+The first publications added 8,431,287 encoded S3 bytes across 10 objects for
+the flat VM disk and 8,432,475 bytes across 13 objects for the paired disk.
+The native-born reference added 8,434,434 bytes across 10 objects; raw workload
+payload was 8,912,896 bytes. These byte counts include encrypted filesystem
+metadata and manifests and exclude HTTP overhead. This is one sequential sample
+per path on shared hosted CI, with the resource limits and advisory cache hints
+described above. It verifies real mounts, writes and recovery; it does not isolate
+idmapping overhead or measure a production network or a Firecracker guest boot.
+
 ## Host ublk and lazy S3 resume
 
 Measured on 2026-10-20, 15:52–15:53 UTC, at

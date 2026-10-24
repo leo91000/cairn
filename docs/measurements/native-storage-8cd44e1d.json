@@ -1,0 +1,159 @@
+{
+  "host": {
+    "kernel": "6.17.0-1022-azure",
+    "machine": "x86_64",
+    "cpuCount": 4,
+    "cpu": "\t: AMD EPYC 7763 64-Core Processor",
+    "memory": "MemTotal:       16373452 kB"
+  },
+  "conditions": "Disposable hosted Linux VM; loopback Moto S3, synthetic credentials; no WAN latency. Cold file reads use advisory POSIX_FADV_DONTNEED; post-eviction controller restart clears userspace cache.",
+  "workload": "Seeded random42 8MiB asset +128 fsynced 4KiB text writes, per-process wall/CPU milliseconds.",
+  "resources": {
+    "nativeCpu": 1,
+    "nativeMemoryMiB": 512,
+    "nativeDiskMiB": 256,
+    "reference": "Host root process without workload cgroup limits",
+    "native": "Unprivileged systemd workload, journal-backed ext4 on ublk",
+    "build": "Cargo development profile, debug info disabled"
+  },
+  "reference": {
+    "write": {
+      "wallMs": 51.82000400000675,
+      "cpuMs": 15.496256
+    },
+    "readColdHint": {
+      "wallMs": 1.7443069999956151,
+      "cpuMs": 1.7448379999999986
+    },
+    "readWarm": {
+      "wallMs": 1.9045450000021447,
+      "cpuMs": 1.9051679999999989
+    }
+  },
+  "filesystem": "ext2/ext3",
+  "nativeRetained": {
+    "write": {
+      "wallMs": 306.2233120000002,
+      "cpuMs": 18.202732
+    },
+    "readColdHint": {
+      "wallMs": 11.812176999995927,
+      "cpuMs": 2.743664999999999
+    },
+    "readWarm": {
+      "wallMs": 1.912950999994223,
+      "cpuMs": 1.9138439999999979
+    },
+    "readTriggeredRemoteRequests": 0
+  },
+  "firstPointEncodedS3Bytes": 8434434,
+  "firstPointEncodedS3Objects": 10,
+  "referenceRawBytes": 8912896,
+  "preparedBaseMetadataBytes": 16809984,
+  "evictedBytes": 37748736,
+  "nativeEvicted": {
+    "write": {
+      "wallMs": 296.0581629999979,
+      "cpuMs": 18.9303
+    },
+    "readColdHint": {
+      "wallMs": 1588.20073199999,
+      "cpuMs": 2.0027099999999978
+    },
+    "readWarm": {
+      "wallMs": 1.8485209999994368,
+      "cpuMs": 1.8494930000000007
+    },
+    "readTriggeredRemoteRequests": 2
+  },
+  "concurrentCloseMs": 492.31363500001635,
+  "nativeAdministrator": {
+    "realHostSudo": true,
+    "ordinaryUser": true,
+    "concurrentConversations": 2,
+    "rootDescendantsStopped": true,
+    "protectedAfterAdministrator": true,
+    "filesPreserved": true,
+    "hostChangesRetained": true,
+    "pendingCrashFailsClosed": true,
+    "generationRetry": true
+  },
+  "encodedS3Bytes": 8570556,
+  "encodedS3Objects": 27,
+  "vmWorkloadUid": 999,
+  "vmDisks": [
+    {
+      "layout": "flat",
+      "encodedNewS3Bytes": 8431287,
+      "encodedNewS3Objects": 10,
+      "nativeWritesStoredAsUid": 1000,
+      "retained": {
+        "write": {
+          "wallMs": 278.2889049999824,
+          "cpuMs": 18.828055
+        },
+        "readColdHint": {
+          "wallMs": 10.177070999986881,
+          "cpuMs": 2.4168629999999984
+        },
+        "readWarm": {
+          "wallMs": 2.006125999997721,
+          "cpuMs": 2.0079890000000016
+        },
+        "readTriggeredRemoteRequests": 0
+      },
+      "remote": {
+        "write": {
+          "wallMs": 272.9619149999962,
+          "cpuMs": 18.858926
+        },
+        "readColdHint": {
+          "wallMs": 798.9071499999909,
+          "cpuMs": 2.257305000000001
+        },
+        "readWarm": {
+          "wallMs": 1.906614000006357,
+          "cpuMs": 1.907882999999999
+        },
+        "readTriggeredRemoteRequests": 1
+      }
+    },
+    {
+      "layout": "paired",
+      "encodedNewS3Bytes": 8432475,
+      "encodedNewS3Objects": 13,
+      "nativeWritesStoredAsUid": 1000,
+      "retained": {
+        "write": {
+          "wallMs": 300.765685999977,
+          "cpuMs": 19.833240999999997
+        },
+        "readColdHint": {
+          "wallMs": 12.919441000008192,
+          "cpuMs": 2.8979500000000034
+        },
+        "readWarm": {
+          "wallMs": 2.0434849999730886,
+          "cpuMs": 2.045049
+        },
+        "readTriggeredRemoteRequests": 0
+      },
+      "remote": {
+        "write": {
+          "wallMs": 302.8181459999928,
+          "cpuMs": 20.956729
+        },
+        "readColdHint": {
+          "wallMs": 851.1175470000012,
+          "cpuMs": 3.079973
+        },
+        "readWarm": {
+          "wallMs": 2.3249090000092565,
+          "cpuMs": 2.3263749999999987
+        },
+        "readTriggeredRemoteRequests": 2
+      }
+    }
+  ],
+  "harnessCpuSeconds": 0.757331
+}

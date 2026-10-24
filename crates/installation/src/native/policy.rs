@@ -15,6 +15,7 @@ tokio::task_local! { pub(crate) static PARENT: String; }
 pub(crate) enum Origin {
     Human(String),
     Run(String),
+    DelegatedTask(String),
     Stored(Value),
     #[default]
     Unknown,
@@ -92,7 +93,7 @@ pub(crate) fn provenance(db: &Db<'_>, source: &Origin) -> Result<Value> {
                 "nativeProvenanceUnknown": false,
             }))
         }
-        Origin::Run(id) => {
+        Origin::Run(id) | Origin::DelegatedTask(id) => {
             let Some(run) = db.run(id)? else {
                 return Ok(unknown());
             };
@@ -105,6 +106,11 @@ pub(crate) fn provenance(db: &Db<'_>, source: &Origin) -> Result<Value> {
                 "nativePrincipals": run["nativePrincipals"],
                 "nativeAuthorityNodes": run["nativeAuthorityNodes"],
                 "nativeParentRunId": id,
+                "nativeParentAccess": if matches!(source, Origin::DelegatedTask(_)) {
+                    "delegation"
+                } else {
+                    "installation"
+                },
                 "nativeProvenanceUnknown": false,
             }))
         }
@@ -116,6 +122,7 @@ pub(crate) fn provenance(db: &Db<'_>, source: &Origin) -> Result<Value> {
                 "nativePrincipals": value["nativePrincipals"],
                 "nativeAuthorityNodes": value["nativeAuthorityNodes"],
                 "nativeParentRunId": value["nativeParentRunId"],
+                "nativeParentAccess": value["nativeParentAccess"],
                 "nativeProvenanceUnknown": false,
             }))
         }
@@ -127,6 +134,7 @@ pub(crate) fn apply(record: &mut Value, grant: &Value) {
         "nativePrincipals",
         "nativeAuthorityNodes",
         "nativeParentRunId",
+        "nativeParentAccess",
         "nativeProvenanceUnknown",
     ] {
         record[key] = grant[key].clone();
@@ -165,6 +173,7 @@ pub(crate) fn task_grant(
                 grant["nativeProvenanceUnknown"] = true.into();
             }
             grant["nativeParentRunId"] = previous["nativeParentRunId"].clone();
+            grant["nativeParentAccess"] = previous["nativeParentAccess"].clone();
             let nodes = grant["nativeAuthorityNodes"]
                 .as_array()
                 .cloned()
@@ -281,9 +290,18 @@ fn allows_agent(
         let current = db
             .get("agents", crate::nodes::run_agent(&parent))?
             .unwrap_or_default();
+        // Historical and management-created edges retain the installation requirement.
+        // Only delegate_task records the narrower capability on its own parent edge.
+        let permission = if scope["nativeParentAccess"] == "delegation" {
+            "delegation"
+        } else {
+            "installation"
+        };
         if !parent["cancelRequestedAt"].is_null()
-            || policy(&current)["installation"] != true
+            || policy(&current)[permission] != true
+            || policy(&parent["snapshot"]["agent"])[permission] != true
             || !crate::installation_mcp::agent_allowed(&current, &parent["snapshot"]["agent"])
+            || permission == "delegation" && !crate::nodes::native_mode::reviewed(node, &current)
         {
             return Ok(false);
         }
@@ -411,6 +429,11 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
         "nativePrincipals": people,
         "nativeAuthorityNodes": nodes,
         "nativeParentRunId": parent,
+        "nativeParentAccess": if chat["nativeParentRunId"].is_string() {
+            chat["nativeParentAccess"].clone()
+        } else {
+            incoming["nativeParentAccess"].clone()
+        },
         "nativeProvenanceUnknown": unknown,
     });
     if native {

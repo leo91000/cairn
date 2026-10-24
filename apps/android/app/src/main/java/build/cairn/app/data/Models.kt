@@ -42,6 +42,11 @@ data class AccessPolicy(
     val mcps: List<String>? = null,
     val mcpTools: Map<String, List<String>> = emptyMap(),
     val installation: Boolean = false,
+    /**
+     * Hands tasks to conversations that report back, on any coding agent and model. Null when the
+     * installation never stored it: left out of saves, so an older installation accepts them.
+     */
+    val delegation: Boolean? = null,
     val sandbox: String = "yolo",
 )
 

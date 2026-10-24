@@ -32,6 +32,7 @@ describe('agent access and task inheritance', () => {
       mcps: null,
       mcpTools: {},
       installation: false,
+      delegation: false,
       sandbox: 'yolo',
     })
     expect(main).toMatchObject({ exclusiveNodes: [], plugins: [] })

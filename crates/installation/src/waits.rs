@@ -44,6 +44,24 @@ fn run_finished() -> Value {
     })
 }
 
+fn task_finished() -> Value {
+    json!({
+        "type": "object",
+        "description": "Resume when a task this conversation delegated with delegate_task finishes.",
+        "properties": {
+            "type": { "const": "task_finished" },
+            "chatId": { "type": "string", "format": "uuid" },
+        },
+        "required": ["type", "chatId"],
+        "additionalProperties": false,
+    })
+}
+
+/// Cairn's own external conditions: a run or a delegated task finishing.
+fn native(condition: &Value) -> bool {
+    matches!(text(condition, "type"), "run_finished" | "task_finished")
+}
+
 fn delay() -> Value {
     json!({
         "type": "object",
@@ -82,14 +100,19 @@ fn date_millis(condition: &Value) -> Result<i64> {
     Ok(date.timestamp_millis() + extra_millisecond)
 }
 
-/// The single wait tool: native time/run conditions and conditions of granted plugins.
-pub fn tool(plugin_conditions: &[Value]) -> Value {
+/// The single wait tool: native time/run conditions and conditions of granted plugins. Only a
+/// conversation that may delegate is offered the delegated-task condition.
+pub fn tool(plugin_conditions: &[Value], delegates: bool) -> Value {
     let mut conditions = vec![delay(), at(), run_finished()];
+    if delegates {
+        conditions.push(task_finished());
+    }
     conditions.extend(plugin_conditions.iter().cloned());
     json!({
         "name": "wait_for",
         "description": "Wait durably for a duration (delay), a date (at), an authorized Cairn run \
-            to finish, or a condition provided by a plugin granted to this agent. Time conditions \
+            to finish, a task this conversation delegated to finish (task_finished), or a \
+            condition provided by a plugin granted to this agent. Time conditions \
             take no timeoutSeconds; external conditions require it (1 to 86400 seconds). \
             If already complete, returns deferred=false and the observation: continue this turn. \
             Otherwise saves a wakeup and returns deferred=true: end this turn so execution resources \
@@ -97,7 +120,8 @@ pub fn tool(plugin_conditions: &[Value]) -> Value {
             conversation or mission when the time or result arrives or the timeout expires, subject to capacity. \
             A time reached is completed, not timed_out. External completion includes failure and \
             cancellation; inspect the result before acting. Never use this for local background \
-            processes that need this execution. Run dependencies require installation access; plugin \
+            processes that need this execution. Run dependencies require installation access; delegated \
+            tasks require delegation; plugin \
             conditions use the agent's plugin grants. One wait is stored per conversation or mission run. Identical \
             repeated requests preserve the deadline; a different request replaces the previous wait. \
             Queued follow-ups start after the continuation. A new user message, stop, deletion, \
@@ -180,10 +204,16 @@ async fn input(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
     match conditions::normalize(s, agent_id, &input["condition"]).await? {
         Some(condition) => input["condition"] = condition,
         None => {
-            if !jsonschema::is_valid(&run_finished(), &input["condition"]) {
+            let condition = &input["condition"];
+            let (schema, key) = if condition["type"] == "task_finished" {
+                (task_finished(), "chatId")
+            } else {
+                (run_finished(), "runId")
+            };
+            if !jsonschema::is_valid(&schema, condition) {
                 return Err(invalid());
             }
-            uuid(text(&input["condition"], "runId"))?;
+            uuid(text(condition, key))?;
         }
     }
     Ok(input)
@@ -254,12 +284,24 @@ fn registering(db: &Db<'_>, bearer: &str, input: &Value) -> Result<(Value, Owner
     if input["condition"]["type"] == "run_finished" {
         crate::installation_mcp::authorize_in(db, bearer)?;
     }
-    if input["condition"]["type"] == "run_finished"
-        && run_result(db, &input["condition"])?.is_none()
+    if native(&input["condition"])
+        && native_result(db, &input["condition"])?.is_none()
+        && let Some(target) = dependency(db, &input["condition"])?
     {
-        check_dependency(db, text(&run, "id"), text(&input["condition"], "runId"))?;
+        check_dependency(db, text(&run, "id"), &target)?;
     }
     Ok((run, owner))
+}
+
+/// The run a native condition waits on; a delegated task has none before its first turn.
+fn dependency(db: &Db<'_>, condition: &Value) -> Result<Option<String>> {
+    match text(condition, "type") {
+        "run_finished" => Ok(Some(text(condition, "runId").to_owned())),
+        "task_finished" => Ok(db
+            .get("chats", text(condition, "chatId"))?
+            .and_then(|chat| chat["runId"].as_str().map(str::to_owned))),
+        _ => Ok(None),
+    }
 }
 
 fn check_dependency(db: &Db<'_>, caller: &str, target: &str) -> Result<()> {
@@ -275,11 +317,10 @@ fn check_dependency(db: &Db<'_>, caller: &str, target: &str) -> Result<()> {
             return Ok(());
         };
         let owner = Owner::for_run(db, &run)?;
-        let next = &owner.record["wakeup"]["condition"];
-        if next["type"] != "run_finished" {
+        let Some(next) = dependency(db, &owner.record["wakeup"]["condition"])? else {
             return Ok(());
-        }
-        target = text(next, "runId").to_owned();
+        };
+        target = next;
     }
     Err(Error::bad("Wait dependency chains are limited to 32 runs."))
 }
@@ -306,10 +347,19 @@ pub(crate) fn access(db: &Db<'_>, run: &Value, condition: &Value) -> Result<()> 
             db.run(text(condition, "runId"))?
                 .ok_or_else(|| Error::not_found("The target run no longer exists."))?;
         }
+        "task_finished" => crate::delegation::wait_access(db, run, condition)?,
         _ if conditions::is_condition(condition) => conditions::access(db, run, condition)?,
         _ => return Err(Error::bad("Unsupported wait condition.")),
     }
     Ok(())
+}
+
+fn native_result(db: &Db<'_>, condition: &Value) -> Result<Option<Value>> {
+    if condition["type"] == "task_finished" {
+        crate::delegation::wait_result(db, condition)
+    } else {
+        run_result(db, condition)
+    }
 }
 
 fn run_result(db: &Db<'_>, condition: &Value) -> Result<Option<Value>> {
@@ -395,8 +445,8 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
             };
             let observed = if condition["type"] == "at" && deadline <= created {
                 Some(time_result(deadline))
-            } else if condition["type"] == "run_finished" {
-                run_result(db, condition)?
+            } else if native(condition) {
+                native_result(db, condition)?
             } else {
                 observed
             };
@@ -475,8 +525,8 @@ pub(crate) fn observation(
             json!({ "state": "unavailable", "message": error.message }),
         ));
     }
-    if condition["type"] == "run_finished" {
-        match run_result(db, condition) {
+    if native(condition) {
+        match native_result(db, condition) {
             Ok(Some(result)) => return Ok(Some(result)),
             Ok(None) => {}
             Err(error) => {

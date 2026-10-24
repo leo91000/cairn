@@ -71,6 +71,7 @@
             "mcps": null,
             "mcpTools": {},
             "installation": false,
+            "delegation": false,
             "sandbox": "yolo"
           },
           "type": "object",
@@ -166,6 +167,10 @@
               "default": false,
               "type": "boolean"
             },
+            "delegation": {
+              "default": false,
+              "type": "boolean"
+            },
             "sandbox": {
               "default": "yolo",
               "type": "string",
@@ -183,6 +188,7 @@
             "mcps",
             "mcpTools",
             "installation",
+            "delegation",
             "sandbox"
           ],
           "additionalProperties": false
@@ -351,6 +357,9 @@
                   }
                 },
                 "installation": {
+                  "type": "boolean"
+                },
+                "delegation": {
                   "type": "boolean"
                 },
                 "sandbox": {
