@@ -118,6 +118,14 @@ Une remise à zéro de fenêtre d’usage offerte par Codex, utilisée automatiq
 La conversation ou la mission dont l’agent a lancé l’exécution d’une mission. Une mission bloquée qui attend son demandeur lui revient plutôt qu’à l’utilisateur, tant que ce demandeur existe.
 _Avoid_ : parent, orchestrateur
 
+**Tâche déléguée** :
+Une conversation qu’un agent autorisé à déléguer crée depuis une conversation,
+éventuellement sur un autre agent de code et un autre modèle, pour un travail qui
+lui revient. Elle garde sa conversation demandeuse, s’exécute dans son propre
+espace avec les droits de son agent, que l’agent demandeur doit couvrir, et ne
+délègue pas à son tour.
+_Avoid_ : sous-agent (réservé aux sous-agents natifs d’un agent de code), parent, enfant
+
 **Mise de côté d’un résultat** :
 Le choix d’un compte de retirer de « Pour vous » le résultat bloqué d’une mission : écarté jusqu’à son prochain résultat, ou reporté jusqu’à une heure donnée. Chaque membre met de côté pour lui seul.
 _Avoid_ : archivage (qui retire la mission elle-même)

@@ -70,6 +70,9 @@ data class ChatWakeup(
     val display: JsonObject? = null,
 )
 
+/** The conversation whose agent delegated a conversation. */
+@Serializable data class ChatRequester(val chatId: String, val title: String = "")
+
 @Serializable
 data class Chat(
     val id: String,
@@ -104,6 +107,8 @@ data class Chat(
     val lifecycleError: String? = null,
     val wakeup: ChatWakeup? = null,
     val suspendedByExclusive: ExclusiveReservation? = null,
+    /** The conversation that delegated this one, while it still exists. */
+    val requester: ChatRequester? = null,
 ) {
     val exclusiveSuspended
         get() =

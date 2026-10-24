@@ -351,6 +351,36 @@ test('verbose tool calls keep their action steps with abbreviated details', asyn
   }
 })
 
+test('a delegated team row opens its child conversation directly', async ({ page, workspace }) => {
+  const parent = await workspace.api('/api/chats', 'POST', {})
+  const child = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${parent.id}/messages`, 'POST', {
+    id: randomUUID(),
+    text: 'Review the send queue.',
+  })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${parent.id}`)).run?.status, { timeout: 15000 }).toBe('succeeded')
+  const detail = await workspace.api(`/api/chats/${parent.id}`)
+  workspace.service.store.event(detail.run.id, 'chat.delegated', '', {
+    chatId: child.id,
+    title: 'Review on another coding agent',
+    agentId: child.agentId,
+    agentName: 'Reviewer',
+    provider: 'codex',
+    model: 'gpt-fixture-mini',
+    task: 'Review the pushed send queue changes.',
+  })
+  await page.goto(workspacePath(`/chats/${parent.id}`))
+  await authenticateWorkspace(page)
+  const team = page.getByTestId('subagent-team')
+  await expect(team).toContainText('1 delegated task')
+  const header = team.locator(':scope > button')
+  if (await header.getAttribute('aria-expanded') === 'false')
+    await header.click()
+  await team.getByRole('link', { name: /^Review on another coding agent,/ }).click()
+  await expect(page).toHaveURL(workspacePath(`/chats/${child.id}`))
+  await expectChatReady(page)
+})
+
 test('subagents show as a team with their own steps and report', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
