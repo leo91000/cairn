@@ -15,7 +15,12 @@ const config = {
   repository,
   commit: 'a'.repeat(40),
   tree,
-  tools: { codex: '0.159.0', gh: '2.101.0' },
+  tools: {
+    codex: '0.159.0',
+    gh: '2.101.0',
+    claude: '2.1.308',
+    opencode: '1.19.4',
+  },
 }
 const beaconDigest = `sha256:${'c'.repeat(64)}`
 const digest = `sha256:${'b'.repeat(64)}`
@@ -149,7 +154,17 @@ describe('release validation reuse', () => {
   })
 
   it('rebuilds if the validated image has older or unrecorded tools', async () => {
-    for (const tools of [undefined, { ...config.tools, codex: '0.156.1' }, { ...config.tools, gh: '2.100.0' }]) {
+    // Evidence recorded before Claude Code and OpenCode were resolved names only
+    // Codex and GitHub CLI: it never vouches for the engines this build installs.
+    const recordedBeforeEngines = { codex: config.tools.codex, gh: config.tools.gh }
+    for (const tools of [
+      undefined,
+      recordedBeforeEngines,
+      { ...config.tools, codex: '0.156.1' },
+      { ...config.tools, gh: '2.100.0' },
+      { ...config.tools, claude: '2.1.280' },
+      { ...config.tools, opencode: '1.19.0' },
+    ]) {
       expect(await resolveRelease(config, {
         gh: github({ runs: () => [mainRun], evidence: { [mainRun.id]: evidenceFor(mainRun, config.commit, { tools }) } }),
         wait: false,

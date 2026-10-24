@@ -144,10 +144,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 # Resolve stable tool versions before building, then validate this exact image.
 ARG GH_VERSION
 ARG CODEX_VERSION
-ARG CLAUDE_VERSION=2.1.280
-ARG OPENCODE_VERSION=1.19.0
+ARG CLAUDE_VERSION
+ARG OPENCODE_VERSION
 ARG TARGETARCH
-RUN test -n "$CODEX_VERSION" && test -n "$GH_VERSION"
+RUN test -n "$CODEX_VERSION" && test -n "$GH_VERSION" && test -n "$CLAUDE_VERSION" && test -n "$OPENCODE_VERSION"
 RUN arch="${TARGETARCH:-amd64}" \
     && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${arch}.tar.gz" -o /tmp/gh.tar.gz \
     && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_checksums.txt" -o /tmp/gh-checksums.txt \
@@ -158,9 +158,10 @@ RUN arch="${TARGETARCH:-amd64}" \
     && rm -rf /tmp/gh*
 # Claude's pinned postinstall places the native executable; pnpm otherwise skips it.
 RUN pnpm add --global --allow-build @anthropic-ai/claude-code "@openai/codex@${CODEX_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
-    && claude --version
+    && test "$(claude --version)" = "${CLAUDE_VERSION} (Claude Code)" \
+    && test "$(codex --version)" = "codex-cli ${CODEX_VERSION}"
 RUN pnpm add --global --allow-build opencode-ai "opencode-ai@${OPENCODE_VERSION}" \
-    && opencode --version
+    && test "$(opencode --version)" = "$OPENCODE_VERSION"
 COPY deploy/codex-state/prepare.mjs /opt/cairn-codex-state-builder.mjs
 RUN --network=none node /opt/cairn-codex-state-builder.mjs /opt/cairn-codex-state
 COPY deploy/toolkit /opt/cairn-toolkit
@@ -176,7 +177,7 @@ COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/package.json ./package.json
 RUN install -d -o node -g node /data /workspaces /home/node/.agents /home/node/.agents/skills /home/node/.codex \
     && chown node:node /home/node /app
-ENV APP_CODEX_VERSION=$CODEX_VERSION APP_GH_VERSION=$GH_VERSION
+ENV APP_CODEX_VERSION=$CODEX_VERSION APP_GH_VERSION=$GH_VERSION APP_CLAUDE_VERSION=$CLAUDE_VERSION APP_OPENCODE_VERSION=$OPENCODE_VERSION
 USER node
 VOLUME ["/data", "/home/node", "/workspaces"]
 EXPOSE 4310

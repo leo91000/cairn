@@ -198,12 +198,13 @@ Keep one manager replica per SQLite data volume. If using a prefilled claim code
 set `CAIRN_INSTALLATION_CLAIM_CODE` and `CAIRN_INSTALLATION_NAME` before first startup;
 otherwise use `cairn claim` as above.
 
-For a local build, resolve current stable CLI versions and pass them to Docker:
+For a local build, resolve the agent tool versions CI would choose and pass them to Docker
+(see [tool versions](CLI-UPDATES.md)):
 
 ```sh
-codex_version=$(npm view @openai/codex version)
-gh_version=$(gh api repos/cli/cli/releases/latest --jq '.tag_name | ltrimstr("v")')
-docker compose build --build-arg CODEX_VERSION="$codex_version" --build-arg GH_VERSION="$gh_version"
+node scripts/cli-updates.mjs build-versions \
+  | node -e 'for (const [tool, version] of Object.entries(JSON.parse(require("node:fs").readFileSync(0, "utf8")))) console.log(`--build-arg=${tool.toUpperCase()}_VERSION=${version}`)' \
+  | xargs -r docker compose build
 docker compose up -d
 ```
 

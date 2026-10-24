@@ -24,7 +24,10 @@ use tokio::{
     task::JoinHandle,
 };
 
-pub const VERSION: &str = "1.19.0";
+/// Release series whose HTTP protocol this adapter was qualified against. Builds
+/// resolve its newest stable patch (scripts/cli-updates.mjs); a new minor or major
+/// release needs a reviewed qualification before it is accepted here.
+pub const SERIES: &str = "1.19";
 const LIMIT: usize = 16_000_000;
 
 const API_PROVIDERS: &[&str] = &[
@@ -207,7 +210,7 @@ impl Server {
             .build()
             .map_err(Error::internal)?;
         let mut child = cmd.spawn().map_err(|_| {
-            Error::unavailable("Unable to start OpenCode. Install OpenCode 1.19.0 on the server.")
+            Error::unavailable("Unable to start OpenCode. Install OpenCode 1.19 on the server.")
         })?;
         let stdout = child.stdout.take().unwrap();
         let mut stderr = child.stderr.take().unwrap();
@@ -228,9 +231,9 @@ impl Server {
             let _ = tokio::io::copy(&mut stdout, &mut tokio::io::sink()).await;
         }));
         let health = server.get("/global/health").await?;
-        if health["version"] != VERSION {
+        if !supported_version(health["version"].as_str().unwrap_or_default()) {
             return Err(Error::bad(
-                "This integration requires OpenCode 1.19.0. Update OPENCODE_BIN or the runner image.",
+                "This integration requires OpenCode 1.19. Update OPENCODE_BIN or the runner image.",
             ));
         }
         Ok(server)
@@ -757,6 +760,14 @@ fn group(raw: &Value, connected: &[String]) -> Vec<Value> {
     entries
 }
 
+/// A stable patch release of the qualified series; prereleases never qualify.
+fn supported_version(version: &str) -> bool {
+    version
+        .strip_prefix(SERIES)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .is_some_and(|patch| !patch.is_empty() && patch.bytes().all(|b| b.is_ascii_digit()))
+}
+
 fn provider_name(provider: &Value) -> &str {
     if provider["id"] == "opencode" {
         "OpenCode Zen"
@@ -768,6 +779,27 @@ fn provider_name(provider: &Value) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_stable_patches_of_the_qualified_series_are_supported() {
+        for version in ["1.19.0", "1.19.4", "1.19.12"] {
+            assert!(supported_version(version), "{version}");
+        }
+        for version in [
+            "",
+            "1.19",
+            "1.19.",
+            "1.20.0",
+            "1.190.0",
+            "2.0.0",
+            "1.18.9",
+            "1.19.5-beta.1",
+            "0.0.0-dev-202610221304",
+            "1.19.4 ",
+        ] {
+            assert!(!supported_version(version), "{version}");
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn restored_native_state_can_start_after_the_previous_deadline() {

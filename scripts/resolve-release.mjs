@@ -64,6 +64,8 @@ async function validatedImage(config, gh) {
       const evidence = JSON.parse(await readFile(path.join(directory, 'image.json'), 'utf8'))
       // Evidence contradicting its own artifact stops reuse instead of being skipped.
       const image = verifiedImage(evidence, config, run.id)
+      // Every resolved tool must match exactly. Older evidence that omits a tool
+      // (such as Claude Code or OpenCode) is skipped, so the release rebuilds.
       const currentTools = !config.tools || Object.entries(config.tools).every(([tool, version]) => evidence.tools?.[tool] === version)
       if (currentTools)
         return { ...image, runId: run.id }
@@ -114,7 +116,13 @@ export async function resolveRelease(config, {
 }
 
 if (import.meta.main) {
-  if (!process.env.CODEX_VERSION || !process.env.GH_VERSION)
+  const tools = {
+    codex: process.env.CODEX_VERSION,
+    gh: process.env.GH_VERSION,
+    claude: process.env.CLAUDE_VERSION,
+    opencode: process.env.OPENCODE_VERSION,
+  }
+  if (Object.values(tools).some(version => !version))
     throw new Error('Missing resolved stable tool versions')
   if (!/^[a-f0-9]{40}$/.test(process.env.GIT_TREE ?? ''))
     throw new Error('Missing the checked-out Git tree')
@@ -122,7 +130,7 @@ if (import.meta.main) {
     repository: process.env.GITHUB_REPOSITORY,
     commit: process.env.GITHUB_SHA,
     tree: process.env.GIT_TREE,
-    tools: { codex: process.env.CODEX_VERSION, gh: process.env.GH_VERSION },
+    tools,
   }
   let result = null
   // Pull requests always validate. Main reuses an identical pull request tree;

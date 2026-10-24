@@ -53,9 +53,10 @@ must be reported instead of bypassing that policy.
 
 ## Image updates
 
-Tools are installed when building a new application image. CI resolves stable
-Codex and GitHub CLI versions with `scripts/cli-updates.mjs build-versions` and
-passes those exact versions to their dedicated installers. The global toolkit
+Tools are installed when building a new application image. CI resolves Codex,
+Claude Code, OpenCode and GitHub CLI versions with
+`scripts/cli-updates.mjs build-versions` and passes those exact versions to their
+dedicated installers. The global toolkit
 uses the reviewed `deploy/toolkit/tools.json` catalogue and `versions.json` pins;
 changing those pins requires rebuilding and validating an application image.
 OS utilities come from the image build's Debian packages. No daily standalone

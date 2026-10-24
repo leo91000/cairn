@@ -36,6 +36,8 @@ jobs:
       artifact: ${{ steps.resolve.outputs.artifact }}
       codex: ${{ steps.tools.outputs.codex }}
       gh: ${{ steps.tools.outputs.gh }}
+      claude: ${{ steps.tools.outputs.claude }}
+      opencode: ${{ steps.tools.outputs.opencode }}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: ./.github/actions/setup-pnpm
@@ -51,6 +53,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CODEX_VERSION: ${{ steps.tools.outputs.codex }}
           GH_VERSION: ${{ steps.tools.outputs.gh }}
+          CLAUDE_VERSION: ${{ steps.tools.outputs.claude }}
+          OPENCODE_VERSION: ${{ steps.tools.outputs.opencode }}
         run: GIT_TREE="$(git rev-parse 'HEAD^{tree}')" node scripts/resolve-release.mjs
   build:
     # Browser tests need only these binaries and the frontend, not the whole quality job.
@@ -171,6 +175,21 @@ jobs:
           node scripts/production-release.mjs qualify backend-tests.log
       - name: Check Rust documentation examples
         run: node scripts/test-backend.mjs --doc --features ublk-prototype
+      - name: Qualify the resolved OpenCode release against its native adapter
+        env:
+          OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
+        run: |
+          # Sessions created by the series' first release must resume on the resolved one.
+          series=$(node --input-type=module -e "import { engines } from './scripts/cli-updates.mjs'; console.log(engines.opencode.series)")
+          npm install --global --prefix "$RUNNER_TEMP/opencode-first" "opencode-ai@${series}.0"
+          npm install --global --prefix "$RUNNER_TEMP/opencode" "opencode-ai@${OPENCODE_VERSION}"
+          test "$("$RUNNER_TEMP/opencode-first/bin/opencode" --version)" = "${series}.0"
+          test "$("$RUNNER_TEMP/opencode/bin/opencode" --version)" = "$OPENCODE_VERSION"
+          test=pinned_native_cli_executes_and_resumes_without_global_plugins
+          OPENCODE_NATIVE_BIN="$RUNNER_TEMP/opencode/bin/opencode" \
+            node scripts/test-backend.mjs -p cairn-installation --features ublk-prototype --test opencode -- --ignored --exact "$test"
+          OPENCODE_NATIVE_BIN="$RUNNER_TEMP/opencode-first/bin/opencode" OPENCODE_NATIVE_RESUME_BIN="$RUNNER_TEMP/opencode/bin/opencode" \
+            node scripts/test-backend.mjs -p cairn-installation --features ublk-prototype --test opencode -- --ignored --exact "$test"
   node-checks:
     services:
       postgres:
@@ -635,6 +654,8 @@ jobs:
             VCS_REF=${{ github.sha }}
             CODEX_VERSION=${{ needs.resolve.outputs.codex }}
             GH_VERSION=${{ needs.resolve.outputs.gh }}
+            CLAUDE_VERSION=${{ needs.resolve.outputs.claude }}
+            OPENCODE_VERSION=${{ needs.resolve.outputs.opencode }}
           # GHCR deduplicates layers across main builds. PRs read the trusted
           # main cache but skip the expensive cache upload on their critical path.
           cache-from: |
@@ -713,6 +734,10 @@ jobs:
       - name: Smoke-test the exact image
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          CODEX_VERSION: ${{ needs.resolve.outputs.codex }}
+          GH_VERSION: ${{ needs.resolve.outputs.gh }}
+          CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
+          OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
           CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@127.0.0.1:5432/cairn_beacon_test
           CAIRN_SMOKE_BEACON_BINARY: beacon-smoke-bin/cairn-beacon
         run: |
@@ -848,6 +873,8 @@ jobs:
             VCS_REF=${{ github.sha }}
             CODEX_VERSION=${{ needs.resolve.outputs.codex }}
             GH_VERSION=${{ needs.resolve.outputs.gh }}
+            CLAUDE_VERSION=${{ needs.resolve.outputs.claude }}
+            OPENCODE_VERSION=${{ needs.resolve.outputs.opencode }}
           cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn:buildcache
           cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true
           secrets: github_token=${{ github.token }}
@@ -897,11 +924,13 @@ jobs:
           GIT_TREE: ${{ needs.resolve.outputs.tree }}
           CODEX_VERSION: ${{ needs.resolve.outputs.codex }}
           GH_VERSION: ${{ needs.resolve.outputs.gh }}
+          CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
+          OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
         run: |
           mkdir -p release-evidence
           node --input-type=module <<'JS'
           import { writeFileSync } from 'node:fs'
-          writeFileSync('release-evidence/image.json', JSON.stringify({ schema: 3, beaconDigest: process.env.BEACON_IMAGE_DIGEST, repository: process.env.GITHUB_REPOSITORY.toLowerCase(), tree: process.env.GIT_TREE, commit: process.env.GITHUB_SHA, digest: process.env.IMAGE_DIGEST, runId: Number(process.env.GITHUB_RUN_ID), tools: { codex: process.env.CODEX_VERSION, gh: process.env.GH_VERSION } }))
+          writeFileSync('release-evidence/image.json', JSON.stringify({ schema: 3, beaconDigest: process.env.BEACON_IMAGE_DIGEST, repository: process.env.GITHUB_REPOSITORY.toLowerCase(), tree: process.env.GIT_TREE, commit: process.env.GITHUB_SHA, digest: process.env.IMAGE_DIGEST, runId: Number(process.env.GITHUB_RUN_ID), tools: { codex: process.env.CODEX_VERSION, gh: process.env.GH_VERSION, claude: process.env.CLAUDE_VERSION, opencode: process.env.OPENCODE_VERSION } }))
           JS
       - uses: actions/upload-artifact@v7.0.1
         if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
