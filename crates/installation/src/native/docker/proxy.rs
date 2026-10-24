@@ -22,6 +22,7 @@ async fn rewrite(policy: &Policy, value: &mut Value) -> Result<()> {
             "Docker container configuration must be an object.",
         ));
     }
+    super::config::fields(value, &["HostConfig"])?;
     let host = &mut value["HostConfig"];
     // Validate all non-mount controls before creating a persistent mirror.
     policy.host_config(host)?;
@@ -66,7 +67,7 @@ async fn forward(policy: Policy, mut request: Request) -> Result<Response> {
         )
         .await
         .map_err(|_| Error::bad("Docker container configuration exceeds its limit."))?;
-        let mut value: Value = serde_json::from_slice(&bytes)?;
+        let mut value = super::config::decode(&bytes)?;
         rewrite(&policy, &mut value).await?;
         *request.body_mut() = Body::from(serde_json::to_vec(&value)?);
         request.headers_mut().remove(header::CONTENT_LENGTH);
@@ -178,6 +179,21 @@ pub(super) async fn serve(policy: Policy, stop: CancellationToken) -> Result<()>
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn noncanonical_container_controls_never_reach_mount_rewriting() {
+        let policy = Policy {
+            plan: Arc::new(serde_json::json!({})),
+        };
+        let mut value = serde_json::json!({"hostConfig": {"Binds": ["/:/host"]}});
+        assert!(rewrite(&policy, &mut value).await.is_err());
+        assert!(
+            super::super::config::decode(
+                br#"{"HostConfig":{"Binds":["/:/host"]},"HostConfig":{}}"#
+            )
+            .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn client_negotiation_does_not_need_a_start_socket_or_daemon() {

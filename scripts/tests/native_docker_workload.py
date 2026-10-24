@@ -1,5 +1,6 @@
 """Synthetic Docker workload executed inside the disposable native enclave."""
 import json
+import http.client
 import os
 import pwd
 import shutil
@@ -70,6 +71,37 @@ def bind_race(image):
     finally:
         stop.set()
         thread.join()
+
+
+def raw_api_rejections():
+    class UnixConnection(http.client.HTTPConnection):
+        def connect(self):
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.sock.settimeout(self.timeout)
+            self.sock.connect(os.environ['DOCKER_HOST'].removeprefix('unix://'))
+
+    def rejected(path, body):
+        connection = UnixConnection('localhost', timeout=30)
+        try:
+            connection.request('POST', path, body.encode(), {'Content-Type': 'application/json'})
+            response = connection.getresponse()
+            message = response.read(65536).decode(errors='replace')
+            assert 400 <= response.status < 500, f'Raw API control bypass: {path}: {body}: {response.status}: {message}'
+        finally:
+            connection.close()
+
+    options = '{"device":"/run/cairn-docker","type":"none","o":"bind"}'
+    for field in ('driverOpts', 'DRIVEROPTS', 'DriverOptſ'):
+        rejected('/volumes/create', '{"Name":"native-case-escape","Driver":"local","' + field + '":' + options + '}')
+    rejected('/volumes/create', '{"Name":"native-case-escape","DriverOpts":' + options + ',"DriverOpts":{}}')
+    assert 'native-case-escape' not in command('docker', 'volume', 'ls', '-q').splitlines()
+    rejected('/containers/create', json.dumps(dict(Image=ALPINE, hostConfig=dict(Binds=['/:/host']))))
+    rejected('/containers/create', '{"Image":"' + ALPINE + '","HostConfig":{"Privileged":true},"HostConfig":{}}')
+    container = command('docker', 'run', '-d', ALPINE, 'sleep', '300')
+    try:
+        rejected('/containers/' + container + '/exec', '{"Cmd":["true"],"privileged":true}')
+    finally:
+        command('docker', 'rm', '-f', container)
 
 
 def main():
@@ -184,6 +216,7 @@ def main():
         metrics['volumeIo'] = json.loads(volume_probe('io'))
         if phase == 'fresh':
             bind_race(ALPINE)
+            raw_api_rejections()
         assert command('docker', 'run', '--rm', '-v', 'persistent:/v', ALPINE, 'cat', '/v/marker') == 'durable'
         assert command('docker', 'run', '--rm', '-v', 'persistent:/v', ALPINE, 'stat', '-c', '%u:%g:%a', '/v/marker') == '999:999:600'
         compose = dict(services=dict(

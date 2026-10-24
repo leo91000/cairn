@@ -21,6 +21,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod config;
 mod hardening;
 mod mounts;
 mod proxy;
@@ -102,6 +103,34 @@ impl Policy {
     }
 
     fn host_config(&self, host: &Value) -> Result<()> {
+        config::fields(
+            host,
+            &[
+                "MaskedPaths",
+                "ReadonlyPaths",
+                "Privileged",
+                "CapAdd",
+                "Devices",
+                "DeviceRequests",
+                "DeviceCgroupRules",
+                "VolumesFrom",
+                "CgroupParent",
+                "UsernsMode",
+                "PidMode",
+                "UTSMode",
+                "ContainerIDFile",
+                "StorageOpt",
+                "IpcMode",
+                "NetworkMode",
+                "CgroupnsMode",
+                "Runtime",
+                "SecurityOpt",
+                "RestartPolicy",
+                "Binds",
+                "Mounts",
+            ],
+        )?;
+        config::fields(&host["RestartPolicy"], &["Name"])?;
         for field in ["MaskedPaths", "ReadonlyPaths"] {
             if host.get(field).is_some_and(|value| !value.is_null()) {
                 return Err(Error::forbidden(
@@ -204,6 +233,12 @@ impl Policy {
         }
         if let Some(mounts) = host["Mounts"].as_array() {
             for mount in mounts {
+                config::fields(
+                    mount,
+                    &["Type", "Source", "ReadOnly", "BindOptions", "VolumeOptions"],
+                )?;
+                config::fields(&mount["BindOptions"], &["NonRecursive", "Propagation"])?;
+                config::fields(&mount["VolumeOptions"], &["DriverConfig"])?;
                 match mount["Type"].as_str() {
                     Some("bind") => {
                         if present(&mount["BindOptions"], "NonRecursive")
@@ -231,6 +266,7 @@ impl Policy {
     }
 
     fn volume_driver(&self, driver: &Value) -> Result<()> {
+        config::fields(driver, &["Name", "Options"])?;
         if driver["Name"]
             .as_str()
             .is_some_and(|name| !name.is_empty() && name != "local")
@@ -274,15 +310,34 @@ impl Policy {
         let method = text(request, "RequestMethod");
         let body = request["RequestBody"].as_str().unwrap_or("");
         let decoded = STANDARD.decode(body).map_err(Error::internal)?;
-        let json_body = serde_json::from_slice::<Value>(&decoded).unwrap_or(Value::Null);
+        // Build archives and upgraded sessions remain streams. Every endpoint
+        // whose JSON controls authorization uses a duplicate-rejecting decoder;
+        // Go merges duplicate map/struct fields where serde would replace them.
+        let configuration = match segments.first().copied() {
+            Some("containers") => {
+                segments.get(1) == Some(&"create")
+                    || matches!(segments.get(2), Some(&"update" | &"exec"))
+            }
+            Some("exec") => segments.get(2) == Some(&"start"),
+            Some("volumes" | "networks") => segments.get(1) == Some(&"create"),
+            _ => false,
+        };
+        let json_body = if configuration && !decoded.is_empty() {
+            config::decode(&decoded)?
+        } else {
+            Value::Null
+        };
+        if configuration && method == "POST" && !json_body.is_object() {
+            return Err(Error::forbidden(
+                "Docker configuration must be a visible JSON object.",
+            ));
+        }
         match segments.first().copied() {
             Some("_ping" | "version" | "info" | "events" | "system" | "distribution")
                 if method == "GET" || method == "HEAD" => {}
             Some("containers") => {
                 if segments.get(1) == Some(&"create") && method == "POST" {
-                    if !json_body.is_object() {
-                        return Err(Error::forbidden("Invalid Docker container configuration."));
-                    }
+                    config::fields(&json_body, &["HostConfig"])?;
                     self.host_config(&json_body["HostConfig"])?;
                 } else if !matches!(segments.get(1), Some(&"json" | &"prune")) {
                     let name = segments.get(1).copied().unwrap_or("");
@@ -330,18 +385,23 @@ impl Policy {
                     if segments.get(2) == Some(&"update") {
                         self.host_config(&json_body)?;
                     }
-                    if segments.get(2) == Some(&"exec") && json_body["Privileged"] == true {
-                        return Err(Error::forbidden("Privileged Docker exec is unavailable."));
+                    if segments.get(2) == Some(&"exec") {
+                        config::fields(&json_body, &["Privileged"])?;
+                        if json_body["Privileged"] == true {
+                            return Err(Error::forbidden("Privileged Docker exec is unavailable."));
+                        }
                     }
                 }
             }
             Some("exec") => {
+                config::fields(&json_body, &["Privileged"])?;
                 if json_body["Privileged"] == true {
                     return Err(Error::forbidden("Privileged Docker exec is unavailable."));
                 }
             }
             Some("volumes") => {
                 if method == "POST" && segments.get(1) == Some(&"create") {
+                    config::fields(&json_body, &["Driver", "DriverOpts"])?;
                     self.volume_driver(&json!({
                         "Name": json_body["Driver"],
                         "Options": json_body["DriverOpts"],
@@ -349,6 +409,7 @@ impl Policy {
                 }
             }
             Some("networks") => {
+                config::fields(&json_body, &["Driver"])?;
                 if method == "POST"
                     && segments.get(1) == Some(&"create")
                     && json_body["Driver"]
@@ -728,6 +789,7 @@ mod tests {
                     .authorize(&json!({
                         "RequestUri": path,
                         "RequestMethod": method,
+                    "RequestBody": STANDARD.encode(b"{}"),
                     }))
                     .is_ok()
             );
@@ -791,6 +853,81 @@ mod tests {
                 .host_config(&json!({
                     "Binds": ["database:/var/lib/postgresql/data"],
                     "RestartPolicy": { "Name": "no" },
+                }))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn raw_json_cannot_hide_controls_from_the_authorization_policy() {
+        for (path, body) in [
+            ("/volumes/create", ""),
+            (
+                "/volumes/create",
+                r#"{"Driver":"local","driverOpts":{"device":"/run/cairn-docker","o":"bind","type":"none"}}"#,
+            ),
+            (
+                "/volumes/create",
+                r#"{"DriverOptſ":{"device":"/run/cairn-docker","o":"bind","type":"none"}}"#,
+            ),
+            (
+                "/volumes/create",
+                r#"{"DriverOpts":{"device":"/run/cairn-docker","o":"bind","type":"none"},"DriverOpts":{}}"#,
+            ),
+            (
+                "/containers/create",
+                r#"{"hostConfig":{"Binds":["/:/host"]}}"#,
+            ),
+            (
+                "/containers/create",
+                r#"{"HostConfig":{"privileged":true}}"#,
+            ),
+            (
+                "/containers/create",
+                r#"{"HostConfig":{"Privileged":true},"HostConfig":{}}"#,
+            ),
+            (
+                "/containers/create",
+                r#"{"HostConfig":{"RestartPolicy":{"name":"always"}}}"#,
+            ),
+            (
+                "/containers/create",
+                r#"{"HostConfig":{"Mounts":[{"Type":"volume","VolumeOptions":{"driverConfig":{"Options":{"device":"/"}}}}]}}"#,
+            ),
+            (
+                "/containers/create",
+                r#"{"HostConfig":{"Mounts":[{"Type":"volume","VolumeOptions":{"DriverConfig":{"options":{"device":"/"}}}}]}}"#,
+            ),
+            (
+                "/containers/create",
+                r#"{"HostConfig":{"Mounts":[{"Type":"bind","Source":"/tmp","BindOptions":{"nonRecursive":true}}]}}"#,
+            ),
+            ("/exec/id/start", r#"{"privileged":true}"#),
+            (
+                "/exec/id/start",
+                r#"{"Privileged":true,"Privileged":false}"#,
+            ),
+            ("/networks/create", r#"{"driver":"host"}"#),
+        ] {
+            assert!(
+                policy()
+                    .authorize(&json!({
+                        "RequestUri": path,
+                        "RequestMethod": "POST",
+                        "RequestBody": STANDARD.encode(body),
+                    }))
+                    .is_err(),
+                "{path}: {body}"
+            );
+        }
+        // These maps are user data, not Go struct field names.
+        let ordinary = br#"{"Name":"development","Driver":"local","Labels":{"driverOpts":"label","DriverOpt\u017f":"label"}}"#;
+        assert!(
+            policy()
+                .authorize(&json!({
+                    "RequestUri": "/volumes/create",
+                    "RequestMethod": "POST",
+                    "RequestBody": STANDARD.encode(ordinary),
                 }))
                 .is_ok()
         );

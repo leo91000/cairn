@@ -44,6 +44,10 @@ namespaces, devices, alternate runtimes, volume driver options and mounts outsid
 the conversation's home, workspace, output and temporary directories. Recursive
 bind restrictions are retained; workspace binds require `:ro` in read-only mode.
 The public Docker socket is a streaming gateway; the daemon socket is root-private.
+JSON controls require their canonical Docker field names and reject duplicate
+object keys, including nested fields and Unicode case aliases. This keeps the
+authorization policy consistent with Docker's case-folding and merging decoder;
+labels and other free-form maps retain ordinary user keys.
 Before forwarding a container create, the gateway resolves bind sources with
 `openat2` without symlinks, clones the pinned mount descriptors, and gives Docker
 immutable private mirror paths. Replacing a source name cannot redirect Docker
