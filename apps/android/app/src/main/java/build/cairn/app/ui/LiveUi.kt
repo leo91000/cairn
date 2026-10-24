@@ -716,6 +716,7 @@ internal fun timelineEntries(
                     folded.filter { it.isMessage() }.map { it.id }.toSet(),
                 )
             else emptySet()
+        val hiddenEngine = if (chat) hiddenEngineNotices(events) else emptySet()
         var via = ""
         // The plan its updates change, until the agent finishes it or writes another one.
         var planIndex: Int? = null
@@ -1106,8 +1107,14 @@ internal fun timelineEntries(
                     val interrupted =
                         event.type == "status" &&
                             event.text.lowercase() in listOf("cancelled", "interrupted")
+                    // The engine's own retries, usage limit and warnings are not failures.
+                    val engine =
+                        event.type in ENGINE_EVENTS &&
+                            event.id !in hiddenEngine &&
+                            engineAttention(event.type, presentation.data)
                     if (
-                        event.id !in recovered && (presentation.failed || interrupted || connection)
+                        event.id !in recovered &&
+                            (presentation.failed || interrupted || connection || engine)
                     ) {
                         flushActivity()
                         if (connection) {

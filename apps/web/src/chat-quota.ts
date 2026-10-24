@@ -2,6 +2,7 @@ import type { Run, RunEvent } from '../../../packages/contracts/contracts'
 import type { ActivityEntry } from './activity'
 import { providers } from '../../../packages/contracts/accounts'
 import { activityPayload, failureReason } from './activity'
+import { limitReset } from './engine-status'
 
 const quotaMessage = /^(?:you['’]ve hit your (?:(?:usage|session|weekly|spend|individual spend) )?limit|you have hit your (?:usage )?limit|usage limit (?:has been )?(?:reached|exceeded)|claude ai usage limit reached|(?:5-hour|session|weekly|opus) limit reached)\b/i
 
@@ -36,12 +37,21 @@ export function chatQuota(run: Run | null | undefined, events: RunEvent[]): Chat
     return null
   const current = events.filter(event => event.runId === run.id)
   let failureMessage = ''
+  // When the engine reported the limit, it said when the limit resets.
+  let failureReset: unknown
   for (const event of current) {
     const turnBoundary = ['chat.user', 'turn.started', 'turn.completed'].includes(event.type)
     const executionBoundary = event.type === 'status' && ['queued', 'succeeded', 'cancelled', 'interrupted'].includes(event.text)
-    if (turnBoundary || executionBoundary)
+    if (turnBoundary || executionBoundary) {
       failureMessage = ''
-    failureMessage = quotaFailure(event) || failureMessage
+      failureReset = undefined
+    }
+
+    const failure = quotaFailure(event)
+    if (failure) {
+      failureMessage = failure
+      failureReset = (activityPayload(event).error as Record<string, unknown> | undefined)?.resetsAt
+    }
   }
 
   const active = ['running', 'queued'].includes(run.status)
@@ -59,7 +69,7 @@ export function chatQuota(run: Run | null | undefined, events: RunEvent[]): Chat
     message,
     spend: /\bspend limit\b/i.test(message),
     // Keep the announced zone and wording: a time without a date is not a deadline.
-    reset: /\bresets\b(.*)$/i.exec(message)?.[1]?.trim().replace(/\.$/, '') || null,
+    reset: /\bresets\b(.*)$/i.exec(message)?.[1]?.trim().replace(/\.$/, '') || (message === failureMessage && limitReset(failureReset)) || null,
     // Pausing the follow-up queue does not pause an execution's capacity wait.
     automatic: waiting,
   }

@@ -386,6 +386,9 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
                         else "En attente de tâches en arrière-plan"
                     "turn.failed",
                     "error" -> "L’agent a rencontré une erreur"
+                    "engine.retry" -> engineRetryTitle(data)
+                    "provider.limit" -> usageLimitTitle(data)
+                    "engine.notice" -> engineNoticeTitle(data)
                     "status" ->
                         when {
                             account != null -> "Compte ${account.first} sélectionné"
@@ -417,6 +420,8 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
             val usage = data?.get("usage").asObject()
             val subtitle =
                 if (account != null) account.second
+                else if (event.type == "engine.retry") engineRetryDetail(data)
+                else if (event.type == "provider.limit") usageLimitDetail(data)
                 else if (backgroundTasks.isNotEmpty()) backgroundTasks.joinToString(" · ")
                 else if (usage != null)
                     listOf("input_tokens" to "entrée", "output_tokens" to "sortie")

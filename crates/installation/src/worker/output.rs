@@ -84,8 +84,9 @@ const TOOL_FRAME_LIMIT: usize = 100_000_000;
 const MESSAGE_LIMIT: usize = 100_000;
 const ERROR_LIMIT: usize = 10_000;
 
-/// Event types that are always recorded. Clients use turn markers to scope reused message IDs.
-const CONVERSATION_EVENTS: [&str; 7] = [
+/// Event types that are always recorded. Clients use turn markers to scope reused message IDs,
+/// and show the engine's retries, usage limits and notices in the conversation.
+const CONVERSATION_EVENTS: [&str; 10] = [
     "thread.started",
     "turn.started",
     "turn.completed",
@@ -93,6 +94,9 @@ const CONVERSATION_EVENTS: [&str; 7] = [
     "turn.waiting",
     "error",
     "runner.failed",
+    "engine.retry",
+    "engine.notice",
+    "provider.limit",
 ];
 
 // Separate pipe readers keep stderr draining even while stdout applies database backpressure.
