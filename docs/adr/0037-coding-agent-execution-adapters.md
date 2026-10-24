@@ -5,7 +5,7 @@ Date: 2026-10-12.
 ## Context
 
 Accounts already use a shared pool with native authentication and usage drivers
-([shared-account-pool decision](0002-one-account-pool-for-coding-agents.md)). Execution still made repeated Claude-versus-Codex choices in the worker,
+([shared-account-pool decision](0061-one-account-pool-for-coding-agents.md)). Execution still made repeated Claude-versus-Codex choices in the worker,
 runner entrypoint, recovery and MCP configuration. A third coding agent would have
 expanded those choices throughout shared orchestration. Web and Android model
 catalogs also stored one field for each of the two existing coding agents.

@@ -1,6 +1,6 @@
 # Coding-agent accounts
 
-Codex, Claude Code and OpenCode accounts share one model. **Connections → Add account** asks for the coding agent and a name, then follows its official sign-in or saves a model-provider API key for OpenCode. Each coding agent can have up to ten accounts. An account can be renamed, paused, reconnected or removed. Accounts that are running something cannot be reconnected or removed until their runs finish. Pausing stops the account from being picked for new runs. Web and Android show the same list, detail panel and sign-in steps. See [shared-account-pool decision](adr/0002-one-account-pool-for-coding-agents.md) for the design.
+Codex, Claude Code and OpenCode accounts share one model. **Connections → Add account** asks for the coding agent and a name, then follows its official sign-in or saves a model-provider API key for OpenCode. Each coding agent can have up to ten accounts. An account can be renamed, paused, reconnected or removed. Accounts that are running something cannot be reconnected or removed until their runs finish. Pausing stops the account from being picked for new runs. Web and Android show the same list, detail panel and sign-in steps. See [shared-account-pool decision](adr/0061-one-account-pool-for-coding-agents.md) for the design.
 
 ## What the list shows
 

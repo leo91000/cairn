@@ -2,7 +2,7 @@
 
 Date: 2026-10-13.
 
-Extend the [durable-condition-waits decision](0038-durable-condition-waits.md) with `github_pr_checks`, identified by an authorized project,
+Extend the [durable-condition-waits decision](0067-durable-condition-waits.md) with `github_pr_checks`, identified by an authorized project,
 positive PR number and full head SHA. Observe through the same existing agent
 GitHub connection, durable wakeup, cancellation and current-permission contracts.
 The condition neither performs a merge nor grants authorization for one.
@@ -37,9 +37,7 @@ existing bounded, deduplicated observer; no network request holds a scheduler
 transaction or conversation execution slot.
 
 No new storage codec or table is introduced. The condition and observations
-use the existing wakeup JSON. See `docs/WAIT-FOR-MEASUREMENTS.md` for reproducible
-metadata measurements against sleep, with synthetic CLI probes distinguished
-from production network latency.
+use the existing wakeup JSON.
 
 References: [GitHub branch rules](https://docs.github.com/en/rest/repos/rules#get-rules-for-a-branch),
 [required checks](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches#require-status-checks-before-merging),

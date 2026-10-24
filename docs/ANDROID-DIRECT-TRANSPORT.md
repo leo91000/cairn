@@ -106,34 +106,6 @@ Retain the existing 16 KiB fragmentation envelope and bounded reassembly rather
 than adding a second wire format. Library reliability does not replace the
 application's replay, cursor, deduplication, grant renewal, and revocation rules.
 
-## Size measurement
-
-Inspection of the exact AAR yields these native-library sizes. Entries are stored
-uncompressed in this AAR; their sizes are **not** measured APK deltas.
-
-| ABI | Native library bytes |
-| --- | ---: |
-| armeabi-v7a | 6,809,404 |
-| arm64-v8a | 12,287,312 |
-| x86 | 12,818,648 |
-| x86_64 | 16,166,352 |
-
-The same CI `assembleDebug` task produced these universal APKs, with identical
-runtime, ABI packaging and build options (all four ABIs above):
-
-| Build | Commit | APK bytes |
-| --- | --- | ---: |
-| Before native transport | `06c68695b934c413be3e9881f873abc15e201fff` | 18,815,941 |
-| Native transport and packaged notices | `096d78af56a1f7f80c731bb7f49812b6be569316` | 67,306,210 |
-
-The measured increase is **48,490,269 bytes (+257.7%)**, including the native
-libraries, Kotlin adapter and consolidated notices. These are APK file sizes,
-not installed sizes or an ABI-specific estimate. Source artifacts are the
-[baseline Android CI run](https://github.com/leo91000/cairn/actions/runs/37704381521)
-and [native Android CI run](https://github.com/leo91000/cairn/actions/runs/37715411140).
-The native CI run also built the minified release successfully; no release-size
-comparison is claimed. No ABI filter or split changes are included in #104.
-
 ## Foreground ownership and recovery
 
 The installation transport starts on the relay. `ProcessLifecycleOwner` owns

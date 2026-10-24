@@ -38,19 +38,7 @@ SQLite schema version 5 prevents the previous executable from opening a database
 - `scripts/tests/node_s3_test.py` uses a loopback Moto server, real SDK/CLI operations, synthetic credentials, and the existing publication/restore interfaces. Coverage includes legacy and shared ciphertext, incremental reuse, old grant retention, missing-object repair, exact version deletion, interrupted publication recovery, same-content publication in another run, legacy migration without a source-block request, deletion of each shared owner, and publication/read progress while a prefix deletion is deliberately blocked.
 - The metadata benchmark reserves/commits twenty 4,096-block manifests; the optimized publication benchmark compares initial unique data, unchanged captures, and one-block deltas against the base revision, with exact restored-byte verification.
 
-### Performance comparison
-
-Release builds against baseline `c6e35f6`, using a 64 MiB synthetic disk and a loopback Moto 5.2.3 server. Three independent repetitions start with an empty bucket; each performs one initial capture, three unchanged captures, and three one-block changes. Each checkout uses a separate Cargo target directory. Restored bytes are checked after capture.
-
-| Capture | Baseline median | Shared median | Baseline CPU | Shared CPU |
-| --- | ---: | ---: | ---: | ---: |
-| Initial unique 64 MiB | 197.55 ms | 198.71 ms | 232.65 ms | 232.25 ms |
-| Unchanged disk | 56.24 ms | 5.54 ms | 2.82 ms | 1.64 ms |
-| One changed 4 MiB block | 124.45 ms | 32.85 ms | 18.55 ms | 15.64 ms |
-
-These measure foreground capture latency: remote reclamation now happens independently. The unchanged and delta paths avoid synchronous deletion work; reused shared blocks also avoid transfer and encryption. Initial unique upload time is effectively unchanged in this sample. This is a local comparison, not a production WAN latency or peak-memory measurement. Raw samples are in [the benchmark artifact](https://github.com/leo91000/cairn/releases/download/v0.50.6/shared-s3-blocks-2026-09-29.json).
-
-The integration suite separately verifies that publishing identical content from another run uploads zero bytes and issues no additional source-block request. It also blocks a remote deletion deliberately and checks that publication and reads still complete.
+### Reproduction
 
 Reproduce with `moto[server]==5.2.3` and the AWS CLI installed:
 

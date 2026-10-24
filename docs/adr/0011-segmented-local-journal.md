@@ -76,7 +76,7 @@ que ses CPUs puissent exécuter cette commande.
 
 ## Validation
 
-Voir [la comparaison des moteurs](../JOURNAL-ENGINE-BENCHMARK.md). La qualification
+La qualification
 de la vraie VM s'exécute dans un runner jetable, avec lectures/écritures synchronisées
 et sauvegardes répétées :
 

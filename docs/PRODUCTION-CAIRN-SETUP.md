@@ -6,10 +6,6 @@ application release keeps the existing setup and follows the
 [release runbook](PRODUCTION-CAIRN.md). Infrastructure changes need authorization
 for their own scope.
 
-The [v0.53 migration archive](archive/CAIRN-V0.53-MIGRATION.md) records the initial
-cutover and retirement of the old public manager. It is not a setup prerequisite
-for an installation already using Beacon.
-
 ## Host and release images
 
 Choose a fully successful `Quality and container` run for the intended Git tree.

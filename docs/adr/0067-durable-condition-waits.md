@@ -1,12 +1,14 @@
+> Statut : Remplacée par [ADR-0060](0060-grouped-wait-conditions.md) pour la limite de profondeur des dépendances ; les conditions durables restent applicables.
+
 # Durable conditions for conversation continuation
 
 Date: 2026-10-13.
 
 Updated: 2026-10-14 — installation access also permits dependencies on other
-agents' runs, following [installation-access decision](0036-opt-in-installation-tools-for-agents.md).
+agents' runs, following [installation-access decision](0064-opt-in-installation-tools-for-agents.md).
 
 An agent repeatedly checking a remote status spends inference and can keep an
-execution alive while no useful work is available. The [durable-conversation-wakeups decision](0037-durable-conversation-wakeups.md)
+execution alive while no useful work is available. The [durable-conversation-wakeups decision](0065-durable-conversation-wakeups.md)
 already supports releasing execution and continuing the same conversation.
 Extend it with `cairn_workspace.wait_for` and named, read-only conditions.
 
@@ -37,7 +39,7 @@ bounds that revision lookup for long histories. Observers recheck the current
 condition, lifecycle and access before
 recording a result. The launch transaction rechecks both the wakeup and the
 observed state. New input, stop, deletion, failure and manual resume retain
-the [durable-wakeup cancellation behavior](0037-durable-conversation-wakeups.md). Queue pause retains the deadline.
+the [durable-wakeup cancellation behavior](0065-durable-conversation-wakeups.md). Queue pause retains the deadline.
 
 Conditions persist in the existing conversation record. `wakeAt` is the fallback
 deadline for a conditional wait; it retains its earliest-resume meaning for
@@ -51,7 +53,6 @@ providing replay, deduplication and current-state reconciliation. MCP Tasks can
 provide job interoperability after capability negotiation, while Cairn continues
 to own conversation scheduling.
 
-See [exploration and capabilities](../WAIT-FOR.md) and
-[metadata measurements](../WAIT-FOR-MEASUREMENTS.md). Further conditions require
+See [exploration and capabilities](../WAIT-FOR.md). Further conditions require
 explicit source semantics and permissions; arbitrary URLs, shell predicates and
 local processes are not accepted by the initial schema.

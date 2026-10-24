@@ -147,8 +147,7 @@ demand; it does not restore the current workspace from a complete file archive
 or replace it with the original project checkout. The remote connector still
 transfers the original checkout in attempt staging, as it does for VM nodes; an
 initialized disk does not consume that seed. Lazy disk resume therefore does not
-mean total startup traffic consists only of demanded blocks. See the
-[storage measurements](NATIVE-NODES-MEASUREMENTS.md) for the measured boundary.
+mean total startup traffic consists only of demanded blocks.
 
 Periodic live checkpoints are crash consistent. Completed turns fence their
 processes and flush/unmount the filesystem before sealing their completed journal

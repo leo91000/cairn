@@ -41,8 +41,8 @@ fixtures are synthetic. Set `CAIRN_BEACON_TEST_DATABASE_URL` to a disposable
 Postgres database and build both binaries plus the web output before
 `pnpm test:e2e`. Handler and worker integration tests retain a test-only relay
 transport and task-author authority (`relay_fixture` / `worker_fixture`); these
-add no local browser login, OAuth issuer or application hosting. Historical
-Browser fixtures run the native installation and Beacon binaries, with synthetic email delivery.
+add no local browser login, OAuth issuer or application hosting. See the
+[native browser fixture guide](../tests/e2e/README.md) for setup and fixture boundaries.
 
 ## Production
 
@@ -53,7 +53,7 @@ The existing `deploy/beacon/compose.yaml` remains development-only.
 Follow [production configuration](PRODUCTION-CAIRN-SETUP.md) for a fresh same-server
 installation, proxy trust, email and OAuth. Follow the
 [release runbook](PRODUCTION-CAIRN.md) for subsequent releases, approval and
-Postgres rollback. The [v0.53 cutover](archive/CAIRN-V0.53-MIGRATION.md) is historical.
+Postgres rollback.
 `/health` returns no-store JSON (`status`, `commit`, `runtimeId`) and verifies
 Postgres availability through a cache sampled every five seconds with a
 one-second timeout. HTTP probes never query the database, and startup remains
@@ -727,7 +727,7 @@ both the canonical origin and its wildcard with valid TLS. The canonical origin
 stays unchanged for login, OAuth callbacks, passkeys, account settings,
 notifications, MCP and installation enrollment. Workspace URLs become
 `https://{installation-slug}.cairn.build/chats/{chat-slug}`. Legacy paths and UUID
-links remain usable. See [readable-workspace-URLs decision](adr/0037-readable-workspace-urls.md) for the
+links remain usable. See [readable-workspace-URLs decision](adr/0066-readable-workspace-urls.md) for the
 shared-cookie trust boundary and browser-storage migration.
 
 For local testing, use the bundled Beacon web build, set the origin to

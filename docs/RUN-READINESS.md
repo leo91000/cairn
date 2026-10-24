@@ -84,9 +84,7 @@ Android uses software emulation when the guest has no accessible KVM device.
 Recreating the VM with the new image is required: installing packages in an
 already-running guest cannot replace its kernel. Stop the emulator before
 memory-heavy builds. JVM/Robolectric tests do not replace device tests.
-See [nested KVM source findings](NESTED-KVM-RESEARCH.md) for CPU handling and
-snapshot limitations; the pool keeps live prepared VMs and does not serialize
-running nested-VM state.
+The pool keeps live prepared VMs and does not serialize running nested-VM state.
 
 Managed devices use a 720 × 1280 display at 320 dpi and software graphics with
 Vulkan disabled. The launcher requests 1.5 GiB of Android RAM, but the emulator

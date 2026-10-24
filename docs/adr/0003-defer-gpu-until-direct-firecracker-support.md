@@ -9,4 +9,4 @@ faisabilité devra être vérifiée même si Firecracker ajoute un accès GPU di
 
 Les nodes CPU, le déplacement complet des environnements et la reprise depuis
 sauvegarde restent dans le périmètre. Voir les sources et décisions dans
-[la conception des nodes](../DISTRIBUTED-NODES-DESIGN.md).
+[le guide des nodes natives](../NATIVE-NODES.md).

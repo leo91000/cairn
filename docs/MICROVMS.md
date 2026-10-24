@@ -83,7 +83,7 @@ end marker, avoiding Base64 expansion and JSON encoding of repository contents.
 Control messages remain bounded JSON. Both sides retain the legacy JSON/Base64
 path for compatibility with older images. Imports still stream directly to guest
 extraction and preserve the existing authorization, atomic publication and
-read-only policy. See [startup measurements](STARTUP-PERFORMANCE.md).
+read-only policy.
 
 Each VM boots a pinned kernel and a read-only root image. A sparse 32 GiB ext4
 private disk supplies the writable overlay, repositories, home, sessions, installed
@@ -331,8 +331,7 @@ cannot compensate for unavailable host capabilities.
 
 The image CI requires a nested `KVM_RUN` probe and an actual Android boot/tap and
 restart scenario. The supported lifecycle remains fresh guest boot from disk;
-we do not serialize Firecracker snapshots containing running nested VMs. See
-[research and limitations](NESTED-KVM-RESEARCH.md).
+we do not serialize Firecracker snapshots containing running nested VMs.
 
 ## Required block transport
 

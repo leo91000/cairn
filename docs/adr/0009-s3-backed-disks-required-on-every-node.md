@@ -1,3 +1,5 @@
+> Statut : Remplacée par [ADR-0055](0055-ublk-only-vm-storage.md) pour le transport FUSE ; le stockage S3 obligatoire reste applicable.
+
 # Disques S3 obligatoires sur toutes les nodes
 
 Le stockage à la demande devient le seul mode d’exécution des conversations isolées. Chaque nouvelle VM démarre avec un journal local durable et un manifeste de blocs publié sur S3. Le manager doit disposer de la configuration S3 ; chaque node d’exécution doit disposer de FUSE et pouvoir lire les blocs via le manager. Les limites de cache, la réserve de disque et la cadence de synchronisation restent configurables par node, mais il n’existe plus d’activation par node.
