@@ -78,7 +78,20 @@ test('delegated conversations keep their requester in attention cards and live r
     requester: { chatId: parent.id, title: 'Review the send queue' },
     ...task,
   }))
-  await page.route('**/api/chats', route => route.fulfill({ json: chats }))
+  await page.route('**/api/chats/stream?**', route => route.fulfill({
+    contentType: 'text/event-stream',
+    body: `id: 0\nevent: batch\ndata: ${JSON.stringify({
+      events: [],
+      state: {
+        run: null,
+        chat: null,
+        chats,
+        artifacts: [],
+      },
+      reset: true,
+      more: false,
+    })}\n\n`,
+  }))
   await signIn(page)
   const forYou = page.getByRole('region', { name: 'For you', exact: true })
   const live = page.getByRole('region', { name: 'Live', exact: true })

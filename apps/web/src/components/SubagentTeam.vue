@@ -8,9 +8,9 @@ import {
   useId,
   watchEffect,
 } from 'vue'
+import { RouterLink } from 'vue-router'
 import { teamEntries } from '../activity'
 import {
-  ArrowUpRight,
   ChevronDown,
   GitFork,
   Maximize2,
@@ -112,12 +112,14 @@ function toggle(id: string) {
         class="border-b border-line last:border-b-0"
         data-testid="subagent"
       >
-        <button
+        <component
+          :is="agent.subagent!.delegation ? RouterLink : 'button'"
+          :to="agent.subagent!.delegation ? chatPath({ id: agent.subagent!.delegation.chatId }) : undefined"
           class="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-hover/60"
           :class="expanded.has(agent.id) ? 'bg-inset' : ''"
-          :aria-expanded="expanded.has(agent.id)"
+          :aria-expanded="agent.subagent!.delegation ? undefined : expanded.has(agent.id)"
           :aria-label="[agent.title, labels[state(agent)], summary(agent)].join(', ')"
-          @click="toggle(agent.id)"
+          @click="!agent.subagent!.delegation && toggle(agent.id)"
         >
           <SubagentMark :agent="agent" :size="28" />
           <span class="min-w-0 flex-1" aria-hidden="true">
@@ -132,7 +134,7 @@ function toggle(id: string) {
           <span class="inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-2xs font-semibold" :class="pills[state(agent)]" aria-hidden="true">
             <span v-if="state(agent) === 'running'" class="subagent-pulse size-1.5 rounded-full bg-current" />{{ labels[state(agent)] }}
           </span>
-        </button>
+        </component>
         <div v-if="expanded.has(agent.id)" class="grid gap-2 bg-inset px-3 pb-3 pl-13 phone:pl-3" data-testid="subagent-detail">
           <p v-if="agent.subagent!.prompt" class="m-0! line-clamp-4 whitespace-pre-wrap text-xs text-muted">
             <span class="font-semibold text-ink">Prompt · </span>{{ agent.subagent!.prompt }}
@@ -150,20 +152,12 @@ function toggle(id: string) {
             </p>
             <ActivityContent :content="agent.subagent!.result || agent.subagent!.message" />
           </div>
-          <div v-if="openSubagent || agent.subagent!.delegation || subagentDetails(agent.subagent!)" class="flex flex-wrap items-center justify-between gap-2">
+          <div v-if="openSubagent || subagentDetails(agent.subagent!)" class="flex flex-wrap items-center justify-between gap-2">
             <p class="m-0! text-2xs text-muted">
               {{ subagentDetails(agent.subagent!) }}
             </p>
-            <RouterLink
-              v-if="agent.subagent!.delegation"
-              :to="chatPath({ id: agent.subagent!.delegation.chatId })"
-              class="inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 text-2xs font-semibold text-ink hover:bg-hover phone:min-h-11"
-              data-testid="open-delegated"
-            >
-              <Icon :name="ArrowUpRight" :size="12" />Open conversation
-            </RouterLink>
             <button
-              v-else-if="openSubagent"
+              v-if="openSubagent"
               class="inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 text-2xs font-semibold text-ink hover:bg-hover phone:min-h-11"
               data-testid="open-subagent"
               @click="openSubagent(agent.id, $event.currentTarget as HTMLElement)"
