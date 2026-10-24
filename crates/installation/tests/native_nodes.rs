@@ -1105,6 +1105,101 @@ async fn retained_conversations_exhaust_the_shared_native_admission_budget() {
 }
 
 #[tokio::test]
+async fn native_disk_growth_is_idempotent_and_competes_atomically_with_admission() {
+    let f = Fixture::new().await;
+    let gib = 1024 * 1024 * 1024u64;
+    let mut node = f.node.clone();
+    node["slots"] = 4.into();
+    node["limits"]["diskMiB"] = (80 * 1024).into();
+    node["capabilities"]["diskTotalMiB"] = (1024 * 1024).into();
+    node["capabilities"]["diskMiB"] = (900 * 1024).into();
+    f.service.store.put("nodes", node.clone()).await.unwrap();
+    let token = auth::token();
+    f.service
+        .store
+        .set(
+            &format!("node-token:{}", auth::digest(&token)),
+            node["id"].clone(),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut attempts = Vec::new();
+    let mut runs = Vec::new();
+    for _ in 0..2 {
+        let mut run = f.run();
+        run["status"] = "running".into();
+        run["resources"] = json!({ "cpu": 2, "memoryMiB": 4096, "diskMiB": 32768 });
+        common::add_run(&f.service.store, &run).await;
+        let attempt = id();
+        placement::reserve(&f.service, &run, &attempt)
+            .await
+            .unwrap();
+        common::set_checkpoint(
+            &f.service.store,
+            text(&run, "id"),
+            json!({ "nodeId": node["id"], "runnerId": attempt }),
+        )
+        .await;
+        attempts.push(attempt);
+        runs.push(run);
+    }
+    let body = json!({
+        "backend": "native", "nodeProtocol": 2, "executionReady": true, "dataRoot": "/fixture",
+        "runtimeId": "development", "runtimes": ["development"],
+        "capabilities": node["capabilities"], "pool": { "capacity": 4 },
+        "sharedResources": true, "budget": { "slots": 4, "limits": node["limits"] },
+        "nativeMode": { "mode": "protected", "generation": null, "status": "applied" },
+        "usage": { "diskMiB": 16384 },
+        "diskGrowth": { "protocol": 1, "capturedAt": now(), "usedBytes": 16 * gib, "freeBytes": 900 * gib,
+            "ownedBytes": { &attempts[0]: 8 * gib, &attempts[1]: 8 * gib },
+            "requests": [
+                { "attemptId": attempts[0], "currentMiB": 32768 },
+                { "attemptId": attempts[1], "currentMiB": 32768 },
+            ] },
+    });
+    for _ in 0..2 {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/internal/nodes/heartbeat")
+            .header("host", common::HOST)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = common::send(&f.router, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let reply = read_json(response).await;
+        assert_eq!(
+            reply["diskGrowth"]["grants"][0]["allowanceMiB"], 40960,
+            "{reply}"
+        );
+        assert_eq!(
+            reply["diskGrowth"]["grants"][1]["allowanceMiB"], 32768,
+            "{reply}"
+        );
+    }
+    assert_eq!(
+        f.service.store.run(text(&runs[0], "id")).await.unwrap()["resources"]["diskMiB"],
+        40960
+    );
+    let incoming = f.run();
+    common::add_run(&f.service.store, &incoming).await;
+    assert!(
+        placement::reserve(&f.service, &incoming, &id())
+            .await
+            .is_err()
+    );
+    placement::release(&f.service, &attempts[0]).await.unwrap();
+    placement::release(&f.service, &attempts[0]).await.unwrap();
+    assert!(
+        placement::reserve(&f.service, &incoming, &id())
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
 async fn wildcard_node_access_still_requires_trusted_contributors() {
     let f = Fixture::new().await;
     let mut agent = f.agent.clone();

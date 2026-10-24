@@ -425,6 +425,33 @@ def main():
             start_controller()
             resumed = start(run, legacy=True, measure='nativeEvicted')
             assert metrics['nativeEvicted']['readTriggeredRemoteRequests'] > 0, 'Payload did not use demand-paged S3 reads.'
+            # Real journal -> live ublk -> online ext4 growth. The workload
+            # process and namespace stay alive; no whole-disk materialization.
+            growth_health = api('/health', method='GET')
+            assert growth_health.get('diskGrowth', {}).get('protocol') == 1, 'Qualification host lacks live ublk resize.'
+            unit = 'cairn-native-' + resumed + '.service'
+            workload_pid = command('systemctl', 'show', unit, '--property=MainPID', '--value').stdout.strip()
+            before_capacity = os.statvfs(managed(run)).f_blocks * os.statvfs(managed(run)).f_frsize
+            before_reads = manager('metrics')['remoteRequests']
+            growth_start = time.monotonic()
+            api('/disk-growth', dict(protocol=1, grants=[dict(attemptId=resumed, allowanceMiB=384, reason='granted')]))
+            eventually(lambda: os.statvfs(managed(run)).f_blocks * os.statvfs(managed(run)).f_frsize > before_capacity)
+            metrics['onlineGrowth'] = dict(fromMiB=256, toMiB=384, wallMs=(time.monotonic()-growth_start)*1000,
+                                          remoteRequests=manager('metrics')['remoteRequests']-before_reads)
+            assert command('systemctl', 'show', unit, '--property=MainPID', '--value').stdout.strip() == workload_pid
+            # Allocating more than the entire old disk exercises the ublk I/O
+            # bounds after resizing, including its newly appended journal tail.
+            tail = managed(run) / 'growth-tail'
+            with tail.open('wb') as stream:
+                os.posix_fallocate(stream.fileno(), 0, 260 * 1024 * 1024)
+                stream.seek(260 * 1024 * 1024 - 8)
+                stream.write(b'new-tail'); stream.flush(); os.fsync(stream.fileno())
+            with tail.open('rb') as stream:
+                stream.seek(-8, os.SEEK_END)
+                assert stream.read() == b'new-tail'
+            tail.unlink()
+            api('/disk-growth', dict(protocol=1, grants=[dict(attemptId=resumed, allowanceMiB=256, reason='granted')]))
+            assert os.statvfs(managed(run)).f_blocks * os.statvfs(managed(run)).f_frsize > before_capacity, 'Grant replay shrank filesystem.'
             for consistency in ('crash', 'filesystem'):
                 live = api('/runs/' + resumed + '/snapshot', dict(consistency=consistency))
                 assert live['manifest']['consistency'] == consistency

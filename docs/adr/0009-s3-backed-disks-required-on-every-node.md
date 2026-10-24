@@ -11,3 +11,5 @@ L’agrandissement ext4 reste une opération exceptionnelle : les outils actuels
 Ce choix réduit les parcours de disque et évite qu’une node démarre silencieusement en mode local non synchronisé. Il impose S3 au manager et FUSE à chaque node avant une nouvelle exécution. Les anciennes conversations qui possèdent encore une image locale doivent être supprimées avant le déploiement de cette version ; leur disque n’est ni converti ni effacé automatiquement par le nouveau code. Le propriétaire a accepté cette suppression. Les écritures restent synchronisées de manière asynchrone selon l’ADR-0008.
 
 Cette décision remplace l’activation par node et la migration progressive des ADR-0006 et ADR-0007, ainsi que le suivi dm-era des disques locaux de l’ADR-0005.
+
+L’[agrandissement natif automatique](0060-automatic-native-disk-growth.md) remplace la restriction de l’image temporaire pour les disques plats natifs sur un kernel compatible. Les disques Firecracker conservent leur parcours existant.

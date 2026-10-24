@@ -9,18 +9,29 @@ use crate::{
     worker::checkpoint,
 };
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 const IDLE_MS: i64 = 60 * 60 * 1000;
 const BATCH: usize = 32;
 
 pub async fn maintain(s: Arc<Service>) {
     let mut cursor = String::new();
+    let mut last_idle = Instant::now();
     loop {
         tokio::select! {
             () = s.shutdown.cancelled() => return,
-            () = tokio::time::sleep(Duration::from_secs(60)) => {}
+            () = tokio::time::sleep(Duration::from_secs(5)) => {}
         }
+        if let Err(error) = pressure(&s).await {
+            tracing::warn!(%error, "Native pressure cache eviction deferred");
+        }
+        if last_idle.elapsed() < Duration::from_secs(60) {
+            continue;
+        }
+        last_idle = Instant::now();
         let (after, cutoff) = (cursor.clone(), now().saturating_sub(IDLE_MS));
         let runs = s.store.read(move |db| db.json_rows(
             "SELECT r.data FROM runs r WHERE r.id>?1
@@ -52,11 +63,106 @@ pub async fn maintain(s: Arc<Service>) {
     }
 }
 
-fn candidate(db: &mut Db<'_>, run: &str, time: i64) -> Result<Option<(Value, Value, Value)>> {
+/// An allocation failure requests asynchronous reclamation. Never perform network
+/// eviction inside a heartbeat transaction: lease renewal must remain prompt.
+pub(crate) fn request(db: &Db<'_>, node: &Value) -> Result<()> {
+    if !pressure_allowed(db, node)? {
+        return Ok(());
+    }
+    db.set(
+        &format!("native-capacity-pressure:{}", text(node, "id")),
+        &json!(true),
+        Some(now() + 30_000),
+    )
+}
+
+fn pressure_allowed(db: &Db<'_>, node: &Value) -> Result<bool> {
+    let Some(observed) = node["diskCapacity"]["capturedAt"].as_i64() else {
+        return Ok(false);
+    };
+    let last = db
+        .kv(&format!("native-capacity-reclaimed:{}", text(node, "id")))?
+        .and_then(|value| value.as_i64())
+        .unwrap_or(0);
+    Ok(observed > last && (0..=30_000).contains(&now().saturating_sub(observed)))
+}
+
+fn pressure_page(db: &Db<'_>, node: &str) -> Result<Vec<Value>> {
+    let cursor = db
+        .kv(&format!("native-capacity-cursor:{node}"))?
+        .unwrap_or_default();
+    db.json_rows(
+        "SELECT r.data FROM runs r WHERE status IN ('succeeded','failed','cancelled','interrupted')
+         AND (COALESCE(json_extract(r.data,'$.finishedAt'),0)>?2 OR
+              (COALESCE(json_extract(r.data,'$.finishedAt'),0)=?2 AND r.id>?3))
+         AND EXISTS(SELECT 1 FROM records v WHERE v.kind='node-volumes'
+           AND json_extract(v.data,'$.runId')=r.id
+           AND json_extract(v.data,'$.nodeId')=?1
+           AND json_extract(v.data,'$.materialized')=1
+           AND json_extract(v.data,'$.lastEvictedBackupId') IS NOT json_extract(r.data,'$.backup.id'))
+         ORDER BY COALESCE(json_extract(r.data,'$.finishedAt'),0), r.id LIMIT 32",
+        rusqlite::params![node, cursor["finishedAt"].as_i64().unwrap_or(0), text(&cursor, "id")],
+    )
+}
+
+async fn pressure(s: &Service) -> Result<()> {
+    let nodes = s
+        .store
+        .transaction(|db| {
+            let mut nodes = Vec::new();
+            for node in db.list("nodes")? {
+                let id = text(&node, "id");
+                let key = format!("native-capacity-pressure:{id}");
+                if db.kv(&key)? == Some(json!(true)) {
+                    db.delete(&key)?;
+                    if pressure_allowed(db, &node)? {
+                        nodes.push(id.to_owned());
+                    }
+                }
+            }
+            Ok(nodes)
+        })
+        .await?;
+    for node in nodes {
+        let id = node.clone();
+        let runs = s.store.read(move |db| pressure_page(db, &id)).await?;
+        let mut reclaimed = false;
+        for run in &runs {
+            // Keep all publication/ownership guards; only the idle age changes.
+            // A dirty or temporarily unavailable cache must not starve others.
+            match evict_clean(s, text(run, "id"), now()).await {
+                Ok(true) => {
+                    reclaimed = true;
+                    break;
+                }
+                Ok(false) => {}
+                Err(error) => tracing::warn!(run = text(run, "id"), %error,
+                    "Native pressure cache candidate deferred"),
+            }
+        }
+        s.store
+            .transaction(move |db| {
+                let key = format!("native-capacity-cursor:{node}");
+                if reclaimed || runs.len() < BATCH {
+                    db.delete(&key)?;
+                } else if let Some(last) = runs.last() {
+                    db.set(
+                        &key,
+                        &json!({ "id": last["id"], "finishedAt": last["finishedAt"] }),
+                        None,
+                    )?;
+                }
+                Ok(())
+            })
+            .await?;
+    }
+    Ok(())
+}
+
+fn candidate(db: &mut Db<'_>, run: &str, cutoff: i64) -> Result<Option<(Value, Value, Value)>> {
     let Some(current) = db.run(run)? else {
         return Ok(None);
     };
-    let cutoff = time.saturating_sub(IDLE_MS);
     if !RunStatus::of(&current).is_some_and(|status| !status.is_active())
         || current["finishedAt"]
             .as_i64()
@@ -127,6 +233,10 @@ fn candidate(db: &mut Db<'_>, run: &str, time: i64) -> Result<Option<(Value, Val
 }
 
 pub(crate) async fn evict_idle(s: &Service, run: &str, time: i64) -> Result<bool> {
+    evict_clean(s, run, time.saturating_sub(IDLE_MS)).await
+}
+
+async fn evict_clean(s: &Service, run: &str, cutoff: i64) -> Result<bool> {
     let preparation = s.worker.run_preparation_lock(run).await;
     let Ok(_preparation) = preparation.try_lock() else {
         return Ok(false);
@@ -136,7 +246,7 @@ pub(crate) async fn evict_idle(s: &Service, run: &str, time: i64) -> Result<bool
     }
     let _publication = s.node_backup_operation.lock(run).await;
     let id = run.to_owned();
-    let Some((node, point, expected)) = s.store.read(move |db| candidate(db, &id, time)).await?
+    let Some((node, point, expected)) = s.store.read(move |db| candidate(db, &id, cutoff)).await?
     else {
         return Ok(false);
     };
@@ -180,6 +290,13 @@ pub(crate) async fn evict_idle(s: &Service, run: &str, time: i64) -> Result<bool
     let (run, node_id) = (run.to_owned(), text(&node, "id").to_owned());
     s.store
         .transaction(move |db| {
+            // Admission retries may still see the pre-eviction sample. Do not
+            // reclaim another cache until the node measures after completion.
+            db.set(
+                &format!("native-capacity-reclaimed:{node_id}"),
+                &json!(now()),
+                None,
+            )?;
             let Some(current) = db.run(&run)? else {
                 return Ok(());
             };
@@ -258,14 +375,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pressure_paginates_past_ineligible_old_caches_and_waits_for_post_eviction_observation()
+    {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let node_id = super::super::LOCAL_NODE_ID;
+                let time = now();
+                let mut final_run = String::new();
+                for index in 0..33 {
+                    let run = id();
+                    records(db, &run, time)?;
+                    db.patch_run(&run, &json!({ "finishedAt": time - IDLE_MS + index }))?;
+                    if index < 32 {
+                        let mut backup = db.run(&run)?.unwrap()["backup"].clone();
+                        backup["status"] = "error".into();
+                        db.patch_run(&run, &json!({ "backup": backup }))?;
+                    } else {
+                        final_run = run;
+                    }
+                }
+                let page = pressure_page(db, node_id)?;
+                assert_eq!(page.len(), BATCH);
+                for run in &page {
+                    assert!(candidate(db, text(run, "id"), time)?.is_none());
+                }
+                let last = page.last().unwrap();
+                db.set(
+                    &format!("native-capacity-cursor:{node_id}"),
+                    &json!({ "id": last["id"], "finishedAt": last["finishedAt"] }),
+                    None,
+                )?;
+                let page = pressure_page(db, node_id)?;
+                assert_eq!(page.len(), 1);
+                assert_eq!(page[0]["id"], final_run);
+                assert!(candidate(db, &final_run, time)?.is_some());
+                let mut node = db.get("nodes", node_id)?.unwrap();
+                node["diskCapacity"] = json!({ "capturedAt": time - 2_000 });
+                db.set(
+                    &format!("native-capacity-reclaimed:{node_id}"),
+                    &json!(time - 1_000),
+                    None,
+                )?;
+                request(db, &node)?;
+                let key = format!("native-capacity-pressure:{node_id}");
+                assert!(db.kv(&key)?.is_none());
+                node["diskCapacity"]["capturedAt"] = time.into();
+                request(db, &node)?;
+                assert_eq!(db.kv(&key)?, Some(json!(true)));
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pressure_can_reclaim_recent_clean_cache_but_never_unpublished_or_owned_work() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let (run, time) = (id(), now());
+                records(db, &run, time)?;
+                db.patch_run(&run, &json!({ "finishedAt": time }))?;
+                let saved = db.kv(&checkpoint::key(&run))?.unwrap();
+                let mut attempt = db.get("node-attempts", text(&saved, "runnerId"))?.unwrap();
+                attempt["releasedAt"] = time.into();
+                db.put("node-attempts", &attempt)?;
+                assert!(candidate(db, &run, time - IDLE_MS)?.is_none());
+                assert!(candidate(db, &run, time)?.is_some());
+                attempt["released"] = false.into();
+                db.put("node-attempts", &attempt)?;
+                assert!(candidate(db, &run, time)?.is_none());
+                attempt["released"] = true.into();
+                db.put("node-attempts", &attempt)?;
+                db.patch_run(&run, &json!({ "backup": { "requestedRevision": 3 } }))?;
+                assert!(candidate(db, &run, time)?.is_none());
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn native_idle_cache_requires_one_hour_and_latest_released_acknowledged_execution() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
         store.transaction(|db| {
             let (run, time) = (id(), now());
             records(db, &run, time)?;
-            assert!(candidate(db, &run, time - 1)?.is_none());
-            assert!(candidate(db, &run, time)?.is_some());
+            assert!(candidate(db, &run, time - IDLE_MS - 1)?.is_none());
+            assert!(candidate(db, &run, time - IDLE_MS)?.is_some());
             let original = db.run(&run)?.unwrap();
             for patch in [
                 json!({ "status": "queued" }), json!({ "status": "running" }),
@@ -274,14 +475,14 @@ mod tests {
                 json!({ "backup": { "status": "ready", "requestedRevision": 3, "acknowledgedRevision": 2 } }),
             ] {
                 db.patch_run(&run, &patch)?;
-                assert!(candidate(db, &run, time)?.is_none(), "{patch}");
+                assert!(candidate(db, &run, time - IDLE_MS)?.is_none(), "{patch}");
                 db.patch_run(&run, &original)?;
             }
             let saved = db.kv(&checkpoint::key(&run))?.unwrap();
             let mut execution = db.get("node-attempts", text(&saved, "runnerId"))?.unwrap();
             execution["releasedAt"] = (time - IDLE_MS + 1).into();
             db.put("node-attempts", &execution)?;
-            assert!(candidate(db, &run, time)?.is_none());
+            assert!(candidate(db, &run, time - IDLE_MS)?.is_none());
             execution["releasedAt"] = (time - IDLE_MS).into();
             db.put("node-attempts", &execution)?;
             // A real consumed destination reservation has no release timestamp.
@@ -289,14 +490,14 @@ mod tests {
                 "id": id(), "role": "destination", "runId": run, "nodeId": super::super::LOCAL_NODE_ID,
                 "released": true,
             }))?;
-            assert!(candidate(db, &run, time)?.is_some());
+            assert!(candidate(db, &run, time - IDLE_MS)?.is_some());
             execution["released"] = false.into();
             db.put("node-attempts", &execution)?;
-            assert!(candidate(db, &run, time)?.is_none());
+            assert!(candidate(db, &run, time - IDLE_MS)?.is_none());
             execution["released"] = true.into();
             execution["releasedAt"] = Value::Null;
             db.put("node-attempts", &execution)?;
-            assert!(candidate(db, &run, time)?.is_none());
+            assert!(candidate(db, &run, time - IDLE_MS)?.is_none());
             Ok(())
         }).await.unwrap();
     }

@@ -186,6 +186,7 @@ struct Chat<'a> {
     last_message: String,
     seen: HashSet<String>,
     attempted: HashSet<String>,
+    operational_notices: HashSet<String>,
     turn_submitted: bool,
     texts: HashMap<String, String>,
     questions: HashMap<String, Question>,
@@ -228,7 +229,7 @@ impl Chat<'_> {
     }
 
     async fn acknowledge(&mut self, id: &str) -> Result<()> {
-        if self.seen.insert(id.to_owned()) {
+        if self.seen.insert(id.to_owned()) && !self.operational_notices.contains(id) {
             self.emit(json!({ "type": "chat.delivered", "messageId": id }))
                 .await?;
         }
@@ -999,6 +1000,9 @@ impl Chat<'_> {
         };
         for message in messages {
             let id = text(&message, "id");
+            if message["operationalNotice"] == true {
+                self.operational_notices.insert(id.to_owned());
+            }
             if self.completed.is_some()
                 || self.seen.contains(id)
                 || !self.attempted.insert(id.to_owned())
@@ -1147,6 +1151,7 @@ async fn run_session(
         last_message: String::new(),
         seen: HashSet::new(),
         attempted: HashSet::new(),
+        operational_notices: HashSet::new(),
         turn_submitted: false,
         texts: HashMap::new(),
         subagents: HashMap::new(),
