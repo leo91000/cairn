@@ -17,6 +17,7 @@ import platform
 import random
 import resource
 import select
+import shutil
 import stat
 import socketserver
 import subprocess
@@ -103,6 +104,17 @@ def main():
         host.INSTALL = root / 'managed-tools'
         docker_tools = host.prepare_docker_tools()
         host.configure_docker_apparmor(docker_tools)
+        # Exercise the distribution's file-capability alternative as well as
+        # validating its ordinary installed setuid helpers above. Copies live
+        # only on this explicitly disposable host, in the fixture's managed bin.
+        for name, capability, bit in [('newuidmap', 'cap_setuid=ep', 1 << 7), ('newgidmap', 'cap_setgid=ep', 1 << 6)]:
+            source = Path(shutil.which(name))
+            target = docker_tools / 'bin' / name
+            shutil.copyfile(source, target)
+            target.chmod(0o755)
+            command('setcap', capability, str(target))
+            assert host.trusted_mapping_helper(target, bit)
+        metrics['mappingHelpers'] = 'Root-owned distribution copies with only CAP_SETUID/CAP_SETGID effective, no setuid bit; host originals unchanged.'
         host.INSTALL = previous_install
         (root / 'disposable-fixture').touch()
         data, state = root / 'data', root / 'state'
@@ -194,6 +206,12 @@ def main():
             else:
                 (stage / 'workspace/seed').write_text('initial project')
                 (stage / 'workspace/asset').write_bytes(asset)
+            local_bin = stage / 'home/.local/bin'
+            local_bin.mkdir(parents=True, exist_ok=True, mode=0o755)
+            for name in ('ip', 'iptables', 'ip6tables', 'newuidmap', 'newgidmap'):
+                shadow = local_bin / name
+                shadow.write_text('#!/bin/sh\nprintf hijacked >/tmp/native-untrusted-helper\nexit 93\n')
+                shadow.chmod(0o755)
             (stage / 'home/.codex/auth.json').write_text(SECRET)
             (stage / 'home/.agents/skills/frozen/SKILL.md').write_text('frozen fixture skill')
             if legacy:
@@ -315,6 +333,7 @@ def main():
             script += 'if test -e persisted; then test "$(cat persisted)" = "' + expected + '"; fi\n'
             if sandbox != 'read-only':
                 script += 'printf changed > persisted\n'
+            script += 'test ! -e /tmp/native-untrusted-helper\n'
             script += 'printf temporary-artifact > /tmp/native-artifact\n'
             script += docker_script
             if sandbox != 'read-only':

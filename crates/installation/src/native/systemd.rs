@@ -621,14 +621,19 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
             property(format!("DeviceAllow={} rw", path_property(&device)?));
         }
     }
-    args.extend([
-        "--setenv=HOME=/home/node",
-        "--setenv=CAIRN_AUTH_SOCKET=/run/cairn-auth.sock",
-        "--setenv=PATH=/opt/cairn-docker/bin:/opt/cairn-native-tools/bin:/run/cairn-entrypoint:/home/node/.local/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-    ].map(String::from));
+    args.extend(
+        [
+            "--setenv=HOME=/home/node",
+            "--setenv=CAIRN_AUTH_SOCKET=/run/cairn-auth.sock",
+        ]
+        .map(String::from),
+    );
     if launch.conversation.is_some() {
         args.extend(
             [
+                // Helpers execute before namespace entry and before NNP. Never
+                // search agent-writable directories, including for iptables.
+                "--setenv=PATH=/opt/cairn-docker/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 "--setenv=HOME=/run/cairn-docker",
                 "--setenv=XDG_RUNTIME_DIR=/run/cairn-docker",
                 "--",
@@ -649,7 +654,10 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
             .map(String::from),
         );
     } else {
-        args.extend(["--", "/run/cairn-entrypoint/cairn", "runner-entry"].map(String::from));
+        args.extend([
+            "--setenv=PATH=/opt/cairn-native-tools/bin:/run/cairn-entrypoint:/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin",
+            "--", "/run/cairn-entrypoint/cairn", "runner-entry",
+        ].map(String::from));
     }
     Ok(args)
 }

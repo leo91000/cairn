@@ -81,6 +81,23 @@ exec /opt/cairn-docker/bin/docker "$@"
 '''
 
 
+def trusted_mapping_helper(path, required_bit):
+    metadata = Path(path).stat()
+    if metadata.st_uid != 0 or metadata.st_mode & 0o022 or not metadata.st_mode & stat.S_IXOTH or not stat.S_ISREG(metadata.st_mode):
+        return False
+    if metadata.st_mode & stat.S_ISUID:
+        return True
+    try:
+        capability = os.getxattr(path, 'security.capability')
+    except OSError:
+        return False
+    if len(capability) not in (20, 24):
+        return False
+    words = [int.from_bytes(capability[offset:offset + 4], 'little') for offset in range(0, len(capability), 4)]
+    expected_revision = 0x02000001 if len(words) == 5 else 0x03000001
+    return words[0] == expected_revision and words[1:5] == [required_bit, 0, 0, 0] and (len(words) == 5 or words[5] == 0)
+
+
 def require_docker_host():
     version = subprocess.run(['systemctl', '--version'], check=True, capture_output=True, text=True, timeout=10).stdout.split()[1]
     if int(version) < 255:
@@ -89,13 +106,12 @@ def require_docker_host():
         path = Path(name)
         if path.exists() and int(path.read_text().strip()) == 0:
             raise ValueError('Native Docker requires enabled unprivileged user namespaces; global restrictions are not changed automatically.')
-    for name in ('newuidmap', 'newgidmap'):
+    for name, required_bit in (('newuidmap', 1 << 7), ('newgidmap', 1 << 6)):
         path = shutil.which(name)
         if not path:
             raise ValueError('Native Docker requires the distribution uidmap package (newuidmap/newgidmap).')
-        metadata = Path(path).stat()
-        if metadata.st_uid != 0 or not metadata.st_mode & stat.S_ISUID or metadata.st_mode & 0o022:
-            raise ValueError('Native Docker requires root-owned, setuid, non-writable UID/GID mapping helpers.')
+        if not trusted_mapping_helper(path, required_bit):
+            raise ValueError('Native Docker requires root-owned non-writable mapping helpers with setuid or the exact effective CAP_SETUID/CAP_SETGID file capability.')
     for name in ('iptables', 'ip6tables', 'ip', 'usermod', 'useradd', 'groupadd', 'getent'):
         if not shutil.which(name):
             raise ValueError('Native Docker requires iptables, iproute2 and account tools (useradd/groupadd/usermod/getent); install distribution packages before enrollment.')

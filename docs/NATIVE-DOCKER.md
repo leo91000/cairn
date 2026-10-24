@@ -20,9 +20,11 @@ root is an unprivileged host UID, reserved for the immutable enclave supervisor
 and rootless daemon. Accounts and ranges are retained with the conversation and
 are never reassigned to another conversation by Cairn.
 
-The outer RootlessKit bootstrap needs the distribution's setuid `newuidmap` and
-`newgidmap` helpers. Its unit permits that transition under the unique account;
-the enclave sets NoNewPrivileges before starting the engine or daemon. Managed
+The outer RootlessKit bootstrap needs the distribution's `newuidmap` and `newgidmap` helpers, using either
+setuid or only their effective global CAP_SETUID/CAP_SETGID file capabilities. Its unit permits that transition under the unique account;
+the enclave sets NoNewPrivileges before starting the engine or daemon. Bootstrap
+and daemon helpers use an immutable system/managed PATH; user-installed helpers
+are available only to the engine after isolation. Managed
 roots, read-only system bindings, device filtering, cgroup protection and the
 existing guardian remain. The bootstrap retains module/clock/raw-I/O/reboot/swap
 syscall filters and excludes their capabilities. Proc/sys/cgroup read-only masks
@@ -116,8 +118,8 @@ directory: Docker 29.9.0, RootlessKit 3.3.0, slirp4netns 1.3.6, Buildx 0.38.1 an
 Compose 5.6.1. Exact archive/executable SHA-256 pins are in `native-host.py`.
 The host needs Linux 5.12+, systemd 255+, cgroup v2, distribution `uidmap`,
 `iproute2`, `iptables`, `/dev/net/tun`, root-managed `/etc/subuid` and `/etc/subgid`,
-and the existing ublk/ext4 prerequisites. Mapping helpers must be root-owned,
-setuid and not writable by workloads. Unsupported prerequisites fail explicitly.
+and the existing ublk/ext4 prerequisites. Mapping helpers must be root-owned, executable and not writable by workloads,
+with setuid or the exact effective global mapping capability. Unsupported prerequisites fail explicitly.
 The installer does not install/start a host Docker daemon or alter GPU drivers.
 
 Rootless Docker is not full host Docker compatibility. NoNewPrivileges also
