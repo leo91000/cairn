@@ -87,10 +87,7 @@ for the separate disk-object workload and format.
 Reproduce with the checked-in probe (the reference handler is unchanged through
 `98da98bd`, the main delivered immediately before F2):
 
-```sh
-CARGO_BUILD_JOBS=2 cargo run --locked \
-  -p cairn-installation --example session_restart_measure
-```
+The standalone measurement probe has been retired.
 
 Each variant uses its own temporary database and the same fixed slug, historical
 chat restoration, failed run and checkpoint with 16 KiB synthetic padding. For

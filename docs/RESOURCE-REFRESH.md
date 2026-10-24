@@ -226,7 +226,6 @@ Beacon binaries with at most two Cargo jobs; install Playwright Chromium. Run:
 cargo build --locked --bin cairn --bin cairn-beacon -j 2
 pnpm exec playwright install chromium
 pnpm build
-node --import tsx scripts/measure-resource-refresh.mjs /path/to/web-results.json
 ```
 
 The launcher strips live agent/provider credential variables **before** importing

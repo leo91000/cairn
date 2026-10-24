@@ -37,5 +37,5 @@
     "No affected-phone Android Keystore/disk/CPU profile",
     "No measured production speedup; detached launch is only a causality experiment, not a final safe fix"
   ],
-  "reproduce": "ANDROID_HOME=/home/leoc/Android/Sdk node scripts/measure-android-cache.mjs /var/tmp/cairn-cache-measurement.json"
+  "reproduce": "Historical standalone probe retired in Wave 1"
 }

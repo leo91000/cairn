@@ -80,11 +80,7 @@ Voir [la comparaison des moteurs](../JOURNAL-ENGINE-BENCHMARK.md). La qualificat
 de la vraie VM s'exécute dans un runner jetable, avec lectures/écritures synchronisées
 et sauvegardes répétées :
 
-```sh
-LEO_STORAGE_SOAK_SECONDS=300 \
-LEO_STORAGE_SOAK_EVIDENCE=/absolute/private/path/storage-vm-soak.json \
-node tests/storage-vm-soak.mjs ghcr.io/leo91000/leo-agent-manager@sha256:IMAGE_DIGEST
-```
+The standalone measurement probe has been retired.
 
 Elle contrôle l'intégrité des lectures après chaque écriture, les latences disque,
 les reçus, la progression, la conservation de l'identité de VM et la reprise sur

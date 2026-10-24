@@ -72,9 +72,7 @@ uses a bounded writer with explicit invalidation and cleanup.
 
 With the Android SDK configured, from the repository root:
 
-```sh
-node scripts/measure-android-cache.mjs /var/tmp/cairn-cache-measurement.json
-```
+The standalone measurement probe has been retired.
 
 Set `ANDROID_HOME` if needed. The launcher enables the two opt-in cost/contention
 cases and runs the normal responsive-delivery regression. It records source
