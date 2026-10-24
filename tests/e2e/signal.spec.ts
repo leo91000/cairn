@@ -43,6 +43,53 @@ async function capture(page: Page, testInfo: TestInfo, name: string) {
   await page.screenshot({ path: testInfo.outputPath(`${name}.png`) })
 }
 
+test('delegated conversations keep their requester in attention cards and live rows', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const parent = await workspace.api('/api/chats', 'POST', {})
+  const now = Date.now()
+  const tasks = [
+    {
+      id: randomUUID(),
+      title: 'Child with a question',
+      status: 'succeeded',
+      pendingQuestions: 1,
+    },
+    { id: randomUUID(), title: 'Failed child', status: 'failed' },
+    { id: randomUUID(), title: 'Interrupted child', status: 'interrupted' },
+    {
+      id: randomUUID(),
+      title: 'Unread child report',
+      status: 'succeeded',
+      unread: true,
+    },
+    { id: randomUUID(), title: 'Working child', status: 'running' },
+  ]
+  const chats = tasks.map(task => ({
+    ...parent,
+    agentName: 'Reviewer',
+    lifecycle: 'active',
+    paused: false,
+    pendingQuestions: 0,
+    unread: false,
+    updatedAt: now,
+    finishedAt: task.status === 'running' ? null : now,
+    runId: randomUUID(),
+    provider: 'claude',
+    requester: { chatId: parent.id, title: 'Review the send queue' },
+    ...task,
+  }))
+  await page.route('**/api/chats', route => route.fulfill({ json: chats }))
+  await signIn(page)
+  const forYou = page.getByRole('region', { name: 'For you', exact: true })
+  const live = page.getByRole('region', { name: 'Live', exact: true })
+  for (const [index, task] of tasks.entries()) {
+    const section = index === tasks.length - 1 ? live : forYou
+    const row = section.locator(`[data-fil-key="chat:${task.id}"]`)
+    await expect(row.getByTestId('fil-requester')).toHaveText('Delegated by Review the send queue')
+    await expect(row.getByRole('img', { name: 'Latest harness: Claude Code', exact: true })).toBeVisible()
+  }
+})
+
 test('exclusive suspension stays live and suppresses working indicators until release', async ({ page, workspace }) => {
   test.setTimeout(90000)
   const chat = await workspace.api('/api/chats', 'POST', {})

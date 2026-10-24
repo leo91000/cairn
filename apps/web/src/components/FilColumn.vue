@@ -340,6 +340,9 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                     :badge="badge(item)"
                   />
                   <span class="min-w-0 flex-1">
+                    <span v-if="item.chatId && item.requester" class="mb-1 flex min-w-0 items-center gap-1 text-[11px] leading-tight text-subtle" data-testid="fil-requester">
+                      <Icon :name="CornerDownRight" :size="11" class="shrink-0" /><span class="truncate">Delegated by {{ item.requester.title }}</span>
+                    </span>
                     <span class="flex items-center gap-2 whitespace-nowrap text-[11.5px] font-semibold">
                       <span
                         v-if="isUnread(item)"
