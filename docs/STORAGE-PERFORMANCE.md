@@ -86,3 +86,33 @@ overlapping reads made eight transfers before this change and one afterward.
 `performance.coalescedReads` counts reads served from memory after waiting behind
 another reader of that block. No speculative prefetch is enabled, so this change
 does not download additional blocks or increase the configured cache budget.
+
+## Persistent storage observations
+
+On the installation host, install and inspect the optional collector from a
+trusted checkout:
+
+```sh
+sudo bash scripts/install-storage-observer.sh
+sudo systemctl status cairn-storage-observer.timer
+sudo journalctl -u cairn-storage-observer.service
+```
+
+It samples every five minutes with bounded CPU, memory and runtime, without
+restarting application containers. Docker access remains privileged operator
+access. Private JSONL output lives in
+`/var/lib/cairn-installation/observations/storage/` (directory 0700, files 0600),
+rotated at 8 MiB and retained for at most 30 days / 128 MiB plus a checkpoint.
+To stop collection while retaining its output:
+
+```sh
+sudo systemctl disable --now cairn-storage-observer.timer
+sudo systemctl stop cairn-storage-observer.service
+```
+
+Records contain aggregate inventory and allowlisted numeric counters, not raw
+logs, object keys, conversation content or credentials. Check snapshot age and
+container/start epochs: missing samples do not prove zero I/O, and counter resets
+suppress invalid deltas. Manager CPU includes all manager work; worker timings
+are wall time. These samples do not classify cold/warm reads or establish precise
+latency percentiles. Keep observations outside Git.

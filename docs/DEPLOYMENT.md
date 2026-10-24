@@ -109,7 +109,7 @@ Install Docker Engine and the Compose plugin. Clone this repository on the serve
 copy `.env.example` to `.env`, and configure `CAIRN_BEACON_ORIGIN`.
 Keep one manager replica per SQLite data volume. If using a prefilled claim code,
 set `CAIRN_INSTALLATION_CLAIM_CODE` and `CAIRN_INSTALLATION_NAME` before first startup;
-otherwise use `cairn claim` as above.
+otherwise follow [Manual Compose claim](#manual-compose-claim) after startup.
 
 For a local build, resolve current stable CLI versions and pass them to Docker:
 
@@ -140,9 +140,27 @@ The image runs as UID/GID 1000. Bind mounts need matching ownership. Do not run
 The Compose defaults give the application two CPUs and 4 GB of memory; adjust these
 for the projects your agents build. Container logs rotate independently of run logs.
 
+## Manual Compose claim
+
+After starting the manager without a prefilled claim code, request a device code:
+
+```sh
+docker compose exec manager cairn claim
+```
+
+Approve the printed code while signed in to your Cairn account on Beacon, then
+restart the manager so it loads the new identity:
+
+```sh
+docker compose restart manager
+```
+
+See [fallback claim and credential recovery](INSTALLATION-RELAY.md#fallback-claim-and-detachment)
+for expired codes or a lost credential. The manager port stays private.
+
 ## Cairn account and CLI accounts
 
-Complete the claim above, then open the installation from your Cairn account on the
+Complete the [claim](#manual-compose-claim), then open the installation from your Cairn account on the
 Beacon site. Agent CLI accounts remain separate from your Cairn account. Keep
 tokens and account files out of Git, images, screenshots and support logs.
 
@@ -217,8 +235,8 @@ the default `memswap_limit` rather than setting it equal to `mem_limit`.
 ## Coolify
 
 Create a Compose service from `compose.yaml`, using the published GHCR image for
-both manager and runner. Configure the beacon origin and claim the manager as
-above. Preserve the persistent mounts, one replica and a 60-second shutdown grace
+both manager and runner. Configure the beacon origin and
+[claim the manager](#manual-compose-claim). Preserve the persistent mounts, one replica and a 60-second shutdown grace
 period. Use `/health` only for the private readiness check. Do not configure a
 public browser domain for the installation; serve the beacon application on its
 own HTTPS origin. Additional nodes connect through Beacon, or through a direct
