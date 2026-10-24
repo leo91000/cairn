@@ -348,6 +348,16 @@ impl Policy {
                     {
                         return Err(Error::forbidden("Invalid Docker container name."));
                     }
+                    // Inspection cannot activate saved mounts; deletion only
+                    // removes this conversation's container. Let Docker own
+                    // their lookup and 404 semantics. Compose inspects while
+                    // parallel creates have not yet persisted every config.
+                    let inspection =
+                        method == "GET" && segments.len() == 3 && segments.get(2) == Some(&"json");
+                    let removal = method == "DELETE" && segments.len() == 2;
+                    if inspection || removal {
+                        return Ok(());
+                    }
                     // Names and unambiguous short IDs are both part of Docker's
                     // public API. Resolve only directories in this private store.
                     let mut found = None;
@@ -369,19 +379,15 @@ impl Policy {
                     }
                     let directory = found
                         .ok_or_else(|| Error::forbidden("Docker container is unavailable."))?;
-                    if method != "DELETE" && !(method == "GET" && segments.get(2) == Some(&"json"))
-                    {
-                        let mut host: Value = serde_json::from_slice(&std::fs::read(
-                            directory.join("hostconfig.json"),
-                        )?)?;
-                        // Docker fills these with its default masks after the
-                        // create request. User overrides were refused at create.
-                        if let Some(object) = host.as_object_mut() {
-                            object.remove("MaskedPaths");
-                            object.remove("ReadonlyPaths");
-                        }
-                        self.host_config(&host)?;
+                    let mut host: Value =
+                        serde_json::from_slice(&std::fs::read(directory.join("hostconfig.json"))?)?;
+                    // Docker fills these with its default masks after the
+                    // create request. User overrides were refused at create.
+                    if let Some(object) = host.as_object_mut() {
+                        object.remove("MaskedPaths");
+                        object.remove("ReadonlyPaths");
                     }
+                    self.host_config(&host)?;
                     if segments.get(2) == Some(&"update") {
                         self.host_config(&json_body)?;
                     }
@@ -856,6 +862,32 @@ mod tests {
                 }))
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn inspection_and_cleanup_keep_docker_lookup_semantics_without_saved_metadata() {
+        for name in [String::from("not-created-yet"), "9b".repeat(32)] {
+            for (method, suffix) in [("GET", "/json"), ("DELETE", "")] {
+                assert!(
+                    policy()
+                        .authorize(&json!({
+                            "RequestUri": format!("/v1.56/containers/{name}{suffix}"),
+                            "RequestMethod": method,
+                        }))
+                        .is_ok()
+                );
+            }
+            // Activation must still read and revalidate the actual saved
+            // configuration; unavailable metadata never authorizes a start.
+            assert!(
+                policy()
+                    .authorize(&json!({
+                        "RequestUri": format!("/v1.56/containers/{name}/start"),
+                        "RequestMethod": "POST",
+                    }))
+                    .is_err()
+            );
+        }
     }
 
     #[test]
