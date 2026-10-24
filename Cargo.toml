@@ -2,6 +2,7 @@
 members = [
   "crates/installation",
   "crates/beacon",
+  "crates/node-gateway",
   "crates/protocol",
   "crates/plugin-api",
   "crates/plugin-host",

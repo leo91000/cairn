@@ -1166,6 +1166,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "cairn-installation",
+ "cairn-node-gateway",
  "cairn-protocol",
  "crc32fast",
  "email_address",
@@ -1239,6 +1240,7 @@ dependencies = [
  "md-5 0.11.0",
  "mime_guess",
  "rand 0.9.5",
+ "rcgen",
  "regex",
  "reqwest",
  "rquickjs",
@@ -1253,6 +1255,7 @@ dependencies = [
  "subtle",
  "tempfile",
  "tokio",
+ "tokio-rustls 0.26.5",
  "tokio-tungstenite",
  "tokio-util",
  "tokio-vsock",
@@ -1266,6 +1269,32 @@ dependencies = [
  "webrtc",
  "zip",
  "zstd",
+]
+
+[[package]]
+name = "cairn-node-gateway"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "cairn-protocol",
+ "futures-util",
+ "hyper 1.11.1",
+ "hyper-util",
+ "reqwest",
+ "rtc",
+ "rustls 0.23.44",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-rustls 0.26.5",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "webrtc",
 ]
 
 [[package]]

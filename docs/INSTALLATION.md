@@ -31,7 +31,11 @@ The manager's origin, `http://manager:4310`, exists only on that private Compose
 network. At startup the manager records it in the data directory it shares with
 its local runner, which then reads conversation disks from exactly this origin.
 Every other controller keeps the HTTPS rule: remote nodes enroll, connect and
-read disks over HTTPS, HTTP being accepted only on loopback for tests.
+read disks over HTTPS, HTTP being accepted only on loopback. A node added without
+an address uses that loopback exception: its local gateway carries each connection
+to the manager, directly or through Beacon, encrypted to the manager's pinned node
+certificate, so this installation still publishes no port. See
+[additional execution nodes](DEPLOYMENT.md#additional-execution-nodes).
 
 Agents never use this origin: their VMs cannot resolve or reach it. Inside a VM,
 `cairn_workspace` and MCP connections use `http://127.0.0.1:5202`. The guest
