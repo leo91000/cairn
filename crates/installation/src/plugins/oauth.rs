@@ -964,10 +964,10 @@ async fn finish_pending(
         .transaction(move |db| {
             current(db, &expected)?;
             let stored = db.kv(&stored_key(&key_claim))?.ok_or_else(expired)?;
-            // Consume only the callback snapshot we inspected; another callback or
-            // concurrent finish cannot replace it while exchange is in flight.
+            // Claim only the inspected snapshot. A callback arriving during an
+            // authority lookup stays pending for the next completion attempt.
             if stored != value {
-                return Err(expired());
+                return Ok(false);
             }
             if expected.code.is_none() && !expected.denied {
                 return Ok(false);
@@ -1488,7 +1488,7 @@ pub(crate) async fn credential_for(
         };
         let fields = BTreeMap::from([
             ("grant_type", "refresh_token".into()),
-            ("refresh_token", refresh),
+            ("refresh_token", refresh.clone()),
         ]);
         let response = exchange(
             s,
@@ -1526,12 +1526,10 @@ pub(crate) async fn credential_for(
             .refresh_token_response
             .as_ref()
             .unwrap_or(&provider.token);
-        let tokens = capture(&response, mapping, &authorization.tokens.scopes)?;
-        if tokens.refresh.is_none() {
-            return Err(Error::bad_gateway(
-                "OAuth did not return the next refresh token. Reconnect this resource.",
-            ));
-        }
+        let mut tokens = capture(&response, mapping, &authorization.tokens.scopes)?;
+        // RFC 6749 section 6 permits a confirmed refresh without rotation. The
+        // old credential stays consumed if exchange or validation fails.
+        tokens.refresh = tokens.refresh.or(Some(refresh));
         for (key, pointer) in &provider.metadata {
             if let Some(value) = response.pointer(pointer).filter(|v| !v.is_null())
                 && authorization.metadata.get(key) != Some(value)

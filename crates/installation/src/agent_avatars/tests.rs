@@ -25,7 +25,10 @@ fn tokens(endpoint: &str) -> Value {
 
 /// A queued conversation, which background work yields to.
 fn foreground_run() -> Value {
-    json!({ "id": "foreground", "taskId": "chat", "status": "queued", "createdAt": 1 })
+    json!({
+        "id": "foreground", "taskId": "chat", "status": "queued", "createdAt": 1,
+        "snapshot": { "agent": { "provider": "codex" } },
+    })
 }
 
 struct Fixture {

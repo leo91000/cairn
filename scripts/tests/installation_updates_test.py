@@ -1,8 +1,7 @@
-"""Supervisor CLI: approved digest, replacement, rollback and interrupted recovery."""
+"""Installation updates retain and retry the candidate without data migration or rollback."""
 import http.server
 import json
 import os
-import sqlite3
 from pathlib import Path
 import subprocess
 import tempfile
@@ -11,21 +10,22 @@ import unittest
 
 from supervisor_fixture import write_supervisors
 
-REPO = Path(__file__).resolve().parents[2]
 OLD = 'ghcr.io/leo91000/cairn@sha256:' + '1' * 64
 NEW = 'ghcr.io/leo91000/cairn@sha256:' + '2' * 64
 
 
 class Updates(unittest.TestCase):
-    def test_approved_update_and_failed_health_restore_previous_image_without_losing_data(self):
-        for failure in ('ublk', 'format-slow', 'format-failed', 'format-interrupted', 'migration-slow', 'migration-failed', '', 'health', 'runner-unhealthy', 'stop-once', 'up-once', 'exec-once', 'digest', 'unapproved', 'interrupted', 'interrupted-stopped', 'interrupted-created', 'interrupted-missing', 'interrupted-restarting', 'interrupted-crash-loop', 'interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-exec-refused', 'interrupted-foreign-restarting', 'lease', 'expired-lease'):
+    def test_candidate_is_retained_and_retry_preserves_data_and_operator_settings(self):
+        for failure in ('', 'ublk', 'unapproved', 'digest', 'lease', 'stop', 'up', 'health', 'unresponsive'):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
+
                 class Beacon(http.server.BaseHTTPRequestHandler):
                     def do_GET(self):
                         self.send_response(200)
                         self.end_headers()
-                        self.wfile.write(json.dumps({'image': NEW if failure != 'unapproved' else 'ghcr.io/leo91000/cairn:latest'}).encode())
+                        image = NEW if failure != 'unapproved' else 'ghcr.io/leo91000/cairn:latest'
+                        self.wfile.write(json.dumps({'image': image}).encode())
 
                     def log_message(self, *_):
                         pass
@@ -33,195 +33,89 @@ class Updates(unittest.TestCase):
                 server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Beacon)
                 threading.Thread(target=server.serve_forever, daemon=True).start()
                 origin = f'http://127.0.0.1:{server.server_port}'
-                config = {'image': OLD, 'origin': origin}
-                if failure in ('interrupted', 'interrupted-stopped', 'interrupted-created', 'interrupted-missing', 'interrupted-restarting', 'interrupted-crash-loop', 'interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-exec-refused', 'interrupted-foreign-restarting', 'expired-lease'):
-                    config.update(pendingImage=NEW, leaseOwner='00000000-0000-4000-8000-000000000001')
-                if failure in ('interrupted-stopped', 'interrupted-created', 'interrupted-missing', 'interrupted-restarting', 'interrupted-crash-loop', 'interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-exec-refused', 'interrupted-foreign-restarting', 'expired-lease'):
-                    config['leaseAcquired'] = True
-                if failure == 'format-interrupted':
-                    config.update(pendingImage=NEW, pendingDatabaseVersion=7,
-                                  leaseOwner='00000000-0000-4000-8000-000000000001', leaseAcquired=True)
-                (root / 'installation.json').write_text(json.dumps(config))
+                (root / 'installation.json').write_text(json.dumps({'image': OLD, 'origin': origin}))
                 (root / 'data').mkdir()
-                if failure.startswith(('migration-', 'format-')):
-                    with sqlite3.connect(root / 'data/manager.db') as db:
-                        version = 8 if failure == 'format-interrupted' else 7 if failure.startswith('format-') else 5
-                        db.execute(f'PRAGMA user_version={version}')
-                        db.execute('CREATE TABLE kv(key TEXT PRIMARY KEY,data TEXT,expires INTEGER)')
-                        if failure.startswith('format-'):
-                            # No disk-block conversion is pending: only the generic format fence applies.
-                            db.execute("INSERT INTO kv VALUES('migration:disk-blocks-v2','true',NULL)")
-                (root / 'data/kept').write_text('conversation and storage must survive')
+                (root / 'data/kept').write_text('retained conversation')
                 (root / 'data/maintenance-token').write_text('fixture-private-token')
                 (root / '.env').write_text('')
-                initial_image = NEW if failure in ('format-interrupted', 'interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-exec-refused', 'interrupted-created', 'interrupted-crash-loop') else OLD
-                (root / 'compose.json').write_text(json.dumps({
-                    'name': 'cairn-installation',
-                    'services': {
-                        'manager': {'image': initial_image, 'environment': {'CAIRN_NODE_IMAGE': initial_image}, 'mem_limit': '6g'},
-                        'runner': {'image': initial_image, 'mem_limit': '18g', 'cap_add': ['SYS_ADMIN', 'IPC_LOCK'], 'environment': {'OPERATOR_SETTING': '${KEEP_THIS_EXPRESSION}'}},
-                        'garage': {'image': 'retained-storage'},
-                    },
-                }))
+                (root / 'compose.json').write_text(json.dumps({'services': {
+                    'manager': {'image': OLD, 'environment': {'CAIRN_NODE_IMAGE': OLD}, 'mem_limit': '6g'},
+                    'runner': {'image': OLD, 'mem_limit': '18g', 'environment': {'OPERATOR_SETTING': '${KEEP_ME}'}},
+                    'garage': {'image': 'retained-storage'},
+                }}))
                 binaries = root / 'bin'
                 binaries.mkdir()
                 docker = binaries / 'docker'
-                docker.write_text('''#!/usr/bin/env python3
-import json, os, pathlib, sys, sqlite3
+                docker.write_text(r'''#!/usr/bin/env python3
+import json, os, pathlib, sys
 root = pathlib.Path(os.environ['CAIRN_INSTALLATION_ROOT'])
 args = sys.argv[1:]
+failure = os.environ['FAILURE']
 with (root / 'events').open('a') as events:
-    events.write(json.dumps(args) + '\\n')
-if 'stop' in args and os.environ['FAILURE'] == 'stop-once' and not (root / 'stop-refused').exists():
-    (root / 'stop-refused').touch()
-    sys.exit(1)
-if 'up' in args:
-    image = json.loads((root / 'compose.json').read_text())['services']['manager']['image']
-    if image.endswith('2' * 64) and os.environ['FAILURE'].startswith(('migration-', 'format-')):
-        with sqlite3.connect(root / 'data/manager.db') as db:
-            version = 8 if os.environ['FAILURE'].startswith('format-') else 7
-            db.execute(f'PRAGMA user_version={version}')
-        if os.environ['FAILURE'] != 'format-interrupted':
-            sys.exit(1)
-    if image.endswith('2' * 64) and os.environ['FAILURE'] == '' and (root / 'data/manager.db').exists():
-        with sqlite3.connect(root / 'data/manager.db') as db:
-            db.execute("INSERT OR REPLACE INTO kv VALUES('migration:disk-blocks-v2','true',NULL)")
-    if image.endswith('2' * 64) and os.environ['FAILURE'] in ('up-once', 'runner-unhealthy'):
-        if os.environ['FAILURE'] == 'runner-unhealthy' or not (root / 'up-refused').exists():
-            (root / 'up-refused').touch()
-            sys.exit(1)
-if 'ps' in args:
-    failure = os.environ['FAILURE']
-    if failure != 'interrupted-missing':
-        state = 'restarting' if 'restarting' in failure else 'exited' if failure == 'interrupted-stopped' else 'created' if failure == 'interrupted-created' else 'running'
-        image = 'ghcr.io/leo91000/cairn@sha256:' + ('2' if failure in ('interrupted-restarting', 'interrupted-crash-loop', 'interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-exec-refused', 'interrupted-created') else '1') * 64
-        if failure.startswith(('migration-', 'format-')) or (root / 'data/manager.db').exists():
-            image = json.loads((root / 'compose.json').read_text())['services']['manager']['image']
-            state = 'exited' if failure in ('migration-failed', 'format-failed') else 'running'
-        if failure == 'interrupted-crash-loop':
-            # Between restarts, Docker briefly reports a crash-looping candidate running.
-            # Recovery observes it running twice before Docker reports the restart.
-            observations = root / 'crash-loop-observations'
-            if args[-1] == 'manager':
-                with observations.open('a') as log:
-                    log.write('.')
-            restarting_manager = args[-1] == 'manager' and len(observations.read_text()) > 2
-            state = 'restarting' if restarting_manager else 'running'
-        if failure in ('up-once', 'runner-unhealthy'):
-            image = json.loads((root / 'compose.json').read_text())['services'][args[-1]]['image']
-            state = 'created' if failure == 'runner-unhealthy' and args[-1] == 'manager' else 'running'
-        health = 'unhealthy' if failure == 'runner-unhealthy' and args[-1] == 'runner' else ''
-        print(json.dumps({'State': state, 'Image': image, 'Health': health}))
+    events.write(json.dumps(args) + '\n')
 if 'inspect' in args:
-    if os.environ['FAILURE'] == 'digest':
-        print(json.dumps([{'Id': 'sha256:bad', 'RepoDigests': [], 'Config': {'Env': ['APP_RUNTIME_ID=fixture']}}]))
-    else:
-        print(json.dumps([{'Id': 'sha256:fixture', 'RepoDigests': [args[-1]], 'Config': {'Env': ['APP_RUNTIME_ID=fixture']}}]))
+    print(json.dumps([{'RepoDigests': [] if failure == 'digest' else [args[-1]], 'Config': {'Env': ['APP_RUNTIME_ID=fixture']}}]))
+if failure == 'stop' and 'stop' in args or failure == 'up' and 'up' in args:
+    sys.exit(1)
+if 'ps' in args:
+    image = json.loads((root / 'compose.json').read_text())['services']['manager']['image']
+    if failure == 'foreign-manager':
+        image = 'foreign-image'
+    print(json.dumps({'Image': image, 'State': 'running', 'Health': 'unhealthy'}))
 if 'exec' in args:
-    manager = json.loads((root / 'compose.json').read_text())['services']['manager']['image']
-    if os.environ['FAILURE'] in ('interrupted-crash-loop', 'interrupted-exec-refused') and manager.endswith('2' * 64):
+    launches = sum('up' in json.loads(event) for event in (root / 'events').read_text().splitlines())
+    unavailable = failure == 'candidate-unavailable' and launches < 2
+    if 'deployment-lease' in args[-1] and (failure in ('lease', 'foreign-lease', 'foreign-manager') or unavailable):
         sys.exit(1)
-    if 'deployment-lease' in args[-1]:
-        if os.environ['FAILURE'] in ('lease', 'expired-lease', 'interrupted-exec-once', 'interrupted-foreign-restarting'):
-            sys.exit(1)
-        if os.environ['FAILURE'] in ('interrupted-restarting', 'interrupted-unhealthy', 'interrupted-created') and '"POST"' in args[-1]:
-            sys.exit(1)
-    if 'health' in args[-1] and os.environ['FAILURE'] in ('exec-once', 'interrupted-exec-once') and not (root / 'exec-refused').exists():
-        (root / 'exec-refused').touch()
+    if failure == 'unresponsive' and 'deployment-lease' not in args[-1]:
         sys.exit(1)
-    if 'health' in args[-1] and os.environ['FAILURE'].startswith(('migration-', 'format-')):
-        probes = root / 'migration-probes'
-        count = int(probes.read_text()) + 1 if probes.exists() else 1
-        probes.write_text(str(count))
-        healthy = os.environ['FAILURE'] == 'format-interrupted' or (os.environ['FAILURE'] in ('migration-slow', 'format-slow') and count >= 2)
-        if healthy:
-            with sqlite3.connect(root / 'data/manager.db') as db:
-                db.execute("INSERT OR REPLACE INTO kv VALUES('migration:disk-blocks-v2','true',NULL)")
-        print(json.dumps({'healthy': healthy}))
-        sys.exit(0)
-    if 'health' in args[-1] and os.environ['FAILURE'] in ('health', 'interrupted-unhealthy'):
-        image = json.loads((root / 'compose.json').read_text())['services']['manager']['image']
-        if image.endswith('2' * 64):
-            print(json.dumps({'healthy': False}))
-            sys.exit(0)
-    print(json.dumps({'healthy': True}))
+    healthy = failure != 'health' and (failure != 'candidate-unavailable' or launches >= 2)
+    print(json.dumps({'healthy': healthy}))
 ''')
                 docker.chmod(0o755)
+                installer, _ = write_supervisors(root)
+
+                def update(fault):
+                    return subprocess.run(['python3', str(installer), origin, '--update'],
+                                          env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
+                                               'CAIRN_INSTALLATION_ROOT': directory, 'FAILURE': fault},
+                                          capture_output=True, text=True, timeout=30)
+
                 try:
-                    result = subprocess.run(['python3', str(write_supervisors(root)[0]), origin, '--update'],
-                                            env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
-                                                 'CAIRN_INSTALLATION_ROOT': directory, 'FAILURE': failure},
-                                            capture_output=True, text=True, timeout=90)
-                    if failure in ('lease', 'expired-lease'):
-                        result = subprocess.run(['python3', str(write_supervisors(root)[0]), origin, '--update'],
-                                                env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
-                                                     'CAIRN_INSTALLATION_ROOT': directory, 'FAILURE': failure},
-                                                capture_output=True, text=True, timeout=90)
-                    self.assertEqual(result.returncode, 0 if failure in ('format-slow', 'format-interrupted', 'migration-slow', '', 'health', 'runner-unhealthy', 'stop-once', 'up-once', 'exec-once', 'interrupted', 'interrupted-stopped', 'interrupted-created', 'interrupted-missing', 'interrupted-restarting', 'interrupted-crash-loop', 'interrupted-unhealthy') else 1, result.stderr)
-                    updated = json.loads((root / 'installation.json').read_text())
-                    self.assertEqual(updated['image'], NEW if not failure or failure in ('migration-slow', 'format-slow', 'format-interrupted') else OLD)
-                    if failure.startswith(('migration-', 'format-')):
-                        deployment = json.loads((root / 'compose.json').read_text())
-                        self.assertEqual(deployment['services']['manager']['image'], NEW)
-                        self.assertEqual((root / 'data/kept').read_text(), 'conversation and storage must survive')
-                        self.assertNotIn('fixture-private-token', result.stdout + result.stderr)
-                        events = [json.loads(line) for line in (root / 'events').read_text().splitlines()]
-                        last_up = next(index for index, event in enumerate(events) if 'up' in event)
-                        self.assertFalse(any('stop' in event for event in events[last_up + 1:]), 'Advanced storage must never trigger a rollback stop')
-                        if failure in ('migration-failed', 'format-failed'):
-                            self.assertEqual(updated['pendingImage'], NEW)
-                            self.assertEqual(updated['pendingDatabaseVersion'], 7 if failure == 'format-failed' else 5)
-                            retry = subprocess.run(['python3', str(write_supervisors(root)[0]), origin, '--update'],
-                                                   env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
-                                                        'CAIRN_INSTALLATION_ROOT': directory, 'FAILURE': ''},
-                                                   capture_output=True, text=True, timeout=90)
-                            self.assertEqual(retry.returncode, 0, retry.stderr)
-                            recovered = json.loads((root / 'installation.json').read_text())
-                            self.assertEqual(recovered['image'], NEW)
-                            self.assertNotIn('pendingImage', recovered)
-                        else:
-                            self.assertNotIn('pendingImage', updated)
-                        continue
-                    if failure in ('health', 'runner-unhealthy'):
-                        self.assertEqual(updated['failedImage'], NEW)
-                    self.assertEqual((root / 'data/kept').read_text(), 'conversation and storage must survive')
-                    self.assertNotIn('fixture-private-token', result.stdout + result.stderr)
+                    result = update(failure)
+                    self.assertEqual(result.returncode, int(bool(failure)), result.stderr)
+                    config = json.loads((root / 'installation.json').read_text())
+                    self.assertEqual(config['image'], OLD if failure else NEW)
+                    if failure in ('lease', 'stop', 'up', 'health', 'unresponsive'):
+                        self.assertEqual(config['pendingImage'], NEW)
                     events = [json.loads(line) for line in (root / 'events').read_text().splitlines()] if (root / 'events').exists() else []
-                    if failure in ('ublk', 'digest', 'unapproved', 'lease', 'expired-lease', 'interrupted-exec-once', 'interrupted-exec-refused', 'interrupted-foreign-restarting'):
-                        self.assertFalse(any('stop' in event or 'up' in event for event in events))
-                        if failure == 'interrupted-exec-refused':
-                            # Without a verdict, a running candidate still requires the lease.
-                            self.assertTrue(any('deployment-lease' in event[-1] and '"POST"' in event[-1] for event in events))
-                    else:
-                        self.assertTrue(any('deployment-lease' in event[-1] for event in events))
-                        self.assertTrue(any('stop' in event for event in events))
+                    starts = [event for event in events if 'up' in event]
+                    self.assertLessEqual(len(starts), 1, 'A failed candidate must never launch a rollback')
+                    if failure in ('ublk', 'unapproved', 'digest', 'lease'):
+                        self.assertFalse(any('stop' in event for event in events))
+                    if failure not in ('ublk', 'unapproved'):
+                        if failure in ('health', 'unresponsive'):
+                            for refused in ('foreign-lease', 'foreign-manager'):
+                                rejected = update(refused)
+                                self.assertNotEqual(rejected.returncode, 0)
+                                after = [json.loads(line) for line in (root / 'events').read_text().splitlines()]
+                                self.assertEqual(sum('up' in event for event in after), len(starts))
+                            retry = update('candidate-unavailable')
+                        else:
+                            retry = update('')
+                        self.assertEqual(retry.returncode, 0, retry.stderr)
+                        config = json.loads((root / 'installation.json').read_text())
+                        self.assertEqual(config['image'], NEW)
+                        self.assertNotIn('pendingImage', config)
                         compose = json.loads((root / 'compose.json').read_text())
-                        self.assertEqual(compose['services']['manager']['image'], updated['image'])
-                        self.assertEqual(compose['services']['runner']['image'], updated['image'])
+                        self.assertEqual(compose['services']['manager']['image'], NEW)
+                        self.assertEqual(compose['services']['runner']['image'], NEW)
                         self.assertEqual(compose['services']['manager']['mem_limit'], '6g')
                         self.assertEqual(compose['services']['runner']['mem_limit'], '18g')
-                        capabilities = compose['services']['runner']['cap_add']
-                        self.assertIn('SYS_ADMIN', capabilities)
-                        self.assertIn('IPC_LOCK', capabilities)
-                        self.assertIn('SYS_PTRACE', capabilities)
-                        self.assertIn('SYS_NICE', capabilities)
-                        self.assertIn('SYS_RESOURCE', capabilities)
-                        self.assertIn('/dev/ublk-control:/dev/ublk-control', compose['services']['runner']['devices'])
-                        self.assertEqual(compose['services']['runner']['device_cgroup_rules'], ['c 238:* rwm', 'b 259:* rwm'])
-                        self.assertEqual(compose['services']['runner']['environment']['OPERATOR_SETTING'], '${KEEP_THIS_EXPRESSION}')
+                        self.assertEqual(compose['services']['runner']['environment']['OPERATOR_SETTING'], '${KEEP_ME}')
                         self.assertEqual(compose['services']['garage']['image'], 'retained-storage')
-                        self.assertNotIn('pendingImage', updated)
-                    if failure in ('interrupted', 'interrupted-created', 'interrupted-unhealthy', 'interrupted-exec-once', 'lease', 'stop-once', 'up-once', 'exec-once'):
-                        # A brief outage is not evidence of an unhealthy candidate.
-                        for _ in range(2):
-                            retry = subprocess.run(['python3', str(write_supervisors(root)[0]), origin, '--update'],
-                                                   env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
-                                                        'CAIRN_INSTALLATION_ROOT': directory, 'FAILURE': ''},
-                                                   capture_output=True, text=True, timeout=90)
-                            self.assertEqual(retry.returncode, 0, retry.stderr)
-                        recovered = json.loads((root / 'installation.json').read_text())
-                        self.assertEqual(recovered['image'], NEW)
-                        self.assertIsNone(recovered.get('failedImage'))
+                    self.assertEqual((root / 'data/kept').read_text(), 'retained conversation')
+                    self.assertNotIn('fixture-private-token', result.stdout + result.stderr)
                 finally:
                     server.shutdown()
                     server.server_close()

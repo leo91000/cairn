@@ -35,23 +35,17 @@ pub struct QuestionField {
     pub extra: Map<String, Value>,
 }
 
-/// Absent fields are tolerated and kept absent: records predate this type.
+/// A persisted question and its delivery state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Question {
-    #[serde(default)]
     pub id: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub chat_id: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub run_id: String,
     /// The user message whose execution issued this question, not its answer.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub turn_id: String,
-    #[serde(default)]
     pub blocking: bool,
     pub status: QuestionStatus,
-    #[serde(default)]
     pub fields: Vec<QuestionField>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<i64>,
@@ -79,72 +73,6 @@ impl Question {
 
 pub fn question_prefix(chat: &str) -> String {
     format!("chat-question:{chat}:")
-}
-
-/// Older questions cannot prove which turn asked them. Withdraw them before any
-/// native or plugin delivery starts, without assigning the current turn's rights.
-pub(crate) fn retire_unattributed(db: &mut Db<'_>) -> Result<()> {
-    let marker = "migration:question-turn-attribution";
-    if db.kv(marker)?.is_some() {
-        return Ok(());
-    }
-
-    let mut affected: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
-    for (key, mut question) in db.keys("chat-question:")? {
-        let open = matches!(text(&question, "status"), "pending" | "answering");
-        if !open || !text(&question, "turnId").is_empty() {
-            continue;
-        }
-        let chat = key
-            .strip_prefix("chat-question:")
-            .and_then(|key| key.rsplit_once(':'))
-            .map_or("", |(chat, _)| chat);
-        affected.entry(chat.to_owned()).or_default().push((
-            text(&question, "id").to_owned(),
-            text(&question, "messageId").to_owned(),
-        ));
-        question["status"] = json!("cancelled");
-        question["blocking"] = json!(false);
-        question["retiredReason"] = json!("missing-turn-attribution");
-        db.set(&key, &question, None)?;
-    }
-
-    for (chat_id, answers) in affected {
-        for mut message in db.messages(&chat_id)? {
-            let pending = matches!(text(&message, "status"), "queued" | "sending");
-            let retired_answer = answers.iter().any(|(question, answer)| {
-                !answer.is_empty() && message["id"] == *answer && message["questionId"] == *question
-            });
-            if pending && retired_answer {
-                message["status"] = super::MessageStatus::Cancelled.into();
-                db.put_message(&message)?;
-            }
-        }
-        if let Some(chat) = db.get("chats", &chat_id)? {
-            let run = text(&chat, "runId");
-            if db.run(run)?.is_some() {
-                // Error notices are visible in both clients. This event does not
-                // change the run's status and contains no question/answer text.
-                db.event(
-                    run,
-                    "error",
-                    "Questions saved before this update could not be matched to their original turn. \
-                     They were withdrawn without answering. Ask the agent to repeat them in this conversation.",
-                    None,
-                )?;
-            }
-        }
-        db.audit(
-            "chat.questions.retired",
-            &json!({
-                "chatId": chat_id,
-                "count": answers.len(),
-                "reason": "missing-turn-attribution",
-            }),
-        )?;
-    }
-
-    db.set(marker, &json!(true), None)
 }
 
 pub(super) fn questions(db: &Db<'_>, chat: &str) -> Result<Vec<Question>> {

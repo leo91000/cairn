@@ -31,7 +31,6 @@ pub struct Route {
     pub selectors: BTreeMap<String, String>,
     pub agent_id: String,
     pub project_id: Option<String>,
-    #[serde(deserialize_with = "connections::read_approved_access")]
     pub granted_access: Value,
     pub owner_access_id: String,
     pub access_mode: AccessMode,

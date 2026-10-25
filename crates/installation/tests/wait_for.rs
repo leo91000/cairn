@@ -948,11 +948,8 @@ async fn all_existing_cancellation_paths_also_invalidate_condition_waits() {
                     .unwrap();
             }
             "new_session" => {
-                let mut chat = f.s.get("chats", &f.chat).await.unwrap();
-                chat["restoredAt"] = now().into();
-                f.s.store.put("chats", chat).await.unwrap();
                 f.s.store
-                    .patch_run(&f.run, json!({ "status": "failed" }))
+                    .patch_run(&f.run, json!({ "status": "failed", "restoredAt": now() }))
                     .await
                     .unwrap();
                 f.s.chat_new_session(&f.chat, true).await.unwrap();

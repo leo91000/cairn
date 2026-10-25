@@ -101,36 +101,17 @@ impl Service {
             vault,
             shutdown: CancellationToken::new(),
         });
-        crate::storage::migration::run(&service).await?;
-        // Reads `access.github` before agents are normalized without it.
-        crate::plugins::legacy_github::migrate(&service).await?;
-        service.migrate_agents().await?;
-        crate::plugins::legacy::migrate(&service).await?;
+        service.bootstrap_main_agent().await?;
         service
             .store
             .transaction(|db| crate::agent_grants::reconcile(db))
-            .await?;
-        service.store.transaction(crate::accounts::migrate).await?;
-        service
-            .store
-            .transaction(crate::chats::questions::retire_unattributed)
-            .await?;
-        service
-            .store
-            .transaction(crate::notifications::remove_local_registrations)
             .await?;
         service.avatars.recover(&service).await?;
         tokio::spawn(crate::artifacts::preview::recover(service.clone()));
         Ok(service)
     }
 
-    async fn migrate_agents(&self) -> Result<()> {
-        for mut agent in self.store.list("agents").await? {
-            if agent["access"].get("mcps").is_none() || agent["access"].get("nodes").is_none() {
-                agent["access"] = policy(&agent);
-                self.store.put("agents", agent).await?;
-            }
-        }
+    async fn bootstrap_main_agent(&self) -> Result<()> {
         if self.store.get("agents", MAIN_AGENT_ID).await?.is_none() {
             let mut agent = parse(
                 "agent",
@@ -143,23 +124,7 @@ impl Service {
             agent["createdAt"] = now().into();
             self.store.put("agents", agent).await?;
         }
-        // Migrate the built-in agent's old default once; preserve custom limits and
-        // any later choice to explicitly restore a two-hour budget.
-        self.store
-            .transaction(|db| {
-                let key = "migration:main-agent-unlimited";
-                if db.kv(key)?.is_some() {
-                    return Ok(());
-                }
-                if let Some(mut agent) = db.get("agents", MAIN_AGENT_ID)?
-                    && agent["timeoutMinutes"] == 120
-                {
-                    agent["timeoutMinutes"] = 0.into();
-                    db.put("agents", &agent)?;
-                }
-                db.set(key, &json!(true), None)
-            })
-            .await
+        Ok(())
     }
 
     pub async fn get(&self, kind: &str, id: &str) -> Result<Value> {
@@ -329,11 +294,6 @@ impl Service {
                     .as_ref()
                     .map_or_else(|| json!([]), |agent| json!(live_grant(agent, key)));
             }
-        }
-        // Clients predating the GitHub plugin still send `access.github`; plugin grants
-        // replaced it.
-        if let Some(access) = input.get_mut("access").and_then(Value::as_object_mut) {
-            access.remove("github");
         }
         let mut agent = parse("agent", input)?;
         crate::agent_grants::normalize(&mut agent);
@@ -1072,16 +1032,13 @@ pub(crate) fn forget_agent(db: &Db<'_>, id: &str) -> Result<()> {
     crate::agent_grants::forget_agent(db, id)
 }
 
-/// Older clients omit settings they do not know about; keep the saved ones.
+/// Partial updates preserve current settings that the caller did not edit.
 fn inherit_agent_settings(input: &mut Value, existing: &Value) {
     if input.get("access").is_none() {
         input["access"] = policy(existing);
     }
     if input.get("provider").is_none() {
-        input["provider"] = existing
-            .get("provider")
-            .cloned()
-            .unwrap_or_else(|| "codex".into());
+        input["provider"] = existing["provider"].clone();
     }
     if input.is_object() {
         for key in [
@@ -1229,29 +1186,12 @@ pub fn policy(agent: &Value) -> Value {
         "backend": "firecracker",
     });
     merge(&mut value, &agent["access"]);
-    // Agents restricted before MCP permissions existed get no MCP connection. Their
-    // GitHub connection setting became a plugin grant, which no longer restricts.
-    let legacy_restricted = agent["id"] != MAIN_AGENT_ID
-        && agent["access"].is_object()
-        && agent["access"].get("mcps").is_none()
-        && (!value["projects"].is_null()
-            || !value["skills"].is_null()
-            || agent["access"]["github"] == false
-            || value["sandbox"] != "yolo");
-    if legacy_restricted {
-        value["mcps"] = json!([]);
-    }
-    // Snapshots of runs queued before the GitHub plugin still carry the setting.
-    if let Some(access) = value.as_object_mut() {
-        access.remove("github");
-    }
     value
 }
 
 /// Whether the `current` agent still allows everything `granted` allowed. Work started
 /// under `granted` continues when access is unchanged or wider, but never with access
-/// the owner has since removed. Settings older versions saved (such as `maxResources`)
-/// do not count, and node grants are excluded: placement follows the current ones.
+/// the owner has since removed. Node grants are excluded: placement follows the current ones.
 pub fn covers(current: &Value, granted: &Value) -> bool {
     let current = policy(current);
     let granted = policy(granted);

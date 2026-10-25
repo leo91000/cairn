@@ -12,8 +12,6 @@ pub mod files;
 pub mod forms;
 pub mod grants;
 mod idempotency;
-pub mod legacy;
-pub mod legacy_github;
 pub(crate) mod management;
 mod mime;
 pub mod oauth;
@@ -184,7 +182,6 @@ impl Plugins {
     }
 
     pub async fn start(self: Arc<Self>, s: Arc<Service>) {
-        tokio::spawn(legacy_github::complete(s.clone()));
         runtime::maintain(s).await;
     }
 }

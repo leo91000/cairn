@@ -11,6 +11,8 @@ mod delegation;
 mod delegation_storage;
 #[path = "plugin_routes/metadata.rs"]
 mod metadata;
+#[path = "plugin_routes/oauth_recovery.rs"]
+mod oauth_recovery;
 
 use aws_lc_rs::hmac;
 use axum::{body::Body, http::StatusCode, response::IntoResponse};

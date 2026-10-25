@@ -83,13 +83,13 @@ The chosen address is visible as an argument in the generated command:
 `curl …/internal/nodes/install.sh | sudo bash -s -- 'https://manager.vpn.example'`.
 The installer refuses URL query parameters that could hide a different download
 origin, and validates its argument before downloading the supervisor or changing
-the host. A usable configured manager origin remains the default for older
-commands without an argument, and for unclaimed installations; a Docker-only
+the host. Without an address argument, a usable configured manager origin is
+the default, including for unclaimed installations; a Docker-only
 origin requires the explicit address. The address is saved in the node’s
 protected identity and supervisor configuration. The node uses this
 authenticated connection address for disk preparation and restoration, even if
 the manager’s internal origin is loopback. The manager’s optional `PUBLIC_URL`
-remains a fallback for older enrollment clients and manager-local calls; it need
+provides the default for enrollment and manager-local calls; it need
 not be the browser’s origin. Installers require `CAIRN_NODE_IMAGE` to pin the
 manager’s approved image digest. Without it, use the matching `cairn node-enroll`
 binary with the address and temporary code shown in the app. Changes of address
@@ -271,7 +271,7 @@ variables listed in the [production setup](PRODUCTION-CAIRN-SETUP.md#read-only-r
 Follow that setup's credential transition before removing required reviewers;
 the legacy `COOLIFY_TOKEN` environment secret must be deleted so historical
 workflows cannot bypass current checks. Routine stable releases deploy automatically
-after installation data compatibility verification; they create no backups.
+after release validation; they create no backups.
 The obsolete `CAIRN_PUBLIC_URL` and standalone-manager deployment target are no
 longer used by the CLI. The script refuses a manager/runner Compose target.
 
@@ -286,17 +286,17 @@ verify the pair. Only beacon is restarted. It waits up to ten minutes for
 report the tested merge commit with the released tree. Existing installations
 update through their host timer; the release job also verifies the configured host has both approved images and
 execution readiness. See [failed releases](PRODUCTION-CAIRN.md#failed-releases)
-for operator intervention; do not roll back an incompatible data migration.
+for operator intervention.
 
-Retained VM disks keep their original guest OS and tools. Only approve an
-installation image automatically if both versions can read the persisted data.
-Review incompatible forward migrations separately.
+Resumed VM disks boot the current guest OS and tools. Manager, runner, nodes and
+guests deploy at the same version.
 
 ## Persisted data
 
-The release system does not create or retain backups. Image rollback cannot undo
-an incompatible data migration. Keep active volumes and credentials intact;
-recover incompatible migrations with a reviewed forward fix.
+The release system does not create or retain backups. The next installation
+release requires the [complete reinstallation](PRODUCTION-CAIRN.md#réinstallation-complète).
+Subsequent update failures retain the pending candidate for repair and retry;
+recover with a reviewed forward fix.
 
 Finished-run events expire after 30 days and audit entries after 90 days. Expired
 OAuth/session records are removed hourly. Run summaries and preserved worktrees
@@ -354,7 +354,7 @@ direct and log the name of the faulty setting; the relay keeps working.
 - **Unexpected host/origin:** check the internal manager origin for node traffic, and the beacon origin for browser access.
 - **Project outside workspace root:** use a directory under `WORKSPACE_ROOTS` (colon-separated on Linux), then register its canonical path.
 - **Worktree preparation failed:** check that the project is a Git repository and the configured local base branch exists.
-- **Recovering:** active conversations resume after the previous process/container stops. If the runner is unavailable, recovery waits and retains project/account locks. **Interrupted:** older runs without a checkpoint need review and an explicit retry. See [restart recovery](RESTART-RECOVERY.md).
+- **Recovering:** active conversations resume after the previous process/container stops. If the runner is unavailable, recovery waits and retains project/account locks. **Interrupted:** a run without its required checkpoint needs review and an explicit retry. See [restart recovery](RESTART-RECOVERY.md).
 - **No CLI installed/signed in:** use Connections and the commands above; provider account credentials are separate from the manager password.
 - **MCP rejects initialization:** verify the client uses Streamable HTTP and the deployed image includes stateless compatibility. Both 2026-07-28 and older 2025 clients are supported; standalone HTTP+SSE and stateful sessions are not.
 - **Always on relay:** see [Direct connection](#direct-connection) checks. Outbound UDP must be allowed from the installation host and the client network.
@@ -366,7 +366,7 @@ and [Codex authentication](https://learn.chatgpt.com/docs/auth) for the underlyi
 ## Automatic CLI updates
 
 Installations update tools through fully validated paired image releases and
-their host timer, with runtime verification and rollback. CI resolves the current
+their host timer, with runtime verification and candidate retry. CI resolves the current
 Codex, GitHub CLI, Claude Code and OpenCode releases before building and
 validating images; see [tool versions](CLI-UPDATES.md).
 

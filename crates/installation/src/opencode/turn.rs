@@ -23,21 +23,13 @@ const LIMIT: usize = 2_000_000;
 #[serde(rename_all = "camelCase")]
 struct Receipt {
     message_id: String,
-    #[serde(default)]
     submissions: Vec<(String, String)>,
-    #[serde(default)]
     submitted_at: Option<i64>,
-    #[serde(default)]
     delivered: HashSet<String>,
-    #[serde(default)]
     previously_delivered: HashSet<String>,
-    #[serde(default)]
     operational_notices: HashSet<String>,
-    #[serde(default)]
     complete: bool,
-    #[serde(default)]
     answer: String,
-    #[serde(default)]
     items: Vec<Value>,
 }
 
@@ -604,24 +596,6 @@ impl Turn<'_> {
             .server
             .get(&format!("/session/{}/message?limit=100", self.session))
             .await?;
-        if self.receipt.submitted_at.is_none() {
-            // Older receipts did not record submission time. Infer it from the
-            // native history before checking continuations, regardless of order.
-            self.receipt.submitted_at = messages
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|message| {
-                    message["info"]["role"] == "user"
-                        && self
-                            .receipt
-                            .submissions
-                            .iter()
-                            .any(|(_, wire)| message["info"]["id"] == wire.as_str())
-                })
-                .filter_map(|message| message["info"]["time"]["created"].as_i64())
-                .min();
-        }
         for message in messages.as_array().into_iter().flatten() {
             if message["info"]["role"] == "user" {
                 self.observe_user(&message["info"])?;

@@ -7,10 +7,7 @@ use super::{
     host::Vm,
     plan::Plan,
 };
-use crate::{
-    error::{Error, Result},
-    skills::private_dir,
-};
+use crate::error::{Error, Result};
 use serde::Serialize;
 use std::{
     collections::VecDeque,
@@ -203,11 +200,6 @@ impl Pool {
         if let Err(error) = super::images::collect(&state, &image).await {
             tracing::warn!(message = %error.message, "Runtime image collection skipped");
         }
-        // Retain the guest OS and toolchains, but never pin the chat adapter to
-        // an obsolete image. Copy once per controller, then import into tmpfs.
-        let entrypoint = state.join("entrypoint");
-        private_dir(&entrypoint).await?;
-        tokio::fs::copy(std::env::current_exe()?, entrypoint.join("cairn")).await?;
         let block_cache = crate::storage::NodeBlockCache::new(&state)?;
         Ok(Arc::new(Self {
             exclusive: AtomicBool::new(false),
@@ -873,11 +865,7 @@ impl Reservation {
             .await;
             self.vm_in_flight = false;
             self.vm = Some(booted?);
-            self.vm
-                .as_mut()
-                .unwrap()
-                .warm_codex(&self.pool.state, &stop)
-                .await
+            self.vm.as_mut().unwrap().warm_codex(&stop).await
         }
         .await;
         let pool = self.pool.clone();
@@ -1897,7 +1885,7 @@ mod tests {
             .await
             .unwrap();
         let anonymous = root.path().join("environments").join(crate::config::id());
-        private_dir(&anonymous).await.unwrap();
+        crate::skills::private_dir(&anonymous).await.unwrap();
         tokio::fs::write(anonymous.join("state.bin"), b"preserve unknown VMM disk")
             .await
             .unwrap();

@@ -673,6 +673,7 @@ mod tests {
                 "taskId": "other",
                 "status": "queued",
                 "createdAt": 2,
+                "snapshot": { "agent": { "provider": "codex" } },
             });
             s.store
                 .transaction(move |db| {

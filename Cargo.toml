@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/contracts",
   "crates/installation",
   "crates/beacon",
   "crates/node-gateway",

@@ -135,7 +135,7 @@ async fn exercise(relay: &RelayedInstallation, gateway: &Gateway) -> String {
             "code": invitation["code"],
             "name": "Office",
             "protocol": 1,
-            "runtimeId": "fixture",
+            "runtimeId": "development",
             "capabilities": {
                 "os": "linux",
                 "arch": "x86_64",
@@ -158,7 +158,7 @@ async fn exercise(relay: &RelayedInstallation, gateway: &Gateway) -> String {
         let heartbeat = client
             .post(format!("{}/internal/nodes/heartbeat", gateway.origin))
             .bearer_auth(&token)
-            .json(&json!({}))
+            .json(&json!({"runtimeId": "development", "nodeProtocol": 2}))
             .send()
             .await
             .unwrap();
@@ -166,7 +166,7 @@ async fn exercise(relay: &RelayedInstallation, gateway: &Gateway) -> String {
     }
     let unauthenticated = client
         .post(format!("{}/internal/nodes/heartbeat", gateway.origin))
-        .json(&json!({}))
+        .json(&json!({"runtimeId": "development", "nodeProtocol": 2}))
         .send()
         .await
         .unwrap();
@@ -268,7 +268,7 @@ async fn a_node_without_a_manager_address_connects_directly_after_beacon_introdu
             let _ = client
                 .post(format!("{}/internal/nodes/heartbeat", gateway.origin))
                 .timeout(Duration::from_secs(5))
-                .json(&json!({}))
+                .json(&json!({"runtimeId": "development", "nodeProtocol": 2}))
                 .send()
                 .await;
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -303,7 +303,7 @@ async fn without_a_direct_connection_beacon_carries_tls_to_the_pinned_manager() 
     let refused = client()
         .post(format!("{}/internal/nodes/heartbeat", impostor.origin))
         .bearer_auth(&token)
-        .json(&json!({}))
+        .json(&json!({"runtimeId": "development", "nodeProtocol": 2}))
         .send()
         .await
         .unwrap();
@@ -326,7 +326,7 @@ async fn without_a_direct_connection_beacon_carries_tls_to_the_pinned_manager() 
             let response = client
                 .post(format!("{}/internal/nodes/heartbeat", gateway.origin))
                 .bearer_auth(&token)
-                .json(&json!({}))
+                .json(&json!({"runtimeId": "development", "nodeProtocol": 2}))
                 .send()
                 .await;
             if let Ok(response) = response

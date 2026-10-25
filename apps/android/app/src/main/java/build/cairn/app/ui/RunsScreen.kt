@@ -18,6 +18,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import build.cairn.contracts.ResumeRunInput
+import build.cairn.contracts.resumeRun
 
 @Composable
 fun RunsScreen(vm: CairnViewModel, state: Workspace, open: (String) -> Unit) {
@@ -270,7 +272,7 @@ fun RunScreen(
                                     enabled = !state.busy,
                                     onClick = {
                                         menu = false
-                                        vm.perform { api.request("POST", "/runs/$id/resume") }
+                                        vm.perform { api.resumeRun(ResumeRunInput(id)) }
                                     },
                                 )
                             if (!current.active && current.trigger != "chat")

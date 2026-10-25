@@ -39,9 +39,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-// Advanced before Service::new runs any data migration. Older managers refuse
-// this database, and installed host updaters retain the candidate after a failure.
-const DATABASE_VERSION: i64 = 13;
+const DATABASE_VERSION: i64 = 1;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -71,18 +69,21 @@ impl Store {
     pub fn open(directory: &Path) -> Result<Self> {
         std::fs::create_dir_all(directory)?;
         let file = directory.join("manager.db");
+        let fresh = !file.exists();
         let mut writer = Connection::open(&file)?;
         let version: i64 = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > DATABASE_VERSION {
+        if !fresh && version != DATABASE_VERSION {
             return Err(Error::bad(
-                "This database belongs to a newer application version.",
+                "Unsupported installation database version; a complete reinstallation is required.",
             ));
         }
         writer.busy_timeout(std::time::Duration::from_secs(5))?;
         writer.set_prepared_statement_cache_capacity(128);
-        writer.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
-CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL,data TEXT NOT NULL,updated_at INTEGER NOT NULL);
+        writer.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        if fresh {
+            let tx = writer.transaction()?;
+            tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL,data TEXT NOT NULL,updated_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS records_kind ON records(kind,updated_at DESC);
 CREATE INDEX IF NOT EXISTS records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,project_id TEXT NOT NULL,status TEXT NOT NULL,created_at INTEGER NOT NULL,data TEXT NOT NULL,dedupe TEXT UNIQUE);
@@ -90,46 +91,25 @@ CREATE INDEX IF NOT EXISTS runs_status ON runs(status,created_at);
 CREATE INDEX IF NOT EXISTS runs_task ON runs(task_id,created_at DESC);
 CREATE INDEX IF NOT EXISTS runs_created ON runs(created_at DESC,id DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS runs_active_task ON runs(task_id) WHERE status IN ('queued','running','waiting');
-CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL,type TEXT NOT NULL,text TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL,type TEXT NOT NULL,text TEXT NOT NULL,payload TEXT);
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id,id);
 CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY,data TEXT NOT NULL,expires INTEGER);
 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at INTEGER NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL);",
         )?;
-        let tx = writer.transaction()?;
-        if version < 2 {
-            tx.execute_batch("ALTER TABLE events ADD COLUMN payload TEXT;")?;
-        }
-        tx.execute_batch(
+            tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS chat_messages(id TEXT PRIMARY KEY,chat_id TEXT NOT NULL,data TEXT NOT NULL,created_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id,created_at);",
         )?;
-        if version < 9 {
-            tx.execute_batch("DROP INDEX runs_active_task;
-CREATE UNIQUE INDEX runs_active_task ON runs(task_id) WHERE status IN ('queued','running','waiting');")?;
-        }
-        tx.pragma_update(None, "user_version", DATABASE_VERSION)?;
-        // Backwards history excludes superseded text snapshots. These small keys
-        // bound both the next-turn lookup and the same-message revision lookup.
-        tx.execute_batch("CREATE INDEX IF NOT EXISTS events_turns ON events(run_id,id) WHERE type='turn.started';
+            tx.pragma_update(None, "user_version", DATABASE_VERSION)?;
+            // Backwards history excludes superseded text snapshots. These small keys
+            // bound both the next-turn lookup and the same-message revision lookup.
+            tx.execute_batch("CREATE INDEX IF NOT EXISTS events_turns ON events(run_id,id) WHERE type='turn.started';
 CREATE INDEX IF NOT EXISTS events_user_input ON events(run_id,id) WHERE type='chat.user';
 CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload,'$.item.id'),id) WHERE json_extract(payload,'$.item.type')='agent_message';")?;
-        tx.execute_batch(crate::nodes::shared_blocks::SCHEMA)?;
-        tx.execute_batch(crate::storage::migration::SCHEMA)?;
-        tx.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS records_chat_slug ON records(json_extract(data,'$.slug')) WHERE kind='chats';")?;
-        let db = Db(&tx);
-        let missing = db.json_rows(
-            "SELECT data FROM records WHERE kind='chats' AND json_extract(data,'$.slug') IS NULL",
-            [],
-        )?;
-        for mut chat in missing {
-            chat["slug"] = db.new_chat_slug()?.into();
-            tx.execute(
-                "UPDATE records SET data=? WHERE kind='chats' AND id=?",
-                params![chat.to_string(), chat["id"].as_str()],
-            )?;
+            tx.execute_batch(crate::nodes::shared_blocks::SCHEMA)?;
+            tx.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS records_chat_slug ON records(json_extract(data,'$.slug')) WHERE kind='chats';")?;
+            tx.commit()?;
         }
-
-        tx.commit()?;
         let mut readers = Vec::new();
         for _ in 0..READERS {
             let connection = Connection::open(&file)?;
@@ -328,12 +308,12 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
 }
 
 /// Run list projection: drops the heavy snapshot and summary, keeps display names and the
-/// coding agent (agents saved before Claude Code support run on Codex).
+/// explicit coding agent saved in the snapshot.
 pub const RUN_SUMMARY: &str = "json_set(
     json_remove(data,'$.snapshot','$.summary'),
     '$.taskName',json_extract(data,'$.snapshot.task.name'),
     '$.agentName',json_extract(data,'$.snapshot.agent.name'),
-    '$.provider',COALESCE(json_extract(data,'$.snapshot.agent.provider'),'codex')
+    '$.provider',json_extract(data,'$.snapshot.agent.provider')
 )";
 
 // Database transactions and statement caches stay on their owning database thread.
@@ -424,9 +404,11 @@ impl Db<'_> {
         let value = if kind == "chats" {
             chat = value.clone();
             let existing = self.get(kind, value["id"].as_str().unwrap_or(""))?;
-            chat["slug"] = match existing.and_then(|chat| chat["slug"].as_str().map(str::to_owned))
-            {
-                Some(slug) => slug.into(),
+            chat["slug"] = match existing {
+                Some(existing) => existing["slug"]
+                    .as_str()
+                    .ok_or_else(|| Error::bad("Missing persisted chat slug."))?
+                    .into(),
                 None => self.new_chat_slug()?.into(),
             };
             &chat
@@ -859,5 +841,50 @@ fn within_budget(
 pub fn merge(value: &mut Value, patch: &Value) {
     if let (Some(target), Some(patch)) = (value.as_object_mut(), patch.as_object()) {
         target.extend(patch.clone());
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn initial_schema_reopens_with_events_and_records_intact() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .put("agents", json!({ "id": "example", "name": "Agent" }))
+            .await
+            .unwrap();
+        let reopened = Store::open(root.path()).unwrap();
+        assert_eq!(
+            reopened.get("agents", "example").await.unwrap().unwrap()["name"],
+            "Agent"
+        );
+        let db = Connection::open(root.path().join("manager.db")).unwrap();
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        db.prepare("SELECT payload FROM events").unwrap();
+        assert!(!db.table_exists(None, "disk_block_migration").unwrap());
+    }
+
+    #[test]
+    fn existing_other_versions_fail_without_changing_the_database() {
+        for version in [0, 2, 6, 12, 99] {
+            let root = tempfile::tempdir().unwrap();
+            let db = Connection::open(root.path().join("manager.db")).unwrap();
+            db.pragma_update(None, "user_version", version).unwrap();
+            let error = Store::open(root.path()).err().unwrap();
+            assert!(error.message.contains("complete reinstallation"));
+            assert_eq!(
+                db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                version
+            );
+            assert!(!db.table_exists(None, "records").unwrap());
+        }
     }
 }

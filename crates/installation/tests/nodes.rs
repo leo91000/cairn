@@ -85,7 +85,7 @@ impl Owner {
         .unwrap();
         if std::env::var_os("CAIRN_NODE_TEST_S3_ENDPOINT").is_some() {
             std::fs::write(
-                service.config.data_dir.join("archive-s3.json"),
+                service.config.data_dir.join("storage-s3.json"),
                 json!({ "bucket": "cairn-node-test" }).to_string(),
             )
             .unwrap();
@@ -118,9 +118,14 @@ impl Owner {
         &self,
         method: &str,
         path: &str,
-        body: Value,
+        mut body: Value,
         token: Option<&str>,
     ) -> (StatusCode, Value) {
+        if path == HEARTBEAT {
+            let fields = body.as_object_mut().unwrap();
+            fields.entry("nodeProtocol").or_insert(json!(2));
+            fields.entry("runtimeId").or_insert(json!("development"));
+        }
         let mut request = self
             .request(method, path)
             .header("content-type", "application/json");
@@ -216,7 +221,7 @@ impl Owner {
     async fn grant_nodes(&self, agent: &str, nodes: Value) {
         self.put(
             "agents",
-            json!({ "id": agent, "access": { "nodes": nodes } }),
+            json!({ "id": agent, "provider": "codex", "access": { "nodes": nodes } }),
         )
         .await;
     }
@@ -261,7 +266,7 @@ fn enrollment(invitation: &Value, name: &str, capabilities: &Value) -> Value {
         "name": name,
         "protocol": 1,
         "capabilities": capabilities,
-        "runtimeId": "fixture",
+        "runtimeId": "development",
     })
 }
 
@@ -275,6 +280,7 @@ fn schedulable_node(id: &str, limits: &Value) -> Value {
         "id": id,
         "accepting": true,
         "executionReady": true,
+        "runtimeId": "development",
         "sharedResources": true,
         "lastSeen": now(),
         "capabilities": { "kvm": true },
@@ -284,12 +290,20 @@ fn schedulable_node(id: &str, limits: &Value) -> Value {
 
 /// A run owned by `agent`, as seen by placement.
 fn agent_run(run: &str, agent: &str) -> Value {
-    json!({ "id": run, "snapshot": { "agent": { "id": agent } } })
+    json!({ "id": run, "snapshot": { "agent": { "id": agent, "provider": "codex" } } })
 }
 
 /// A persisted run record in `status`.
 fn run_record(run: &str, status: RunStatus) -> Value {
-    json!({ "id": run, "taskId": "fixture", "createdAt": 0, "status": status })
+    json!({
+        "id": run,
+        "taskId": "fixture",
+        "createdAt": 0,
+        "status": status,
+        "nativeProvenanceUnknown": true,
+        "nativePrincipals": [],
+        "nativeAuthorityNodes": [],
+    })
 }
 
 /// A storage policy with a small reserve, so fixtures fit on any disk.
@@ -318,7 +332,7 @@ fn find_by_id(list: &Value, id: &str) -> Value {
 async fn controller_manifest(disk: &Path) -> Value {
     let mut manifest = snapshots::index(disk).await.unwrap();
     manifest["capturedAt"] = now().into();
-    manifest["runtime"] = json!({ "runtimeId": "fixture" });
+    manifest["runtime"] = json!({ "runtimeId": "development" });
     manifest
 }
 
@@ -373,7 +387,7 @@ async fn shared_budget_must_be_applied_before_admission_and_reconfiguration_paus
     owner.put("nodes", record).await;
     owner.authorize_node(&node, token).await;
     let mut heartbeat = json!({
-        "runtimeId": "fixture",
+        "runtimeId": "development",
         "executionReady": true,
         "dataRoot": owner.service.config.data_dir,
         "budget": { "slots": 4, "limits": shared_limits },
@@ -462,7 +476,7 @@ async fn enrollment_is_single_use_and_revocation_removes_node_access() {
         .call(
             "POST",
             HEARTBEAT,
-            json!({ "runtimeId": "fixture" }),
+            json!({ "runtimeId": "development" }),
             Some(token),
         )
         .await;
@@ -482,7 +496,107 @@ async fn enrollment_is_single_use_and_revocation_removes_node_access() {
 }
 
 #[tokio::test]
-async fn enrollment_identity_tracks_the_exact_invitation_and_accepts_legacy_codes() {
+async fn component_version_mismatches_are_explicitly_rejected() {
+    let owner = Owner::new().await;
+    let invitation = owner.invite("Versioned").await;
+    let mut request = enrollment(
+        &invitation,
+        "Versioned",
+        &capabilities(true, 8, 16384, 65536),
+    );
+    request["runtimeId"] = "other-version".into();
+    let (status, error) = owner.call("POST", ENROLL, request.clone(), None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    request["runtimeId"] = "development".into();
+    let (status, identity) = owner.call("POST", ENROLL, request, None).await;
+    assert_eq!(status, StatusCode::OK, "{identity}");
+    let node_id = identity["nodeId"].as_str().unwrap();
+    let mut node = owner.stored("nodes", node_id).await.unwrap();
+    node["slots"] = 2.into();
+    node["accepting"] = true.into();
+    let valid = json!({
+        "runtimeId": "development", "nodeProtocol": 2, "executionReady": true,
+        "sharedResources": true, "dataRoot": owner.service.config.data_dir,
+        "budget": { "slots": 2, "limits": node["limits"] },
+    });
+    owner.put("nodes", node).await;
+    owner.grant_nodes(MAIN_AGENT_ID, json!([node_id])).await;
+    for request in [
+        json!({ "runtimeId": "other-version", "nodeProtocol": 2 }),
+        json!({ "runtimeId": "development", "nodeProtocol": 3 }),
+        json!({ "runtimeId": "development", "nodeProtocol": null, "executionReady": false }),
+        json!({ "runtimeId": "other-version", "nodeProtocol": 2, "capabilities": { "backend": "firecracker" } }),
+    ] {
+        assert_eq!(
+            owner
+                .call("POST", HEARTBEAT, valid.clone(), identity["token"].as_str())
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            owner.stored("nodes", node_id).await.unwrap()["executionReady"],
+            true
+        );
+        let (run_id, reservation, attempt) = (id(), id(), id());
+        let mut run = run_record(&run_id, RunStatus::Queued);
+        run["taskId"] = run_id.clone().into();
+        run["snapshot"] = json!({ "agent": { "id": MAIN_AGENT_ID, "provider": "codex" } });
+        run["isolated"] = true.into();
+        run["resources"] = limits(1, 512, 1024);
+        run["placementTransition"] = true.into();
+        owner.add_run(&run).await;
+        placement::reserve(&owner.service, &run, &reservation)
+            .await
+            .unwrap();
+        run["placementTransition"] = false.into();
+        run["moveReservation"] = reservation.clone().into();
+        owner
+            .service
+            .store
+            .patch_run(
+                &run_id,
+                json!({
+                    "placementTransition": false, "moveReservation": reservation,
+                }),
+            )
+            .await
+            .unwrap();
+        let (status, error) = owner
+            .call("POST", HEARTBEAT, request, identity["token"].as_str())
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{error}");
+        assert_eq!(
+            owner.stored("nodes", node_id).await.unwrap()["executionReady"],
+            false,
+            "A rejected or unavailable controller must not retain its previous readiness"
+        );
+        let error = placement::reserve(&owner.service, &run, &attempt)
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("not ready"), "{error:?}");
+        assert_eq!(
+            owner.stored("node-attempts", &reservation).await.unwrap()["released"],
+            false
+        );
+        assert!(owner.stored("node-attempts", &attempt).await.is_none());
+        assert_eq!(owner.run(&run_id).await["moveReservation"], reservation);
+        assert_eq!(
+            owner
+                .call("POST", HEARTBEAT, valid.clone(), identity["token"].as_str())
+                .await
+                .0,
+            StatusCode::OK
+        );
+        placement::reserve(&owner.service, &run, &attempt)
+            .await
+            .unwrap();
+        placement::release(&owner.service, &attempt).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn enrollment_identity_tracks_the_exact_invitation() {
     let owner = Owner::new().await;
     let first = owner.invite("Workstation").await;
     let second = owner.invite("Workstation").await;
@@ -503,32 +617,6 @@ async fn enrollment_identity_tracks_the_exact_invitation_and_accepts_legacy_code
         assert_eq!(status, StatusCode::OK, "{identity}");
         assert_eq!(identity["nodeId"], invitation["nodeId"]);
     }
-
-    let code = auth::token();
-    owner
-        .service
-        .store
-        .set(
-            &format!("node-enrollment:{}", auth::digest(&code)),
-            json!({ "name": "Legacy", "backend": "firecracker" }),
-            Some(now() + 600_000),
-        )
-        .await
-        .unwrap();
-    let (status, identity) = owner
-        .call(
-            "POST",
-            ENROLL,
-            enrollment(
-                &json!({ "code": code }),
-                "Legacy",
-                &capabilities(true, 8, 16384, 65536),
-            ),
-            None,
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{identity}");
-    assert!(identity["nodeId"].is_string());
 }
 
 #[tokio::test]
@@ -611,7 +699,7 @@ async fn direct_node_channel_accepts_private_proxy_hosts_and_keeps_credentials_r
             let mut request = client
                 .post(format!("{base}{HEARTBEAT}"))
                 .header("host", host)
-                .json(&json!({}));
+                .json(&json!({ "runtimeId": "development", "nodeProtocol": 2 }));
             if let Some(credential) = credential {
                 request = request.bearer_auth(credential);
             }
@@ -1271,7 +1359,8 @@ async fn native_project_archive_handshake_skips_the_tree_and_rechecks_cache_gran
             "nodes",
             json!({
                 "id": node, "revoked": false, "accepting": true,
-                "capabilities": { "backend": "native" }, "nativeEnabled": true,
+                "capabilities": { "backend": "native", "nativeModeProtocol": 1 }, "nativeEnabled": true,
+                "nativeModeObserved": { "mode": "protected", "generation": null, "status": "applied" },
                 "nativeAccounts": [person],
             }),
         )
@@ -1298,7 +1387,7 @@ async fn native_project_archive_handshake_skips_the_tree_and_rechecks_cache_gran
     let project_record = json!({ "id": project, "path": project_path, "sourceMode": "remote", "baseBranch": "main" });
     owner.put("projects", project_record.clone()).await;
     let mut record = run_record(&run, RunStatus::Running);
-    record["snapshot"] = json!({ "agent": { "id": MAIN_AGENT_ID, "access": { "backend": "native" } }, "projects": [project_record] });
+    record["snapshot"] = json!({ "agent": { "id": MAIN_AGENT_ID, "provider": "codex", "access": { "backend": "native" } }, "projects": [project_record] });
     record["workspaces"] =
         json!([{ "projectId": project, "revision": "a".repeat(40), "path": project_path }]);
     record["nativePrincipals"] = json!([person]);
@@ -2049,6 +2138,35 @@ async fn bulk_stream_backpressure_and_reader_cancellation_bound_the_upload() {
 }
 
 #[tokio::test]
+async fn current_components_resume_a_backend_converted_environment_after_an_application_update() {
+    let owner = Owner::new().await;
+    let (node, agent, run) = (id(), id(), id());
+    owner
+        .put("nodes", schedulable_node(&node, &limits(4, 8192, 65536)))
+        .await;
+    owner.grant_nodes(&agent, json!([node])).await;
+    owner
+        .set_checkpoint(
+            &run,
+            json!({
+                "nodeId": node,
+                "runtimeId": "previous-release",
+                "workspaceInitialized": true,
+            }),
+        )
+        .await;
+    let mut record = agent_run(&run, &agent);
+    record["isolated"] = true.into();
+    // A successful live backend conversion records this runtime on the run too.
+    record["requiredRuntime"] = "previous-release".into();
+    let placement = placement::reserve(&owner.service, &record, &id())
+        .await
+        .unwrap();
+    assert_eq!(placement["nodeId"], node);
+    assert_eq!(placement["runtimeId"], "development");
+}
+
+#[tokio::test]
 async fn concurrent_admission_reserves_capacity_once_and_preserves_agent_grants() {
     let owner = Owner::new().await;
     let (node, agent) = (id(), id());
@@ -2094,7 +2212,6 @@ async fn queued_capacity_moves_preserve_the_source_and_unfinished_mission_waits(
         let (run, agent, source, destination) = (id(), id(), id(), id());
         for (node, cpu) in [(&source, 1), (&destination, 12)] {
             let mut record = schedulable_node(node, &limits(cpu, 32768, 131072));
-            record["runtimes"] = json!(["fixture"]);
             if node == &source {
                 record["pressure"] = "memory".into();
             }
@@ -2117,7 +2234,7 @@ async fn queued_capacity_moves_preserve_the_source_and_unfinished_mission_waits(
         owner
             .set_checkpoint(
                 &run,
-                json!({ "nodeId": source, "runtimeId": "fixture", "completed": false }),
+                json!({ "nodeId": source, "runtimeId": "development", "completed": false }),
             )
             .await;
         assert!(placement::is_no_capacity(
@@ -2349,6 +2466,7 @@ async fn a_remote_only_agent_prepares_a_private_vm_without_a_local_controller() 
         "snapshot": {
             "agent": {
                 "id": MAIN_AGENT_ID,
+                "provider": "codex",
                 "access": { "nodes": ["e2000000-0000-4000-8000-000000000002"] },
             },
             "projects": [],
@@ -2657,7 +2775,7 @@ async fn remote_vm_agents_reach_workspace_tools_only_through_their_node_session(
             json!({ "id": attempt, "runId": run, "nodeId": node, "released": false }),
         )
         .await;
-    let snapshot = json!({ "agent": { "id": MAIN_AGENT_ID, "access": { "nodes": [node] } } });
+    let snapshot = json!({ "agent": { "id": MAIN_AGENT_ID, "provider": "codex", "access": { "nodes": [node] } } });
     let mut record = run_record(&run, RunStatus::Running);
     record["snapshot"] = snapshot.clone();
     owner.add_run(&record).await;
@@ -3019,7 +3137,7 @@ async fn retired_audit_errors_do_not_force_full_download_before_demand_resume() 
         "version": 1,
         "size": 4096,
         "blockSize": snapshots::BLOCK,
-        "blocks": [{ "offset": 0, "size": 4096, "hash": "a".repeat(64) }],
+        "blocks": [{ "offset": 0, "size": 4096, "hash": format!("b3-{}", "a".repeat(64)), "object": id() }],
     });
     let encrypted = owner.encrypt_manifest(&point, &manifest);
     owner
@@ -3031,6 +3149,7 @@ async fn retired_audit_errors_do_not_force_full_download_before_demand_resume() 
                 "sessionId": "saved-session",
                 "capturedAt": 1,
                 "destination": "s3",
+                "blockFormat": "shared-v1",
                 "manifest": encrypted,
             }),
         )
@@ -3130,7 +3249,7 @@ async fn configure_loopback_s3(owner: &Owner, endpoint: &str) {
     std::fs::write(&wrapper, script).unwrap();
     std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::write(
-        owner.service.config.data_dir.join("archive-s3.json"),
+        owner.service.config.data_dir.join("storage-s3.json"),
         json!({ "bucket": "cairn-node-test", "awsBinary": wrapper }).to_string(),
     )
     .unwrap();
@@ -3155,7 +3274,7 @@ async fn assert_s3_outage_is_transient(
     hash: &str,
 ) {
     std::fs::remove_dir_all(blocks).unwrap();
-    let config_path = owner.service.config.data_dir.join("archive-s3.json");
+    let config_path = owner.service.config.data_dir.join("storage-s3.json");
     let original_config = std::fs::read(&config_path).unwrap();
     let mut disconnected_config: Value = serde_json::from_slice(&original_config).unwrap();
     disconnected_config["endpoint"] = json!("https://127.0.0.1:1");
@@ -3193,7 +3312,7 @@ async fn assert_s3_outage_is_transient(
     std::fs::write(&config_path, original_config).unwrap();
 }
 
-/// Normal recovery rejects old envelopes immediately after startup migration.
+/// Recovery accepts only the current authenticated envelope.
 async fn assert_legacy_block_envelope_is_rejected(
     owner: &Owner,
     key: &str,
@@ -3610,7 +3729,7 @@ async fn an_unreachable_owner_is_fenced_only_after_its_last_lease_and_cannot_ren
             .call(
                 "POST",
                 HEARTBEAT,
-                json!({ "runtimeId": "fixture" }),
+                json!({ "runtimeId": "development" }),
                 Some(&token),
             )
             .await;
@@ -3884,7 +4003,7 @@ async fn connect_node(
 ) -> [tokio::task::JoinHandle<()>; 2] {
     let run = record["id"].as_str().unwrap();
     let state = owner.root().join(node);
-    let image = state.join("images/fixture");
+    let image = state.join("images/development");
     std::fs::create_dir_all(&image).unwrap();
     std::fs::write(image.join("root.ext4"), b"fixture runtime").unwrap();
     std::fs::write(image.join("vmlinux"), b"fixture kernel").unwrap();
@@ -3894,9 +4013,7 @@ async fn connect_node(
     let token = auth::token();
     let mut enrolled = schedulable_node(node, &limits(2, 1024, 1024));
     enrolled["revoked"] = false.into();
-    enrolled["runtimeId"] = "fixture".into();
-    enrolled["runtimeIds"] = json!(["fixture"]);
-    enrolled["runtimes"] = json!(["fixture"]);
+    enrolled["runtimeId"] = "development".into();
     enrolled["storage"] = json!(small_reserve());
     owner.put("nodes", enrolled).await;
     owner.authorize_node(node, &token).await;
@@ -4079,7 +4196,7 @@ async fn queued_capacity_transfer_carries_unpublished_writes_and_keeps_the_sourc
             json!({
                 "nodeId": source,
                 "runnerId": attempt,
-                "runtimeId": "fixture",
+                "runtimeId": "development",
                 "prepared": { "backend": "firecracker", "isolated": true },
             }),
         )
@@ -4672,7 +4789,7 @@ async fn coalesced_final_publication_survives_a_new_attempt_and_preserves_later_
                     manifest["generation"] = generation.into();
                     manifest["onDemand"] = true.into();
                     manifest["capturedAt"] = now().into();
-                    manifest["runtime"] = json!({ "runtimeId": "fixture" });
+                    manifest["runtime"] = json!({ "runtimeId": "development" });
                     let snapshot = id();
                     let directory = state.join("snapshots").join(&snapshot);
                     tokio::fs::create_dir_all(&directory).await.unwrap();
@@ -4702,18 +4819,22 @@ async fn coalesced_final_publication_survives_a_new_attempt_and_preserves_later_
                     .unwrap();
                     return Json(json!({ "committed": true })).into_response();
                 }
-                if path.ends_with("/blocks") || path.ends_with("/publication") {
-                    return StatusCode::NOT_FOUND.into_response();
+                if request.method() != "POST" || !path.ends_with("/publication") {
+                    return StatusCode::METHOD_NOT_ALLOWED.into_response();
                 }
                 if reads.fetch_add(1, Ordering::SeqCst) == 0 {
                     transfer_entered.notify_one();
                     transfer_release.cancelled().await;
                 }
                 let parts: Vec<_> = path.split('/').collect();
-                snapshots::served(&state.join("snapshots").join(parts[2]), parts[3])
-                    .await
-                    .unwrap()
-                    .into_response()
+                let body = to_bytes(request.into_body(), 4096).await.unwrap();
+                let value: Value = serde_json::from_slice(&body).unwrap();
+                let hashes = serde_json::from_value(value["hashes"].clone()).unwrap();
+                let (length, body) =
+                    snapshots::served_publication(&state.join("snapshots").join(parts[2]), hashes)
+                        .await
+                        .unwrap();
+                ([("content-length", length.to_string())], body).into_response()
             }
         }
     });
@@ -4868,15 +4989,21 @@ fn capture_controller(disk: PathBuf, manifest: Value, grant: String, log: Captur
                 return Json(json!({ "id": snapshot, "manifest": manifest, "grantId": grant }))
                     .into_response();
             }
-            if request.method() != "GET" {
+            if request.method() != "POST" || !path.ends_with("/publication") {
                 return StatusCode::METHOD_NOT_ALLOWED.into_response();
             }
-            let hash = path.rsplit('/').next().unwrap();
-            log.block_reads.fetch_add(1, Ordering::SeqCst);
-            snapshots::block(&disk, &manifest, hash)
-                .await
-                .unwrap()
-                .into_response()
+            let body = to_bytes(request.into_body(), 4096).await.unwrap();
+            let batch: Value = serde_json::from_slice(&body).unwrap();
+            let mut bytes = Vec::new();
+            for hash in batch["hashes"].as_array().unwrap() {
+                log.block_reads.fetch_add(1, Ordering::SeqCst);
+                bytes.extend(
+                    snapshots::block(&disk, &manifest, hash.as_str().unwrap())
+                        .await
+                        .unwrap(),
+                );
+            }
+            bytes.into_response()
         }
     })
 }
@@ -5133,7 +5260,7 @@ async fn permits(owner: &Owner, credential: &str, point: &Value) -> bool {
 async fn publish_s3_points(owner: &Owner, run: &str, node: &str) -> Vec<Value> {
     let mut points = Vec::new();
     for (generation, byte) in (1..).zip([7u8, 9u8, 11u8]) {
-        let hash = hex::encode(Sha256::digest(vec![byte; 4096]));
+        let hash = cairn_installation::storage::digest::block(&vec![byte; 4096]);
         let mut point = published_point(run, node, generation);
         let manifest = json!({
             "version": 1,
@@ -5238,42 +5365,9 @@ async fn mounted_disk_grants_pin_generations_and_reject_the_previous_owner() {
     );
 }
 
-#[tokio::test]
-async fn corrupted_recovery_ciphertext_is_terminal_and_invalidates_the_baseline() {
-    let owner = Owner::new().await;
-    let run = id();
-    let mut record = run_record(&run, RunStatus::Succeeded);
-    record["backup"] = json!({ "snapshotId": "previous" });
-    owner.add_run(&record).await;
-    let data = b"durable conversation work";
-    let hash = hex::encode(Sha256::digest(data));
-    let key = format!("node-backups-v2/{run}/blocks/{hash}");
-    let mut encoded = cairn_installation::storage::block_codec::BlockCodec::default()
-        .encode(owner.service.vault.clone(), key.clone(), data.to_vec())
-        .await
-        .unwrap();
-    *encoded.last_mut().unwrap() ^= 1;
-    let path = owner.backup_directory(&run).join("blocks").join(&hash);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, encoded).unwrap();
-    let error = publication::read_block(
-        &owner.service,
-        &json!({ "runId": run, "destination": "master" }),
-        &hash,
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(
-        error.status, 409,
-        "corrupt ciphertext must not trigger an endless 5xx retry"
-    );
-    assert!(!path.exists());
-    assert!(owner.run(&run).await["backup"]["snapshotId"].is_null());
-}
-
-/// Publishes one master recovery point per generation: `shared` plus its own block.
+/// Records one current-format recovery point per generation.
 /// Newer generations get older timestamps, so only the published pointer orders them.
-async fn publish_master_points(
+async fn publish_points(
     owner: &Owner,
     run: &str,
     shared: &str,
@@ -5287,8 +5381,8 @@ async fn publish_master_points(
             "size": 2 * snapshots::BLOCK,
             "blockSize": snapshots::BLOCK,
             "blocks": [
-                { "offset": 0, "size": snapshots::BLOCK, "hash": shared },
-                { "offset": snapshots::BLOCK, "size": snapshots::BLOCK, "hash": hash },
+                { "offset": 0, "size": snapshots::BLOCK, "hash": shared, "object": id() },
+                { "offset": snapshots::BLOCK, "size": snapshots::BLOCK, "hash": hash, "object": id() },
             ],
         });
         owner
@@ -5297,7 +5391,9 @@ async fn publish_master_points(
                 json!({
                     "id": point,
                     "runId": run,
-                    "destination": "master",
+                    "destination": "s3",
+                    "bucket": "fixture",
+                    "blockFormat": "shared-v1",
                     "createdAt": 100 - generation,
                     "manifest": owner.encrypt_manifest(&point, &manifest),
                 }),
@@ -5309,19 +5405,14 @@ async fn publish_master_points(
 }
 
 #[tokio::test]
-async fn publication_cleanup_preserves_current_and_in_use_blocks_then_reclaims_idle_generations() {
+async fn publication_cleanup_preserves_current_and_in_use_points_then_retires_idle_generations() {
     let owner = Owner::new().await;
     let run = id();
     owner.add_run(&run_record(&run, RunStatus::Succeeded)).await;
-    let directory = owner.backup_directory(&run).join("blocks");
-    std::fs::create_dir_all(&directory).unwrap();
-    let shared = hex::encode(Sha256::digest(b"shared"));
-    let old = hex::encode(Sha256::digest(b"old"));
-    let new = hex::encode(Sha256::digest(b"new"));
-    for hash in [&shared, &old, &new] {
-        std::fs::write(directory.join(hash), b"fixture").unwrap();
-    }
-    let ids = publish_master_points(&owner, &run, &shared, [&old, &new]).await;
+    let shared = cairn_installation::storage::digest::block(b"shared");
+    let old = cairn_installation::storage::digest::block(b"old");
+    let new = cairn_installation::storage::digest::block(b"new");
+    let ids = publish_points(&owner, &run, &shared, [&old, &new]).await;
     owner
         .service
         .store
@@ -5359,7 +5450,6 @@ async fn publication_cleanup_preserves_current_and_in_use_blocks_then_reclaims_i
             .len(),
         2
     );
-    assert!(directory.join(&old).exists());
     owner
         .service
         .store
@@ -5378,9 +5468,6 @@ async fn publication_cleanup_preserves_current_and_in_use_blocks_then_reclaims_i
         points[0]["id"], ids[1],
         "Published pointer wins over timestamp ordering"
     );
-    assert!(directory.join(shared).exists());
-    assert!(directory.join(new).exists());
-    assert!(!directory.join(old).exists());
 }
 
 /// Runs `aws s3api` against the loopback bucket.
@@ -5475,17 +5562,20 @@ fn paused_capture_controller(
                 resume.notified().await;
                 return Json(json!({ "id": id(), "manifest": manifest })).into_response();
             }
-            if request.method() != "GET" {
+            if request.method() != "POST" || !request.uri().path().ends_with("/publication") {
                 return StatusCode::METHOD_NOT_ALLOWED.into_response();
             }
-            snapshots::block(
-                &disk,
-                &manifest,
-                request.uri().path().rsplit('/').next().unwrap(),
-            )
-            .await
-            .unwrap()
-            .into_response()
+            let body = to_bytes(request.into_body(), 4096).await.unwrap();
+            let batch: Value = serde_json::from_slice(&body).unwrap();
+            let mut bytes = Vec::new();
+            for hash in batch["hashes"].as_array().unwrap() {
+                bytes.extend(
+                    snapshots::block(&disk, &manifest, hash.as_str().unwrap())
+                        .await
+                        .unwrap(),
+                );
+            }
+            bytes.into_response()
         }
     })
 }
@@ -5624,7 +5714,7 @@ struct SharedPublicationGates {
     racing: Arc<AtomicBool>,
 }
 
-/// A runner controller serving `disk` one block at a time, never in batches.
+/// A runner controller serving the current publication stream.
 fn shared_publication_controller(
     disk: PathBuf,
     manifest: Arc<tokio::sync::Mutex<Value>>,
@@ -5653,7 +5743,23 @@ fn shared_publication_controller(
             if request.uri().path().ends_with("/blocks")
                 || request.uri().path().ends_with("/publication")
             {
-                return StatusCode::NOT_FOUND.into_response();
+                let body = axum::body::to_bytes(request.into_body(), 1_000_000)
+                    .await
+                    .unwrap();
+                let value: Value = serde_json::from_slice(&body).unwrap();
+                let mut bytes = Vec::new();
+                for hash in value["hashes"].as_array().unwrap() {
+                    gates.requests.fetch_add(1, Ordering::SeqCst);
+                    if gates.racing.load(Ordering::SeqCst) {
+                        upload_barrier.wait().await;
+                    }
+                    bytes.extend(
+                        snapshots::block(&disk, &*manifest.lock().await, hash.as_str().unwrap())
+                            .await
+                            .unwrap(),
+                    );
+                }
+                return bytes.into_response();
             }
             gates.requests.fetch_add(1, Ordering::SeqCst);
             if gates.racing.load(Ordering::SeqCst) {
@@ -5673,7 +5779,7 @@ fn shared_publication_controller(
 
 #[tokio::test]
 #[ignore = "requires loopback S3; run scripts/tests/node_s3_test.py"]
-async fn shared_publications_reuse_across_runs_migrate_legacy_and_ignore_slow_cleanup() {
+async fn shared_publications_reuse_across_runs_and_ignore_slow_cleanup() {
     let root = TempDir::new().unwrap();
     let disk = root.path().join("source");
     let original = vec![42u8; 4 * MIB];
@@ -5731,6 +5837,7 @@ async fn shared_publications_reuse_across_runs_migrate_legacy_and_ignore_slow_cl
     // disk-reader lock, and removing one owner cannot delete another owner's block.
     let entered = root.path().join("delete-entered");
     let release = root.path().join("delete-release");
+    let previous_storage = std::fs::read(s.config.data_dir.join("storage-s3.json")).unwrap();
     let wrapper = root.path().join("slow-aws");
     let script = format!(
         "#!/usr/bin/env python3
@@ -5805,7 +5912,7 @@ sys.exit(subprocess.call(['aws']+sys.argv[1:]))
             .status,
         409
     );
-    std::fs::remove_file(s.config.data_dir.join("storage-s3.json")).unwrap();
+    std::fs::write(s.config.data_dir.join("storage-s3.json"), previous_storage).unwrap();
 
     // A cancelled caller cannot release reservations while its owned capture is
     // running. The operation completes before another collector can retire it.
@@ -5887,80 +5994,6 @@ sys.exit(subprocess.call(['aws']+sys.argv[1:]))
         .unwrap();
     drain_remote_deletions(s).await;
 
-    // Run-scoped manifests migrated at startup can omit unchanged bytes on the
-    // node. Reuse their v2 object instead of requesting absent data.
-    let legacy_run = new_run().await;
-    let run_id = legacy_run["id"].as_str().unwrap();
-    let point_id = id();
-    let legacy_bytes = b"legacy unchanged block";
-    std::fs::write(&disk, legacy_bytes).unwrap();
-    let mut legacy_manifest = snapshots::index(&disk).await.unwrap();
-    legacy_manifest["incremental"] = true.into();
-    let hash = legacy_manifest["blocks"][0]["hash"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let old_key = format!("node-backups-v2/{run_id}/blocks/{hash}");
-    let encoded = cairn_installation::storage::block_codec::BlockCodec::default()
-        .encode(s.vault.clone(), old_key.clone(), legacy_bytes.to_vec())
-        .await
-        .unwrap();
-    Storage::configured(s)
-        .unwrap()
-        .upload_bytes(encoded, &old_key)
-        .await
-        .unwrap();
-    let legacy = json!({
-        "id": point_id,
-        "runId": run_id,
-        "destination": "s3",
-        "bucket": "cairn-node-test",
-        "endpoint": null,
-        "manifest": owner.encrypt_manifest(&point_id, &legacy_manifest),
-    });
-    owner.put("node-backups", legacy.clone()).await;
-    s.store
-        .patch_run(
-            run_id,
-            json!({ "backup": { "id": point_id, "snapshotId": id() } }),
-        )
-        .await
-        .unwrap();
-    let directory = owner.backup_directory(run_id);
-    std::fs::create_dir_all(&directory).unwrap();
-    std::fs::write(
-        directory.join(format!("{point_id}.json")),
-        legacy.to_string(),
-    )
-    .unwrap();
-    *state.lock().await = legacy_manifest;
-
-    let before = gates.requests.load(Ordering::SeqCst);
-    let migrated = publication::capture(s, &owner.run(run_id).await)
-        .await
-        .unwrap();
-    assert_eq!(migrated["blockFormat"], "shared-v1");
-    assert_eq!(gates.requests.load(Ordering::SeqCst), before);
-    let migrated = s
-        .get("node-backups", migrated["id"].as_str().unwrap())
-        .await
-        .unwrap();
-    assert_eq!(
-        publication::read_block(s, &migrated, &hash).await.unwrap(),
-        legacy_bytes
-    );
-    drain_remote_deletions(s).await;
-    assert_eq!(
-        Storage::configured(s)
-            .unwrap()
-            .download_bytes(&old_key, 65536)
-            .await
-            .unwrap_err()
-            .status,
-        409
-    );
-    publication::purge(s, run_id).await.unwrap();
-    drain_remote_deletions(s).await;
     server.abort();
 }
 
@@ -5975,9 +6008,7 @@ async fn compressed_publications_restore_mixed_blocks_reuse_objects_and_repair_c
     let mut original = vec![42u8; 8 * MIB + 23];
     rand::rngs::StdRng::seed_from_u64(42).fill_bytes(&mut original[4 * MIB..8 * MIB]);
     std::fs::write(&disk, &original).unwrap();
-    let mut manifest = snapshots::index(&disk).await.unwrap();
-    // Mixed identity algorithms are independent of the storage representation.
-    manifest["blocks"][1]["hash"] = hex::encode(Sha256::digest(&original[4 * MIB..8 * MIB])).into();
+    let manifest = snapshots::index(&disk).await.unwrap();
     let state = Arc::new(tokio::sync::Mutex::new(manifest.clone()));
     let gates = SharedPublicationGates::default();
     let (url, server) =
@@ -6256,155 +6287,4 @@ async fn slot_shortage_reports_free_slots_and_check_reserves_nothing() {
     let node = find_by_id(&inventory, &node);
     assert_eq!(node["availableSlots"], 1);
     assert!(node.get("reserved").is_none());
-}
-
-#[tokio::test]
-#[ignore = "requires loopback S3; run scripts/tests/node_s3_test.py --case native_stopped_publications"]
-async fn native_stopped_publications_preserve_the_archive_and_restore_through_encrypted_s3() {
-    let (listener, address) = common::bind().await;
-    let owner = Owner::with_runner(common::HOST.into(), format!("http://{address}")).await;
-    let endpoint = std::env::var("CAIRN_NODE_TEST_S3_ENDPOINT").unwrap();
-    configure_loopback_s3(&owner, &endpoint).await;
-    let (run, attempt, snapshot) = (id(), id(), id());
-    let source = owner.root().join("native-source");
-    std::fs::create_dir_all(source.join("workspaces/project")).unwrap();
-    std::fs::write(
-        source.join("workspaces/project/untracked.txt"),
-        b"native unpublished work",
-    )
-    .unwrap();
-    let archive = owner.root().join("native-files");
-    let mut file = tokio::fs::File::create(&archive).await.unwrap();
-    files::send(&source, &mut file).await.unwrap();
-    file.sync_all().await.unwrap();
-    drop(file);
-    let mut manifest = snapshots::index(&archive).await.unwrap();
-    manifest["kind"] = "native-files-v1".into();
-    manifest["runtime"] = json!({
-        "backend": "native",
-        "os": "linux",
-        "arch": "x86_64",
-        "runtimeId": "fixture",
-    });
-    manifest["attempt"] = attempt.clone().into();
-    let current = Arc::new(tokio::sync::Mutex::new(manifest));
-    let acknowledged = Arc::new(AtomicUsize::new(0));
-    let discarded = Arc::new(AtomicUsize::new(0));
-    let controller = Router::new().fallback({
-        let (current, acknowledged, discarded, archive, snapshot) = (
-            current.clone(),
-            acknowledged.clone(),
-            discarded.clone(),
-            archive.clone(),
-            snapshot.clone(),
-        );
-        move |request: Request<Body>| {
-            let (current, acknowledged, discarded, archive, snapshot) = (
-                current.clone(),
-                acknowledged.clone(),
-                discarded.clone(),
-                archive.clone(),
-                snapshot.clone(),
-            );
-            async move {
-                let path = request.uri().path().to_owned();
-                if request.method() == "DELETE" {
-                    discarded.fetch_add(1, Ordering::SeqCst);
-                    return Json(json!({ "ok": true })).into_response();
-                }
-                if path.ends_with("/snapshot") || path.ends_with("/snapshot-completed") {
-                    return Json(
-                        json!({ "id": snapshot, "manifest": current.lock().await.clone() }),
-                    )
-                    .into_response();
-                }
-                if path.ends_with("/published") {
-                    let value: Value =
-                        serde_json::from_slice(&to_bytes(request.into_body(), 4096).await.unwrap())
-                            .unwrap();
-                    assert_eq!(value["snapshotId"], snapshot);
-                    acknowledged.fetch_add(1, Ordering::SeqCst);
-                    return Json(json!({ "committed": true })).into_response();
-                }
-                if path.ends_with("/storage-status") {
-                    return Json(json!({
-                        "mode": "native",
-                        "localBytes": 4096,
-                        "activeLocalBytes": 4096,
-                        "dirtyBytes": 0,
-                    }))
-                    .into_response();
-                }
-                if path.ends_with("/blocks") || path.ends_with("/publication") {
-                    let batch: Value =
-                        serde_json::from_slice(&to_bytes(request.into_body(), 4096).await.unwrap())
-                            .unwrap();
-                    let manifest = current.lock().await;
-                    let mut bytes = Vec::new();
-                    for hash in batch["hashes"].as_array().unwrap() {
-                        bytes.extend(
-                            snapshots::block(&archive, &manifest, hash.as_str().unwrap())
-                                .await
-                                .unwrap(),
-                        );
-                    }
-                    return bytes.into_response();
-                }
-                StatusCode::NOT_FOUND.into_response()
-            }
-        }
-    });
-    let controller_task = common::serve(listener, controller);
-    let record = run_record(&run, RunStatus::Succeeded);
-    owner.add_run(&record).await;
-    owner
-        .set_checkpoint(
-            &run,
-            json!({ "nodeId": LOCAL_NODE_ID, "runnerId": attempt }),
-        )
-        .await;
-    let point = publication::capture(&owner.service, &record).await.unwrap();
-    assert_eq!(acknowledged.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        discarded.load(Ordering::SeqCst),
-        0,
-        "completed native capture must remain available after publication"
-    );
-    let saved = owner
-        .stored("node-backups", point["id"].as_str().unwrap())
-        .await
-        .unwrap();
-    let saved_manifest = publication::manifest(&owner.service, &saved).await.unwrap();
-    assert_eq!(saved_manifest["kind"], "native-files-v1");
-    let restored_archive = owner.root().join("restored-native-files");
-    snapshots::restore(&restored_archive, &saved_manifest, |hash| {
-        let (service, saved) = (owner.service.clone(), saved.clone());
-        async move { publication::read_block(&service, &saved, &hash).await }
-    })
-    .await
-    .unwrap();
-    let restored = owner.root().join("restored-native-workspace");
-    files::receive(
-        &mut BufReader::new(tokio::fs::File::open(restored_archive).await.unwrap()),
-        &restored,
-        MIB as u64,
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        std::fs::read(restored.join("workspaces/project/untracked.txt")).unwrap(),
-        b"native unpublished work"
-    );
-    current.lock().await["attempt"] = id().into();
-    assert_eq!(
-        publication::capture(&owner.service, &record)
-            .await
-            .unwrap_err()
-            .status,
-        425
-    );
-    assert_eq!(acknowledged.load(Ordering::SeqCst), 1);
-    assert_eq!(discarded.load(Ordering::SeqCst), 0);
-    publication::purge(&owner.service, &run).await.unwrap();
-    controller_task.abort();
 }

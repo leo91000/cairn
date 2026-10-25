@@ -24,22 +24,22 @@ pub fn key(run_id: &str) -> String {
 ///
 /// Other modules read and patch the same document as JSON, so unknown fields
 /// round-trip through `extra` and nullable fields keep `null` distinct from absent.
-/// A mistyped field reads as absent, like the `Value` accessors it replaces.
+/// Present fields must have their current type.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunCheckpoint {
-    #[serde(default, with = "lenient", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub launched: Option<bool>,
     /// Preserved when an engine session is replaced on the same workspace disk.
-    #[serde(default, with = "lenient", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_initialized: Option<bool>,
     /// Explicit controller rejection of this attempt; absent is not proof of rejection.
-    #[serde(default, with = "lenient", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub start_rejected: Option<bool>,
     /// `null` means the run has no time limit; absent means its budget is spent.
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
     pub remaining_ms: Nullable<i64>,
-    #[serde(default, with = "lenient", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub generation: Option<String>,
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
     pub prepared: Nullable<Value>,
@@ -51,18 +51,18 @@ pub struct RunCheckpoint {
     pub runtime_id: Nullable<Value>,
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
     pub process: Nullable<ProcessIdentity>,
-    #[serde(default, with = "lenient", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub completed: Option<bool>,
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
     pub last_error: Nullable<String>,
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
     pub retry_cause: Nullable<crate::run_retry::Cause>,
-    #[serde(default, with = "lenient", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub last_message: Option<String>,
-    #[serde(default, with = "lenient", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub controller_recoveries: Option<u64>,
     /// A controller's capacity refusal delays admission without consuming a recovery attempt.
-    #[serde(default, with = "lenient", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub capacity_retry_at: Option<i64>,
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
     pub settled: Nullable<Settled>,
@@ -319,25 +319,6 @@ impl Checkpoint {
     }
 }
 
-/// Serde adapter reading a mistyped value as absent.
-mod lenient {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
-    use serde_json::Value;
-
-    pub fn serialize<S: Serializer, T: Serialize>(
-        value: &Option<T>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        value.serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>, T: DeserializeOwned>(
-        deserializer: D,
-    ) -> Result<Option<T>, D::Error> {
-        Ok(T::deserialize(Value::deserialize(deserializer)?).ok())
-    }
-}
-
 /// Serde adapter keeping an explicit `null` distinct from an absent field.
 mod nullable {
     use super::Nullable;
@@ -361,7 +342,9 @@ mod nullable {
         if value.is_null() {
             return Ok(Some(None));
         }
-        Ok(T::deserialize(value).ok().map(Some))
+        T::deserialize(value)
+            .map(|value| Some(Some(value)))
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -397,11 +380,9 @@ mod tests {
     }
 
     #[test]
-    fn mistyped_fields_read_as_absent() {
-        let checkpoint =
-            RunCheckpoint::from_value(json!({ "launched": "yes", "remainingMs": 1.5 })).unwrap();
-        assert!(!checkpoint.launched());
-        assert_eq!(checkpoint.remaining_ms, None);
+    fn mistyped_fields_are_rejected() {
+        assert!(RunCheckpoint::from_value(json!({ "launched": "yes" })).is_err());
+        assert!(RunCheckpoint::from_value(json!({ "remainingMs": 1.5 })).is_err());
     }
 
     #[tokio::test]

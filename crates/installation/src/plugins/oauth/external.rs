@@ -323,13 +323,18 @@ pub(crate) async fn call(
                 ));
             }
             let result = finish_pending(s, &package, provider, key.clone(), value, pending).await;
+            let authority_unavailable = result.as_ref().is_err_and(Error::is_authority_unavailable);
             if !result
                 .as_ref()
                 .is_ok_and(|value| value["status"] == "pending")
             {
                 s.store
                     .transaction(move |db| {
-                        if db.kv(&index)?.is_some_and(|value| value["key"] == key) {
+                        // A temporary authority failure can precede the code
+                        // claim. Deletion or consumption still wins this race.
+                        let unconsumed =
+                            authority_unavailable && db.kv(&stored_key(&key))?.is_some();
+                        if !unconsumed && db.kv(&index)?.is_some_and(|value| value["key"] == key) {
                             db.delete(&index)?;
                         }
                         Ok(())

@@ -6,7 +6,7 @@ mod common;
 use axum::{body::Body, http::StatusCode};
 use cairn_installation::{
     config::{MAIN_AGENT_ID, id},
-    plugins::{agents, connections, legacy, panels},
+    plugins::{agents, connections, panels},
     run_output,
     service::Service,
     validation::text,
@@ -487,55 +487,6 @@ async fn owners_see_the_package_view_run_its_actions_and_test_it() {
             .unwrap_err()
             .message
             .contains("1Password request failed")
-    );
-}
-
-#[tokio::test]
-async fn legacy_service_accounts_move_into_instances_once() {
-    let f = fixture().await;
-    let s = &f.s;
-    let account = id();
-    s.store
-        .put(
-            "onepassword",
-            json!({
-                "id": account, "name": "Legacy", "enabled": true,
-                "agentIds": [MAIN_AGENT_ID], "updatedAt": 1,
-            }),
-        )
-        .await
-        .unwrap();
-    let encrypted = s
-        .vault
-        .encrypt(
-            &format!("onepassword:{account}"),
-            &json!({ "token": "ops_fixture" }),
-        )
-        .unwrap();
-    s.store
-        .set(
-            &format!("mcp-secret:onepassword:{account}"),
-            encrypted,
-            None,
-        )
-        .await
-        .unwrap();
-    legacy::migrate(s).await.unwrap();
-    legacy::migrate(s).await.unwrap();
-    assert!(s.store.list("onepassword").await.unwrap().is_empty());
-    let instance = s.get(connections::KIND, &account).await.unwrap();
-    assert_eq!(instance["pluginId"], "onepassword");
-    assert_eq!(instance["name"], "Legacy");
-    assert_eq!(instance["agentIds"], json!([MAIN_AGENT_ID]));
-    // Agents keep their account IDs and the token still reaches op.
-    assert_eq!(
-        run(
-            &f,
-            command("read", &["--account", &account, "op://vault/item/password"])
-        )
-        .await
-        .unwrap()["value"],
-        "secret-with-no-newline"
     );
 }
 

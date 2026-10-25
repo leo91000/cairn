@@ -142,7 +142,4 @@ following checks before merge:
   a permission prompt reaches Cairn, and that an MCP tool call completes. With a
   test account, check `claude auth login --claudeai`, `get_usage` quota values and
   resuming a subscription session.
-- All engines: keep their autoupdaters disabled at runtime. Engine session state
-  in account homes is persisted installation data. The
-  [installation data compatibility contract](PRODUCTION-CAIRN.md#installation-data-compatibility)
-  applies to it: the served release must still read what the new release writes.
+- All engines: keep their autoupdaters disabled at runtime.

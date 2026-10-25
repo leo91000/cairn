@@ -477,7 +477,7 @@ struct OperationDescriptor {
 }
 
 pub(crate) fn operations() -> Vec<Value> {
-    CATALOG
+    let mut operations: Vec<Value> = CATALOG
         .iter()
         .map(|tool| {
             let name = tool.name.as_str();
@@ -500,7 +500,9 @@ pub(crate) fn operations() -> Vec<Value> {
             })
             .expect("serializable tool descriptor")
         })
-        .collect()
+        .collect();
+    operations.push(crate::capabilities::RESUME_RUN.descriptor());
+    operations
 }
 
 pub(crate) fn catalog() -> Vec<Value> {
@@ -530,6 +532,14 @@ pub(crate) async fn operation(
     name: &str,
     args: Value,
 ) -> Result<Value> {
+    if name == cairn_contracts::RESUME_RUN_ID {
+        let input = crate::capabilities::RESUME_RUN.decode(args)?;
+        let context = crate::capabilities::ResumeContext::Public(scopes.to_vec());
+        let output = crate::capabilities::RESUME_RUN
+            .invoke(s, input, context)
+            .await?;
+        return Ok(serde_json::to_value(output)?);
+    }
     let tool = CATALOG
         .iter()
         .find(|tool| tool.name == name)

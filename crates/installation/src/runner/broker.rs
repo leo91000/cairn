@@ -625,7 +625,7 @@ mod ownership_tests {
     }
 
     #[tokio::test]
-    async fn controller_failures_emit_structured_events_and_legacy_diagnostics() {
+    async fn controller_failures_emit_structured_events_and_readable_diagnostics() {
         let root = tempfile::tempdir().unwrap();
         let (broker, run) = pending_claim(root.path()).await;
         let message = "Guest output exceeded the run limit.";

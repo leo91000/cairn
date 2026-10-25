@@ -718,7 +718,7 @@ async fn chat_state_questions_and_artifacts_update_without_text_events() {
         .store
         .set(
             &format!("chat-question:{chat_id}:question"),
-            json!({ "id": "question", "status": "pending" }),
+            json!({ "id": "question", "chatId": chat_id, "runId": f.run, "turnId": id(), "blocking": false, "fields": [], "status": "pending" }),
             None,
         )
         .await

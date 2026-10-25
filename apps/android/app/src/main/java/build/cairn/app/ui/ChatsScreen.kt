@@ -46,6 +46,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.SecureFlagPolicy
 import build.cairn.app.data.*
+import build.cairn.contracts.ResumeRunInput
+import build.cairn.contracts.resumeRun
 import java.io.File
 import java.util.UUID
 import kotlinx.serialization.json.*
@@ -1278,9 +1280,8 @@ internal fun ChatPage(
                                                     chat?.let { current ->
                                                         vm.perform {
                                                             if (current.run?.status == "failed")
-                                                                api.request(
-                                                                    "POST",
-                                                                    "/runs/${segment(current.run.id)}/resume",
+                                                                api.resumeRun(
+                                                                    ResumeRunInput(current.run.id)
                                                                 )
                                                             api.request(
                                                                 "POST",

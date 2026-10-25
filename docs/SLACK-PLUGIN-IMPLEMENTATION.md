@@ -1,10 +1,11 @@
 # Slack plugin implementation
 
-Current integration reserves epoch 14 / SQLite 13 after Main adopted epoch 13 /
-SQLite 12 for native administrator mode. Historical checkpoints below describe
-their own earlier boundaries and test sources. No automatic Slack transition,
-deployment or complete-contract qualification is implied.
-
+Current integration follows Main403's current-only data contract: database version
+1, fresh installation data for a future owner-authorized release, no automatic
+installation migration or downgrade reader. Earlier epoch/SQLite and transition
+statements below are historical checkpoint evidence, not the current release
+contract. [Current data inventory](SLACK-PLUGIN-COMPATIBILITY.md).
+No deployment or reinstallation is authorized by this implementation task.
 
 Q20 authorized the complete contract in `SLACK-PLUGIN-SPEC.md`, including its
 dedicated branch and PR. Base: `be40dc4b3a75a788a7678e310f185b9bb1eba12a`.

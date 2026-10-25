@@ -44,14 +44,10 @@ owns no disk, source, grant or VM; eviction and controller shutdown only lose
 the optimization. Publication receipts, journal reclamation and crash recovery
 continue to determine durability independently of the cache.
 
-New block identities are `b3-<64 lowercase hex digits>`. BLAKE3 identifies newly
-indexed and changed blocks. Plain 64-digit SHA-256 identities retain their exact
-meaning for older blocks. All upload, decode, restore and controller checks use
-the declared identity algorithm; a prefix cannot silently reinterpret a digest.
-Journal frames use `LEOJNL03` with BLAKE3 header and payload checksums. Existing
-`LEOJNL02` SHA-256 frames and historical SQLite writes remain readable, including
-mixed segments. Metadata and durability fences are unchanged. An old binary
-must not be used after new frames or identities have been published.
+Block identities are `b3-<64 lowercase hex digits>`. All upload, decode, restore
+and controller checks verify the BLAKE3 identity of the plaintext block.
+Journal frames use `CAIRNJ03` with BLAKE3 header and payload checksums. Other
+journal formats are not read. Metadata and durability fences remain authoritative.
 
 ## Controller and publication
 

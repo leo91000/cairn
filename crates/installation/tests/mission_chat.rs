@@ -25,6 +25,9 @@ async fn fixture() -> (tempfile::TempDir, std::sync::Arc<Service>, Value, Value)
         .await
         .unwrap();
     let mut run = service.snapshot(task.clone(), "manual").await.unwrap();
+    run["nativeProvenanceUnknown"] = true.into();
+    run["nativePrincipals"] = json!([]);
+    run["nativeAuthorityNodes"] = json!([]);
     run["status"] = "succeeded".into();
     run["sessionId"] = "saved-session".into();
     run["summary"] = "Deployment reviewed".into();

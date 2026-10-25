@@ -29,7 +29,7 @@ async function enroll(page: Page, workspace: Workspace, name: string, exclusive:
       code: invitation.code,
       name,
       protocol: 1,
-      runtimeId: 'fixture',
+      runtimeId: 'development',
       capabilities: {
         os: 'linux',
         arch: 'x86_64',
@@ -44,7 +44,7 @@ async function enroll(page: Page, workspace: Workspace, name: string, exclusive:
   const node = await response.json()
   const heartbeat = await page.request.post(`${workspace.installationUrl}/internal/nodes/heartbeat`, {
     headers: { authorization: `Bearer ${node.token}` },
-    data: { exclusiveReservations: exclusive },
+    data: { exclusiveReservations: exclusive, runtimeId: 'development', nodeProtocol: 2 },
   })
   expect(heartbeat.ok()).toBe(true)
   return node.nodeId as string
@@ -785,7 +785,7 @@ test('the execution backend chooses which nodes an agent can be granted', async 
       code: invitation.code,
       name: 'native-box',
       protocol: 1,
-      runtimeId: 'fixture',
+      runtimeId: 'development',
       capabilities: {
         backend: 'native',
         os: 'linux',

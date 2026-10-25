@@ -68,6 +68,7 @@ struct NewChat {
     paused: bool,
     created_at: i64,
     updated_at: i64,
+    last_activity_at: i64,
 }
 
 /// `chatExecution` on a run: the user message the next agent turn delivers,
@@ -966,6 +967,7 @@ fn from_run(db: &Db<'_>, run_id: &str, origin: &crate::native::policy::Origin) -
         ));
     }
 
+    let created_at = now();
     let mut chat = json!({
         "id": id(),
         "title": run["snapshot"]["task"]["name"],
@@ -973,8 +975,9 @@ fn from_run(db: &Db<'_>, run_id: &str, origin: &crate::native::policy::Origin) -
         "projectId": run["projectId"],
         "runId": run_id,
         "paused": false,
-        "createdAt": now(),
-        "updatedAt": now(),
+        "createdAt": created_at,
+        "updatedAt": created_at,
+        "lastActivityAt": created_at,
     });
     crate::native::policy::apply(&mut chat, &run);
     task_projects(&agent, &chat, &db.list("projects")?)?;
@@ -1027,6 +1030,7 @@ pub(crate) fn create_as(
         paused: false,
         created_at,
         updated_at: created_at,
+        last_activity_at: created_at,
     })?;
     crate::native::policy::authorize_chat(db, &mut chat, origin)?;
     task_projects(&agent, &chat, &db.list("projects")?)?;
@@ -1526,7 +1530,7 @@ mod tests {
             .transaction(|db| {
                 for (id, agent) in [
                     ("switched", json!({ "provider": "claude" })),
-                    ("legacy", json!({})),
+                    ("codex", json!({ "provider": "codex" })),
                 ] {
                     let run = json!({
                         "id": id,
@@ -1551,14 +1555,14 @@ mod tests {
                     chats.iter().find(|chat| chat["id"] == id).unwrap()["provider"].clone()
                 };
                 assert_eq!(provider("switched"), "claude");
-                assert_eq!(provider("legacy"), "codex");
+                assert_eq!(provider("codex"), "codex");
                 assert!(provider("new").is_null());
 
                 let runs = db.runs(None, None, 10, 0, false)?;
                 let provider =
                     |id: &str| runs.iter().find(|run| run["id"] == id).unwrap()["provider"].clone();
                 assert_eq!(provider("switched"), "claude");
-                assert_eq!(provider("legacy"), "codex");
+                assert_eq!(provider("codex"), "codex");
                 Ok(())
             })
             .await
@@ -1566,10 +1570,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn continuation_consumes_durable_and_legacy_fresh_session_requests_once() {
+    async fn continuation_consumes_chat_and_checkpoint_fresh_session_requests_once() {
         use crate::store::Store;
 
-        for legacy in [false, true] {
+        for checkpoint_restart in [false, true] {
             for (isolated, native) in [(false, false), (true, false), (true, true)] {
                 let root = tempfile::tempdir().unwrap();
                 let store = Store::open(root.path()).unwrap();
@@ -1588,7 +1592,7 @@ mod tests {
                         let chat = json!({
                             "id": "chat",
                             "runId": "run",
-                            "sessionRestartRequested": !legacy,
+                            "sessionRestartRequested": !checkpoint_restart,
                         });
                         db.put("chats", &chat)?;
                         db.set(
@@ -1611,7 +1615,7 @@ mod tests {
                         db.set(
                             "run-checkpoint:run",
                             &json!({
-                                "freshSession": legacy,
+                                "freshSession": checkpoint_restart,
                                 "completed": true,
                                 "launched": true,
                                 "prepared": prepared,

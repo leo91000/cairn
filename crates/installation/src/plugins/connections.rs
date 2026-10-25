@@ -56,18 +56,6 @@ pub struct Label {
     pub name: String,
 }
 
-pub(super) fn read_approved_access<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> std::result::Result<Value, D::Error> {
-    let mut access = Value::deserialize(deserializer)?;
-    // Older approvals omitted this default-off power. Keep explicit values and
-    // every other field unchanged so real permission changes still suspend bots.
-    if let Some(access) = access.as_object_mut() {
-        access.entry("delegation").or_insert(false.into());
-    }
-    Ok(access)
-}
-
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Connection {
@@ -85,7 +73,6 @@ pub struct Connection {
     /// Empty when the plugin cannot start conversations.
     pub agent_id: String,
     pub project_id: Option<String>,
-    #[serde(deserialize_with = "read_approved_access")]
     pub granted_access: Value,
     pub owner_access_id: Option<String>,
     pub access_mode: AccessMode,
@@ -93,13 +80,10 @@ pub struct Connection {
     pub people: Vec<Label>,
     pub max_messages_per_hour: u32,
     /// Hourly limit for each person when anyone can use the connection.
-    #[serde(default = "per_person")]
     pub max_per_person_per_hour: u32,
     /// Agents the owner granted for the package's commands and tools.
-    #[serde(default)]
     pub agent_ids: Vec<String>,
     /// Names of the secret fields saved in the vault (values never leave the host).
-    #[serde(default)]
     pub secret_keys: Vec<String>,
     pub updated_at: i64,
 }
@@ -1246,61 +1230,6 @@ fn project_access(db: &Db<'_>, project: Option<&str>, access: &Value) -> Result<
     if !reachable {
         return Err(Error::bad("This agent can’t open the selected project."));
     }
-    Ok(())
-}
-
-/// Runs the package's form on a saved instance and keeps the values it derives, such
-/// as the account a credential belongs to. Used after migrations; an instance edited
-/// meanwhile is left as the owner saved it.
-pub(crate) async fn refresh(s: &Service, connection: &Connection) -> Result<()> {
-    let package = registry::active(s, &connection.plugin_id).await?;
-    if !package.manifest.instance_form {
-        return Ok(());
-    }
-    let credential = s
-        .vault
-        .get(&credential_key(&connection.id))
-        .await?
-        .map(|value| text(&value, "token").to_owned());
-    let draft = forms::Draft {
-        management: None,
-        credential,
-        secrets: secret_values(s, &connection.id).await?,
-        setup: None,
-        urls: None,
-        owner: None,
-        resource: None,
-        root: Some(
-            super::resources::target::Target::active(s, &connection.plugin_id, &connection.id)
-                .await?,
-        ),
-    };
-    let settings = forms::submit(
-        s,
-        &package,
-        &connection.id,
-        connection.settings.clone(),
-        draft,
-    )
-    .await?;
-    let expected = connection.revision.clone();
-    let id_ = connection.id.clone();
-    s.store
-        .transaction(move |db| {
-            let Some(mut current) = db.get(KIND, &id_)? else {
-                return Ok(());
-            };
-            if current["revision"] != expected.as_str() {
-                return Ok(());
-            }
-            current["settings"] = settings;
-            current["revision"] = id().into();
-            current["updatedAt"] = now().into();
-            db.put(KIND, &current)?;
-            Ok(())
-        })
-        .await?;
-    s.plugins.changed.notify_one();
     Ok(())
 }
 

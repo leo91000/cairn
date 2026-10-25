@@ -1,7 +1,7 @@
 # Prepared project archives
 
 Native conversations can initialize their private ext4 filesystem from a cached
-ZIP rather than transferring JSON/base64 file frames and syncing every file.
+ZIP.
 The manager refreshes remote project seeds every minute. Nodes learn about
 complete, authorized versions through their existing heartbeat and preload them
 over their authenticated outbound connection. This is background distribution,
@@ -26,9 +26,9 @@ The master and each node keep at most 2 GiB of encoded cache objects. A project
 set that exceeds this capacity keeps the established file-transfer path. The node
 also reclaims unpinned old objects against actual pool pressure, reserving room
 for missing downloads and the final extracted filesystem before admission. Initial
-home/configuration, legacy project and inbox transfers can reclaim unused archives
+home/configuration, project and inbox transfers can reclaim unused archives
 as file headers exceed their initial space budget; protected current project
-archives remain available. Native admission also reclaims cache for legacy disk
+archives remain available. Native admission also reclaims cache during disk
 initialization. Native
 pool accounting counts shared archive inodes once, including temporary run pins.
 Pins protect extraction against concurrent eviction and are removed after the
@@ -41,31 +41,30 @@ appears. The priority lock is visible across the connector and controller
 processes. Cancellation discards the incomplete download before releasing the
 mutation lock. Heartbeat and lease renewal do not await downloads.
 
-## Compatibility and recovery
+## Storage and recovery
 
-The installation data epoch stays unchanged. Conversation filesystems, journals,
+Conversation filesystems, journals,
 database records, published manifests and storage grants retain their format.
 The new ZIPs and JSON descriptors are disposable caches, not a new backup format;
 this does not reopen the historical conversation-archive behavior in ADR-0008.
 
-The manager adds optional archive descriptors to the prepare response. Old
-connectors ignore them and request complete legacy staging trees. A new connector
-requires the controller's `projectArchives: 1` health capability before omitting
-project files. An old controller therefore receives the original complete tree,
-including during a mixed-version update. The archive fields exist only in the
-node's local, attempt-scoped runner plan, not the manager's authoritative plan.
+The manager adds archive descriptors to the prepare response when a seed is
+available. The connector stages those archives for the current controller and
+omits their project files from the initial file transfer. Archive fields exist
+only in the node's local, attempt-scoped runner plan, not the manager's
+authoritative plan.
 
 Controller startup fences interrupted attempts rather than replaying their local
 plans. After interruption, the connector regenerates staging from the manager's
-plan: an older connector restores the legacy tree. Before the first successful
+plan. Before the first successful
 initialization, an incomplete `.cairn-initial-seed` is discarded and rebuilt; no
 workload has been admitted at this point. After initialization, the existing disk
 is authoritative and its completion marker bypasses extraction. Neither a new
 commit nor a cache eviction overwrites an existing conversation's work.
 
-Cache failure or an oversized archive falls back to legacy preparation. A damaged
+Cache failure or an oversized archive falls back to complete file staging. A damaged
 master cache is discarded and rebuilt from the currently authorized remote. Node
-archive staging errors remove partial pins and request a complete legacy seed;
+archive staging errors remove partial pins and request a complete file seed;
 authorization failures remain failures. An unavailable archive catalogue never
 invalidates node leases. Invalid or interrupted downloads never become cache hits. Archive distribution checks
 current agent project/node grants, backend, node admission and trusted native

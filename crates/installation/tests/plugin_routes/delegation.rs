@@ -573,7 +573,7 @@ async fn delegation_cannot_borrow_another_agents_granular_resource_grants() {
 }
 
 #[tokio::test]
-async fn saved_routes_without_delegation_stay_active_until_that_power_is_enabled() {
+async fn altered_route_approvals_do_not_gain_implicit_delegation_defaults() {
     let (_root, s, instance, resource, app) = fixture().await;
     let agent = s
         .agent(json!({ "name": "Existing routed agent" }), None)
@@ -589,7 +589,8 @@ async fn saved_routes_without_delegation_stay_active_until_that_power_is_enabled
         }),
     )
     .await;
-    // Reproduce an approval saved before the default-off power existed.
+    // A current approval is complete. Missing a stored permission must not
+    // silently reconstruct authority or rewrite the saved proof.
     let mut saved = s
         .store
         .get("plugin-routes", text(&route, "id"))
@@ -603,13 +604,12 @@ async fn saved_routes_without_delegation_stay_active_until_that_power_is_enabled
         .remove("delegation");
     s.store.put("plugin-routes", saved.clone()).await.unwrap();
     let event = json!({
-        "id": "old-route-approval", "resource": resource, "author": { "id": "alice" },
-        "context": { "channel": "C1", "thread": "old-route-thread" },
-        "body": { "text": "Use the existing approved route" },
+        "id": "incomplete-route-approval", "resource": resource, "author": { "id": "alice" },
+        "context": { "channel": "C1", "thread": "incomplete-route-thread" },
+        "body": { "text": "Refuse an incomplete stored approval" },
     });
     let admitted = deliver(&app, &instance, event.clone()).await;
-    assert_eq!(admitted.0, StatusCode::OK, "{}", admitted.1);
-    assert_eq!(admitted.1["status"], "accepted", "{}", admitted.1);
+    assert_ne!(admitted.1["status"], "accepted", "{}", admitted.1);
     assert_eq!(
         s.store
             .get("plugin-routes", text(&route, "id"))
@@ -618,7 +618,7 @@ async fn saved_routes_without_delegation_stay_active_until_that_power_is_enabled
         Some(saved)
     );
 
-    // A real increase still suspends the old approval.
+    // Adding the real power cannot repair the incomplete approval implicitly.
     let mut changed = s.get("agents", text(&agent, "id")).await.unwrap();
     changed["access"]["delegation"] = json!(true);
     s.agent(changed, Some(text(&agent, "id"))).await.unwrap();

@@ -11,8 +11,7 @@ Discard reads as zeros after its durable acknowledgement. Each range uses normal
 checksummed `CAIRNJ03` write frames, including the ordinary zero payload checksum.
 Zero payloads extend the append file sparsely instead of writing their data pages.
 Headers, frame lengths, sequence numbers, group commit, segment rotation, crash
-recovery and publication ownership retain their existing contracts. An older
-reader sees precisely the same bytes as an ordinary zero write. No payload is
+recovery and publication ownership retain their existing contracts. Readers see precisely the same bytes as an ordinary zero write. No payload is
 punched out of an earlier frame, and nothing is reclaimed before publication.
 
 The complete range is checked before any mutation. A large operation can commit
@@ -114,14 +113,6 @@ Existing conversations gain maintenance on their next cold boot, including when
 resumed from their durable disk. Dormant remote conversations are not automatically
 started or bucket-scanned by this feature. Their bytes are reclaimed after they
 are resumed and a trimmed publication replaces the previous one.
-
-This storage change preserves the existing installation compatibility epoch.
-Disk frames, database schemas,
-manifest/envelope formats and runtime records are unchanged. Rollback must follow the installation's
-[compatibility policy](PRODUCTION-CAIRN.md#installation-data-compatibility).
-The updated init tolerates a missing control disk on rollback, so ordinary disk
-reads and the older bridge remain usable. Rolling back disables new maintenance;
-it does not resurrect discarded bytes, which were already free in ext4.
 
 ## Reproduction and evidence
 

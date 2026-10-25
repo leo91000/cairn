@@ -291,11 +291,6 @@ async fn release(
             // Native work can only be captured after fencing, including failed,
             // cancelled and paused turns. Durable demand survives upload errors.
             crate::nodes::publication::request(s, run_id).await?;
-            if native && run["storage"]["mode"] != "on-demand" {
-                // Legacy native checkpoints are stopped file streams. Finish this turn's
-                // publication before admitting another writer to the conversation.
-                crate::nodes::publication::attempt(s, &s.store.run(run_id).await?).await;
-            }
         }
     }
     if fenced {
@@ -523,19 +518,18 @@ mod tests {
         })
         .await
         .unwrap();
-        for mode in [None, Some("native"), Some("on-demand")] {
-            for (backend, status, fenced, expected) in [
-                ("native", "succeeded", true, true),
-                ("native", "failed", true, true),
-                ("native", "cancelled", true, true),
-                ("native", "queued", true, true),
-                ("firecracker", "waiting", true, true),
-                ("native", "failed", false, false),
-                ("firecracker", "failed", true, false),
-                ("firecracker", "cancelled", true, false),
-            ] {
-                let run = crate::config::id();
-                service
+        for (backend, status, fenced, expected) in [
+            ("native", "succeeded", true, true),
+            ("native", "failed", true, true),
+            ("native", "cancelled", true, true),
+            ("native", "queued", true, true),
+            ("firecracker", "waiting", true, true),
+            ("native", "failed", false, false),
+            ("firecracker", "failed", true, false),
+            ("firecracker", "cancelled", true, false),
+        ] {
+            let run = crate::config::id();
+            service
                 .store
                 .transaction({
                     let run = run.clone();
@@ -544,7 +538,7 @@ mod tests {
                             "id": run,
                             "status": status,
                             "isolated": true,
-                            "storage": { "mode": mode },
+                            "storage": { "mode": "on-demand" },
                         });
                         db.0.execute(
                             "INSERT INTO runs(id,task_id,project_id,status,created_at,data) VALUES(?1,?1,'',?2,0,?3)",
@@ -555,36 +549,29 @@ mod tests {
                 })
                 .await
                 .unwrap();
-                let checkpoint = Checkpoint::new(
-                    service.store.clone(),
-                    run.clone(),
-                    RunCheckpoint::from_value(json!({
-                        "prepared": { "backend": backend, "isolated": true },
-                        "runnerId": crate::config::id(),
-                    }))
-                    .unwrap(),
-                );
-                checkpoint.persist().await.unwrap();
-                release(&service, &checkpoint, None, fenced).await.unwrap();
-                let current = service.store.run(&run).await.unwrap();
-                assert_eq!(
-                    crate::nodes::publication::requested(&current),
-                    expected,
-                    "{backend}/{status}/fenced={fenced}: {current}",
-                );
-                if expected {
-                    // No S3 is configured. Native file publications attempt synchronously;
-                    // on-demand disks and VMs retain pending demand for the scheduler.
-                    assert_eq!(current["backup"]["requestedRevision"], 1);
-                    if mode == Some("on-demand") || backend != "native" {
-                        assert_eq!(current["backup"]["status"], "pending");
-                    } else {
-                        assert_eq!(current["backup"]["status"], "error");
-                        assert!(!current["backup"]["error"].as_str().unwrap().is_empty());
-                    }
-                } else {
-                    assert!(current["backup"].is_null());
-                }
+            let checkpoint = Checkpoint::new(
+                service.store.clone(),
+                run.clone(),
+                RunCheckpoint::from_value(json!({
+                    "prepared": { "backend": backend, "isolated": true },
+                    "runnerId": crate::config::id(),
+                }))
+                .unwrap(),
+            );
+            checkpoint.persist().await.unwrap();
+            release(&service, &checkpoint, None, fenced).await.unwrap();
+            let current = service.store.run(&run).await.unwrap();
+            assert_eq!(
+                crate::nodes::publication::requested(&current),
+                expected,
+                "{backend}/{status}/fenced={fenced}: {current}",
+            );
+            if expected {
+                // Every current disk retains demand for the publication scheduler.
+                assert_eq!(current["backup"]["requestedRevision"], 1);
+                assert_eq!(current["backup"]["status"], "pending");
+            } else {
+                assert!(current["backup"].is_null());
             }
         }
         service.shutdown.cancel();

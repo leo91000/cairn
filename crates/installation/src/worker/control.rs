@@ -394,9 +394,15 @@ pub async fn routes(s: &Arc<Service>, input: &crate::http::Input) -> Option<Resu
     let result = match segments.as_slice() {
         ["runs", id, "cancel"] => s.worker.cancel(s, id).await.map(|()| json!({ "ok": true })),
         ["runs", id, "resume"] => {
-            s.worker
-                .resume_authorized(s, id, crate::native::policy::run_authorization(id))
-                .await
+            async {
+                let command = crate::capabilities::RESUME_RUN.decode(json!({ "runId": id }))?;
+                let context = crate::capabilities::ResumeContext::http(input)?;
+                let output = crate::capabilities::RESUME_RUN
+                    .invoke(s, command, context)
+                    .await?;
+                Ok(serde_json::to_value(output)?)
+            }
+            .await
         }
         ["runs", id, "cleanup"] => s.worker.cleanup(s, id).await,
         ["chats", id, "pause"] => pause_chat(s, input, id).await,

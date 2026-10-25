@@ -121,6 +121,15 @@ jobs:
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt && rustup default 1.97.1
       - name: Check formatting, lint, tests and frontend build
         run: pnpm check
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Regenerate Rust-owned contracts without a diff
+        run: pnpm check:contracts
+      - name: Decode the shared corpus with generated Kotlin models
+        run: apps/android/gradlew -p scripts/contracts-kotlin spotlessCheck test --no-daemon
       - name: Check generated API schemas
         run: |
           node --import tsx scripts/backend-schemas.mjs
@@ -186,7 +195,6 @@ jobs:
         run: |
           set -o pipefail
           node scripts/test-backend.mjs --nextest --test-threads 8 --no-fail-fast --color never --status-level pass 2>&1 | tee backend-tests.log
-          node scripts/production-release.mjs qualify backend-tests.log
       - name: Check Rust documentation examples
         run: node scripts/test-backend.mjs --doc
       - name: Qualify the resolved OpenCode release against its native adapter
@@ -1059,10 +1067,6 @@ jobs:
           CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
           OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
         run: node scripts/served-tools.mjs verify-served
-      - name: Verify installation data compatibility
-        env:
-          CAIRN_BEACON_ORIGIN: ${{ vars.CAIRN_BEACON_ORIGIN }}
-        run: node scripts/production-release.mjs check
       - name: Deploy the published image and verify the running commit
         env:
           COOLIFY_URL: ${{ vars.COOLIFY_URL }}

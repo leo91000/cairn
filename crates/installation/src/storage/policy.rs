@@ -12,10 +12,6 @@ pub struct Policy {
     pub reserve_percent: u64,
     pub backup_seconds: u64,
     pub max_dirty_seconds: u64,
-    #[serde(rename = "automaticArchiving", skip_serializing)]
-    pub _legacy_archiving: Option<bool>,
-    #[serde(rename = "enabled", skip_serializing)]
-    pub _legacy_enabled: Option<bool>,
 }
 
 impl Default for Policy {
@@ -27,8 +23,6 @@ impl Default for Policy {
             reserve_percent: 5,
             backup_seconds: 60,
             max_dirty_seconds: 300,
-            _legacy_archiving: None,
-            _legacy_enabled: None,
         }
     }
 }
@@ -49,8 +43,6 @@ impl Policy {
         Ok(())
     }
 
-    /// Old node records may carry the former opt-in flag. Preserve their
-    /// limits while ignoring that flag for every new execution.
     pub fn for_node(value: &serde_json::Value) -> Result<Self> {
         let value = if value.is_object() {
             value.clone()

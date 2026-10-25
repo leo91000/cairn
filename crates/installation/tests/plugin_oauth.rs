@@ -554,6 +554,15 @@ async fn owner_resource_forms_cannot_borrow_personal_oauth() {
 
 #[tokio::test]
 async fn confidential_exchange_and_shared_refresh_form_encode_client_credentials() {
+    confidential_refresh(true).await;
+}
+
+#[tokio::test]
+async fn confirmed_nonrotating_refresh_preserves_its_credential_for_the_next_expiry() {
+    confidential_refresh(false).await;
+}
+
+async fn confidential_refresh(rotates: bool) {
     let (_root, s, instance, resource, path, app) = fixture(false).await;
     connections::save(
         &s,
@@ -587,11 +596,18 @@ async fn confidential_exchange_and_shared_refresh_form_encode_client_credentials
                 axum::Json(json!({"access_token": "expiring-fixture", "refresh_token": "refresh-0-fixture", "expires_in": 1,
                     "scope": "messages:read", "team": {"id": "T111"}}))
             } else {
-                assert_eq!(call, 1, "redeemed a refresh token more than once");
+                assert!(call <= if rotates { 1 } else { 2 }, "unexpected refresh replay");
                 assert_eq!(form["grant_type"], "refresh_token");
                 assert_eq!(form["refresh_token"], "refresh-0-fixture");
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                axum::Json(json!({"access_token": "renewed-fixture", "refresh_token": "refresh-1-fixture", "expires_in": 43200, "scope": "messages:read"}))
+                let mut response = json!({
+                    "access_token": "renewed-fixture", "scope": "messages:read",
+                    "expires_in": if rotates { 43200 } else { 1 },
+                });
+                if rotates {
+                    response["refresh_token"] = json!("refresh-1-fixture");
+                }
+                axum::Json(response)
             }
         }
     })).route("/messages", axum::routing::get(|headers: axum::http::HeaderMap| async move {
@@ -627,13 +643,25 @@ async fn confidential_exchange_and_shared_refresh_form_encode_client_credentials
         common::read_text(response).await
     );
     let input = json!({"action": "read", "payload": {"resource": resource}});
-    let (first, second) = tokio::join!(
-        panels::action(&s, "example", &instance, &input),
-        panels::action(&s, "example", &instance, &input)
-    );
-    assert_eq!(first.unwrap()["notice"], "Authorized");
-    assert_eq!(second.unwrap()["notice"], "Authorized");
-    assert_eq!(exchanges.load(Ordering::SeqCst), 2);
+    if rotates {
+        let (first, second) = tokio::join!(
+            panels::action(&s, "example", &instance, &input),
+            panels::action(&s, "example", &instance, &input)
+        );
+        assert_eq!(first.unwrap()["notice"], "Authorized");
+        assert_eq!(second.unwrap()["notice"], "Authorized");
+        assert_eq!(exchanges.load(Ordering::SeqCst), 2);
+    } else {
+        // Each access token expires immediately. A second actual action must
+        // reuse the confirmed nonrotating credential, not ask for consent again.
+        for _ in 0..2 {
+            let answer = panels::action(&s, "example", &instance, &input)
+                .await
+                .unwrap();
+            assert_eq!(answer["notice"], "Authorized");
+        }
+        assert_eq!(exchanges.load(Ordering::SeqCst), 3);
+    }
     server.abort();
 }
 

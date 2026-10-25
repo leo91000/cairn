@@ -72,11 +72,8 @@ explicitement, pour ne jamais approuver des accès que le propriétaire n’a pa
 
 Les nodes et les instances gardent une copie, `exclusiveAgents` et `agentIds`, écrite
 dans la même transaction que l’agent. L’application des droits lit cette copie,
-comme les versions précédentes. Une version antérieure lit donc les mêmes droits
-après un retour arrière, et l’epoch de compatibilité ne change pas. Ces versions ne
-modifient que la copie. Au démarrage, toute différence vient donc d’elles, et la
-copie l’emporte : le côté agent est reconstruit, et les identifiants d’agents
-supprimés sont retirés des copies. Les anciens clients qui envoient encore
+Au démarrage, la copie l’emporte : le côté agent est reconstruit et les identifiants
+d’agents supprimés sont retirés des copies. Les anciens clients qui envoient encore
 `exclusiveAgents` à une node ou `agentIds` à une instance mettent à jour les agents,
 et leur omission conserve les droits existants.
 

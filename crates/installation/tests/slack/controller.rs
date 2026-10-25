@@ -89,10 +89,11 @@ async fn controller_health_is_accepted_by_the_current_node_schema() {
 async fn handle(State(state): State<Arc<Controller>>, request: Request) -> Response {
     let path = request.uri().path();
     if path == "/health" {
+        let runtime = std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into());
         return Json(json!({
             "status": "ok", "sharedResources": true,
             "budget": state.budget.lock().await.clone(),
-            "runtimeId": "fixture", "runtimes": ["fixture"],
+            "runtimeId": runtime, "runtimes": [runtime], "nodeProtocol": 2,
             "capabilities": { "os": "linux", "arch": "x86_64", "kvm": true,
                 "cpu": 4, "memoryMiB": 16384, "diskMiB": 131072 }
         }))

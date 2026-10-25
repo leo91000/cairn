@@ -687,7 +687,7 @@ async fn plugin_project_imports_require_trusted_owner_context() {
 }
 
 #[tokio::test]
-async fn agents_default_to_unlimited_and_migrate_only_the_main_agents_old_default() {
+async fn agent_bootstrap_defaults_to_unlimited_and_preserves_configured_limits() {
     let (_root, _app, s) = app().await;
     let timeout_of_main = async |service: &Service| {
         service.get("agents", MAIN_AGENT_ID).await.unwrap()["timeoutMinutes"].clone()
@@ -709,12 +709,8 @@ async fn agents_default_to_unlimited_and_migrate_only_the_main_agents_old_defaul
         assert!(s.agent(invalid, None).await.is_err());
     }
     let main_agent = |minutes: i64| json!({ "name": "Main agent", "timeoutMinutes": minutes });
-    for (previous, expected) in [(90, 90), (120, 0)] {
+    for (previous, expected) in [(90, 90), (120, 120)] {
         s.agent(main_agent(previous), Some(MAIN_AGENT_ID))
-            .await
-            .unwrap();
-        s.store
-            .write(|db| db.delete("migration:main-agent-unlimited"))
             .await
             .unwrap();
         let restarted = Service::new(s.config.clone()).await.unwrap();
@@ -725,7 +721,7 @@ async fn agents_default_to_unlimited_and_migrate_only_the_main_agents_old_defaul
     assert_eq!(
         timeout_of_main(&restarted).await,
         120,
-        "An explicit choice after migration must survive restart"
+        "An explicit limit must survive restart"
     );
 }
 

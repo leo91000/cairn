@@ -26,6 +26,11 @@ and leaves native execution disabled. In Configure, explicitly enable native wor
 select trusted people and conservative CPU/RAM/disk limits. Configure a native
 agent and select this node. Other agents retain their Firecracker backend.
 
+Approved updates drain the node before selecting the verified candidate. The
+selected candidate is retained across failed health checks and service restarts.
+A durable update record retries the manager's maintenance-completion
+acknowledgement once the candidate is healthy, including after a lost reply.
+
 Start a new conversation as a trusted person. An authorized coordinator can also
 start a conversation with that native agent through its installation tools. Each
 follow-up, resume, scheduled dispatch and delegated run retains and rechecks its
@@ -42,9 +47,8 @@ and the other backend. Run the generated installer on the same machine: the new
 runtime enrolls as a separate node with its own identity, grants and storage,
 alongside the existing one. After its configuration and agent step, Cairn offers to
 retire the previous node. The invitation assigns the replacement's identity before
-it connects, so another enrollment cannot advance this switch. Older invitations
-remain consumable; installations without identity tracking keep the previous node
-and ask for an update before completing a guided switch.
+it connects, so another enrollment cannot advance this switch. Every invitation
+and enrolling component must carry the current identity and version.
 Revoking it from there also returns conversations fixed
 to or preferring that node to automatic placement; a plain revocation keeps those
 explicit choices waiting. Switch each agent's backend on its page and allow the
@@ -56,7 +60,6 @@ System packages and running processes do not transfer; dependencies may need
 reinstalling. Migration needs a coherent source capture, S3 access, temporary
 manager disk space (including the logical destination disk budget), fakeroot and e2fsprogs. An interrupted or
 failed migration retains the source and stays paused; retry from the same action.
-Legacy native file archives must resume once on their original node first.
 Finally run the uninstall command shown for the previous runtime after the
 conversations you want to keep have migrated.
 
@@ -104,35 +107,6 @@ including Codex's `codex-code-mode-host` companion beside its executable, Node.j
 and `gh`; other toolchains use this node's installed binaries/libraries or
 user-managed tools under the private home. Respect repository version pins.
 
-### Updating an existing native supervisor
-
-Native runtime updates verify the complete tool inventory before activation.
-Supervisors installed before the Codex companion was bundled recognize only the
-original five executables: they reject the expanded archive and keep the previous
-runtime active. Refresh their supervisor once after updating the manager: rerun the
-node's installation command from Nodes → Add a machine (no new code is needed for an
-enrolled node), then `sudo systemctl restart cairn-native-node` once it is idle.
-Equivalently, wait for the node to be idle, then run the following on the native
-host, replacing the origin with its manager origin (`http://127.0.0.1:4319` for a
-node using the gateway):
-
-```sh
-sudo sh -eu <<'SH'
-candidate=$(mktemp /opt/cairn-native/host-update.XXXXXX)
-trap 'rm -f "$candidate"' EXIT
-curl --fail --silent --show-error --proto '=https' --max-time 30 \
-  https://MANAGER-ORIGIN/internal/nodes/native-host.py > "$candidate"
-python3 -m py_compile "$candidate"
-chmod 0755 "$candidate"
-mv "$candidate" /opt/cairn-native/host.py
-systemctl restart cairn-native-node.service
-SH
-```
-
-This preserves enrollment, grants and conversation storage. The refreshed
-supervisor accepts the original inventory for older pinned runtimes and verifies
-the companion's hash and unprivileged launch when it is present in a newer bundle.
-
 Skills are the run's frozen bundle, copied afresh for each attempt. Accounts and
 MCP access use the usual scoped brokers. Credentials provided to an engine are
 available to that engine. Do not assume the checkpoint exclusions detect secrets
@@ -163,7 +137,7 @@ local block cache and obsolete generated attempt files. The sweep checks bounded
 batches every minute, so reclamation can occur later than the one-hour threshold.
 It requires the exact latest acknowledged S3 generation and no active attempt,
 pending publication or movement. Unpublished journal writes are never evicted. The
-journal metadata, base manifest, scoped grant and pinned runtime remain, so the
+journal metadata, base manifest and scoped grant remain, so the
 next execution can read its files from S3 on demand. Chat history, published
 artifacts and shared engine/tool bundles remain available.
 
@@ -184,7 +158,7 @@ budget charges retained journals, caches, migration copies, staging, logs and
 artifacts; the mounted view is not charged a second time. Temporary files and
 other host-side copies remain monitored limits rather than hard host filesystem
 quotas. Physical free-space reserves and journal admission still apply. First-time
-migration from native file storage, and exceptional filesystem growth, can need
+Exceptional filesystem growth can need
 extra temporary capacity. Ordinary remounts keep demand loading.
 
 Generated runtime configuration, account credentials and frozen skills are bound
@@ -194,29 +168,7 @@ filesystem. This does not detect secrets deliberately written into arbitrary use
 files. A different workload UID on a destination can require a one-time ownership
 reconciliation of filesystem metadata.
 
-Existing stopped `native-files-v1` checkpoints remain readable. Local file work is
-copied into the block filesystem while retaining the old source until its new S3
-point is acknowledged. Displaced recovery copies remain under `stale-*` for explicit
-prune/delete. Restore staging is journaled; retry that same recovery point after an
-interruption. A failed restore cannot silently fall back to an original seed.
-
-Cross-node recovery requires native Linux x86-64, ublk and the pinned coding-engine
-runtime on the destination. Different installed application dependencies can still
-prevent a project from running. Native-to-VM and cross-OS environment conversion
-remain unsupported. This storage change advances installation data epoch 6 to 7;
-the [reviewed automatic transition to epoch 9](AUTOMATIC-MIGRATIONS.md) qualifies its
-conversion and recovery tests alongside the rules in
-[ADR 0052](adr/0052-native-ublk-workspaces-and-idle-eviction.md).
-An older native binary must not be started against the new state.
-
 ## Updates and removal
-
-The root service polls approved manager releases. It verifies bounded payloads,
-checks binaries before draining, synchronizes current work, then health-checks the
-candidate. Failed compatible updates retain the prior version; epoch transitions
-stop for reviewed intervention. Existing local conversations keep their pinned
-engine bundle. Inspect `journalctl -u cairn-native-node` and the node maintenance
-status for update failures. Enrollment and update credentials stay root-private.
 
 Revoke the node in Cairn first, then stop/disable `cairn-native-node.service` on its
 host. Removing `/opt/cairn-native` and `/var/lib/cairn-native` deletes binaries and

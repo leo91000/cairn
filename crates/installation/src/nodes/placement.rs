@@ -103,20 +103,16 @@ struct Request<'a> {
     access: &'a Value,
     checkpoint: &'a Value,
     moving: bool,
-    required_runtime: Option<&'a str>,
 }
 
 impl<'a> Request<'a> {
-    fn new(run: &'a Value, access: &'a Value, checkpoint: &'a Value) -> Result<Self> {
-        Ok(Self {
+    fn new(run: &'a Value, access: &'a Value, checkpoint: &'a Value) -> Self {
+        Self {
             run,
             access,
             checkpoint,
             moving: run["placementTransition"] == true,
-            required_runtime: run["requiredRuntime"]
-                .as_str()
-                .or(checkpoint["runtimeId"].as_str()),
-        })
+        }
     }
 
     fn run_id(&self) -> &'a str {
@@ -137,13 +133,6 @@ impl<'a> Request<'a> {
             .into_iter()
             .flatten()
             .all(|tag| super::node_tags(node).any(|present| present == tag));
-        let has_runtime = self.required_runtime.is_none_or(|runtime| {
-            node["runtimes"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|r| r == runtime)
-        });
         let only = |field: &str| run[field].as_str().is_none_or(|only| only == id);
         // An existing environment stays where it is unless it is moving.
         let existing = self.moving || self.checkpoint["nodeId"].as_str().is_none_or(|p| p == id);
@@ -154,18 +143,19 @@ impl<'a> Request<'a> {
         {
             return false;
         }
-        let ready = (native
-            && node["executionReady"] == true
-            && super::seen_within(node, FRESH_HEARTBEAT_MS))
-            || local_unconfigured
-            || (node["capabilities"]["kvm"] == true
+        let same_version = local_unconfigured || node["runtimeId"] == super::component_runtime();
+        let ready = same_version
+            && ((native
                 && node["executionReady"] == true
-                && super::seen_within(node, FRESH_HEARTBEAT_MS));
+                && super::seen_within(node, FRESH_HEARTBEAT_MS))
+                || local_unconfigured
+                || (node["capabilities"]["kvm"] == true
+                    && node["executionReady"] == true
+                    && super::seen_within(node, FRESH_HEARTBEAT_MS)));
         !node["maintenance"].is_string()
             && !node["exclusiveReservation"].is_object()
             && !(local_unconfigured && run["isolated"] == true)
             && has_tags
-            && has_runtime
             && only("targetNodeId")
             && allowed(&self.access["nodes"], id)
             && only("pinnedNodeId")
@@ -448,11 +438,18 @@ fn shortage(full: &[String]) -> String {
 
 fn reserve_in(db: &Db<'_>, run: &Value, attempt: &str, configured: bool) -> Result<Value> {
     let snapshot = Snapshot::load(db, run, configured)?;
-    let request = Request::new(run, &snapshot.access, &snapshot.checkpoint)?;
+    let request = Request::new(run, &snapshot.access, &snapshot.checkpoint);
     if !request.moving
         && let Some(reservation) = run["moveReservation"].as_str()
     {
-        return claim_reservation(db, &request, &snapshot.nodes, reservation, attempt);
+        return claim_reservation(
+            db,
+            &request,
+            &snapshot.nodes,
+            reservation,
+            attempt,
+            configured,
+        );
     }
     let best = snapshot.select(&request, configured)?;
     admit(db, &request, &best, &snapshot.attempts, attempt)
@@ -460,7 +457,7 @@ fn reserve_in(db: &Db<'_>, run: &Value, attempt: &str, configured: bool) -> Resu
 
 fn request_reclamation(db: &Db<'_>, run: &Value, configured: bool) -> Result<()> {
     let snapshot = Snapshot::load(db, run, configured)?;
-    let request = Request::new(run, &snapshot.access, &snapshot.checkpoint)?;
+    let request = Request::new(run, &snapshot.access, &snapshot.checkpoint);
     for node in &snapshot.nodes {
         if node["diskGrowthProtocol"] == 1
             && request.eligible(node, configured)
@@ -490,7 +487,7 @@ pub async fn check(s: &Service, run: &Value) -> Result<()> {
     s.store
         .transaction(move |db| {
             let snapshot = Snapshot::load(db, &run, configured)?;
-            let request = Request::new(&run, &snapshot.access, &snapshot.checkpoint)?;
+            let request = Request::new(&run, &snapshot.access, &snapshot.checkpoint);
             if !request.moving && run["moveReservation"].is_string() {
                 return Ok(Ok(()));
             }
@@ -513,6 +510,7 @@ fn claim_reservation(
     nodes: &[Value],
     reservation: &str,
     attempt: &str,
+    configured: bool,
 ) -> Result<Value> {
     let mut held = db
         .get("node-attempts", reservation)?
@@ -522,6 +520,19 @@ fn claim_reservation(
         .iter()
         .find(|n| n["id"] == node.as_str())
         .ok_or_else(|| Error::conflict("Destination removed."))?;
+    let local_unconfigured = record["local"] == true && !configured;
+    if !local_unconfigured && record["runtimeId"] != super::component_runtime() {
+        return Err(Error::conflict(
+            "Destination version mismatch; deploy all components at the same version.",
+        ));
+    }
+    if !local_unconfigured
+        && (record["executionReady"] != true || !super::seen_within(record, FRESH_HEARTBEAT_MS))
+    {
+        return Err(Error::unavailable(
+            "Destination execution is not ready; restore a healthy controller with matching component versions.",
+        ));
+    }
     let native = crate::native::policy::native(&request.run["snapshot"]["agent"]);
     if native != crate::native::policy::node_native(record)
         || native && record["capabilities"]["ublk"] != true
@@ -545,6 +556,7 @@ fn claim_reservation(
     db.put("node-attempts", &consumed)?;
     held["id"] = attempt.into();
     held["role"] = AttemptRole::Execution.as_str().into();
+    held["runtimeId"] = record["runtimeId"].clone();
     held["leaseExpiresAt"] = (now() + RESERVATION_LEASE_MS).into();
     db.put("node-attempts", &held)?;
     db.patch_run(request.run_id(), &json!({ "moveReservation": null }))?;
@@ -578,9 +590,7 @@ fn admit(
             "Previous execution still owns this conversation.",
         ));
     }
-    let runtime_id = request
-        .required_runtime
-        .unwrap_or_else(|| text(&best.node, "runtimeId"));
+    let runtime_id = text(&best.node, "runtimeId");
     let volume_id = format!("{}:{id}", request.run_id());
     let mut volume = match db.get("node-volumes", &volume_id)? {
         Some(volume) => volume,
@@ -832,4 +842,60 @@ pub async fn renew_local(s: &Service, run_id: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn move_reservations_require_the_current_node_and_adopt_its_runtime() {
+        for backend in ["native", "firecracker"] {
+            let root = tempfile::tempdir().unwrap();
+            let store = crate::store::Store::open(root.path()).unwrap();
+            let run_id = crate::config::id();
+            let held_id = crate::config::id();
+            let attempt = crate::config::id();
+            let node_id = crate::config::id();
+            store.transaction(move |db| {
+                let run = json!({
+                    "id": run_id, "taskId": crate::config::id(), "createdAt": now(),
+                    "status": "pending", "moveReservation": held_id,
+                    "snapshot": { "agent": { "provider": "codex", "access": { "backend": backend } } },
+                });
+                db.add_run(&run, None)?;
+                db.put("node-attempts", &json!({
+                    "id": held_id, "runId": run_id, "nodeId": node_id,
+                    "role": "destination", "runtimeId": "previous-build", "released": false,
+                    "resources": { "cpu": 1, "memoryMiB": 512, "diskMiB": 1024 },
+                    "nativeMode": { "mode": "protected", "generation": null },
+                }))?;
+                let access = json!({ "nodes": [node_id] });
+                let checkpoint = Value::Null;
+                let request = Request::new(&run, &access, &checkpoint);
+                let mut node = json!({
+                    "id": node_id, "runtimeId": "previous-build", "executionReady": true,
+                    "capabilities": { "backend": backend, "ublk": true },
+                });
+                let error = claim_reservation(db, &request, &[node.clone()], &held_id, &attempt, true).unwrap_err();
+                assert!(error.message.contains("version mismatch"));
+                assert_eq!(db.get("node-attempts", &held_id)?.unwrap()["released"], false);
+                assert!(db.get("node-attempts", &attempt)?.is_none());
+                assert_eq!(db.run(&run_id)?.unwrap()["moveReservation"], held_id);
+
+                node["runtimeId"] = super::super::component_runtime().into();
+                node["lastSeen"] = (now() - FRESH_HEARTBEAT_MS).into();
+                assert!(claim_reservation(db, &request, &[node.clone()], &held_id, &attempt, true).is_err());
+                assert_eq!(db.get("node-attempts", &held_id)?.unwrap()["released"], false);
+                assert!(db.get("node-attempts", &attempt)?.is_none());
+                node["lastSeen"] = now().into();
+                let placement = claim_reservation(db, &request, &[node], &held_id, &attempt, true)?;
+                assert_eq!(placement["runtimeId"], super::super::component_runtime());
+                assert_eq!(db.get("node-attempts", &attempt)?.unwrap()["runtimeId"], placement["runtimeId"]);
+                assert_eq!(db.get("node-attempts", &held_id)?.unwrap()["released"], true);
+                assert!(db.run(&run_id)?.unwrap()["moveReservation"].is_null());
+                Ok(())
+            }).await.unwrap();
+        }
+    }
 }
