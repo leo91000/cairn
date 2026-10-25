@@ -48,12 +48,8 @@ pub fn applied(node: &Value) -> bool {
     if !valid_generation {
         return false;
     }
-    if node["nativeModeRequest"].is_object() && node["capabilities"]["nativeModeProtocol"] != 1 {
+    if node["capabilities"]["nativeModeProtocol"] != 1 {
         return false;
-    }
-    // An old controller remains usable only with the unchanged protected default.
-    if node["nativeModeObserved"].is_null() && node["nativeModeRequest"].is_null() {
-        return true;
     }
     node["nativeModeObserved"]["status"] == "applied"
         && node["nativeModeObserved"]["mode"] == request["mode"]
@@ -324,6 +320,18 @@ pub async fn change(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protected_mode_requires_the_current_controller_acknowledgement() {
+        let mut node = json!({ "capabilities": { "nativeModeProtocol": 1 } });
+        assert!(!applied(&node));
+        node["nativeModeObserved"] = json!({
+            "mode": "protected", "generation": null, "status": "applied",
+        });
+        assert!(applied(&node));
+        node["capabilities"]["nativeModeProtocol"] = Value::Null;
+        assert!(!applied(&node));
+    }
 
     #[tokio::test]
     async fn plan_acknowledgement_preserves_a_newer_transition_interruption() {

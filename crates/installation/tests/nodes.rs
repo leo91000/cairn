@@ -281,7 +281,6 @@ fn schedulable_node(id: &str, limits: &Value) -> Value {
         "accepting": true,
         "executionReady": true,
         "runtimeId": "development",
-        "runtimes": ["development"],
         "sharedResources": true,
         "lastSeen": now(),
         "capabilities": { "kvm": true },
@@ -1278,7 +1277,8 @@ async fn native_project_archive_handshake_skips_the_tree_and_rechecks_cache_gran
             "nodes",
             json!({
                 "id": node, "revoked": false, "accepting": true,
-                "capabilities": { "backend": "native" }, "nativeEnabled": true,
+                "capabilities": { "backend": "native", "nativeModeProtocol": 1 }, "nativeEnabled": true,
+                "nativeModeObserved": { "mode": "protected", "generation": null, "status": "applied" },
                 "nativeAccounts": [person],
             }),
         )
@@ -2104,7 +2104,6 @@ async fn queued_capacity_moves_preserve_the_source_and_unfinished_mission_waits(
         let (run, agent, source, destination) = (id(), id(), id(), id());
         for (node, cpu) in [(&source, 1), (&destination, 12)] {
             let mut record = schedulable_node(node, &limits(cpu, 32768, 131072));
-            record["runtimes"] = json!(["development"]);
             if node == &source {
                 record["pressure"] = "memory".into();
             }
@@ -3907,8 +3906,6 @@ async fn connect_node(
     let mut enrolled = schedulable_node(node, &limits(2, 1024, 1024));
     enrolled["revoked"] = false.into();
     enrolled["runtimeId"] = "development".into();
-    enrolled["runtimeIds"] = json!(["development"]);
-    enrolled["runtimes"] = json!(["development"]);
     enrolled["storage"] = json!(small_reserve());
     owner.put("nodes", enrolled).await;
     owner.authorize_node(node, &token).await;

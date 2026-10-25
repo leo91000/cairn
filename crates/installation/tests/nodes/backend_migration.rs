@@ -182,6 +182,9 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     }
     let mut native = owner.stored("nodes", &native_node).await.unwrap();
     native["capabilities"]["backend"] = "native".into();
+    native["capabilities"]["nativeModeProtocol"] = 1.into();
+    native["nativeModeObserved"] =
+        json!({ "mode": "protected", "generation": null, "status": "applied" });
     native["capabilities"]["ublk"] = true.into();
     native["nativeEnabled"] = true.into();
     native["nativeAccounts"] = json!(["fixture-owner"]);

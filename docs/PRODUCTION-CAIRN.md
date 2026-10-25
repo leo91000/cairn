@@ -58,11 +58,17 @@ La prochaine release repart de données vierges, avec l’accord du propriétair
 Les anciens formats ne sont ni lus ni migrés. Manager, runner, nodes et guests
 se déploient à la même version ; un écart de version doit être corrigé avant reprise.
 
-1. Arrêter le manager, le runner et toutes les nodes, ainsi que leurs timers de mise à jour.
-2. Effacer les données du manager (dont `manager.db`, identité et secrets), vider
-   entièrement le bucket S3 de cette installation, versions et marqueurs de suppression
-   compris, puis effacer l’état local de toutes ses nodes (disques, journaux et caches).
-3. Réinstaller l’installation et ses nodes avec les images et binaires de la même
+1. Arrêter les timers de mise à jour, le manager, le runner et toutes les nodes.
+   Supprimer les conteneurs de l’installation avec `docker compose down`, avant
+   d’effacer leur configuration Compose.
+2. Vider entièrement le bucket S3 externe de cette installation, versions et
+   marqueurs de suppression compris. Supprimer toute la racine de l’installation
+   (`/var/lib/cairn-installation` par défaut), dont `installation.json`, la
+   configuration Compose et de mise à jour, `data`, `home`, `workspaces`,
+   `runner-state` et `garage`. Cela efface aussi le bucket Garage intégré, les
+   anciennes images sélectionnées, l’identité et les secrets. Effacer également
+   la configuration et tout l’état local de chaque node (disques, journaux et caches).
+3. Réinstaller dans des racines vides avec les images et binaires de la même
    release, selon [l’installation](INSTALLATION.md), puis revendiquer l’installation.
 4. Reconnecter les comptes et plugins, réimporter les projets et vérifier une nouvelle
    conversation. Les anciennes conversations et identités ne sont pas récupérées.

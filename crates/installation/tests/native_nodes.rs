@@ -25,13 +25,16 @@ async fn native_administrator_requires_owner_review_verified_generation_and_expl
     let f = Fixture::new().await;
     let node_id = text(&f.node, "id");
     let path = format!("/api/nodes/{node_id}/native-mode");
+    let mut unsupported = f.node.clone();
+    unsupported["capabilities"]["nativeModeProtocol"] = 0.into();
+    f.service.store.put("nodes", unsupported).await.unwrap();
     let (status, _) = f
         .owner_call("POST", &path, json!({ "mode": "administrator" }))
         .await;
     assert_eq!(
         status,
         StatusCode::CONFLICT,
-        "Old supervisors must not receive privileged work"
+        "Unsupported supervisors must not receive privileged work"
     );
     let mut node = f.node.clone();
     node["capabilities"]["nativeModeProtocol"] = 1.into();
@@ -302,8 +305,9 @@ impl Fixture {
             "lastSeen": now(),
             "executionReady": true,
             "runtimeId": "development",
-            "runtimes": ["development"],
+            "nativeModeObserved": { "mode": "protected", "generation": null, "status": "applied" },
             "capabilities": {
+                "nativeModeProtocol": 1,
                 "backend": "native",
                 "ublk": true,
                 "os": "linux",
@@ -1298,9 +1302,10 @@ async fn native_nodes_admit_six_attempts_only_after_the_configured_budget_is_app
         .unwrap();
     let send = |slots| {
         let body = json!({
-            "runtimeId": "development", "runtimes": ["development"],
+            "runtimeId": "development",
             "capabilities": f.node["capabilities"], "dataRoot": "/private/native-node/data",
             "backend": "native", "nodeProtocol": 2, "executionReady": true,
+            "nativeMode": f.node["nativeModeObserved"],
             "budget": { "slots": slots, "limits": f.node["limits"] },
             "pool": { "capacity": slots },
         });
@@ -1440,6 +1445,7 @@ async fn revoking_a_native_person_stops_lease_renewals_and_workspace_access() {
         "backend": "native",
         "nodeProtocol": 2,
         "executionReady": true,
+        "nativeMode": f.node["nativeModeObserved"],
         "budget": { "slots": 1, "limits": f.node["limits"] },
         "pool": { "capacity": 1 },
     });

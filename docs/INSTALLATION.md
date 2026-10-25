@@ -142,9 +142,10 @@ checksum-verified host supervisors on an existing one-command installation. Reco
 renews the recorded deployment lease before stopping a running manager, because
 a durable acknowledgement may outlive the lease. If the interrupted replacement
 already removed/stopped it, or the exact recorded candidate has never started, is
-crash-looping or is running without a healthy HTTP endpoint, the host lock and recorded acknowledgement permit restoring only the previously
-committed approved image. An unrelated or functioning manager still requires
-lease acquisition.
+crash-looping or is running without a healthy HTTP endpoint, the host lock and
+recorded acknowledgement permit retrying the same pending candidate. The
+supervisor never restores a previous image. An unrelated or functioning manager
+still requires lease acquisition.
 
 ## Operation and validation
 

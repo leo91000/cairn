@@ -442,7 +442,14 @@ fn reserve_in(db: &Db<'_>, run: &Value, attempt: &str, configured: bool) -> Resu
     if !request.moving
         && let Some(reservation) = run["moveReservation"].as_str()
     {
-        return claim_reservation(db, &request, &snapshot.nodes, reservation, attempt);
+        return claim_reservation(
+            db,
+            &request,
+            &snapshot.nodes,
+            reservation,
+            attempt,
+            configured,
+        );
     }
     let best = snapshot.select(&request, configured)?;
     admit(db, &request, &best, &snapshot.attempts, attempt)
@@ -503,6 +510,7 @@ fn claim_reservation(
     nodes: &[Value],
     reservation: &str,
     attempt: &str,
+    configured: bool,
 ) -> Result<Value> {
     let mut held = db
         .get("node-attempts", reservation)?
@@ -512,6 +520,12 @@ fn claim_reservation(
         .iter()
         .find(|n| n["id"] == node.as_str())
         .ok_or_else(|| Error::conflict("Destination removed."))?;
+    let local_unconfigured = record["local"] == true && !configured;
+    if !local_unconfigured && record["runtimeId"] != super::component_runtime() {
+        return Err(Error::conflict(
+            "Destination version mismatch; deploy all components at the same version.",
+        ));
+    }
     let native = crate::native::policy::native(&request.run["snapshot"]["agent"]);
     if native != crate::native::policy::node_native(record)
         || native && record["capabilities"]["ublk"] != true
@@ -535,6 +549,7 @@ fn claim_reservation(
     db.put("node-attempts", &consumed)?;
     held["id"] = attempt.into();
     held["role"] = AttemptRole::Execution.as_str().into();
+    held["runtimeId"] = record["runtimeId"].clone();
     held["leaseExpiresAt"] = (now() + RESERVATION_LEASE_MS).into();
     db.put("node-attempts", &held)?;
     db.patch_run(request.run_id(), &json!({ "moveReservation": null }))?;
@@ -820,4 +835,55 @@ pub async fn renew_local(s: &Service, run_id: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn move_reservations_require_the_current_node_and_adopt_its_runtime() {
+        for backend in ["native", "firecracker"] {
+            let root = tempfile::tempdir().unwrap();
+            let store = crate::store::Store::open(root.path()).unwrap();
+            let run_id = crate::config::id();
+            let held_id = crate::config::id();
+            let attempt = crate::config::id();
+            let node_id = crate::config::id();
+            store.transaction(move |db| {
+                let run = json!({
+                    "id": run_id, "taskId": crate::config::id(), "createdAt": now(),
+                    "status": "pending", "moveReservation": held_id,
+                    "snapshot": { "agent": { "provider": "codex", "access": { "backend": backend } } },
+                });
+                db.add_run(&run, None)?;
+                db.put("node-attempts", &json!({
+                    "id": held_id, "runId": run_id, "nodeId": node_id,
+                    "role": "destination", "runtimeId": "previous-build", "released": false,
+                    "resources": { "cpu": 1, "memoryMiB": 512, "diskMiB": 1024 },
+                    "nativeMode": { "mode": "protected", "generation": null },
+                }))?;
+                let access = json!({ "nodes": [node_id] });
+                let checkpoint = Value::Null;
+                let request = Request::new(&run, &access, &checkpoint);
+                let mut node = json!({
+                    "id": node_id, "runtimeId": "previous-build",
+                    "capabilities": { "backend": backend, "ublk": true },
+                });
+                let error = claim_reservation(db, &request, &[node.clone()], &held_id, &attempt, true).unwrap_err();
+                assert!(error.message.contains("version mismatch"));
+                assert_eq!(db.get("node-attempts", &held_id)?.unwrap()["released"], false);
+                assert!(db.get("node-attempts", &attempt)?.is_none());
+                assert_eq!(db.run(&run_id)?.unwrap()["moveReservation"], held_id);
+
+                node["runtimeId"] = super::super::component_runtime().into();
+                let placement = claim_reservation(db, &request, &[node], &held_id, &attempt, true)?;
+                assert_eq!(placement["runtimeId"], super::super::component_runtime());
+                assert_eq!(db.get("node-attempts", &attempt)?.unwrap()["runtimeId"], placement["runtimeId"]);
+                assert_eq!(db.get("node-attempts", &held_id)?.unwrap()["released"], true);
+                assert!(db.run(&run_id)?.unwrap()["moveReservation"].is_null());
+                Ok(())
+            }).await.unwrap();
+        }
+    }
 }

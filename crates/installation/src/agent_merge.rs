@@ -130,11 +130,6 @@ fn merge(db: &Db<'_>, input: &Value, executing: &[String]) -> Result<Value> {
     // profile identity changes so recovery and live authorization find the target.
     for run in &runs {
         let mut snapshot = run["snapshot"].clone();
-        // Legacy restricted snapshots derive their MCP denial from the profile ID.
-        // Make that policy explicit before assigning Main's identity.
-        if snapshot["agent"]["access"].get("mcps").is_none() {
-            snapshot["agent"]["access"] = policy(&snapshot["agent"]);
-        }
         snapshot["agent"]["id"] = target_id.into();
         if snapshot["task"]["agentId"] == source_id {
             snapshot["task"]["agentId"] = target_id.into();
