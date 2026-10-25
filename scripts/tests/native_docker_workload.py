@@ -48,6 +48,35 @@ def wait_http(expected):
             time.sleep(0.1)
 
 
+def wait_compose_services(compose_path):
+    # Detached startup does not imply application readiness. In particular,
+    # Postgres can already accept connections while resumed Redis is starting.
+    deadline = time.monotonic() + 45
+    probes = [('db', ['pg_isready']), ('redis', ['redis-cli', 'ping'])]
+    pending = dict(probes)
+    diagnostics = {}
+    while pending:
+        for service, probe in list(pending.items()):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError('Compose services did not become ready: ' + repr(diagnostics))
+            try:
+                ready = subprocess.run(['docker', 'compose', '-p', 'native', '-f', str(compose_path),
+                                        'exec', '-T', service, *probe],
+                                       capture_output=True, text=True, timeout=min(10, remaining))
+            except subprocess.TimeoutExpired:
+                diagnostics[service] = 'readiness command timed out'
+                continue
+            expected = 'accepting connections' in ready.stdout if service == 'db' else ready.stdout.strip() == 'PONG'
+            if ready.returncode == 0 and expected:
+                del pending[service]
+                diagnostics.pop(service, None)
+            else:
+                diagnostics[service] = (ready.stdout + ready.stderr)[-4096:]
+        if pending:
+            time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+
+
 def bind_race(image):
     root = Path.cwd() / '.docker-race'
     root.mkdir(exist_ok=True)
@@ -260,14 +289,7 @@ def main():
         compose_path = context / 'compose.json'
         compose_path.write_text(json.dumps(compose))
         command('docker', 'compose', '-p', 'native', '-f', str(compose_path), 'up', '-d')
-        deadline = time.monotonic() + 45
-        while time.monotonic() < deadline:
-            ready = subprocess.run(['docker', 'compose', '-p', 'native', '-f', str(compose_path), 'exec', '-T', 'db', 'pg_isready'], capture_output=True, text=True, timeout=10)
-            if ready.returncode == 0 and 'accepting connections' in ready.stdout:
-                break
-            time.sleep(0.2)
-        else:
-            raise AssertionError('Compose Postgres did not become ready.')
+        wait_compose_services(compose_path)
         assert command('docker', 'compose', '-p', 'native', '-f', str(compose_path), 'exec', '-T', 'redis', 'redis-cli', 'ping') == 'PONG'
         wait_http(b'conversation')
         # Same agent-visible bind paths reach the daemon; no host path rewriting.
