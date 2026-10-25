@@ -1,6 +1,5 @@
 use super::Disk;
 use super::*;
-use sha2::{Digest, Sha256};
 use std::{
     io,
     sync::{
@@ -99,40 +98,6 @@ fn publication_cache_failure_or_zero_budget_never_prevents_publication() {
     }
 }
 
-#[test]
-fn old_sha256_segment_and_new_blake3_frames_can_share_a_journal() {
-    let root = tempfile::tempdir().unwrap();
-    let source = Arc::new(Source {
-        reads: AtomicUsize::new(0),
-    });
-    let disk = LazyDisk::create(
-        root.path(),
-        &single_block(4096, BLOCK, &Value::Null),
-        source.clone(),
-    )
-    .unwrap();
-    disk.write_at(0, b"old payload").unwrap();
-    drop(disk);
-    let path = root.path().join("payload-1-1.segment");
-    let mut frame = std::fs::read(&path).unwrap();
-    frame[..8].copy_from_slice(b"CAIRNJ02");
-    let header = Sha256::digest(&frame[..48]);
-    frame[48..80].copy_from_slice(&header);
-    let mut digest = Sha256::new();
-    digest.update(&frame[..80]);
-    digest.update(&frame[112..]);
-    frame[80..112].copy_from_slice(&digest.finalize());
-    std::fs::write(&path, frame).unwrap();
-    let disk = LazyDisk::open(root.path(), source.clone()).unwrap();
-    disk.write_at(20, b"new payload").unwrap();
-    drop(disk);
-    let disk = LazyDisk::open(root.path(), source).unwrap();
-    let mut bytes = [0; 31];
-    disk.read_at(0, &mut bytes).unwrap();
-    assert_eq!(&bytes[..11], b"old payload");
-    assert_eq!(&bytes[20..], b"new payload");
-}
-
 /// A single-block manifest; a `null` hash is an empty (zero) block.
 fn single_block(size: u64, block_size: u64, hash: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
@@ -223,65 +188,6 @@ fn publication_retires_obsolete_clean_cache_without_evicting_current_blocks() {
     assert_eq!(&bytes, b"unpublished");
 }
 
-#[test]
-fn legacy_journal_conversion_waits_for_all_unpublished_writes() {
-    let root = tempfile::tempdir().unwrap();
-    let source = Arc::new(Source {
-        reads: AtomicUsize::new(0),
-    });
-    let manifest = single_block(BLOCK, BLOCK, &serde_json::Value::Null);
-    legacy_fixture(root.path(), &manifest);
-    let disk = LazyDisk::open(root.path(), source.clone()).unwrap();
-    assert!(root.path().join("journal.sqlite").exists());
-    assert_eq!(disk.accounting().unwrap()["dirtyBytes"], BLOCK);
-    let first = disk.seal().unwrap();
-    disk.capture(first).unwrap();
-    disk.write_at(1, &[7]).unwrap();
-    disk.commit_published(first, "first").unwrap();
-    assert!(
-        std::fs::metadata(root.path().join("journal.sqlite"))
-            .unwrap()
-            .len()
-            < 4096,
-        "published legacy payloads should be unlinked"
-    );
-    assert_eq!(disk.accounting().unwrap()["dirtyBytes"], 1);
-    let second = disk.seal().unwrap();
-    disk.capture(second).unwrap();
-    disk.commit_published(second, "second").unwrap();
-    assert_eq!(disk.accounting().unwrap()["dirtyBytes"], 0);
-    drop(disk);
-    let reopened = LazyDisk::open(root.path(), source).unwrap();
-    let mut bytes = [0; 8];
-    reopened.read_at(0, &mut bytes).unwrap();
-    assert_eq!(bytes, [7; 8]);
-}
-
-fn legacy_fixture(directory: &Path, manifest: &Value) {
-    let db = Connection::open(directory.join("journal.sqlite")).unwrap();
-    db.execute_batch("CREATE TABLE state(id INTEGER PRIMARY KEY,manifest TEXT,generation INTEGER,next_sequence INTEGER);
-        CREATE TABLE sealed(generation INTEGER PRIMARY KEY,manifest TEXT);
-        CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT);
-        CREATE TABLE epochs(generation INTEGER PRIMARY KEY,written_at INTEGER);
-        CREATE TABLE writes(seq INTEGER PRIMARY KEY AUTOINCREMENT,generation INTEGER,start INTEGER,end INTEGER,data BLOB,checksum TEXT);
-        INSERT INTO epochs VALUES (1,0);").unwrap();
-    db.execute(
-        "INSERT INTO state VALUES (1,?1,1,2)",
-        [manifest.to_string()],
-    )
-    .unwrap();
-    let bytes = vec![7; manifest["size"].as_u64().unwrap().min(BLOCK) as usize];
-    db.execute(
-        "INSERT INTO writes VALUES (1,1,0,?1,?2,?3)",
-        params![
-            bytes.len() as i64,
-            bytes,
-            LazyDisk::checksum(1, 1, 0, &bytes)
-        ],
-    )
-    .unwrap();
-}
-
 impl BlockSource for Source {
     fn fetch(&self, _hash: &str) -> io::Result<Vec<u8>> {
         self.reads.fetch_add(1, Ordering::SeqCst);
@@ -314,7 +220,7 @@ fn node_cache_evicts_the_oldest_clean_block_after_a_verified_read() {
     let mut disks = Vec::new();
     for (name, value) in [("first", 1_u8), ("second", 2), ("third", 3)] {
         let bytes = vec![value; 4 * 1024 * 1024];
-        let hash = hex::encode(Sha256::digest(&bytes));
+        let hash = block_digest(&bytes);
         blocks.insert(hash.clone(), bytes);
         let namespace = if name == "second" {
             "environments"
@@ -456,7 +362,7 @@ fn interrupted_tail_is_trimmed_and_missing_acknowledged_segments_are_rejected() 
         .append(true)
         .open(&path)
         .unwrap();
-    tail.write_all(b"CAIRNJ02partial").unwrap();
+    tail.write_all(b"CAIRNJ03partial").unwrap();
     tail.sync_all().unwrap();
     let disk = LazyDisk::open(root.path(), source.clone()).unwrap();
     assert_eq!(std::fs::metadata(&path).unwrap().len(), length);
@@ -582,7 +488,7 @@ fn unavailable_or_corrupt_base_never_becomes_a_zero_block() {
         }
     }
     let root = tempfile::tempdir().unwrap();
-    let hash = hex::encode(Sha256::digest(vec![8; 4 * 1024 * 1024]));
+    let hash = block_digest(&vec![8; 4 * 1024 * 1024]);
     let manifest = single_block(4194304, 4194304, &hash.as_str().into());
     let disk = LazyDisk::create(root.path(), &manifest, Arc::new(Missing)).unwrap();
     assert_eq!(
@@ -653,7 +559,7 @@ fn partial_write_is_durable_without_fetching_its_remote_base() {
     let source = Arc::new(Source {
         reads: AtomicUsize::new(0),
     });
-    let hash = hex::encode(Sha256::digest(vec![7; 4 * 1024 * 1024]));
+    let hash = block_digest(&vec![7; 4 * 1024 * 1024]);
     let manifest = single_block(4194304, 4194304, &hash.as_str().into());
     let disk = LazyDisk::create(root.path(), &manifest, source.clone()).unwrap();
     disk.write_at(123, b"retained").unwrap();

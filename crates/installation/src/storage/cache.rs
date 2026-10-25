@@ -428,7 +428,7 @@ mod tests {
             let disk = root.path().join(namespace).join(name).join("lazy");
             std::fs::create_dir_all(disk.join("cache")).unwrap();
             std::fs::write(disk.join("cache").join("a".repeat(64)), b"clean").unwrap();
-            std::fs::write(disk.join("journal.sqlite"), b"unsaved work").unwrap();
+            std::fs::write(disk.join("journal-v2.sqlite"), b"unsaved work").unwrap();
         }
         let policy = Policy {
             cache_mi_b: 0,
@@ -441,7 +441,7 @@ mod tests {
             let disk = root.path().join(namespace).join(name).join("lazy");
             assert_eq!(std::fs::read_dir(disk.join("cache")).unwrap().count(), 0);
             assert_eq!(
-                std::fs::read(disk.join("journal.sqlite")).unwrap(),
+                std::fs::read(disk.join("journal-v2.sqlite")).unwrap(),
                 b"unsaved work"
             );
         }

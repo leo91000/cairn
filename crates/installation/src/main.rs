@@ -193,7 +193,6 @@ where
                     .await?;
             println!("{}", serde_json::to_string(&environment)?);
         }
-        "prepare-execution" => prepare_execution().await?,
         "runner-broker" => cairn_installation::runner::serve(stop).await?,
         "runner-client" => {
             let runner = arg(&args, 1, "Missing runner identifier.")?;
@@ -234,24 +233,6 @@ where
 async fn read_stdin_json() -> Result<Value> {
     let bytes = cairn_installation::process::read_bounded(tokio::io::stdin(), 8_000_000).await?;
     Ok(serde_json::from_slice(&bytes)?)
-}
-
-async fn prepare_execution() -> Result<()> {
-    let input = read_stdin_json().await?;
-    let config: Config = serde_json::from_value(input["config"].clone())?;
-    let mut run = input["run"].clone();
-    let credentials = cairn_installation::plugins::run_credentials::RunCredentials::default();
-    let mut prepared =
-        cairn_installation::execution::prepare(&run, &config, &credentials, None, None).await?;
-    run["workspace"] = prepared["cwd"].clone();
-    run["workspaces"] = prepared["workspaces"].clone();
-    prepared["args"] = serde_json::to_value(cairn_installation::run_output::args(
-        &run,
-        text(&prepared, "output"),
-        None,
-    ))?;
-    println!("{prepared}");
-    Ok(())
 }
 
 async fn chat_command(binary: Option<&String>, stop: CancellationToken) -> Result<i32> {

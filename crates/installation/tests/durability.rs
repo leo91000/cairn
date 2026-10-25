@@ -12,7 +12,7 @@ use cairn_installation::{
     vault::Vault,
 };
 use serde_json::{Value, json};
-use std::{collections::HashSet, path::Path};
+use std::collections::HashSet;
 use tempfile::TempDir;
 
 const COMPLETE: &str = "The requested work is complete.";
@@ -483,112 +483,4 @@ async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
         reopened.chat_detail(chat_id).await.unwrap()["questions"][0]["status"],
         "answered"
     );
-}
-
-/// Runs `git` in `directory` and returns its trimmed output.
-fn git(directory: &Path, args: &[&str]) -> String {
-    let result = std::process::Command::new("git")
-        .arg("-C")
-        .arg(directory)
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    String::from_utf8_lossy(&result.stdout).trim().to_owned()
-}
-
-#[tokio::test]
-async fn microvm_migration_preserves_linked_worktree_commits_and_uncommitted_changes() {
-    let root = TempDir::new().unwrap();
-    let mut config = config(&root);
-    config.runner_url = "http://runner:4311".into();
-    tokio::fs::create_dir(&config.home).await.unwrap();
-    let repo = root.path().join("repository");
-    let old = root.path().join("old-worktree");
-    tokio::fs::create_dir(&repo).await.unwrap();
-    git(&repo, &["init", "-b", "main"]);
-    git(&repo, &["config", "user.name", "Fixture"]);
-    git(&repo, &["config", "user.email", "fixture@example.test"]);
-    tokio::fs::write(repo.join("deleted"), "tracked")
-        .await
-        .unwrap();
-    git(&repo, &["add", "."]);
-    git(&repo, &["commit", "-m", "initial"]);
-    git(
-        &repo,
-        &["worktree", "add", "-b", "feat/saved", old.to_str().unwrap()],
-    );
-    tokio::fs::write(old.join("committed"), "saved commit")
-        .await
-        .unwrap();
-    git(&old, &["add", "."]);
-    git(&old, &["commit", "-m", "saved work"]);
-    let head = git(&old, &["rev-parse", "HEAD"]);
-    tokio::fs::remove_file(old.join("deleted")).await.unwrap();
-    tokio::fs::write(old.join("untracked"), "unsaved work")
-        .await
-        .unwrap();
-    let s = Service::new(config).await.unwrap();
-    let project = s
-        .project(
-            json!({ "name": "Fixture", "path": repo, "baseBranch": "main" }),
-            None,
-        )
-        .await
-        .unwrap();
-    let task = json!({
-        "name": "Migrate",
-        "agentId": MAIN_AGENT_ID,
-        "projectId": project["id"],
-        "prompt": "inspect",
-    });
-    let task = s.task(task, None).await.unwrap();
-    let run = s
-        .enqueue(task["id"].as_str().unwrap(), "manual", None)
-        .await
-        .unwrap();
-    let home = s
-        .config
-        .data_dir
-        .join("runs")
-        .join(run["id"].as_str().unwrap())
-        .join("codex");
-    tokio::fs::create_dir_all(home.join("sessions"))
-        .await
-        .unwrap();
-    tokio::fs::write(home.join("cairn-managed-auth"), "1")
-        .await
-        .unwrap();
-    tokio::fs::write(home.join("sessions/saved.jsonl"), "saved session")
-        .await
-        .unwrap();
-    let prepared = json!({
-        "isolated": false,
-        "workspaces": [{ "projectId": project["id"], "path": old, "kind": "worktree" }],
-    });
-    let migrated = execution::restore(&run, prepared, &s.config, &RunCredentials::default())
-        .await
-        .unwrap();
-    let target = Path::new(migrated["workspaces"][0]["path"].as_str().unwrap());
-    assert!(target.join(".git").is_dir());
-    assert_eq!(git(target, &["rev-parse", "HEAD"]), head);
-    assert_eq!(git(target, &["branch", "--show-current"]), "feat/saved");
-    assert!(!target.join("deleted").exists());
-    assert_eq!(
-        tokio::fs::read_to_string(target.join("untracked"))
-            .await
-            .unwrap(),
-        "unsaved work"
-    );
-    assert!(
-        home.parent()
-            .unwrap()
-            .join("home/.codex/sessions/saved.jsonl")
-            .exists()
-    );
-    assert_eq!(git(&old, &["rev-parse", "HEAD"]), head);
 }

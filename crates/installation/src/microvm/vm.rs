@@ -483,11 +483,7 @@ impl Vm {
             child.stderr.take().unwrap(),
             state.join(format!("{id}.vmm.log")),
         ));
-        let status = self.wait_for_guest().await?;
-        if status.version != 1 {
-            // An incompatible image never succeeds on retry.
-            return Err(Error::bad_gateway("Unsupported guest protocol."));
-        }
+        self.wait_for_guest().await?;
         Ok(())
     }
 
@@ -507,8 +503,12 @@ impl Vm {
                 ));
             }
             let probe = host::status(&self.socket);
-            if let Ok(Ok(status)) = tokio::time::timeout(Duration::from_secs(1), probe).await {
-                return Ok(status);
+            if let Ok(result) = tokio::time::timeout(Duration::from_secs(1), probe).await {
+                match result {
+                    Ok(status) => return Ok(status),
+                    Err(error) if error.status == 502 => return Err(error),
+                    Err(_) => {}
+                }
             }
             // A remote disk read is still waiting; guest boot has not stalled.
             if self.volume.as_ref().is_some_and(|v| v.source.waiting()) {
@@ -739,7 +739,7 @@ impl Vm {
             }
             if plan.command().is_none() && !status.codex_ready {
                 timing.next("current_entrypoint");
-                host::prepare_entrypoint(socket, state, &status).await?;
+                host::prepare_entrypoint(socket).await?;
             }
             run(socket, plan, state, timing).await
         };
@@ -759,8 +759,7 @@ impl Vm {
 
     /// Warm only an anonymous local disk. A live native process must never be
     /// initialized over a previous conversation or a borrowed storage grant.
-    /// Older guest images return false and remain eligible for the cold path.
-    pub async fn warm_codex(&mut self, state: &Path, stop: &CancellationToken) -> Result<bool> {
+    pub async fn warm_codex(&mut self, stop: &CancellationToken) -> Result<bool> {
         if self
             .volume
             .as_ref()
@@ -772,16 +771,13 @@ impl Vm {
             return Err(Error::conflict("Only an anonymous VM can prewarm Codex."));
         }
         let status = host::status(&self.socket).await?;
-        if !status.codex_service {
-            return Ok(false);
-        }
         if status.initialized {
             return Err(Error::conflict("VM already contains a conversation."));
         }
         let mut timing = Operation::new("vm_codex_warm", self.id(), "clock");
         self.synchronize_clock().await?;
         timing.next("current_entrypoint");
-        host::prepare_entrypoint(&self.socket, state, &status).await?;
+        host::prepare_entrypoint(&self.socket).await?;
         // Any uncertain outcome retires this VM; execute cannot silently start
         // a second native process over databases opened by the first one.
         self.warmed = true;

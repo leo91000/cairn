@@ -411,7 +411,7 @@ impl Controller {
                     crate::runner::CONTROLLER_FAILED
                 }
             };
-            // Deliver the legacy result path expected by the node connector.
+            // Deliver the result path consumed by the node connector.
             let result = root.join("data/output/result.md");
             if let Ok(file) = crate::artifacts::file::open_export(&result, &root.join("data")) {
                 let file = tokio::fs::File::from_std(file);
@@ -427,9 +427,7 @@ impl Controller {
                     let _ = atomic_write(&target, &bytes).await;
                 }
             }
-            let native_block =
-                block::exists(&controller.state, text(&plan, "runId")).unwrap_or(true);
-            if native_block {
+            {
                 let mounted = {
                     controller
                         .mounted
@@ -462,21 +460,6 @@ impl Controller {
                 {
                     tracing::error!(attempt = id, %error, "Native completed generation must be recovered before ownership release");
                     tokio::time::sleep(Duration::from_secs(2)).await;
-                }
-            } else {
-                let budget = plan["resources"]["diskMiB"]
-                    .as_u64()
-                    .unwrap_or(32768)
-                    .saturating_mul(1_048_576);
-                let captured = controller
-                    .capture_checkpoint(text(&plan, "runId"), &id, budget)
-                    .await;
-                if let Err(error) = captured {
-                    tracing::error!(attempt = id, message = %error.message, "Native checkpoint failed; local work retained");
-                    let _ = atomic_write(&root.join("checkpoint-error"), error.message.as_bytes())
-                        .await;
-                } else {
-                    let _ = tokio::fs::remove_file(root.join("checkpoint-error")).await;
                 }
             }
             // Release physical ownership before reporting completion to a replacement.
@@ -1129,11 +1112,6 @@ impl Controller {
         Ok(())
     }
 
-    async fn capture_checkpoint(&self, run: &str, attempt: &str, budget: u64) -> Result<Value> {
-        let _disk = disk::lock(&self.state).await?;
-        workspace::capture(&self.state, run, attempt, budget, self.disk_growth().await?).await
-    }
-
     async fn stopped_snapshot(&self, run: &str, force: bool) -> Result<Value> {
         let _disk = disk::lock(&self.state).await?;
         if block::exists(&self.state, run)? {
@@ -1162,39 +1140,7 @@ impl Controller {
             )
             .await;
         }
-        if self
-            .active
-            .lock()
-            .await
-            .values()
-            .any(|attempt| attempt.run == run)
-        {
-            return Err(Error::conflict(
-                "Waiting for the stopped native checkpoint to finish.",
-            ));
-        }
-        let root = workspace::directory(&self.state, run)?;
-        let _owner =
-            crate::file_lock::exclusive(&root.join("owner.lock"), "Native workspace is active.")?;
-        let attempt = tokio::fs::read_to_string(root.join("attempt")).await?;
-        if !force
-            && let Ok(snapshot) = workspace::completed(&self.state, run).await
-            && snapshot["manifest"]["attempt"] == attempt
-        {
-            return Ok(snapshot);
-        }
-        let limit = match tokio::fs::read(root.join("resources.json")).await {
-            Ok(bytes) => {
-                let resources: crate::nodes::Resources = serde_json::from_slice(&bytes)?;
-                resources
-                    .disk_mi_b
-                    .saturating_mul(disk::MIB)
-                    .min(self.disk_limit().await?)
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => self.disk_limit().await?,
-            Err(error) => return Err(error.into()),
-        };
-        workspace::capture(&self.state, run, &attempt, limit, self.disk_growth().await?).await
+        Err(Error::conflict("Conversation has no native journal."))
     }
 
     async fn abort_disk(&self, id: &str) -> Result<()> {
@@ -1628,57 +1574,12 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         }
         ("POST", ["disks", run, "storage-status"]) => {
             uuid(run)?;
-            if block::exists(&controller.state, run)? {
-                return Ok(Json(block::status(&controller.state, run).await?).into_response());
-            }
-            let root = workspace::directory(&controller.state, run)?;
-            let active_local = disk::bytes_if_present(&root.join("data")).await?;
-            let local = workspace::retained_bytes(&controller.state, run).await?;
-            let active = controller
-                .active
-                .lock()
-                .await
-                .values()
-                .any(|attempt| attempt.run == *run);
-            let completed = workspace::completed(&controller.state, run).await.ok();
-            let published: Value = match tokio::fs::read(root.join("published.json")).await {
-                Ok(bytes) => serde_json::from_slice(&bytes)?,
-                Err(_) => Value::Null,
-            };
-            let dirty = active
-                || completed
-                    .as_ref()
-                    .is_none_or(|point| point["id"] != published["snapshotId"]);
-            json!({ "mode": "native", "localBytes": local, "activeLocalBytes": active_local,
-                "dirtyBytes": if dirty { local.max(1) } else { 0 }, "waitingFor": null,
-                "checkpointConsistency": "stopped", "published": published })
+            block::status(&controller.state, run).await?
         }
         ("POST", ["disks", run, "published"]) => {
             uuid(run)?;
-            if block::exists(&controller.state, run)? {
-                let receipt = input(request, 16384).await?;
-                return Ok(
-                    Json(block::published(&controller.state, run, &receipt).await?).into_response(),
-                );
-            }
-            let _disk = disk::lock(&controller.state).await?;
-            uuid(run)?;
             let receipt = input(request, 16384).await?;
-            uuid(text(&receipt, "backupId"))?;
-            uuid(text(&receipt, "snapshotId"))?;
-            let root = workspace::directory(&controller.state, run)?;
-            let completed = workspace::completed(&controller.state, run).await?;
-            if completed["id"] != receipt["snapshotId"] {
-                return Err(Error::conflict(
-                    "Native checkpoint changed before publication acknowledgement.",
-                ));
-            }
-            atomic_write(&root.join("published.json"), &serde_json::to_vec(&receipt)?).await?;
-            // Acknowledging the latest durable backup makes older stopped archives
-            // redundant. Never collect another conversation's or the current archive.
-            workspace::collect_archives(&controller.state, run, Some(text(&completed, "id")))
-                .await?;
-            json!({ "committed": true })
+            block::published(&controller.state, run, &receipt).await?
         }
         ("POST", ["disks", run, "snapshot-completed"]) => {
             uuid(run)?;
@@ -1731,7 +1632,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 ));
             }
             let run = tokio::fs::read_to_string(controller.file(id, "run")).await?;
-            workspace::completed(&controller.state, &run).await?
+            controller.stopped_snapshot(&run, false).await?
         }
         (_, ["snapshots", snapshot, operation]) => {
             uuid(snapshot)?;
@@ -1778,23 +1679,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             let _disk = disk::lock(&controller.state).await?;
             uuid(run)?;
             let request = input(request, snapshots::MAX_MANIFEST_BYTES).await?;
-            if request["manifest"]["kind"] == block::KIND {
-                return Ok(
-                    Json(block::restore(&controller.state, run, request).await?).into_response()
-                );
-            }
-            let limit = controller.budget.lock().await["limits"]["diskMiB"]
-                .as_u64()
-                .unwrap_or(32768)
-                * 1_048_576;
-            block::restore_files(
-                &controller.state,
-                run,
-                &request,
-                limit,
-                controller.disk_growth().await?,
-            )
-            .await?
+            block::restore(&controller.state, run, request).await?
         }
         ("POST", ["disks", run, action @ ("delete" | "prune")]) => {
             let _disk = disk::lock(&controller.state).await?;
@@ -1805,11 +1690,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 &root.join("owner.lock"),
                 "Native workspace is active.",
             )?;
-            if (root.join("restore.pending.json").exists()
-                || root.join("block-restore.pending.json").exists()
-                || root.join("legacy-block-restore.pending.json").exists())
-                && *action == "prune"
-            {
+            if root.join("block-restore.pending.json").exists() && *action == "prune" {
                 return Err(Error::conflict(
                     "Finish native restore before pruning retained local work.",
                 ));
@@ -1817,8 +1698,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             let retired_grants = block::action(&controller.state, run, *action == "delete").await?;
             let mut entries = tokio::fs::read_dir(&root).await?;
             while let Some(entry) = entries.next_entry().await? {
-                if (entry.file_name().to_string_lossy().starts_with("stale-")
-                    || entry.file_name().to_string_lossy().starts_with("restore-"))
+                if entry.file_name().to_string_lossy().starts_with("stale-")
                     && entry.file_type().await?.is_dir()
                 {
                     tokio::fs::remove_dir_all(entry.path()).await?;
@@ -1827,21 +1707,14 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             if *action == "delete" {
                 for entry in [
                     "data",
-                    "completed.json",
                     "initialized",
                     "resources.json",
                     "attempt",
-                    "restored.json",
-                    "checkpoint-error",
-                    "published.json",
                     "runtime.json",
-                    "restore.pending.json",
                     "block-initialized",
                     "file-owner.json",
                     "block-seeding",
                     "block-restore.pending.json",
-                    "legacy-block-restore.pending.json",
-                    "legacy-data",
                     "tmp",
                 ] {
                     let path = root.join(entry);
@@ -1855,7 +1728,6 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 }
             }
             if *action == "delete" {
-                workspace::collect_archives(&controller.state, run, None).await?;
                 let stage = controller.data.join("runs").join(run);
                 if stage.exists() {
                     tokio::fs::remove_dir_all(stage).await?;
@@ -3031,19 +2903,6 @@ mod tests {
             .unwrap();
     }
 
-    async fn stopped_data(controller: &Controller, run: &str, attempt: &str) -> PathBuf {
-        let root = workspace::directory(&controller.state, run).unwrap();
-        private_dir(&root.join("data/workspaces")).await.unwrap();
-        atomic_write(&root.join("attempt"), attempt.as_bytes())
-            .await
-            .unwrap();
-        atomic_write(&root.join("initialized"), b"1").await.unwrap();
-        atomic_write(&root.join("data/workspaces/source"), b"original")
-            .await
-            .unwrap();
-        root
-    }
-
     #[tokio::test]
     async fn tmp_artifact_uses_the_ephemeral_path_and_rejects_redirects() {
         let (_fixture, controller) = fixture().await;
@@ -3168,129 +3027,6 @@ mod tests {
         assert!(!receiving.path().join("model").exists());
         assert_eq!(tokio::fs::metadata(retained).await.unwrap().len(), 20 * gib);
         assert_eq!(controller.usage().await.unwrap(), usage);
-    }
-
-    #[tokio::test]
-    async fn native_stop_waits_for_checkpoint_completion_and_physical_owner_release() {
-        let (_fixture, controller) = fixture().await;
-        let run = crate::config::id();
-        let attempt = crate::config::id();
-        let root = stopped_data(&controller, &run, &attempt).await;
-        let owner = workspace::execution_ownership(&controller.state, &run)
-            .await
-            .unwrap();
-        controller.active.lock().await.insert(
-            attempt.clone(),
-            Attempt {
-                run: run.clone(),
-                expires: None,
-                stop: CancellationToken::new(),
-                started: true,
-                protection: None,
-            },
-        );
-        let (waiting_controller, waiting_attempt) = (controller.clone(), attempt.clone());
-        let mut waiting =
-            tokio::spawn(async move { waiting_controller.wait_stopped(&waiting_attempt).await });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(30), &mut waiting)
-                .await
-                .is_err()
-        );
-        let error = controller.stopped_snapshot(&run, false).await.unwrap_err();
-        assert_eq!(error.status, 409);
-        let snapshot = controller
-            .capture_checkpoint(&run, &attempt, disk::MIB)
-            .await
-            .unwrap();
-        assert!(!waiting.is_finished());
-        drop(owner);
-        controller.active.lock().await.remove(&attempt);
-        tokio::time::timeout(Duration::from_secs(2), waiting)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let _replacement = crate::file_lock::exclusive(&root.join("owner.lock"), "busy").unwrap();
-        assert_eq!(
-            workspace::completed(&controller.state, &run).await.unwrap()["id"],
-            snapshot["id"]
-        );
-    }
-
-    #[tokio::test]
-    async fn native_completed_snapshot_recovers_after_space_is_freed_without_serving_old_data() {
-        let (_fixture, controller) = fixture().await;
-        let run = crate::config::id();
-        let attempt = crate::config::id();
-        let root = stopped_data(&controller, &run, &attempt).await;
-        let original = controller.stopped_snapshot(&run, false).await.unwrap();
-        atomic_write(&root.join("data/workspaces/source"), b"latest local work")
-            .await
-            .unwrap();
-        let other = controller
-            .state
-            .join("native")
-            .join(crate::config::id())
-            .join("data/stale");
-        sparse(&other, 2048 * disk::MIB).await;
-        assert!(controller.stopped_snapshot(&run, true).await.is_err());
-        assert!(workspace::completed(&controller.state, &run).await.is_err());
-        assert!(controller.stopped_snapshot(&run, false).await.is_err());
-        assert!(
-            controller
-                .state
-                .join("snapshots")
-                .join(text(&original, "id"))
-                .exists()
-        );
-
-        tokio::fs::remove_file(other).await.unwrap();
-        let response = route(
-            controller.clone(),
-            request(&format!("/disks/{run}/snapshot-completed"), &json!({})),
-        )
-        .await
-        .unwrap();
-        let recovered: Value = serde_json::from_slice(
-            &axum::body::to_bytes(response.into_body(), 1_000_000)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        assert_ne!(recovered["id"], original["id"]);
-        assert!(!root.join("checkpoint-error").exists());
-        let archive = tokio::fs::read(
-            controller
-                .state
-                .join("snapshots")
-                .join(text(&recovered, "id"))
-                .join("disk"),
-        )
-        .await
-        .unwrap();
-        assert!(
-            String::from_utf8(archive)
-                .unwrap()
-                .contains(&STANDARD.encode(b"latest local work"))
-        );
-        assert_eq!(
-            controller.stopped_snapshot(&run, false).await.unwrap()["id"],
-            recovered["id"]
-        );
-
-        atomic_write(
-            &root.join("checkpoint-error"),
-            b"transient explicit capture failure",
-        )
-        .await
-        .unwrap();
-        let replacement = controller.stopped_snapshot(&run, true).await.unwrap();
-        assert!(!root.join("checkpoint-error").exists());
-        assert_eq!(
-            workspace::completed(&controller.state, &run).await.unwrap()["id"],
-            replacement["id"]
-        );
     }
 
     #[tokio::test]

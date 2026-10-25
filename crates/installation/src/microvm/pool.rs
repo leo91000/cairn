@@ -873,11 +873,7 @@ impl Reservation {
             .await;
             self.vm_in_flight = false;
             self.vm = Some(booted?);
-            self.vm
-                .as_mut()
-                .unwrap()
-                .warm_codex(&self.pool.state, &stop)
-                .await
+            self.vm.as_mut().unwrap().warm_codex(&stop).await
         }
         .await;
         let pool = self.pool.clone();

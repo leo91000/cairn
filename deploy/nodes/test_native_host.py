@@ -17,8 +17,8 @@ SPEC.loader.exec_module(host)
 
 def release(**changes):
     value = dict(sha256='a' * 64, toolsSha256='b' * 64, size=3, toolsSize=3,
-                 os='linux', arch='x86_64', protocolMin=2, protocolMax=2,
-                 dataEpoch=5, runtimeId='synthetic-runtime',
+                 os='linux', arch='x86_64', nodeProtocol=2,
+                 runtimeId='synthetic-runtime',
                  binaryPath='/internal/nodes/native-binary', toolsPath='/internal/nodes/native-tools')
     value.update(changes)
     return value
@@ -67,7 +67,7 @@ class NativeHostTests(unittest.TestCase):
         self.assertEqual([], companion.kwargs['extra_groups'])
 
     def test_inventory_rejects_unlisted_companions_and_duplicate_entries(self):
-        files = [{'path': 'bin/' + name} for name in ('codex', 'claude', 'opencode', 'node', 'gh')]
+        files = [{'path': 'bin/' + name} for name in ('codex', 'claude', 'opencode', 'node', 'gh', 'codex-code-mode-host')]
         manifest = dict(version=1, os='linux', arch='x86_64', files=files)
         for extra in ('bin/unapproved-host', 'bin/codex'):
             with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, 'inventory'):
@@ -122,8 +122,8 @@ class NativeHostTests(unittest.TestCase):
     def test_only_exact_compatible_release_artifacts_are_accepted(self):
         self.assertEqual(release(), host.validate_release(release()))
         for change in ({'sha256': '../escape'}, {'size': 1 << 40}, {'arch': 'aarch64'},
-                       {'os': 'windows'}, {'protocolMin': 3}, {'toolsPath': 'https://elsewhere.test/tool'},
-                       {'dataEpoch': None}, {'runtimeId': 'bad%runtime'}):
+                       {'os': 'windows'}, {'nodeProtocol': 3}, {'toolsPath': 'https://elsewhere.test/tool'},
+                       {'runtimeId': 'bad%runtime'}):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 host.validate_release(release(**change))
 
@@ -164,7 +164,7 @@ class NativeHostTests(unittest.TestCase):
             files = []
             with zipfile.ZipFile(archive, 'w') as bundle:
                 bundle.writestr('bin/', b'')
-                for name in ('codex', 'claude', 'opencode', 'node', 'gh'):
+                for name in ('codex', 'claude', 'opencode', 'node', 'gh', 'codex-code-mode-host'):
                     payload = b'synthetic executable'
                     files.append(dict(path='bin/' + name, size=len(payload), sha256=hashlib.sha256(payload).hexdigest()))
                     bundle.writestr('bin/' + name, payload)
@@ -186,7 +186,7 @@ class NativeHostTests(unittest.TestCase):
             digest = hashlib.sha256(payload).hexdigest()
             (root / 'cairn').write_bytes(payload)
             entries = []
-            for name in ('codex', 'claude', 'opencode', 'node', 'gh'):
+            for name in ('codex', 'claude', 'opencode', 'node', 'gh', 'codex-code-mode-host'):
                 (root / 'tools/bin' / name).write_bytes(payload)
                 entries.append(dict(path='bin/' + name, size=len(payload), sha256=digest))
             (root / 'tools/manifest.json').write_text(json.dumps(dict(version=1, os='linux', arch='x86_64', files=entries)))
@@ -214,17 +214,15 @@ class NativeHostTests(unittest.TestCase):
             self.assertTrue(all(path.exists() for path in paths[:3]))
             self.assertFalse(paths[3].exists())
 
-    def test_failed_candidate_health_restores_the_previous_version(self):
+    def test_failed_candidate_health_retains_candidate_for_restart(self):
         previous, candidate = Path('/synthetic/previous'), Path('/synthetic/candidate')
         active, trial, restored = Mock(), Mock(), Mock()
         trial.poll.return_value = None
         with patch.object(host, 'terminate') as terminate, patch.object(host, 'start_node', side_effect=[trial, restored]), \
                 patch.object(host, 'health', side_effect=[False, True]), patch.object(host, 'select') as select:
-            child, selected, error = host.activate(candidate, previous, active)
-            self.assertIs(restored, child)
-            self.assertEqual(previous, selected)
-            self.assertIn('previous compatible version restored', error)
-            select.assert_not_called()
+            with self.assertRaisesRegex(RuntimeError, 'candidate retained'):
+                host.activate(candidate, previous, active)
+            select.assert_called_once_with(candidate)
             self.assertEqual([unittest.mock.call(active), unittest.mock.call(trial)], terminate.call_args_list)
 
     def test_success_selects_the_candidate_only_after_health_passes(self):

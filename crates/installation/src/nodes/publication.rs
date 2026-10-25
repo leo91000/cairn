@@ -1,6 +1,5 @@
 //! Publish the current disk to S3, then collect unreachable generations.
-//! Publications share immutable objects; startup migrates older encoded objects.
-//! Persisted record and object names remain compatible with existing disks.
+//! Publications share immutable authenticated objects.
 use super::{shared_blocks, snapshots};
 use crate::{
     config::{id, now},
@@ -13,7 +12,6 @@ use crate::{
 };
 use serde::Serialize;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -30,7 +28,7 @@ const CLEANUP_INTERVAL_MS: i64 = 60_000;
 
 const S3: &str = "s3";
 
-/// `blockFormat` of publications whose blocks are shared objects. Legacy points have none.
+/// Current block format: shared immutable objects.
 const SHARED_V1: &str = "shared-v1";
 
 /// Running executions and stopped on-demand disks with unpublished writes or an
@@ -125,10 +123,6 @@ fn root(s: &Service, run: &str) -> PathBuf {
     s.config.data_dir.join("node-backups").join(run)
 }
 
-pub(crate) fn key(run: &str, hash: &str) -> String {
-    format!("node-backups-v2/{run}/blocks/{hash}")
-}
-
 fn manifest_key(run: &str, point: &str) -> String {
     format!("node-backups/{run}/{point}.json")
 }
@@ -136,19 +130,6 @@ fn manifest_key(run: &str, point: &str) -> String {
 /// Whether a publication (or receipt location) is stored in S3.
 pub(crate) fn in_s3(point: &Value) -> bool {
     point["destination"] == S3
-}
-
-fn shared_format(point: &Value) -> bool {
-    point["blockFormat"] == SHARED_V1
-}
-
-/// Where an S3 copy lives. Receipt names hash this exact shape.
-fn s3_location(bucket: impl Serialize, endpoint: impl Serialize) -> Value {
-    json!({
-        "destination": S3,
-        "bucket": bucket,
-        "endpoint": endpoint
-    })
 }
 
 /// The bucket and endpoint of a point, as queued for remote deletion.
@@ -331,14 +312,6 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
     };
     let result = publication.run(&mut timing).await;
 
-    if snapshot["manifest"]["kind"] == "native-files-v1" {
-        // Native completed.json and its receipt identify this immutable stopped
-        // capture. Retain it until the next acknowledged capture or explicit purge.
-        if result.is_ok() {
-            timing.finish();
-        }
-        return result;
-    }
     if result.is_ok() {
         timing.next("discard_snapshot");
     }
@@ -380,13 +353,13 @@ async fn request_snapshot(
         if response.status() == reqwest::StatusCode::CONFLICT {
             return Err(Error::new(425, "Waiting for completed generation capture."));
         }
-        if !matches!(response.status().as_u16(), 404 | 412) {
+        if response.status().as_u16() != 412 {
             return Err(Error::unavailable(
                 "Unable to capture the completed disk generation.",
             ));
         }
-        // Older nodes and pre-upgrade completed turns use the existing coherent
-        // capture path. New nodes never pause a following turn for final upload.
+        // A current turn stopped before recording a completed generation still
+        // needs a coherent capture of its retained disk.
     }
     let stopped = run["status"] != RunStatus::Running || run["moveRequest"]["idle"] == true;
     let capture_path = if stopped {
@@ -433,12 +406,6 @@ impl Publication<'_> {
         let s = self.s;
         let manifest = self.snapshot["manifest"].clone();
         snapshots::validate(&manifest)?;
-        if manifest["kind"] == "native-files-v1" && manifest["attempt"] != self.attempt {
-            return Err(Error::new(
-                425,
-                "Waiting for the current native attempt's stopped checkpoint.",
-            ));
-        }
         let directory = root(s, self.run_id);
         crate::skills::private_dir(&directory.join("blocks")).await?;
         let mut intent = self.write_intent(&directory, manifest).await?;
@@ -461,25 +428,6 @@ impl Publication<'_> {
             let _ = super::storage::refresh(s, self.run).await;
         }
 
-        if intent.manifest["kind"] == "native-files-v1" {
-            let response = self
-                .s
-                .http
-                .post(format!("{}/disks/{}/published", self.base, self.run_id))
-                .bearer_auth(self.credential)
-                .json(&json!({ "backupId": intent.value["id"], "snapshotId": self.snapshot_id }))
-                .timeout(Duration::from_secs(10))
-                .send()
-                .await
-                .map_err(Error::internal)?;
-            if !response.status().is_success() {
-                return Err(Error::unavailable(
-                    "Native checkpoint acknowledgement failed.",
-                ));
-            }
-            self.complete().await?;
-            let _ = super::storage::refresh(self.s, self.run).await;
-        }
         timing.next("collect_after");
         collect_unused(s, self.run_id).await?;
         Ok(public(intent.value))
@@ -890,25 +838,6 @@ async fn source_block(
     Ok(bytes)
 }
 
-fn receipt(file: &Path, location: &Value) -> Result<PathBuf> {
-    let location = s3_location(&location["bucket"], &location["endpoint"]);
-    Ok(file.with_extension(format!(
-        "s3-{}",
-        hex::encode(Sha256::digest(serde_json::to_vec(&location)?))
-    )))
-}
-
-/// The S3 location recorded by a receipt, or the bucket named in its file name.
-async fn receipt_location(path: &Path, bucket: &str) -> Result<Value> {
-    let bytes = tokio::fs::read(path).await?;
-    Ok(serde_json::from_slice(&bytes).unwrap_or_else(|_| {
-        json!({
-            "destination": S3,
-            "bucket": bucket
-        })
-    }))
-}
-
 pub fn public(mut value: Value) -> Value {
     value.as_object_mut().unwrap().remove("manifest");
     value
@@ -920,14 +849,15 @@ pub async fn manifest(s: &Service, backup: &Value) -> Result<Value> {
         &backup["manifest"],
     )?;
     snapshots::validate(&value)?;
-    if shared_format(backup) {
+    if backup["blockFormat"] != SHARED_V1 {
+        return Err(Error::bad("Unsupported disk block format."));
+    }
+    {
         for block in value["blocks"].as_array().into_iter().flatten() {
             if block["hash"].is_string() {
                 crate::validation::uuid(text(block, "object"))?;
             }
         }
-    } else if !backup["blockFormat"].is_null() {
-        return Err(Error::bad("Unsupported disk block format."));
     }
     Ok(value)
 }
@@ -935,9 +865,6 @@ pub async fn manifest(s: &Service, backup: &Value) -> Result<Value> {
 pub async fn read_block(s: &Service, backup: &Value, hash: &str) -> Result<Vec<u8>> {
     if !snapshots::valid_hash(hash) {
         return Err(Error::bad("Invalid backup block."));
-    }
-    if !shared_format(backup) {
-        return read_run_scoped_block(s, backup, hash).await;
     }
     let manifest = manifest(s, backup).await?;
     let block = snapshots::find_block(&manifest, hash)
@@ -953,9 +880,6 @@ pub(crate) async fn read_manifest_block(
     block: &Value,
 ) -> Result<Vec<u8>> {
     let hash = text(block, "hash");
-    if !shared_format(backup) {
-        return read_run_scoped_block(s, backup, hash).await;
-    }
     let object = text(block, "object");
     crate::validation::uuid(object)?;
     if !snapshots::valid_hash(hash) {
@@ -984,66 +908,6 @@ pub(crate) async fn read_manifest_block(
         forget_baseline(s, text(backup, "runId")).await?;
     }
     result
-}
-
-async fn read_run_scoped_block(s: &Service, backup: &Value, hash: &str) -> Result<Vec<u8>> {
-    let run = text(backup, "runId");
-    let path = root(s, run).join("blocks").join(hash);
-    let permit = s.hot_s3.block_codec.read_permit().await?;
-    if let Ok(encoded) = tokio::fs::read(&path).await {
-        match decode_block(s, run, hash, encoded, permit).await {
-            Ok(bytes) => return Ok(bytes),
-            Err(error) => {
-                // A failed restore must not leave known-bad bytes in the cache.
-                tokio::fs::remove_file(&path).await?;
-                if !in_s3(backup) {
-                    forget_baseline(s, run).await?;
-                    return Err(error);
-                }
-            }
-        }
-    } else {
-        drop(permit);
-    }
-    if !in_s3(backup) {
-        forget_baseline(s, run).await?;
-        return Err(Error::unavailable("Local recovery block is missing."));
-    }
-
-    let storage = storage_for(s, backup)?;
-    crate::skills::private_dir(path.parent().unwrap()).await?;
-    let recovered = async {
-        let permit = s.hot_s3.block_codec.read_permit().await?;
-        let encoded = storage
-            .download_bytes(
-                &key(run, hash),
-                crate::storage::block_codec::MAX_ENCODED_BYTES,
-            )
-            .await?;
-        decode_block(s, run, hash, encoded, permit).await
-    }
-    .await;
-    if let Err(error) = &recovered
-        && matches!(error.status, 400 | 409)
-    {
-        // An outage or access refusal says nothing about the integrity of a verified copy.
-        let mark = receipt(&path, backup)?;
-        if mark.exists() {
-            tokio::fs::remove_file(mark).await?;
-        }
-        forget_baseline(s, run).await?;
-    }
-    recovered
-}
-
-async fn decode_block(
-    s: &Service,
-    run: &str,
-    hash: &str,
-    encoded: Vec<u8>,
-    permit: tokio::sync::OwnedSemaphorePermit,
-) -> Result<Vec<u8>> {
-    decode_scoped_block(s, &key(run, hash), hash, None, encoded, permit).await
 }
 
 async fn decode_scoped_block(
@@ -1193,11 +1057,10 @@ pub async fn collect(s: &Service, run: &str) -> Result<()> {
     collect_unused(s, run).await
 }
 
-/// Publications a run still depends on, and the legacy blocks they reference.
+/// Publications a run still depends on.
 struct Retained {
     points: Vec<Value>,
     keep: HashSet<String>,
-    needed: HashSet<String>,
 }
 
 /// Decided while holding the cache lock. `None` defers cleanup.
@@ -1226,23 +1089,7 @@ async fn retained(s: &Service, run: &str) -> Result<Option<Retained>> {
         ));
     }
 
-    let mut needed = HashSet::new();
-    let retained_legacy = points
-        .iter()
-        .filter(|point| keep.contains(text(point, "id")) && !shared_format(point));
-    for point in retained_legacy {
-        // A damaged retained manifest must not prevent creating a fresh good point,
-        // nor cause dependencies we cannot identify to be deleted.
-        let Ok(manifest) = manifest(s, point).await else {
-            return Ok(None);
-        };
-        needed.extend(snapshots::hashes(&manifest).map(str::to_owned));
-    }
-    Ok(Some(Retained {
-        points,
-        keep,
-        needed,
-    }))
+    Ok(Some(Retained { points, keep }))
 }
 
 async fn collect_unused(s: &Service, run: &str) -> Result<()> {
@@ -1261,7 +1108,6 @@ async fn collect_unused(s: &Service, run: &str) -> Result<()> {
     drop(readers);
 
     queue_abandoned_intents(s, run, &retained).await?;
-    queue_unneeded_blocks(s, run, &retained.needed).await?;
     let run = run.to_owned();
     let keep = retained.keep;
     s.store
@@ -1327,7 +1173,7 @@ async fn queue_abandoned_intents(s: &Service, run: &str, retained: &Retained) ->
         }
         let point = read_intent(&entry.path(), &point_id, run, "cleanup").await?;
         if in_s3(&point) {
-            let keys = abandoned_keys(s, run, &point, &retained.needed).await?;
+            let keys = vec![manifest_key(run, text(&point, "id"))];
             let location = deletion_location(&point);
             s.store
                 .transaction(move |db| {
@@ -1337,49 +1183,6 @@ async fn queue_abandoned_intents(s: &Service, run: &str, retained: &Retained) ->
                     Ok(())
                 })
                 .await?;
-        }
-        tokio::fs::remove_file(entry.path()).await?;
-    }
-    Ok(())
-}
-
-/// Remote objects an abandoned intent may have written: its manifest and, for a
-/// legacy point, run-scoped blocks that nothing retained needs.
-async fn abandoned_keys(
-    s: &Service,
-    run: &str,
-    point: &Value,
-    needed: &HashSet<String>,
-) -> Result<Vec<String>> {
-    let mut keys = vec![manifest_key(run, text(point, "id"))];
-    if !point["blockFormat"].is_null() {
-        return Ok(keys);
-    }
-    let manifest = manifest(s, point).await?;
-    let blocks = root(s, run).join("blocks");
-    for hash in snapshots::hashes(&manifest).collect::<HashSet<_>>() {
-        if !needed.contains(hash) && !receipt(&blocks.join(hash), point)?.exists() {
-            keys.push(key(run, hash));
-        }
-    }
-    Ok(keys)
-}
-
-async fn queue_unneeded_blocks(s: &Service, run: &str, needed: &HashSet<String>) -> Result<()> {
-    let blocks = root(s, run).join("blocks");
-    if !blocks.exists() {
-        return Ok(());
-    }
-    let mut entries = tokio::fs::read_dir(&blocks).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let hash = name.split('.').next().unwrap_or("");
-        if !snapshots::valid_hash(hash) || needed.contains(hash) {
-            continue;
-        }
-        if let Some((_, bucket)) = name.split_once(".s3-") {
-            let location = receipt_location(&entry.path(), bucket).await?;
-            queue_deletion(s, &location, &key(run, hash), false).await?;
         }
         tokio::fs::remove_file(entry.path()).await?;
     }
@@ -1422,7 +1225,7 @@ pub async fn attempt(s: &Service, run: &Value) {
         return;
     }
 
-    // Nothing to save yet, or an older guest image whose limitation is shown in the conversation.
+    // Nothing to save yet.
     if error.status != 409 && error.status != 412 {
         let body = format!(
             "The current disk could not be synchronized: {}",
@@ -1767,15 +1570,12 @@ pub async fn purge(s: &Service, run: &str) -> Result<()> {
         let storage = storage_for(s, &location)?;
         if deleted.insert((storage.endpoint.clone(), storage.bucket.clone())) {
             queue_deletion(s, &location, &format!("node-backups/{run}/"), true).await?;
-            queue_deletion(s, &location, &format!("node-backups-v2/{run}/"), true).await?;
         }
     }
     let directory = root(s, run);
     if directory.exists() {
         tokio::fs::remove_dir_all(directory).await?;
     }
-    // Old installations may still hold metadata from the removed periodic audit.
-    s.store.delete(&format!("node-backup-audit:{run}")).await?;
 
     let run = run.to_owned();
     s.store
@@ -1807,16 +1607,6 @@ async fn local_locations(s: &Service, run: &str) -> Result<Vec<Value>> {
             let point = read_intent(&entry.path(), &id, run, "purge").await?;
             if in_s3(&point) {
                 locations.push(point);
-            }
-        }
-    }
-    let blocks = directory.join("blocks");
-    if blocks.exists() {
-        let mut entries = tokio::fs::read_dir(&blocks).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if let Some((_, bucket)) = name.split_once(".s3-") {
-                locations.push(receipt_location(&entry.path(), bucket).await?);
             }
         }
     }

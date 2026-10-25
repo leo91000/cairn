@@ -129,7 +129,6 @@ impl Drop for Volume {
 
 pub fn exists(directory: &Path) -> bool {
     directory.join("lazy/journal-v2.sqlite").exists()
-        || directory.join("lazy/journal.sqlite").exists()
 }
 
 pub fn live(directory: &Path) -> Option<Arc<Volume>> {

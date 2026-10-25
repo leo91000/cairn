@@ -25,7 +25,7 @@ pub trait Disk: Send + Sync {
 
     /// Durably discard a checked range. Reads subsequently return zeros. Like
     /// write_batch, a failure may leave a durable prefix; it is not atomic.
-    /// Use ordinary write frames so older releases can recover the journal.
+    /// The default implementation writes zeros in bounded chunks.
     fn discard(&self, offset: u64, length: usize) -> io::Result<()> {
         range(self.size(), offset, length)?;
         let zeros = vec![0; length.min(8 * 1024 * 1024)];

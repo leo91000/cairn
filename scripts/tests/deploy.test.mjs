@@ -274,15 +274,6 @@ describe('coolify deployment over HTTP', () => {
     expect(requests.some(request => request.path.endsWith('/restart'))).toBe(true)
   })
 
-  it('assigns VM resource defaults when migrating a legacy container runner', () => {
-    const document = parse(compose)
-    document.services.runner.devices = ['/dev/ublk-control:/dev/ublk-control']
-    Object.assign(document.services.runner, { mem_limit: '4g', cpus: 2, pids_limit: 128 })
-    const result = parse(firecrackerRunnerCompose(stringify(document)))
-    expect(result.services.runner).toMatchObject({ mem_limit: '20g', cpus: 8 })
-    expect(result.services.runner.pids_limit).toBeUndefined()
-  })
-
   it.each(['mapping', 'list'])('preserves the operator pool setting across deployment (%s)', async (shape) => {
     const document = parse(compose)
     const environment = { ...document.services.runner.environment, CAIRN_READY_VM_POOL: 'false', CAIRN_READY_VM_POOL_SIZE: '4' }
@@ -291,8 +282,7 @@ describe('coolify deployment over HTTP', () => {
       : environment
     compose = stringify(document)
     await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
-    expect(parse(compose).services.runner.environment.CAIRN_READY_VM_POOL).toBe('false')
-    expect(parse(compose).services.runner.environment.CAIRN_READY_VM_POOL_SIZE).toBe('4')
+    expect(parse(compose).services.runner.environment).toEqual(shape === 'list' ? Object.entries(environment).map(([key, value]) => `${key}=${value}`) : environment)
     expect(firecrackerRunnerCompose(compose)).toBe(compose)
   })
 
@@ -392,7 +382,7 @@ describe('coolify deployment over HTTP', () => {
     expect(nativeRunnerCompose(compose)).toBe(compose)
   })
 
-  it.each([{ CONCURRENCY: '12' }, ['CONCURRENCY=12']])('shares configured manager concurrency with the VM runner (%j)', (environment) => {
+  it.each([{ CONCURRENCY: '12' }, ['CONCURRENCY=12']])('preserves each component’s configured concurrency (%j)', (environment) => {
     const document = parse(compose)
     document.services.manager.environment = environment
     const migrated = firecrackerRunnerCompose(stringify(document))
@@ -400,7 +390,7 @@ describe('coolify deployment over HTTP', () => {
     expect(result.services.manager.environment).toEqual(Array.isArray(environment)
       ? [...environment, `CAIRN_NODE_IMAGE=${nodeImage}`]
       : { ...environment, CAIRN_NODE_IMAGE: nodeImage })
-    expect(result.services.runner.environment.CONCURRENCY).toBe('12')
+    expect(result.services.runner.environment.CONCURRENCY).toBe(parse(compose).services.runner.environment.CONCURRENCY)
     expect(firecrackerRunnerCompose(migrated)).toBe(migrated)
   })
 

@@ -971,27 +971,22 @@ async fn runs_install_the_files_frozen_when_they_were_created() {
         .is_err()
     );
 
-    // Only snapshots predating bundle revisions may use the live directory.
+    // Missing revisions cannot silently read a live skill folder.
     let mut legacy = next;
     legacy["snapshot"]["skills"][0]
         .as_object_mut()
         .unwrap()
         .remove("bundle");
-    let prepared = cairn_installation::execution::prepare(
-        &legacy,
-        &s.config,
-        &RunCredentials::default(),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        prepared["skills"][0]["path"],
-        api.skill_dir("review")
-            .join("SKILL.md")
-            .to_string_lossy()
-            .as_ref()
+    assert!(
+        cairn_installation::execution::prepare(
+            &legacy,
+            &s.config,
+            &RunCredentials::default(),
+            None,
+            None,
+        )
+        .await
+        .is_err()
     );
 }
 

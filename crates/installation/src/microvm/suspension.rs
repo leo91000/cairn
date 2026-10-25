@@ -37,17 +37,11 @@ pub struct Status {
 #[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Record {
-    #[serde(default)]
     vm_id: Option<String>,
-    #[serde(default)]
     ready: Option<bool>,
-    #[serde(default)]
     reasons: BTreeSet<Reason>,
-    #[serde(default)]
     confirmed_paused: Option<bool>,
-    #[serde(default)]
     administrative_since: Option<i64>,
-    #[serde(default)]
     administrative_suspended_ms: u64,
 }
 

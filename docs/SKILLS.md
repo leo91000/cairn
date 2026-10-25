@@ -218,8 +218,7 @@ Completed bundles are retained regardless of inactivity: an old queued run or
 dormant conversation can still reference them. Cleanup must establish that all
 snapshot references have been released before reclaiming a bundle; there is no
 automatic collection of completed bundles yet. A missing or malformed recorded
-revision stops preparation with an error. Only snapshots created before bundles
-may use the live skill folder. Reads and saves share a lock so an export or
+revision stops preparation with an error. Reads and saves share a lock so an export or
 freeze sees one complete saved version.
 
 The prompt lists each selected skill by name, description and `SKILL.md` path.

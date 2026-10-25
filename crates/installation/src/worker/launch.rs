@@ -196,8 +196,7 @@ struct RunnerPlan<'a> {
     backend: &'a Value,
     runtime_id: &'a Value,
     storage: RunnerStorage<'a>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    chat: Option<Value>,
+    chat: Value,
 }
 
 #[derive(Serialize)]
@@ -494,7 +493,7 @@ impl Execution<'_> {
         );
         let mut launch = Launch {
             binary: adapter.binary(&s.config).to_owned(),
-            args: adapter.legacy_args(self.run, &workspace.mcp, &output, resume),
+            args: Vec::new(),
             prompt: self.prompt(resume).await?,
         };
         let auth_broker = match self.account.as_ref() {
@@ -631,19 +630,16 @@ impl Execution<'_> {
             .collect())
     }
 
-    /// Chats, Claude runs and account-backed runs go through the `chat` protocol.
+    /// Every execution uses the coding agent’s chat protocol.
     async fn chat_plan(
         &self,
         workspace: &Workspace,
         resume: Option<&str>,
         launch: &mut Launch,
-    ) -> Result<Option<Value>> {
+    ) -> Result<Value> {
         let s = self.s;
         let adapter = self.provider.adapter();
         let chat_execution = self.run["chatExecution"].is_object();
-        if !adapter.uses_chat(chat_execution, self.account.is_some()) {
-            return Ok(None);
-        }
         private_dir(&self.directory.join("chat-input")).await?;
         s.prepare_chat_files(&self.id, &self.run["chatExecution"]["attachments"])
             .await?;
@@ -655,7 +651,6 @@ impl Execution<'_> {
             &workspace.mcp,
             resume,
         )?;
-        // Optional fields: retained older adapters can ignore them.
         chat["runId"] = self.id.clone().into();
         chat["attemptId"] = self.attempt_id.clone().into();
         if !chat_execution {
@@ -670,7 +665,7 @@ impl Execution<'_> {
         launch.binary = current_exe()?;
         launch.args = vec!["chat".into(), adapter.binary(&s.config).to_owned()];
         launch.prompt = chat.to_string();
-        Ok(Some(chat))
+        Ok(chat)
     }
 
     /// Places the run on a node and routes the launch through its isolated runner.
@@ -678,7 +673,7 @@ impl Execution<'_> {
         &mut self,
         workspace: &mut Workspace,
         resume: Option<&str>,
-        chat: Option<Value>,
+        chat: Value,
         launch: &mut Launch,
     ) -> Result<()> {
         let s = self.s;
@@ -731,7 +726,7 @@ impl Execution<'_> {
         runner: &str,
         placement: &Value,
         resume: Option<&str>,
-        mut chat: Option<Value>,
+        mut chat: Value,
         launch: &Launch,
     ) -> Result<()> {
         let s = self.s;
@@ -739,20 +734,16 @@ impl Execution<'_> {
         let plans = s.config.data_dir.join("runner-plans");
         private_dir(&plans).await?;
         let mut imports = prepared["mounts"].as_array().unwrap().clone();
-        if chat.is_some() {
-            imports.push(json!({
-                "source": self.directory.join("chat-input"),
-                "target": "/run/cairn-chat",
-                "readOnly": true,
-            }));
-        }
+        imports.push(json!({
+            "source": self.directory.join("chat-input"),
+            "target": "/run/cairn-chat",
+            "readOnly": true,
+        }));
         let mut context = crate::plugins::agents::with_instructions(s, self.run).await;
         context["snapshot"]["skills"] = prepared["skills"].clone();
         context["nativeMode"] = placement["nativeMode"].clone();
-        if prepared["backend"] == "native"
-            && let Some(chat) = &mut chat
-        {
-            run_output::native_chat_privileges(chat, &context, &placement["nativeMode"]);
+        if prepared["backend"] == "native" {
+            run_output::native_chat_privileges(&mut chat, &context, &placement["nativeMode"]);
         }
         let prompt = if resume.is_some() {
             launch.prompt.clone()

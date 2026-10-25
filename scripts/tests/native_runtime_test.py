@@ -173,7 +173,7 @@ def main():
         host_marker = Path("/etc/cairn-native-qualification-" + identifier)
         base_projects, base_archives, base_keys = {}, {}, {}
 
-        def seed(run, legacy=False):
+        def seed(run):
             stage = data / 'runs' / run
             for directory in (stage / 'workspace', stage / 'home/.codex', stage / 'home/.claude', stage / 'home/.agents/skills/frozen', stage / 'output'):
                 directory.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -184,24 +184,13 @@ def main():
                 (stage / 'workspace/asset').write_bytes(asset)
             (stage / 'home/.codex/auth.json').write_text(SECRET)
             (stage / 'home/.agents/skills/frozen/SKILL.md').write_text('frozen fixture skill')
-            if legacy:
-                old = state / 'native' / run
-                for directory in (old / 'data/workspaces', old / 'data/home/.cache/models', old / 'data/home/.codex/sessions', old / 'data/home/.claude/plugins/user', old / 'data/output'):
-                    directory.mkdir(parents=True, mode=0o700)
-                (old / 'data/workspaces/seed').write_text('initial project')
-                (old / 'data/workspaces/asset').write_bytes(asset)
-                (old / 'data/home/.cache/models/keep').write_text('model cache')
-                (old / 'data/home/.codex/sessions/keep').write_text('session state')
-                (old / 'data/home/.claude/plugins/user/tool').write_text('legacy installed plugin')
-                (old / 'data/home/.claude/CLAUDE.md').write_text('legacy user instructions')
-                (old / 'initialized').write_text('1')
             return stage
 
-        def create(legacy=False):
+        def create():
             run = str(uuid.uuid4())
             runs.append(run)
             contexts[run] = manager('create', run=run)
-            seed(run, legacy)
+            seed(run)
             return run
 
         def managed(run):
@@ -247,7 +236,7 @@ def main():
             cached.unlink()
             metrics['preparedBaseMetadataBytes'] = ready['metadataBytes']
 
-        def start(run, long=True, lease=90000, expected='changed', legacy=False, measure=None):
+        def start(run, long=True, lease=90000, expected='changed', measure=None):
             seed(run)
             attempt = str(uuid.uuid4())
             attempts.append(attempt)
@@ -279,11 +268,6 @@ def main():
             script += 'test "$(cat /run/cairn-chat/attachments/native-image/image.png)" = "synthetic image bytes"\n'
             script += 'test -f /home/node/.agents/skills/frozen/SKILL.md\n'
             script += 'if touch /home/node/.agents/skills/bad 2>/dev/null; then exit 83; fi\n'
-            if legacy:
-                script += 'test "$(cat /home/node/.cache/models/keep)" = "model cache"\n'
-                script += 'test "$(cat /home/node/.claude/plugins/user/tool)" = "legacy installed plugin"\n'
-                script += 'test "$(cat /home/node/.claude/CLAUDE.md)" = "legacy user instructions"\n'
-                script += 'test "$(cat /home/node/.codex/sessions/keep)" = "session state"\n'
             script += 'if test -e persisted; then test "$(cat persisted)" = "' + expected + '"; fi\n'
             script += 'printf changed > persisted\nprintf temporary-artifact > /tmp/native-artifact\n'
             script += f'printf %s {attempt} > ready\n'
@@ -387,13 +371,12 @@ def main():
 
         command('useradd', '--system', '--no-create-home', '--shell', '/usr/sbin/nologin', user)
         try:
-            run = create(legacy=True)
+            run = create()
             other = create()
             start_controller()
-            first = start(run, lease=45000, legacy=True, measure='nativeRetained')
+            first = start(run, lease=45000, measure='nativeRetained')
             fenced(run, first)
             assert not (state / 'native-block' / run / 'root/disk.blk').exists(), 'Retired device inode was retained.'
-            assert (state / 'native' / run / 'legacy-data').exists(), 'Migration source retired before S3 acknowledgement.'
             stopped_health = api('/health', method='GET')
             assert stopped_health['usage']['diskBytes'] > 0
             assert stopped_health['diskGrowth']['retainedBytes'][run] > 0, 'Stopped journal lost its measured admission credit.'
@@ -420,7 +403,6 @@ def main():
             other_before = api('/disks/' + other + '/storage-status')
             evicted = api('/disks/' + run + '/evict', receipt)
             assert evicted['evictedBytes'] > 0, 'No real clean block cache reclaimed.'
-            assert not (state / 'native' / run / 'legacy-data').exists()
             assert api('/disks/' + other + '/storage-status')['localBytes'] == other_before['localBytes']
             metrics['evictedBytes'] = evicted['evictedBytes']
             # A stale private inode with a different rdev must not block the next
@@ -428,7 +410,7 @@ def main():
             os.mknod(state / 'native-block' / run / 'root/disk.blk', stat.S_IFBLK | 0o600, os.makedev(7, 65535))
             command('systemctl', 'stop', supervisor)
             start_controller()
-            resumed = start(run, legacy=True, measure='nativeEvicted')
+            resumed = start(run, measure='nativeEvicted')
             assert metrics['nativeEvicted']['readTriggeredRemoteRequests'] > 0, 'Payload did not use demand-paged S3 reads.'
             # Real journal -> live ublk -> online ext4 growth. The workload
             # process and namespace stay alive; no whole-disk materialization.
@@ -520,7 +502,7 @@ def main():
             else:
                 raise AssertionError('Eviction removed unpublished journal writes.')
             manager('restore', run=run, backupId=point['backupId'])
-            restored = start(run, legacy=True)
+            restored = start(run)
             # The next start expects the retained 'changed' value. A no-op
             # second restore would leave this distinct mutation and fail it.
             (managed(run) / 'persisted').write_text('second unpublished mutation')
@@ -629,7 +611,7 @@ def main():
             evidence = Path(os.environ.get('NATIVE_STORAGE_EVIDENCE_DIR', str(root / 'evidence')))
             evidence.mkdir(parents=True, exist_ok=True)
             (evidence / 'native-storage.json').write_text(json.dumps(metrics, indent=2) + '\n')
-            print('PASS: real ublk/ext4, unprivileged runner-entry, read-only runtime secrets/skills, legacy cache/session migration, '
+            print('PASS: real ublk/ext4, unprivileged runner-entry, read-only runtime secrets/skills, '
                   'S3 publish/ack, conditional clean eviction, unrelated conversation retained, lazy remote resume, repeated restore, '
                   'lease/descendant/guardian/controller fencing, crash recovery, concurrent disk retirement, final checkpoint, retry tombstone.')
         finally:

@@ -62,25 +62,3 @@ sidecar: provenance relies on the approved official HTTPS host, and Cairn record
 the downloaded hash. This is not verification of the bundled OpenPGP signature.
 Other installers can supply a publisher SHA-256 that Cairn checks before extraction.
 A moving latest URL is not used for execution after installation.
-
-## Compatibility and recovery
-
-The reviewed installation compatibility epoch advances from 2 to 3. An epoch-2
-binary cannot read an installer-backed program manifest or a TOML package on disk;
-the new program locks have no old-reader contract. The legacy tree is unchanged.
-Routine automatic deployment must stop at this epoch transition; shipping this PR
-requires the separate reviewed transition described in PRODUCTION-CAIRN.md.
-
-Forward migration is additive: existing JSON packages, approvals, accounts, tokens
-and grants remain in place. Uploaded TOML is normalized to JSON, and program locks
-are created only when preparation is requested. No installation database migration
-or replacement of an existing package version is required. Failed downloads leave
-the active lock/package unchanged and discard their temporary files; retry the
-preparation after fixing the source or connectivity.
-
-For deployment rollback, preserve the prior binary/image and an explicitly prepared
-pre-transition data backup. Restoring an epoch-2 binary requires restoring its
-matching data backup; there is no automatic backup or data restoration. Within
-epoch 3, use program restoration or activation of an earlier approved package
-without reverting installation data. Do not decrement the epoch to bypass rollout
-checks.

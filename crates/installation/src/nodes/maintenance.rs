@@ -133,15 +133,6 @@ async fn advertise_runtime(
     let deadline = now.saturating_add(RUNTIME_ADVERTISEMENT_MS);
     store
         .transaction(move |db| {
-            // Migrate permanent records once. Refreshing the current runtime must
-            // not keep extending every obsolete runtime's grace period.
-            for (old_key, mut value) in db.keys("node-runtime:")? {
-                if old_key != key && value["advertisedUntil"].as_i64().is_none() {
-                    value["advertisedUntil"] = deadline.into();
-                    db.set(&old_key, &value, Some(deadline))?;
-                }
-            }
-
             db.set(
                 &key,
                 &json!({
@@ -345,18 +336,9 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn runtime_announcements_expire_without_refresh_and_migrate_permanent_entries() {
+    async fn runtime_announcements_expire_without_refresh() {
         let root = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(root.path()).unwrap();
-        store
-            .set(
-                "node-runtime:legacy",
-                json!({ "runtimeId": "legacy", "image": "legacy-image" }),
-                None,
-            )
-            .await
-            .unwrap();
-
         let previous = crate::config::now() - 86_400_001;
         advertise_runtime(&store, "previous", "previous-image", previous)
             .await

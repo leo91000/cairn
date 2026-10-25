@@ -611,31 +611,24 @@ pub fn tools(runtime: &str) -> Result<PathBuf> {
 fn installed_tools() -> Result<Vec<(String, PathBuf)>> {
     let current = PathBuf::from(
         std::env::var("CAIRN_NATIVE_TOOLS")
-            .map_err(|_| Error::bad("Missing pinned native tool bundle."))?,
+            .map_err(|_| Error::bad("Missing native tool bundle."))?,
     );
-    let versions = current
+    let release_path = current
         .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| Error::bad("Invalid native tool bundle path."))?;
-    let mut runtimes = Vec::new();
-    for entry in std::fs::read_dir(versions)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() || entry.file_name().to_string_lossy().starts_with('.') {
-            continue;
-        }
-        let release: Value = match std::fs::read(entry.path().join("release.json")) {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
-            Err(_) => continue,
-        };
-        if release["os"] != "linux" || release["arch"] != "x86_64" {
-            continue;
-        }
-        let path = entry.path().join("tools");
-        if path.join("manifest.json").is_file() {
-            runtimes.push((text(&release, "runtimeId").to_owned(), path));
-        }
+        .ok_or_else(|| Error::bad("Invalid native tool bundle path."))?
+        .join("release.json");
+    let release: Value = serde_json::from_slice(&std::fs::read(release_path)?)?;
+    let runtime = crate::nodes::component_runtime();
+    if release["runtimeId"] != runtime
+        || release["os"] != "linux"
+        || release["arch"] != "x86_64"
+        || !current.join("manifest.json").is_file()
+    {
+        return Err(Error::conflict(
+            "Native tool version mismatch; reinstall the current component bundle.",
+        ));
     }
-    Ok(runtimes)
+    Ok(vec![(runtime, current)])
 }
 
 /// Freeze the entire workload, including descendants. An acknowledged command

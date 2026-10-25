@@ -34,12 +34,7 @@ pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Resu
     let manifest = super::publication::manifest(s, backup).await?;
     let record = s.get("nodes", node).await?;
     let native = crate::native::policy::node_native(&record);
-    if native
-        != matches!(
-            manifest["kind"].as_str(),
-            Some("native-files-v1" | "native-ext4-v1")
-        )
-    {
+    if native != matches!(manifest["kind"].as_str(), Some("native-ext4-v1")) {
         return Err(Error::conflict(
             "Conversation moves cannot change execution backend.",
         ));

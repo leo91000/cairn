@@ -327,7 +327,7 @@ async fn fallback_seed(session: &Session, root: &Path, error: Error) -> Result<(
     }
     tracing::warn!(
         status = error.status,
-        "Archive staging unavailable; requesting the complete legacy seed"
+        "Archive staging unavailable; requesting the complete seed"
     );
     crate::project_archives::abandon_stage(root, error.status == 507, &session.attempt).await?;
     session
@@ -428,7 +428,7 @@ mod tests {
     use axum::{Json, Router, body::Body, routing::post};
 
     #[tokio::test]
-    async fn failed_archive_staging_requests_full_legacy_files_but_never_bypasses_revocation() {
+    async fn failed_archive_staging_requests_full_seed_files_but_never_bypasses_revocation() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("source");

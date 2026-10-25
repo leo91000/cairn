@@ -108,6 +108,16 @@ struct Request<'a> {
 
 impl<'a> Request<'a> {
     fn new(run: &'a Value, access: &'a Value, checkpoint: &'a Value) -> Result<Self> {
+        if run["requiredRuntime"]
+            .as_str()
+            .or(checkpoint["runtimeId"].as_str())
+            .is_some_and(|runtime| runtime != super::component_runtime())
+            && run["isolated"] == true
+        {
+            return Err(Error::conflict(
+                "Saved execution version mismatch; start a new conversation with the current components.",
+            ));
+        }
         Ok(Self {
             run,
             access,
@@ -154,13 +164,15 @@ impl<'a> Request<'a> {
         {
             return false;
         }
-        let ready = (native
-            && node["executionReady"] == true
-            && super::seen_within(node, FRESH_HEARTBEAT_MS))
-            || local_unconfigured
-            || (node["capabilities"]["kvm"] == true
+        let same_version = local_unconfigured || node["runtimeId"] == super::component_runtime();
+        let ready = same_version
+            && ((native
                 && node["executionReady"] == true
-                && super::seen_within(node, FRESH_HEARTBEAT_MS));
+                && super::seen_within(node, FRESH_HEARTBEAT_MS))
+                || local_unconfigured
+                || (node["capabilities"]["kvm"] == true
+                    && node["executionReady"] == true
+                    && super::seen_within(node, FRESH_HEARTBEAT_MS)));
         !node["maintenance"].is_string()
             && !node["exclusiveReservation"].is_object()
             && !(local_unconfigured && run["isolated"] == true)

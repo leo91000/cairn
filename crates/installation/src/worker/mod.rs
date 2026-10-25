@@ -196,7 +196,7 @@ fn restore_after_restart(db: &mut Db<'_>) -> Result<()> {
             let patch = json!({
                 "status": RunStatus::Interrupted,
                 "finishedAt": now(),
-                "summary": "This older run has no restart checkpoint. Review its working files before retrying.",
+                "summary": "This run has no restart checkpoint. Review its working files before retrying.",
             });
             db.patch_run(id, &patch)?;
             continue;

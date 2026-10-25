@@ -95,7 +95,7 @@ data; keep Garage and its directory while disks still use it. Local S3 does not
 protect against losing the machine. Back up the entire installation, including
 Garage, with the services stopped. Never discard volumes containing needed data.
 
-Nonempty `STORAGE_S3_*` or legacy `ARCHIVE_S3_*` overrides remain authoritative;
+Nonempty `STORAGE_S3_*` overrides remain authoritative;
 remove them before editing the default in the app. For an environment-managed R2
 endpoint, set `STORAGE_S3_PRIVATE_BUCKET_CONFIRMED=true` only after checking in the
 Cloudflare dashboard that public domains and bucket locks are disabled. This

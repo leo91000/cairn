@@ -340,11 +340,6 @@ pub fn exhausted(event: &Value) -> bool {
         || EXHAUSTED.is_match(text(error, "message"))
 }
 
-/// Compatibility entrypoint for the legacy Codex exec protocol.
-pub fn args(run: &Value, output: &str, session: Option<&str>) -> Vec<String> {
-    crate::coding_agent::codex_args(run, output, session)
-}
-
 /// The rule that sets chat turns apart from scheduled work.
 pub const INTERACTIVE: &str = "This is an interactive chat. Use native user-input questions when \
     clarification is useful. Nonblocking questions let you continue independent \

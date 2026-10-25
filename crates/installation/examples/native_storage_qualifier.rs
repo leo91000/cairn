@@ -191,7 +191,7 @@ async fn main() -> Result<()> {
     tokio::fs::write(&wrapper, script).await?;
     tokio::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).await?;
     tokio::fs::write(
-        data.join("archive-s3.json"),
+        data.join("storage-s3.json"),
         serde_json::to_vec(&json!({ "bucket": "cairn-node-test", "awsBinary": wrapper }))?,
     )
     .await?;

@@ -1163,6 +1163,11 @@ async fn enroll(s: &Service, body: Value) -> Result<Value> {
     if request.protocol != 1 {
         return Err(Error::conflict("Unsupported node protocol."));
     }
+    if request.runtime_id != component_runtime() {
+        return Err(Error::conflict(
+            "Node version mismatch; deploy manager and nodes at the same version.",
+        ));
+    }
     request.capabilities.validate()?;
     name(&request.name)?;
     let runtime = name(&request.runtime_id)?;
@@ -1177,14 +1182,18 @@ async fn enroll(s: &Service, body: Value) -> Result<Value> {
             let invitation = db
                 .kv(&key)?
                 .ok_or_else(|| Error::unauthorized("Invalid or expired enrollment code."))?;
-            let expected = invitation["backend"].as_str().unwrap_or("firecracker");
+            let expected = invitation["backend"]
+                .as_str()
+                .ok_or_else(|| Error::bad("Missing enrollment backend."))?;
             if request.capabilities.backend != expected {
                 return Err(Error::forbidden(
                     "Enrollment backend differs from the owner's invitation.",
                 ));
             }
-            // Invitations issued before identity tracking remain consumable.
-            let node_id = invitation["nodeId"].as_str().map_or_else(id, str::to_owned);
+            let node_id = invitation["nodeId"]
+                .as_str()
+                .ok_or_else(|| Error::bad("Missing enrollment node identity."))?
+                .to_owned();
             db.delete(&key)?;
             let capabilities = request.capabilities;
             let node = EnrolledNode {
@@ -1219,6 +1228,10 @@ async fn enroll(s: &Service, body: Value) -> Result<Value> {
             }))
         })
         .await
+}
+
+pub(crate) fn component_runtime() -> String {
+    std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into())
 }
 
 /// What the master expects from a node before it may execute conversations.
@@ -1305,6 +1318,11 @@ fn record_heartbeat(
         .get("nodes", &node_id)?
         .filter(|v| v["revoked"] != true)
         .ok_or_else(|| Error::unauthorized("Invalid node identity."))?;
+    if body["runtimeId"] != component_runtime() || body["nodeProtocol"] != 2 {
+        return Err(Error::conflict(
+            "Node/controller version mismatch; deploy all components at the same version.",
+        ));
+    }
     if let Some(runtime) = body.get("runtimeId") {
         node["runtimeId"] = name(runtime.as_str().unwrap_or(""))?.into();
     }
@@ -1367,11 +1385,11 @@ fn record_heartbeat(
 }
 
 fn execution_ready(node: &Value, body: &Value, expected: &Expectations) -> bool {
-    // A node whose update failed keeps running its previous image.
+    // Only the image approved by this manager may execute.
     let current_image = expected
         .image
         .as_ref()
-        .is_none_or(|image| node["imageDigest"] == *image || node["updateError"].is_string());
+        .is_none_or(|image| node["imageDigest"] == *image);
     if crate::native::policy::node_native(node) {
         return native_mode::applied(node)
             && body["executionReady"] == true
@@ -1444,6 +1462,15 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
         .json::<Value>()
         .await
         .map_err(Error::internal)?;
+    if health["runtimeId"] != component_runtime() || health["nodeProtocol"] != 2 {
+        if let Some(mut node) = s.store.get("nodes", LOCAL_NODE_ID).await? {
+            node["executionReady"] = false.into();
+            s.store.put("nodes", node).await?;
+        }
+        return Err(Error::conflict(
+            "Local controller version mismatch; deploy all components at the same version.",
+        ));
+    }
     let capabilities = health["capabilities"].clone();
     if !capabilities.is_object() {
         return Ok(());

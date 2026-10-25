@@ -181,7 +181,6 @@ pub(super) async fn configure_git(
 }
 
 /// Copies the selected skills into the home and points their snapshot at the guest copy.
-/// Runs created before frozen bundles copy the live skill directory.
 async fn install_skills(home: &Path, skills: &Value, config: &Config) -> Result<Vec<Value>> {
     let mut installed = Vec::new();
     for (index, skill) in skills.as_array().into_iter().flatten().enumerate() {
@@ -189,13 +188,7 @@ async fn install_skills(home: &Path, skills: &Value, config: &Config) -> Result<
         let target = home.join(".agents/skills").join(&relative);
         private_dir(target.parent().unwrap()).await?;
         let frozen = recorded_bundle(skill, config).await?;
-        let live = Path::new(text(skill, "path"))
-            .parent()
-            .ok_or_else(|| Error::bad("Invalid selected skill path."))?;
-        copy_tree(frozen.as_deref().unwrap_or(live), &target, true).await?;
-        if frozen.is_none() {
-            atomic_write(&target.join("SKILL.md"), text(skill, "content").as_bytes()).await?;
-        }
+        copy_tree(&frozen, &target, true).await?;
         let mut skill = skill.clone();
         skill["path"] = format!("{GUEST_SKILLS}/{relative}/SKILL.md").into();
         installed.push(skill);
@@ -213,7 +206,8 @@ pub(super) async fn frozen_skills(run: &Value, config: &Config) -> Result<Value>
         Err(error) => return Err(error.into()),
     }
     for (index, skill) in skills.as_array_mut().into_iter().flatten().enumerate() {
-        if let Some(source) = recorded_bundle(skill, config).await? {
+        {
+            let source = recorded_bundle(skill, config).await?;
             let target = root.join(index.to_string()).join(text(skill, "name"));
             private_dir(target.parent().unwrap()).await?;
             copy_tree(&source, &target, true).await?;
@@ -227,11 +221,9 @@ pub(super) async fn frozen_skills(run: &Value, config: &Config) -> Result<Value>
     Ok(skills)
 }
 
-/// A live-directory fallback belongs only to snapshots created before bundles.
-async fn recorded_bundle(skill: &Value, config: &Config) -> Result<Option<std::path::PathBuf>> {
-    let Some(value) = skill.get("bundle") else {
-        return Ok(None);
-    };
+/// Every skill snapshot names its immutable bundle.
+async fn recorded_bundle(skill: &Value, config: &Config) -> Result<std::path::PathBuf> {
+    let value = &skill["bundle"];
     let path = value
         .as_str()
         .and_then(|revision| crate::skills::frozen(config, revision))
@@ -241,7 +233,7 @@ async fn recorded_bundle(skill: &Value, config: &Config) -> Result<Option<std::p
             "The frozen skill bundle recorded by this run is missing.",
         ));
     }
-    Ok(Some(path))
+    Ok(path)
 }
 
 pub(super) struct HomeOptions<'a> {

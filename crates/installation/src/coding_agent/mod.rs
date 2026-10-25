@@ -5,8 +5,6 @@ mod codex;
 pub mod mcp;
 mod opencode;
 
-pub(crate) use codex::args_for_run as codex_args;
-
 use crate::{
     accounts::Lease, config::Config, error::Result, process::Environment, provider::Provider,
     service::Service,
@@ -34,16 +32,6 @@ pub trait ExecutionAdapter: Send + Sync {
     fn configure_environment(&self, env: &mut Environment, home: &Path) {
         self.isolate_environment(env, home);
     }
-
-    fn uses_chat(&self, chat_execution: bool, managed_account: bool) -> bool;
-
-    fn legacy_args(
-        &self,
-        run: &Value,
-        mcp: &Value,
-        output: &str,
-        session: Option<&str>,
-    ) -> Vec<String>;
 
     fn validate_agent(&self, agent: &Value) -> Result<()>;
 

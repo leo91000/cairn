@@ -436,24 +436,8 @@ fn controller_ready(health: &Value) -> bool {
     health["status"] == "ok"
         && health["pool"]["quarantined"] != true
         && health["nodeProtocol"] == NODE_PROTOCOL
+        && health["runtimeId"] == super::component_runtime()
         && health["dataRoot"] == super::node_data_dir().to_string_lossy().as_ref()
-}
-
-/// Older native controllers do not participate in foreground-preemption locks.
-/// They remain executable, but cannot safely share storage with this warmer.
-fn archive_catalog(
-    health: &Value,
-    reply: &Value,
-) -> Result<Option<Vec<crate::project_archives::Archive>>> {
-    if health["projectArchives"] != 1 {
-        return Ok(None);
-    }
-    reply
-        .get("projectArchives")
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(Error::from)
 }
 
 async fn heartbeat(
@@ -469,12 +453,18 @@ async fn heartbeat(
         let started = super::boot_ms();
         let runner = std::env::var("RUNNER_URL").unwrap_or_default();
         let health = local_health(&controller, &runner).await;
+        if health["status"] == "ok"
+            && (health["runtimeId"] != super::component_runtime()
+                || health["nodeProtocol"] != NODE_PROTOCOL)
+        {
+            return Err(Error::conflict(
+                "Controller version mismatch; deploy all components at the same version.",
+            ));
+        }
         let ready = controller_ready(&health);
         let report = HeartbeatRequest {
             image_digest: std::env::var("CAIRN_NODE_IMAGE").ok(),
-            runtime_id: health["runtimeId"]
-                .as_str()
-                .map_or_else(runtime, str::to_owned),
+            runtime_id: super::component_runtime(),
             execution_ready: ready,
             data_root: &health["dataRoot"],
             capabilities: &health["capabilities"],
@@ -529,8 +519,10 @@ async fn heartbeat(
                 }
                 if ready {
                     if let Ok(guard) = archive_warmer.clone().try_lock_owned()
-                        && let Some(descriptors) = archive_catalog(&health, &value)?
+                        && let Some(catalog) = value.get("projectArchives")
                     {
+                        let descriptors: Vec<crate::project_archives::Archive> =
+                            serde_json::from_value(catalog.clone())?;
                         let (client, origin, token, stop) = (
                             client.clone(),
                             origin.clone(),
@@ -663,21 +655,6 @@ mod capacity_tests {
 #[cfg(test)]
 mod origin_tests {
     use super::*;
-
-    #[test]
-    fn legacy_controllers_never_start_archive_warming() {
-        let legacy = serde_json::json!({ "status": "ok", "backend": "native", "nodeProtocol": 2 });
-        let incompatible_catalog =
-            serde_json::json!({ "projectArchives": ["unsupported archive descriptor"] });
-        assert!(
-            super::archive_catalog(&legacy, &incompatible_catalog)
-                .unwrap()
-                .is_none()
-        );
-        let current = serde_json::json!({ "projectArchives": 1 });
-        let reply = serde_json::json!({ "projectArchives": [] });
-        assert!(super::archive_catalog(&current, &reply).unwrap().is_some());
-    }
 
     #[test]
     fn only_the_recorded_manager_origin_relaxes_the_https_rule() {

@@ -330,18 +330,25 @@ async fn incompatible_restored_session_requires_consent_and_never_restarts_on_it
 }
 
 #[tokio::test]
-async fn fresh_session_availability_uses_current_and_legacy_restorations_and_keeps_its_lifetime() {
+async fn fresh_session_availability_uses_restored_runs_and_keeps_its_lifetime() {
     for historical_chat in [false, true] {
         let app = App::new().await;
         let mut chat = app.create_chat().await;
         let run = id();
         chat["runId"] = run.clone().into();
         if historical_chat {
-            chat["restoredAt"] = 10.into();
+            // The restored run is written below.
         }
         app.service.store.put("chats", chat.clone()).await.unwrap();
         app.add_finished_run(&run, RunStatus::Failed, json!({}), "History")
             .await;
+        if historical_chat {
+            app.service
+                .store
+                .patch_run(&run, json!({ "restoredAt": 10 }))
+                .await
+                .unwrap();
+        }
         let path = chat_path(&chat);
         assert_eq!(
             app.get(&path).await.1["canRequestNewSession"],
@@ -537,55 +544,6 @@ async fn previously_trashed_conversations_keep_their_recovery_deadline() {
         .await;
     assert_eq!(status, StatusCode::OK, "{restored}");
     assert_eq!(restored["lifecycle"], "active");
-}
-
-#[tokio::test]
-async fn legacy_conversations_get_stable_slugs_without_changing_activity_or_uuid() {
-    use cairn_installation::store::Store;
-    let root = TempDir::new().unwrap();
-    let store = Store::open(root.path()).unwrap();
-    let chat_id = id();
-    let legacy = json!({ "id": chat_id, "title": "Legacy conversation", "updatedAt": 123 });
-    let record = legacy.clone();
-    store
-        .write(move |db| {
-            db.0.execute(
-                "INSERT INTO records VALUES(?1,'chats',?2,123)",
-                rusqlite::params![record["id"].as_str(), record.to_string()],
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-    drop(store);
-
-    let store = Store::open(root.path()).unwrap();
-    let migrated = store.get("chats", &chat_id).await.unwrap().unwrap();
-    assert_eq!(migrated["id"], legacy["id"]);
-    assert_eq!(migrated["updatedAt"], 123);
-    let timestamp = store
-        .read(|db| {
-            Ok(db.0.query_row(
-                "SELECT updated_at FROM records WHERE kind='chats'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )?)
-        })
-        .await
-        .unwrap();
-    assert_eq!(timestamp, 123);
-    let mut edited = migrated.clone();
-    edited["slug"] = "changed-slug".into();
-    edited["title"] = "Renamed conversation".into();
-    let saved = store.put("chats", edited).await.unwrap();
-    assert_eq!(saved["slug"], migrated["slug"]);
-    drop(store);
-
-    let reopened = Store::open(root.path()).unwrap();
-    assert_eq!(
-        reopened.get("chats", &chat_id).await.unwrap().unwrap()["slug"],
-        migrated["slug"]
-    );
 }
 
 #[tokio::test]
@@ -837,7 +795,7 @@ async fn retention_protects_pending_work_recent_completion_and_worker_finalizati
 }
 
 #[tokio::test]
-async fn expiration_uses_recent_activity_and_legacy_fallback_and_bounds_each_pass() {
+async fn expiration_uses_recorded_activity_and_bounds_each_pass() {
     let app = App::new().await;
     let mut recent = old_chat(&app, 10).await;
     recent["lastActivityAt"] = cairn_installation::config::now().into();
@@ -846,18 +804,12 @@ async fn expiration_uses_recent_activity_and_legacy_fallback_and_bounds_each_pas
         .put("chats", recent.clone())
         .await
         .unwrap();
-    let mut legacy = old_chat(&app, 8).await;
-    legacy.as_object_mut().unwrap().remove("lastActivityAt");
-    app.service
-        .store
-        .put("chats", legacy.clone())
-        .await
-        .unwrap();
+    let expired = old_chat(&app, 8).await;
     let second = old_chat(&app, 8).await;
     app.service.cleanup_conversations().await.unwrap();
     assert_eq!(app.service.store.list("chats").await.unwrap().len(), 2);
     app.service.cleanup_conversations().await.unwrap();
-    assert_eq!(app.get(&chat_path(&legacy)).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(app.get(&chat_path(&expired)).await.0, StatusCode::NOT_FOUND);
     assert_eq!(app.get(&chat_path(&second)).await.0, StatusCode::NOT_FOUND);
     assert_eq!(app.get(&chat_path(&recent)).await.0, StatusCode::OK);
 }

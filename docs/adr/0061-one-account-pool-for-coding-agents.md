@@ -6,9 +6,9 @@ Les autres options étaient de garder deux implémentations parallèles, ce qui 
 
 Conséquences difficiles à inverser :
 
-- Les comptes des deux agents de code sont stockés dans une seule collection. Les anciens comptes Codex et l’ancienne connexion Claude Code y sont migrés au démarrage, une seule fois, et les exécutions référencent leur compte par un identifiant neutre (`accountId`). Revenir à une version antérieure ferait disparaître ces comptes : il faudrait restaurer la sauvegarde prise avant la mise à jour.
-- La session native de Claude Code appartient à l’exécution et non plus au compte : une conversation peut donc reprendre sur un autre compte Claude. Les sessions des anciennes exécutions locales sont copiées dans leur exécution lors de la migration.
-- La remise des identifiants Claude par transfert sérialisé (`sync-required`), antérieure au broker d’accès, est supprimée. Une connexion encore marquée par ce transfert est migrée à l’état « À reconnecter ».
+- Les comptes des deux agents de code sont stockés dans une seule collection. Les exécutions référencent leur compte par un identifiant neutre (`accountId`).
+- La session native de Claude Code appartient à l’exécution et non plus au compte : une conversation peut donc reprendre sur un autre compte Claude.
+- La remise des identifiants Claude par transfert sérialisé (`sync-required`), antérieure au broker d’accès, est supprimée.
 - Les anciennes routes `/api/codex/accounts` et `/api/claude/connection` sont remplacées par `/api/accounts`. Le serveur et l’application Android sont publiés avec la même étiquette.
 
 Voir [les comptes d’agents de code](../AGENT-ACCOUNTS.md).

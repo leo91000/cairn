@@ -9,24 +9,12 @@ const state = process.env.CAIRN_RUNNER_STATE || '/runner-state'
 const data = process.env.DATA_DIR || '/data'
 const db = new DatabaseSync(join(data, 'manager.db'), { readOnly: true })
 const runs = new Map(db.prepare('SELECT id, status, data FROM runs').all().map(row => [row.id, { status: row.status, ...JSON.parse(row.data) }]))
-const chats = new Set(db.prepare('SELECT json_extract(data,\'$.runId\') runId FROM records WHERE kind=\'chats\'').all().map(row => row.runId))
 const allocated = path => statSync(path).blocks * 512
 const disks = []
-const legacy = { count: 0, allocatedBytes: 0, withoutChatBytes: 0 }
 
 for (const id of readdirSync(join(state, 'disks'))) {
   const directory = join(state, 'disks', id)
-  const raw = join(directory, 'data.ext4')
-  if (existsSync(raw)) {
-    const bytes = allocated(raw)
-    legacy.count++
-    legacy.allocatedBytes += bytes
-    if (!chats.has(id))
-      legacy.withoutChatBytes += bytes
-  }
-
-  const segmented = existsSync(join(directory, 'lazy', 'journal-v2.sqlite'))
-  const journal = join(directory, 'lazy', segmented ? 'journal-v2.sqlite' : 'journal.sqlite')
+  const journal = join(directory, 'lazy', 'journal-v2.sqlite')
   if (!existsSync(journal))
     continue
   const disk = new DatabaseSync(journal, { readOnly: true })
@@ -36,8 +24,8 @@ for (const id of readdirSync(join(state, 'disks'))) {
     const base = JSON.parse(manifest)
     // Segmented journal counters come from the controller's live accounting;
     // an offline inventory reports unknown rather than reading private payloads.
-    const dirty = segmented ? { rows: null, bytes: runs.get(id)?.storage?.dirtyBytes ?? null } : disk.prepare('SELECT count(*) rows, coalesce(sum(end-start),0) bytes FROM writes').get()
-    const { since } = segmented ? { since: runs.get(id)?.storage?.dirtySince ?? null } : disk.prepare('SELECT min(written_at) since FROM epochs').get()
+    const dirty = { rows: null, bytes: runs.get(id)?.storage?.dirtyBytes ?? null }
+    const { since } = { since: runs.get(id)?.storage?.dirtySince ?? null }
     const free = disk.prepare('PRAGMA freelist_count').get().freelist_count * disk.prepare('PRAGMA page_size').get().page_size
     const autoVacuum = disk.prepare('PRAGMA auto_vacuum').get().auto_vacuum
     disk.exec('ROLLBACK')
@@ -78,7 +66,7 @@ for (const id of readdirSync(join(state, 'disks'))) {
       cacheBytes,
       journalFreeBytes: free,
       autoVacuum,
-      journalFormat: segmented ? 'segments-v2' : 'sqlite-blobs',
+      journalFormat: 'segments-v2',
       generation,
       dirtyBytes: dirty.bytes,
       journalRows: dirty.rows,
@@ -95,7 +83,6 @@ for (const id of readdirSync(join(state, 'disks'))) {
 db.close()
 console.log(JSON.stringify({
   capturedAt: new Date().toISOString(),
-  legacy,
   onDemand: {
     count: disks.length,
     allocatedBytes: disks.reduce((sum, disk) => sum + disk.journalBytes + disk.cacheBytes, 0),
