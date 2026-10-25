@@ -1,3 +1,5 @@
+> Statut : Remplacée par [ADR-0054](0054-explicit-conversation-backend-migration.md) pour l’interdiction de conversion native/VM ; le stockage ublk natif reste applicable.
+
 # Native workspaces use the VM journal through host ublk
 
 Native Linux execution keeps its host drivers and systemd process boundary. Its

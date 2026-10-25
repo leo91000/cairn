@@ -1,3 +1,5 @@
+> Statut : Remplacée par [ADR-0055](0055-ublk-only-vm-storage.md) pour le transport optionnel et le défaut vhost-user ; le choix VMGenID est conservé.
+
 # Transport ublk optionnel et VMGenID
 
 Date : 2026-10-02. Statut : livré et vérifié dans v0.52.4 (`fa4052b`).

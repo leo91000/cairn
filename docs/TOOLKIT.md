@@ -72,8 +72,7 @@ exact toolkit manifest and build time.
 Installations follow the approved paired release through their host updater,
 which retains the deployment lease, runtime verification and rollback. Tools
 never update themselves inside a running agent process. See
-[tool versions and retired standalone updates](CLI-UPDATES.md) for the retained
-CI command and operator instructions for old dispatch timers, and the
+[tool versions](CLI-UPDATES.md) for the CI command, and the
 [production runbook](PRODUCTION-CAIRN.md) for the supported release path.
 
 References: [mise system installs](https://mise.jdx.dev/mise-cookbook/docker.html),

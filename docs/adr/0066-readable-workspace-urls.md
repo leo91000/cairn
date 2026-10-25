@@ -71,9 +71,3 @@ Un retour au mode désactivé retire le cookie partagé au profit du cookie limi
 à l’hôte, sans changer la session serveur. Les anciens liens par sous-domaine
 redirigent vers les chemins canoniques si le DNS et le proxy wildcard sont
 conservés. Les brouillons restent dans leur stockage navigateur d’origine.
-
-## Mesures
-
-Voir [les mesures locales](../READABLE-SLUG-MEASUREMENTS.md) pour le coût des
-champs et index ajoutés au stockage. Ces mesures ne représentent pas la latence
-réseau d’une installation en production.

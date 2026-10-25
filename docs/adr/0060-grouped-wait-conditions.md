@@ -2,7 +2,7 @@
 
 Date: 2026-10-24.
 
-Extends [durable condition waits](0038-durable-condition-waits.md).
+Extends [durable condition waits](0067-durable-condition-waits.md).
 
 ## Context
 

@@ -95,5 +95,5 @@ cet identifiant orphelin faisait échouer l’enregistrement suivant de la node.
   1Password ce que voit le compte, et crée un autre compte pour d’autres droits.
 - Les délégations externes restent choisies sur l’instance (quel agent répond aux
   personnes). La page de l’agent les montre et propose leur réapprobation.
-- Les comptes d’agent de code restent un pool partagé (ADR 0002) : la page l’indique
+- Les comptes d’agent de code restent un pool partagé ([ADR-0061](0061-one-account-pool-for-coding-agents.md)) : la page l’indique
   sans créer de droit.

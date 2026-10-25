@@ -125,7 +125,7 @@ Every plugin uses the same connection model: name, settings, optional credential
 (encrypted in the vault), and, when the package can start conversations, an owner
 delegation: the agent that answers, the people allowed (listed, approved as they ask,
 or anyone), and an hourly message limit. Any agent can answer
-([ADR-0059](adr/0059-owner-chosen-agents-for-bot-delegation.md)); the setup assistant
+([ADR-0068](adr/0068-owner-chosen-agents-for-bot-delegation.md)); the setup assistant
 warns when it can manage the installation or open several projects, and, for anyone,
 when it can also write, run commands or use MCP connections or plugins (GitHub,
 1Password…). The agent must be able to open the delegation's project. “Anyone” is
@@ -565,8 +565,7 @@ a `message/rfc822` handle and its `messageId`. `messageKey` produces a determini
 Message-ID scoped to the instance, useful for reconciling uncertain sends.
 `contentDigest` hashes the stable composition input and the actual attachment
 bytes, excluding generated MIME boundaries and dates. A changed attachment cannot
-silently replay an earlier send receipt. Local byte/I/O/CPU measurements and their
-limits are recorded in [the transfer measurements](PLUGIN-TRANSFER-MEASUREMENTS.md).
+silently replay an earlier send receipt.
 
 The run-local CLI transfers conversation files with any approved files-capable
 package: `cairn plugin PACKAGE --upload INSTANCE PATH`, `--download INSTANCE HANDLE
@@ -851,10 +850,6 @@ records its output. Already delivered secrets cannot be revoked.
 The CLI expects an active conversation VM with the current Cairn binary and guest
 channel; VMs started by an earlier binary must restart to use it. Non-VM development
 commands do not acquire a new manager network route.
-
-Existing 1Password accounts migrate to plugin instances at startup. This is a data
-compatibility break (epoch 2); follow the [migration and rollback plan](PLUGIN-V2-MIGRATION.md)
-before deploying the first plugin API v2 release.
 
 ## GitHub
 

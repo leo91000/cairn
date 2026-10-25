@@ -42,6 +42,8 @@ replacement. Do not delete `rotation.json` to retry. Claim and rotation share an
 exclusive machine lock. A pending rotation from a different identity generation
 is refused; back it up before recovering that installation.
 
+### Revoke and reclaim
+
 The owner can instead choose **Revoke and forget installation** in the beacon
 app, including for an offline or orphaned installation. Confirmation permanently
 invalidates the machine credential and recovery proofs, removes sharing and the
@@ -111,11 +113,13 @@ file is saved, detach in the app and retry with that file to recover the same ID
 This proof remains solely for reclamation of an unowned record; it cannot connect
 while unclaimed. Successful reclamation rotates it and keeps the same ID.
 
-For deployment migration, interrupted claims and recovery after losing the
-private identity file, follow [DEPLOYMENT.md](DEPLOYMENT.md). Execution nodes
-keep their own node credentials on every request, whatever path carries them.
+For interrupted CLI claims, follow [fallback claim and detachment](#fallback-claim-and-detachment).
+If the private identity file is lost, follow [revoke and reclaim](#revoke-and-reclaim).
+For Compose setup, see [manual Compose claim](DEPLOYMENT.md#manual-compose-claim).
+
+Execution nodes keep their own node credentials on every request, whatever path carries them.
 Beacon introduces a node enrolled without an address to its manager (protocol 5,
-[ADR-0059](adr/0059-nodes-introduced-by-beacon.md)):
+[ADR-0069](adr/0069-nodes-introduced-by-beacon.md)):
 
 - **Direct.** The node's gateway posts a complete WebRTC offer to
   `/api/relay/{installation}/nodes/direct`. Beacon sends `NodeOffer { id, sdp,

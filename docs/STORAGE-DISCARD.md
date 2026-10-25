@@ -3,8 +3,7 @@
 Cairn propagates guest ext4 FITRIM through native virtio-blk Async and managed ublk.
 The guest filesystem decides which extents are free. No controller mounts a
 conversation filesystem, infers free ranges from a partial cache or overwrites
-allocated files. This implements the discard recommendation from
-[the storage follow-up study](STORAGE-FOLLOWUP.md).
+allocated files.
 
 ## Storage and durability
 
@@ -135,22 +134,6 @@ it does not resurrect discarded bytes, which were already free in ext4.
 
 ## Reproduction and evidence
 
-Native storage/codec comparison, isolated from live agent credentials:
-
-The standalone measurement probe has been retired.
-
-It alternates three reference and three discard trials over the same 64 MiB
-controlled data: sixteen unique 4 MiB regions, each half seeded random and half
-repeated. The operation discards eight whole regions and the random halves of
-four more. Every surviving byte and zero manifest extent is verified. Output
-includes current unique encoded bytes, physical/logical journal bytes, write,
-trim and publication CPU/latency, and cold/warm 4 KiB read measurements. Thirty-two
-non-overlapping foreground write/read pairs start concurrently with maintenance
-to record foreground contention against the disabled reference; concurrent CPU
-measurements include all process threads and must not be added together. Cold reads
-empty decoded caches and execute the real authenticated codec; encoded objects
-are in memory. This excludes S3, HTTP, VM overhead and production workload mix.
-
 Native Firecracker regression tests require working host io_uring, rather than
 silently skipping it in a container build sandbox:
 
@@ -183,21 +166,3 @@ workflow are both required for this change's review evidence. Reproducible
 measurement JSON and host conditions belong with the PR/release reference;
 controlled gains are not a forecast for the whole production bucket.
 
-Real native guest qualification, on a disposable private directory with KVM and
-ublk available (root, Debian Python 3.11, busybox-static and e2fsprogs required):
-
-The standalone measurement probe has been retired.
-
-Use the exact musl binary/kernel/control disk from the built candidate image;
-provide the historical init explicitly when the checkout no longer has it at
-HEAD. The harness checks flat and paired retained guests, holds a real backend
-discard pending for at least two seconds, requires GET and pause/resume responses
-within one second, then releases it and verifies retained files and completed
-FITRIM on both mounts. It verifies kernel-device and private-registry removal
-before deleting fixtures. The retired standalone probe supported only private fixture markers
-`METRICS.discard-hold` and `METRICS.discard-entered`; managed-stop also releases a
-held fixture request. This opt-in fault injection is absent from production code.
-The harness also requires the ublk device to advertise host WRITE_ZEROES, the
-Linux block-device ABI used by Async hole punching. The qualification measures
-responsiveness during a controlled stall, not normal
-read/write latency or S3 performance.

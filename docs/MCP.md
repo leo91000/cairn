@@ -149,7 +149,7 @@ run's revocable grant. This delegates management across the entire installation,
 including other agents and their work, even when the caller's direct resource
 access is restricted. It requires no external OAuth connection or personal token.
 Disabling the option, ending or cancelling the execution, or changing its chat
-turn invalidates the access. See [the installation-access decision](adr/0036-opt-in-installation-tools-for-agents.md).
+turn invalidates the access. See [the installation-access decision](adr/0064-opt-in-installation-tools-for-agents.md).
 
 An agent with **Task delegation** also finds `delegate_task`, `task_status` and
 `task_cancel` on `cairn_workspace` in conversations it did not receive as a
