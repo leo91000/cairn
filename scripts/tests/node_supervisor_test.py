@@ -47,14 +47,14 @@ elif args[0]=='stop':
 
 
 class Supervisor(unittest.TestCase):
-    def test_snapshot_options_survive_launch_and_can_be_disabled_without_changing_layout(self):
+    def test_ready_pool_options_survive_launch(self):
         spec = importlib.util.spec_from_file_location('node_supervisor', SOURCE)
         host = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(host)
         self.assertEqual(host.vm_arguments({}), [])
         self.assertEqual(host.vm_arguments({'readyVmPool': False}), ['-e', 'CAIRN_READY_VM_POOL=false'])
-        config = {'blockTransport': 'ublk', 'vmSnapshots': True}
-        self.assertEqual(host.vm_arguments(config), ['-e', 'CAIRN_DISK_LAYOUT=paired-ext4-v1', '-e', 'CAIRN_VM_SNAPSHOTS=true'])
+        config = {}
+        self.assertEqual(host.vm_arguments(config), [])
         config['readyVmPoolSize'] = 4
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -64,21 +64,18 @@ class Supervisor(unittest.TestCase):
             with patch.object(host, 'ROOT', root), patch.object(host, 'remove'), patch.object(host, 'block_device_arguments', return_value=[]), patch.object(host, 'command') as command:
                 host.launch(NEW)
             launch = command.call_args_list[0].args[0]
-            self.assertIn('CAIRN_DISK_LAYOUT=paired-ext4-v1', launch)
-            self.assertIn('CAIRN_VM_SNAPSHOTS=true', launch)
             self.assertIn('CAIRN_READY_VM_POOL_SIZE=4', launch)
             self.assertIn('--cap-add=SYS_PTRACE', launch)
             self.assertIn('--cap-add=SYS_NICE', launch)
             self.assertIn('--cap-drop=ALL', launch)
             self.assertNotIn('--privileged', launch)
-        config.update({'vmSnapshots': False, 'diskLayout': 'paired-ext4-v1'})
-        self.assertEqual(host.vm_arguments(config), ['-e', 'CAIRN_READY_VM_POOL_SIZE=4', '-e', 'CAIRN_DISK_LAYOUT=paired-ext4-v1', '-e', 'CAIRN_VM_SNAPSHOTS=false'])
+        self.assertEqual(host.vm_arguments(config), ['-e', 'CAIRN_READY_VM_POOL_SIZE=4'])
 
-    def test_incompatible_snapshot_configuration_never_removes_the_running_node(self):
+    def test_invalid_pool_configuration_never_removes_the_running_node(self):
         spec = importlib.util.spec_from_file_location('node_supervisor', SOURCE)
         host = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(host)
-        for config in [{'readyVmPoolSize': value} for value in [0, 5, True, '4', 1.5]] + [ {'vmSnapshots': 'true'}, {'vmSnapshots': 1}, {'diskLayout': 'invalid'}, {'blockTransport': 'ublk', 'vmSnapshots': True, 'diskLayout': 'flat-ext4-v1'}]:
+        for config in [{'readyVmPoolSize': value} for value in [0, 5, True, '4', 1.5]]:
             with self.subTest(config=config), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 (root / 'config.json').write_text(json.dumps(config))
@@ -98,20 +95,18 @@ class Supervisor(unittest.TestCase):
             return '0' if path.name == 'io_uring_disabled' else devices
 
         with patch.object(host, 'command') as command, patch.object(Path, 'is_dir', return_value=False), patch.object(Path, 'stat', return_value=control), patch.object(Path, 'read_text', read):
-            arguments = host.block_device_arguments('ublk')
+            arguments = host.block_device_arguments()
         self.assertEqual(command.call_args.args[0], ['modprobe', 'ublk_drv'])
-        self.assertEqual(arguments, ['--cap-add=SYS_RESOURCE', '--device=/dev/ublk-control', '--device-cgroup-rule=c 507:* rwm', '--device-cgroup-rule=b 260:* rwm', '-e', 'CAIRN_BLOCK_TRANSPORT=ublk'])
+        self.assertEqual(arguments, ['--cap-add=SYS_RESOURCE', '--device=/dev/ublk-control', '--device-cgroup-rule=c 507:* rwm', '--device-cgroup-rule=b 260:* rwm'])
         with patch.object(host, 'command'), patch.object(Path, 'stat', return_value=control), patch.object(Path, 'read_text', lambda path: '0' if path.name == 'io_uring_disabled' else devices):
-            self.assertEqual(host.block_device_arguments('vhost-user'), arguments)
+            self.assertEqual(host.block_device_arguments(), arguments)
 
         with patch.object(host, 'command'), patch.object(Path, 'stat', return_value=control), patch.object(Path, 'read_text', lambda path: '2' if path.name == 'io_uring_disabled' else devices):
             with self.assertRaisesRegex(RuntimeError, 'requires io_uring'):
-                host.block_device_arguments('ublk')
+                host.block_device_arguments()
         with patch.object(host, 'command'), patch.object(Path, 'stat', return_value=control), patch.object(Path, 'read_text', return_value=''):
             with self.assertRaisesRegex(RuntimeError, 'Missing ublk device classes'):
-                host.block_device_arguments('ublk')
-        with self.assertRaisesRegex(ValueError, 'Unsupported block transport'):
-            host.block_device_arguments('unknown')
+                host.block_device_arguments()
 
     def test_loaded_ublk_does_not_require_the_running_kernels_module_files(self):
         spec = importlib.util.spec_from_file_location('node_supervisor', SOURCE)
@@ -124,7 +119,7 @@ class Supervisor(unittest.TestCase):
             return '0' if path.name == 'io_uring_disabled' else devices
 
         with patch.object(host, 'command', side_effect=RuntimeError('Running kernel modules were upgraded')) as command, patch.object(Path, 'is_dir', return_value=True), patch.object(Path, 'stat', return_value=control), patch.object(Path, 'read_text', read):
-            arguments = host.block_device_arguments('ublk')
+            arguments = host.block_device_arguments()
 
         command.assert_not_called()
         self.assertIn('--device=/dev/ublk-control', arguments)

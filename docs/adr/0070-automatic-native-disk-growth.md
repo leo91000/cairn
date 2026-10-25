@@ -1,3 +1,5 @@
+> Statut : La mention des disques paired est obsolète : ce layout non déployé est supprimé. L’agrandissement natif reste applicable.
+
 # Automatic bounded native disk growth
 
 Date: 2026-10-24.

@@ -82,7 +82,7 @@ impl Drop for LazyDisk {
 }
 
 fn validate(manifest: &Value) -> io::Result<u64> {
-    let layout = super::layout::Layout::from_manifest(manifest)?;
+    super::layout::validate(manifest)?;
     let size = manifest["size"]
         .as_u64()
         .filter(|s| *s > 0 && *s <= 1 << 40)
@@ -90,7 +90,7 @@ fn validate(manifest: &Value) -> io::Result<u64> {
     let blocks = manifest["blocks"]
         .as_array()
         .ok_or_else(|| failure("Missing disk blocks"))?;
-    if manifest["version"] != layout.manifest_version()
+    if manifest["version"] != 1
         || manifest["blockSize"] != BLOCK
         || blocks.len() as u64 != size.div_ceil(BLOCK)
     {
@@ -110,11 +110,6 @@ fn validate(manifest: &Value) -> io::Result<u64> {
 }
 
 impl LazyDisk {
-    pub fn layout(&self) -> io::Result<super::layout::Layout> {
-        let manifest = self.base.lock().map_err(failure)?;
-        super::layout::Layout::from_manifest(&manifest)
-    }
-
     pub(crate) fn has_remote_base(&self) -> io::Result<bool> {
         let base = self.base.lock().map_err(failure)?;
         Ok(base["blocks"]
@@ -341,7 +336,7 @@ impl LazyDisk {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Ok(bytes);
         }
-        // Concurrent FUSE readers and snapshot reconstruction may need the same
+        // Concurrent disk readers and snapshot reconstruction may need the same
         // cold block. Hold only its lock across I/O; unrelated blocks stay parallel.
         let fetching = self.blocks.fetching(hash, &self.source)?;
         let _fetching = fetching.lock().map_err(failure)?;

@@ -530,10 +530,6 @@ async fn exercise_vm_control(case: ControlScenario) {
 
 #[tokio::test]
 async fn restore_does_not_replace_a_journal_still_in_use() {
-    if !Path::new("/dev/fuse").exists() {
-        eprintln!("skipping on-demand controller restore: /dev/fuse is unavailable");
-        return;
-    }
     let root = TempDir::new().unwrap();
     let run = id();
     let directory = root.path().join("disks").join(&run);

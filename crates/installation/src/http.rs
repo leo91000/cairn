@@ -295,11 +295,6 @@ fn rate_limit(app: &App, subject: &RateLimitSubject, method: &str, path: &str) -
     Ok(())
 }
 
-fn development_origin(origin: &str) -> bool {
-    std::env::var("NODE_ENV").unwrap_or_default() != "production"
-        && ["http://localhost:5178", "http://127.0.0.1:5178"].contains(&origin)
-}
-
 fn check_security(
     app: &App,
     headers: &HeaderMap,
@@ -327,10 +322,7 @@ fn check_security(
         return Err(Error::forbidden("Unexpected host."));
     }
     let requested = header(headers, "origin");
-    if !requested.is_empty()
-        && requested != app.service.config.public_url
-        && !development_origin(requested)
-    {
+    if !requested.is_empty() && requested != app.service.config.public_url {
         return Err(Error::forbidden("Unexpected origin."));
     }
     rate_limit(app, subject, method, path)?;

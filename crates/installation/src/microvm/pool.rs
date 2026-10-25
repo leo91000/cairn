@@ -170,7 +170,6 @@ pub struct Pool {
     stop: CancellationToken,
     cleanup: TaskTracker,
     _block_cache: crate::storage::NodeBlockCache,
-    templates: super::vm::snapshots::Templates,
 }
 
 impl Pool {
@@ -210,7 +209,6 @@ impl Pool {
         private_dir(&entrypoint).await?;
         tokio::fs::copy(std::env::current_exe()?, entrypoint.join("cairn")).await?;
         let block_cache = crate::storage::NodeBlockCache::new(&state)?;
-        let templates = super::vm::snapshots::Templates::new(&state, &image).await?;
         Ok(Arc::new(Self {
             exclusive: AtomicBool::new(false),
             quarantined: AtomicBool::new(false),
@@ -229,7 +227,6 @@ impl Pool {
             stop,
             cleanup: TaskTracker::new(),
             _block_cache: block_cache,
-            templates,
         }))
     }
 
@@ -857,17 +854,6 @@ impl Reservation {
             "diskMiB": DEFAULT_DISK_MIB,
         });
         let operation = async {
-            self.vm_in_flight = true;
-            let prepared = self
-                .pool
-                .templates
-                .prepare(&directory, self.slot, &stop, &resources, &policy)
-                .await;
-            self.vm_in_flight = false;
-            if let Some(vm) = prepared? {
-                self.vm = Some(vm);
-                return Ok(true);
-            }
             crate::storage::bootstrap::prepare_unassigned(
                 &directory,
                 DEFAULT_DISK_MIB * 1_048_576,
@@ -993,41 +979,6 @@ impl Reservation {
                 let _ = socket.set(vm.socket.clone());
                 timing.finish();
                 return vm.execute(&plan, &self.pool.state, stop.clone()).await;
-            }
-            if self.prepared.is_none()
-                && disk_mib == DEFAULT_DISK_MIB
-                && let Some(budget) = &budget
-                && ready::eligible(&plan).await?
-                && ready::fresh_disk(&self.pool.state, plan.run_id()).await?
-            {
-                let directory = self
-                    .pool
-                    .state
-                    .join("environments")
-                    .join(crate::config::id());
-                let policy = crate::storage::policy::Policy::for_node(&plan.storage()["policy"])?;
-                self.anonymous = Some(directory.clone());
-                self.vm_in_flight = true;
-                let restored = self
-                    .pool
-                    .templates
-                    .restore_cached(
-                        &directory,
-                        self.slot,
-                        &stop,
-                        plan.resources().unwrap(),
-                        &policy,
-                    )
-                    .await;
-                self.vm_in_flight = false;
-                if let Some(vm) = restored? {
-                    self.vm = Some(vm);
-                    self.prepared = Some(ready::Prepared {
-                        budget: budget.clone(),
-                    });
-                } else {
-                    self.anonymous = None;
-                }
             }
             let compatible = self.prepared.as_ref().is_some_and(|prepared| {
                 budget

@@ -698,9 +698,7 @@ mod tests {
                 "meanUs": values.iter().sum::<f64>() / values.len() as f64,
             })
         }
-        let parent = std::env::var_os("CAIRN_MEASUREMENT_DIR")
-            .map_or_else(std::env::temp_dir, PathBuf::from);
-        let root = tempfile::tempdir_in(parent).unwrap();
+        let root = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
         std::fs::write(
             root.path().join("native-accounting.json"),

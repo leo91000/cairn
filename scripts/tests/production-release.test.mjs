@@ -277,7 +277,7 @@ describe('production release', () => {
     expect(workflow.jobs.deploy.concurrency['cancel-in-progress']).toBe(false)
     const quality = workflow.jobs.backend.steps.map(step => step.run ?? '').join('\n')
     expect(quality).toContain('set -o pipefail')
-    expect(quality).toContain('node scripts/test-backend.mjs --nextest --features ublk-prototype --test-threads 8 --no-fail-fast --color never --status-level pass 2>&1 | tee backend-tests.log')
+    expect(quality).toContain('node scripts/test-backend.mjs --nextest --test-threads 8 --no-fail-fast --color never --status-level pass 2>&1 | tee backend-tests.log')
     expect(quality.indexOf('qualify backend-tests.log')).toBeGreaterThan(quality.indexOf('tee backend-tests.log'))
   })
 })

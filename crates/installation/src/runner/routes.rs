@@ -170,10 +170,6 @@ async fn storage_policy(broker: &Broker, request: Request) -> Result<Response> {
     let bytes = body(request, 16384, "Invalid storage policy.").await?;
     let policy: crate::storage::policy::Policy = serde_json::from_slice(&bytes)?;
     policy.validate()?;
-    let state = broker.state.clone();
-    tokio::task::spawn_blocking(move || crate::storage::fuse::probe(&state))
-        .await
-        .map_err(Error::internal)??;
     crate::skills::atomic_write(
         &broker.state.join("storage-policy.json"),
         &serde_json::to_vec(&policy)?,

@@ -409,7 +409,6 @@ test('native enrollment requires explicit people and native agent grants', async
     memoryMiB: 16384,
     diskMiB: 65536,
     kvm: false,
-    fuse: false,
   }
   // A native agent already runs on another native machine.
   const laptopInvitation = await workspace.api('/api/nodes/enrollments', 'POST', { name: 'Native laptop', backend: 'native' })
@@ -617,7 +616,6 @@ test('switching a machine to native enrolls it again and retires the previous no
     ...machine,
     backend: 'native',
     kvm: false,
-    fuse: false,
   })
   await page.waitForResponse(async response => response.request().method() === 'GET'
     && new URL(response.url()).pathname.endsWith('/api/nodes')
@@ -629,7 +627,6 @@ test('switching a machine to native enrolls it again and retires the previous no
     ...machine,
     backend: 'native',
     kvm: false,
-    fuse: false,
   })
 
   // The new runtime is configured and offered agents first, then the previous node can be retired.

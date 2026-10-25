@@ -69,7 +69,7 @@ The standard release profile uses ThinLTO, one codegen unit and stripped debug
 information. Build with the pinned tools:
 
 ```sh
-cargo build --locked --release --bin cairn --features ublk --timings
+cargo build --locked --release --bin cairn --timings
 ```
 
 Compare the same source, toolchain, features and CPU conditions, and keep cold

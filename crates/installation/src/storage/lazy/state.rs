@@ -31,12 +31,9 @@ fn stored_manifest(directory: &Path, timeout: std::time::Duration) -> io::Result
 impl LazyDisk {
     /// Bootstrap only needs geometry when no resize/recovery is pending. The
     /// subsequent mounted Volume still performs the complete integrity scan.
-    pub(crate) fn geometry(directory: &Path) -> io::Result<(u64, super::super::layout::Layout)> {
+    pub(crate) fn geometry(directory: &Path) -> io::Result<u64> {
         let manifest = stored_manifest(directory, std::time::Duration::from_secs(5))?;
-        Ok((
-            manifest["size"].as_u64().unwrap(),
-            super::super::layout::Layout::from_manifest(&manifest)?,
-        ))
+        Ok(manifest["size"].as_u64().unwrap())
     }
 
     /// Conservative local backing: only exclusively allocated decoded cache

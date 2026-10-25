@@ -313,7 +313,6 @@ impl Fixture {
                 "diskMiB": 100000,
                 "diskTotalMiB": 100000,
                 "kvm": false,
-                "fuse": false,
             },
             "limits": { "cpu": 2, "memoryMiB": 4096, "diskMiB": 32768 },
             "slots": 1,
@@ -971,7 +970,6 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
         let mut node = f.node.clone();
         node["capabilities"]["backend"] = backend.into();
         node["capabilities"]["kvm"] = (!native).into();
-        node["capabilities"]["fuse"] = (!native).into();
         f.service.store.put("nodes", node.clone()).await.unwrap();
         let mut agent = f.agent.clone();
         agent["access"]["backend"] = backend.into();
@@ -1024,14 +1022,11 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
         if changed_backend {
             node["capabilities"]["backend"] = "firecracker".into();
             node["capabilities"]["kvm"] = true.into();
-            node["capabilities"]["fuse"] = true.into();
-        } else if !native {
-            node["capabilities"]["fuse"] = false.into();
         }
         f.service.store.put("nodes", node).await.unwrap();
         let attempt = id();
         let claimed = placement::reserve(&f.service, &resumed, &attempt).await;
-        let succeeds = native && !changed_backend;
+        let succeeds = !changed_backend;
         if succeeds {
             let claimed = claimed.unwrap();
             assert_eq!(claimed["nodeId"], f.node["id"]);
@@ -1049,14 +1044,7 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
         } else {
             let error = claimed.unwrap_err();
             assert_eq!(error.status, 409);
-            assert_eq!(
-                error.message,
-                if changed_backend {
-                    "Destination execution backend changed."
-                } else {
-                    "Destination no longer supports on-demand disks."
-                }
-            );
+            assert_eq!(error.message, "Destination execution backend changed.");
             assert!(
                 f.service
                     .store
@@ -1631,7 +1619,6 @@ async fn parent_node_grant_reductions_revoke_existing_native_delegation() {
         node["id"] = node_id.clone().into();
         node["capabilities"]["backend"] = "firecracker".into();
         node["capabilities"]["kvm"] = true.into();
-        node["capabilities"]["fuse"] = true.into();
         f.service.store.put("nodes", node).await.unwrap();
     }
     let agent = f
