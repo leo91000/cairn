@@ -527,10 +527,10 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       usageLimits = []
     }
 
-    // The engine's retries and usage limit belong to the run that reported them. A run that ends
-    // before its turn completes, stopped or failed by the runner, ends its retries unrecovered; a
-    // later run reports its own limit.
-    if (event.type === 'runner.failed' || (event.type === 'status' && terminalStatuses.has(event.text))) {
+    // The engine's retries and usage limit belong to the execution that reported them. One that
+    // ends before its turn completes, stopped or failed by the runner, ends its retries
+    // unrecovered; a later execution, perhaps on another account, reports its own limit.
+    if (event.type === 'runner.failed' || (event.type === 'status' && (terminalStatuses.has(event.text) || data.attempt === true))) {
       for (const notice of [...engineRetries, ...usageLimits])
         notice.attention = false
       engineRetries = []

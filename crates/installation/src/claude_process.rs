@@ -26,8 +26,6 @@ use tokio_util::sync::CancellationToken;
 const STOPPED: &str = "Claude execution stopped.";
 const MAX_LINE: usize = 32_000_000;
 const MAX_IMAGE: usize = 10_000_000;
-/// Claude Code's notices are status lines; a longer one is cut.
-const NOTICE_LIMIT: usize = 4_000;
 
 const DENIED: &str =
     "This tool is outside the agent's access policy. Ask the user in your response.";
@@ -693,7 +691,7 @@ impl Turn<'_> {
             level @ ("info" | "notice" | "suggestion" | "warning") => level,
             _ => "notice",
         };
-        let message = &message[..message.floor_char_boundary(NOTICE_LIMIT)];
+        // The worker cuts a long notice once it is redacted.
         let mut notice = json!({ "type": "engine.notice", "level": level, "message": message });
         if value["prevent_continuation"] == true {
             notice["stopsTurn"] = true.into();
@@ -1066,14 +1064,18 @@ impl Turn<'_> {
     /// by Claude Code itself. It keeps its task ID, but this execution never saw the tool use that
     /// started it, so it shows as a new row marked resumed. Its run names the SendMessage call,
     /// or, when Claude Code resumed it, the earlier execution's call that started it, or none.
-    /// Another tool use of this execution, such as a workflow's, starts its own agents.
+    /// Another tool use of this execution, such as a workflow's, starts its own agents. A call
+    /// this execution never made only names a resumed subagent the agent itself started: a nested
+    /// agent may start from work this execution does not see.
     async fn subagent_resumed(&mut self, value: &Value) -> Result<()> {
         let task = text(value, "task_id");
         let tool_use = text(value, "tool_use_id");
-        let resumes = self
-            .called
-            .get(tool_use)
-            .is_none_or(|tool| tool == "SendMessage");
+        let top_level = text(value, "parent_task_id").is_empty()
+            && value["spawn_depth"].as_u64().is_none_or(|depth| depth <= 1);
+        let resumes = match self.called.get(tool_use) {
+            Some(tool) => tool == "SendMessage",
+            None => tool_use.is_empty() || top_level,
+        };
         // Housekeeping agents Claude Code starts itself stay out of the transcript.
         if value["subtype"] != "task_started"
             || value["task_type"] != "local_agent"

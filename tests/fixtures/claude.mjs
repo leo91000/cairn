@@ -666,12 +666,23 @@ else {
         description: 'Finish the migration',
         subagent_type: 'general-purpose',
         is_backgrounded: true,
+        spawn_depth: 1,
         task_type: 'local_agent',
       })
       out({
         type: 'assistant',
         parent_tool_use_id: 'agent-earlier',
         message: { id: 'orphan-1', content: [{ type: 'text', text: 'Migration done.' }] },
+      })
+      // Nor is an agent a subagent starts from work this execution does not see.
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-unseen',
+        tool_use_id: 'unseen-call',
+        description: 'Nested work',
+        spawn_depth: 2,
+        task_type: 'local_agent',
       })
       // Nor is a housekeeping agent Claude Code starts itself.
       out({

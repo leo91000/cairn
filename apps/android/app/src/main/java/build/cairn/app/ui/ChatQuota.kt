@@ -63,10 +63,12 @@ internal fun chatQuota(run: Run?, events: List<RunEvent>): ChatQuota? {
         }
         val failure = quotaFailure(event)
         if (failure.isNotEmpty()) {
-            failureMessage = failure
-            failureReset =
+            // The runner repeats the engine's failure without its reset.
+            val reset =
                 (event.activityData()?.get("error").asObject()?.get("resetsAt") as? JsonPrimitive)
                     ?.longOrNull
+            failureReset = reset ?: failureReset.takeIf { failure == failureMessage }
+            failureMessage = failure
         }
     }
     val exhausted =

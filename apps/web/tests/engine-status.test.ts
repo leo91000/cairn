@@ -149,8 +149,9 @@ describe('engine status', () => {
     expect(notices([reset(Date.now() - 60_000)])).toEqual([])
     expect(notices([reset(Date.now() + 3_600_000)]).map(notice => notice.title)).toEqual(['Approaching the 5-hour limit'])
 
-    // A limit belongs to the run that reported it: a later run reports its own.
-    for (const end of [[event('turn.completed'), status('succeeded')], [status('cancelled')]])
+    // A limit belongs to the execution that reported it: a later one reports its own.
+    const attempt = { ...event('status', { attempt: true }), text: 'Preparing workspace' }
+    for (const end of [[event('turn.completed'), status('succeeded')], [status('cancelled')], [attempt]])
       expect(notices([warning, step(), ...end]).map(notice => notice.title)).not.toContain('Approaching the 5-hour limit')
 
     const blocked = limit('rejected', true)
@@ -176,5 +177,14 @@ describe('engine status', () => {
     } as Run
     const failed = event('turn.failed', { error: { message, code: 'usage_limit_reached', resetsAt } })
     expect(chatQuota(run, [failed])).toMatchObject({ message, reset: limitReset(resetsAt) })
+
+    // The runner repeats the failure without its reset, in wording the banner recognizes.
+    const known = 'Claude AI usage limit reached'
+    const reported = event('turn.failed', { error: { message: known, code: 'usage_limit_reached', resetsAt } })
+    const repeated = event('turn.failed', { error: { message: known } })
+    expect(chatQuota(run, [reported, repeated])).toMatchObject({ message: known, reset: limitReset(resetsAt) })
+    // A new failure without a reset does not inherit an earlier one.
+    const other = event('turn.failed', { error: { message: 'You\'ve hit your limit' } })
+    expect(chatQuota(run, [reported, other])?.reset).toBeNull()
   })
 })

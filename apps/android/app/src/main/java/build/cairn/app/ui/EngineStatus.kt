@@ -154,9 +154,15 @@ private fun workContinues(event: RunEvent): Boolean {
     }
 }
 
-/** A run that ends without its turn completing, stopped or failed by the runner. */
+/**
+ * An execution that ends without its turn completing, stopped or failed by the runner, or gives way
+ * to another attempt, perhaps on another account.
+ */
 private fun runEnds(event: RunEvent): Boolean =
-    event.type == "runner.failed" || (event.type == "status" && event.text in TERMINAL_STATUSES)
+    event.type == "runner.failed" ||
+        (event.type == "status" &&
+            (event.text in TERMINAL_STATUSES ||
+                event.activityData()?.get("attempt") == JsonPrimitive(true)))
 
 /** The engine's latest retry before work continued, which the run log marks recovered. */
 internal fun recoveredEngineRetries(events: List<RunEvent>): Set<Long> {

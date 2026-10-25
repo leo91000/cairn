@@ -49,8 +49,10 @@ export function chatQuota(run: Run | null | undefined, events: RunEvent[]): Chat
 
     const failure = quotaFailure(event)
     if (failure) {
+      // The runner repeats the engine's failure without its reset.
+      const reset = (activityPayload(event).error as Record<string, unknown> | undefined)?.resetsAt
+      failureReset = reset ?? (failure === failureMessage ? failureReset : undefined)
       failureMessage = failure
-      failureReset = (activityPayload(event).error as Record<string, unknown> | undefined)?.resetsAt
     }
   }
 

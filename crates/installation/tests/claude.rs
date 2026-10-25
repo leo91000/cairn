@@ -1671,7 +1671,8 @@ async fn a_subagent_resumed_by_a_later_execution_shows_as_resumed() {
         .filter(|event| event["item"]["type"] == "subagent")
         .collect();
     // Only the subagents resumed, by the agent or by Claude Code: an agent its workflow starts,
-    // or a housekeeping agent Claude Code starts itself, is not one.
+    // one a subagent starts from work this execution does not see, or a housekeeping agent
+    // Claude Code starts itself, is not one.
     assert!(
         all.iter()
             .all(|event| ["task-old", "task-orphan"]

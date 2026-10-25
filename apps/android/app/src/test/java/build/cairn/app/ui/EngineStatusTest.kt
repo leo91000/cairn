@@ -203,11 +203,13 @@ class EngineStatusTest {
         val upcoming = resetting(now + 3_600_000)
         assertEquals(listOf(upcoming.id), notices(listOf(upcoming)).map { it.id })
 
-        // A limit belongs to the run that reported it: a later run reports its own.
+        // A limit belongs to the execution that reported it: a later one reports its own.
+        val attempt = event("status") { put("attempt", true) }.copy(text = "Preparing workspace")
         for (end in
             listOf(
                 listOf(event("turn.completed"), status("succeeded")),
                 listOf(status("cancelled")),
+                listOf(attempt),
             )) {
             assertFalse(warning.id in notices(listOf(warning, step()) + end).map { it.id })
         }
@@ -268,6 +270,36 @@ class EngineStatusTest {
         val quota = chatQuota(run, listOf(failed))!!
         assertEquals("Your usage allowance is used up for now.", quota.message)
         assertEquals(limitReset(resetsAt), quota.reset)
+
+        // The runner repeats the failure without its reset, in wording the banner recognizes.
+        fun failure(id: Long, message: String, reset: Long? = null) =
+            RunEvent(
+                id,
+                id,
+                "turn.failed",
+                "",
+                buildJsonObject {
+                    put(
+                        "error",
+                        buildJsonObject {
+                            put("message", message)
+                            if (reset != null) {
+                                put("code", "usage_limit_reached")
+                                put("resetsAt", reset)
+                            }
+                        },
+                    )
+                },
+                runId = "run",
+            )
+        val known = "Claude AI usage limit reached"
+        val reported = failure(2, known, resetsAt)
+        assertEquals(
+            limitReset(resetsAt),
+            chatQuota(run, listOf(reported, failure(3, known)))!!.reset,
+        )
+        // A new failure without a reset does not inherit an earlier one.
+        assertNull(chatQuota(run, listOf(reported, failure(3, "You've hit your limit")))!!.reset)
     }
 
     @Test

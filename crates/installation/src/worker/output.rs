@@ -83,6 +83,8 @@ static AGENT_PERFORMANCE_RECORD: LazyLock<regex::Regex> = LazyLock::new(|| {
 const TOOL_FRAME_LIMIT: usize = 100_000_000;
 const MESSAGE_LIMIT: usize = 100_000;
 const ERROR_LIMIT: usize = 10_000;
+/// Claude Code's notices are status lines; a longer one is cut.
+const NOTICE_LIMIT: usize = 4_000;
 
 /// Event types that are always recorded. Clients use turn markers to scope reused message IDs,
 /// and show the engine's retries and usage limits in the conversation.
@@ -303,11 +305,18 @@ pub(super) async fn record(
     let activity_item = text(&event, "type").starts_with("item.") && event["item"].is_object();
     if conversation || activity_item || *log_total < LOG_BUDGET {
         let abbreviated = !conversation && activity_item && raw.len() > ITEM_DETAIL_LIMIT;
-        let stored = if abbreviated {
+        let mut stored = if abbreviated {
             run_output::compact_activity(&event, secrets)
         } else {
             run_output::payload(&event, secrets)
         };
+        // Cut once redacted, so a cut cannot expose part of a secret.
+        if let Some(message) = stored["message"]
+            .as_str()
+            .filter(|_| stored["type"] == "engine.notice")
+        {
+            stored["message"] = truncate(message, NOTICE_LIMIT).into();
+        }
         let serialized = serde_json::to_string(&stored)?;
         if !conversation && !activity_item {
             *log_total = log_total.saturating_add(serialized.len());

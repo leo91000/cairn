@@ -78,15 +78,17 @@ kind of wait stays separate:
   streams, a tool (a subagent among them) starts or the turn completes. The run log
   then marks it recovered. A subagent's progress or resumption does not count. When
   Claude Code gives up, it reports the last API error as a message and the turn fails;
-  that retry is not marked recovered. Neither is a retry whose run is stopped,
-  interrupted or failed by the runner: the conversation stops showing it. These are the
+  that retry is not marked recovered. Neither is a retry whose execution is stopped,
+  interrupted, failed by the runner or replaced by a new attempt: the conversation stops
+  showing it. These are the
   agent's own requests: Claude Code reports a subagent's retries in its tool progress
   (`subagent_retry`), which Cairn does not show.
 - **Provider usage limit.** `rate_limit_event` becomes `provider.limit` when its state
   changes. That covers a warning, a limit covered by extra usage, a limit that stops
   requests (`blocked`), and the return to normal after one of these. Window and reset
   time are included. The conversation shows it until the limit no longer applies, its
-  reset time passes, or its run ends or fails: a later run reports its own state. If a
+  reset time passes, or its execution ends or fails: a later execution, perhaps a new
+  attempt on another account, reports its own state. If a
   turn fails because the usage limit refused the agent's request (its message carries
   `error: "rate_limit"`) while the latest state blocks requests, the adapter fails it
   with `code: usage_limit_reached`, the window and `resetsAt`. The worker then takes Cairn's durable account wait or fails over, without
@@ -122,14 +124,16 @@ so a frame naming an earlier run, or repeating the start of the run that reporte
 late and ignored. A subagent an earlier execution started, resumed by a `SendMessage`
 call or by Claude Code itself (its run then names the earlier execution's call, or no
 call), shows as a new row of the current execution marked `resumed`, keyed by its task
-ID: Cairn rows belong to one execution. Other unknown agent tasks, such as a workflow's agents or housekeeping
-agents Claude Code marks `skip_transcript` or `ambient`, are ignored. Nested subagents
-keep their parent and `parent_task_id`. Without `agent_id`, a resumed subagent's
-messages may name the call that resumed it (such as `SendMessage`) in
-`parent_tool_use_id`; once a task frame ties that call to the subagent, they stay its
-steps. The minimum supported CLI stays **2.1.280**:
-older frames without these fields keep the earlier correlation, and the fixtures cover
-both shapes. The events reach the public MCP and `cairn_installation` through
+ID: Cairn rows belong to one execution. A call this execution never made only counts
+for a top-level subagent (no `parent_task_id`, `spawn_depth` 1). Other unknown agent
+tasks, such as a workflow's agents, nested agents started from work this execution does
+not see, or housekeeping agents Claude Code marks `skip_transcript` or `ambient`, are
+ignored. Nested subagents keep their parent and `parent_task_id`. Without `agent_id`,
+a resumed subagent's messages may name the call that resumed it (such as
+`SendMessage`) in `parent_tool_use_id`; once a task frame ties that call to the
+subagent, they stay its steps. The minimum supported CLI stays **2.1.280**: older
+frames without these fields keep the earlier correlation, and the fixtures cover both
+shapes. The events reach the public MCP and `cairn_installation` through
 `get_run`.
 
 An explicit provider choice is saved with each queued message. Steering cannot

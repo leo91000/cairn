@@ -551,8 +551,8 @@ internal fun SubagentSheet(
                             listOf(
                                     agent.type,
                                     if (agent.background) "arrière-plan" else "",
-                                    if (agent.resumed) "relancé par l’agent"
-                                    else "lancé par l’agent",
+                                    // Claude Code may resume a subagent itself.
+                                    if (agent.resumed) "relancé" else "lancé par l’agent",
                                 )
                                 .filter { it.isNotBlank() }
                                 .joinToString(" · "),
