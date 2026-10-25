@@ -148,7 +148,12 @@ class SignalPresentationTest {
         val feed =
             buildFeed(
                 listOf(
-                    Chat("switched", status = "running", provider = "claude"),
+                    Chat(
+                        "switched",
+                        status = "running",
+                        provider = "claude",
+                        requester = ChatRequester("parent", "Review request"),
+                    ),
                     Chat("new"),
                 ),
                 listOf(
@@ -161,6 +166,10 @@ class SignalPresentationTest {
             feed.running.map { it.key to it.harness },
         )
         assertNull(feed.recent.single().harness)
+        assertEquals(
+            FeedRequester("Review request", "parent", null),
+            feed.running.single { it.chatId == "switched" }.requester,
+        )
     }
 
     @Test

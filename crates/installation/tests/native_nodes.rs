@@ -21,6 +21,200 @@ const TRUSTED: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const OTHER: &str = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 
 #[tokio::test]
+async fn native_administrator_requires_owner_review_verified_generation_and_explicit_admission() {
+    let f = Fixture::new().await;
+    let node_id = text(&f.node, "id");
+    let path = format!("/api/nodes/{node_id}/native-mode");
+    let (status, _) = f
+        .owner_call("POST", &path, json!({ "mode": "administrator" }))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "Old supervisors must not receive privileged work"
+    );
+    let mut node = f.node.clone();
+    node["capabilities"]["nativeModeProtocol"] = 1.into();
+    f.service.store.put("nodes", node.clone()).await.unwrap();
+    let (status, _) = f
+        .call(
+            &f.trusted,
+            "POST",
+            &path,
+            json!({ "mode": "administrator" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = f.owner_call("POST", &path, json!({ "mode": "root" })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (_, preview) = f
+        .owner_call("POST", &path, json!({ "mode": "administrator" }))
+        .await;
+    assert!(
+        preview["preview"]["warning"]
+            .as_str()
+            .unwrap()
+            .contains("real host")
+    );
+    assert!(
+        preview["preview"]["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["id"] == f.agent["id"])
+    );
+    assert!(f.service.get("nodes", node_id).await.unwrap()["nativeModeRequest"].is_null());
+    let (status, pending) = f
+        .owner_call(
+            "POST",
+            &path,
+            json!({
+                "mode": "administrator", "previewId": preview["previewId"], "confirm": true,
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{pending}");
+    assert_eq!(pending["nativeModeStatus"], "pending");
+    assert_eq!(pending["executionReady"], false);
+    assert_eq!(pending["nativeModeRequest"]["mode"], "administrator");
+    let run = f.run();
+    let denied = {
+        let run = run.clone();
+        let pending = pending.clone();
+        f.service
+            .store
+            .read(move |db| policy::allows(db, &run, &pending))
+            .await
+            .unwrap()
+    };
+    assert!(!denied, "Pending transitions cannot admit work");
+    let (status, _) = f
+        .owner_call(
+            "POST",
+            &path,
+            json!({
+                "mode": "administrator", "previewId": preview["previewId"], "confirm": true,
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "Confirmation is single-use");
+    let mut applied = pending;
+    applied["nativeModeObserved"] = json!({
+        "mode": "administrator", "generation": applied["nativeModeRequest"]["generation"], "status": "applied",
+    });
+    let approved = {
+        let run = run.clone();
+        let applied = applied.clone();
+        f.service
+            .store
+            .read(move |db| policy::allows(db, &run, &applied))
+            .await
+            .unwrap()
+    };
+    assert!(approved);
+    for status in ["pending", "failed"] {
+        let run = run.clone();
+        let mut failed = applied.clone();
+        failed["nativeModeObserved"]["status"] = status.into();
+        assert!(
+            !f.service
+                .store
+                .read(move |db| policy::allows(db, &run, &failed))
+                .await
+                .unwrap()
+        );
+    }
+    let mut stale = applied.clone();
+    stale["nativeModeObserved"]["generation"] = id().into();
+    let checked_run = run.clone();
+    assert!(
+        !f.service
+            .store
+            .read(move |db| policy::allows(db, &checked_run, &stale))
+            .await
+            .unwrap()
+    );
+    // A future wildcard agent did not appear in the owner's confirmation.
+    let future = f
+        .service
+        .agent(
+            json!({ "name": "Future native", "access": { "backend": "native", "nodes": null } }),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut future_run = run;
+    future_run["snapshot"]["agent"] = future;
+    assert!(
+        !f.service
+            .store
+            .read(move |db| policy::allows(db, &future_run, &applied))
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn native_mode_preview_detects_concurrent_access_changes_and_agent_requests_need_owner() {
+    let f = Fixture::new().await;
+    let node_id = text(&f.node, "id");
+    let path = format!("/api/nodes/{node_id}/native-mode");
+    let mut node = f.node.clone();
+    node["capabilities"]["nativeModeProtocol"] = 1.into();
+    f.service.store.put("nodes", node.clone()).await.unwrap();
+    let (_, preview) = f
+        .owner_call("POST", &path, json!({ "mode": "administrator" }))
+        .await;
+    node["nativeAccounts"] = json!([TRUSTED, OTHER]);
+    f.service.store.put("nodes", node).await.unwrap();
+    let (status, _) = f
+        .owner_call(
+            "POST",
+            &path,
+            json!({
+                "mode": "administrator", "previewId": preview["previewId"], "confirm": true,
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let preview = cairn_installation::nodes::native_mode::change(
+        &f.service,
+        node_id,
+        json!({ "mode": "administrator" }),
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
+    let proposal = cairn_installation::nodes::native_mode::change(
+        &f.service,
+        node_id,
+        json!({
+            "mode": "administrator", "previewId": preview["previewId"], "confirm": true,
+        }),
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(proposal["status"], "awaiting-owner");
+    assert!(f.service.get("nodes", node_id).await.unwrap()["nativeModeRequest"].is_null());
+    // The owner reviews again through the same API and can then apply the request.
+    let (_, preview) = f
+        .owner_call("POST", &path, json!({ "mode": "administrator" }))
+        .await;
+    let (status, changed) = f
+        .owner_call(
+            "POST",
+            &path,
+            json!({
+                "mode": "administrator", "previewId": preview["previewId"], "confirm": true,
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(changed["nativeModeProposal"].is_null());
+}
+
+#[tokio::test]
 async fn converting_a_mission_retains_native_authority_and_rejects_unauthorized_callers() {
     let f = Fixture::new().await;
     let mut run = f.run();
@@ -67,9 +261,17 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_workspace(false).await
+    }
+
+    async fn with_workspace(workspace: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("home")).unwrap();
-        let service = Service::new(common::config(root.path())).await.unwrap();
+        let mut config = common::config(root.path());
+        if workspace {
+            config.runner_url = "http://unused-runner:4311".into();
+        }
+        let service = Service::new(config).await.unwrap();
         let router = common::relay_fixture::router(service.clone())
             .await
             .unwrap();
@@ -111,7 +313,6 @@ impl Fixture {
                 "diskMiB": 100000,
                 "diskTotalMiB": 100000,
                 "kvm": false,
-                "fuse": false,
             },
             "limits": { "cpu": 2, "memoryMiB": 4096, "diskMiB": 32768 },
             "slots": 1,
@@ -219,6 +420,197 @@ impl Fixture {
             "snapshot": { "agent": self.agent },
         })
     }
+}
+
+#[tokio::test]
+async fn delegated_native_administration_requires_the_requesters_current_review() {
+    let mut f = Fixture::with_workspace(true).await;
+    f.agent["access"]["delegation"] = true.into();
+    f.agent["access"]["nodes"] = Value::Null;
+    f.service
+        .store
+        .put("agents", f.agent.clone())
+        .await
+        .unwrap();
+
+    let mut administrator = f.node.clone();
+    administrator["id"] = id().into();
+    administrator["name"] = "Administrative host".into();
+    f.service
+        .store
+        .put("nodes", administrator.clone())
+        .await
+        .unwrap();
+    let target = f
+        .service
+        .agent(
+            json!({
+                "name": "Reviewed target",
+                "access": { "backend": "native", "nodes": [administrator["id"]] },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let (_, parent) = f.conversation().await;
+    let parent = f
+        .service
+        .store
+        .patch_run(
+            text(&parent, "id"),
+            json!({
+                "status": "running", "nodeId": f.node["id"],
+            }),
+        )
+        .await
+        .unwrap();
+    let configuration = f
+        .service
+        .mcps
+        .run_configuration(&f.service, &parent)
+        .await
+        .unwrap();
+    let token = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+
+    let generation = id();
+    administrator["capabilities"]["nativeModeProtocol"] = 1.into();
+    administrator["nativeModeRequest"] =
+        json!({ "mode": "administrator", "generation": generation });
+    administrator["nativeModeObserved"] = json!({
+        "mode": "administrator", "generation": generation, "status": "applied",
+    });
+    administrator["nativeReviewedAgents"] = json!([target["id"]]);
+    f.service
+        .store
+        .put("nodes", administrator.clone())
+        .await
+        .unwrap();
+    let input = json!({ "task": "Review on the administrative host", "agentId": target["id"] });
+    let error = cairn_installation::delegation::delegate(&f.service, token, &input)
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+
+    administrator["nativeReviewedAgents"] = json!([target["id"], f.agent["id"]]);
+    f.service
+        .store
+        .put("nodes", administrator.clone())
+        .await
+        .unwrap();
+    let task = cairn_installation::delegation::delegate(&f.service, token, &input)
+        .await
+        .unwrap();
+    f.service.chat_tick(&HashSet::new()).await.unwrap();
+    let child = f.service.chat_detail(text(&task, "chatId")).await.unwrap()["run"].clone();
+    let check = |node: Value| {
+        let child = child.clone();
+        f.service
+            .store
+            .read(move |db| policy::allows(db, &child, &node))
+    };
+    assert!(check(administrator.clone()).await.unwrap());
+
+    administrator["nativeReviewedAgents"] = json!([target["id"]]);
+    f.service
+        .store
+        .put("nodes", administrator.clone())
+        .await
+        .unwrap();
+    assert!(
+        !check(administrator).await.unwrap(),
+        "Removing the requester's review revokes its child's administrator admission"
+    );
+}
+
+#[tokio::test]
+async fn task_delegation_has_its_own_revocable_native_authority() {
+    let mut f = Fixture::with_workspace(true).await;
+    f.agent["access"]["delegation"] = true.into();
+    f.service
+        .store
+        .put("agents", f.agent.clone())
+        .await
+        .unwrap();
+    let (_, parent) = f.conversation().await;
+    let parent = f
+        .service
+        .store
+        .patch_run(text(&parent, "id"), json!({ "status": "running" }))
+        .await
+        .unwrap();
+    let configuration = f
+        .service
+        .mcps
+        .run_configuration(&f.service, &parent)
+        .await
+        .unwrap();
+    let task = cairn_installation::delegation::delegate(
+        &f.service,
+        text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN"),
+        &json!({ "task": "Review on the authorized native node" }),
+    )
+    .await
+    .unwrap();
+    let child_id = text(&task, "chatId");
+    let child = f.service.get("chats", child_id).await.unwrap();
+    assert_eq!(child["nativeParentRunId"], parent["id"]);
+    assert_eq!(child["nativeParentAccess"], "delegation");
+    assert_eq!(child["nativeAuthorityNodes"], json!([f.node["id"]]));
+    f.service.chat_tick(&HashSet::new()).await.unwrap();
+    let child = f.service.chat_detail(child_id).await.unwrap()["run"].clone();
+    assert_eq!(child["nativeParentAccess"], "delegation");
+
+    let check = |run: Value| {
+        let node = f.node.clone();
+        f.service
+            .store
+            .read(move |db| policy::allows(db, &run, &node))
+    };
+    assert!(check(child.clone()).await.unwrap());
+    let mut management_child = child.clone();
+    management_child["nativeParentAccess"] = Value::Null;
+    assert!(
+        !check(management_child).await.unwrap(),
+        "Management-created and historical edges still require installation access"
+    );
+
+    // A human follow-up preserves the capability that authorized the parent edge.
+    policy::CALLER
+        .scope(
+            Some(TRUSTED.into()),
+            f.service.chat_send(
+                child_id,
+                json!({ "id": id(), "text": "Also inspect the tests" }),
+            ),
+        )
+        .await
+        .unwrap();
+    let continued = f.service.get("chats", child_id).await.unwrap();
+    assert_eq!(continued["nativeParentAccess"], "delegation");
+
+    let mut revoked = f.agent.clone();
+    revoked["access"]["delegation"] = false.into();
+    revoked["access"]["installation"] = true.into();
+    f.service.store.put("agents", revoked).await.unwrap();
+    assert!(
+        !check(child.clone()).await.unwrap(),
+        "Installation access cannot replace revoked task delegation"
+    );
+    f.service
+        .store
+        .put("agents", f.agent.clone())
+        .await
+        .unwrap();
+    assert!(check(child.clone()).await.unwrap());
+    f.service
+        .store
+        .patch_run(text(&parent, "id"), json!({ "nativeAuthorityNodes": [] }))
+        .await
+        .unwrap();
+    assert!(
+        !check(child).await.unwrap(),
+        "The parent's node ceiling remains live"
+    );
 }
 
 #[tokio::test]
@@ -578,7 +970,6 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
         let mut node = f.node.clone();
         node["capabilities"]["backend"] = backend.into();
         node["capabilities"]["kvm"] = (!native).into();
-        node["capabilities"]["fuse"] = (!native).into();
         f.service.store.put("nodes", node.clone()).await.unwrap();
         let mut agent = f.agent.clone();
         agent["access"]["backend"] = backend.into();
@@ -631,14 +1022,11 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
         if changed_backend {
             node["capabilities"]["backend"] = "firecracker".into();
             node["capabilities"]["kvm"] = true.into();
-            node["capabilities"]["fuse"] = true.into();
-        } else if !native {
-            node["capabilities"]["fuse"] = false.into();
         }
         f.service.store.put("nodes", node).await.unwrap();
         let attempt = id();
         let claimed = placement::reserve(&f.service, &resumed, &attempt).await;
-        let succeeds = native && !changed_backend;
+        let succeeds = !changed_backend;
         if succeeds {
             let claimed = claimed.unwrap();
             assert_eq!(claimed["nodeId"], f.node["id"]);
@@ -656,14 +1044,7 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
         } else {
             let error = claimed.unwrap_err();
             assert_eq!(error.status, 409);
-            assert_eq!(
-                error.message,
-                if changed_backend {
-                    "Destination execution backend changed."
-                } else {
-                    "Destination no longer supports on-demand disks."
-                }
-            );
+            assert_eq!(error.message, "Destination execution backend changed.");
             assert!(
                 f.service
                     .store
@@ -709,6 +1090,154 @@ async fn retained_conversations_exhaust_the_shared_native_admission_budget() {
     let next = f.run();
     common::add_run(&f.service.store, &next).await;
     assert!(placement::reserve(&f.service, &next, &id()).await.is_err());
+}
+
+#[tokio::test]
+async fn native_same_node_resume_reuses_retained_capacity_on_a_small_pool() {
+    let f = Fixture::new().await;
+    let mut node = f.node.clone();
+    node["limits"]["diskMiB"] = 32768.into();
+    node["diskGrowthProtocol"] = 1.into();
+    node["diskCapacity"] = json!({ "protocol": 1, "capturedAt": now(), "usedBytes": 0,
+        "freeBytes": 900 * 1024 * 1024 * 1024u64, "ownedBytes": {}, "retainedBytes": {}, "requests": [] });
+    f.service.store.put("nodes", node.clone()).await.unwrap();
+    let mut run = f.run();
+    common::add_run(&f.service.store, &run).await;
+    let first = id();
+    let selected = placement::reserve(&f.service, &run, &first).await.unwrap();
+    assert_eq!(selected["resources"]["diskMiB"], 31_000);
+    common::set_checkpoint(
+        &f.service.store,
+        text(&run, "id"),
+        json!({
+            "nodeId": node["id"], "runnerId": first, "resources": selected["resources"],
+        }),
+    )
+    .await;
+    placement::materialize(&f.service, &first).await.unwrap();
+    placement::release(&f.service, &first).await.unwrap();
+    let volume_id = format!("{}:{}", text(&run, "id"), text(&node, "id"));
+    let mut volume = f
+        .service
+        .store
+        .get("node-volumes", &volume_id)
+        .await
+        .unwrap()
+        .unwrap();
+    volume["materialized"] = true.into();
+    volume["storageMode"] = "on-demand".into();
+    volume["diskMiB"] = 256.into();
+    volume["activeDiskMiB"] = 256.into();
+    f.service.store.put("node-volumes", volume).await.unwrap();
+    node["diskCapacity"]["usedBytes"] = (256 * 1024 * 1024u64).into();
+    node["diskCapacity"]["retainedBytes"] = json!({ text(&run, "id"): 256 * 1024 * 1024u64 });
+    f.service.store.put("nodes", node).await.unwrap();
+    run["status"] = "queued".into();
+    run["finishedAt"] = Value::Null;
+    run["recoveryPending"] = true.into();
+    f.service
+        .store
+        .patch_run(text(&run, "id"), run.clone())
+        .await
+        .unwrap();
+    placement::check(&f.service, &run).await.unwrap();
+    let selected = placement::reserve(&f.service, &run, &id()).await.unwrap();
+    assert_eq!(selected["resources"]["diskMiB"], 31_000);
+}
+
+#[tokio::test]
+async fn native_disk_growth_is_idempotent_and_competes_atomically_with_admission() {
+    let f = Fixture::new().await;
+    let gib = 1024 * 1024 * 1024u64;
+    let mut node = f.node.clone();
+    node["slots"] = 4.into();
+    node["limits"]["diskMiB"] = (80 * 1024).into();
+    node["capabilities"]["diskTotalMiB"] = (1024 * 1024).into();
+    node["capabilities"]["diskMiB"] = (900 * 1024).into();
+    f.service.store.put("nodes", node.clone()).await.unwrap();
+    let token = auth::token();
+    f.service
+        .store
+        .set(
+            &format!("node-token:{}", auth::digest(&token)),
+            node["id"].clone(),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut attempts = Vec::new();
+    let mut runs = Vec::new();
+    for _ in 0..2 {
+        let mut run = f.run();
+        run["status"] = "running".into();
+        run["resources"] = json!({ "cpu": 2, "memoryMiB": 4096, "diskMiB": 32768 });
+        common::add_run(&f.service.store, &run).await;
+        let attempt = id();
+        placement::reserve(&f.service, &run, &attempt)
+            .await
+            .unwrap();
+        common::set_checkpoint(
+            &f.service.store,
+            text(&run, "id"),
+            json!({ "nodeId": node["id"], "runnerId": attempt }),
+        )
+        .await;
+        attempts.push(attempt);
+        runs.push(run);
+    }
+    let body = json!({
+        "backend": "native", "nodeProtocol": 2, "executionReady": true, "dataRoot": "/fixture",
+        "runtimeId": "development", "runtimes": ["development"],
+        "capabilities": node["capabilities"], "pool": { "capacity": 4 },
+        "sharedResources": true, "budget": { "slots": 4, "limits": node["limits"] },
+        "nativeMode": { "mode": "protected", "generation": null, "status": "applied" },
+        "usage": { "diskMiB": 16384 },
+        "diskGrowth": { "protocol": 1, "capturedAt": now(), "usedBytes": 16 * gib, "freeBytes": 900 * gib,
+            "ownedBytes": { &attempts[0]: 8 * gib, &attempts[1]: 8 * gib },
+            "requests": [
+                { "attemptId": attempts[0], "currentMiB": 32768 },
+                { "attemptId": attempts[1], "currentMiB": 32768 },
+            ] },
+    });
+    for _ in 0..2 {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/internal/nodes/heartbeat")
+            .header("host", common::HOST)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = common::send(&f.router, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let reply = read_json(response).await;
+        assert_eq!(
+            reply["diskGrowth"]["grants"][0]["allowanceMiB"], 40960,
+            "{reply}"
+        );
+        assert_eq!(
+            reply["diskGrowth"]["grants"][1]["allowanceMiB"], 32768,
+            "{reply}"
+        );
+    }
+    assert_eq!(
+        f.service.store.run(text(&runs[0], "id")).await.unwrap()["resources"]["diskMiB"],
+        40960
+    );
+    let incoming = f.run();
+    common::add_run(&f.service.store, &incoming).await;
+    assert!(
+        placement::reserve(&f.service, &incoming, &id())
+            .await
+            .is_err()
+    );
+    placement::release(&f.service, &attempts[0]).await.unwrap();
+    placement::release(&f.service, &attempts[0]).await.unwrap();
+    assert!(
+        placement::reserve(&f.service, &incoming, &id())
+            .await
+            .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -813,6 +1342,58 @@ async fn native_nodes_admit_six_attempts_only_after_the_configured_budget_is_app
     placement::reserve(&f.service, &overflow, &id())
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn native_mode_default_protected_failure_is_observable_without_a_saved_request() {
+    let f = Fixture::new().await;
+    let token = auth::token();
+    f.service
+        .store
+        .set(
+            &format!("node-token:{}", auth::digest(&token)),
+            f.node["id"].clone(),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut capabilities = f.node["capabilities"].clone();
+    capabilities["nativeModeProtocol"] = 1.into();
+    for state in ["failed", "pending", "applied"] {
+        let body = json!({
+            "runtimeId": "development", "capabilities": capabilities,
+            "dataRoot": "/private/native-node/data", "backend": "native", "nodeProtocol": 2,
+            "executionReady": true, "budget": { "slots": 1, "limits": f.node["limits"] },
+            "pool": { "capacity": 1 },
+            "nativeMode": { "mode": "protected", "generation": null, "status": state },
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/internal/nodes/heartbeat")
+            .header("host", common::HOST)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = common::send(&f.router, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let node = f.service.get("nodes", text(&f.node, "id")).await.unwrap();
+        assert!(
+            node["nativeModeRequest"].is_null(),
+            "No default migration creates an elevation request"
+        );
+        assert_eq!(node["nativeModeStatus"], state);
+        assert_eq!(node["executionReady"], state == "applied");
+        let (status, listed) = f.owner_call("GET", "/api/nodes", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        let public = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["id"] == f.node["id"])
+            .unwrap();
+        assert_eq!(public["nativeModeStatus"], state);
+    }
 }
 
 #[tokio::test]
@@ -1038,7 +1619,6 @@ async fn parent_node_grant_reductions_revoke_existing_native_delegation() {
         node["id"] = node_id.clone().into();
         node["capabilities"]["backend"] = "firecracker".into();
         node["capabilities"]["kvm"] = true.into();
-        node["capabilities"]["fuse"] = true.into();
         f.service.store.put("nodes", node).await.unwrap();
     }
     let agent = f
@@ -1537,4 +2117,342 @@ async fn scheduled_native_placement_rechecks_the_retained_author_even_on_older_p
     run["snapshot"]["task"] = json!({ "authorId": OTHER });
     common::add_run(&f.service.store, &run).await;
     assert!(placement::check(&f.service, &run).await.is_err());
+}
+
+#[tokio::test]
+async fn converting_wildcard_access_never_reviews_host_root_without_explicit_owner_confirmation() {
+    let f = Fixture::new().await;
+    let node_id = text(&f.node, "id");
+    let mut node = f.node.clone();
+    node["nativeModeRequest"] = json!({ "mode": "administrator", "generation": id() });
+    node["nativeReviewedAgents"] = json!([]);
+    f.service.store.put("nodes", node).await.unwrap();
+    let agent = f
+        .service
+        .agent(
+            json!({ "name": "Future wildcard", "access": { "backend": "native", "nodes": null } }),
+            None,
+        )
+        .await
+        .unwrap();
+    let path = format!("/api/agents/{}", text(&agent, "id"));
+    let edit =
+        json!({ "name": "Future wildcard", "access": { "backend": "native", "nodes": [node_id] } });
+    let (status, _) = f.owner_call("PUT", &path, edit.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        f.service.get("nodes", node_id).await.unwrap()["nativeReviewedAgents"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        f.service.get("agents", text(&agent, "id")).await.unwrap()["access"]["nodes"].is_null()
+    );
+    let mut confirmed = edit;
+    confirmed["nativeNodeReviews"] = json!([node_id]);
+    let (status, result) = f.owner_call("PUT", &path, confirmed).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert!(
+        f.service.get("nodes", node_id).await.unwrap()["nativeReviewedAgents"]
+            .as_array()
+            .unwrap()
+            .contains(&agent["id"])
+    );
+    assert!(
+        result["nativeNodeReviews"].is_null(),
+        "The acknowledgement is not a new profile permission"
+    );
+}
+
+#[tokio::test]
+async fn native_mode_preview_includes_unplaced_automatic_work_and_rejects_concurrent_arrivals() {
+    let f = Fixture::new().await;
+    let node_id = text(&f.node, "id");
+    let mut node = f.node.clone();
+    node["capabilities"]["nativeModeProtocol"] = 1.into();
+    f.service.store.put("nodes", node).await.unwrap();
+    let first = f.run();
+    common::add_run(&f.service.store, &first).await;
+    let path = format!("/api/nodes/{node_id}/native-mode");
+    let (status, preview) = f
+        .owner_call("POST", &path, json!({ "mode": "administrator" }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert!(
+        preview["preview"]["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|run| run["id"] == first["id"])
+    );
+
+    let second = f.run();
+    common::add_run(&f.service.store, &second).await;
+    let (status, _) = f
+        .owner_call(
+            "POST",
+            &path,
+            json!({ "mode": "administrator", "previewId": preview["previewId"], "confirm": true }),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "An undisclosed automatic arrival requires a fresh preview"
+    );
+    assert!(f.service.get("nodes", node_id).await.unwrap()["nativeModeRequest"].is_null());
+    let (_, fresh) = f
+        .owner_call("POST", &path, json!({ "mode": "administrator" }))
+        .await;
+    let listed = fresh["preview"]["conversations"].as_array().unwrap();
+    assert_eq!(listed.len(), 2);
+    assert!(listed.iter().any(|run| run["id"] == second["id"]));
+    let (status, pending) = f
+        .owner_call(
+            "POST",
+            &path,
+            json!({ "mode": "administrator", "previewId": fresh["previewId"], "confirm": true }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{pending}");
+    assert_eq!(pending["nativeModeStatus"], "pending");
+}
+
+#[tokio::test]
+async fn native_mode_confirmation_covers_incoming_moves_and_reservations() {
+    let f = Fixture::new().await;
+    let node_id = text(&f.node, "id");
+    let mut node = f.node.clone();
+    node["capabilities"]["nativeModeProtocol"] = 1.into();
+    f.service.store.put("nodes", node).await.unwrap();
+    let source = id();
+    let mut incoming = Vec::new();
+    for selection in ["move", "reservation", "later"] {
+        let mut run = f.run();
+        run["nodeId"] = source.clone().into();
+        if selection == "move" {
+            run["moveRequest"] = json!({ "nodeId": node_id, "reservation": id() });
+        }
+        common::add_run(&f.service.store, &run).await;
+        if selection == "reservation" {
+            f.service
+                .store
+                .put(
+                    "node-attempts",
+                    json!({
+                        "id": id(), "runId": run["id"], "nodeId": node_id, "released": false,
+                    }),
+                )
+                .await
+                .unwrap();
+        }
+        incoming.push(run);
+    }
+    let path = format!("/api/nodes/{node_id}/native-mode");
+    let (status, preview) = f
+        .owner_call("POST", &path, json!({ "mode": "administrator" }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    let listed = preview["preview"]["conversations"].as_array().unwrap();
+    assert_eq!(listed.len(), 2);
+    for run in &incoming[..2] {
+        assert!(listed.iter().any(|listed| listed["id"] == run["id"]));
+    }
+    f.service
+        .store
+        .patch_run(
+            text(&incoming[2], "id"),
+            json!({
+                "moveRequest": { "nodeId": node_id, "reservation": id() },
+            }),
+        )
+        .await
+        .unwrap();
+    let (status, _) = f
+        .owner_call(
+            "POST",
+            &path,
+            json!({
+                "mode": "administrator", "previewId": preview["previewId"], "confirm": true,
+            }),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "A newly incoming conversation requires review"
+    );
+    let (_, preview) = f
+        .owner_call("POST", &path, json!({ "mode": "administrator" }))
+        .await;
+    assert_eq!(
+        preview["preview"]["conversations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    // A new attempt for an already displayed conversation also invalidates the
+    // interruption snapshot, even though the conversation count stays the same.
+    f.service
+        .store
+        .put(
+            "node-attempts",
+            json!({
+                "id": id(), "runId": incoming[0]["id"], "nodeId": node_id, "released": false,
+            }),
+        )
+        .await
+        .unwrap();
+    let (status, _) = f
+        .owner_call(
+            "POST",
+            &path,
+            json!({
+                "mode": "administrator", "previewId": preview["previewId"], "confirm": true,
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(f.service.get("nodes", node_id).await.unwrap()["nativeModeRequest"].is_null());
+}
+
+#[tokio::test]
+async fn native_mode_transition_keeps_automatic_recovery_and_capacity_moves_on_the_source() {
+    use cairn_installation::nodes::{moves, snapshots};
+
+    let f = Fixture::new().await;
+    let source = text(&f.node, "id");
+    let destination = id();
+    let mut other = f.node.clone();
+    other["id"] = destination.clone().into();
+    f.service.store.put("nodes", other).await.unwrap();
+    let mut agent = f.agent.clone();
+    agent["access"]["nodes"] = json!([source, destination]);
+    f.service.store.put("agents", agent.clone()).await.unwrap();
+    let mut run = f.run();
+    let run_id = text(&run, "id").to_owned();
+    let point = id();
+    run["nodeId"] = source.into();
+    run["snapshot"]["agent"] = agent;
+    run["nativeAuthorityNodes"] = json!([source, destination]);
+    run["resources"] = json!({ "cpu": 1, "memoryMiB": 128, "diskMiB": 128 });
+    run["backup"] = json!({ "id": point });
+    common::add_run(&f.service.store, &run).await;
+    common::set_checkpoint(
+        &f.service.store,
+        &run_id,
+        json!({
+            "nodeId": source, "runtimeId": "development", "completed": true,
+        }),
+    )
+    .await;
+    let manifest = json!({
+        "version": 1, "size": snapshots::BLOCK, "blockSize": snapshots::BLOCK,
+        "blocks": [{ "offset": 0, "size": snapshots::BLOCK, "hash": null }],
+        "runtime": { "runtimeId": "development", "backend": "native" },
+    });
+    f.service
+        .store
+        .put(
+            "node-backups",
+            json!({
+                "id": point, "runId": run_id, "destination": "s3", "sessionId": "saved-session",
+                "manifest": f.service.vault.encrypt(&format!("backup:{point}"), &manifest).unwrap(),
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(moves::latest(&f.service, &run_id).await.unwrap().is_some());
+    let mut node = f.node.clone();
+    let generation = id();
+    node["capabilities"]["nativeModeProtocol"] = 1.into();
+    node["nativeModeRequest"] = json!({ "mode": "administrator", "generation": generation });
+    node["nativeReviewedAgents"] = json!([f.agent["id"]]);
+    node["executionReady"] = false.into();
+    for state in ["pending", "failed"] {
+        node["nativeModeObserved"] = json!({
+            "mode": "protected", "generation": null, "status": state,
+        });
+        f.service.store.put("nodes", node.clone()).await.unwrap();
+        assert!(!moves::advance(&f.service, &run).await.unwrap());
+        assert!(!moves::queue_capacity_move(&f.service, &run).await.unwrap());
+        assert!(f.service.store.run(&run_id).await.unwrap()["moveRequest"].is_null());
+        assert!(
+            f.service
+                .store
+                .list("node-attempts")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            f.service
+                .store
+                .kv(&format!("run-checkpoint:{run_id}"))
+                .await
+                .unwrap()
+                .unwrap()["nodeId"],
+            source
+        );
+    }
+    node["nativeModeObserved"] = json!({
+        "mode": "administrator", "generation": generation, "status": "applied",
+    });
+    node["executionReady"] = true.into();
+    f.service.store.put("nodes", node.clone()).await.unwrap();
+    assert!(moves::advance(&f.service, &run).await.unwrap());
+    assert!(!moves::queue_capacity_move(&f.service, &run).await.unwrap());
+    // Genuine unavailability after confirmation retains ordinary relocation.
+    node["executionReady"] = false.into();
+    f.service.store.put("nodes", node).await.unwrap();
+    assert!(moves::queue_capacity_move(&f.service, &run).await.unwrap());
+    assert_eq!(
+        f.service.store.run(&run_id).await.unwrap()["moveRequest"]["nodeId"],
+        destination
+    );
+}
+
+#[tokio::test]
+async fn deleting_an_agent_revokes_admin_review_before_reusing_its_creation_id() {
+    let f = Fixture::new().await;
+    let node_id = text(&f.node, "id");
+    let mut node = f.node.clone();
+    let generation = id();
+    node["nativeModeRequest"] = json!({ "mode": "administrator", "generation": generation });
+    node["nativeModeObserved"] =
+        json!({ "mode": "administrator", "generation": generation, "status": "applied" });
+    node["capabilities"]["nativeModeProtocol"] = 1.into();
+    node["nativeReviewedAgents"] = json!([f.agent["id"]]);
+    let original = f.run();
+    let before = node.clone();
+    assert!(
+        f.service
+            .store
+            .read(move |db| policy::allows(db, &original, &before))
+            .await
+            .unwrap()
+    );
+    f.service.store.put("nodes", node).await.unwrap();
+    let path = format!("/api/agents/{}", text(&f.agent, "id"));
+    let (status, result) = f.owner_call("DELETE", &path, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert!(
+        f.service.get("nodes", node_id).await.unwrap()["nativeReviewedAgents"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let (status, recreated) = f.owner_call("POST", "/api/agents", json!({
+        "creationId": f.agent["id"], "name": "Replayed creation", "access": { "backend": "native", "nodes": null }
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{recreated}");
+    assert_eq!(recreated["id"], f.agent["id"]);
+    let node = f.service.get("nodes", node_id).await.unwrap();
+    assert!(!cairn_installation::nodes::native_mode::reviewed(
+        &node, &recreated
+    ));
+    let (status, _) = f.owner_call("PUT", &path, json!({ "name": "Explicit replay", "access": { "backend": "native", "nodes": [node_id] } })).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }

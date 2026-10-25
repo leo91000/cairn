@@ -95,7 +95,7 @@ def main(mode):
 
     # Devices are inert character placeholders: no ioctl or VM boot is performed.
     Path('/dev/net').mkdir(exist_ok=True)
-    for device in ('/dev/kvm', '/dev/net/tun', '/dev/fuse'):
+    for device in ('/dev/kvm', '/dev/net/tun'):
         if not Path(device).exists():
             os.mknod(device, stat.S_IFCHR | 0o600, os.makedev(1, 3))
     Path('/etc/systemd/system').mkdir(parents=True, exist_ok=True)
@@ -211,7 +211,7 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
                 result = run_installer()
                 assert result.returncode != 0 and message in result.stderr, result.stderr
                 del os.environ[variable]
-            for device, message in [('/dev/kvm', 'KVM'), ('/dev/net/tun', 'TUN'), ('/dev/fuse', 'FUSE')]:
+            for device, message in [('/dev/kvm', 'KVM'), ('/dev/net/tun', 'TUN')]:
                 Path(device).unlink()
                 result = run_installer()
                 assert result.returncode != 0 and message in result.stderr, result.stderr
@@ -234,7 +234,7 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
             result = run_installer()
             assert result.returncode == 0, result.stderr
             assert (ROOT / 'data/storage-s3.json').stat().st_uid == 1000, 'Rerun must repair an interrupted storage chown'
-            print('Container: KVM/TUN/FUSE diagnostics, automatic private Garage configuration passed')
+            print('Container: KVM/TUN diagnostics, automatic private Garage configuration passed')
         finally:
             server.shutdown()
         return

@@ -1,3 +1,4 @@
+import type { ChatView } from '../../../packages/contracts/chats'
 import type { RunEvent } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
 import { activityEntries } from '../src/activity'
@@ -363,5 +364,75 @@ describe('subagents', () => {
     })]
     expect(waitingForSubagents(mixed, agents)).toBe(false)
     expect(waitingForSubagents([event('turn.waiting', { tasks: [] })], agents)).toBe(false)
+  })
+})
+
+describe('delegated tasks', () => {
+  const delegated = (chatId: string) => event('chat.delegated', {
+    chatId,
+    title: `Task ${chatId}`,
+    agentId: 'main',
+    agentName: 'Reviewer',
+    provider: 'codex',
+    model: 'gpt-5.5',
+    task: `Review for ${chatId}`,
+  })
+  const toolCall = item('item.completed', {
+    id: 'call',
+    type: 'mcp_tool_call',
+    server: 'cairn_workspace',
+    tool: 'delegate_task',
+    status: 'completed',
+  })
+  const view = (id: string, values: Partial<ChatView> = {}): ChatView => ({
+    id,
+    title: id,
+    agentId: 'main',
+    projectId: null,
+    runId: 'child-run',
+    paused: false,
+    createdAt: 1,
+    updatedAt: 1,
+    pendingQuestions: 0,
+    agentName: 'Reviewer',
+    projectName: null,
+    status: 'running',
+    ...values,
+  })
+
+  it('shows tasks delegated together as one team instead of their tool calls', () => {
+    const entries = activityEntries([user('Review it'), toolCall, delegated('a'), delegated('b'), delegated('a')], true)
+    const team = entries.find(entry => entry.kind === 'team')
+    expect(team?.kind === 'team' && team.agents.map(agent => agent.subagent?.delegation)).toEqual([
+      { chatId: 'a', agentName: 'Reviewer', provider: 'codex' },
+      { chatId: 'b', agentName: 'Reviewer', provider: 'codex' },
+    ])
+    expect(team?.kind === 'team' && team.agents[0]).toMatchObject({ title: 'Task a', subagent: { prompt: 'Review for a', model: 'gpt-5.5' } })
+    expect(entries.some(entry => entry.kind === 'group' && entry.artifacts.some(artifact => artifact.kind === 'tool'))).toBe(false)
+  })
+
+  it('follows each delegated task through its conversation', () => {
+    const [agent] = currentSubagents(activityEntries([user('Review it'), delegated('a')], true))
+    const state = (chat?: ChatView) => {
+      const chats = new Map(chat ? [[chat.id, chat]] : [])
+      return [subagentState(agent!, false, chats), subagentSummary(agent!, false, chats)]
+    }
+
+    expect(state(view('a'))).toEqual(['running', 'Working'])
+    expect(state(view('a', { runId: null, status: 'queued' }))).toEqual(['running', 'Waiting for a runner'])
+    expect(state(view('a', { runId: null, status: 'idle' }))).toEqual(['stopped', 'Stopped'])
+    expect(state(view('a', { status: 'succeeded', pendingQuestions: 1 }))).toEqual(['running', 'Asks a question'])
+    expect(state(view('a', { status: 'succeeded', preview: '2 findings' }))).toEqual(['done', '2 findings'])
+    expect(state(view('a', { status: 'succeeded' }))).toEqual(['done', 'Reported back'])
+    expect(state(view('a', { status: 'cancelled', paused: true }))).toEqual(['stopped', 'Stopped'])
+    expect(state(view('a', { status: 'succeeded', paused: true, pendingQuestions: 1 }))).toEqual(['stopped', 'Stopped'])
+    expect(state(view('a', { status: 'running', paused: true, pendingQuestions: 2 }))).toEqual(['stopped', 'Stopped'])
+    expect(state(view('a', { status: 'failed' }))).toEqual(['failed', 'Failed'])
+    expect(state()).toEqual(['stopped', 'Conversation deleted'])
+  })
+
+  it('keeps earlier delegated tasks with the request that started them', () => {
+    const entries = activityEntries([user('First'), delegated('a'), user('Second')], true)
+    expect(currentSubagents(entries)).toEqual([])
   })
 })

@@ -708,17 +708,12 @@ private suspend fun fetchOriginal(files: Files, api: CairnApi, attachment: ChatA
     // FileProvider derives its MIME from the physical filename, including for the clipboard.
     // Keep a typed cache name even for renamed images; actions expose the original display name.
     val cacheName = imageExtension?.let { "${attachment.name}.$it" } ?: attachment.name
-    return try {
-        files.fetch(
-            api,
-            "${attachmentPath(attachment)}/stream",
-            cacheName,
-            MAX_ATTACHMENT_BYTES,
-        )
-    } catch (e: ApiException) {
-        if (e.status != 404 && e.status != 501) throw e
-        files.fetch(api, attachmentPath(attachment), cacheName, MAX_ATTACHMENT_BYTES)
-    }
+    return files.fetch(
+        api,
+        "${attachmentPath(attachment)}/stream",
+        cacheName,
+        MAX_ATTACHMENT_BYTES,
+    )
 }
 
 private fun shareFile(context: Context, file: File, attachment: ChatAttachment) {

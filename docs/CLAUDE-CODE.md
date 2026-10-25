@@ -121,8 +121,10 @@ No T3 Code runtime dependency or source code is included.
 
 ## Installation
 
-The manager and guest images include unmodified Claude Code **2.1.280**.
-For development, install that CLI and set `CLAUDE_BIN` if it is outside PATH.
+The manager and guest images include unmodified Claude Code from Anthropic's
+stable release channel, resolved for each image build (see
+[tool versions](CLI-UPDATES.md)); `/health` reports the exact version.
+For development, install that release and set `CLAUDE_BIN` if it is outside PATH.
 The CLI owns the interactive login flow and each account’s private state. Léo never
 exposes access/refresh tokens through its public API. Identity responses are
 restricted to connected state, email and subscription type. There is no API-key
@@ -159,5 +161,14 @@ a synthetic executable. `tests/e2e/claude.spec.ts` exercises the native backend 
 Chromium and WebKit, including mobile layouts and resumed conversations.
 `AccountsJourneyTest` covers Android’s code-entry flow and provider serialization.
 These fixtures never contact Anthropic or spend subscription allowance.
-The real installed 2.1.280 CLI was also checked with a non-inference initialization
-request, verifying its current model names and effort capabilities.
+CI runs every resolved release through the adapter's native tests: credential-free
+model discovery, including the effort levels agents may save, usage and
+authentication status, a turn against a local Messages API, and session
+resumption with its oldest qualified release and the release production serves
+(see [tool versions](CLI-UPDATES.md)). Catalogs depend on the release and the
+account. With synthetic subscription credentials, 2.1.308 lists `opus` and
+`fable` where 2.1.280 lists `opus[1m]` and `claude-fable-5-1`. Both remain
+documented `--model` values, so saved agents keep working. Model-scoped
+quota windows, such as "Weekly · Opus", cover the models of the current catalog
+and saved models of their family that it no longer lists, such as `opus[1m]` or
+`claude-opus-4-6[1m]` ([#390](https://github.com/leo91000/cairn/issues/390)).

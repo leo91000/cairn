@@ -9,12 +9,14 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicI64, Ordering},
+        atomic::{AtomicI64, AtomicU64, Ordering},
     },
 };
 
 const BLOCK: u64 = 4 * 1024 * 1024;
 const MAX_IO: usize = 8 * 1024 * 1024;
+
+mod growth;
 
 fn failure(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
@@ -32,7 +34,7 @@ pub trait BlockSource: Send + Sync {
 
 pub struct LazyDisk {
     directory: PathBuf,
-    size: u64,
+    size: AtomicU64,
     db: Mutex<Connection>,
     journal: Mutex<journal::Journal>,
     commit: Mutex<()>,
@@ -80,7 +82,7 @@ impl Drop for LazyDisk {
 }
 
 fn validate(manifest: &Value) -> io::Result<u64> {
-    let layout = super::layout::Layout::from_manifest(manifest)?;
+    super::layout::validate(manifest)?;
     let size = manifest["size"]
         .as_u64()
         .filter(|s| *s > 0 && *s <= 1 << 40)
@@ -88,7 +90,7 @@ fn validate(manifest: &Value) -> io::Result<u64> {
     let blocks = manifest["blocks"]
         .as_array()
         .ok_or_else(|| failure("Missing disk blocks"))?;
-    if manifest["version"] != layout.manifest_version()
+    if manifest["version"] != 1
         || manifest["blockSize"] != BLOCK
         || blocks.len() as u64 != size.div_ceil(BLOCK)
     {
@@ -108,11 +110,6 @@ fn validate(manifest: &Value) -> io::Result<u64> {
 }
 
 impl LazyDisk {
-    pub fn layout(&self) -> io::Result<super::layout::Layout> {
-        let manifest = self.base.lock().map_err(failure)?;
-        super::layout::Layout::from_manifest(&manifest)
-    }
-
     pub(crate) fn has_remote_base(&self) -> io::Result<bool> {
         let base = self.base.lock().map_err(failure)?;
         Ok(base["blocks"]
@@ -212,7 +209,7 @@ impl LazyDisk {
         let foreground = blocks.working_set(directory)?;
         Ok(Self {
             directory: directory.to_owned(),
-            size,
+            size: AtomicU64::new(size),
             db: Mutex::new(db),
             journal: Mutex::new(journal),
             commit: Mutex::new(()),
@@ -270,7 +267,7 @@ impl LazyDisk {
         if length > MAX_IO {
             return Err(failure("Disk request exceeds the I/O limit"));
         }
-        super::device::range(self.size, offset, length)
+        super::device::range(self.size(), offset, length)
     }
 
     fn cached_record(
@@ -282,7 +279,7 @@ impl LazyDisk {
         if let Some(bytes) = self.records.lock().map_err(failure)?.get(&key, foreground) {
             return Ok((record.start, bytes));
         }
-        let bytes = record.read(self.size)?;
+        let bytes = record.read(self.size())?;
         let bytes = self
             .records
             .lock()
@@ -339,7 +336,7 @@ impl LazyDisk {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Ok(bytes);
         }
-        // Concurrent FUSE readers and snapshot reconstruction may need the same
+        // Concurrent disk readers and snapshot reconstruction may need the same
         // cold block. Hold only its lock across I/O; unrelated blocks stay parallel.
         let fetching = self.blocks.fetching(hash, &self.source)?;
         let _fetching = fetching.lock().map_err(failure)?;
@@ -649,7 +646,7 @@ impl LazyDisk {
         length: usize,
         mut write: impl FnMut(u64, &[u8]) -> io::Result<()>,
     ) -> io::Result<()> {
-        super::device::range(self.size, offset, length)?;
+        super::device::range(self.size(), offset, length)?;
         let sample = self.metrics.discards.start();
         let mut position = offset;
         let end = offset + length as u64;
@@ -680,7 +677,7 @@ impl LazyDisk {
 
 impl Disk for LazyDisk {
     fn size(&self) -> u64 {
-        self.size
+        self.size.load(Ordering::Acquire)
     }
 
     fn read_at(&self, offset: u64, bytes: &mut [u8]) -> io::Result<()> {

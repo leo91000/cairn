@@ -5,6 +5,7 @@ use crate::{
     error::{Error, Result},
     run_status::RunStatus,
     service::Service,
+    store::Db,
     validation::text,
 };
 use serde::Serialize;
@@ -315,6 +316,14 @@ async fn record_request(
             let current = db
                 .run(&owner)?
                 .ok_or_else(|| Error::not_found("Conversation removed."))?;
+            if source.is_none()
+                && expected == RunStatus::Queued
+                && source_mode_unconfirmed(db, &owner)?
+            {
+                return Err(Error::unavailable(
+                    "Waiting for the node's privilege mode to be confirmed.",
+                ));
+            }
             // Explicit movement would bypass a mission wait. Internal relocation
             // of an unfinished queued turn must still be able to restore capacity.
             if expected != RunStatus::Queued
@@ -427,6 +436,15 @@ enum Recovery {
 
 const WAITING_TITLE: &str = "Conversation waiting for its node";
 
+fn source_mode_unconfirmed(db: &Db<'_>, run: &str) -> Result<bool> {
+    let checkpoint = super::db_checkpoint(db, run)?;
+    let Some(source) = checkpoint["nodeId"].as_str() else {
+        return Ok(false);
+    };
+    let node = db.get("nodes", source)?.unwrap_or_default();
+    Ok(super::native_mode::unconfirmed(&node))
+}
+
 /// Plans a lossless move of queued work when its retained node has no room.
 pub async fn queue_capacity_move(s: &Service, run: &Value) -> Result<bool> {
     if super::publication::requested(run) {
@@ -445,6 +463,13 @@ pub async fn queue_capacity_move(s: &Service, run: &Value) -> Result<bool> {
     let Some(source) = checkpoint["nodeId"].as_str() else {
         return Ok(false);
     };
+    let owner = run_id.to_owned();
+    if s.store
+        .read(move |db| source_mode_unconfirmed(db, &owner))
+        .await?
+    {
+        return Ok(false);
+    }
     // A normal resume still prefers the intact local disk. Only a capacity
     // shortage starts a full, fenced transfer; unavailable nodes use recovery.
     match super::placement::check(s, run).await {
@@ -500,6 +525,9 @@ async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
         let _ = super::refresh_local(s).await;
     }
     let node = s.get("nodes", source).await?;
+    if super::native_mode::unconfirmed(&node) {
+        return Ok(Recovery::Waiting);
+    }
     let agent = s.get("agents", super::run_agent(current)).await?;
     let available = super::seen_within(&node, super::HEARTBEAT_TIMEOUT_MS)
         && node["revoked"] != true
@@ -573,10 +601,30 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
             Recovery::NotNeeded => return Ok(true),
             Recovery::Waiting => return Ok(false),
             Recovery::Planned(movement) => {
-                current["moveRequest"] = movement;
-                s.store
-                    .patch_run(run_id, json!({ "moveRequest": current["moveRequest"] }))
-                    .await?;
+                let owner = run_id.to_owned();
+                let pending = movement.clone();
+                let accepted = s
+                    .store
+                    .transaction(move |db| {
+                        if source_mode_unconfirmed(db, &owner)?
+                            || db
+                                .run(&owner)?
+                                .is_none_or(|run| run["moveRequest"].is_object())
+                        {
+                            return Ok(false);
+                        }
+                        db.patch_run(&owner, &json!({ "moveRequest": pending }))?;
+                        Ok(true)
+                    })
+                    .await;
+                match accepted {
+                    Ok(true) => current["moveRequest"] = movement,
+                    rejected => {
+                        super::placement::release(s, text(&movement, "reservation")).await?;
+                        rejected?;
+                        return Ok(false);
+                    }
+                }
             }
         }
     }
@@ -809,7 +857,7 @@ mod tests {
         );
         for manifest in [
             json!({ "kind": "native-ext4-v1" }),
-            json!({ "layout": { "kind": "paired-ext4-v2" } }),
+            json!({ "version": 1 }),
             json!(null),
         ] {
             assert_eq!(restored_storage_mode(&manifest), "on-demand");

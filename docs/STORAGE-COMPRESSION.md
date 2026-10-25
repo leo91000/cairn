@@ -7,13 +7,6 @@ Each object remains independent, immutable and bound to its unique S3 locator.
 Compression introduces no base dependencies, additional GETs, pack compaction or
 changes to publication ownership and garbage collection.
 
-This implements the first recommendation from the storage-efficiency experiment.
-That study's small, cache-biased production sample saved about 68% with compression;
-it is not a forecast for the installation or the purged historical workload.
-Delta compression provided little additional benefit on that sample and requires
-durable dependency references and replacement materialization. Content-defined
-chunking and discard propagation need separate changes and qualification.
-
 ## Format and integrity
 
 | Bytes | Meaning |
@@ -183,19 +176,6 @@ The loopback source also omits manager-to-node plaintext transport.
 Record comparable workload and host conditions for future changes. Do not turn
 these timings into flaky CI thresholds.
 
-The `Storage compression reference` workflow runs this benchmark for storage PRs
-and on manual dispatch. Its job summary compares both policies and its artifact
-retains the sixteen JSON rows, input hashes, revision, host details and log for
-thirty days. It also records three `STORAGE_MIGRATION_PERF` trials. Each trial
-compares `Service::new` with a completed migration marker against startup that
-must convert four old raw 4 MiB S3 objects from the same corpus. Migration timing
-includes manifest authentication, durable planning/checkpoints, verified copy,
-old-key/version cleanup and ordinary manager initialization. Fixture construction
-and final cleanup are outside the timed regions. Wall time and manager process
-CPU are recorded separately; Moto CPU and WAN latency are excluded. These small
-trials establish a reproducible startup reference, not a downtime prediction for
-a large installation.
-
 For correctness against a versioned bucket, run the same launcher with
 `--migration-tests`. It uploads multiple old source versions and checks that
 migration and test cleanup leave neither versions nor delete markers.
@@ -207,94 +187,14 @@ intervals for S3 bytes, codec execution time, manager CPU usage, cold-fetch late
 and synchronization lag.
 This PR does not deploy to production or generate benchmark writes there.
 
-## Recorded reference
-
-The [release run](https://github.com/leo91000/cairn/actions/runs/38141454326)
-measured the implementation at PR head `61112373` on a four-CPU Linux x86-64
-Azure runner (kernel 6.17, glibc 2.39, Rust 1.97.1), using the repository's
-release settings with thin LTO. Two warmups precede sixteen alternating measured
-trials per policy and input. The [full JSON reference](benchmarks/storage-compression-reference.json)
-preserves input hashes, the tested merge revision, host metadata, byte counts,
-wall/process-CPU p50/p95/mean and warm-cache timings.
-
-Every input is 4 MiB; the old raw envelope is 4,194,340 bytes. These deliberately
-constructed inputs establish a comparison, not a workload-weighted savings forecast.
-The following medians include encoding plus loopback S3 PUT for writes and a
-fresh LazyDisk/S3 fetch plus verified decode/cache admission for cold 4 KiB reads:
-
-| Input | New envelope bytes | Write ms, raw → v2 | Cold read ms, raw → v2 |
-| --- | ---: | ---: | ---: |
-| Sparse | 192 | 28.583 → 4.043 | 12.842 → 6.447 |
-| Repeated source | 3,290 | 28.047 → 3.991 | 12.614 → 6.221 |
-| Half random / half source | 2,099,126 | 28.283 → 17.109 | 12.536 → 9.989 |
-| Incompressible | 4,194,345 | 27.938 → 30.476 | 12.675 → 14.152 |
-
-Compressible inputs reduced write medians by 40–86% and cold-read medians by
-20–51% in this loopback reference. Incompressible input added five stored bytes,
-about 9% write time and 12% cold-read time. Warm 4 KiB read medians across both
-policies were 0.34–0.36 microseconds; every trial asserted exactly one cold fetch
-and no warm fetches. Production plaintext transport, WAN and startup costs are
-outside these measurements.
-
-Native codec process-CPU medians, including encryption and verified decode:
-
-| Input | Encode CPU ms, raw → v2 | Decode CPU ms, raw → v2 |
-| --- | ---: | ---: |
-| Sparse | 4.273 → 1.087 | 4.923 → 1.248 |
-| Repeated source | 4.275 → 1.254 | 4.929 → 1.303 |
-| Half random / half source | 4.278 → 3.373 | 4.945 → 3.198 |
-| Incompressible | 4.387 → 5.590 | 4.955 → 5.529 |
-
-## Blocking-startup reference
-
-The [startup qualification run](https://github.com/leo91000/cairn/actions/runs/38161779663)
-measured PR head `cd6741ca` on a four-CPU Linux x86-64 Azure runner (kernel
-6.17, glibc 2.39, Rust 1.97.1), with the same release profile, corpus and input
-hashes as the original reference. The
-[complete JSON](benchmarks/storage-compression-startup-reference.json) records
-all sixteen codec/read/write rows and three startup trials. Native and loopback
-process CPU, wall p50/p95/mean and warm reads remain available for comparison.
-
-Fresh loopback medians against the raw reference in that same run:
-
-| Input | New bytes | Write ms, raw → v2 | Cold read ms, raw → v2 |
-| --- | ---: | ---: | ---: |
-| Sparse | 192 | 23.675 → 3.072 | 10.084 → 4.503 |
-| Repeated source | 3,290 | 23.976 → 3.256 | 9.845 → 4.578 |
-| Half random / half source | 2,099,126 | 23.978 → 13.863 | 9.808 → 7.625 |
-| Incompressible | 4,194,345 | 23.361 → 25.598 | 9.800 → 11.187 |
-
-Warm 4 KiB medians were 0.26–0.29 microseconds, with no warm GETs. Native
-process-CPU medians for the same run:
-
-| Input | Encode CPU ms, raw → v2 | Decode CPU ms, raw → v2 |
-| --- | ---: | ---: |
-| Sparse | 3.371 → 0.885 | 3.775 → 0.789 |
-| Repeated source | 3.373 → 0.957 | 3.781 → 0.850 |
-| Half random / half source | 3.374 → 2.492 | 3.782 → 2.398 |
-| Incompressible | 3.332 → 4.168 | 3.763 → 4.103 |
-
-Each startup trial converted one object from each of those four cases, totaling
-16 MiB plaintext. Stored bytes went from 16,777,360 to 6,296,953 in every trial.
-This equal-weight synthetic mix is not a production savings forecast.
-
-| Trial | Startup without migration ms | Startup with migration ms | CPU without migration ms | CPU with migration ms |
-| ---: | ---: | ---: | ---: | ---: |
-| 0 | 10.111 | 322.520 | 9.585 | 89.704 |
-| 1 | 9.732 | 472.226 | 9.232 | 83.576 |
-| 2 | 9.697 | 479.419 | 9.244 | 82.372 |
-
-The startup median was 472 ms with conversion versus 9.7 ms with a completed
-marker. Conversion includes verification and old-key/version purge. This is a
-small loopback reference; it excludes WAN, Moto CPU and production contention,
-and must not be extrapolated into installation downtime.
-
 ## Qualification
 
-The PR records the reference workflow run and measured comparison. Preserve its
-JSON artifact with the input hashes and host metadata when making future
-comparisons; benchmark results from a different workload or build profile are
-not interchangeable.
+Record reproducible measurements in the PR description: reference and candidate
+SHAs, exact command, encoded bytes, cold/warm read latency, write latency, CPU,
+workload, build profile and host conditions. Keep raw JSON/logs in temporary
+files or CI artifacts; commit no measurement artifacts. Distinguish local costs
+from production network latency. Results from different workloads or build
+profiles are not interchangeable.
 
 Required checks are `pnpm lint:fix`, `pnpm check`, `pnpm test:backend` and
 `cargo clippy --locked --workspace --all-targets -- -D warnings`. The normal S3

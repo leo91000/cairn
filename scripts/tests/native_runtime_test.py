@@ -169,6 +169,8 @@ def main():
 
         contexts = {}
         started_runs = set()
+        current_mode = dict(mode="protected", generation=None)
+        host_marker = Path("/etc/cairn-native-qualification-" + identifier)
         base_projects, base_archives, base_keys = {}, {}, {}
 
         def seed(run, legacy=False):
@@ -251,8 +253,21 @@ def main():
             attempts.append(attempt)
             workspace = data / 'runs' / run / 'workspace'
             script = '#!/bin/sh\nset -eux\n'
-            script += 'test "$(id -u)" -ne 0\ntest ! -e ' + str(private) + '\n'
-            script += 'test ! -e /run/docker.sock\nif touch /usr/cairn-should-be-readonly 2>/dev/null; then exit 81; fi\n'
+            script += 'test "$(id -u)" -ne 0\n'
+            administrator = current_mode['mode'] == 'administrator'
+            script += "/usr/bin/python3 - <<'CAPS'\nfrom pathlib import Path\ns=dict(line.split(':',1) for line in Path('/proc/self/status').read_text().splitlines() if ':' in line)\n"
+            script += 'for k in ("CapEff", "CapAmb"): assert bool(int(s[k].strip(),16) & 4) == ' + str(administrator) + '\nCAPS\n'
+            if administrator:
+                script += 'test "$(sudo -n id -u)" = 0\n'
+                # Admin's read/search capability preserves private logical
+                # workspace ancestors without chmod or path/session remapping.
+                script += 'test "$(cat ' + str(private) + ')" = "synthetic owner data"\n'
+                script += 'test "$(sudo -n cat ' + str(private) + ')" = "synthetic owner data"\n'
+                script += 'sudo -n sh -c "printf administrative-change > ' + str(host_marker) + '"\n'
+            else:
+                script += 'test ! -e ' + str(private) + '\n'
+                script += 'if sudo -n true 2>/dev/null; then exit 80; fi\n'
+                script += 'test ! -e /run/docker.sock\nif touch /usr/cairn-should-be-readonly 2>/dev/null; then exit 81; fi\n'
             script += "test \"$(cat /home/node/.codex/auth.json)\" = '" + SECRET + "'\n"
             script += 'if echo bad > /home/node/.codex/auth.json 2>/dev/null; then exit 82; fi\n'
             # Exercise the same atomic credential replacement as the real Claude
@@ -276,10 +291,13 @@ def main():
                 script += "while ! test -e measure-go; do sleep 0.05; done\n/usr/bin/python3 - <<'MEASURE' > measure.json\n" + MEASURE + '\nMEASURE\n'
                 script += 'printf measured > measure-ready\n'
             if long:
-                script += "setsid sh -c 'while :; do printf x >> descendant; sleep 0.1; done' &\nwait\n"
+                # Read the actual read-only bind as the unprivileged workload,
+                # including concurrent steering updates after a disk warning.
+                script += "/usr/bin/python3 - <<'INBOX' &\nimport json,time\nfrom pathlib import Path\nwhile True:\n    for name in ('messages.json','disk-notice.json'):\n        try: value=json.loads((Path('/run/cairn-chat')/name).read_text())\n        except FileNotFoundError: continue\n        except PermissionError:\n            Path('inbox-read-error').write_text(name); raise\n        if name=='disk-notice.json': Path('disk-notice-seen').write_text(value['id'])\n        elif value: Path('steering-seen').write_text(value[0]['text'])\n    time.sleep(0.02)\nINBOX\n"
+                script += ("sudo -n " if administrator else "") + "setsid sh -c 'while :; do printf x >> descendant; sleep 0.1; done' &\nwait\n"
             (tools / 'bin/codex').write_text(script)
             (tools / 'bin/codex').chmod(0o555)
-            plan = dict(id=attempt, runId=run, backend='native', runtimeId='synthetic', nodeLeaseRequired=True,
+            plan = dict(id=attempt, runId=run, backend='native', runtimeId='synthetic', nodeLeaseRequired=True, nativeMode=current_mode.copy(),
                 expires=None, cwd=str(workspace / base_projects[run] if run in base_projects else workspace), projectRoot=str(workspace), sandbox='workspace-write',
                 resources=dict(cpu=1, memoryMiB=512, diskMiB=256), args=[], prompt='synthetic input', storage=contexts[run],
                 imports=[dict(source=str(workspace), target=str(workspace)), dict(source=str(data / 'runs' / run / 'home'), target='/home/node')])
@@ -376,7 +394,9 @@ def main():
             fenced(run, first)
             assert not (state / 'native-block' / run / 'root/disk.blk').exists(), 'Retired device inode was retained.'
             assert (state / 'native' / run / 'legacy-data').exists(), 'Migration source retired before S3 acknowledgement.'
-            assert api('/health', method='GET')['usage']['diskBytes'] > 0
+            stopped_health = api('/health', method='GET')
+            assert stopped_health['usage']['diskBytes'] > 0
+            assert stopped_health['diskGrowth']['retainedBytes'][run] > 0, 'Stopped journal lost its measured admission credit.'
             point = manager('publish', run=run)
             s3 = boto3.client('s3', endpoint_url=os.environ['CAIRN_NODE_TEST_S3_ENDPOINT'])
             first_objects = [obj for page in s3.get_paginator('list_objects_v2').paginate(Bucket='cairn-node-test') for obj in page.get('Contents', [])]
@@ -410,6 +430,52 @@ def main():
             start_controller()
             resumed = start(run, legacy=True, measure='nativeEvicted')
             assert metrics['nativeEvicted']['readTriggeredRemoteRequests'] > 0, 'Payload did not use demand-paged S3 reads.'
+            # Real journal -> live ublk -> online ext4 growth. The workload
+            # process and namespace stay alive; no whole-disk materialization.
+            growth_health = api('/health', method='GET')
+            assert growth_health.get('diskGrowth', {}).get('protocol') == 1, 'Qualification host lacks live ublk resize.'
+            unit = 'cairn-native-' + resumed + '.service'
+            workload_pid = command('systemctl', 'show', unit, '--property=MainPID', '--value').stdout.strip()
+            before_capacity = os.statvfs(managed(run)).f_blocks * os.statvfs(managed(run)).f_frsize
+            # Negotiate first, then generate real combined workspace/tmp
+            # pressure without filling the workspace itself. Sparse tmp is
+            # intentionally charged by logical length, as in production.
+            api('/disk-growth', dict(protocol=1, grants=[]))
+            space = os.statvfs(managed(run))
+            used = (space.f_blocks - space.f_bfree) * space.f_frsize
+            pressure_file = state / 'native' / run / 'tmp/growth-pressure'
+            with pressure_file.open('wb') as stream:
+                stream.truncate(max(0, 256 * 1024 * 1024 * 83 // 100 - used))
+            eventually(lambda: (managed(run) / 'disk-notice-seen').exists(), timeout=20)
+            assert not (managed(run) / 'inbox-read-error').exists()
+            inbox = data / 'runs' / run / 'chat-input'
+            steering = inbox / '.fixture-steering'
+            steering.write_text(json.dumps([dict(id='synthetic-follow-up', text='Continue safely')]))
+            steering.chmod(0o444)
+            steering.replace(inbox / 'messages.json')
+            eventually(lambda: (managed(run) / 'steering-seen').read_text() == 'Continue safely', timeout=20)
+            assert not (managed(run) / 'inbox-read-error').exists()
+            before_reads = manager('metrics')['remoteRequests']
+            growth_start = time.monotonic()
+            api('/disk-growth', dict(protocol=1, grants=[dict(attemptId=resumed, allowanceMiB=384, reason='granted')]))
+            eventually(lambda: os.statvfs(managed(run)).f_blocks * os.statvfs(managed(run)).f_frsize > before_capacity)
+            metrics['onlineGrowth'] = dict(fromMiB=256, toMiB=384, wallMs=(time.monotonic()-growth_start)*1000,
+                                          remoteRequests=manager('metrics')['remoteRequests']-before_reads)
+            assert command('systemctl', 'show', unit, '--property=MainPID', '--value').stdout.strip() == workload_pid
+            pressure_file.unlink()
+            # Allocating more than the entire old disk exercises the ublk I/O
+            # bounds after resizing, including its newly appended journal tail.
+            tail = managed(run) / 'growth-tail'
+            with tail.open('wb') as stream:
+                os.posix_fallocate(stream.fileno(), 0, 260 * 1024 * 1024)
+                stream.seek(260 * 1024 * 1024 - 8)
+                stream.write(b'new-tail'); stream.flush(); os.fsync(stream.fileno())
+            with tail.open('rb') as stream:
+                stream.seek(-8, os.SEEK_END)
+                assert stream.read() == b'new-tail'
+            tail.unlink()
+            api('/disk-growth', dict(protocol=1, grants=[dict(attemptId=resumed, allowanceMiB=256, reason='granted')]))
+            assert os.statvfs(managed(run)).f_blocks * os.statvfs(managed(run)).f_frsize > before_capacity, 'Grant replay shrank filesystem.'
             for consistency in ('crash', 'filesystem'):
                 live = api('/runs/' + resumed + '/snapshot', dict(consistency=consistency))
                 assert live['manifest']['consistency'] == consistency
@@ -497,6 +563,60 @@ def main():
                 assert error.code == 409
             else:
                 raise AssertionError('Completed attempt restarted.')
+            # Real host administration and both directions of a multi-conversation
+            # transition. This runs only on the disposable CI VM guarded above.
+            api('/node-budget', dict(limits=dict(diskMiB=4096, cpu=2, memoryMiB=1024), slots=2))
+            first_protected, second_protected = start(run), start(other)
+            target = dict(mode='administrator', generation=str(uuid.uuid4()))
+            applied = api('/native-mode', target)
+            assert applied['status'] == 'applied', applied
+            current_mode.update(target)
+            fenced(run, first_protected)
+            fenced(other, second_protected)
+            admin_first, admin_second = start(run), start(other)
+            assert stat.S_IMODE(root.stat().st_mode) == 0o700, 'Administrator changed private ancestor permissions.'
+            assert host_marker.read_text() == 'administrative-change', 'sudo did not administer the actual host.'
+            target = dict(mode='protected', generation=str(uuid.uuid4()))
+            applied = api('/native-mode', target)
+            assert applied['status'] == 'applied', applied
+            current_mode.update(target)
+            fenced(run, admin_first)
+            fenced(other, admin_second)
+            assert host_marker.read_text() == 'administrative-change', 'Returning to protected must not claim to restore the host.'
+            protected_again = start(run, long=False)
+            fenced(run, protected_again)
+            assert int((state / (protected_again + '.exit')).read_text()) == 0
+            assert api('/native-mode', target) == applied, 'Retry of the applied generation must be idempotent.'
+            assert api('/health', method='GET')['nativeMode'] == applied
+            # A crash after persisting intent must never reopen admission on an
+            # unconfirmed protected claim. Resume the durable request explicitly.
+            command('systemctl', 'stop', supervisor)
+            pending_generation = dict(mode='protected', generation=str(uuid.uuid4()))
+            (state / 'native-mode.json').write_text(json.dumps(dict(applied, status='pending', target=pending_generation)))
+            start_controller()
+            assert api('/health', method='GET')['nativeMode']['status'] == 'pending'
+            stale_attempt = str(uuid.uuid4())
+            stale_plan = json.loads((data / 'runner-plans' / (protected_again + '.json')).read_text())
+            stale_plan['id'] = stale_attempt
+            attempts.append(stale_attempt)
+            (data / 'runner-plans' / (stale_attempt + '.json')).write_text(json.dumps(stale_plan))
+            api('/runs/' + stale_attempt + '/lease', {'remainingMs': 60000})
+            try:
+                api('/runs/' + stale_attempt)
+            except urllib.error.HTTPError as error:
+                assert error.code == 409
+            else:
+                raise AssertionError('Unconfirmed privilege generation admitted an execution.')
+            applied = api('/native-mode', pending_generation)
+            assert applied['status'] == 'applied', applied
+            current_mode.update(pending_generation)
+            after_crash = start(run, long=False)
+            fenced(run, after_crash)
+            assert int((state / (after_crash + '.exit')).read_text()) == 0
+            metrics['nativeAdministrator'] = dict(realHostSudo=True, ordinaryUser=True,
+                concurrentConversations=2, rootDescendantsStopped=True,
+                protectedAfterAdministrator=True, filesPreserved=True, hostChangesRetained=True,
+                pendingCrashFailsClosed=True, generationRetry=True)
             manager('publish', run=run)
             # Publication checks every decoded S3 block for generated secrets.
             s3 = boto3.client('s3', endpoint_url=os.environ['CAIRN_NODE_TEST_S3_ENDPOINT'])
@@ -522,6 +642,8 @@ def main():
             bridge.shutdown()
             for unit in [supervisor] + ['cairn-native-' + attempt + '.service' for attempt in attempts] + ['cairn-native-guardian-' + attempt + '.service' for attempt in attempts]:
                 subprocess.run(['systemctl', 'stop', unit], capture_output=True, timeout=30)
+            Path('/etc/sudoers.d/cairn-native-' + str(__import__('pwd').getpwnam(user).pw_uid)).unlink(missing_ok=True)
+            host_marker.unlink(missing_ok=True)
             subprocess.run(['userdel', user], check=True, capture_output=True)
 
 

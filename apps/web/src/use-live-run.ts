@@ -1,6 +1,4 @@
-import type { Deliverable } from '../../../packages/contracts/artifacts'
-import type { ChatDetail, ChatView } from '../../../packages/contracts/chats'
-import type { Run, RunEvent } from '../../../packages/contracts/contracts'
+import type { RunEvent } from '../../../packages/contracts/contracts'
 import type { HistoryPage, LiveState } from '../../../packages/contracts/live'
 import type { CachedHistory, ReadingPosition } from './history-cache'
 import type { LiveStatus } from './live-connection'
@@ -53,7 +51,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
   // The snapshot shown comes from the saved conversation, not yet from the server.
   const restored = ref(false)
   // A conversation owns the shell's list while connecting, then only while its stream
-  // can deliver it. Terminal failures and finite compatibility reads release that job.
+  // can deliver it. Terminal failures release that job.
   const carriesList = ref(false)
   const error = ref('')
   const position = ref<ReadingPosition>()
@@ -189,71 +187,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
     }
 
     let checking = false
-    let receivedBatches = 0
-    let readingSnapshot = false
-    let readSnapshotOnce = false
-    let finiteRead = false
-
-    // An installation on the first relay protocol cannot stream: when the stream fails
-    // before its first batch, one finite read keeps it readable. Never polled.
-    async function readSnapshot() {
-      if (readingSnapshot || readSnapshotOnce || receivedBatches || document.hidden || disposed || current !== generation)
-        return
-      readingSnapshot = true
-      readSnapshotOnce = true
-      try {
-        const endpoint = value.replace(/\/stream$/, '')
-        const isList = endpoint === '/chats'
-        const isChat = endpoint.startsWith('/chats/')
-        const result = await api<ChatDetail | ChatView[] | Run>(endpoint)
-        const chat = isChat ? result as ChatDetail : null
-        const run = isList ? null : isChat ? chat!.run : result as Run
-        const nextRows: RunEvent[] = []
-        const fallback = new LiveEvents()
-        let files: Deliverable[] = []
-        if (run?.id) {
-          files = await api<Deliverable[]>(`/runs/${run.id}/artifacts`)
-          let page: RunEvent[]
-          do {
-            page = await api<RunEvent[]>(`/runs/${run.id}/events?after=${fallback.cursor}&limit=500`)
-            fallback.append(nextRows, page)
-            if (disposed || current !== generation || receivedBatches)
-              return
-          } while (page.length === 500)
-        }
-
-        if (disposed || current !== generation || receivedBatches)
-          return
-        // HTTP reads have no validated SSE history/cursor and must not replace
-        // the stream's persisted snapshot or advance its replay cursor.
-        complete = false
-        finiteRead = true
-        carriesList.value = false
-        restored.value = false
-        snapshot.value = {
-          chat,
-          run,
-          artifacts: files,
-          ...(isList ? { chats: result as ChatView[] } : {}),
-        }
-        events.value = nextRows
-        catchingUp.value = false
-        hasOlder.value = false
-        error.value = ''
-      }
-      catch (cause) {
-        if (!disposed && current === generation && !receivedBatches) {
-          error.value = cause instanceof Error ? cause.message : 'Unable to reach your installation.'
-          catchingUp.value = false
-        }
-      }
-      finally {
-        readingSnapshot = false
-      }
-    }
-
     connection = liveConnection(value, (batch, accepted) => {
-      receivedBatches++
       if (batch.state?.cacheRevision) {
         const revisionKey = state.installationId ? `conversation-cache-revision:${state.installationId}` : 'conversation-cache-revision'
         try {
@@ -288,7 +222,6 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
       rows = next
       if (batch.state)
         detail = batch.state
-      finiteRead = false
       carriesList.value = !!options.list && !!detail?.chats
 
       cursor = accepted
@@ -315,11 +248,8 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
 
       error.value = ''
     }, (connectionStatus, opening = false) => {
-      // A finite read lets the shell carry the Fil while streaming is unavailable. Each
-      // retry takes the slot back before connecting, keeping one stream per tab even
-      // when every account slot is occupied; a failed retry gives it back again.
-      if (options.list && (opening || finiteRead))
-        carriesList.value = opening
+      if (options.list && opening)
+        carriesList.value = true
       setStatus(connectionStatus)
       if (connectionStatus === 'live')
         return
@@ -331,8 +261,6 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
 
       if (connectionStatus !== 'reconnecting')
         return
-      if (state.installationId && (!cached || value === '/chats/stream'))
-        void readSnapshot()
       if (checking)
         return
       checking = true

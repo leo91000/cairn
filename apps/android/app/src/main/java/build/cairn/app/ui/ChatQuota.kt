@@ -105,7 +105,6 @@ private data class QuotaEcho(var text: String = "", val ids: MutableList<Long> =
 
 private data class QuotaTurn(
     var exhausted: Boolean = false,
-    var legacyTool: Boolean = false,
     val causes: MutableSet<String> = mutableSetOf(),
     val failures: MutableSet<String> = mutableSetOf(),
     val messages: MutableMap<String, QuotaEcho> = mutableMapOf(),
@@ -123,11 +122,7 @@ internal fun quotaHiddenEvents(events: List<RunEvent>): Set<Long> {
             turns[event.runId] = QuotaTurn()
         val turn = turns.getValue(event.runId)
         val item = event.item()
-        val legacy = event.activityData() == null
-        val legacyMessage = legacy && event.type == "item.completed" && !turn.legacyTool
-        if (legacy && event.type == "item.started") turn.legacyTool = true
-        if (legacy && event.type == "item.completed") turn.legacyTool = false
-        if (item.string("type") == "agent_message" || legacyMessage) {
+        if (item.string("type") == "agent_message") {
             val key = item.string("id").ifBlank { event.id.toString() }
             val message = turn.messages.getOrPut(key) { QuotaEcho() }
             message.text = item.string("text").ifBlank { event.text }

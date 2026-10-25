@@ -791,7 +791,6 @@ test('the execution backend chooses which nodes an agent can be granted', async 
         memoryMiB: 16384,
         diskMiB: 65536,
         kvm: false,
-        fuse: false,
       },
     },
   })
@@ -898,49 +897,6 @@ test('reloading after a conflict keeps a node granted elsewhere and the owner\'s
   expect([...saved.access.nodes].sort()).toEqual([mine, theirs].sort())
 })
 
-test('on an older installation, live grants are read-only and never sent', async ({ page, workspace }) => {
-  await useRelayForHttpMocks(page)
-  const agent = await workspace.api('/api/agents', 'POST', { name: 'Older grants' })
-  // An installation before live grants on agents, e.g. after a rollback: agents keep their
-  // revision, but lack the capability marker and the grants; it has no preview.
-  await page.route('**/api/agents', async (route) => {
-    if (route.request().method() !== 'GET') {
-      await route.continue()
-      return
-    }
-
-    const response = await route.fetch()
-    const agents = await response.json()
-    await route.fulfill({
-      response,
-      json: agents.map(({
-        grantsOnAgent: _marker,
-        exclusiveNodes: _nodes,
-        plugins: _plugins,
-        ...item
-      }: Record<string, unknown>) => item),
-    })
-  })
-  await page.route(`**/api/agents/${agent.id}/preview`, route => route.fulfill({ status: 404, json: { error: 'Not found' } }))
-  await page.goto(workspacePath(`/agents/${agent.id}?section=plugins`))
-  await authenticateWorkspace(page)
-  await expect(page.getByRole('note').filter({ hasText: 'Update the installation to grant these from the agent page.' })).toBeVisible()
-  await openAgentSection(page, 'Nodes')
-  await expect(page.getByText('Exclusive reservations: Update the installation to grant these from the agent page.')).toBeVisible()
-
-  await openAgentSection(page, 'Identity & instructions')
-  await page.getByLabel('Description', { exact: true }).fill('Saved on an older installation')
-  const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${agent.id}`))
-  await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
-  const sent = (await saving).postDataJSON()
-  expect(sent).not.toHaveProperty('exclusiveNodes')
-  expect(sent).not.toHaveProperty('plugins')
-  expect(sent).not.toHaveProperty('revision')
-  expect(sent).not.toHaveProperty('grantsOnAgent')
-  await expect(page.getByRole('region', { name: 'Unsaved changes' })).toHaveCount(0)
-  await page.unrouteAll({ behavior: 'ignoreErrors' })
-})
-
 test('while the workspace lists cannot load, MCP access is read-only and not reported gone', async ({ page, workspace }) => {
   await workspace.restart()
   await useRelayForHttpMocks(page)
@@ -972,72 +928,18 @@ test('while the workspace lists cannot load, MCP access is read-only and not rep
   await expect(page.getByRole('group', { name: 'MCP connections access' })).toBeVisible()
 })
 
-test('on an older installation, grants read from resources appear once plugins load', async ({ page, workspace }) => {
-  await workspace.restart()
+test('a missing agent preview keeps edits unsaved and reports the error', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
-  const agent = await workspace.api('/api/agents', 'POST', { name: 'Older retry' })
-  await page.route('**/api/agents', async (route) => {
-    if (route.request().method() !== 'GET') {
-      await route.continue()
-      return
-    }
-
-    const response = await route.fetch()
-    const agents = await response.json()
-    await route.fulfill({
-      response,
-      json: agents.map(({
-        grantsOnAgent: _marker,
-        exclusiveNodes: _nodes,
-        plugins: _plugins,
-        ...item
-      }: Record<string, unknown>) => item),
-    })
-  })
-  let pluginsFail = true
-  await page.route('**/api/plugins', async (route) => {
-    if (pluginsFail) {
-      await route.fulfill({ status: 500, json: { error: 'Plugin host unavailable' } })
-      return
-    }
-
-    const response = await route.fetch()
-    const catalog = await response.json()
-    // The older installation records the grant on the instance.
-    await route.fulfill({
-      response,
-      json: {
-        ...catalog,
-        connections: [{
-          id: 'queue',
-          pluginId: 'onepassword',
-          name: 'Support queue',
-          enabled: true,
-          settings: {},
-          agentIds: [agent.id],
-          userIds: [],
-          people: [],
-          accessMode: 'allowlist',
-          agentId: '',
-          projectId: null,
-          maxMessagesPerHour: 0,
-          status: { state: 'ready' },
-          usage: { hour: 0 },
-          requests: [],
-          activity: [],
-        }],
-      },
-    })
-  })
-  await page.goto(workspacePath(`/agents/${agent.id}?section=plugins`))
+  const agent = await workspace.api('/api/agents', 'POST', { name: 'Required preview' })
+  await page.route(`**/api/agents/${agent.id}/preview`, route => route.fulfill({ status: 404, json: { error: 'Preview unavailable' } }))
+  await page.goto(workspacePath(`/agents/${agent.id}`))
   await authenticateWorkspace(page)
-  const failure = page.getByRole('alert').filter({ hasText: 'Plugins could not be loaded' })
-  await expect(failure).toBeVisible()
-  pluginsFail = false
-  await failure.getByRole('button', { name: 'Try again', exact: true }).click()
-  const grant = page.getByRole('switch', { name: 'Access to 1Password Support queue' })
-  await expect(grant).toBeChecked()
-  await expect(grant).toBeDisabled()
-  await expect(page.getByRole('region', { name: 'Unsaved changes' })).toHaveCount(0)
-  await page.unrouteAll({ behavior: 'ignoreErrors' })
+  await openAgentSection(page, 'Identity & instructions')
+  await page.getByLabel('Description', { exact: true }).fill('Unsaved edits')
+  const bar = page.getByRole('region', { name: 'Unsaved changes' })
+  await bar.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(page.getByText('Preview unavailable', { exact: true })).toBeVisible()
+  await expect(bar).toBeVisible()
+  const stored = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id)
+  expect(stored.description).not.toBe('Unsaved edits')
 })

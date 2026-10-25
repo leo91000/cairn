@@ -62,10 +62,10 @@ test('a saved quota failure really resumes its session from the inline card', as
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
   const before = (await workspace.api(`/api/chats/${chat.id}`)).run
   const message = 'You\'ve hit your individual spend limit · your weekly limit resets 3pm (UTC)'
-  // Reproduce a pre-fix persisted failure with a real prepared session and workspace.
+  // A saved structured failure keeps its real prepared session and workspace.
   workspace.service.store.updateRun(before.id, { status: 'failed', error: message, resumeAvailable: true })
   workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, paused: true })
-  workspace.service.store.event(before.id, 'turn.failed', JSON.stringify({ type: 'turn.failed', error: { message } }))
+  workspace.service.store.event(before.id, 'turn.failed', message, { type: 'turn.failed', error: { message } })
   workspace.service.store.event(before.id, 'status', 'failed')
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
@@ -124,8 +124,9 @@ test('Claude agents, chats, questions and scheduled work run on a connected Clau
   const run = await workspace.api(`/api/tasks/${task.id}/run`, 'POST')
   await expect.poll(async () => (await workspace.api(`/api/runs/${run.id}`)).status, { timeout: 20000 }).toBe('succeeded')
   // The run is recorded with the Claude account it used.
-  const account = (await workspace.api('/api/accounts')).accounts.find((a: { provider: string }) => a.provider === 'claude')
-  expect((await workspace.api(`/api/runs/${run.id}`)).accountId).toBe(account.id)
+  const completed = await workspace.api(`/api/runs/${run.id}`)
+  const account = (await workspace.api('/api/accounts')).accounts.find((a: { id: string }) => a.id === completed.accountId)
+  expect(account?.provider).toBe('claude')
 })
 
 test('switching coding agents preserves one chat, context and provider selection after reload', async ({ page, workspace }, testInfo) => {

@@ -54,7 +54,7 @@ class ConversationPresentationTest {
     }
 
     @Test
-    fun `quota history supports structured failures retry notices and plain legacy replies`() {
+    fun `quota history supports structured failures and retry notices`() {
         val text = "Account usage is exhausted."
         fun event(id: Long, type: String, payload: JsonObject? = null, raw: String = "") =
             RunEvent(id, id, type, raw, payload, runId = "run")
@@ -88,23 +88,6 @@ class ConversationPresentationTest {
                     event(3, "error", JsonObject(failure + ("willRetry" to JsonPrimitive(true))))
             assertTrue(quotaHiddenEvents(retrying).isEmpty())
         }
-        val message = "You've hit your individual spend limit"
-        val legacy =
-            listOf(
-                event(1, "turn.started"),
-                event(2, "item.started", raw = "cat log"),
-                event(3, "item.completed", raw = message),
-                event(4, "item.completed", raw = message),
-                event(
-                    5,
-                    "turn.failed",
-                    raw = """{"type":"turn.failed","error":{"message":"$message"}}""",
-                ),
-            )
-        assertEquals(setOf(4L, 5L), quotaHiddenEvents(legacy))
-        val entries = quotaTimeline(timelineEntries(legacy, chat = true), legacy)
-        assertEquals(1, entries.size)
-        assertFalse(entries.single().message)
     }
 
     @Test

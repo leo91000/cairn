@@ -258,8 +258,16 @@ pub fn disk_space(path: &Path, total: u64, free: u64) -> io::Result<(u64, u64)> 
         if !file.exists() {
             continue;
         }
-        let budget: Budget =
-            serde_json::from_slice(&std::fs::read(file)?).map_err(io::Error::other)?;
+        let bytes = std::fs::read(file)?;
+        let budget: Budget = if state.join("native-accounting.json").exists() {
+            // Native controller records fence older binaries with a protocol
+            // marker. The shared quota reader must validate that same format;
+            // Firecracker and old readers retain their strict Budget contract.
+            let value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+            crate::native::native_budget(&value).map_err(io::Error::other)?
+        } else {
+            serde_json::from_slice(&bytes).map_err(io::Error::other)?
+        };
         let limit = budget.limits.disk_mi_b * 1_048_576;
         let remaining = limit.saturating_sub(disk_bytes(state)?);
         let policy: crate::storage::policy::Policy =
@@ -592,6 +600,164 @@ mod tests {
         assert_eq!(pressure(0, 32768, free, reserve), Some("disk"));
         let (_, free) = disk_space(root.path(), total, reserve - 1).unwrap();
         assert_eq!(free, reserve - 1);
+    }
+
+    #[test]
+    fn shared_disk_quota_accepts_only_the_verified_native_budget_protocol() {
+        let root = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let mut record = serde_json::json!({
+            "slots": 2,
+            "limits": { "cpu": 2, "memoryMiB": 1024, "diskMiB": 512 },
+            "nativeModeProtocol": 1,
+        });
+        let path = root.path().join(FILE);
+        let bytes = serde_json::to_vec(&record).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(
+            serde_json::from_slice::<Budget>(&bytes).is_err(),
+            "Older controller/VM decoding must remain fenced"
+        );
+        let total = 128 * 1024 * 1_048_576;
+        assert!(
+            disk_space(root.path(), total, total).is_err(),
+            "A VM budget cannot accept a native marker"
+        );
+        std::fs::write(
+            root.path().join("native-accounting.json"),
+            serde_json::to_vec(&serde_json::json!({ "data": data.path() })).unwrap(),
+        )
+        .unwrap();
+        let (_, free) = disk_space(root.path(), total, total).unwrap();
+        let reserve = crate::storage::policy::Policy::default().reserve(total);
+        assert!(free > reserve + 511 * 1_048_576 && free <= reserve + 512 * 1_048_576);
+        charge_disk(root.path(), 512 * 1_048_576).unwrap();
+        assert_eq!(disk_space(root.path(), total, total).unwrap().1, reserve);
+        for protocol in [
+            serde_json::json!(2),
+            serde_json::json!(null),
+            serde_json::json!("1"),
+        ] {
+            record["nativeModeProtocol"] = protocol;
+            std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+            assert!(disk_space(root.path(), total, total).is_err());
+        }
+        record.as_object_mut().unwrap().remove("nativeModeProtocol");
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        assert!(
+            disk_space(root.path(), total, total).is_ok(),
+            "Legacy protected native budgets stay readable"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "explicit local native budget metadata measurements; run alone with --ignored --nocapture"]
+    async fn native_budget_metadata_measurements() {
+        use serde_json::json;
+        use std::os::fd::AsRawFd;
+
+        // Flat-fixture read/quota logic from base 87e87412. Accounting and
+        // cache implementation are shared; only the metadata reader differs.
+        fn reference_read(state: &Path, total: u64) -> io::Result<(u64, u64)> {
+            let file = state.join(FILE);
+            assert!(file.exists());
+            let budget: Budget =
+                serde_json::from_slice(&std::fs::read(file)?).map_err(io::Error::other)?;
+            let remaining =
+                (budget.limits.disk_mi_b * 1_048_576).saturating_sub(disk_bytes(state)?);
+            let policy: crate::storage::policy::Policy =
+                match std::fs::read(state.join("storage-policy.json")) {
+                    Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        crate::storage::policy::Policy::default()
+                    }
+                    Err(error) => return Err(error),
+                };
+            Ok((
+                total,
+                total.min(policy.reserve(total).saturating_add(remaining)),
+            ))
+        }
+
+        fn cpu_us() -> f64 {
+            let mut time = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            assert_eq!(
+                unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut time) },
+                0
+            );
+            time.tv_sec as f64 * 1_000_000.0 + time.tv_nsec as f64 / 1000.0
+        }
+        fn summary(mut values: Vec<f64>) -> serde_json::Value {
+            values.sort_by(f64::total_cmp);
+            json!({
+                "p50Us": values[values.len() / 2],
+                "p95Us": values[(values.len() * 95 / 100).min(values.len() - 1)],
+                "meanUs": values.iter().sum::<f64>() / values.len() as f64,
+            })
+        }
+        let root = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("native-accounting.json"),
+            serde_json::to_vec(&json!({ "data": data.path() })).unwrap(),
+        )
+        .unwrap();
+        let file = root.path().join(FILE);
+        let legacy =
+            json!({ "slots": 2, "limits": { "cpu": 2, "memoryMiB": 1024, "diskMiB": 512 } });
+        let mut current = legacy.clone();
+        current["nativeModeProtocol"] = 1.into();
+        let total = 128 * 1024 * 1_048_576;
+        let mut results = Vec::new();
+        for (name, record) in [("legacy-reference", legacy), ("native-protocol-1", current)] {
+            let encoded = serde_json::to_vec(&record).unwrap();
+            crate::native::atomic_write(&file, &encoded).await.unwrap();
+            let read = || {
+                if name == "legacy-reference" {
+                    reference_read(root.path(), total)
+                } else {
+                    disk_space(root.path(), total, total)
+                }
+            };
+            for _ in 0..2 {
+                read().unwrap();
+            }
+            let mut warm = Vec::new();
+            let mut cold = Vec::new();
+            let mut writes = Vec::new();
+            let cpu = cpu_us();
+            for _ in 0..16 {
+                let begin = Instant::now();
+                read().unwrap();
+                warm.push(begin.elapsed().as_secs_f64() * 1_000_000.0);
+                let descriptor = std::fs::File::open(&file).unwrap();
+                assert_eq!(
+                    unsafe {
+                        libc::posix_fadvise(descriptor.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED)
+                    },
+                    0
+                );
+                let begin = Instant::now();
+                read().unwrap();
+                cold.push(begin.elapsed().as_secs_f64() * 1_000_000.0);
+                let begin = Instant::now();
+                crate::native::atomic_write(&file, &encoded).await.unwrap();
+                writes.push(begin.elapsed().as_secs_f64() * 1_000_000.0);
+            }
+            results.push(json!({
+                "case": name,
+                "encodedBytes": encoded.len(),
+                "warmRead": summary(warm),
+                "coldKernelEvictionRequestedRead": summary(cold),
+                "durableWrite": summary(writes),
+                "processCpuUs": cpu_us() - cpu,
+                "trials": 16,
+            }));
+        }
+        println!("{}", json!({ "nativeBudgetMetadata": results }));
     }
 
     #[test]

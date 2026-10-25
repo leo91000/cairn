@@ -55,6 +55,7 @@
           "mcps": null,
           "mcpTools": {},
           "installation": false,
+          "delegation": false,
           "sandbox": "yolo"
         },
         "type": "object",
@@ -158,6 +159,10 @@
             "default": false,
             "type": "boolean"
           },
+          "delegation": {
+            "default": false,
+            "type": "boolean"
+          },
           "sandbox": {
             "default": "yolo",
             "type": "string",
@@ -176,6 +181,7 @@
           "mcps",
           "mcpTools",
           "installation",
+          "delegation",
           "sandbox"
         ],
         "additionalProperties": false
@@ -192,6 +198,16 @@
       },
       "plugins": {
         "default": [],
+        "maxItems": 100,
+        "type": "array",
+        "items": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        }
+      },
+      "nativeNodeReviews": {
+        "description": "Owner confirmation of specifically reviewed administrator node IDs already covered by access.nodes, including wildcard access. Reviews only these nodes while preserving the placement selection. These grant unrestricted passwordless sudo on the real host, including access to locally present credentials and services. Never infer confirmation from an all-node grant or conversion. Not saved on the agent; delegated installation agents cannot approve it.",
         "maxItems": 100,
         "type": "array",
         "items": {

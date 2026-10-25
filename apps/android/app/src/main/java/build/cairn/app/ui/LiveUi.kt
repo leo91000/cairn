@@ -593,9 +593,7 @@ internal fun JsonObject?.string(key: String) =
     this?.get(key)?.let { it as? JsonPrimitive }?.contentOrNull.orEmpty()
 
 internal fun RunEvent.isMessage(): Boolean =
-    type == "chat.user" ||
-        item().string("type") == "agent_message" ||
-        (activityData() == null && type == "item.completed" && item() == null)
+    type == "chat.user" || item().string("type") == "agent_message"
 
 internal data class TimelineEntry(
     val key: String,
@@ -632,7 +630,6 @@ internal fun timelineEntries(
         val sources = mutableListOf<MutableList<Long>>()
         val positions = mutableMapOf<String, Int>()
         val subagents = subagentTimeline(events)
-        var legacyTool: Int? = null
         for (event in events) {
             if (event.type == "artifact") continue
             if (event.id in subagents.captured) {
@@ -644,32 +641,7 @@ internal fun timelineEntries(
             }
             if (event.type == "turn.started") {
                 positions.clear()
-                legacyTool = null
             }
-            val legacy =
-                (event.type == "item.started" || event.type == "item.completed") &&
-                    event.activityData() == null
-            if (legacy && event.type == "item.completed" && legacyTool != null) {
-                val index = legacyTool
-                val original = folded[index]
-                sources[index].add(event.id)
-                folded[index] =
-                    event.copy(
-                        id = original.id,
-                        createdAt = original.createdAt,
-                        payload =
-                            mapOf(
-                                "item" to
-                                    buildJsonObject {
-                                        put("type", "saved_output")
-                                        put("text", event.text)
-                                    }
-                            ),
-                    )
-                legacyTool = null
-                continue
-            }
-            if (legacy && event.type == "item.started") legacyTool = folded.size
             val item = event.item()
             val id = item.string("id")
             // Each plan update keeps its place: it shows what changed at that moment.
@@ -723,11 +695,6 @@ internal fun timelineEntries(
         // The wait still pending, by its wakeup ID, so that its result and resumption complete it.
         val waits = mutableMapOf<String, Int>()
         var openWait: Int? = null
-        // The current wait call's reason: its tool row is hidden, and an immediate result omits
-        // it. Only that call may lend it, so it resets once used, once a wakeup carries it, and
-        // each turn.
-        var waitCall = ""
-        var waitReason = ""
         fun updateWait(index: Int, change: (ActivityWait) -> ActivityWait) {
             result[index] = result[index].copy(wait = change(result[index].wait!!))
         }
@@ -760,7 +727,6 @@ internal fun timelineEntries(
             )
                 placeScheduled()
             if (event.type == "turn.started") {
-                waitReason = ""
                 connections.clear()
             }
             val failure = failureReason(event)
@@ -817,7 +783,6 @@ internal fun timelineEntries(
                     openWait = result.size
                     scheduled = result.size
                     waits[wakeup.id] = result.size
-                    waitReason = ""
                     result.add(
                         TimelineEntry(
                             "wait:${wakeup.id}",
@@ -833,12 +798,7 @@ internal fun timelineEntries(
                 "run.wait_ready" -> {
                     val observation = event.activityData()
                     // Right away, the agent never waited, and this call replaced any wait.
-                    val immediate =
-                        when (observation?.get("immediate")) {
-                            JsonPrimitive(true) -> true
-                            JsonPrimitive(false) -> false
-                            else -> event.text == IMMEDIATE_WAIT_RESULT
-                        }
+                    val immediate = observation?.get("immediate") == JsonPrimitive(true)
                     if (immediate) {
                         openWait?.let { index -> updateWait(index) { it.copy(ended = "replaced") } }
                         openWait = null
@@ -890,17 +850,13 @@ internal fun timelineEntries(
                                         null,
                                         observation,
                                         observed = true,
-                                        // Cairn records the reason with the result; older
-                                        // histories only kept it on the call.
+                                        // The result carries the reason.
                                         reason =
-                                            if (immediate)
-                                                observation.string("reason").ifBlank { waitReason }
-                                            else "",
+                                            if (immediate) observation.string("reason") else "",
                                     ),
                             )
                         )
                     }
-                    if (immediate) waitReason = ""
                     continue
                 }
                 "chat.wakeup",
@@ -954,14 +910,11 @@ internal fun timelineEntries(
                 }
             val waitTool =
                 event.item().let { it.string("type") == "mcp_tool_call" && isWaitTool(it) }
+            val delegateTool =
+                event.item().let { it.string("type") == "mcp_tool_call" && isDelegateTool(it) }
+            if (delegateTool && !presentActivity(event).failed) continue
             // The wait shows as its own card; only a call that failed stays among the tools.
             if (waitTool && !presentActivity(event).failed) {
-                // A provider may announce the call before its arguments: keep what the same call
-                // said.
-                val callId = event.item().string("id")
-                val reason = toolArguments(event.item()).string("reason")
-                if (callId != waitCall || reason.isNotBlank()) waitReason = reason
-                waitCall = callId
                 continue
             }
             val route = event.activityData()?.get("route") as? JsonObject

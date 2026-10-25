@@ -420,6 +420,27 @@ async fn inbox_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Publish controller information into an already mounted read-only inbox.
+/// Its directory stays traversable and final bytes are readable before rename.
+pub(crate) async fn publish_native_notice(root: &Path, bytes: &[u8]) -> Result<()> {
+    inbox_directory(root).await?;
+    let (root, bytes) = (root.to_owned(), bytes.to_owned());
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new_in(&root)?;
+        file.write_all(&bytes)?;
+        file.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o444))?;
+        file.as_file().sync_all()?;
+        file.persist(root.join("disk-notice.json"))
+            .map_err(|error| error.error)?;
+        std::fs::File::open(root)?.sync_all()
+    })
+    .await
+    .map_err(Error::internal)??;
+    Ok(())
+}
+
 async fn install_native_inbox(source: &Path, target: &Path) -> Result<()> {
     prepare_native_inbox(source).await?;
     let messages = source.join("messages.json");
@@ -509,6 +530,52 @@ pub async fn auth_listener(
 mod native_inbox_tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;
+
+    #[tokio::test]
+    async fn controller_notice_keeps_live_inbox_and_user_steering_readable() {
+        let root = tempfile::tempdir().unwrap();
+        let inbox = root.path().join("inbox");
+        tokio::fs::create_dir(&inbox).await.unwrap();
+        tokio::fs::write(inbox.join("messages.json"), b"[]")
+            .await
+            .unwrap();
+        prepare_native_inbox(&inbox).await.unwrap();
+        let inode = tokio::fs::metadata(&inbox).await.unwrap().ino();
+        for text in [b"first notice".as_slice(), b"updated notice".as_slice()] {
+            publish_native_notice(&inbox, text).await.unwrap();
+            assert_eq!(tokio::fs::metadata(&inbox).await.unwrap().ino(), inode);
+            assert_eq!(
+                tokio::fs::metadata(&inbox)
+                    .await
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            );
+            for name in ["disk-notice.json", "messages.json"] {
+                assert_eq!(
+                    tokio::fs::metadata(inbox.join(name))
+                        .await
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o444
+                );
+            }
+            assert_eq!(
+                tokio::fs::read(inbox.join("messages.json")).await.unwrap(),
+                b"[]"
+            );
+            assert_eq!(
+                tokio::fs::read(inbox.join("disk-notice.json"))
+                    .await
+                    .unwrap(),
+                text
+            );
+        }
+    }
 
     #[tokio::test]
     async fn empty_native_inbox_refresh_waits_for_messages_without_replacing_the_mount() {

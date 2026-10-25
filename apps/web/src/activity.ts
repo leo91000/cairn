@@ -2,7 +2,6 @@ import type { ChatWakeup } from '../../../packages/contracts/chats'
 import type { RunEvent } from '../../../packages/contracts/contracts'
 import type { AgentPlan, PlanChange, PlanProgress } from './agent-plan'
 import { describeCommand, expectedCommandOutcome } from './activity-command'
-import { outputSummary } from './activity-data'
 import {
   continuesPlan,
   planChange,
@@ -45,6 +44,8 @@ export interface ActivitySubagent {
   tokens?: number
   toolUses?: number
   steps: ActivityArtifact[]
+  /** A task Cairn delegated to another conversation, followed through that conversation. */
+  delegation?: { chatId: string, agentName: string, provider: string }
 }
 export interface ActivityArtifact {
   kind: 'command' | 'read' | 'browse' | 'output' | 'files' | 'search' | 'tool' | 'plan' | 'thinking' | 'notice' | 'subagent'
@@ -63,7 +64,6 @@ export interface ActivityArtifact {
   cwd?: string
   exitCode?: number
   durationMs?: number
-  historical?: boolean
   statusLabel?: string
   attention?: boolean
   /** Process output must be displayed as written, without interpreting embedded data. */
@@ -118,8 +118,6 @@ export interface ActivityWait {
   reason?: string
 }
 
-/** Historical marker for events that predate the explicit immediate boolean. */
-const immediateResult = 'Wait condition already completed'
 // Where a scheduled wait's card is placed: its turn ended, or a message or another wait event came.
 const waitBoundaries = new Set(['turn.started', 'turn.completed', 'turn.failed', 'chat.user', 'chat.sleep', 'chat.wait', 'chat.wait_ready', 'chat.wakeup', 'run.wait', 'run.wait_ready', 'run.wakeup'])
 const terminalStatuses = new Set(['succeeded', 'failed', 'cancelled', 'interrupted'])
@@ -133,16 +131,12 @@ const statusTitles: Record<string, string> = {
 // Codex names the workspace server; Claude and OpenCode prefix the tool with it.
 const workspaceWaitTool = /^(?:mcp__)?cairn_workspace(?:__|_|\.)(?:sleep|wait_for)$/
 
-/** A tool call's arguments, which some providers record as JSON text. */
-function toolArguments(value: unknown) {
-  if (typeof value !== 'string')
-    return record(value)
-  try {
-    return record(JSON.parse(value))
-  }
-  catch {
-    return {}
-  }
+const workspaceDelegateTool = /^(?:mcp__)?cairn_workspace(?:__|_|\.)delegate_task$/
+
+/** Its result shows as the delegated task Cairn records, rather than as a tool call. */
+function isDelegateTool(item: Record<string, unknown>) {
+  const tool = text(item.tool)
+  return workspaceDelegateTool.test(tool) || (text(item.server) === 'cairn_workspace' && tool === 'delegate_task')
 }
 
 function isWaitTool(item: Record<string, unknown>) {
@@ -166,15 +160,7 @@ export function activityPayload(event: RunEvent) {
   // Stderr can itself look like a protocol event; it is always process output.
   if (event.type === 'diagnostic')
     return {}
-  if (event.payload)
-    return event.payload
-  try {
-    const data = record(JSON.parse(event.text))
-    return ['chat.wait_ready', 'run.wait_ready'].includes(event.type) || data.type === event.type || Object.hasOwn(data, 'item') ? data : {}
-  }
-  catch {
-    return {}
-  }
+  return event.payload ?? {}
 }
 
 /** A failed attempt's reasons, its card and how many times Cairn retried its chain. */
@@ -239,15 +225,6 @@ const collaborationTitles: Record<string, string> = {
   closeAgent: 'Closed a subagent',
 }
 
-// CSI sequences (colors, cursor moves), OSC sequences (titles, links) and two-byte escapes.
-// eslint-disable-next-line no-control-regex
-const terminalEscape = /\x1B(?:\[[\x30-\x3F]*[\x20-\x2F]*[\x40-\x7E]|\][^\x07\x1B]*(?:\x07|\x1B\\)?|[\x40-\x5A\x5C-\x5F])/g
-
-/** Agent stderr recorded by older runners keeps its terminal styling. */
-function withoutTerminalStyling(value: string) {
-  return value.replace(terminalEscape, '')
-}
-
 /** Keep tool updates in their original position and fold actions between messages. */
 export function activityEntries(events: RunEvent[], chat = false, groups = new ActivityGroups(), pendingWakeup?: ChatWakeup | null): ActivityEntry[] {
   const entries: ActivityEntry[] = []
@@ -300,16 +277,9 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
   let via: string | undefined
   // The plan its updates change, until the agent finishes it or writes another one.
   let plan: Extract<ActivityEntry, { kind: 'plan' }> | undefined
-  let legacyTool: ActivityArtifact | undefined
   // The wait still pending, by its wakeup ID, so that its result and resumption complete it.
   const waits = new Map<string, ActivityWait>()
   let openWait: ActivityWait | undefined
-  // The current wait call's reason: its tool row is hidden, and an immediate result omits it.
-  // Only that call may lend it, so it resets once used, once a wakeup carries it, and each turn.
-  let waitCall = ''
-  let waitReason = ''
-  // The call whose reason was used: its later updates must not lend it again.
-  let spentCall = ''
   // A scheduled wait only starts once its turn ends: its card follows what the agent did after
   // the call, and is placed when the turn ends, another wait or a message comes, or the
   // history does.
@@ -321,9 +291,51 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
   }
 
   for (const [eventIndex, stored] of events.entries()) {
-    const event = stored.type === 'diagnostic' ? { ...stored, text: withoutTerminalStyling(stored.text) } : stored
+    const event = stored
     if (event.type === 'artifact')
       continue
+    // A delegated task works like a subagent, in a conversation of its own.
+    if (event.type === 'chat.delegated') {
+      const data = record(event.payload)
+      const chatId = text(data.chatId)
+      const id = `delegated:${chatId}`
+      if (!chatId || artifacts.has(id))
+        continue
+      const agentName = text(data.agentName)
+      const artifact: ActivityArtifact = {
+        id,
+        sourceIds: [`${event.runId}:${event.id}`],
+        time: event.createdAt,
+        kind: 'subagent',
+        title: text(data.title) || event.text || 'Delegated task',
+        subtitle: agentName,
+        status: 'running',
+        blocks: [],
+        files: [],
+        tasks: [],
+        raw: pretty(data),
+        subagent: {
+          type: agentName,
+          prompt: text(data.task),
+          result: '',
+          message: '',
+          activity: '',
+          model: text(data.model),
+          background: true,
+          state: 'running',
+          steps: [],
+          delegation: { chatId, agentName, provider: text(data.provider) },
+        },
+      }
+      artifacts.set(id, artifact)
+      const last = entries.at(-1)
+      if (last?.kind === 'group')
+        last.artifacts.push(artifact)
+      else
+        entries.push({ kind: 'group', id: `group:${id}`, artifacts: [artifact] })
+      continue
+    }
+
     if (waitBoundaries.has(event.type) || (event.type === 'status' && terminalStatuses.has(event.text)))
       placeScheduled()
     if (['chat.sleep', 'chat.wait', 'run.wait'].includes(event.type)) {
@@ -334,8 +346,6 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
         openWait.ended = 'replaced'
       openWait = { wakeup }
       waits.set(wakeup.id, openWait)
-      waitReason = ''
-      spentCall = waitCall
       scheduled = {
         kind: 'wait',
         id: `wait:${wakeup.id}`,
@@ -347,23 +357,20 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
 
     // The condition completed right away: the agent never waited, and this call replaced any wait.
     const observation = ['chat.wait_ready', 'run.wait_ready'].includes(event.type) ? activityPayload(event) : {}
-    const immediate = typeof observation.immediate === 'boolean' ? observation.immediate : event.text === immediateResult
+    const immediate = observation.immediate === true
     if (['chat.wait_ready', 'run.wait_ready'].includes(event.type) && immediate) {
       if (openWait) {
         openWait.ended = 'replaced'
         openWait = undefined
       }
 
-      // Cairn records the reason with the result; older histories only kept it on the call.
-      const reason = text(observation.reason) || waitReason
+      const reason = text(observation.reason)
       entries.push({
         kind: 'wait',
         id: `wait-ready:${event.id}`,
         time: event.createdAt,
         wait: { wakeup: null, observation, ...(reason ? { reason } : {}) },
       })
-      waitReason = ''
-      spentCall = waitCall
       continue
     }
 
@@ -376,9 +383,9 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       const resumed = continuation.find(next => ['chat.wakeup', 'run.wakeup'].includes(next.type)
         && JSON.stringify(next.payload?.observation) === JSON.stringify(observation))
       const open = openWait?.wakeup?.condition ? openWait.wakeup : undefined
-      const legacy = resumed?.payload as unknown as ChatWakeup | undefined
+      const resumedWakeup = resumed?.payload as unknown as ChatWakeup | undefined
       const pending = pendingWakeup?.condition && pendingWakeup.createdAt <= event.createdAt ? pendingWakeup : undefined
-      const target = open ?? legacy ?? pending
+      const target = open ?? resumedWakeup ?? pending
       let wait = target?.id ? waits.get(target.id) : undefined
       if (!wait && target?.id) {
         wait = { wakeup: target }
@@ -498,9 +505,6 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
 
     if (event.type === 'turn.started') {
       // Item IDs may repeat in a later turn: a new turn's calls start afresh.
-      waitReason = ''
-      waitCall = ''
-      spentCall = ''
       connectionNotices = []
       engineRetries = []
       usageLimits = []
@@ -583,8 +587,6 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     const parentArtifact = subagents.get(agentKey(event, text(item.parent_id)))
     const agentId = type === 'subagent' ? subagents.get(agentKey(event, itemId))?.id ?? `${turn}:${agentKey(event, itemId)}` : undefined
     const id = agentId || (itemId ? `${parentArtifact?.id ?? turn}:${itemId}` : `event:${event.id}`)
-    const legacy = !event.payload && !Object.keys(data).length
-    const legacyMessage = legacy && event.type === 'item.completed' && !legacyTool && event.text.trim()
     const parent = parentArtifact?.subagent
     if (type === 'subagent_message' && parent) {
       parent.message = text(item.text)
@@ -649,7 +651,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       continue
     }
 
-    if (type === 'agent_message' || legacyMessage) {
+    if (type === 'agent_message') {
       recovered()
       const content = text(item.text) || event.text
       const existing = messages.get(id)
@@ -670,18 +672,6 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
         messages.set(id, message)
       }
 
-      continue
-    }
-
-    if (legacyTool && legacy && event.type === 'item.completed') {
-      legacyTool.kind = 'output'
-      Object.assign(legacyTool, outputSummary(event.text))
-      legacyTool.status = 'info'
-      legacyTool.historical = true
-      legacyTool.durationMs = Math.max(0, event.createdAt - legacyTool.time)
-      legacyTool.blocks = [{ label: 'Output', code: event.text, language: 'plaintext' }]
-      legacyTool.raw = event.text
-      legacyTool = undefined
       continue
     }
 
@@ -900,16 +890,11 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       }
     }
 
+    if (type === 'mcp_tool_call' && isDelegateTool(item) && artifact.status !== 'error')
+      continue
+
     // A scheduled wait shows as its own card; only a call that failed stays among the tools.
     if (type === 'mcp_tool_call' && isWaitTool(item) && artifact.status !== 'error') {
-      // A provider may announce the call before its arguments: keep what the same call said.
-      const reason = text(toolArguments(item.arguments).reason)
-      if (itemId !== spentCall) {
-        if (itemId !== waitCall || reason)
-          waitReason = reason
-        waitCall = itemId
-      }
-
       continue
     }
 
@@ -934,8 +919,6 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       last.artifacts.push(artifact)
     else
       entries.push({ kind: 'group', id: `group:${id}`, artifacts: [artifact] })
-    if (legacy && event.type === 'item.started')
-      legacyTool = Object.assign(artifact, { kind: 'output' as const, title: 'Recorded step', historical: true })
   }
 
   placeScheduled()

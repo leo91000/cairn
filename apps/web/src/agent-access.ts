@@ -65,7 +65,7 @@ export function sandboxOptionsFor(backend: 'firecracker' | 'native') {
   if (backend !== 'native')
     return sandboxOptions
   return sandboxOptions.map(option => option.value === 'yolo'
-    ? { ...option, description: 'Native process under a managed account on the host: GPU and system tools, no sudo or Docker. Default.' }
+    ? { ...option, description: 'Native process under a managed account. Host privileges follow the node’s confirmed protected or administrator mode. Default.' }
     : option)
 }
 
@@ -99,6 +99,7 @@ export function newAgentDraft(): AgentDraft {
       mcps: [],
       mcpTools: {},
       installation: false,
+      delegation: false,
       sandbox: 'yolo',
     },
     exclusiveNodes: [],
@@ -106,7 +107,7 @@ export function newAgentDraft(): AgentDraft {
   }
 }
 
-/** The editable part of a saved agent, with the defaults older records omit. */
+/** The editable part of a saved agent. */
 export function draftOf(agent: Agent): AgentDraft {
   const access = (agent.access ?? {}) as Partial<AgentAccess>
   return {
@@ -125,6 +126,7 @@ export function draftOf(agent: Agent): AgentDraft {
       mcps: access.mcps ? [...access.mcps] : null,
       mcpTools: structuredClone(JSON.parse(JSON.stringify(access.mcpTools ?? {}))),
       installation: access.installation ?? false,
+      delegation: access.delegation ?? false,
       sandbox: access.sandbox ?? 'yolo',
     },
     // Responses omit empty live grants: absent means none.
@@ -214,60 +216,6 @@ export function savedDraft(draft: AgentDraft, existingMcps?: string[]): AgentDra
     return draft
   return { ...draft, access: { ...draft.access, mcpTools: granted } }
 }
-
-/**
- * An installation that predates live grants on the agent ignores top-level `exclusiveNodes` and
- * `plugins` and keeps them on the resources, as Android handles it. Current installations mark
- * every listed agent with the computed `grantsOnAgent` capability; revisions alone are not proof,
- * since agents keep them after a rollback.
- */
-export function olderInstallation(agents: object[]) {
-  return agents.length > 0 && !agents.some(agent => (agent as { grantsOnAgent?: unknown }).grantsOnAgent === true)
-}
-
-/** The draft as the server applies it: an older installation never receives live grant changes. */
-export function sentDraft(saved: AgentDraft, draft: AgentDraft, older: boolean): AgentDraft {
-  return older ? { ...draft, exclusiveNodes: saved.exclusiveNodes, plugins: saved.plugins } : draft
-}
-
-/** On an older installation, the agent's live grants as its resources record them. */
-export function withResourceGrants(draft: AgentDraft, agentId: string, connections: Pick<PluginConnection, 'id' | 'agentIds'>[], nodes: Pick<ExecutionNode, 'id' | 'local' | 'exclusiveAgents'>[]): AgentDraft {
-  return {
-    ...draft,
-    plugins: connections.filter(connection => connection.agentIds?.includes(agentId)).map(connection => connection.id),
-    exclusiveNodes: nodes.filter(node => node.exclusiveAgents?.includes(agentId)).map(node => node.local ? LOCAL_NODE_ID : node.id),
-  }
-}
-
-/**
- * The agents an instance save must send back unchanged on an older installation (or one not known
- * yet), which replaces the list when it is omitted; undefined when it should be omitted.
- */
-export function keptAgentIds(agents: object[], entry: Pick<PluginEntry, 'manifest'> | undefined, connection: Pick<PluginConnection, 'agentIds'> | null | undefined) {
-  // Main always exists: no agent at all means the list did not load, and the installation is unknown.
-  const unknown = agents.length === 0
-  if (!(unknown || olderInstallation(agents)) || !entry?.manifest?.agentAccess || !connection?.agentIds?.length)
-    return undefined
-  return [...connection.agentIds]
-}
-
-/**
- * `keptAgentIds` from the instance as it is now, re-read right before saving: an agent revoked
- * meanwhile from its page is not granted back. Undefined when nothing has to be sent.
- */
-export async function currentAgentIds(
-  agents: object[],
-  entry: Pick<PluginEntry, 'manifest'> | undefined,
-  connection: Pick<PluginConnection, 'id' | 'agentIds'> | null | undefined,
-  connections: () => Promise<Pick<PluginConnection, 'id' | 'agentIds'>[]>,
-) {
-  if (!connection || keptAgentIds(agents, entry, { agentIds: ['?'] }) === undefined)
-    return undefined
-  const fresh = (await connections()).find(item => item.id === connection.id)
-  return keptAgentIds(agents, entry, fresh ?? connection)
-}
-
-export const updateForGrants = 'Update the installation to grant these from the agent page.'
 
 /** "All, including future" | "3 of 12" | "None". */
 export function selectionSummary(selected: string[] | null, total: number) {
@@ -377,20 +325,19 @@ export function runProblem(id: string, access: AgentAccess, nodes: ExecutionNode
 
 /**
  * Node access after allowing or forbidding a node: forbidding it also drops its exclusive
- * reservation, which could never be used, unless reservations are read-only (an older installation
- * keeps them on its nodes and never receives them from here).
+ * reservation, which could never be used.
  */
-export function withRun(access: AgentAccess, exclusiveNodes: string[], node: string, on: boolean, readOnlyGrants = false) {
+export function withRun(access: AgentAccess, exclusiveNodes: string[], node: string, on: boolean) {
   const nodes = (access.nodes ?? []).filter(id => id !== node)
   return {
     nodes: on ? [...nodes, node] : nodes,
-    exclusiveNodes: on || readOnlyGrants ? exclusiveNodes : exclusiveNodes.filter(id => id !== node),
+    exclusiveNodes: on ? exclusiveNodes : exclusiveNodes.filter(id => id !== node),
   }
 }
 
 /** Node access for another execution backend: the choices start over, read-only reservations stay. */
-export function withBackend(exclusiveNodes: string[], readOnlyGrants = false) {
-  return { nodes: [] as string[], exclusiveNodes: readOnlyGrants ? exclusiveNodes : [] }
+export function withBackend() {
+  return { nodes: [] as string[], exclusiveNodes: [] }
 }
 
 /** Whether the agent may run on a node: listed, or every node allowed. */
@@ -449,6 +396,7 @@ export function instanceState(connection: PluginConnection): { tone: 'granted' |
 }
 
 export interface Context {
+  agentId?: string
   projects: Pick<Project, 'id' | 'name'>[]
   skills: Skill[]
   mcps: McpView[]
@@ -506,7 +454,7 @@ export function changes(saved: AgentDraft, draft: AgentDraft) {
   for (const connection of tools)
     add('mcps', Number(asSet(savedTools[connection]) !== asSet(draftTools[connection])))
   add('sandbox', Number(saved.access.sandbox !== draft.access.sandbox))
-  add('powers', Number(saved.access.installation !== draft.access.installation))
+  add('powers', Number(saved.access.installation !== draft.access.installation) + Number(!!saved.access.delegation !== !!draft.access.delegation))
   add('nodes', Number(backendOf(saved.access) !== backendOf(draft.access)))
   add('nodes', listCount(saved.access.nodes, draft.access.nodes))
   // Responses omit empty live grants: absent means none.
@@ -545,9 +493,18 @@ function restrictedTools(saved: AgentAccess, draft: AgentAccess) {
  * What saving would grant or take away that deserves a look first: new powers and
  * secrets, and removed access when `runs` says work is affected.
  */
+export function nativeReviewNodes(draft: AgentDraft, context: Context) {
+  if (backendOf(draft.access) !== 'native' || draft.access.nodes === null)
+    return []
+  return context.nodes.filter(node => node.nativeModeRequest?.mode === 'administrator'
+    && draft.access.nodes!.includes(node.id) && !node.nativeReviewedAgents?.includes(context.agentId ?? '')).map(node => node.id)
+}
+
 export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Context, runs = { queued: 0, running: 0 }) {
   const lines: ReviewLine[] = []
   const node = (id: string) => nodeName(context.nodes.find(item => item.id === id), id)
+  for (const id of nativeReviewNodes(draft, context))
+    lines.push({ kind: 'power', section: 'nodes', text: `Added: administrator access to ${node(id)}. Every admitted conversation receives unrestricted passwordless sudo on the real host. Root can read local files and credentials, change services and defeat cooperative limits. Returning to protected does not clean or restore the machine.` })
 
   for (const id of listChanges(saved.exclusiveNodes ?? [], draft.exclusiveNodes ?? []).added)
     lines.push({ kind: 'power', section: 'nodes', text: `Added: exclusive reservation on ${node(id)}. This agent will be able to suspend other agents’ conversations on this machine.` })
@@ -555,6 +512,8 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
     lines.push({ kind: 'power', section: 'nodes', text: `Added: native execution. ${nativeHelp}` })
   if (draft.access.installation && !saved.access.installation)
     lines.push({ kind: 'power', section: 'powers', text: 'Added: installation management. This agent will be able to create and change agents, projects, skills, MCP connections, missions and runs on your behalf.' })
+  if (draft.access.delegation && !saved.access.delegation)
+    lines.push({ kind: 'power', section: 'powers', text: 'Added: task delegation. This agent will be able to start conversations that report back to it, on any coding agent and model, as itself or as an agent whose access it covers.' })
   for (const id of listChanges(saved.plugins ?? [], draft.plugins ?? []).added)
     lines.push({ kind: 'secret', section: 'plugins', text: `Added: ${connectionLabel(id, context)} — effective immediately, including in running conversations.` })
 
@@ -581,6 +540,8 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
     removed.push(connectionLabel(id, context))
   if (saved.access.installation && !draft.access.installation)
     removed.push('installation management')
+  if (saved.access.delegation && !draft.access.delegation)
+    removed.push('task delegation')
   if (backendOf(saved.access) === 'native' && backendOf(draft.access) !== 'native')
     removed.push('native execution')
   if (sandboxStrictness[draft.access.sandbox] > sandboxStrictness[saved.access.sandbox]) {
@@ -703,12 +664,9 @@ export function issues(draft: AgentDraft, context: Context, isMain: boolean, age
 }
 
 /** "3 projects · 2 nodes · 1Password" for the agents list. */
-export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 'connections'> & { nodes?: ExecutionNode[] }, older = false) {
+export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 'connections'> & { nodes?: ExecutionNode[] }) {
   const access = agent.access ?? {} as AgentAccess
-  // An older installation keeps plugin grants on its instances (unknown to members, who get none).
-  const plugins = older
-    ? context.connections.filter(connection => connection.agentIds?.includes(agent.id)).map(connection => connection.id)
-    : agent.plugins ?? []
+  const plugins = agent.plugins ?? []
   const count = (value: string[] | null | undefined, noun: string, all: string) => value === null || value === undefined
     ? all
     : `${value.length || 'No'} ${noun}${value.length === 1 ? '' : 's'}`
@@ -734,10 +692,12 @@ export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 
   if (unnamed)
     parts.push(`${unnamed} ${packages.size ? 'other ' : ''}plugin${unnamed === 1 ? '' : 's'}`)
   // Only an effective reservation, which the node list says; without it, none is claimed.
-  if (!older && agent.exclusiveNodes?.length && context.nodes && effectiveExclusive({ access, exclusiveNodes: agent.exclusiveNodes }, context.nodes).length)
+  if (agent.exclusiveNodes?.length && context.nodes && effectiveExclusive({ access, exclusiveNodes: agent.exclusiveNodes }, context.nodes).length)
     parts.push('Exclusive reservation')
   if (access.installation)
     parts.push('Installation management')
+  if (access.delegation)
+    parts.push('Task delegation')
   return parts.join(' · ')
 }
 

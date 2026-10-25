@@ -348,6 +348,17 @@ pub fn args(run: &Value, output: &str, session: Option<&str>) -> Vec<String> {
     crate::coding_agent::codex_args(run, output, session)
 }
 
+/// The rule that sets chat turns apart from scheduled work.
+pub const INTERACTIVE: &str = "This is an interactive chat. Use native user-input questions when \
+    clarification is useful. Nonblocking questions let you continue independent \
+    work while the user considers the options; a suggested answer is never user \
+    approval. Follow the latest user instructions and do not treat a question \
+    as authorization to publish changes. Use cairn_workspace.pending_questions and \
+    cairn_workspace.withdraw_question to retire a question that became unnecessary \
+    or was answered in ordinary chat. Withdrawal never supplies approval. A completed \
+    outcome retires unanswered questions at the end of the turn; report needs_input \
+    when an answer is still required.";
+
 pub fn prompt(run: &Value, chat: bool) -> String {
     // Set at launch from the plugins granting this run's agent (`agents::with_instructions`).
     let plugins = if run["isolated"] == true {
@@ -375,15 +386,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
         ""
     };
     let interaction = if chat {
-        "This is an interactive chat. Use native user-input questions when \
-            clarification is useful. Nonblocking questions let you continue independent \
-            work while the user considers the options; a suggested answer is never user \
-            approval. Follow the latest user instructions and do not treat a question \
-            as authorization to publish changes. Use cairn_workspace.pending_questions and \
-            cairn_workspace.withdraw_question to retire a question that became unnecessary \
-            or was answered in ordinary chat. Withdrawal never supplies approval. A completed \
-            outcome retires unanswered questions at the end of the turn; report needs_input \
-            when an answer is still required."
+        INTERACTIVE
     } else {
         "This unattended task cannot answer clarification questions; report a \
             concrete blocker if required information is missing."
@@ -394,7 +397,19 @@ pub fn prompt(run: &Value, chat: bool) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     let skills = skill_index(&run["snapshot"]["skills"]);
-    let tooling = if crate::native::policy::native(&run["snapshot"]["agent"]) {
+    let storage = if crate::native::policy::native(&run["snapshot"]["agent"]) {
+        "The managed /tmp is cleared on every execution attempt. Keep SDKs and build caches \
+            (including Cargo target directories) in the managed home or workspace, never in /tmp. \
+            Moving a large directory across filesystems copies it before removing the source \
+            and can temporarily exceed the disk budget; managed /tmp and workspace share that budget."
+    } else {
+        ""
+    };
+    let tooling = if crate::native::policy::native(&run["snapshot"]["agent"])
+        && run["nativeMode"]["mode"] == "administrator"
+    {
+        "Tooling: This execution uses Native administrator on the real Linux host as an ordinary user with unrestricted passwordless sudo. The owner entrusted this machine to admitted conversations. Keep the managed HOME/workspace for durable work. System changes persist on this node and may affect other work. Respect the user's scope; this mode does not grant new remote Cairn accounts or resources. Root can read credentials present on this host and alter or escape its supervisor, cooperative budgets, leases and cancellation. Do not expose credentials. Returning to protected does not clean or restore this machine."
+    } else if crate::native::policy::native(&run["snapshot"]["agent"]) {
         "Tooling: This execution runs on a native Linux node using its installed GPU driver. \
             Cairn supplies the pinned coding engines, Node.js and GitHub CLI. Other tools and \
             project SDKs depend on this node; check availability before using them. Respect \
@@ -427,10 +442,10 @@ pub fn prompt(run: &Value, chat: bool) -> String {
     };
     format!(
         "{}\n\n{}\n\nAuthorized projects (open only those needed for the task; \
-            unopened repositories are not on disk):\n{}\n\n{tooling}\n\nSelected skills (read a skill's SKILL.md before using it; its \
+            unopened repositories are not on disk):\n{}\n\n{tooling}\n{storage}\n\nSelected skills (read a skill's SKILL.md before using it; its \
             scripts and references sit beside it):\n{skills}\n\n{plugins}\n\nRun this task to completion within \
             its stated scope. Preserve unrelated files. Do not expose credentials. \
-            {interaction}\n{deliverables}{requested}\n{waiting} All task-authorized effects such as creating \
+            {interaction}\n{deliverables}{requested}\n{waiting}{delegation} All task-authorized effects such as creating \
             PRs or releasing must follow their checks. Use .agents/skills for skills. \
             Summarize actual changes, validation, external links and remaining blockers \
             at the end.",
@@ -452,6 +467,14 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             crate::waits::INSTRUCTIONS
         } else {
             ""
+        },
+        delegation = match (
+            run["isolated"] == true,
+            text(&run["snapshot"], "delegation")
+        ) {
+            (true, "requester") => format!(" {}", crate::delegation::INSTRUCTIONS),
+            (true, "delegated") => format!(" {}", crate::delegation::DELEGATED_INSTRUCTIONS),
+            _ => String::new(),
         },
     )
 }
@@ -516,7 +539,7 @@ pub fn chat_plan(
     let mut plan = json!({
         "provider": provider,
         "execution": run["chatExecution"],
-        "instructions": prompt(&context, true),
+        "instructions": prompt(&context, interactive(run)),
         "inputDirectory": input_directory,
         "output": prepared["output"],
         "cwd": prepared["cwd"],
@@ -530,6 +553,30 @@ pub fn chat_plan(
         plan["sessionId"] = session.into();
     }
     Ok(plan)
+}
+
+/// Only chat turns can answer questions. Scheduled work also uses the chat
+/// protocol, without a conversation to deliver them to.
+fn interactive(run: &Value) -> bool {
+    run["chatExecution"].is_object()
+}
+
+/// The first turn of scheduled work sent through the chat protocol. The
+/// instructions already carry the Cairn frame, so a fresh turn sends only the
+/// task brief; a resumed turn sends its resume prompt. The brief follows a
+/// fixed lead-in: Claude Code runs a turn that starts with a command such as
+/// `/clear` as that command, and unattended work has nobody to notice.
+pub fn scheduled_turn(run: &Value, resume_prompt: Option<&str>) -> Value {
+    let turn = resume_prompt.map_or_else(
+        || format!("Task brief:\n{}", text(&run["snapshot"]["task"], "prompt")),
+        str::to_owned,
+    );
+    json!({
+        "messageId": run["missionTurnId"].as_str().unwrap_or_else(|| text(run, "id")),
+        "text": turn,
+        "recovery": resume_prompt.is_some(),
+        "attachments": [],
+    })
 }
 
 /// One line per selected skill: name, description and `SKILL.md` path. The
@@ -557,8 +604,81 @@ fn skill_index(skills: &Value) -> String {
         .join("\n")
 }
 
+/// Chat runners consume their chat payload instead of RunnerPlan.prompt. Both
+/// fresh instructions and the actual turn carry the confirmed mode on resumption.
+pub(crate) fn native_chat_privileges(chat: &mut Value, run: &Value, mode: &Value) {
+    let mut context = run.clone();
+    context["nativeMode"] = mode.clone();
+    context["snapshot"]["task"]["prompt"] = "".into();
+    let notice = native_privileges(mode);
+    chat["instructions"] = format!("{notice}\n\n{}", prompt(&context, interactive(run))).into();
+    chat["execution"]["text"] = format!("{notice}\n\n{}", text(&chat["execution"], "text")).into();
+}
+
+/// Always delivered on a native attempt, including an engine session resumed after a switch.
+pub(crate) fn native_privileges(mode: &Value) -> &'static str {
+    if mode["mode"] == "administrator" {
+        "Effective node mode: Native administrator. You run as an ordinary user with unrestricted passwordless sudo on the real host. The owner confirmed this access. Root can alter the supervisor and local credentials; budgets, leases and cancellation are cooperative. Existing remote Cairn authorizations remain unchanged. Stay within the user's instructions."
+    } else {
+        "Effective node mode: Native protected. Host sudo and personal host paths are unavailable. Use the managed HOME/workspace. Previous administrator changes, if any, persist: this mode change did not clean or restore the machine."
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn native_chat_turns_and_resumed_instructions_use_the_confirmed_mode() {
+        for provider in ["codex", "claude", "opencode"] {
+            let run = serde_json::json!({
+                "id": "chat", "trigger": "chat", "isolated": true,
+                "nativeMode": { "mode": "administrator" },
+                "snapshot": { "agent": { "provider": provider, "access": { "backend": "native" } }, "task": {} },
+            });
+            for mode in ["protected", "administrator"] {
+                let mut chat = serde_json::json!({ "instructions": "stale mode instructions", "execution": { "text": "continue the task", "recovery": true } });
+                super::native_chat_privileges(
+                    &mut chat,
+                    &run,
+                    &serde_json::json!({ "mode": mode }),
+                );
+                let expected = if mode == "administrator" {
+                    "Effective node mode: Native administrator."
+                } else {
+                    "Effective node mode: Native protected."
+                };
+                assert!(chat["instructions"].as_str().unwrap().starts_with(expected));
+                assert!(
+                    chat["execution"]["text"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with(expected)
+                );
+                assert!(
+                    chat["execution"]["text"]
+                        .as_str()
+                        .unwrap()
+                        .ends_with("continue the task")
+                );
+                assert!(
+                    !chat["instructions"]
+                        .as_str()
+                        .unwrap()
+                        .contains("stale mode instructions")
+                );
+                assert_eq!(chat["execution"]["recovery"], true);
+                if mode == "administrator" {
+                    assert!(
+                        !chat["instructions"]
+                            .as_str()
+                            .unwrap()
+                            .contains("system directories and the owner's desktop are unavailable")
+                    );
+                }
+            }
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -599,6 +719,92 @@ mod tests {
             skill_index(&skills),
             "- review: Review a change.\n  /home/node/.agents/skills/0/review/SKILL.md\n- legacy: Older snapshot\n  /skills/1/legacy/SKILL.md"
         );
+    }
+
+    #[test]
+    fn chat_protocol_runs_receive_one_frame_matching_their_interaction() {
+        let guest = "/home/node/.agents/skills/0/review/SKILL.md";
+        let host = "/installation/skills/review/SKILL.md";
+        for provider in ["codex", "claude", "opencode"] {
+            let mut run = json!({
+                "id": "run", "isolated": true, "missionTurnId": "turn",
+                "pluginInstructions": "Mail: never print credentials.",
+                "snapshot": {
+                    "agent": { "provider": provider, "instructions": "Agent rules." },
+                    "task": { "prompt": "Check the deployment." },
+                    "skills": [{ "name": "review", "description": "Review a change.", "path": host }],
+                },
+            });
+            let prepared = json!({
+                "isolated": true,
+                "output": "/run/output/result.md",
+                "skills": [{ "name": "review", "description": "Review a change.", "path": guest }],
+            });
+            let plan = chat_plan(&run, &prepared, Path::new("/tmp"), &json!({}), None).unwrap();
+            let instructions = text(&plan, "instructions");
+            for expected in [
+                "Agent rules.",
+                "Mail: never print credentials.",
+                guest,
+                "This unattended task",
+            ] {
+                assert!(instructions.contains(expected), "{provider}: {expected}");
+            }
+            assert!(!instructions.contains(host));
+            assert!(!instructions.contains("This is an interactive chat"));
+
+            let turn = scheduled_turn(&run, None);
+            assert_eq!(turn["messageId"], "turn");
+            assert_eq!(turn["text"], "Task brief:\nCheck the deployment.");
+            assert_eq!(turn["recovery"], false);
+            let resumed = scheduled_turn(&run, Some("Continue."));
+            assert_eq!(resumed["text"], "Continue.");
+            assert_eq!(resumed["recovery"], true);
+
+            run["chatExecution"] = json!({ "messageId": "message", "text": "Hello" });
+            let plan = chat_plan(&run, &prepared, Path::new("/tmp"), &json!({}), None).unwrap();
+            let instructions = text(&plan, "instructions");
+            assert!(instructions.contains("This is an interactive chat"));
+            assert!(instructions.contains("Mail: never print credentials."));
+            assert!(!instructions.contains("This unattended task"));
+            assert_eq!(plan["execution"]["text"], "Hello");
+        }
+    }
+
+    #[test]
+    fn native_chat_protocol_runs_keep_the_frame_of_their_interaction() {
+        for provider in ["codex", "claude", "opencode"] {
+            let mut run = json!({
+                "id": "run",
+                "isolated": true,
+                "pluginInstructions": "Mail: never print credentials.",
+                "snapshot": {
+                    "agent": { "provider": provider, "access": { "backend": "native" } },
+                    "task": { "prompt": "Check the deployment." },
+                },
+            });
+            let mode = json!({ "mode": "protected" });
+            let mut chat = json!({
+                "execution": { "text": "Task brief:\nCheck the deployment." },
+            });
+            native_chat_privileges(&mut chat, &run, &mode);
+            let instructions = text(&chat, "instructions");
+            assert!(instructions.contains("Mail: never print credentials."));
+            assert!(instructions.contains("This unattended task"), "{provider}");
+            assert!(!instructions.contains("This is an interactive chat"));
+            assert!(!instructions.contains("Check the deployment."));
+
+            run["chatExecution"] = json!({ "messageId": "message", "text": "Hello" });
+            let mut chat = json!({ "execution": { "text": "Hello" } });
+            native_chat_privileges(&mut chat, &run, &mode);
+            let instructions = text(&chat, "instructions");
+            assert!(instructions.contains("Mail: never print credentials."));
+            assert!(
+                instructions.contains("This is an interactive chat"),
+                "{provider}"
+            );
+            assert!(!instructions.contains("This unattended task"));
+        }
     }
 
     #[test]

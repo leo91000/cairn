@@ -1,3 +1,5 @@
+> Statut : Remplacée par [ADR-0052](0052-native-ublk-workspaces-and-idle-eviction.md) pour les checkpoints arrêtés native-files-v1 : les environnements natifs utilisent un journal ext4 sur ublk et une publication périodique. Les décisions de confiance et d’admission natives restent applicables.
+
 # Trusted native execution alongside Firecracker
 
 Date: 2026-10-18.
@@ -43,3 +45,14 @@ retained. Epoch-5 binaries cannot interpret the native records introduced here.
 Rollback to epoch 5 requires its matching prepared data backup and binary; automatic
 updates do not cross epochs or restore data. Windows/macOS and desktop-session
 access remain separate future work.
+
+Update, 2026-10-23: a native node may use the explicitly owner-confirmed
+[administrator mode](../NATIVE-ADMINISTRATOR.md). This deliberately extends the
+original no-sudo boundary for that node only, using an ordinary workload identity
+with unrestricted passwordless host sudo. Protected remains the default; VM
+semantics remain unchanged. Admission requires a node-specific owner review,
+including existing global grants; future grants never silently grant root. A
+durable generation handshake stops managed workloads before changing mode.
+Returning to protected restricts new runs but does not restore the host or defend
+against root that altered its supervisor. Epoch 13 / SQLite 12 and a strict native
+budget marker fence older readers; unknown/unconfirmed modes fail closed.

@@ -228,7 +228,7 @@ data class PluginEntry(
     val status: String = "active",
     val active: String? = null,
     val manifest: PluginManifest? = null,
-    /** The steps the owner follows; older installations send only the manifest. */
+    /** The steps resolved by the installation; null for invalid packages. */
     val setup: PluginSetup? = null,
     val versions: List<PluginVersion> = emptyList(),
 ) {
@@ -416,23 +416,31 @@ fun PluginManifest.contributions(): List<String> = buildList {
 }
 
 /**
- * External people may only reach a dedicated agent: one project at most, no installation access.
+ * What the people reaching an agent through a bot could do with its access, for the owner's
+ * warning. Nothing is refused: the owner chooses who may reach which agent. For anyone in a
+ * channel, writing, MCP and plugin access matter as well.
  */
-fun Agent.eligibleForPlugins() =
-    !access.installation && access.projects != null && access.projects.size <= 1
-
-/**
- * Why an agent can't answer anyone who reaches an instance, or null when it can. Mirrors the
- * server: read-only sandbox, one project at most, no installation, MCP or plugin grants.
- */
-fun Agent.publicProblem(connections: List<PluginConnection>): String? =
+fun Agent.delegationRisks(
+    connections: List<PluginConnection>,
+    everyone: Boolean,
+    draftGrants: List<String> = emptyList(),
+): List<String> = buildList {
+    if (access.installation) add("gérer toute votre installation")
     when {
-        !eligibleForPlugins() -> "Trop large"
-        access.sandbox != "read-only" -> "Pas en lecture seule"
-        access.mcps == null || access.mcps.isNotEmpty() -> "A des MCP"
-        connections.any { id in it.agentIds } -> "A des plugins"
-        else -> null
+        access.projects == null -> add("ouvrir tous les projets")
+        access.projects.size > 1 -> add("ouvrir ${access.projects.size} projets")
     }
+    if (!everyone) return@buildList
+    if (access.sandbox != "read-only") add("modifier des fichiers et lancer des commandes")
+    if (access.mcps == null || access.mcps.isNotEmpty()) add("utiliser ses connexions MCP")
+    if (id in draftGrants || connections.any { id in it.agentIds })
+        add("utiliser ses plugins, comme GitHub ou 1Password")
+}
+
+/** `a, b et c`. */
+fun listed(items: List<String>): String =
+    if (items.size > 1) items.dropLast(1).joinToString(", ") + " et " + items.last()
+    else items.firstOrNull().orEmpty()
 
 /**
  * Form values as the server expects them: numbers as numbers, blanks omitted. Multiple choices are
@@ -535,35 +543,6 @@ fun PluginCatalog.grantsOf(agentId: String): List<String> =
             val plugin = packages.find { it.id == connection.pluginId }?.name ?: connection.pluginId
             "$plugin · ${connection.name}"
         }
-
-/**
- * The grants an edited instance must send back unchanged, or null to omit them. An older
- * installation reads a missing list as "no agents"; a current one keeps the grants when omitted.
- * With the agents not loaded yet (Main always exists) the installation is unknown, so they are kept
- * as for an older one. Only packages giving agents access have grants to keep.
- */
-fun PluginConnection.agentIdsToKeep(agents: List<Agent>, manifest: PluginManifest): List<String>? =
-    agentIds.takeIf {
-        it.isNotEmpty() &&
-            manifest.agentAccess != null &&
-            (agents.isEmpty() || olderInstallation(agents))
-    }
-
-/**
- * The grants to send back on an older or unknown installation, always read again just before saving
- * ([current], null when the instance no longer exists) whatever the editor last saw: a grant
- * revoked meanwhile is never restored, one added meanwhile is never dropped.
- */
-suspend fun PluginConnection.agentIdsToSend(
-    agents: List<Agent>,
-    manifest: PluginManifest,
-    current: suspend () -> List<String>?,
-): List<String>? {
-    val keeps = manifest.agentAccess != null && (agents.isEmpty() || olderInstallation(agents))
-    if (!keeps) return null
-    val fresh = current() ?: return null
-    return copy(agentIds = fresh).agentIdsToKeep(agents, manifest)
-}
 
 /**
  * A plugin's device sign-in as the installation shows it (`POST /plugins/{id}/device-flow`): the

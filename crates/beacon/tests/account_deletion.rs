@@ -432,7 +432,7 @@ async fn mutually_shared_owners_can_delete_their_accounts_concurrently() {
             json!({
                 "code": code["code"],
                 "name": "Second installation",
-                "protocol": 1,
+                "protocol": cairn_protocol::PROTOCOL_VERSION,
             }),
         )
         .await
@@ -969,7 +969,7 @@ async fn deletion_revokes_other_sessions_mcp_token_families_and_inbound_invitati
             json!({
                 "code": claim["code"],
                 "name": "Invitation source",
-                "protocol": 1,
+                "protocol": cairn_protocol::PROTOCOL_VERSION,
             }),
         )
         .await

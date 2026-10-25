@@ -80,6 +80,7 @@ struct NewAttempt<'a> {
     created_at: i64,
     lease_expires_at: i64,
     released: bool,
+    native_mode: Value,
     additional_disk_mi_b: u64,
     disk_materialized: bool,
 }
@@ -91,6 +92,7 @@ struct Placement<'a> {
     node_id: &'a Value,
     resources: &'a Value,
     runtime_id: &'a Value,
+    native_mode: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     lease_expires_at: Option<i64>,
 }
@@ -159,10 +161,7 @@ impl<'a> Request<'a> {
             || (node["capabilities"]["kvm"] == true
                 && node["executionReady"] == true
                 && super::seen_within(node, FRESH_HEARTBEAT_MS));
-        // A moved disk is mounted from its published S3 state. A node that
-        // has not passed the storage probe cannot receive that disk.
-        (native || node["capabilities"]["fuse"] == true)
-            && !node["maintenance"].is_string()
+        !node["maintenance"].is_string()
             && !node["exclusiveReservation"].is_object()
             && !(local_unconfigured && run["isolated"] == true)
             && has_tags
@@ -176,13 +175,26 @@ impl<'a> Request<'a> {
             && ready
     }
 
-    /// VM address-space ceilings follow the node; they never reserve host capacity.
+    /// Native negotiated allowances reserve capacity; VM ceilings retain their policy.
     fn resources_for(&self, node: &Value) -> Option<Resources> {
         let limits: Resources = serde_json::from_value(node["limits"].clone()).ok()?;
         let disk = self.run["resources"]["diskMiB"]
             .as_u64()
             .or(self.checkpoint["resources"]["diskMiB"].as_u64())
-            .unwrap_or_else(|| defaults().disk_mi_b.min(limits.disk_mi_b));
+            .unwrap_or_else(|| {
+                let usable = if node["diskGrowthProtocol"] == 1 {
+                    limits.disk_mi_b.saturating_sub(
+                        super::disk_capacity::pool_reserve(
+                            limits.disk_mi_b.saturating_mul(1_048_576),
+                        ) / 1_048_576
+                            + JOURNAL_MIB,
+                    ) / 4
+                        * 4
+                } else {
+                    limits.disk_mi_b
+                };
+                defaults().disk_mi_b.min(usable)
+            });
         Some(Resources {
             cpu: limits.cpu.min(32),
             memory_mi_b: limits.memory_mi_b,
@@ -241,6 +253,15 @@ impl Fleet<'_> {
         storage_policy: &Policy,
     ) -> bool {
         let id = text(node, "id");
+        if node["diskGrowthProtocol"] == 1 && crate::native::policy::node_native(node) {
+            return super::disk_capacity::admission_fits(
+                node,
+                self.attempts,
+                request.run_id(),
+                resources.disk_mi_b.saturating_mul(1_048_576),
+                !request.replacing(id),
+            );
+        }
         // Nodes reporting free space keep their reserve plus room for each pending journal.
         if let Some(free) = node["capabilities"]["diskMiB"].as_u64() {
             let total = node["capabilities"]["diskTotalMiB"]
@@ -296,8 +317,20 @@ pub async fn reserve(s: &Service, run: &Value, attempt: &str) -> Result<Value> {
     let attempt = attempt.to_owned();
     let configured = !s.config.runner_url.is_empty();
     s.store
-        .transaction(move |db| reserve_in(db, &run, &attempt, configured))
-        .await
+        .transaction(move |db| {
+            let result = match reserve_in(db, &run, &attempt, configured) {
+                Ok(placement) => Ok(placement),
+                Err(error) if is_no_capacity(&error) => Err(error),
+                Err(error) => return Err(error),
+            };
+            if result.as_ref().is_err_and(is_no_capacity) {
+                request_reclamation(db, &run, configured)?;
+            }
+            // A failed transaction rolls back its pressure signal as well.
+            // Return the decision as data so the independent signal commits.
+            Ok(result)
+        })
+        .await?
 }
 
 /// Without a configured controller, development execution uses the process itself.
@@ -312,7 +345,7 @@ fn development_node(configured: bool) -> Value {
             "diskMiB": 1_099_511_627_776u64,
         },
         "slots": 4096,
-        "capabilities": { "kvm": configured, "fuse": true },
+        "capabilities": { "kvm": configured },
         "runtimeId": "local",
     })
 }
@@ -425,22 +458,52 @@ fn reserve_in(db: &Db<'_>, run: &Value, attempt: &str, configured: bool) -> Resu
     admit(db, &request, &best, &snapshot.attempts, attempt)
 }
 
-/// Fails like [`reserve`] when no node can take `run` now, without reserving anything.
+fn request_reclamation(db: &Db<'_>, run: &Value, configured: bool) -> Result<()> {
+    let snapshot = Snapshot::load(db, run, configured)?;
+    let request = Request::new(run, &snapshot.access, &snapshot.checkpoint)?;
+    for node in &snapshot.nodes {
+        if node["diskGrowthProtocol"] == 1
+            && request.eligible(node, configured)
+            && snapshot.fleet().free_slots(&request, node) > 0
+            && request.resources_for(node).is_some_and(|resources| {
+                !super::disk_capacity::admission_fits(
+                    node,
+                    &snapshot.attempts,
+                    request.run_id(),
+                    resources.disk_mi_b.saturating_mul(1_048_576),
+                    !request.replacing(text(node, "id")),
+                )
+            })
+        {
+            super::eviction::request(db, node)?;
+        }
+    }
+    Ok(())
+}
+
+/// Fails like [`reserve`] without holding capacity; disk pressure can schedule
+/// verification and reclamation of synchronized inactive local caches.
 pub async fn check(s: &Service, run: &Value) -> Result<()> {
     let _ = super::refresh_local(s).await;
     let run = run.clone();
     let configured = !s.config.runner_url.is_empty();
     s.store
-        .read(move |db| {
+        .transaction(move |db| {
             let snapshot = Snapshot::load(db, &run, configured)?;
             let request = Request::new(&run, &snapshot.access, &snapshot.checkpoint)?;
-            // A move already holds its destination.
             if !request.moving && run["moveReservation"].is_string() {
-                return Ok(());
+                return Ok(Ok(()));
             }
-            snapshot.select(&request, configured).map(drop)
+            match snapshot.select(&request, configured) {
+                Ok(_) => Ok(Ok(())),
+                Err(error) if is_no_capacity(&error) => {
+                    request_reclamation(db, &run, configured)?;
+                    Ok(Err(error))
+                }
+                Err(error) => Err(error),
+            }
         })
-        .await
+        .await?
 }
 
 /// A move reserved destination capacity in advance; the new execution takes it over.
@@ -465,11 +528,6 @@ fn claim_reservation(
     {
         return Err(Error::conflict("Destination execution backend changed."));
     }
-    if !native && record["capabilities"]["fuse"] != true {
-        return Err(Error::conflict(
-            "Destination no longer supports on-demand disks.",
-        ));
-    }
     if record["maintenance"].is_string() {
         return Err(Error::unavailable(
             "Destination is preparing for maintenance.",
@@ -491,6 +549,7 @@ fn claim_reservation(
     db.put("node-attempts", &held)?;
     db.patch_run(request.run_id(), &json!({ "moveReservation": null }))?;
     let placement = Placement {
+        native_mode: held["nativeMode"].clone(),
         node_id: &held["nodeId"],
         resources: &held["resources"],
         runtime_id: &held["runtimeId"],
@@ -553,12 +612,14 @@ fn admit(
         created_at: now(),
         lease_expires_at,
         released: false,
+        native_mode: super::native_mode::requested(&best.node),
         additional_disk_mi_b: disk.saturating_sub(previous),
         disk_materialized: false,
     };
     db.put("node-attempts", &serde_json::to_value(record)?)?;
     db.put("node-volumes", &volume)?;
     let placement = Placement {
+        native_mode: super::native_mode::requested(&best.node),
         node_id: &id.into(),
         resources: &serde_json::to_value(&best.resources)?,
         runtime_id: &runtime_id.into(),

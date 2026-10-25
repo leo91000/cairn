@@ -2,13 +2,12 @@
 //! Requests are independent: future streaming frames can share their request ID.
 pub mod data_channel;
 pub mod direct;
+pub mod nodes;
 pub mod slugs;
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u16 = 4;
-pub const MIN_PROTOCOL_VERSION: u16 = 1;
-pub const SUPPORTED_VERSIONS: &[u16] = &[PROTOCOL_VERSION, 3, 2, MIN_PROTOCOL_VERSION];
+pub const PROTOCOL_VERSION: u16 = 5;
 pub const MAX_STREAM_CHUNK: usize = 65_536;
 pub const MAX_BODY: usize = 8_000_000;
 // Base64 expands by four bytes per three body bytes, plus envelope metadata.
@@ -20,6 +19,11 @@ pub const MAX_STREAMS_PER_ACCOUNT: usize = 8;
 pub const MAX_PUBLIC_IN_FLIGHT: usize = 4;
 pub const MAX_NOTIFICATION_IN_FLIGHT: usize = 4;
 pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+// A node channel carries raw HTTP bytes in binary WebSocket messages.
+pub const MAX_NODE_CHANNEL_MESSAGE: usize = 1 << 20;
+pub const MAX_NODE_CHANNELS: usize = 256;
+// One address cannot take every channel of an installation.
+pub const MAX_NODE_CHANNELS_PER_ADDRESS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -128,16 +132,15 @@ mod body {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Frame {
     Hello {
-        versions: Vec<u16>,
+        version: u16,
     },
     Welcome {
         version: u16,
     },
-    // Version 4: control plane only, on the authenticated installation tunnel.
+    // Control plane only, on the authenticated installation tunnel.
     DirectKey {
         public_key: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        stun_url: Option<String>,
+        stun_url: String,
     },
     DirectAuthorize {
         id: String,
@@ -164,9 +167,13 @@ pub enum Frame {
     DirectRevoke {
         scope: direct::DirectRevocation,
     },
+    // Terminal refusal on an authenticated DataChannel; no application request was admitted.
+    UpdateRequired {
+        message: String,
+    },
     Request(ApiRequest),
     Response(ApiResponse),
-    // Version 2 only. Credit permits one bounded chunk, independently per stream.
+    // Credit permits one bounded chunk, independently per stream.
     StreamStart(ApiResponse),
     StreamChunk {
         id: String,
@@ -183,7 +190,7 @@ pub enum Frame {
     Cancel {
         id: String,
     },
-    // Version 3 only. Pending events stay on the installation until acknowledged.
+    // Pending events stay on the installation until acknowledged.
     Notification(NotificationEvent),
     NotificationAck {
         id: String,
@@ -191,13 +198,28 @@ pub enum Frame {
         // including invalid events and installations whose access has been revoked.
         delivered: bool,
     },
-}
-
-pub fn negotiate(versions: &[u16]) -> Option<u16> {
-    SUPPORTED_VERSIONS
-        .iter()
-        .copied()
-        .find(|version| versions.contains(version))
+    // Beacon asks the installation to accept a node channel by
+    // opening its own authenticated WebSocket for this ID. The node and the
+    // manager speak TLS inside it, so Beacon carries bytes it cannot read.
+    NodeChannel {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        address: Option<String>,
+    },
+    // Beacon forwards a node's WebRTC offer, with every
+    // candidate already gathered, so the node can reach the manager directly.
+    NodeOffer {
+        id: String,
+        sdp: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        address: Option<String>,
+    },
+    // The installation's complete answer, or no SDP to refuse the offer.
+    NodeAnswer {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sdp: Option<String>,
+    },
 }
 
 pub fn stream_path(path: &str) -> bool {

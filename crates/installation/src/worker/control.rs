@@ -240,7 +240,17 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
             checkpoint.completed = Some(false);
         }
         checkpoint.settled = None;
-        checkpoint.retry_cause = Some(None);
+        // A confirmed pre-turn failure may have no session yet. Its safety
+        // evidence survives a manual budget reset until the next supervised launch.
+        let pending_startup = !run["sessionId"].is_string()
+            && checkpoint
+                .retry_cause
+                .as_ref()
+                .and_then(Option::as_ref)
+                .is_some_and(|cause| cause.startup);
+        if !pending_startup {
+            checkpoint.retry_cause = Some(None);
+        }
         checkpoint.store_in(db, id)?;
     }
     let wait_reason = (!before_launch).then_some("Resuming saved conversation.");

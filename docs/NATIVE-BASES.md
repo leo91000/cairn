@@ -38,25 +38,3 @@ physical device. The block write is a disposable journal I/O probe, not a comple
 application filesystem transaction. Real mounting, workload isolation, S3,
 restoration and frozen-workload shutdown are qualified separately by the
 disposable native-runtime CI fixture.
-
-On 2026-10-23, local ext4/NVMe on an i9-14900K, Linux 7.2.9, 94 GiB RAM,
-with other builds and native workloads running, produced the following
-development-profile samples. Host load at completion was 6.58 / 5.62 / 7.21.
-
-| Metric | Cached ZIP | Prepared base |
-| --- | ---: | ---: |
-| Sample 1 preparation | 715 ms | 128 ms |
-| Sample 2 preparation | 438 ms | 214 ms |
-| Sample 3 preparation | 427 ms | 136 ms |
-| Median preparation | 438 ms | 136 ms |
-| Median process CPU | 341 ms | 84 ms |
-| Project bytes expanded / new private allocated bytes | 24 MiB | 76 KiB |
-
-The ZIP contains 9,102,989 bytes. The reusable journal base allocates 67,194,880
-bytes (64.08 MiB) and takes 843 ms wall / 476 ms CPU to prepare once. This
-trades more bounded per-version cache space for less per-conversation writing.
-The median of three advisory cold/warm 4 MiB reads was 4.25 / 0.19 ms; the
-synchronized 4 KiB journal delta took 13.84 ms wall / 0.56 ms CPU. The first ZIP
-sample shows the variability of host-wide writeback; the three samples and
-measurement boundaries are retained instead of treating that sample as a steady
-production comparison.

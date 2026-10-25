@@ -15,8 +15,8 @@ and verifies the embedded SHA-256 of `host.py` before installing it. No local pa
 is needed. The installation connects out using the existing claim and relay.
 
 Use a host with systemd. Install Docker Engine with its Compose plugin, Python 3 and curl first. Enable
-hardware virtualization, `/dev/kvm`, `/dev/net/tun` and `/dev/fuse` (install
-`fuse3` and load the kernel modules). The script checks each requirement before
+hardware virtualization, `/dev/kvm`, `/dev/net/tun` and a working `ublk_drv` kernel module
+(`/dev/ublk-control`, with io_uring enabled). The script checks each requirement before
 downloading or starting services, including a working Docker daemon and 16 GiB
 of free disk for runtime images and recovery staging. Conversation disks need
 additional space. It does not install Docker or change virtualization settings.
@@ -31,7 +31,11 @@ The manager's origin, `http://manager:4310`, exists only on that private Compose
 network. At startup the manager records it in the data directory it shares with
 its local runner, which then reads conversation disks from exactly this origin.
 Every other controller keeps the HTTPS rule: remote nodes enroll, connect and
-read disks over HTTPS, HTTP being accepted only on loopback for tests.
+read disks over HTTPS, HTTP being accepted only on loopback. A node added without
+an address uses that loopback exception: its local gateway carries each connection
+to the manager, directly or through Beacon, encrypted to the manager's pinned node
+certificate, so this installation still publishes no port. See
+[additional execution nodes](DEPLOYMENT.md#additional-execution-nodes).
 
 Agents never use this origin: their VMs cannot resolve or reach it. Inside a VM,
 `cairn_workspace` and MCP connections use `http://127.0.0.1:5202`. The guest

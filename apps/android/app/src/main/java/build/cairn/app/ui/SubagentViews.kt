@@ -75,6 +75,21 @@ private fun SubagentState.color(): Color =
 /** The same colour for a subagent in the conversation, the bar and its activity. */
 @Composable
 internal fun SubagentAvatar(agent: Subagent, size: Dp = 28.dp, modifier: Modifier = Modifier) {
+    // A delegated task shows the coding agent it runs on.
+    val delegation = agent.delegation
+    if (delegation != null && delegation.provider.isNotBlank()) {
+        Box(
+            modifier
+                .size(size)
+                .clip(RoundedCornerShape(size * 0.3f))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .clearAndSetSemantics {},
+            contentAlignment = Alignment.Center,
+        ) {
+            ProviderMark(delegation.provider, size * 0.6f)
+        }
+        return
+    }
     Box(
         modifier
             .size(size)

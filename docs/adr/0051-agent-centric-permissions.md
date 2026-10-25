@@ -74,11 +74,10 @@ ces champs (les copies sur les ressources restent, et le démarrage suivant reco
 l’agent). Le démarrage donne aussi une révision aux agents enregistrés avant son
 introduction.
 
-Les clients sont mis à jour indépendamment de l’installation (le web est servi par
-Beacon). `GET /agents` ajoute à chaque agent un indicateur calculé, jamais enregistré,
-`grantsOnAgent` : sans lui, l’installation est antérieure ou revenue en arrière. Les
-clients affichent alors ces droits en lecture seule depuis les copies, renvoient la
-liste `agentIds` d’une instance enregistrée et se passent de l’aperçu.
+Depuis la campagne de refacto (2026-10-25), les clients exigent le protocole et les
+API courants. Le marqueur `grantsOnAgent`, les droits en lecture seule pour les
+anciennes installations et le repli sans aperçu ont été supprimés. Les instances
+éditées omettent `agentIds` : le serveur conserve leurs droits en direct.
 
 Les autres modifications d’un agent conservent ses droits en direct, par exemple
 la suppression d’une connexion MCP, qui change aussi sa révision. Un droit déjà
@@ -95,5 +94,5 @@ cet identifiant orphelin faisait échouer l’enregistrement suivant de la node.
   1Password ce que voit le compte, et crée un autre compte pour d’autres droits.
 - Les délégations externes restent choisies sur l’instance (quel agent répond aux
   personnes). La page de l’agent les montre et propose leur réapprobation.
-- Les comptes d’agent de code restent un pool partagé (ADR 0002) : la page l’indique
+- Les comptes d’agent de code restent un pool partagé ([ADR-0061](0061-one-account-pool-for-coding-agents.md)) : la page l’indique
   sans créer de droit.

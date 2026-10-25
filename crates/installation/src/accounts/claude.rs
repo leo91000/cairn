@@ -19,14 +19,17 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
+    borrow::Cow,
     path::{Path, PathBuf},
     time::Duration,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
-// Official Claude Code 2.1.280 default; a per-login clientId takes precedence.
-const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+/// Token rotation uses the endpoint and official client the installed Claude Code
+/// ships; CI checks both in every resolved release. A per-login clientId takes
+/// precedence.
+pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const LIMIT: usize = 128_000;
 const USAGE_TTL: i64 = 300_000;
 /// The CLI files that follow an account into a run's home. Credentials never do.
@@ -413,6 +416,27 @@ fn scope(windows: &mut [usage::Window], catalog: &Catalog) {
     }
 }
 
+/// The family a saved model runs, as model-scoped windows name it, so a model that a newer
+/// catalog no longer lists stays limited by its family: an alias without its context
+/// variant ("opus[1m]" is "opus"), or the family of a model ID ("claude-opus-4-6[1m]" is
+/// "opus"). Any other name, such as "default" or "opusplan", is matched as saved.
+fn family(model: &str) -> Cow<'_, str> {
+    let lower = model.to_ascii_lowercase();
+    let base = match lower
+        .strip_suffix(']')
+        .and_then(|rest| rest.rsplit_once('['))
+    {
+        Some((base, variant)) if !base.is_empty() && !variant.is_empty() => base,
+        _ => lower.as_str(),
+    };
+    let named = |name: &str| !name.is_empty() && name.bytes().all(|b| b.is_ascii_lowercase());
+    let family = match base.strip_prefix("claude-") {
+        Some(id) => id.split('-').find(|part| named(part)),
+        None => Some(base).filter(|alias| named(alias) && *alias != model),
+    };
+    family.map_or(Cow::Borrowed(model), |family| Cow::Owned(family.into()))
+}
+
 /// Reads usage at most every five minutes. A failure keeps the last known windows.
 async fn read_usage(s: &Service, id: &str, previous: Option<Usage>) -> Usage {
     let mut current = previous.unwrap_or_default();
@@ -711,6 +735,15 @@ impl Driver for Claude {
         false
     }
 
+    /// A model a window names, such as a catalog alias, keeps its own windows.
+    fn usage_model<'a>(&self, usage: &Usage, model: &'a str) -> Cow<'a, str> {
+        if usage.names(model) {
+            Cow::Borrowed(model)
+        } else {
+            family(model)
+        }
+    }
+
     async fn supports(&self, _s: &Service, _id: &str, _model: &str) -> Result<bool> {
         Ok(true)
     }
@@ -852,6 +885,57 @@ mod tests {
         scope(&mut windows, &catalog);
         assert!(windows[0].models.is_empty());
         assert_eq!(windows[1].models, ["opus", "opus[1m]", "default"]);
+    }
+
+    #[test]
+    fn saved_models_are_limited_by_the_family_they_run() {
+        for (saved, runs) in [
+            ("opus[1m]", "opus"),
+            ("Sonnet[1M]", "sonnet"),
+            ("Opus", "opus"),
+            ("claude-opus-4-6", "opus"),
+            ("claude-opus-4-6[1m]", "opus"),
+            ("claude-haiku-4-5-20251001", "haiku"),
+            ("claude-3-5-sonnet-20241022", "sonnet"),
+        ] {
+            assert_eq!(family(saved), runs, "{saved}");
+        }
+        // Names without a precise family stay as saved: their catalog rows scope them.
+        for saved in [
+            "opus",
+            "default",
+            "opusplan",
+            "",
+            "opus[]",
+            "claude-",
+            "my-opus-proxy",
+            "us.anthropic.claude-opus-4-6-v1",
+        ] {
+            assert!(
+                matches!(family(saved), Cow::Borrowed(name) if name == saved),
+                "{saved}"
+            );
+        }
+        // A name a window already lists keeps it, even when its family differs.
+        let catalog = Catalog::read(Some(json!({
+            "models": [{ "model": "opusplan[1m]", "resolvedModel": "claude-opus-fixture" }],
+        })));
+        let mut windows = vec![window(&["opus"])];
+        scope(&mut windows, &catalog);
+        let usage = Usage {
+            windows,
+            ..Usage::default()
+        };
+        let driver = Provider::Claude.driver();
+        assert_eq!(driver.usage_model(&usage, "opusplan[1m]"), "opusplan[1m]");
+        assert_eq!(driver.usage_model(&usage, "opus[1m]"), "opus");
+        // Other engines match their usage windows by the exact saved model.
+        for provider in [Provider::Codex, Provider::Opencode] {
+            for saved in ["opus[1m]", "gpt-5.5[1m]", "opencode-go/claude-opus-4-6"] {
+                let model = provider.driver().usage_model(&usage, saved);
+                assert_eq!(model, saved, "{provider:?}");
+            }
+        }
     }
 
     fn stored() -> Value {

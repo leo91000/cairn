@@ -276,6 +276,13 @@ async fn health_and_deployment_lease_report_live_worker_ownership() {
         "createdAt": 1,
     });
     common::add_run(&service.store, &saved).await;
+    let tools = health(&app).await["tools"].clone();
+    for tool in ["codex", "gh", "claude", "opencode"] {
+        assert!(
+            tools.as_object().unwrap().contains_key(tool),
+            "Health reports the image's {tool} version"
+        );
+    }
     assert_eq!(
         health(&app).await["activeRuns"],
         0,
@@ -323,6 +330,34 @@ async fn health_and_deployment_lease_report_live_worker_ownership() {
             .await
             .unwrap()
             .is_none()
+    );
+    // An abandoned updater must not hold the worker forever or prevent the next
+    // updater from acquiring ownership after its lease expires.
+    service
+        .store
+        .set(
+            "deployment-lease",
+            json!("abandoned-owner"),
+            Some(cairn_installation::config::now() - 1),
+        )
+        .await
+        .unwrap();
+    assert!(
+        service
+            .store
+            .kv("deployment-lease")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    service
+        .worker
+        .deployment_lease(&service, "next-owner".into(), false)
+        .await
+        .unwrap();
+    assert_eq!(
+        service.store.kv("deployment-lease").await.unwrap(),
+        Some(json!("next-owner"))
     );
 }
 

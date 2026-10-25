@@ -47,4 +47,4 @@ Deleting a conversation immediately revokes public links, cancels pending work a
 
 Protect the application database and `DATA_DIR/mcp-encryption-key` separately. Remote disk objects alone cannot recreate the application or decrypt its data. The key is never uploaded alongside disk blocks. Keep configuration and persisted object keys stable while disks reference them.
 
-See [the current specification](STORAGE-SYNC-SIMPLIFICATION.md) and [ADR-0008](adr/0008-current-disk-publication-without-archives.md).
+See [ADR-0008](adr/0008-current-disk-publication-without-archives.md).

@@ -115,10 +115,10 @@ impl DirectTraffic {
                             request.public_artifact = None;
 
                             let credit = Arc::new(Semaphore::new(0));
-                            let streaming = Some(StreamOutput {
+                            let streaming = StreamOutput {
                                 frames: output.clone(),
                                 credit: credit.clone(),
-                            });
+                            };
                             let router = router.clone();
                             let output = output.clone();
                             let reply_id = id.clone();

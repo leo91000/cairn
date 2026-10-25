@@ -281,7 +281,6 @@ describe('coolify deployment over HTTP', () => {
     const result = parse(firecrackerRunnerCompose(stringify(document)))
     expect(result.services.runner).toMatchObject({ mem_limit: '20g', cpus: 8 })
     expect(result.services.runner.pids_limit).toBeUndefined()
-    expect(result.services.runner.devices).toContain('/dev/fuse:/dev/fuse')
   })
 
   it.each(['mapping', 'list'])('preserves the operator pool setting across deployment (%s)', async (shape) => {
@@ -297,10 +296,10 @@ describe('coolify deployment over HTTP', () => {
     expect(firecrackerRunnerCompose(compose)).toBe(compose)
   })
 
-  it.each(['mapping', 'list'])('preserves explicitly configured ublk transport and device classes (%s)', async (shape) => {
+  it.each(['mapping', 'list'])('preserves explicitly configured ublk device classes (%s)', async (shape) => {
     const document = parse(compose)
     const runner = document.services.runner
-    const environment = { ...runner.environment, CAIRN_BLOCK_TRANSPORT: 'ublk' }
+    const environment = { ...runner.environment }
     runner.environment = shape === 'list'
       ? Object.entries(environment).map(([key, value]) => `${key}=${value}`)
       : environment
@@ -309,22 +308,10 @@ describe('coolify deployment over HTTP', () => {
     compose = stringify(document)
     await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
     const result = parse(compose).services.runner
-    expect(result.environment.CAIRN_BLOCK_TRANSPORT).toBe('ublk')
     expect(result.devices).toContain('/dev/ublk-control:/dev/ublk-control')
     expect(result.device_cgroup_rules).toEqual(runner.device_cgroup_rules)
     expect(result.cap_add).toContain('SYS_RESOURCE')
     expect(result.privileged).toBeUndefined()
-    expect(firecrackerRunnerCompose(compose)).toBe(compose)
-  })
-
-  it('migrates the former transport selection to ublk', async () => {
-    const document = parse(compose)
-    document.services.runner.cap_add.push('SYS_RESOURCE')
-    document.services.runner.environment.CAIRN_BLOCK_TRANSPORT = 'vhost-user'
-    compose = stringify(document)
-    await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
-    expect(parse(compose).services.runner.cap_add).toContain('SYS_RESOURCE')
-    expect(parse(compose).services.runner.environment.CAIRN_BLOCK_TRANSPORT).toBe('ublk')
     expect(firecrackerRunnerCompose(compose)).toBe(compose)
   })
 
@@ -348,63 +335,12 @@ describe('coolify deployment over HTTP', () => {
     expect(firecrackerRunnerCompose(compose)).toBe(compose)
   })
 
-  it.each(['mapping', 'list'])('preserves snapshot activation through repeated deployment (%s)', async (shape) => {
-    const document = parse(compose)
-    const runner = document.services.runner
-    const environment = {
-      ...runner.environment,
-      CAIRN_BLOCK_TRANSPORT: 'ublk',
-      CAIRN_DISK_LAYOUT: 'paired-ext4-v1',
-      CAIRN_VM_SNAPSHOTS: 'true',
-    }
-    runner.environment = shape === 'list'
-      ? Object.entries(environment).map(([key, value]) => `${key}=${value}`)
-      : environment
-    runner.devices.push('/dev/ublk-control:/dev/ublk-control')
-    runner.device_cgroup_rules = ['c 238:* rwm', 'b 259:* rwm']
-    compose = stringify(document)
-    await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
-    expect(parse(compose).services.runner.environment).toMatchObject({ CAIRN_BLOCK_TRANSPORT: 'ublk', CAIRN_DISK_LAYOUT: 'paired-ext4-v1', CAIRN_VM_SNAPSHOTS: 'true' })
-    expect(firecrackerRunnerCompose(compose)).toBe(compose)
-    // Disabling new clones must retain the ability to boot existing paired disks.
-    const disabled = parse(compose)
-    disabled.services.runner.environment.CAIRN_VM_SNAPSHOTS = 'false'
-    compose = stringify(disabled)
-    await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
-    expect(parse(compose).services.runner.environment).toMatchObject({ CAIRN_DISK_LAYOUT: 'paired-ext4-v1', CAIRN_VM_SNAPSHOTS: 'false' })
-  })
-
-  it.each([
-    { CAIRN_VM_SNAPSHOTS: 'true' },
-    { CAIRN_VM_SNAPSHOTS: 'yes' },
-    { CAIRN_DISK_LAYOUT: 'unknown' },
-    { CAIRN_VM_SNAPSHOTS: 'true', CAIRN_BLOCK_TRANSPORT: 'ublk', CAIRN_DISK_LAYOUT: 'flat-ext4-v1' },
-  ])('rejects incompatible snapshot configuration before mutating the service (%j)', async (settings) => {
-    const document = parse(compose)
-    Object.assign(document.services.runner.environment, settings)
-    compose = stringify(document)
-    await expect(deploy(config, { intervalMs: 0, timeoutMs: 1000 })).rejects.toThrow()
-    expect(requests.some(request => request.method === 'PATCH' || request.method === 'POST')).toBe(false)
-  })
-
   it('rejects incomplete ublk permissions before changing or restarting the service', async () => {
     const document = parse(compose)
-    document.services.runner.environment.CAIRN_BLOCK_TRANSPORT = 'ublk'
     delete document.services.runner.device_cgroup_rules
     compose = stringify(document)
     await expect(deploy(config, { intervalMs: 0, timeoutMs: 1000 })).rejects.toThrow('ublk')
     expect(requests.some(request => request.method === 'PATCH' || request.method === 'POST')).toBe(false)
-  })
-
-  it('adds FUSE to an existing VM runner before deploying the S3-backed image', async () => {
-    const document = parse(compose)
-    document.services.runner.devices = document.services.runner.devices.filter(device => !device.startsWith('/dev/fuse:'))
-    compose = stringify(document)
-    await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
-    const patched = requests.find(request => request.method === 'PATCH' && request.path === '/api/v1/services/cairn-service')
-    expect(patched).toBeDefined()
-    expect(parse(compose).services.runner.devices).toContain('/dev/fuse:/dev/fuse')
-    expect(requests.some(request => request.path.endsWith('/restart'))).toBe(true)
   })
 
   it.each(['mapping', 'list'])('enables remote node updates in a legacy %s manager environment', async (shape) => {

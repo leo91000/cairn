@@ -135,6 +135,70 @@ async fn enroll_management_node(app: &axum::Router, invitation: &Value) -> Value
 }
 
 #[tokio::test]
+async fn pending_recovery_can_be_inspected_and_cancelled_through_both_tool_interfaces() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let agent_token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let owner_token = common::relay_fixture::grant(&s, &["read", "run", "manage"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    for (endpoint, token) in [
+        ("/mcp", owner_token.as_str()),
+        ("/mcp-installation", agent_token),
+    ] {
+        for chat_retry in [true, false] {
+            let chat = s.chat_create(json!({})).await.unwrap();
+            s.chat_send(
+                chat["id"].as_str().unwrap(),
+                json!({ "text": "Keep this request", "id": uuid::Uuid::new_v4().to_string() }),
+            )
+            .await
+            .unwrap();
+            s.chat_tick(&std::collections::HashSet::default())
+                .await
+                .unwrap();
+            let chat = s.chat_detail(chat["id"].as_str().unwrap()).await.unwrap();
+            let run_id = chat["runId"].as_str().unwrap();
+            let retry = json!({
+                "attempt": 2,
+                "limit": 5,
+                "nextAttemptAt": cairn_installation::config::now() + 60_000,
+                "startedAt": cairn_installation::config::now(),
+                "deadlineAt": cairn_installation::config::now() + 600_000,
+                "cause": { "kind": "timeout", "message": "Temporary timeout", "startup": true },
+            });
+            s.store
+                .patch_run(run_id, json!({ "retry": retry }))
+                .await
+                .unwrap();
+            let (_, history) =
+                node_management_call(&app, endpoint, token, "get_run", json!({ "runId": run_id }))
+                    .await;
+            assert_eq!(result(&history)["run"]["retry"], retry);
+            let (name, args) = if chat_retry {
+                ("stop_chat", json!({ "chatId": chat["id"] }))
+            } else {
+                ("cancel_run", json!({ "runId": run_id }))
+            };
+            let (status, response) = node_management_call(&app, endpoint, token, name, args).await;
+            assert_eq!(status, StatusCode::OK, "{response}");
+            result(&response);
+            let stopped = s.store.run(run_id).await.unwrap();
+            assert_eq!(stopped["status"], RunStatus::Cancelled);
+            assert!(stopped["retry"].is_null());
+            let retained = s.chat_detail(chat["id"].as_str().unwrap()).await.unwrap();
+            assert_eq!(retained["messages"].as_array().unwrap().len(), 1);
+            if chat_retry {
+                assert_eq!(retained["paused"], true);
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_their_grants() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
@@ -198,6 +262,48 @@ async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_t
         .await;
         assert_eq!(result(&updated)["nativeEnabled"], true);
         assert_eq!(result(&updated)["capabilities"]["backend"], "native");
+        let mut capable = s.get("nodes", next).await.unwrap();
+        capable["capabilities"]["nativeModeProtocol"] = 1.into();
+        s.store.put("nodes", capable).await.unwrap();
+        let (_, preview) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "change_native_node_mode",
+            json!({
+                "nodeId": next, "change": { "mode": "administrator" },
+            }),
+        )
+        .await;
+        let preview = result(&preview);
+        assert!(
+            preview["preview"]["warning"]
+                .as_str()
+                .unwrap()
+                .contains("real host")
+        );
+        let (_, requested) = node_management_call(&app, endpoint, token, "change_native_node_mode", json!({
+            "nodeId": next, "change": { "mode": "administrator", "previewId": preview["previewId"], "confirm": true },
+        })).await;
+        if endpoint == "/mcp-installation" {
+            assert_eq!(
+                result(&requested)["status"],
+                "awaiting-owner",
+                "{requested}"
+            );
+            assert!(s.get("nodes", next).await.unwrap()["nativeModeRequest"].is_null());
+        } else {
+            assert_eq!(
+                result(&requested)["nativeModeStatus"],
+                "pending",
+                "{requested}"
+            );
+            assert_eq!(
+                result(&requested)["nativeModeRequest"]["mode"],
+                "administrator"
+            );
+        }
+
         let (_, listed) =
             node_management_call(&app, endpoint, token, "list_nodes", json!({})).await;
         let node = result(&listed)
@@ -2818,4 +2924,71 @@ async fn waiting_missions_are_visible_and_cancellable_through_both_installation_
         assert_eq!(final_run["status"], "cancelled");
         assert!(final_run["wakeup"].is_null());
     }
+}
+
+#[tokio::test]
+async fn owner_mcp_can_review_one_wildcard_administrator_node_without_broadening_other_admission() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let agent_token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let owner_token = common::relay_fixture::grant(&s, &["read", "manage"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let agent = s
+        .agent(
+            json!({ "name": "Wildcard native", "access": { "backend": "native", "nodes": null } }),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut nodes = Vec::new();
+    for _ in 0..2 {
+        let node = cairn_installation::config::id();
+        s.store.put("nodes", json!({
+            "id": node, "capabilities": { "backend": "native", "nativeModeProtocol": 1 },
+            "nativeModeRequest": { "mode": "administrator", "generation": cairn_installation::config::id() },
+            "nativeReviewedAgents": [],
+        })).await.unwrap();
+        nodes.push(node);
+    }
+    let args = json!({ "id": agent["id"], "agent": { "nativeNodeReviews": [nodes[0]] } });
+    let (_, denied) = node_management_call(
+        &app,
+        "/mcp-installation",
+        agent_token,
+        "update_agent",
+        args.clone(),
+    )
+    .await;
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    assert!(
+        s.get("nodes", &nodes[0]).await.unwrap()["nativeReviewedAgents"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let (_, response) =
+        node_management_call(&app, "/mcp", &owner_token, "update_agent", args).await;
+    let saved = result(&response);
+    assert_eq!(saved["id"], agent["id"], "{response}");
+    assert!(
+        saved["access"]["nodes"].is_null(),
+        "Scoped review must preserve wildcard placement"
+    );
+    assert!(saved["nativeNodeReviews"].is_null());
+    assert!(
+        s.get("nodes", &nodes[0]).await.unwrap()["nativeReviewedAgents"]
+            .as_array()
+            .unwrap()
+            .contains(&agent["id"])
+    );
+    assert!(
+        s.get("nodes", &nodes[1]).await.unwrap()["nativeReviewedAgents"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }

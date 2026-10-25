@@ -238,47 +238,6 @@ async fn selected_roots_cannot_be_symlinks_or_files_in_either_backend() {
 }
 
 #[tokio::test]
-async fn paired_vm_copies_workspace_and_redirected_home_caches() {
-    let root = tempfile::tempdir().unwrap();
-    let system_tree = root.path().join("system-tree");
-    write(&system_tree, "upper/home/node/.codex/history", b"history");
-    let work_tree = root.path().join("work-tree");
-    write(&work_tree, "runs/test/workspace/dirty", b"workspace");
-    write(&work_tree, "runs/test/output/result.md", b"output");
-    write(&work_tree, ".cairn-system/home-cache/tool", b"cache");
-    write(&work_tree, ".cairn-system/home-share/data", b"share");
-    write(&work_tree, ".cairn-system/android/emulator", b"android");
-    let system = image(root.path(), &system_tree, "system.ext4").await;
-    let work = image(root.path(), &work_tree, "work.ext4").await;
-    let paired = root.path().join("paired.ext4");
-    let mut file = File::create(&paired).unwrap();
-    std::io::copy(&mut File::open(system).unwrap(), &mut file).unwrap();
-    std::io::copy(&mut File::open(work).unwrap(), &mut file).unwrap();
-    let staging = root.path().join("staging");
-    std::fs::create_dir(&staging).unwrap();
-    let disk = convert(
-        &paired,
-        &json!({ "version": 2, "size": 2 * SIZE,
-        "layout": { "kind": "paired-ext4-v1", "systemBytes": SIZE } }),
-        &prepared(),
-        "native",
-        &staging,
-    )
-    .await
-    .unwrap();
-    let fs = filesystem(&disk, 0, 2 * SIZE).unwrap();
-    for (path, expected) in [
-        ("/workspaces/dirty", b"workspace".as_slice()),
-        ("/output/result.md", b"output"),
-        ("/home/.cache/tool", b"cache"),
-        ("/home/.local/share/data", b"share"),
-        ("/home/.android/emulator", b"android"),
-    ] {
-        assert_eq!(fs.read(path).unwrap(), expected);
-    }
-}
-
-#[tokio::test]
 async fn malformed_filesystem_and_missing_work_never_produce_a_destination() {
     let root = tempfile::tempdir().unwrap();
     let raw = root.path().join("invalid.ext4");

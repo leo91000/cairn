@@ -15,6 +15,7 @@ tokio::task_local! { pub(crate) static PARENT: String; }
 pub(crate) enum Origin {
     Human(String),
     Run(String),
+    DelegatedTask(String),
     Stored(Value),
     #[default]
     Unknown,
@@ -96,7 +97,7 @@ pub(crate) fn provenance(db: &Db<'_>, source: &Origin) -> Result<Value> {
                 "nativeProvenanceUnknown": false,
             }))
         }
-        Origin::Run(id) => {
+        Origin::Run(id) | Origin::DelegatedTask(id) => {
             let Some(run) = db.run(id)? else {
                 return Ok(unknown());
             };
@@ -109,6 +110,11 @@ pub(crate) fn provenance(db: &Db<'_>, source: &Origin) -> Result<Value> {
                 "nativePrincipals": run["nativePrincipals"],
                 "nativeAuthorityNodes": run["nativeAuthorityNodes"],
                 "nativeParentRunId": id,
+                "nativeParentAccess": if matches!(source, Origin::DelegatedTask(_)) {
+                    "delegation"
+                } else {
+                    "installation"
+                },
                 "nativeProvenanceUnknown": false,
             }))
         }
@@ -120,6 +126,7 @@ pub(crate) fn provenance(db: &Db<'_>, source: &Origin) -> Result<Value> {
                 "nativePrincipals": value["nativePrincipals"],
                 "nativeAuthorityNodes": value["nativeAuthorityNodes"],
                 "nativeParentRunId": value["nativeParentRunId"],
+                "nativeParentAccess": value["nativeParentAccess"],
                 "nativeProvenanceUnknown": false,
             }))
         }
@@ -131,6 +138,7 @@ pub(crate) fn apply(record: &mut Value, grant: &Value) {
         "nativePrincipals",
         "nativeAuthorityNodes",
         "nativeParentRunId",
+        "nativeParentAccess",
         "nativeProvenanceUnknown",
     ] {
         record[key] = grant[key].clone();
@@ -169,6 +177,7 @@ pub(crate) fn task_grant(
                 grant["nativeProvenanceUnknown"] = true.into();
             }
             grant["nativeParentRunId"] = previous["nativeParentRunId"].clone();
+            grant["nativeParentAccess"] = previous["nativeParentAccess"].clone();
             let nodes = grant["nativeAuthorityNodes"]
                 .as_array()
                 .cloned()
@@ -198,7 +207,7 @@ pub fn allows(db: &Db<'_>, run: &Value, node: &Value) -> Result<bool> {
     let agent = db
         .get("agents", crate::nodes::run_agent(run))?
         .unwrap_or_default();
-    allows_agent(db, run, node, &agent)
+    allows_agent(db, run, node, &agent, Admission::Execution)
 }
 
 /// Only the fenced migration read path can substitute the saved backend for the
@@ -214,15 +223,40 @@ pub(crate) fn allows_migration_source(db: &Db<'_>, run: &Value, node: &Value) ->
     agent["access"]["nodes"] = json!([node["id"]]);
     let mut source = run.clone();
     apply(&mut source, &run["backendMigration"]["grant"]);
-    allows_agent(db, &source, node, &agent)
+    allows_agent(db, &source, node, &agent, Admission::MigrationSource)
 }
 
-fn allows_agent(db: &Db<'_>, run: &Value, node: &Value, agent: &Value) -> Result<bool> {
+fn authority_allows(db: &Db<'_>, run: &Value, node: &Value) -> Result<bool> {
+    let agent = db
+        .get("agents", crate::nodes::run_agent(run))?
+        .unwrap_or_default();
+    allows_agent(db, run, node, &agent, Admission::Authority)
+}
+
+#[derive(Clone, Copy)]
+enum Admission {
+    Execution,
+    Authority,
+    MigrationSource,
+}
+
+fn allows_agent(
+    db: &Db<'_>,
+    run: &Value,
+    node: &Value,
+    agent: &Value,
+    admission: Admission,
+) -> Result<bool> {
     if !native(agent)
         || !native(&run["snapshot"]["agent"])
         || !node_native(node)
         || node["nativeEnabled"] != true
         || node["revoked"] == true
+        || !matches!(admission, Admission::Authority) && !crate::nodes::native_mode::applied(node)
+        // A fenced migration reads existing storage; it never launches a workload.
+        // Switching backend revokes the agent's administrator execution review.
+        || !matches!(admission, Admission::MigrationSource)
+            && !crate::nodes::native_mode::reviewed(node, agent)
         || !crate::service::allowed(&policy(agent)["nodes"], text(node, "id"))
     {
         return Ok(false);
@@ -264,9 +298,18 @@ fn allows_agent(db: &Db<'_>, run: &Value, node: &Value, agent: &Value) -> Result
         let current = db
             .get("agents", crate::nodes::run_agent(&parent))?
             .unwrap_or_default();
+        // Historical and management-created edges retain the installation requirement.
+        // Only delegate_task records the narrower capability on its own parent edge.
+        let permission = if scope["nativeParentAccess"] == "delegation" {
+            "delegation"
+        } else {
+            "installation"
+        };
         if !parent["cancelRequestedAt"].is_null()
-            || policy(&current)["installation"] != true
+            || policy(&current)[permission] != true
+            || policy(&parent["snapshot"]["agent"])[permission] != true
             || !crate::installation_mcp::agent_allowed(&current, &parent["snapshot"]["agent"])
+            || permission == "delegation" && !crate::nodes::native_mode::reviewed(node, &current)
         {
             return Ok(false);
         }
@@ -292,7 +335,7 @@ pub(crate) fn authorize_origin(db: &Db<'_>, agent: &Value, source: &Origin) -> R
     let mut run = json!({ "snapshot": { "agent": agent } });
     apply(&mut run, &grant);
     for node in db.list("nodes")? {
-        if allows(db, &run, &node)? {
+        if authority_allows(db, &run, &node)? {
             return Ok(grant);
         }
     }
@@ -383,6 +426,11 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
         "nativePrincipals": people,
         "nativeAuthorityNodes": nodes,
         "nativeParentRunId": parent,
+        "nativeParentAccess": if chat["nativeParentRunId"].is_string() {
+            chat["nativeParentAccess"].clone()
+        } else {
+            incoming["nativeParentAccess"].clone()
+        },
         "nativeProvenanceUnknown": unknown,
     });
     if native(&agent) {
@@ -392,7 +440,7 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
             run["nodeId"]
                 .as_str()
                 .is_none_or(|current| node["id"] == current)
-                && allows(db, &combined, node).unwrap_or(false)
+                && authority_allows(db, &combined, node).unwrap_or(false)
         }) {
             return Err(Error::forbidden(
                 "The conversation's callers have no common authorized native node.",

@@ -847,6 +847,8 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
             } }),
         )
         .await;
+        // Queue an earlier heartbeat, as the random first heartbeat can do.
+        send(&mut socket, json!({ "op": 1 })).await;
         // A large server's GUILD_CREATE, well over what a script receives whole.
         let channels = (0..12_000)
             .map(|index| json!({ "id": format!("{}", 10_000 + index), "type": 0, "name": "x".repeat(80) }))
@@ -869,9 +871,22 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
         )
         .await;
         send(&mut socket, json!({ "op": 1 })).await;
-        let heartbeat = tokio::time::timeout(Duration::from_secs(1), receive(&mut socket))
-            .await
-            .expect("oversized thread routing must not block heartbeats on REST");
+        let heartbeat = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let heartbeat = receive(&mut socket).await;
+                let caught_up = heartbeat["d"]
+                    .as_u64()
+                    .is_some_and(|sequence| sequence >= 3);
+                if heartbeat["op"] != 1 || caught_up {
+                    break heartbeat;
+                }
+                // A periodic heartbeat can precede the requested one. Acknowledge
+                // it while waiting for the response after the large dispatch.
+                send(&mut socket, json!({ "op": 11 })).await;
+            }
+        })
+        .await
+        .expect("oversized thread routing must not block heartbeats on REST");
         assert_eq!(
             heartbeat,
             json!({ "op": 1, "d": 3 }),
@@ -1267,19 +1282,18 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
     );
     assert_ne!(stored.revision, text(&saved, "revision"));
 
-    // Installation access can never be approved for external people.
-    let mut wider = updated.clone();
-    wider["access"]["installation"] = true.into();
-    let preview = s.agent_preview(wider.clone(), &id).await.unwrap();
-    assert!(effect(&preview)["blocked"].is_string());
-    wider["reapproveDelegations"] = json!([connection]);
-    assert!(s.agent(wider.clone(), Some(&id)).await.is_err());
+    // The owner may approve installation access for Discord people too.
+    let mut installation = updated.clone();
+    installation["access"]["installation"] = true.into();
+    let preview = s.agent_preview(installation.clone(), &id).await.unwrap();
+    assert_eq!(effect(&preview)["suspended"], true);
+    assert_eq!(effect(&preview)["blocked"], Value::Null);
+    installation["reapproveDelegations"] = json!([connection]);
+    let updated = s.agent(installation, Some(&id)).await.unwrap();
 
     // Without reapproval the save succeeds and the bot waits for the owner.
-    wider
-        .as_object_mut()
-        .unwrap()
-        .remove("reapproveDelegations");
+    let mut wider = updated.clone();
+    wider["access"]["sandbox"] = "yolo".into();
     let widened = s.agent(wider, Some(&id)).await.unwrap();
     let stored = s
         .store
@@ -1311,11 +1325,8 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
 }
 
 #[tokio::test]
-async fn preview_reports_a_plugin_grant_that_would_stop_a_bot_anyone_can_reach() {
+async fn plugin_grants_keep_a_bot_anyone_can_reach_answering() {
     let (_root, s, agent) = service().await;
-    let mut public = agent.clone();
-    public["access"]["sandbox"] = "read-only".into();
-    let public = s.agent(public, Some(text(&agent, "id"))).await.unwrap();
     let saved = connections::save(
         &s,
         "discord",
@@ -1323,7 +1334,7 @@ async fn preview_reports_a_plugin_grant_that_would_stop_a_bot_anyone_can_reach()
             "name": "#support on Acme",
             "settings": { "guildId": "100", "channelId": "200" },
             "accessMode": "everyone",
-            "agentId": public["id"],
+            "agentId": agent["id"],
             "projectId": null,
             "enabled": true,
             "token": "synthetic_discord_token",
@@ -1340,20 +1351,24 @@ async fn preview_reports_a_plugin_grant_that_would_stop_a_bot_anyone_can_reach()
     )
     .await
     .unwrap();
-    let id = text(&public, "id").to_owned();
+    let id = text(&agent, "id").to_owned();
 
-    // The approved policy is unchanged, but anyone could then reach a secret.
-    let mut secret = public.clone();
+    // The approved policy is unchanged: the owner chose who may reach this agent.
+    let mut secret = agent.clone();
     secret["plugins"] = json!([account["id"]]);
     let preview = s.agent_preview(secret.clone(), &id).await.unwrap();
     let effect = &preview["delegations"][0];
     assert_eq!(effect["id"], saved["id"]);
-    assert_eq!(effect["suspended"], true);
-    assert!(effect["blocked"].is_string());
-    secret["reapproveDelegations"] = json!([saved["id"]]);
-    assert!(s.agent(secret, Some(&id)).await.is_err());
-
-    // Without plugin grants the same preview is clean.
-    let preview = s.agent_preview(public.clone(), &id).await.unwrap();
-    assert_eq!(preview["delegations"][0]["suspended"], false);
+    assert_eq!(effect["suspended"], false);
+    assert_eq!(effect["blocked"], Value::Null);
+    s.agent(secret, Some(&id)).await.unwrap();
+    let stored: Connection = serde_json::from_value(
+        s.store
+            .get(connections::KIND, text(&saved, "id"))
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stored.revision, text(&saved, "revision"));
 }

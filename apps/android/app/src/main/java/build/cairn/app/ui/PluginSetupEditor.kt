@@ -151,10 +151,13 @@ internal fun InstanceEditor(
     var completing by remember(initial.id) { mutableStateOf(manifest.instanceForm) }
     // Each change asks the package again; a newer question cancels the older one.
     var asking by remember(initial.id) { mutableStateOf(0 to listOf<String?>(null)) }
-    val others = connections.filter { it.id != initial.id }
-    fun problem(agent: Agent): String? =
-        if (accessMode == "everyone") agent.publicProblem(others)
-        else if (agent.eligibleForPlugins()) null else "Trop large"
+    /** What this instance's people could do through an agent, for the owner's warning. */
+    fun risks(agent: Agent): List<String> =
+        agent.delegationRisks(
+            connections,
+            everyone = accessMode == "everyone",
+            draftGrants = if (creating) grants else emptyList(),
+        )
     fun refresh(key: String?) {
         asking = (asking.first + 1) to listOf(key)
     }
@@ -375,7 +378,7 @@ internal fun InstanceEditor(
             "people" ->
                 when {
                     !manifest.delegates -> null
-                    agent == null || problem(agent) != null -> "Choisissez l’agent qui répond."
+                    agent == null -> "Choisissez l’agent qui répond."
                     accessMode == "allowlist" && people.isEmpty() ->
                         "Ajoutez au moins une personne."
                     else -> null
@@ -402,17 +405,6 @@ internal fun InstanceEditor(
             if (saving) name.isNotBlank() && steps.all { stepProblem(it) == null }
             else stepProblem(current) == null
     fun save() = vm.perform {
-        // Grants to send back (older or unknown installation), as saved right now.
-        val keptGrants =
-            if (creating) null
-            else
-                initial.agentIdsToSend(state.agents, manifest) {
-                    wireJson
-                        .decodeFromString<PluginCatalog>(api.request("GET", "/plugins"))
-                        .connections
-                        .find { it.id == initial.id }
-                        ?.agentIds
-                }
         api.pluginOperation(
             "/plugins/${segment(pluginId)}/connections" +
                 if (creating) "" else "/${segment(initial.id)}",
@@ -427,7 +419,8 @@ internal fun InstanceEditor(
                     put("agentId", agentId)
                     put(
                         "projectId",
-                        agent?.access?.projects?.firstOrNull()?.let(::JsonPrimitive) ?: JsonNull,
+                        // An agent with one project answers in it; a broader one outside projects.
+                        agent?.access?.projects?.singleOrNull()?.let(::JsonPrimitive) ?: JsonNull,
                     )
                     put("accessMode", accessMode)
                     put("userIds", JsonArray(people.map { JsonPrimitive(it.id) }))
@@ -447,12 +440,12 @@ internal fun InstanceEditor(
                 }
                 put("enabled", enabled)
                 sharing()
-                // An older (or unknown) installation needs the granted agents back, as they are
-                // now. A new instance is granted to the agents chosen on the agents step; creation
-                // only grants, it never removes.
-                (keptGrants ?: grants.takeIf { creating && it.isNotEmpty() })?.let { ids ->
-                    put("agentIds", JsonArray(ids.map(::JsonPrimitive)))
-                }
+                // Creation grants the chosen agents; editing keeps current grants.
+                grants
+                    .takeIf { creating && it.isNotEmpty() }
+                    ?.let { ids ->
+                        put("agentIds", JsonArray(ids.map(::JsonPrimitive)))
+                    }
             },
             method = if (creating) "POST" else "PUT",
         )
@@ -755,7 +748,7 @@ internal fun InstanceEditor(
                     }
                     if (accessMode == "everyone")
                         Note(
-                            "Il faut un agent en lecture seule, limité à un projet, sans MCP ni plugin."
+                            "Toute personne qui peut écrire dans le salon, avec une limite horaire par personne."
                         )
                     Text("Personnes autorisées", style = MaterialTheme.typography.labelLarge)
                     people.forEach { label ->
@@ -812,19 +805,21 @@ internal fun InstanceEditor(
                         "Répond en tant que",
                         agentId,
                         state.agents
-                            .sortedBy { problem(it) != null }
+                            .sortedBy { risks(it).isNotEmpty() }
                             .map { agent ->
                                 PluginOption(
                                     agent.id,
                                     agent.name,
-                                    problem(agent).orEmpty(),
-                                    disabled = problem(agent) != null,
+                                    if (risks(agent).isEmpty()) "" else "Accès large",
                                 )
                             },
                         enabled = !state.busy,
                     ) {
                         agentId = it
                     }
+                    Note(
+                        "Les personnes parlent à cet agent avec tous ses accès. Créez un agent dédié pour limiter ce qu’elles peuvent faire."
+                    )
                     Field(
                         "Messages par heure",
                         perHour,
@@ -882,6 +877,26 @@ internal fun InstanceEditor(
                             }
                         }
                     }
+
+                if (manifest.delegates && current.kind in listOf("people", "agents")) {
+                    val chosenRisks = agent?.let(::risks).orEmpty()
+                    if (agent != null && chosenRisks.isNotEmpty()) {
+                        val everyone = accessMode == "everyone"
+                        SetupWarning(
+                            title =
+                                if (everyone)
+                                    "Tout le monde dans le salon peut utiliser tout ce que ${agent.name} sait faire"
+                                else
+                                    "Les personnes autorisées peuvent utiliser tout ce que ${agent.name} sait faire",
+                            text =
+                                "Via le bot, il est possible de ${listed(chosenRisks)}. " +
+                                    if (everyone)
+                                        "Pour un salon public, préférez un agent en lecture seule avec un seul projet."
+                                    else
+                                        "N’autorisez que des personnes de confiance, ou choisissez un agent plus limité.",
+                        )
+                    }
+                }
 
                 if (saving) {
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -1077,7 +1092,7 @@ private fun SetupChecklist(tasks: List<SetupTask>, callbackUrl: String) {
 
 /** A consequence to know before going on, e.g. a provider's token expiry. */
 @Composable
-private fun SetupWarning(text: String) {
+private fun SetupWarning(text: String, title: String? = null) {
     Row(
         Modifier.fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
@@ -1092,7 +1107,16 @@ private fun SetupWarning(text: String) {
             tint = signal.warning,
         )
         Spacer(Modifier.width(10.dp))
-        Text(text, style = MaterialTheme.typography.bodySmall, color = signal.warning)
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            if (title != null)
+                Text(
+                    title,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = signal.warning,
+                )
+            Text(text, style = MaterialTheme.typography.bodySmall, color = signal.warning)
+        }
     }
 }
 
