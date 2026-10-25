@@ -97,7 +97,7 @@ disabled.
 Direct Docker builds must pass these build arguments too; see
 [deployment setup](DEPLOYMENT.md) and the [agent toolkit](TOOLKIT.md).
 
-### Qualifying an engine change
+## Qualifying an engine change
 
 A new channel release ships through the normal validated build and its automated
 checks above. A release that fails them blocks validation. There is no hold or
