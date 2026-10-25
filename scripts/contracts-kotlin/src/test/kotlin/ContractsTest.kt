@@ -35,7 +35,16 @@ class ContractsTest {
     @Test
     fun projectsMatchRustWireAndDefaults() {
         val root = File(System.getProperty("cairn.contractWire")).parentFile
-        val corpus = json.parseToJsonElement(File(root.parentFile.parentFile.parentFile, "tests/fixtures/project-contracts.json").readText()).jsonObject
+        val corpus =
+            json
+                .parseToJsonElement(
+                    File(
+                            root.parentFile.parentFile.parentFile,
+                            "tests/fixtures/project-contracts.json",
+                        )
+                        .readText()
+                )
+                .jsonObject
         val wire = json.parseToJsonElement(File(root, "project-wire.json").readText()).jsonObject
         for ((index, input) in corpus.getValue("creates").jsonArray.withIndex()) {
             val model = json.decodeFromJsonElement<CreateProjectInput>(input)
