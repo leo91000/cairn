@@ -453,6 +453,16 @@ fn withdraw(db: &Db<'_>, chat_id: &str, message: &Value) -> Result<Value> {
     Ok(json!({ "deleted": true }))
 }
 
+/// Parses an edited message. A speed the editor did not send stays as stored.
+pub(crate) fn parse_edit(input: Value) -> Result<Value> {
+    let sends_speed = input.get("speed").is_some();
+    let mut values = parse("message", input)?;
+    if !sends_speed && let Some(values) = values.as_object_mut() {
+        values.remove("speed");
+    }
+    Ok(values)
+}
+
 pub(crate) fn edit(
     db: &Db<'_>,
     chat_id: &str,
@@ -493,7 +503,13 @@ pub(crate) fn edit_as(
     }
     crate::attachments::message(db, chat_id, &mut values)?;
     validate_steer(db, &chat, &values)?;
+    // An edit without a speed, from an editor predating speeds, keeps the stored one while the
+    // message still goes to Codex.
+    let kept_speed = values.get("speed").is_none();
     crate::store::merge(&mut current, &values);
+    if kept_speed && message_provider(db, &chat, &current)? != Provider::Codex.as_str() {
+        set_speed(&mut current, "");
+    }
     validate_speed(db, &chat, &current)?;
     db.put_message(&current)
 }
@@ -1081,7 +1097,7 @@ impl Service {
         let values = input
             .map(|mut input| {
                 input["id"] = message.clone().into();
-                parse("message", input)
+                parse_edit(input)
             })
             .transpose()?;
         let result = self

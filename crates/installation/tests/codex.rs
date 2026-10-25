@@ -1095,6 +1095,34 @@ async fn queued_speed_is_kept_and_an_unavailable_one_runs_at_standard_with_a_not
     for model in ["fixture-deep", "fixture-fast"] {
         assert_eq!(configure(model, "").await["serviceTier"], "default");
     }
+
+    // An edit from an editor predating speeds keeps the queued speed, unless it moves the
+    // message to another coding agent.
+    let queued_id = id();
+    let queued =
+        json!({ "id": queued_id, "text": "Next", "provider": "codex", "speed": "priority" });
+    service.chat_send(chat_id, queued).await.unwrap();
+    let edited = service
+        .chat_edit(
+            chat_id,
+            &queued_id,
+            Some(json!({ "text": "Next, reworded", "provider": "codex" })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(edited["speed"], "priority");
+    let moved = service
+        .chat_edit(
+            chat_id,
+            &queued_id,
+            Some(json!({ "text": "Next", "provider": "claude" })),
+        )
+        .await
+        .unwrap();
+    assert!(
+        moved.get("speed").is_none_or(|speed| speed == ""),
+        "{moved}"
+    );
 }
 
 #[tokio::test]

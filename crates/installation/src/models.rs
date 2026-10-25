@@ -15,6 +15,12 @@ use std::{
 use tokio::sync::Mutex;
 
 const TTL: i64 = 300_000;
+/// Usage polls refresh a catalog this long before it expires, so routing and the speed check
+/// keep a fresh one between polls (one a minute).
+const REFRESH_AHEAD: i64 = 120_000;
+/// How long a catalog's speeds decide routing and the speed check. Plans change rarely, and usage
+/// polls skip a busy account, so this outlasts the picker's freshness.
+const SPEEDS_TTL: i64 = 30 * 60_000;
 
 #[derive(Default)]
 pub struct Models {
@@ -174,9 +180,13 @@ async fn discover_pages(session: &mut Session) -> Result<Value> {
 }
 
 fn due(cached: &Value) -> bool {
+    due_within(cached, TTL)
+}
+
+fn due_within(cached: &Value, age: i64) -> bool {
     cached["checkedAt"]
         .as_i64()
-        .is_none_or(|at| now() - at > TTL)
+        .is_none_or(|at| now() - at > age)
         && cached["attemptedAt"]
             .as_i64()
             .is_none_or(|at| now() - at > 30_000)
@@ -198,7 +208,7 @@ async fn record(s: &Service, key: &str, mut cached: Value, result: Result<Value>
 pub async fn refresh_from_session(s: &Service, source: &str, session: &mut Session) -> Result<()> {
     let key = format!("codex-models:{source}");
     let cached = s.store.kv(&key).await?.unwrap_or(Value::Null);
-    if due(&cached) {
+    if due_within(&cached, TTL - REFRESH_AHEAD) {
         record(s, &key, cached, discover(session).await).await?;
     }
     Ok(())
@@ -206,7 +216,7 @@ pub async fn refresh_from_session(s: &Service, source: &str, session: &mut Sessi
 
 /// Combines one model listed by several accounts: only effort levels supported by
 /// every account, hidden only when hidden everywhere, default when default anywhere.
-/// Speeds are offered when any account offers them, since runs go to an account that
+/// Speeds are offered when any account offers them, since runs prefer an account that
 /// does; `limited` marks a speed that some of these accounts lack.
 fn intersect(existing: &mut Value, model: &Value) {
     let supported = model["supportedReasoningEfforts"]
@@ -339,11 +349,11 @@ pub async fn account_supports(
         && account_offers_speed(s, account, model, speed).await?)
 }
 
-fn fresh(cached: &Value) -> bool {
+fn speeds_known(cached: &Value) -> bool {
     cached["checkedAt"]
         .as_i64()
         .and_then(|at| now().checked_sub(at))
-        .is_some_and(|age| (0..=TTL).contains(&age))
+        .is_some_and(|age| (0..=SPEEDS_TTL).contains(&age))
 }
 
 /// The catalog row a run of `model` uses; an empty model is the catalog default.
@@ -359,7 +369,7 @@ fn catalog_row<'a>(cached: &'a Value, model: &str) -> Option<&'a Value> {
 
 /// Whether a fresh catalog offers `tier` for `model`, or `None` when it cannot tell.
 fn offers_tier(cached: &Value, model: &str, tier: &str) -> Option<bool> {
-    if !fresh(cached) {
+    if !speeds_known(cached) {
         return None;
     }
     let tiers = catalog_row(cached, model)?["serviceTiers"].as_array()?;
@@ -657,12 +667,20 @@ mod tests {
             ServiceTierChoice::Unavailable
         );
 
+        // A catalog past the picker's freshness still knows its speeds between usage polls.
+        let mut lapsed = cached.clone();
+        lapsed["checkedAt"] = (now() - TTL - 60_000).into();
+        assert_eq!(
+            resolve_tier(Some(&lapsed), "gpt-6-luna", "priority"),
+            ServiceTierChoice::Unavailable
+        );
+
         // Unknown capabilities are left to Codex: a model or speed list it did not report,
-        // a stale catalog, or none at all.
+        // an outdated catalog, or none at all.
         assert_eq!(resolve("gpt-5.5", "priority"), send("priority"));
         assert_eq!(resolve("custom-alias", "priority"), send("priority"));
         let mut stale = cached.clone();
-        stale["checkedAt"] = (now() - TTL - 1).into();
+        stale["checkedAt"] = (now() - SPEEDS_TTL - 1).into();
         assert_eq!(
             resolve_tier(Some(&stale), "gpt-6-luna", "priority"),
             send("priority")
