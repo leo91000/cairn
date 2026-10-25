@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends clang libclang-
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
+COPY crates/contracts/Cargo.toml ./crates/contracts/Cargo.toml
 COPY vendor ./vendor
 COPY crates/installation/Cargo.toml ./crates/installation/Cargo.toml
 COPY crates/beacon/Cargo.toml ./crates/beacon/Cargo.toml
@@ -30,7 +31,8 @@ COPY crates/node-gateway/Cargo.toml ./crates/node-gateway/Cargo.toml
 # Cargo's package lock lives outside this mount. Serialize registry writers
 # across build stages, including the independently pinned Firecracker toolchain.
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    mkdir -p crates/installation/src crates/installation/examples crates/beacon/src crates/protocol/src crates/plugin-api/src crates/plugin-host/src crates/plugin-runtime/src crates/node-gateway/src \
+    mkdir -p crates/contracts/src crates/installation/src crates/installation/examples crates/beacon/src crates/protocol/src crates/plugin-api/src crates/plugin-host/src crates/plugin-runtime/src crates/node-gateway/src \
+    && printf '' > crates/contracts/src/lib.rs \
     && printf '' > crates/node-gateway/src/lib.rs \
     && printf 'fn main() {}\n' > crates/node-gateway/src/main.rs \
     && printf '' > crates/plugin-api/src/lib.rs \
@@ -42,6 +44,7 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharin
     && printf 'fn main() {}\n' > crates/beacon/src/main.rs \
     && printf '' > crates/protocol/src/lib.rs \
     && printf '' > crates/beacon/src/lib.rs && cargo build --locked --release --bin cairn
+COPY crates/contracts ./crates/contracts
 COPY crates/plugin-api ./crates/plugin-api
 COPY crates/plugin-host ./crates/plugin-host
 COPY crates/plugin-runtime ./crates/plugin-runtime
@@ -51,7 +54,7 @@ COPY crates/protocol ./crates/protocol
 COPY deploy/nodes ./deploy/nodes
 COPY deploy/installations/data-compatibility.json ./deploy/installations/data-compatibility.json
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    touch crates/installation/src/main.rs crates/installation/src/lib.rs crates/protocol/src/lib.rs \
+    touch crates/contracts/src/lib.rs crates/installation/src/main.rs crates/installation/src/lib.rs crates/protocol/src/lib.rs \
     crates/plugin-api/src/lib.rs crates/plugin-host/src/lib.rs crates/plugin-runtime/src/lib.rs && \
     cargo build --locked --release --bin cairn && cp target/release/cairn /usr/local/bin/cairn
 
@@ -67,6 +70,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends musl-tools \
     && rustup target add x86_64-unknown-linux-musl
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
+COPY crates/contracts/Cargo.toml ./crates/contracts/Cargo.toml
 COPY vendor ./vendor
 COPY crates/installation/Cargo.toml ./crates/installation/Cargo.toml
 COPY crates/beacon/Cargo.toml ./crates/beacon/Cargo.toml
@@ -76,7 +80,8 @@ COPY crates/plugin-host/Cargo.toml ./crates/plugin-host/Cargo.toml
 COPY crates/plugin-runtime/Cargo.toml ./crates/plugin-runtime/Cargo.toml
 COPY crates/node-gateway/Cargo.toml ./crates/node-gateway/Cargo.toml
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    mkdir -p crates/installation/src crates/installation/examples crates/beacon/src crates/protocol/src crates/plugin-api/src crates/plugin-host/src crates/plugin-runtime/src crates/node-gateway/src \
+    mkdir -p crates/contracts/src crates/installation/src crates/installation/examples crates/beacon/src crates/protocol/src crates/plugin-api/src crates/plugin-host/src crates/plugin-runtime/src crates/node-gateway/src \
+    && printf '' > crates/contracts/src/lib.rs \
     && printf '' > crates/node-gateway/src/lib.rs \
     && printf 'fn main() {}\n' > crates/node-gateway/src/main.rs \
     && printf '' > crates/plugin-api/src/lib.rs \

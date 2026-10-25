@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
+import { resumeRun } from '../../../../packages/contracts/generated/resume-run'
 import {
   api,
   date,
@@ -122,7 +123,7 @@ async function cancel() {
 async function resume() {
   tab.value = 'events'
   try {
-    await api(`/runs/${run.value!.id}/resume`, { method: 'POST' })
+    await resumeRun(api, { runId: run.value!.id })
     notify('Resuming saved conversation')
   }
   catch (e) { error.value = (e as Error).message }

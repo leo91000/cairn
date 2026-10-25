@@ -24,7 +24,9 @@
     "lint": "eslint . && node scripts/rust-format.mjs --check",
     "lint:fix": "eslint . --fix && node scripts/rust-format.mjs",
     "build:backend": "cargo build --release --bin cairn",
-    "test:backend": "node scripts/test-backend.mjs"
+    "test:backend": "node scripts/test-backend.mjs",
+    "generate:contracts": "node scripts/generate-contracts.mjs",
+    "check:contracts": "node scripts/generate-contracts.mjs --check"
   },
   "dependencies": {
     "@fontsource-variable/dm-sans": "5.3.0",
@@ -55,6 +57,8 @@
     "@tailwindcss/vite": "4.3.3",
     "@types/node": "24.12.0",
     "@vitejs/plugin-vue": "6.0.8",
+    "ajv": "8.17.1",
+    "ajv-formats": "3.0.1",
     "concurrently": "10.0.5",
     "eslint": "10.10.0",
     "fastify": "5.12.3",

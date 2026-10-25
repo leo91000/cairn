@@ -157,6 +157,14 @@ pub(crate) async fn operation(
     if !known {
         return Err(Error::not_found("Unknown operation"));
     }
+    if name == cairn_contracts::RESUME_RUN_ID {
+        let input = crate::capabilities::RESUME_RUN.decode(args)?;
+        let context = crate::capabilities::ResumeContext::Installation(bearer.to_owned());
+        let output = crate::capabilities::RESUME_RUN
+            .invoke(s, input, context)
+            .await?;
+        return Ok(serde_json::to_value(output)?);
+    }
     let input = match name {
         "create_task" | "create_chat" => Some(&mut args),
         "update_task" => args.get_mut("task"),
