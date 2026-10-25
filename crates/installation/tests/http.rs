@@ -276,6 +276,13 @@ async fn health_and_deployment_lease_report_live_worker_ownership() {
         "createdAt": 1,
     });
     common::add_run(&service.store, &saved).await;
+    let tools = health(&app).await["tools"].clone();
+    for tool in ["codex", "gh", "claude", "opencode"] {
+        assert!(
+            tools.as_object().unwrap().contains_key(tool),
+            "Health reports the image's {tool} version"
+        );
+    }
     assert_eq!(
         health(&app).await["activeRuns"],
         0,

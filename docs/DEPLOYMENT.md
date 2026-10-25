@@ -111,13 +111,14 @@ Keep one manager replica per SQLite data volume. If using a prefilled claim code
 set `CAIRN_INSTALLATION_CLAIM_CODE` and `CAIRN_INSTALLATION_NAME` before first startup;
 otherwise follow [Manual Compose claim](#manual-compose-claim) after startup.
 
-For a local build, resolve current stable CLI versions and pass them to Docker:
+For a local build, resolve the agent tool versions CI would choose and pass them to Docker
+(see [tool versions](CLI-UPDATES.md)):
 
 ```sh
-codex_version=$(npm view @openai/codex version)
-gh_version=$(gh api repos/cli/cli/releases/latest --jq '.tag_name | ltrimstr("v")')
-docker compose build --build-arg CODEX_VERSION="$codex_version" --build-arg GH_VERSION="$gh_version"
-docker compose up -d
+versions=$(node scripts/cli-updates.mjs build-versions) \
+  && node -e 'for (const [tool, version] of Object.entries(JSON.parse(process.argv[1]))) console.log(`--build-arg=${tool.toUpperCase()}_VERSION=${version}`)' "$versions" \
+  | xargs docker compose build \
+  && docker compose up -d
 ```
 
 For published images, use
@@ -257,8 +258,9 @@ carry SBOM/provenance and share schema-3 evidence for one validated Git tree.
 Older single-image evidence cannot be reused. Fork images remain local.
 
 A `v*` tag promotes both immutable digests without rebuilding if a trusted run
-validated that exact tree and current installation CLI versions. Otherwise the
-full pipeline runs. A tag waits for concurrent main validation for up to 40
+validated that exact tree and current installation CLI versions, and production
+still serves the engine releases its rollback checks used. Otherwise the full
+pipeline runs. A tag waits for concurrent main validation for up to 40
 minutes; if validation is still pending, retry after it completes. No second
 build starts at that deadline. Production deployment jobs remain serialized.
 Main, PR and manual workflows never deploy.
@@ -364,9 +366,9 @@ and [Codex authentication](https://learn.chatgpt.com/docs/auth) for the underlyi
 ## Automatic CLI updates
 
 Installations update tools through fully validated paired image releases and
-their host timer, with runtime verification and rollback. CI resolves current
-stable Codex/GitHub CLI versions before building and validating images; see
-[tool versions](CLI-UPDATES.md).
+their host timer, with runtime verification and rollback. CI resolves the current
+Codex, GitHub CLI, Claude Code and OpenCode releases before building and
+validating images; see [tool versions](CLI-UPDATES.md).
 
 Codex `initialize` and retained-session `thread/resume` get separate, bounded
 two-minute deadlines for cold executable loading and native context recovery.

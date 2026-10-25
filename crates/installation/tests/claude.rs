@@ -248,6 +248,81 @@ async fn default_model_labels_survive_missing_metadata_without_pinning() {
     }
 }
 
+/// Optional native qualification: the real Claude Code release answers the control
+/// protocol Cairn's model discovery and usage use, and the authentication status
+/// account refresh reads, with synthetic credentials and no inference.
+/// Run with CLAUDE_NATIVE_BIN set via the credential-isolated backend launcher.
+#[tokio::test]
+#[ignore = "requires a native Claude Code binary"]
+async fn native_cli_lists_its_model_catalog_without_inference() {
+    let binary = std::env::var("CLAUDE_NATIVE_BIN").expect("set CLAUDE_NATIVE_BIN");
+    let root = TempDir::new().unwrap();
+    let s = Service::new(Config {
+        claude_bin: binary,
+        ..config(&root)
+    })
+    .await
+    .unwrap();
+    // Token rotation sends the release's own OAuth client to its token endpoint.
+    let executable = std::fs::read(&s.config.claude_bin).unwrap();
+    for shipped in [accounts::claude::CLIENT_ID, accounts::claude::TOKEN_URL] {
+        let literal = regex::bytes::Regex::new(&regex::escape(shipped)).unwrap();
+        assert!(
+            literal.is_match(&executable),
+            "{shipped} is not in the release"
+        );
+    }
+    let id = connected(&s).await;
+    let catalog = claude::model_catalog(&s).await.unwrap();
+    assert_eq!(catalog["stale"], false, "{catalog}");
+    let models = catalog["models"].as_array().unwrap();
+    // Agents without a chosen model run the CLI's default alias.
+    assert!(
+        models
+            .iter()
+            .any(|model| model["model"] == "default" && model["isDefault"] == true),
+        "{catalog}"
+    );
+    assert!(
+        models.iter().all(|model| {
+            !model["model"].as_str().unwrap().is_empty()
+                && model["displayName"]
+                    .as_str()
+                    .is_some_and(|name| !name.is_empty())
+        }),
+        "{catalog}"
+    );
+    // Agents can save exactly the effort levels the catalog offers: a level the
+    // release adds would be refused, and one it drops would still be passed to it.
+    let offered = models
+        .iter()
+        .flat_map(|model| model["supportedReasoningEfforts"].as_array().unwrap())
+        .map(|effort| effort["reasoningEffort"].as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    let saved = claude::EFFORTS
+        .into_iter()
+        .filter(|effort| !effort.is_empty());
+    assert_eq!(offered, saved.collect(), "{catalog}");
+    // Account usage uses the same protocol. Without a subscription, the CLI answers
+    // that no limits are available, in the fields the adapter reads.
+    let usage = claude::query_metadata(
+        &s,
+        &id,
+        Some(json!({ "subtype": "get_usage", "skip_behaviors": true })),
+    )
+    .await
+    .unwrap();
+    assert!(
+        usage.get("rate_limits_available").is_some() && usage.get("rate_limits").is_some(),
+        "{usage}"
+    );
+    // Account refresh reads `claude auth status` JSON, then usage. A changed status
+    // format would mark the account as failed.
+    s.accounts.refresh(&s, &id).await.unwrap();
+    let account = view(&s, &id).await;
+    assert_eq!(account["state"], "ready", "{account}");
+}
+
 #[tokio::test]
 async fn sign_in_cancellation_failure_retry_identity_and_removal() {
     let root = TempDir::new().unwrap();
@@ -369,6 +444,156 @@ async fn run_to_end(c: &Config, p: Value) -> (Result<()>, Vec<Value>) {
     let (tx, rx) = mpsc::channel(64);
     let result = claude_process::run(c, p, tx, CancellationToken::new()).await;
     (result, drain(rx).await)
+}
+
+/// Optional native qualification: the real Claude Code release runs a turn through
+/// the adapter against a local Messages API, then resumes that session, optionally
+/// with another release (CLAUDE_NATIVE_RESUME_BIN), as after an update or a rollback.
+/// Run with CLAUDE_NATIVE_BIN set via the credential-isolated backend launcher.
+#[tokio::test]
+#[ignore = "requires a native Claude Code binary"]
+async fn native_cli_executes_and_resumes_a_session_against_a_local_model() {
+    use axum::{Router, body::Bytes, routing::post};
+    const REPLY: &str = "Native Claude Code local model passed.";
+    let binary = std::env::var("CLAUDE_NATIVE_BIN").expect("set CLAUDE_NATIVE_BIN");
+    let resume = std::env::var("CLAUDE_NATIVE_RESUME_BIN").unwrap_or_else(|_| binary.clone());
+    let requests = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let recorded = requests.clone();
+    let router = Router::new()
+        .route(
+            "/v1/messages",
+            post(move |body: Bytes| async move {
+                let request: Value = serde_json::from_slice(&body).unwrap();
+                recorded.lock().unwrap().push(request.clone());
+                // A streamed Messages API reply, as Server-Sent Events named by their type.
+                let body = [
+                    json!({
+                        "type": "message_start",
+                        "message": {
+                            "id": "msg_local",
+                            "type": "message",
+                            "role": "assistant",
+                            "model": request["model"],
+                            "content": [],
+                            "stop_reason": null,
+                            "usage": { "input_tokens": 10, "output_tokens": 0 },
+                        },
+                    }),
+                    json!({
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": { "type": "text", "text": "" },
+                    }),
+                    json!({
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": { "type": "text_delta", "text": REPLY },
+                    }),
+                    json!({ "type": "content_block_stop", "index": 0 }),
+                    json!({
+                        "type": "message_delta",
+                        "delta": { "stop_reason": "end_turn" },
+                        "usage": { "output_tokens": 8 },
+                    }),
+                    json!({ "type": "message_stop" }),
+                ]
+                .iter()
+                .map(|event| {
+                    format!(
+                        "event: {}\ndata: {event}\n\n",
+                        event["type"].as_str().unwrap()
+                    )
+                })
+                .collect::<String>();
+                ([("content-type", "text/event-stream")], body)
+            }),
+        )
+        .route(
+            "/v1/messages/count_tokens",
+            post(|| async { axum::Json(json!({ "input_tokens": 10 })) }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let root = TempDir::new().unwrap();
+    let mut c = setup(&root);
+    // The adapter never forwards an API key or endpoint override to subscription runs.
+    // Only this test's launcher points the CLI at the local model with a synthetic key.
+    let launcher = |name: &str, binary: &str| {
+        let path = root.path().join(name);
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nexport ANTHROPIC_BASE_URL=http://{address} ANTHROPIC_API_KEY=sk-ant-local-test CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1\nexec '{binary}' \"$@\"\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        path.to_string_lossy().into_owned()
+    };
+    c.claude_bin = launcher("claude-first", &binary);
+    let mut p = plan(
+        &root,
+        "Reply with the local model result. Do not call tools.",
+    );
+    let (result, events) =
+        tokio::time::timeout(Duration::from_secs(120), run_to_end(&c, p.clone()))
+            .await
+            .expect("native execution timed out");
+    result.unwrap();
+    assert!(completes(&events), "{events:?}");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("result.md")).unwrap(),
+        REPLY
+    );
+    let session = events
+        .iter()
+        .find(|event| event["type"] == "thread.started")
+        .unwrap()["thread_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    c.claude_bin = launcher("claude-resume", &resume);
+    let first_turn = requests.lock().unwrap().len();
+    p["sessionId"] = session.clone().into();
+    p["execution"]["messageId"] = "follow-up".into();
+    p["execution"]["text"] = "Continue in the same session. Do not call tools.".into();
+    p["output"] = root
+        .path()
+        .join("follow-up.md")
+        .to_string_lossy()
+        .into_owned()
+        .into();
+    let (result, events) = tokio::time::timeout(Duration::from_secs(120), run_to_end(&c, p))
+        .await
+        .expect("native resume timed out");
+    server.abort();
+    result.unwrap();
+    assert!(completes(&events), "{events:?}");
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == "thread.started" && event["thread_id"] == session)
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("follow-up.md")).unwrap(),
+        REPLY
+    );
+    // The resuming release sent the stored history rather than starting over.
+    assert!(
+        requests.lock().unwrap()[first_turn..]
+            .iter()
+            .any(|request| {
+                let messages = request["messages"].to_string();
+                messages.contains("Reply with the local model result")
+                    && messages.contains(REPLY)
+                    && messages.contains("Continue in the same session")
+            }),
+        "The follow-up request did not include the first turn"
+    );
 }
 
 #[tokio::test]
@@ -1410,6 +1635,77 @@ async fn opus_windows_limit_every_model_that_runs_opus() {
     }
     let lease = acquire(&s, FIRST_RUN, "sonnet").await.unwrap().unwrap();
     s.accounts.release(&lease).await.unwrap();
+}
+
+#[tokio::test]
+async fn auto_keeps_saved_models_the_catalog_no_longer_lists_within_their_family_windows() {
+    let root = TempDir::new().unwrap();
+    let s = Service::new(config(&root)).await.unwrap();
+    // A newer Claude Code catalog lists "opus" but no longer "opus[1m]", which agents
+    // saved under an earlier release still run.
+    s.store
+        .set(
+            claude::CATALOG,
+            json!({
+                "models": [
+                    { "model": "opus" },
+                    { "model": "sonnet", "resolvedModel": "claude-sonnet-fixture" },
+                ],
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let read = async |id: &str, opus: u32| {
+        let home = accounts::claude::account_home(&s.config, id);
+        let payload = json!({
+            "rate_limits_available": true,
+            "rate_limits": {
+                "five_hour": { "utilization": 10 },
+                "seven_day": { "utilization": 20 },
+                "seven_day_opus": { "utilization": opus },
+            },
+        });
+        std::fs::write(home.join("fixture-usage.json"), payload.to_string()).unwrap();
+        s.accounts.refresh(&s, id).await.unwrap();
+    };
+    let spent = connected(&s).await;
+    read(&spent, 100).await;
+    for model in ["opus[1m]", "claude-opus-4-6[1m]"] {
+        let error = acquire(&s, FIRST_RUN, model).await.unwrap_err();
+        assert!(error.message.contains("available usage"), "{model}");
+    }
+    // Other families keep the account's capacity.
+    for model in ["sonnet[1m]", "claude-haiku-4-5"] {
+        let lease = acquire(&s, FIRST_RUN, model).await.unwrap().unwrap();
+        assert_eq!(lease.account_id, spent, "{model}");
+        s.accounts.release(&lease).await.unwrap();
+    }
+
+    // Auto picks the account with Opus capacity left; other families still prefer the
+    // account with the most capacity.
+    let open = connected(&s).await;
+    read(&open, 50).await;
+    let mut account = s.accounts.get(&s, &open).await.unwrap();
+    account["usage"]["windows"][0]["usedPercent"] = 80.into();
+    s.store.put(KIND, account).await.unwrap();
+    let lease = acquire(&s, FIRST_RUN, "opus[1m]").await.unwrap().unwrap();
+    assert_eq!(lease.account_id, open);
+    s.accounts.release(&lease).await.unwrap();
+    let lease = acquire(&s, FIRST_RUN, "sonnet").await.unwrap().unwrap();
+    assert_eq!(lease.account_id, spent);
+    s.accounts.release(&lease).await.unwrap();
+
+    // An exhaustion recorded for the old alias clears once Opus capacity returns.
+    s.accounts.exhausted(&s, &open, "opus[1m]").await.unwrap();
+    reset_usage_backoff(&s, &open).await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    read(&open, 100).await;
+    assert_eq!(view(&s, &open).await["status"], "waiting");
+    reset_usage_backoff(&s, &open).await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    read(&open, 40).await;
+    assert_eq!(view(&s, &open).await["status"], "next");
 }
 
 #[tokio::test]

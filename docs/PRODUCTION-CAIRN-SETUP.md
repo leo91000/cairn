@@ -10,7 +10,8 @@ for their own scope.
 
 Choose a fully successful `Quality and container` run for the intended Git tree.
 Its schema-3 `validated-image-<tree>/image.json` records both immutable digests,
-the tested commit, tree, repository, run ID and installation CLI versions. Use:
+the tested commit, tree, repository, run ID, installation CLI versions and the
+served engine releases its rollback checks used. Use:
 
 - `CAIRN_BEACON_IMAGE=ghcr.io/leo91000/cairn-beacon@sha256:<beacon digest>`;
 - `CAIRN_INSTALLATION_IMAGE=ghcr.io/leo91000/cairn@sha256:<installation digest>`.

@@ -46,10 +46,10 @@ See [microVM requirements and architecture](docs/MICROVMS.md).
 ```sh
 cp .env.example .env
 # Configure CAIRN_BEACON_ORIGIN for Beacon.
-codex_version=$(npm view @openai/codex version)
-gh_version=$(gh api repos/cli/cli/releases/latest --jq '.tag_name | ltrimstr("v")')
-docker compose build --build-arg CODEX_VERSION="$codex_version" --build-arg GH_VERSION="$gh_version"
-docker compose up -d
+versions=$(node scripts/cli-updates.mjs build-versions) \
+  && node -e 'for (const [tool, version] of Object.entries(JSON.parse(process.argv[1]))) console.log(`--build-arg=${tool.toUpperCase()}_VERSION=${version}`)' "$versions" \
+  | xargs docker compose build \
+  && docker compose up -d
 # Approve the printed device code in the beacon app.
 docker compose exec manager cairn claim
 docker compose restart manager

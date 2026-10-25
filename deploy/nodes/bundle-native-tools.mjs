@@ -73,14 +73,23 @@ export async function selectPinnedBinaries(packageRoot, versions) {
   return binaries
 }
 
+// Native nodes receive exactly the engine versions this image's build resolved
+// (APP_<NAME>_VERSION), never whatever another install left on PATH.
+export function pinnedVersion(name, output, resolved) {
+  const version = output.match(/\b\d+\.\d+\.\d+\b/)?.[0]
+  if (!version)
+    throw new Error(`Cannot identify pinned CLI version: ${name}`)
+  if (resolved !== undefined && version !== resolved)
+    throw new Error(`Installed ${name} ${version} is not the resolved ${resolved}`)
+  return version
+}
+
 async function main() {
   const target = process.env.CAIRN_NATIVE_BUNDLE_OUTPUT || '/opt/cairn-native-tools'
   await mkdir(`${target}/bin`, { recursive: true })
   const versions = new Map(['codex', 'claude', 'opencode'].map((name) => {
-    const version = execFileSync(name, ['--version'], { encoding: 'utf8' }).match(/\b\d+\.\d+\.\d+\b/)?.[0]
-    if (!version)
-      throw new Error(`Cannot identify pinned CLI version: ${name}`)
-    return [name, version]
+    const output = execFileSync(name, ['--version'], { encoding: 'utf8' })
+    return [name, pinnedVersion(name, output, process.env[`APP_${name.toUpperCase()}_VERSION`])]
   }))
   const binaries = await selectPinnedBinaries('/pnpm', versions)
   binaries.set('node', '/usr/local/bin/node')

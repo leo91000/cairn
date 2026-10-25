@@ -133,7 +133,7 @@ if(mode==='first') {
   console.log(execFileSync('/usr/local/bin/node',[root+'/workspace/network-probe.mjs','guest',${JSON.stringify(publicPeer)},${JSON.stringify(privatePeer)}],{encoding:'utf8',timeout:15000}));
   const env=JSON.parse(execFileSync('/usr/local/bin/cairn',['toolkit-env'],{encoding:'utf8'}));
   assert.equal(env.CAIRN_TOOLKIT_DIR,'/opt/cairn-toolkit');
-  for(const tool of ['cargo','rustc','pnpm','python','uv','rg','fd','gh','codex','claude'])execFileSync(tool,['--version'],{env,timeout:30000});
+  for(const tool of ['cargo','rustc','pnpm','python','uv','rg','fd','gh','codex','claude','opencode'])execFileSync(tool,['--version'],{env,timeout:30000});
   const auth=await new Promise((resolve,reject)=>{const socket=net.connect('/run/cairn-auth.sock',()=>socket.write('{"refresh":false}\\n'));let data='';socket.on('data',chunk=>{data+=chunk;if(data.includes('\\n')){socket.end();resolve(JSON.parse(data))}});socket.on('error',reject);});
   assert.equal(auth.accessToken,'fixture-access-token');
   assert.equal(fs.existsSync(project),false,'unopened project is absent');
