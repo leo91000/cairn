@@ -1384,7 +1384,6 @@ async fn native_project_archive_handshake_skips_the_tree_and_rechecks_cache_gran
     std::fs::create_dir_all(root.join("home")).unwrap();
     std::fs::write(project_path.join("file"), "project seed").unwrap();
     std::fs::write(root.join("home/config"), "fresh configuration").unwrap();
-    let project_record = json!({ "id": project, "path": project_path, "sourceMode": "remote", "baseBranch": "main" });
     let fixture_project = cairn_contracts::Project {
         id: cairn_contracts::ProjectId(uuid::Uuid::parse_str(&project).unwrap()),
         settings: serde_json::from_value(json!({ "name": "Fixture", "path": project_path }))
@@ -1394,6 +1393,7 @@ async fn native_project_archive_handshake_skips_the_tree_and_rechecks_cache_gran
         revision: id(),
         created_at: now(),
     };
+    let project_record = serde_json::to_value(&fixture_project).unwrap();
     owner
         .service
         .store
