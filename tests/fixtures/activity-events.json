@@ -204,38 +204,8 @@
       "type": "run_finished",
       "runId": "dependency",
       "status": "succeeded",
-      "reason": "Review finished"
-    }
-  },
-  {
-    "type": "chat.wait_ready",
-    "text": "Wait condition already completed",
-    "payload": {
-      "state": "completed",
-      "type": "run_finished",
-      "runId": "dependency",
-      "status": "succeeded",
       "reason": "Review finished",
       "immediate": false
     }
-  },
-  {
-    "type": "chat.wait_ready",
-    "text": "Wait condition resolved",
-    "payload": {
-      "state": "completed",
-      "type": "run_finished",
-      "runId": "dependency",
-      "status": "succeeded",
-      "reason": "Review finished"
-    }
-  },
-  {
-    "type": "chat.wait_ready",
-    "text": "{\"state\": \"completed\", \"type\": \"run_finished\", \"runId\": \"dependency\", \"status\": \"succeeded\", \"reason\": \"Review finished\", \"immediate\": true}"
-  },
-  {
-    "type": "chat.wait_ready",
-    "text": "{\"state\": \"completed\", \"type\": \"run_finished\", \"runId\": \"dependency\", \"status\": \"succeeded\", \"reason\": \"Review finished\"}"
   }
 ]

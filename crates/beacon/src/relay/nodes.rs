@@ -15,9 +15,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use cairn_protocol::{
-    Frame, MAX_NODE_CHANNEL_MESSAGE, MAX_NODE_CHANNELS_PER_ADDRESS, NODE_CHANNEL_VERSION,
-};
+use cairn_protocol::{Frame, MAX_NODE_CHANNEL_MESSAGE, MAX_NODE_CHANNELS_PER_ADDRESS};
 use futures_util::{
     SinkExt, StreamExt,
     stream::{SplitSink, SplitStream},
@@ -132,7 +130,7 @@ fn current_tunnel(service: &Service, installation: &str) -> Result<Arc<Tunnel>, 
         .unwrap()
         .get(installation)
         .cloned()
-        .filter(|tunnel| !*tunnel.stop.borrow() && tunnel.version >= NODE_CHANNEL_VERSION)
+        .filter(|tunnel| !*tunnel.stop.borrow())
         .ok_or(OFFLINE)
 }
 

@@ -12,7 +12,8 @@ test('Gmail connects two explicit mailboxes with OAuth and saves no browser toke
     target.screenshot({ path: testInfo.outputPath(`gmail-${name}.png`), animations: 'disabled' })
   await useRelayForHttpMocks(page)
   const catalog = await workspace.api('/api/plugins')
-  const gmail = catalog.packages.find((item: { id: string }) => item.id === 'gmail').manifest
+  const gmailEntry = catalog.packages.find((item: { id: string }) => item.id === 'gmail')
+  const gmail = gmailEntry.manifest
   expect(gmail.brand?.color).toBe('#EA4335')
   expect(gmail.brand?.path).toBeTruthy()
   const connections: Record<string, unknown>[] = []
@@ -27,6 +28,7 @@ test('Gmail connects two explicit mailboxes with OAuth and saves no browser toke
         status: 'active',
         active: '1.0.0',
         manifest: { ...gmail, instanceView: false },
+        setup: gmailEntry.setup,
         versions: [],
       }],
       capabilities: [],

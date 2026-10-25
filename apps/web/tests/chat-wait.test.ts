@@ -231,6 +231,7 @@ describe('scheduled waits', () => {
       type: 'github_workflow',
       runId: 99,
       conclusion: 'success',
+      immediate: true,
     }
     const entries = activityEntries([
       event('chat.wait', scheduled as unknown as Record<string, unknown>),
@@ -280,7 +281,12 @@ describe('scheduled waits', () => {
 
   it('keeps an immediate result apart from the wait it replaced', () => {
     const replaced = wakeup({ condition: { type: 'run_finished', runId: 'first' } })
-    const immediate = { state: 'completed', type: 'run_finished', status: 'succeeded' }
+    const immediate = {
+      state: 'completed',
+      type: 'run_finished',
+      status: 'succeeded',
+      immediate: true,
+    }
     const entries = activityEntries([
       event('chat.wait', replaced as unknown as Record<string, unknown>),
       event('chat.wait_ready', immediate, 'Wait condition already completed'),
@@ -289,26 +295,6 @@ describe('scheduled waits', () => {
       { wakeup: replaced, ended: 'replaced' },
       { wakeup: null, observation: immediate },
     ])
-    // Its hidden call still gives the card the agent's reason, whichever way the provider records it.
-    for (const args of [{ reason: 'Merge after CI' }, JSON.stringify({ reason: 'Merge after CI' })]) {
-      const [card] = activityEntries([
-        toolCall('wait_for', 'cairn_workspace', { arguments: args }),
-        event('chat.wait_ready', immediate, 'Wait condition already completed'),
-      ], true)
-      expect(card).toMatchObject({ kind: 'wait', wait: { wakeup: null, reason: 'Merge after CI' } })
-    }
-
-    // A call announced without its arguments never borrows an earlier call's reason.
-    const later = activityEntries([
-      toolCall('sleep', 'cairn_workspace', { arguments: { reason: 'Earlier delay' } }),
-      event('chat.sleep', wakeup() as unknown as Record<string, unknown>),
-      event('chat.wakeup', wakeup() as unknown as Record<string, unknown>),
-      toolCall('wait_for', 'cairn_workspace', { arguments: {} }),
-      event('chat.wait_ready', immediate, 'Wait condition already completed'),
-    ], true)
-    expect(later.at(-1)).toMatchObject({ kind: 'wait', wait: { wakeup: null } })
-    expect(later.at(-1)).not.toHaveProperty('wait.reason')
-    // A call's later update cannot lend its reason again once a card used it.
     const call = (type: string, callId: string, reason: string) => event(type, {
       item: {
         id: callId,
@@ -319,14 +305,6 @@ describe('scheduled waits', () => {
         arguments: { reason },
       },
     })
-    const raced = activityEntries([
-      call('item.started', 'c1', 'First'),
-      event('chat.wait_ready', immediate, 'Wait condition already completed'),
-      call('item.completed', 'c1', 'First'),
-      event('chat.wait_ready', immediate, 'Wait condition already completed'),
-      call('item.started', 'c2', 'Second'),
-    ], true)
-    expect(raced.map(entry => entry.kind === 'wait' ? entry.wait.reason : undefined)).toEqual(['First', undefined])
     // Recorded with the result, the reason no longer depends on when the call is reported.
     const recorded = activityEntries([
       event('chat.wait_ready', { ...immediate, reason: 'First' }, 'Wait condition already completed'),
@@ -335,16 +313,6 @@ describe('scheduled waits', () => {
       call('item.started', 'c2', 'Second'),
     ], true)
     expect(recorded.map(entry => entry.kind === 'wait' ? entry.wait.reason : undefined)).toEqual(['First', 'Second'])
-    // Item IDs may repeat in a later turn, whose call lends its own reason again.
-    const repeated = activityEntries([
-      call('item.started', 'item_1', 'First'),
-      event('chat.wait', wakeup() as unknown as Record<string, unknown>),
-      event('chat.wakeup', wakeup() as unknown as Record<string, unknown>),
-      event('turn.started', {}),
-      call('item.started', 'item_1', 'Second'),
-      event('chat.wait_ready', immediate, 'Wait condition already completed'),
-    ], true)
-    expect(repeated.at(-1)).toMatchObject({ kind: 'wait', wait: { wakeup: null, reason: 'Second' } })
     // A resumption whose scheduling is unloaded keeps one card, even if it repeats.
     const resumed = activityEntries([
       event('chat.wakeup', wakeup() as unknown as Record<string, unknown>),
@@ -459,7 +427,7 @@ describe('scheduled waits', () => {
 })
 
 describe('shared wait_ready corpus', () => {
-  const immediate = [true, true, false, false, true, false]
+  const immediate = [true, false]
   for (const [index, raw] of sample.slice(15).entries()) {
     it(`normalizes case ${index + 1} and preserves the pending wait`, () => {
       const ready: RunEvent = {

@@ -111,8 +111,8 @@ Beacon's memory and logs; it is not end-to-end encryption against it.
 - Strict UDP filtering or symmetric NAT on both sides falls back to the relay.
 - The installation needs outbound UDP for direct connection; a setting disables
   direct connection entirely.
-- Older installations or clients without the new protocol version stay on the
-  relay.
+- A protocol mismatch requires updating Beacon, the installation and the client
+  together; it cannot use the relay as a version fallback.
 - A single beacon process remains required
   ([single-relay-process decision](adr/0032-single-official-relay-process.md)).
 - Signaling relays the DTLS fingerprints, so the Beacon could
@@ -141,7 +141,7 @@ emulator through simulated networks:
 - reconnection with event resume: no lost or duplicated events, no double send;
 - revocation during a stream on both routes: logout, session expiry, member
   removal, detachment, rotation;
-- an old installation or client: relay only;
+- a protocol mismatch: update required on both clients;
 - the beacon tunnel down: no new direct connection, existing ones end at
   grant expiry, agent executions continue.
 - beacon restart and tunnel reconnection: the new key closes old leases before
@@ -159,10 +159,11 @@ unknown, detached or removed-member installations return 404). POST also require
 the configured origin and CSRF token:
 
 - `POST /api/installations/{id}/direct/authorize` with
-  `{ "fingerprint": "sha-256 AA:…", "versions": [4] }` returns
+  `{ "fingerprint": "sha-256 AA:…", "version": 4 }` returns
   `{ "available": true, "grant": { "claims": { … }, "signature": "…" } }`
-  after installation verification, or `{ "available": false }` for an older
-  client/tunnel or an offline installation. The relay stays usable in all cases.
+  after installation verification, or `{ "available": false }` for an offline
+  installation. A different direct version returns 426 with an update-required
+  message; there is no version negotiation.
 - `POST /api/installations/{id}/direct/{connection}/renew` uses the same input,
   rechecks session and role, and returns a fresh signed grant for that connection.
   Another session cannot renew it, even for the same account.
@@ -179,7 +180,7 @@ The installation receives its public verification key only from the authenticate
 tunnel. Ed25519 signatures cover the protocol context and every claim. Keys are
 per tunnel, so a reconnect cannot restore an old authorization. Nonces, leases and
 signal queues are bounded in-memory control state. Access generations also remain
-in memory for the lifetime of the tunnel; none of these are conversation storage. See [Version 4 limits and installation integration](INSTALLATION-RELAY.md#version-4-direct-authorization-and-signaling-100).
+in memory for the lifetime of the tunnel; none of these are conversation storage. See [Direct limits and installation integration](INSTALLATION-RELAY.md#direct-authorization-and-signaling-100).
 
 The installation tolerates up to 30 seconds of signing clock skew in the maximum
 remaining grant lifetime; its local expiry is strict. Direct signaling uses
@@ -255,6 +256,14 @@ Binary messages contain a 13-byte envelope followed by JSON-frame bytes:
 `version:u8=1`, `transfer:u32`, `total:u32`, `offset:u32`; integers are network
 byte order. Transfer IDs are nonzero. `total` is the UTF-8 JSON byte count for
 one existing relay `Frame`; body bytes retain the protocol's base64 encoding.
+A different envelope version or channel label receives an `update_required`
+control frame with an update message in the current envelope. Application dispatch
+stops immediately; the client closes after consuming the refusal, or the installation
+ends the peer after the 30-second request deadline. No application request from that
+incompatible channel is dispatched.
+Web and Android stop ordinary requests and live streams on this refusal; they do
+not reopen them through the relay. Ordinary network loss retains its relay fallback.
+
 Each message is at most 16,384 bytes, leaving 16,371 bytes per fragment. Offsets
 must be contiguous within a transfer, although separate transfers (including
 credits/cancellation) can interleave. `total=offset=0` with no payload abandons
@@ -374,15 +383,14 @@ If renewal does not extend a session-capped deadline, no further renewal is
 attempted for that lease. A 30-second negotiation deadline,
 10-second application heartbeat (a protocol HEAD request, with a
 5-second response deadline starting after transmission), channel closure, ICE failure and signaling-reader loss all
-return traffic to the relay. Unsupported clients/installations and refused local
-network permission cause no visible connection error. Temporary failures retry
+return traffic to the relay. Refused local network permission returns traffic to the relay. Temporary failures retry
 with exponential backoff from 30 seconds to five minutes, reset when an
 authorized channel opens. `available: false`,
 403 and permission denial stop direct attempts until the session or network
 changes; a capacity 503 backs off while the relay remains usable. A recovery
 observed by the existing installation availability check also resumes
 negotiation, covering beacon restart/tunnel reconnection without polling
-incompatible installations through the direct endpoints. Offline and
+offline installations through the direct endpoints. Offline and
 hidden documents do not negotiate. An established peer in a hidden document
 closes after a 30-second grace period, stopping signaling, renewal and heartbeat;
 visibility restores negotiation after any pending backoff deadline. A retry whose

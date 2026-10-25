@@ -98,8 +98,8 @@ l’interception, pas contre ce cas.
 ## Conséquences
 
 - Le protocole du relais passe à la version 5. Une installation ou un Beacon plus
-  ancien négocie la version 4 et refuse offres et canaux ; la passerelle affiche
-  alors « offline or must be updated ».
+  ancien est refusé : depuis la campagne de refacto (2026-10-25), seule la version
+  courante est acceptée, avec un message de mise à jour requise.
 - L’image de Beacon embarque la passerelle (`/usr/local/lib/cairn/cairn-node-gateway`,
   ou `CAIRN_NODE_GATEWAY`). Sans elle, `/install/node.sh` demande une adresse
   directe.

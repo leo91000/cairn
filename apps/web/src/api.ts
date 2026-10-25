@@ -7,6 +7,7 @@ import type {
 import type { McpView } from '../../../packages/contracts/mcp'
 import { reactive, watch } from 'vue'
 import { beaconOrigin, installationHost } from './beacon-location'
+import { ProtocolMismatch } from './direct-channel'
 import { clearHistoryCache } from './history-cache'
 import { InstallationTransport } from './installation-transport'
 import { observeTransport } from './transport-observation'
@@ -17,6 +18,7 @@ export const installationRoute = beaconEntry ? installationHost || /^\/installat
 
 export const state = reactive({
   transportRoute: 'relay' as 'direct' | 'relay',
+  protocolError: '',
   connectionLost: false,
   ready: false,
   authenticated: false,
@@ -38,6 +40,9 @@ export const state = reactive({
   toast: '',
   error: '',
 })
+watch(connectionScope, () => {
+  state.protocolError = ''
+}, { flush: 'sync' })
 watch(() => state.signingOut || (state.ready && !state.authenticated), (clear) => {
   if (clear)
     void clearHistoryCache()
@@ -249,6 +254,8 @@ async function requestOnce<T = any>(
   catch (error) {
     if (options.signal?.aborted)
       throw error
+    if (error instanceof ProtocolMismatch)
+      throw new ApiError(error.message, 426)
     throw new ConnectionError(error)
   }
 

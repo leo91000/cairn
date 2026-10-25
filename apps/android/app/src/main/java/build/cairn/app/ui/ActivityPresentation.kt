@@ -50,16 +50,7 @@ internal fun JsonElement?.plain(): String = (this as? JsonPrimitive)?.contentOrN
 
 internal fun RunEvent.activityData(): JsonObject? =
     // Stderr can itself look like a protocol event; it is always process output.
-    if (type == "diagnostic") null
-    else
-        payload?.let(::JsonObject)
-            ?: runCatching {
-                if (text.firstOrNull { !it.isWhitespace() } != '{') return@runCatching null
-                (wireJson.parseToJsonElement(text) as? JsonObject)?.takeIf {
-                    type == "chat.wait_ready" || it.string("type") == type || it.containsKey("item")
-                }
-            }
-                .getOrNull()
+    if (type == "diagnostic") null else payload?.let(::JsonObject)
 
 internal fun readableField(value: String): String =
     value
@@ -241,17 +232,9 @@ internal fun expectedOutcome(view: CommandView, code: Int?): String? {
     }
 }
 
-// CSI sequences (colors, cursor moves), OSC sequences (titles, links) and two-byte escapes.
-private val terminalEscape =
-    Regex("\u001B(?:\\[[0-?]*[ -/]*[@-~]|\\][^\u0007\u001B]*(?:\u0007|\u001B\\\\)?|[@-Z\\\\-_])")
-
-/** Agent stderr recorded by older runners keeps its terminal styling. */
-internal fun withoutTerminalStyling(text: String) = text.replace(terminalEscape, "")
-
 internal fun presentActivity(event: RunEvent): ActivityPresentation =
     if (event.type == "diagnostic")
-        presentEvent(event.copy(text = withoutTerminalStyling(event.text)))
-            .copy(title = "Diagnostic de l’agent", verbatim = true)
+        presentEvent(event).copy(title = "Diagnostic de l’agent", verbatim = true)
     else presentEvent(event)
 
 private fun presentEvent(event: RunEvent): ActivityPresentation {
@@ -299,13 +282,6 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
                 command = command.source,
                 paths = command.paths,
                 output = item.string("aggregated_output").ifBlank { item.string("output") },
-            )
-        "saved_output" ->
-            base.copy(
-                kind = ActivityKind.OUTPUT,
-                title = "Résultat enregistré",
-                subtitle = "Étape issue de l’historique",
-                output = item.string("text"),
             )
         "file_change" ->
             base.copy(

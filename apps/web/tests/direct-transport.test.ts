@@ -10,12 +10,13 @@ import { nextTick } from 'vue'
 class Source extends EventTarget {
   static all: Source[] = []
   onerror: (() => void) | null = null
+  closed = false
   constructor(readonly url: string) {
     super()
     Source.all.push(this)
   }
 
-  close() {}
+  close() { this.closed = true }
 }
 
 class Channel extends EventTarget {
@@ -853,4 +854,79 @@ it('keeps a session-capped renewal until expiry without issuing one-second renew
   expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith('/renew'))).toHaveLength(1)
   await vi.advanceTimersByTimeAsync(1)
   expect(state.transportRoute).toBe('relay')
+})
+
+it('requires an update after a DataChannel version mismatch without relaying the interrupted read', async () => {
+  const { api, channel, state } = await direct()
+  const pending = api('/chats')
+  const rejected = expect(pending).rejects.toMatchObject({ status: 426, message: expect.stringContaining('Update required') })
+  await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+  const packet = new Uint8Array(13)
+  packet[0] = 2
+  channel.dispatchEvent(new MessageEvent('message', { data: packet.buffer }))
+  await rejected
+  expect(state.protocolError).toContain('Update required')
+  const requests = vi.mocked(fetch).mock.calls.length
+  await expect(api('/chats')).rejects.toMatchObject({ status: 426 })
+  await vi.advanceTimersByTimeAsync(300000)
+  expect(fetch).toHaveBeenCalledTimes(requests)
+})
+
+it('requires an update after direct authorization refuses the protocol instead of retrying', async () => {
+  vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(Response.json({ error: 'Update required: update the app and Beacon.' }, { status: 426 }))))
+  const { api, state } = await import('../src/api')
+  state.csrf = 'test-csrf'
+  state.authenticated = true
+  state.ready = true
+  await nextTick()
+  await vi.waitFor(() => expect(state.protocolError).toContain('Update required'))
+  const requests = vi.mocked(fetch).mock.calls.length
+  await expect(api('/chats')).rejects.toMatchObject({ status: 426 })
+  await vi.advanceTimersByTimeAsync(300000)
+  expect(fetch).toHaveBeenCalledTimes(requests)
+})
+
+it('stops live readers and refuses new streams after a DataChannel mismatch', async () => {
+  const { channel, state, installationTransport } = await direct()
+  const { liveConnection } = await import('../src/live-connection')
+  const connection = liveConnection('/chats/stream', vi.fn(), vi.fn())
+  await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+  const packet = new Uint8Array(13)
+  packet[0] = 2
+  channel.dispatchEvent(new MessageEvent('message', { data: packet.buffer }))
+  await vi.waitFor(() => expect(state.protocolError).toContain('Update required'))
+  expect(() => installationTransport.source('/chats/stream', '/api/chats/stream')).toThrow('Update required')
+  await vi.advanceTimersByTimeAsync(300000)
+  expect(Source.all.filter(source => source.url.includes('/api/chats/stream'))).toHaveLength(0)
+  connection.close()
+})
+
+it('closes an existing relay stream when authorization requires an update', async () => {
+  let refuse: (response: Response) => void = () => {}
+  vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(resolve => refuse = resolve)))
+  const { state } = await import('../src/api')
+  const { liveConnection } = await import('../src/live-connection')
+  Object.assign(state, { authenticated: true, ready: true, csrf: 'csrf' })
+  await nextTick()
+  const connection = liveConnection('/chats/stream', vi.fn(), vi.fn())
+  const relay = Source.all.find(source => source.url.includes('/api/chats/stream'))!
+  expect(relay).toBeDefined()
+  refuse(Response.json({ error: 'Update required.' }, { status: 426 }))
+  await vi.waitFor(() => expect(state.protocolError).toContain('Update required'))
+  expect(relay.closed).toBe(true)
+  await vi.advanceTimersByTimeAsync(300000)
+  expect(Source.all.filter(source => source.url.includes('/api/chats/stream'))).toHaveLength(1)
+  connection.close()
+})
+
+it('treats an explicit installation protocol refusal as terminal', async () => {
+  const { api, channel, state } = await direct()
+  const pending = api('/chats')
+  const rejected = expect(pending).rejects.toMatchObject({ status: 426 })
+  await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+  reply(channel, { type: 'update_required', message: 'Update required: update the app and installation.' })
+  await rejected
+  expect(state.protocolError).toContain('Update required')
+  await expect(api('/chats')).rejects.toMatchObject({ status: 426 })
+  expect(vi.mocked(fetch).mock.calls.every(([url]) => String(url).includes('/direct/'))).toBe(true)
 })

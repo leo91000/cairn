@@ -119,12 +119,9 @@ describe('conversation quota presentation', () => {
     expect(chatQuota({ ...run, status: 'failed', error: currentMessage }, events)?.message).toBe(currentMessage)
   })
 
-  it('keeps recovered and repeated quota interruptions folded, including legacy JSON text events', () => {
-    const legacy = events.map(event => event.type === 'turn.failed'
-      ? { ...event, payload: undefined, text: JSON.stringify({ type: event.type, ...event.payload }) }
-      : event)
+  it('keeps recovered and repeated quota interruptions folded, with structured events', () => {
     const resumed = [
-      ...legacy,
+      ...events,
       event(6, 'turn.started'),
       event(7, 'item.completed', { item: { id: 'quota', type: 'agent_message', text: message } }),
       event(8, 'turn.failed', { error: { message } }),
@@ -134,19 +131,6 @@ describe('conversation quota presentation', () => {
     expect(chatQuota(recovered, resumed)).toBeNull()
     expect(quotaEntries(activityEntries(resumed, true), resumed)).toHaveLength(1)
     expect(activityEntries(resumed, false).length).toBeGreaterThan(1)
-  })
-
-  it('folds plain historical replies but preserves legacy command results', () => {
-    const history = [
-      event(1, 'turn.started'),
-      { ...event(2, 'item.started', {}, 'cat log'), payload: undefined },
-      { ...event(3, 'item.completed', {}, message), payload: undefined },
-      { ...event(4, 'item.completed', {}, message), payload: undefined },
-      { ...event(5, 'turn.failed', {}, JSON.stringify({ type: 'turn.failed', error: { message } })), payload: undefined },
-    ]
-    const entries = quotaEntries(activityEntries(history, true), history)
-    expect(entries).toHaveLength(1)
-    expect(entries[0]).toMatchObject({ kind: 'group' })
   })
 
   it('uses structured quota codes and respects native willRetry notifications', () => {

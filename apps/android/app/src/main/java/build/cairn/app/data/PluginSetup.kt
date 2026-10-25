@@ -61,52 +61,8 @@ data class PluginSetup(
     val steps: List<SetupStep> = emptyList(),
 )
 
-/**
- * The setup the owner follows. An older installation sends only the manifest: resolve it the same
- * way, the package's declared steps first, else the default ones.
- */
-fun PluginEntry.resolvedSetup(): PluginSetup {
-    setup?.let {
-        return it
-    }
-    val manifest = manifest ?: return PluginSetup()
-    val derived = manifest.defaultSetup()
-    val declared = manifest.setup ?: return derived
-    return declared.copy(
-        effort = declared.effort ?: derived.effort,
-        steps = declared.steps.ifEmpty { derived.steps },
-    )
-}
-
-/** The steps the installation derives for packages that declare none. */
-fun PluginManifest.defaultSetup(): PluginSetup {
-    val visible = settings.filter { !it.hidden }.map { it.key }
-    val fields =
-        if (visible.isEmpty()) emptyList()
-        else listOf(SetupStep("settings", "settings", "Settings", settings = visible))
-    val signIn =
-        credential?.let {
-            val title =
-                if (it.oauth != null || it.deviceFlow != null) "Sign in with $name" else it.label
-            listOf(SetupStep("credential", "credential", title))
-        } ?: emptyList()
-    // An OAuth sign-in needs its client settings first; other forms read the credential to offer
-    // their choices.
-    val steps =
-        (if (credential?.oauth != null) fields + signIn else signIn + fields).toMutableList()
-    if ("conversations.submit" in capabilities)
-        steps += SetupStep("people", "people", "Who can talk to it")
-    if (agentAccess != null) steps += SetupStep("agents", "agents", "Agents")
-    val secret = settings.any { it.type == "secret" && it.required }
-    val effort =
-        when {
-            credential?.oauth != null -> "app"
-            credential?.deviceFlow != null -> "signin"
-            credential != null || secret -> "token"
-            else -> null
-        }
-    return PluginSetup(effort = effort, steps = steps)
-}
+/** The setup resolved by the installation; invalid packages have no setup. */
+fun PluginEntry.resolvedSetup(): PluginSetup = setup ?: PluginSetup()
 
 /** The catalogue's words for what connecting takes. */
 fun effortLabel(effort: String?): String? =

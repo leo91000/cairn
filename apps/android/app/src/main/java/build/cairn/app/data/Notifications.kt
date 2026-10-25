@@ -11,9 +11,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
-import androidx.work.CoroutineWorker
 import androidx.work.WorkManager
-import androidx.work.WorkerParameters
 import java.util.UUID
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -22,7 +20,6 @@ const val QUESTION_CHANNEL = "cairn-questions"
 const val EXECUTION_CHANNEL = "cairn-execution"
 const val NATIVE_PUSH_REENROLLMENT_MESSAGE =
     "Les notifications push ont été désactivées. Confirmez votre identité par e-mail ou passkey dans les réglages du compte, puis réactivez-les."
-private const val QUESTION_WORK = "cairn-question-check"
 private val enabledKey = booleanPreferencesKey("notifications")
 private val nativeReenrollmentKey = booleanPreferencesKey("native_push_reenrollment_required")
 private val seenKey = stringSetPreferencesKey("notified_questions")
@@ -95,17 +92,9 @@ fun notificationsAllowed(context: Context): Boolean =
 
 fun schedule(context: Context, enabled: Boolean) {
     val manager = WorkManager.getInstance(context)
-    // Upgrade cancels the legacy per-installation polling; native push belongs to the account.
-    manager.cancelUniqueWork(QUESTION_WORK)
     if (enabled) enqueueNativeDevice(context)
     else {
         manager.cancelUniqueWork("cairn-native-device")
         NotificationManagerCompat.from(context).cancelAll()
     }
-}
-
-/** Kept for persisted WorkManager entries from before account-level native push. */
-class QuestionWorker(context: Context, params: WorkerParameters) :
-    CoroutineWorker(context, params) {
-    override suspend fun doWork(): Result = Result.success()
 }

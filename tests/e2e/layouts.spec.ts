@@ -1,6 +1,7 @@
 import type { Locator, Page, TestInfo } from '@playwright/test'
 import type { RunEvent } from '../../packages/contracts/contracts'
 import type { Workspace } from './fixtures'
+import { randomUUID } from 'node:crypto'
 import {
   signIn as authenticateWorkspace,
   expect,
@@ -291,7 +292,6 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     name: index === 4999 ? 'Équipe sécurité' : `Agent ${index.toString().padStart(5, '0')}`,
     description: `Maintains project ${index}`,
     // A current installation marks its agents as holding their live grants.
-    grantsOnAgent: true,
     model: '',
     reasoning: 'high',
     access: {
@@ -331,57 +331,12 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
   await page.keyboard.press('Escape')
   virtualAgents = undefined
 
-  function history(events: RunEvent[]) {
-    workspace.service.store.clearEvents(run.id)
-    for (const event of events)
-      workspace.service.store.event(run.id, event.type, event.text, event.payload)
-  }
-
-  history([
-    {
-      id: 1,
-      runId: run.id,
-      createdAt: 1000,
-      type: 'item.started',
-      text: '',
-    },
-    {
-      id: 2,
-      runId: run.id,
-      createdAt: 1800,
-      type: 'item.completed',
-      text: 'Already up to date.\ncompatibility/css-feature-target.json',
-    },
-    {
-      id: 3,
-      runId: run.id,
-      createdAt: 2000,
-      type: 'item.started',
-      text: '',
-    },
-    {
-      id: 4,
-      runId: run.id,
-      createdAt: 2500,
-      type: 'item.completed',
-      text: '[{"id":123,"jobs":[{"name":"quality","conclusion":"success"}]}]',
-    },
-    {
-      id: 5,
-      runId: run.id,
-      createdAt: 3000,
-      type: 'item.started',
-      text: '',
-    },
-    {
-      id: 6,
-      runId: run.id,
-      createdAt: 3500,
-      type: 'item.completed',
-      text: 'implementation-pr {"files":["src/activity.ts"',
-    },
-  ])
-  await page.goto(workspacePath(`/runs/${run.id}`))
+  const outcomeRun = workspace.service.store.addRun({
+    ...workspace.service.store.run(run.id),
+    id: randomUUID(),
+    taskId: randomUUID(),
+    trigger: 'layout-command-outcomes',
+  })
   const sheet = page.getByTestId('agent-step-sheet')
 
   async function openStep(text: string) {
@@ -393,33 +348,10 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     await expect(sheet).toBeVisible()
   }
 
-  await openStep('Recorded output')
-  await expect(sheet).toContainText('Recorded · step 1 of 3')
-  await expect(sheet.getByText(/Its command and exit code weren’t recorded/)).toBeVisible()
-  await screenshot('historical-operation')
-  await page.keyboard.press('Escape')
-  await expect(page.getByTestId('agent-step').nth(1)).toContainText('Workflow checks')
-  await expect(page.getByTestId('agent-step').nth(1)).not.toContainText('"jobs"')
-  await openStep('Workflow checks')
-  await expect(sheet.getByRole('region', { name: 'Workflow checks' }).last()).toBeVisible()
-  await expect(sheet.locator('pre')).toHaveCount(0)
-  await page.keyboard.press('Escape')
-  await expect(page.getByTestId('agent-step').nth(2)).toContainText('Incomplete result')
-  await expect(page.getByTestId('agent-step').nth(2)).not.toContainText('"files"')
-  await openStep('Incomplete result')
-  const incomplete = sheet.getByRole('region', { name: 'Incomplete result' }).last()
-  await expect(incomplete).toBeVisible()
-  await expect(incomplete.locator('pre')).toHaveCount(0)
-  await incomplete.scrollIntoViewIfNeeded()
-  await screenshot('historical-json-results')
-  await incomplete.locator('summary').click()
-  await expect(incomplete.getByRole('button', { name: 'Copy Saved source' })).toBeVisible()
-  await expect(incomplete.locator('pre')).toContainText('{"files":["src/activity.ts"')
-  await page.keyboard.press('Escape')
-  history([
+  const outcomeEvents: RunEvent[] = [
     {
       id: 1,
-      runId: run.id,
+      runId: outcomeRun.id,
       createdAt: 1000,
       type: 'error',
       text: '',
@@ -427,7 +359,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     },
     {
       id: 2,
-      runId: run.id,
+      runId: outcomeRun.id,
       createdAt: 2000,
       type: 'item.completed',
       text: '',
@@ -442,7 +374,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     },
     {
       id: 3,
-      runId: run.id,
+      runId: outcomeRun.id,
       createdAt: 3000,
       type: 'item.completed',
       text: '',
@@ -457,7 +389,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     },
     {
       id: 4,
-      runId: run.id,
+      runId: outcomeRun.id,
       createdAt: 4000,
       type: 'item.completed',
       text: '',
@@ -472,14 +404,16 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     },
     {
       id: 5,
-      runId: run.id,
+      runId: outcomeRun.id,
       createdAt: 5000,
       type: 'turn.completed',
       text: '',
       payload: {},
     },
-  ])
-  await page.goto(workspacePath(`/runs/${run.id}`))
+  ]
+  for (const event of outcomeEvents)
+    workspace.service.store.event(outcomeRun.id, event.type, event.text, event.payload)
+  await page.goto(workspacePath(`/runs/${outcomeRun.id}`))
   // Expected outcomes and a recovered connection are not failures: only the test run counts.
   await expect(page.getByTestId('agent-actions')).toContainText('1 failure')
   for (const [step, label] of [['Connection restored', 'Recovered'], ['rg needle src', 'No matches'], ['diff before after', 'Differences found']]) {

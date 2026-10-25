@@ -5,6 +5,8 @@ import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
 
+private const val IMMEDIATE_WAIT_RESULT = "Wait condition already completed"
+
 class ChatWaitTest {
     // A plugin's condition: only the plugin knows what its fields mean.
     private val checks = buildJsonObject {
@@ -422,6 +424,7 @@ class ChatWaitTest {
     @Test
     fun `an immediately completed replacement does not resolve the previous wait`() {
         val observation = buildJsonObject {
+            put("immediate", true)
             put("state", "completed")
             put("type", "github_workflow")
             put("runId", 99)
@@ -527,6 +530,7 @@ class ChatWaitTest {
                 }
             )
         val immediate = buildJsonObject {
+            put("immediate", true)
             put("state", "completed")
             put("type", "run_finished")
             put("status", "succeeded")
@@ -546,42 +550,6 @@ class ChatWaitTest {
             ),
             entries.map { it.wait },
         )
-        // Its hidden call still gives the card the agent's reason, whichever way the provider
-        // records it.
-        for (arguments in
-            listOf(
-                buildJsonObject { put("reason", "Merger après la CI") },
-                JsonPrimitive("""{"reason":"Merger après la CI"}"""),
-            )) {
-            val card =
-                timelineEntries(
-                        listOf(
-                            toolCall("wait_for", "cairn_workspace", arguments = arguments),
-                            event("chat.wait_ready", immediate, IMMEDIATE_WAIT_RESULT),
-                        ),
-                        chat = true,
-                    )
-                    .single()
-            assertEquals("Merger après la CI", card.wait?.reason)
-        }
-        // A call announced without its arguments never borrows an earlier call's reason.
-        val later =
-            timelineEntries(
-                listOf(
-                    toolCall(
-                        "sleep",
-                        "cairn_workspace",
-                        arguments = buildJsonObject { put("reason", "Délai précédent") },
-                    ),
-                    event("chat.sleep", wakeup().json()),
-                    event("chat.wakeup", wakeup().json()),
-                    toolCall("wait_for", "cairn_workspace", arguments = buildJsonObject {}),
-                    event("chat.wait_ready", immediate, IMMEDIATE_WAIT_RESULT),
-                ),
-                chat = true,
-            )
-        assertEquals("", later.last().wait?.reason)
-        // A call's later update cannot lend its reason again once a card used it.
         fun call(type: String, callId: String, reason: String) =
             event(
                 type,
@@ -596,18 +564,6 @@ class ChatWaitTest {
                     }
                 },
             )
-        val raced =
-            timelineEntries(
-                listOf(
-                    call("item.started", "c1", "Premier"),
-                    event("chat.wait_ready", immediate, IMMEDIATE_WAIT_RESULT),
-                    call("item.completed", "c1", "Premier"),
-                    event("chat.wait_ready", immediate, IMMEDIATE_WAIT_RESULT),
-                    call("item.started", "c2", "Second"),
-                ),
-                chat = true,
-            )
-        assertEquals(listOf("Premier", ""), raced.mapNotNull { it.wait?.reason })
         // Recorded with the result, the reason no longer depends on when the call is reported.
         fun ready(reason: String) =
             event(

@@ -973,11 +973,11 @@ abstract class NodePlacementCases {
                             when {
                                 path == "/api/installations/fixture/api/nodes/enrollments" -> {
                                     enrolled = true
-                                    """{"code":"fixture-enrollment","expiresAt":4102444800000,"installCommand":"curl https://fixture.invalid/install | bash"}"""
+                                    """{"code":"fixture-enrollment","nodeId":"fresh","expiresAt":4102444800000,"installCommand":"curl https://fixture.invalid/install | bash"}"""
                                 }
                                 path == "/api/installations/fixture/api/nodes/node/revoke" -> {
                                     revoked = true
-                                    "{}"
+                                    """{"releasedPlacements":0}"""
                                 }
                                 path == "/api/installations/fixture/api/nodes/node" -> {
                                     configured = true

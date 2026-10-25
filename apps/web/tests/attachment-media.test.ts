@@ -124,25 +124,7 @@ it('downloads full originals through the binary stream route', async () => {
   expect(attachmentUrl(attachment)).toBe('/chats/chat/attachments/original')
 })
 
-it.each([404, 501])('reads originals from supported older installations when streaming returns %s', async (status) => {
-  const attachment = {
-    id: `legacy-${status}`,
-    chatId: 'chat',
-    name: 'notes.txt',
-    size: 6,
-    kind: 'file' as const,
-    mediaType: 'text/plain',
-  }
-  blob.mockRejectedValueOnce(new ApiError('Not supported', status))
-    .mockResolvedValueOnce(new Blob(['legacy'], { type: 'text/plain' }))
-  expect(await (await attachmentFile(attachment)).text()).toBe('legacy')
-  expect(blob.mock.calls.map(([path]) => path)).toEqual([
-    `/chats/chat/attachments/legacy-${status}/stream`,
-    `/chats/chat/attachments/legacy-${status}`,
-  ])
-})
-
-it('does not retry a legacy download in a newly selected installation', async () => {
+it('does not retry a failed download in a newly selected installation', async () => {
   const attachment = {
     id: 'switched-download',
     chatId: 'chat',

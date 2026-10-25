@@ -10,7 +10,6 @@ import { diskCapacity, formatMiB, nodeDiagnostics } from '../../../../packages/c
 import { nodeBackend } from '../agent-access'
 import {
   api,
-  ApiError,
   notify,
   refresh,
   state,
@@ -59,7 +58,6 @@ const enrollmentCommand = computed(() => {
   return origin ? `sudo cairn node-enroll '${origin.replaceAll('\'', '\'\\\'\'')}' /var/lib/cairn-node/data/node` : ''
 })
 // Machines known when the code was created, to recognise the newly connected one.
-let knownBeforeEnrollment = new Set<string>()
 const error = ref('')
 const busy = ref(false)
 const recovery = ref<NodeSyncSettings | null>(null)
@@ -98,12 +96,9 @@ async function load() {
   if (!enrollment.value)
     return
   const invitation = enrollment.value
-  // Older installations cannot safely associate a guided switch with its replacement.
-  if (replacing.value && !invitation.nodeId)
-    return
   const connected = nodes.value.find(node => !node.local && !node.revoked
     && nodeBackend(node) === (invitation.backend ?? 'firecracker')
-    && (invitation.nodeId ? node.id === invitation.nodeId : !knownBeforeEnrollment.has(node.id)))
+    && node.id === invitation.nodeId)
   if (connected) {
     enrollment.value = null
     adding.value = false
@@ -149,7 +144,6 @@ async function action(operation: () => Promise<void>) {
 
 function enroll() {
   return action(async () => {
-    knownBeforeEnrollment = new Set(nodes.value.map(node => node.id))
     enrollment.value = await api<NodeEnrollment>('/nodes/enrollments', {
       method: 'POST',
       // Without an address, Beacon introduces the machine to the manager.
@@ -275,16 +269,7 @@ function saveGrants() {
   const agentIds = granted.value.filter(agentId => !allowed(agentId) && !mismatch(agentId))
   return action(async () => {
     if (agentIds.length) {
-      try {
-        await api(`/nodes/${node.id}/agents`, { method: 'PUT', body: JSON.stringify({ agentIds, add: true, ...(node.nativeModeRequest?.mode === 'administrator' ? { confirmNativeAdministration: true } : {}) }) })
-      }
-      catch (e) {
-        // An older installation only replaces the list: send the agents already allowed with the new ones.
-        if (!(e instanceof ApiError && e.status === 400 && (e.message === 'Invalid node request.' || /unknown field/i.test(e.message))))
-          throw e
-        const kept = (node.agents ?? []).filter(agent => !agent.allNodes).map(agent => agent.id)
-        await api(`/nodes/${node.id}/agents`, { method: 'PUT', body: JSON.stringify({ agentIds: [...new Set([...kept, ...agentIds])] }) })
-      }
+      await api(`/nodes/${node.id}/agents`, { method: 'PUT', body: JSON.stringify({ agentIds, add: true, ...(node.nativeModeRequest?.mode === 'administrator' ? { confirmNativeAdministration: true } : {}) }) })
     }
 
     granting.value = null
@@ -445,9 +430,6 @@ function statusLabel(node: ExecutionNode) {
             </template>
           </template>
           <code class="block break-all select-all" aria-label="Single-use enrollment code">{{ enrollment.code }}</code>
-          <UiAlert v-if="replacing && !enrollment.nodeId">
-            Update this installation to track the replacement and finish the guided switch. The previous node is kept.
-          </UiAlert>
           <p class="text-sm text-muted">
             <strong>3.</strong> {{ enrollment.backend === 'native' ? 'This page detects the machine once it connects, opens its configuration to enable native execution and choose trusted people, then asks which agents may use it.' : 'This page detects the machine once it connects and asks which agents may use it, as the last step.' }}
           </p>

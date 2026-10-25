@@ -1,1 +1,0 @@
-ALTER TABLE installations ADD COLUMN update_required BOOLEAN NOT NULL DEFAULT FALSE;
