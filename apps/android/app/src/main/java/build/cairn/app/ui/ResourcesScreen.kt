@@ -12,8 +12,15 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import build.cairn.contracts.CreateProjectInput
+import build.cairn.contracts.ProjectInput
+import build.cairn.contracts.ProjectSettings
+import build.cairn.contracts.ReplaceProjectInput
+import build.cairn.contracts.createProject
+import build.cairn.contracts.deleteProject
+import build.cairn.contracts.replaceProject
+import kotlinx.serialization.json.*
 import kotlinx.serialization.json.decodeFromJsonElement
-import kotlinx.serialization.json.encodeToJsonElement
 
 @Composable
 fun ResourcesScreen(
@@ -77,10 +84,7 @@ fun ResourcesScreen(
                             }
                             if (agent.description.isNotBlank()) Text(agent.description)
                             Text(
-                                agentAccessSummary(
-                                    agent,
-                                    older = olderInstallation(state.agents),
-                                ),
+                                agentAccessSummary(agent),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -103,7 +107,7 @@ fun ResourcesScreen(
                         Text(
                             "${project.baseBranch} · ${if (project.sourceMode == "local") "Branche locale" else "Branche distante"}"
                         )
-                        project.origin?.let { Code(it) }
+                        if (project.origin.isNotEmpty()) Code(project.origin)
                         Row {
                             ActionIcon(
                                 "Démarrer une conversation",
@@ -134,7 +138,7 @@ fun ResourcesScreen(
     }
     editing?.let { id ->
         if (!agents)
-            ProjectEditor(vm, state, state.projects.find { it.id == id } ?: Project()) {
+            ProjectEditor(vm, state, state.projects.find { it.id == id }) {
                 editing = null
             }
     }
@@ -147,7 +151,8 @@ fun ResourcesScreen(
             { deleting = null },
         ) {
             vm.perform {
-                delete("/$kind/${segment(id)}")
+                if (kind == "projects") api.deleteProject(ProjectInput(id))
+                else delete("/$kind/${segment(id)}")
                 deleting = null
             }
         }
@@ -158,11 +163,21 @@ fun ResourcesScreen(
 internal fun ProjectEditor(
     vm: CairnViewModel,
     state: Workspace,
-    initial: Project,
+    initial: Project?,
     close: () -> Unit,
 ) {
-    var form by rememberForm(initial)
-    val saving = rememberResourceSave(initial.id)
+    var form by
+        rememberForm(
+            ProjectSettings(
+                name = initial?.name.orEmpty(),
+                path = initial?.path.orEmpty(),
+                description = initial?.description.orEmpty(),
+                baseBranch = initial?.baseBranch ?: "main",
+                sourceMode = initial?.sourceMode ?: "remote",
+            )
+        )
+    var revision by rememberSaveable { mutableStateOf(initial?.revision.orEmpty()) }
+    val saving = rememberResourceSave(initial?.takeIf { it.revision.isNotEmpty() }?.id.orEmpty())
     var saveError by rememberSaveable { mutableStateOf<String?>(null) }
     // "local", or the key of a plugin's project source to import from.
     var mode by rememberSaveable { mutableStateOf("local") }
@@ -216,12 +231,40 @@ internal fun ProjectEditor(
                                 )
                             else wireJson.encodeToJsonElement(form)
                         },
+                        request = { method, route, payload ->
+                            if (route == "/projects/import")
+                                api.send<JsonElement>(method, route, payload)
+                            else {
+                                val saved =
+                                    if (method == "PUT")
+                                        api.replaceProject(
+                                            ReplaceProjectInput(saving.id, revision, form)
+                                        )
+                                    else {
+                                        val original = JsonObject(payload.jsonObject - "creationId")
+                                        api.createProject(
+                                            CreateProjectInput(
+                                                creationId =
+                                                    payload.jsonObject["creationId"]
+                                                        ?.jsonPrimitive
+                                                        ?.content,
+                                                settings =
+                                                    wireJson.decodeFromJsonElement<ProjectSettings>(
+                                                        original
+                                                    ),
+                                            )
+                                        )
+                                    }
+                                revision = saved.revision
+                                wireJson.encodeToJsonElement(saved)
+                            }
+                        },
                         onCreated = {
+                            val saved = wireJson.decodeFromJsonElement<Project>(it)
+                            revision = saved.revision
                             if (importing) {
-                                val saved = wireJson.decodeFromJsonElement<Project>(it)
                                 form =
                                     form.copy(
-                                        id = saved.id,
                                         path = saved.path,
                                         sourceMode = saved.sourceMode,
                                     )
@@ -229,7 +272,7 @@ internal fun ProjectEditor(
                         },
                     )
                 } catch (error: Exception) {
-                    if (saving.id.isNotBlank() && saving.id != initial.id)
+                    if (saving.id.isNotBlank() && saving.id != initial?.id)
                         saveError =
                             "Projet enregistré, mais les dernières modifications n’ont pas été enregistrées. Réessayez."
                     throw error

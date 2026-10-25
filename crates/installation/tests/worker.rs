@@ -73,33 +73,16 @@ impl Fixture {
     }
 
     async fn start(&mut self) {
-        self.start_backend(false).await;
-    }
-
-    /// Starts the worker process, or the former Node backend when `legacy`.
-    async fn start_backend(&mut self, legacy: bool) {
         let file = self.root.path().join("config.json");
-        let mut config = serde_json::to_value(&self.service.config).unwrap();
-        // The historical backend still runs its own GitHub CLI.
-        config["ghBin"] = "gh".into();
-        tokio::fs::write(&file, serde_json::to_vec(&config).unwrap())
+        tokio::fs::write(&file, serde_json::to_vec(&self.service.config).unwrap())
             .await
             .unwrap();
-        let mut command = if legacy {
-            let mut command = Command::new("node");
-            command
-                .args(["--import", "tsx"])
-                .arg(common::fixture_path("legacy-worker.mjs"));
-            command
-        } else {
-            let binary = std::path::Path::new(env!("CARGO_BIN_EXE_cairn"))
-                .parent()
-                .unwrap()
-                .join("examples/worker_fixture");
-            let mut command = Command::new(binary);
-            command.arg("serve");
-            command
-        };
+        let binary = std::path::Path::new(env!("CARGO_BIN_EXE_cairn"))
+            .parent()
+            .unwrap()
+            .join("examples/worker_fixture");
+        let mut command = Command::new(binary);
+        command.arg("serve");
         let usage = self.root.path().join("usage.json");
         if usage.exists() {
             command.env("CAIRN_FIXTURE_USAGE", usage);
@@ -107,7 +90,6 @@ impl Fixture {
         let mut child = command
             .env("CAIRN_CONFIG", file)
             .env_remove("CAIRN_TOOLKIT_DIR")
-            .env("NODE_ENV", "test")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
             .kill_on_drop(true)
@@ -240,15 +222,22 @@ async fn transient_agent_failure_resumes_same_session_and_workspace_after_restar
     let prompt = "fixture:agent-failures:[{\"codexErrorInfo\":\"other\",\"message\":\"workspace routing discovery timed out\"}]";
     let chat_id = fixture.start_chat(message(prompt)).await;
     let run_id = fixture.chat_run(&chat_id).await;
-    let waiting = fixture
+    let mut waiting = fixture
         .until(&run_id, |run| run["retry"].is_object() || finished(run))
         .await;
     assert_eq!(waiting["status"], RunStatus::Queued, "{waiting}");
     assert_eq!(waiting["retry"]["attempt"], 1);
-    assert_eq!(waiting["retry"]["limit"], 3);
+    assert_eq!(waiting["retry"]["limit"], 5);
     assert_eq!(waiting["retry"]["cause"]["kind"], "timeout");
     assert!(waiting["retry"]["nextAttemptAt"].as_i64().unwrap() > now());
     assert_eq!(waiting["sessionId"], "fixture-chat");
+    waiting["retry"]["nextAttemptAt"] = (now() + 60_000).into();
+    fixture
+        .service
+        .store
+        .patch_run(&run_id, json!({ "retry": waiting["retry"] }))
+        .await
+        .unwrap();
     fixture.stop(false).await;
     fixture.start().await;
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -276,6 +265,235 @@ async fn transient_agent_failure_resumes_same_session_and_workspace_after_restar
     assert_eq!(marker["cwd"], completed["workspace"]);
     let chat = fixture.service.chat_detail(&chat_id).await.unwrap();
     assert_eq!(chat["paused"], false);
+    fixture.stop(false).await;
+}
+
+#[tokio::test]
+async fn startup_disconnect_before_first_turn_retries_without_losing_the_pending_message() {
+    let mut fixture = Fixture::new().await;
+    fixture.stop(false).await;
+    let chat = fixture
+        .start_chat(message("Complete the pending request once."))
+        .await;
+    fixture
+        .service
+        .chat_tick(&std::collections::HashSet::default())
+        .await
+        .unwrap();
+    let run_id = fixture.chat_run(&chat).await;
+    let home = fixture.run_directory(&run_id).join("codex");
+    tokio::fs::create_dir_all(&home).await.unwrap();
+    let marker = home.join("fixture-startup-failures.json");
+    tokio::fs::write(&marker, br#"{"method":"initialize","remaining":1}"#)
+        .await
+        .unwrap();
+    fixture.start().await;
+    let waiting = fixture
+        .until(&run_id, |run| run["retry"].is_object() || finished(run))
+        .await;
+    assert_eq!(waiting["status"], RunStatus::Queued, "{waiting}");
+    assert_eq!(waiting["retry"]["cause"]["startup"], true);
+    assert!(!waiting["sessionId"].is_string());
+    let mut retry = waiting["retry"].clone();
+    retry["nextAttemptAt"] = now().into();
+    fixture
+        .service
+        .store
+        .patch_run(&run_id, json!({ "retry": retry }))
+        .await
+        .unwrap();
+    let completed = fixture.until_finished(&run_id).await;
+    assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
+    assert_eq!(completed["sessionId"], "fixture-chat");
+    assert!(completed["retry"].is_null());
+    let attempts: Value = serde_json::from_slice(&tokio::fs::read(marker).await.unwrap()).unwrap();
+    assert_eq!(attempts["remaining"], 0);
+    assert_eq!(attempts["pids"].as_array().unwrap().len(), 1);
+    let chat = fixture.service.chat_detail(&chat).await.unwrap();
+    assert_eq!(chat["messages"].as_array().unwrap().len(), 1);
+    fixture.stop(false).await;
+}
+
+#[tokio::test]
+async fn first_start_recovery_remains_manually_resumable_after_stop_or_exhaustion() {
+    for ending in ["cancel", "deadline", "exhaustion"] {
+        let mut fixture = Fixture::new().await;
+        fixture.stop(false).await;
+        let chat = fixture
+            .start_chat(message("Keep the original pending request."))
+            .await;
+        fixture
+            .service
+            .chat_tick(&std::collections::HashSet::default())
+            .await
+            .unwrap();
+        let run_id = fixture.chat_run(&chat).await;
+        let home = fixture.run_directory(&run_id).join("codex");
+        tokio::fs::create_dir_all(&home).await.unwrap();
+        let marker = home.join("fixture-startup-failures.json");
+        let failures = if ending == "exhaustion" { 6 } else { 1 };
+        tokio::fs::write(
+            &marker,
+            serde_json::to_vec(&json!({ "method": "initialize", "remaining": failures })).unwrap(),
+        )
+        .await
+        .unwrap();
+        fixture.start().await;
+        let mut waiting = fixture
+            .until(&run_id, |run| run["retry"].is_object() || finished(run))
+            .await;
+        assert_eq!(waiting["status"], RunStatus::Queued, "{waiting}");
+        let workspace = waiting["workspace"].clone();
+        if ending == "cancel" {
+            fixture
+                .service
+                .worker
+                .cancel(&fixture.service, &run_id)
+                .await
+                .unwrap();
+            fixture
+                .until(&run_id, |run| run["status"] == RunStatus::Cancelled)
+                .await;
+        } else {
+            for attempt in 1..=5 {
+                assert_eq!(waiting["retry"]["attempt"], attempt);
+                let mut retry = waiting["retry"].clone();
+                retry["nextAttemptAt"] = now().into();
+                if ending == "deadline" {
+                    retry["deadlineAt"] = (now() - 1).into();
+                }
+                fixture
+                    .service
+                    .store
+                    .patch_run(&run_id, json!({ "retry": retry }))
+                    .await
+                    .unwrap();
+                waiting = fixture
+                    .until(&run_id, |run| {
+                        finished(run)
+                            || (run["status"] == RunStatus::Queued
+                                && run["retry"]["attempt"]
+                                    .as_u64()
+                                    .is_some_and(|n| n > attempt))
+                    })
+                    .await;
+                if finished(&waiting) {
+                    break;
+                }
+            }
+            assert_eq!(waiting["status"], RunStatus::Failed, "{waiting}");
+        }
+        let resumed = fixture
+            .service
+            .worker
+            .resume(&fixture.service, &run_id)
+            .await
+            .unwrap();
+        assert!(
+            resumed["retry"].is_null(),
+            "Manual resume starts a new budget"
+        );
+        let completed = fixture.until_finished(&run_id).await;
+        assert_eq!(
+            completed["status"],
+            RunStatus::Succeeded,
+            "{ending}: {completed}"
+        );
+        assert_eq!(completed["workspace"], workspace);
+        let detail = fixture.service.chat_detail(&chat).await.unwrap();
+        assert_eq!(detail["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(detail["messages"][0]["status"], "delivered");
+        fixture.stop(false).await;
+    }
+}
+
+#[tokio::test]
+async fn native_recovery_preflight_disconnect_consumes_the_same_retry_budget() {
+    let mut fixture = Fixture::new().await;
+    let chat = fixture
+        .start_chat(message(
+            "fixture:agent-failures:[{\"code\":\"server_overloaded\"}]",
+        ))
+        .await;
+    let run_id = fixture.chat_run(&chat).await;
+    let waiting = fixture
+        .until(&run_id, |run| run["retry"].is_object() || finished(run))
+        .await;
+    assert_eq!(waiting["status"], RunStatus::Queued, "{waiting}");
+    fixture.stop(false).await;
+    let marker = fixture
+        .run_directory(&run_id)
+        .join("codex/fixture-startup-failures.json");
+    tokio::fs::write(&marker, br#"{"method":"thread/read","remaining":1}"#)
+        .await
+        .unwrap();
+    let mut retry = waiting["retry"].clone();
+    retry["nextAttemptAt"] = now().into();
+    fixture
+        .service
+        .store
+        .patch_run(&run_id, json!({ "retry": retry }))
+        .await
+        .unwrap();
+    fixture.start().await;
+    let recovering = fixture
+        .until(&run_id, |run| {
+            (run["status"] == RunStatus::Queued && run["retry"]["attempt"] == 2) || finished(run)
+        })
+        .await;
+    assert_eq!(recovering["status"], RunStatus::Queued, "{recovering}");
+    assert_eq!(recovering["retry"]["cause"]["startup"], true);
+    assert_eq!(
+        recovering["retry"]["startedAt"],
+        waiting["retry"]["startedAt"]
+    );
+    let mut retry = recovering["retry"].clone();
+    retry["nextAttemptAt"] = now().into();
+    fixture
+        .service
+        .store
+        .patch_run(&run_id, json!({ "retry": retry }))
+        .await
+        .unwrap();
+    let completed = fixture.until_finished(&run_id).await;
+    assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
+    assert_eq!(completed["workspace"], waiting["workspace"]);
+    assert_eq!(completed["sessionId"], waiting["sessionId"]);
+    fixture.stop(false).await;
+}
+
+#[tokio::test]
+async fn an_expired_retry_window_does_not_admit_another_agent() {
+    let mut fixture = Fixture::new().await;
+    let chat = fixture
+        .start_chat(message(
+            "fixture:agent-failures:[{\"code\":\"server_overloaded\"}]",
+        ))
+        .await;
+    let run_id = fixture.chat_run(&chat).await;
+    let waiting = fixture
+        .until(&run_id, |run| run["retry"].is_object() || finished(run))
+        .await;
+    assert_eq!(waiting["status"], RunStatus::Queued, "{waiting}");
+    let mut retry = waiting["retry"].clone();
+    retry["nextAttemptAt"] = (now() - 100).into();
+    retry["deadlineAt"] = (now() - 1).into();
+    fixture
+        .service
+        .store
+        .patch_run(&run_id, json!({ "retry": retry }))
+        .await
+        .unwrap();
+    let stopped = fixture.until_finished(&run_id).await;
+    assert_eq!(stopped["status"], RunStatus::Failed);
+    assert!(text(&stopped, "error").contains("10-minute limit"));
+    let marker: Value = serde_json::from_slice(
+        &tokio::fs::read(Path::new(text(&stopped, "workspace")).join("fixture-retry-work.json"))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(marker["attempts"], 1);
     fixture.stop(false).await;
 }
 
@@ -310,7 +528,7 @@ async fn agent_failure_without_a_message_keeps_its_code_for_the_retry() {
 }
 
 #[tokio::test]
-async fn agent_retries_stop_after_three_attempts_or_when_the_error_becomes_terminal() {
+async fn agent_retries_stop_after_five_attempts_or_when_the_error_becomes_terminal() {
     for terminal in [false, true] {
         let mut fixture = Fixture::new().await;
         // Codex's report for a model at capacity.
@@ -322,12 +540,12 @@ async fn agent_retries_stop_after_three_attempts_or_when_the_error_becomes_termi
                 json!({ "code": "authentication_error", "message": "Reconnect account" }),
             ]
         } else {
-            vec![transient; 4]
+            vec![transient; 6]
         };
         let prompt = format!("fixture:agent-failures:{}", json!(failures));
         let chat = fixture.start_chat(message(&prompt)).await;
         let run_id = fixture.chat_run(&chat).await;
-        let attempts = if terminal { 1 } else { 3 };
+        let attempts = if terminal { 1 } else { 5 };
         for attempt in 1..=attempts {
             let waiting = fixture
                 .until(&run_id, |run| {
@@ -784,48 +1002,6 @@ async fn chat_messages_invoke_dollar_skills_without_changing_the_visible_text() 
 }
 
 #[tokio::test]
-async fn migration_resumes_a_checkpoint_written_by_the_node_backend() {
-    let mut fixture = Fixture::new().await;
-    fixture.stop(false).await;
-
-    // Seed an actual version-4 fixture before asking the historical backend to
-    // create its checkpoint. A version-5 database must reject that executable.
-    fixture
-        .service
-        .store
-        .transaction(|db| {
-            let objects: i64 =
-                db.0.query_row("SELECT count(*) FROM shared_objects", [], |row| row.get(0))?;
-            assert_eq!(objects, 0);
-            db.0.execute_batch(
-                "DROP TABLE shared_references;
-                 DROP TABLE shared_publications;
-                 DROP TABLE shared_objects;
-                 DROP TABLE remote_deletions;
-                 PRAGMA user_version=4;",
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-
-    fixture.start_backend(true).await;
-    let run = fixture.enqueue("fixture:restart").await;
-    let id = text(&run, "id");
-    let running = fixture
-        .until(id, |r| r["sessionId"] == "fixture-session")
-        .await;
-    fixture.stop(true).await;
-    fixture.start().await;
-    let completed = fixture.until_finished(id).await;
-    assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
-    assert_eq!(completed["workspace"], running["workspace"]);
-    assert_eq!(completed["sessionId"], running["sessionId"]);
-    assert_eq!(completed["resumeCount"], 1);
-    fixture.stop(false).await;
-}
-
-#[tokio::test]
 async fn usage_exhaustion_switches_accounts_and_preserves_the_conversation() {
     let mut fixture = Fixture::new().await;
     fixture.stop(false).await;
@@ -918,7 +1094,7 @@ async fn native_worker_records_artifacts_and_completes_task() {
     let id = text(&run, "id").to_owned();
     let complete = fixture.until_finished(&id).await;
     assert_eq!(complete["status"], RunStatus::Succeeded, "{complete}");
-    assert_eq!(complete["sessionId"], "fixture-session");
+    assert_eq!(complete["sessionId"], "fixture-chat");
     let events = fixture
         .service
         .store
@@ -988,7 +1164,7 @@ async fn abrupt_restart_fences_previous_process_and_resumes_workspace() {
     let run = fixture.enqueue("fixture:restart").await;
     let id = text(&run, "id");
     let running = fixture
-        .until(id, |r| r["sessionId"] == "fixture-session")
+        .until(id, |r| r["sessionId"] == "fixture-chat")
         .await;
     fixture.stop(true).await;
     fixture.start().await;
@@ -1077,7 +1253,7 @@ async fn sleeping_chat_survives_worker_restart_and_releases_capacity_before_waki
     let wake = cairn_installation::chats::wait_for::schedule(
         &s,
         token,
-        &json!({ "condition": { "type": "delay", "seconds": 15 }, "reason": "Wait for CI" }),
+        &json!({ "conditions": [{ "type": "delay", "seconds": 15 }], "reason": "Wait for CI" }),
     )
     .await
     .unwrap()["wakeup"]
@@ -1186,7 +1362,7 @@ async fn waiting_mission_survives_restart_and_releases_capacity_without_finishin
         &s,
         token,
         &json!({
-            "condition": { "type": "delay", "seconds": 15 }, "reason": "Wait for mission CI",
+            "conditions": [{ "type": "delay", "seconds": 15 }], "reason": "Wait for mission CI",
         }),
     )
     .await
@@ -1300,7 +1476,7 @@ async fn stopped_waiting_mission_manual_resume_starts_a_new_provider_turn() {
         .await
         .unwrap();
     cairn_installation::waits::schedule(&s, token, &json!({
-        "condition": { "type": "delay", "seconds": 600 }, "reason": "Wait for the remote result",
+        "conditions": [{ "type": "delay", "seconds": 600 }], "reason": "Wait for the remote result",
     })).await.unwrap();
     let waiting = fixture
         .until(run_id, |run| run["status"] == "waiting")
@@ -1386,7 +1562,7 @@ async fn condition_wait_yields_the_only_slot_to_its_dependency_and_resumes_the_s
         &s,
         token,
         &json!({
-            "condition": { "type": "run_finished", "runId": other["id"] },
+            "conditions": [{ "type": "run_finished", "runId": other["id"] }],
             "reason": "Join the dependency",
             "timeoutSeconds": 60,
         }),
@@ -1516,15 +1692,16 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
     if path == "/health" {
         return Json(json!({
             "status": "ok",
+            "nodeProtocol": 2,
+            "dataRoot": state.data,
             "sharedResources": true,
             "budget": { "slots": state.slots, "limits": { "cpu": 7, "memoryMiB": 15872, "diskMiB": 104857 } },
-            "runtimeId": "fixture",
-            "runtimes": ["fixture"],
+            "runtimeId": "development",
+
             "capabilities": {
                 "os": "linux",
                 "arch": "x86_64",
                 "kvm": true,
-                "fuse": true,
                 "cpu": 8,
                 "memoryMiB": 16384,
                 "diskMiB": 131_072,
@@ -1743,17 +1920,11 @@ impl WorkspaceProbe {
             .find(|import| import["target"] == "/home/node")
             .map(|import| PathBuf::from(text(import, "source")))
             .unwrap();
-        // The URL Codex receives: `-c mcp_servers.cairn_workspace={…,"url"="…"}`.
-        let url = plan["args"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(Value::as_str)
-            .filter(|arg| arg.starts_with("mcp_servers.cairn_workspace="))
-            .find_map(|arg| arg.split("\"url\"=\"").nth(1))
-            .and_then(|rest| rest.split('"').next())
-            .unwrap()
-            .to_owned();
+        let url = text(
+            &plan["chat"]["codexConfig"]["mcp_servers"]["cairn_workspace"],
+            "url",
+        )
+        .to_owned();
         let token = text(&plan["mcpEnv"], "CAIRN_MCP_RUN_TOKEN");
         let client = reqwest::Client::builder()
             .unix_socket(home.join("cairn-mcp.sock"))
@@ -1833,7 +2004,7 @@ async fn vm_agents_call_workspace_tools_through_their_run_channel_without_a_publ
         hold: std::sync::atomic::AtomicBool::new(false),
     });
     // A token granted to another run of the same installation.
-    let other_run = json!({ "id": id(), "snapshot": { "agent": { "id": MAIN_AGENT_ID } } });
+    let other_run = json!({ "id": id(), "snapshot": { "agent": { "id": MAIN_AGENT_ID, "provider": "codex" } } });
     let other = fixture
         .service
         .mcps
@@ -2385,13 +2556,7 @@ async fn controller_interruptions_resume_saved_threads_and_stop_after_three_reco
         let plans = controller.plans.lock().await;
         assert_eq!(plans.len(), attempts);
         for plan in plans.iter().skip(1) {
-            assert!(
-                plan["args"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!("fixture-session")),
-                "{plan}"
-            );
+            assert_eq!(plan["chat"]["sessionId"], "fixture-session", "{plan}");
             assert_eq!(plan["runId"], run_id);
             assert_eq!(plan["cwd"], plans[0]["cwd"]);
         }
@@ -2399,6 +2564,92 @@ async fn controller_interruptions_resume_saved_threads_and_stop_after_three_reco
         fixture.stop(false).await;
         server.abort();
     }
+}
+
+#[tokio::test]
+async fn vm_chat_protocol_runs_receive_one_frame_with_plugin_instructions() {
+    let mut fixture = Fixture::new().await;
+    fixture.stop(false).await;
+    let controller = Arc::new(Controller {
+        data: fixture.service.config.data_dir.clone(),
+        plans: tokio::sync::Mutex::new(Vec::new()),
+        failures: 0,
+        slots: 4,
+        hold: std::sync::atomic::AtomicBool::new(false),
+    });
+    let app = Router::new()
+        .fallback(any(serve_controller))
+        .with_state(controller.clone());
+    let (listener, address) = common::bind().await;
+    common::reconfigure(&mut fixture.service, |config| {
+        config.runner_url = format!("http://{address}");
+    })
+    .await;
+    let server = common::serve(listener, app);
+    let s = fixture.service.clone();
+    claude_account(&s, 4).await;
+    tokio::fs::write(
+        s.config.data_dir.join("storage-s3.json"),
+        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
+    )
+    .await
+    .unwrap();
+    let agent = s
+        .agent(json!({ "name": "Claude", "provider": "claude" }), None)
+        .await
+        .unwrap();
+    cairn_installation::plugins::connections::save(
+        &s,
+        "onepassword",
+        &json!({
+            "name": "Production", "enabled": true,
+            "secrets": { "token": "ops_fixture" }, "agentIds": [agent["id"]],
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    let plugin = "cairn plugin onepassword read --account ACCOUNT_ID";
+    fixture.start().await;
+
+    // Scheduled work: the frame is in the instructions, the turn is the brief.
+    // A leading command stays text: Claude Code would run `/clear` itself.
+    let brief = "/clear stale branches, then check the deployment.";
+    let task = json!({
+        "name": "Scheduled", "prompt": brief, "worktree": false, "agentId": agent["id"],
+    });
+    let task = s.task(task, None).await.unwrap();
+    let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
+    let finished = fixture.until_finished(text(&run, "id")).await;
+    assert_eq!(finished["status"], RunStatus::Succeeded, "{finished}");
+    let plan = controller.plans.lock().await[0]["chat"].clone();
+    let instructions = text(&plan, "instructions");
+    assert!(instructions.contains(plugin), "{instructions}");
+    assert!(instructions.contains("This unattended task"));
+    assert!(!instructions.contains("This is an interactive chat"));
+    assert!(!instructions.contains(brief));
+    assert_eq!(plan["execution"]["text"], format!("Task brief:\n{brief}"));
+    assert_eq!(plan["execution"]["recovery"], false);
+
+    // Chat turns stay interactive and also receive plugin instructions.
+    let chat = s
+        .chat_create(json!({ "agentId": agent["id"] }))
+        .await
+        .unwrap();
+    let chat_id = text(&chat, "id").to_owned();
+    s.chat_send(&chat_id, message("Hello")).await.unwrap();
+    let chat_run = fixture.chat_run(&chat_id).await;
+    fixture
+        .until(&chat_run, |run| run["status"] == RunStatus::Succeeded)
+        .await;
+    let plan = controller.plans.lock().await.last().unwrap()["chat"].clone();
+    let instructions = text(&plan, "instructions");
+    assert!(instructions.contains(plugin), "{instructions}");
+    assert!(instructions.contains("This is an interactive chat"));
+    assert!(!instructions.contains("This unattended task"));
+    assert_eq!(plan["execution"]["text"], "Hello");
+    fixture.stop(false).await;
+    server.abort();
 }
 
 #[tokio::test]
@@ -2497,14 +2748,14 @@ async fn claude_conversations_run_together_and_lowering_limit_does_not_cancel_th
 }
 
 #[tokio::test]
-async fn unlimited_runs_can_be_cancelled_and_finite_checkpoints_still_expire() {
+async fn unlimited_runs_cancel_and_resume_without_creating_a_deadline() {
     let mut fixture = Fixture::new().await;
     let s = fixture.service.clone();
     let run = fixture.enqueue("fixture:restart").await;
     let id = text(&run, "id");
     assert_eq!(run["snapshot"]["agent"]["timeoutMinutes"], 0);
     fixture
-        .until(id, |r| r["sessionId"] == "fixture-session")
+        .until(id, |r| r["sessionId"] == "fixture-chat")
         .await;
     assert_eq!(s.store.run(id).await.unwrap()["status"], RunStatus::Running);
     assert_eq!(
@@ -2577,6 +2828,13 @@ async fn unlimited_runs_can_be_cancelled_and_finite_checkpoints_still_expire() {
         Some(&Value::Null)
     );
     fixture.stop(false).await;
+}
+
+#[tokio::test]
+async fn quiet_chat_protocol_keeps_a_finite_checkpoint_deadline() {
+    let mut fixture = Fixture::new().await;
+    fixture.stop(false).await;
+    let s = fixture.service.clone();
     let run = fixture.enqueue("fixture:hang").await;
     let id = text(&run, "id");
     let mut snapshot = run["snapshot"].clone();
@@ -2585,20 +2843,23 @@ async fn unlimited_runs_can_be_cancelled_and_finite_checkpoints_still_expire() {
         .patch_run(id, json!({ "snapshot": snapshot }))
         .await
         .unwrap();
-    // Resume the final five seconds of an existing one-minute budget.
+    // Resume the final second of an existing one-minute budget.
     common::set_checkpoint(
         &s.store,
         id,
-        json!({ "launched": false, "remainingMs": 5000 }),
+        json!({ "launched": false, "remainingMs": 1000 }),
     )
     .await;
     fixture.start().await;
     fixture
-        .until(id, |r| r["sessionId"] == "fixture-session")
+        .until(id, |r| r["sessionId"] == "fixture-chat")
         .await;
-    let failed = fixture
-        .until(id, |r| r["status"] == RunStatus::Failed)
-        .await;
+    let failed = tokio::time::timeout(
+        Duration::from_secs(8),
+        fixture.until(id, |r| r["status"] == RunStatus::Failed),
+    )
+    .await
+    .expect("a quiet chat must stop when its finite checkpoint budget expires");
     assert!(text(&failed, "summary").contains("time limit"), "{failed}");
     fixture.stop(false).await;
 }
@@ -2635,13 +2896,6 @@ async fn queued_work_continues_with_equivalent_or_wider_access_but_not_reduced_a
         .enqueue("Inspect the fixture after an equivalent access change")
         .await;
     let id = text(&run, "id");
-    // Queued by an older version that saved a setting the policy no longer has.
-    let mut snapshot = s.store.run(id).await.unwrap()["snapshot"].clone();
-    snapshot["agent"]["access"]["maxResources"] = Value::Null;
-    s.store
-        .patch_run(id, json!({ "snapshot": snapshot }))
-        .await
-        .unwrap();
     let mut agent = s.get("agents", MAIN_AGENT_ID).await.unwrap();
     agent["name"] = "Renamed agent".into();
     s.store.put("agents", agent.clone()).await.unwrap();
@@ -2677,8 +2931,10 @@ async fn queued_work_waits_for_node_capacity_without_failing() {
             "name": name,
             "accepting": true,
             "executionReady": true,
+            "runtimeId": "development",
+
             "lastSeen": now() + 60_000,
-            "capabilities": {"kvm": true, "fuse": true},
+            "capabilities": {"kvm": true },
             "limits": {"cpu": 1, "memoryMiB": 8192, "diskMiB": 65536},
             "pressure": "memory"
         })

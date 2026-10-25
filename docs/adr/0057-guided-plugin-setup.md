@@ -27,9 +27,9 @@ settings may declare a `risk`.
 
 The installation resolves the setup (`setup` beside each catalogue manifest and in
 the management `setup` action). Web and Android render it as the same assistant,
-natively. Clients served to an older installation derive the same steps from the
-manifest; a shared corpus (`tests/fixtures/plugin-setup.json`) keeps Rust, web and
-Android equal.
+natively. Clients consume this resolved setup and require a current installation.
+A shared corpus (`tests/fixtures/plugin-setup.json`) keeps Rust, web and Android
+equal.
 
 A step marked `shared` holds values that serve every instance, such as an OAuth
 client and its secret. A new instance names a saved instance of the same package
@@ -48,18 +48,3 @@ change on agent pages. Public MCP and the installation tool still refuse
 `agentIds`.
 
 ## Consequences
-
-- Plugins announce what they take before the owner starts: "Sign in", "Paste a
-  token" or "Needs your own app".
-- A second Gmail mailbox takes the permissions and one Google sign-in.
-- Changing one instance's OAuth client does not change the others; each must be
-  reconnected on its own, as before.
-- Built-in manifests gained `[setup]`; packages without it get the derived
-  assistant. A manifest declaring `[setup]` needs an installation that knows it.
-- Installed package manifests persist `[setup]`, which previous binaries reject.
-  Epoch 12 and SQLite version 11 fence those older readers before plugin loading.
-  Existing packages, approvals, settings and secrets are retained without rewriting;
-  see the [forward migration and recovery plan](../AUTOMATIC-MIGRATIONS.md#current-transition-epochs-311-to-12).
-- A Cairn-managed Google app, which would remove the Google Cloud step, is not
-  provided: Gmail scopes are restricted and would require Google verification and
-  an annual security assessment.

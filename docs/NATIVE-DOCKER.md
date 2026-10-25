@@ -118,12 +118,17 @@ daemon shutdown; ordinary workspace/home/output files remain. Native
 conversations without Docker keep their existing conversion path. VM Docker state
 is not imported into the rootless daemon during VM-to-native conversion.
 
-This is installation data epoch 14 / SQLite version 13. The native runtime identity
-also records `nativeIsolation: rootless-v1`, so previous controllers' complete
-identity comparison rejects the disk before changing its file owners, including
-after cross-node restore. See the [forward transition](AUTOMATIC-MIGRATIONS.md).
-Do not roll back to an old controller or lower compatibility markers. This change
-does not release or deploy any runtime.
+The native runtime records `storage: ublk-rootless-v1` before mounting or
+reconciling file owners. Older controllers require `storage: ublk` and refuse the
+new identity, including during restore on another node. Current tool bundles may
+advance without changing the disk platform or conversation identity. Unknown
+storage identities fail closed. The manager database schema is unchanged.
+
+The current [production contract](PRODUCTION-CAIRN.md#réinstallation-complète)
+requires a fresh installation for the next release and matching manager, runner,
+node and guest versions; historical data formats are not migrated. This PR does
+not perform that reinstallation, release or deployment. Do not run an older
+controller against conversation state written with the rootless identity.
 
 Administrator mode retains its existing owner-reviewed host execution and sudo
 contract; it does not receive this managed rootless daemon or socket. Switching
@@ -165,8 +170,11 @@ and loopback Moto S3. It executes the shipped native controller and entrypoint,
 the real systemd/ublk/ext4 stack and the managed Docker tools. Reference binaries
 use the PR base or main push's previous commit; manual runs and tags use the
 checked-out candidate's first parent, fetching shallow history when needed. They
-may be reused only for the same exact base, pinned Rust/profile/features and runner
-image, with recorded binary checksums and original build run. The complete reference
+may be reused only for the same exact base, pinned Rust/profile (with the required ublk transport) and runner
+image, with recorded binary checksums and original build run. Verified reference binaries
+are also uploaded before qualification, so another attempt of the same workflow
+run can reuse the exact image/profile artifact even if the Actions cache is lost.
+Artifacts from other runs are not selected. The complete reference
 qualification still runs on the current host before candidate measurements. No qualification
 command runs against the owner's desktop node or its Docker daemon.
 

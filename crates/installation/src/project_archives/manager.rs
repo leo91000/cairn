@@ -234,7 +234,8 @@ async fn allowed(s: &Service, node_id: &str, project: &Value) -> Result<bool> {
 
 pub(crate) async fn catalog(s: &Service, node: &str) -> Result<Vec<Archive>> {
     let mut result = Vec::new();
-    for project in s.store.list("projects").await? {
+    for project in s.store.projects().await? {
+        let project = serde_json::to_value(project)?;
         if project["sourceMode"] == "local" || !allowed(s, node, &project).await? {
             continue;
         }
@@ -375,7 +376,8 @@ pub(crate) async fn maintain(s: Arc<Service>) {
     }
     loop {
         let refresh_all = async {
-            for project in s.store.list("projects").await? {
+            for project in s.store.projects().await? {
+                let project = serde_json::to_value(project)?;
                 if let Err(error) = refresh(&s, &project).await {
                     tracing::warn!(
                         status = error.status,

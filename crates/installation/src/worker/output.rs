@@ -83,9 +83,12 @@ static AGENT_PERFORMANCE_RECORD: LazyLock<regex::Regex> = LazyLock::new(|| {
 const TOOL_FRAME_LIMIT: usize = 100_000_000;
 const MESSAGE_LIMIT: usize = 100_000;
 const ERROR_LIMIT: usize = 10_000;
+/// Claude Code's notices are status lines; a longer one is cut.
+const NOTICE_LIMIT: usize = 4_000;
 
-/// Event types that are always recorded. Clients use turn markers to scope reused message IDs.
-const CONVERSATION_EVENTS: [&str; 7] = [
+/// Event types that are always recorded. Clients use turn markers to scope reused message IDs,
+/// and show the engine's retries and usage limits in the conversation.
+const CONVERSATION_EVENTS: [&str; 9] = [
     "thread.started",
     "turn.started",
     "turn.completed",
@@ -93,7 +96,16 @@ const CONVERSATION_EVENTS: [&str; 7] = [
     "turn.waiting",
     "error",
     "runner.failed",
+    "engine.retry",
+    "provider.limit",
 ];
+
+/// An engine notice the conversation shows. Other notices only reach the run log, within its
+/// budget.
+fn shown_notice(event: &Value) -> bool {
+    event["type"] == "engine.notice"
+        && (matches!(text(event, "level"), "warning" | "suggestion") || event["stopsTurn"] == true)
+}
 
 // Separate pipe readers keep stderr draining even while stdout applies database backpressure.
 pub(super) async fn read_output(
@@ -238,6 +250,17 @@ pub(super) async fn record(
         record_raw(s, id, "output", raw, secrets, log_total).await?;
         return Ok(false);
     };
+    if event["type"] == "runtime.disk_notice" {
+        let event = run_output::payload(&event, secrets);
+        let message = text(&event, "text").to_owned();
+        // Capacity is runtime diagnostic state, separate from the controller's
+        // authoritative storage document refreshed by the publication monitor.
+        s.store
+            .patch_run(id, serde_json::json!({ "diskCapacity": event["capacity"] }))
+            .await?;
+        s.store.event(id, "status", &message, Some(event)).await?;
+        return Ok(false);
+    }
     if event["type"] == "runner.start_rejected" {
         let run = s.store.run(id).await?;
         let first_rejected = !previously_launched
@@ -277,15 +300,23 @@ pub(super) async fn record(
     apply_event(s, id, &event, checkpoint, secrets).await?;
     // Every activity item has its own detail limit, regardless of earlier output.
     let conversation = event["item"]["type"] == "agent_message"
-        || CONVERSATION_EVENTS.contains(&text(&event, "type"));
+        || CONVERSATION_EVENTS.contains(&text(&event, "type"))
+        || shown_notice(&event);
     let activity_item = text(&event, "type").starts_with("item.") && event["item"].is_object();
     if conversation || activity_item || *log_total < LOG_BUDGET {
         let abbreviated = !conversation && activity_item && raw.len() > ITEM_DETAIL_LIMIT;
-        let stored = if abbreviated {
+        let mut stored = if abbreviated {
             run_output::compact_activity(&event, secrets)
         } else {
             run_output::payload(&event, secrets)
         };
+        // Cut once redacted, so a cut cannot expose part of a secret.
+        if let Some(message) = stored["message"]
+            .as_str()
+            .filter(|_| stored["type"] == "engine.notice")
+        {
+            stored["message"] = cut_notice(message).into();
+        }
         let serialized = serde_json::to_string(&stored)?;
         if !conversation && !activity_item {
             *log_total = log_total.saturating_add(serialized.len());
@@ -422,6 +453,23 @@ async fn store_event(s: &Service, id: &str, raw: &str, event: &Value) -> Result<
 
 fn truncate(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
+}
+
+/// A redacted notice cut to its limit, never inside a redaction marker, marked as cut.
+fn cut_notice(message: &str) -> String {
+    const MARKER: &str = "[redacted]";
+    if message.chars().count() <= NOTICE_LIMIT {
+        return message.to_owned();
+    }
+    let mut cut = truncate(message, NOTICE_LIMIT - 1);
+    if let Some(start) = cut.rfind('[')
+        && message[start..].starts_with(MARKER)
+        && start + MARKER.len() > cut.len()
+    {
+        cut.truncate(start);
+    }
+    cut.push('…');
+    cut
 }
 
 #[cfg(test)]

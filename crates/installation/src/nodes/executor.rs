@@ -246,24 +246,7 @@ async fn stage_plan(session: &Session, data: &Path, descriptor: Value) -> Result
         }
     }
     let root = data.join("runs").join(text(&plan, "runId"));
-    let archive_health = if crate::native::enabled() && descriptor.get("projectArchives").is_some()
-    {
-        let health = super::local_client()?
-            .get("http://localhost/health")
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await;
-        match health {
-            Ok(response) if response.status().is_success() => {
-                response.json::<Value>().await.unwrap_or_default()
-            }
-            _ => Value::Null,
-        }
-    } else {
-        Value::Null
-    };
-    let archive_controller = archive_health["projectArchives"] == 1;
-    let archives: Option<Vec<crate::project_archives::Archive>> = if archive_controller {
+    let archives: Option<Vec<crate::project_archives::Archive>> = if crate::native::enabled() {
         descriptor
             .get("projectArchives")
             .cloned()
@@ -283,9 +266,7 @@ async fn stage_plan(session: &Session, data: &Path, descriptor: Value) -> Result
         .await?;
     plan["workspaceSeeded"] = seed_workspace.into();
     if let Some(archives) = archives {
-        let base_size = (archive_health["nativeProjectBases"] == 1)
-            .then(|| plan["resources"]["diskMiB"].as_u64())
-            .flatten();
+        let base_size = plan["resources"]["diskMiB"].as_u64();
         match crate::project_archives::stage(session, &root, &archives, base_size).await {
             Ok(base) => {
                 if let Some(key) = base {
@@ -327,7 +308,7 @@ async fn fallback_seed(session: &Session, root: &Path, error: Error) -> Result<(
     }
     tracing::warn!(
         status = error.status,
-        "Archive staging unavailable; requesting the complete legacy seed"
+        "Archive staging unavailable; requesting the complete seed"
     );
     crate::project_archives::abandon_stage(root, error.status == 507, &session.attempt).await?;
     session
@@ -428,7 +409,7 @@ mod tests {
     use axum::{Json, Router, body::Body, routing::post};
 
     #[tokio::test]
-    async fn failed_archive_staging_requests_full_legacy_files_but_never_bypasses_revocation() {
+    async fn failed_archive_staging_requests_full_seed_files_but_never_bypasses_revocation() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("source");

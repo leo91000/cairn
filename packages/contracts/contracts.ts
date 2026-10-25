@@ -1,3 +1,4 @@
+import type { Project } from './generated/typescript/Project'
 import { z } from 'zod'
 import { LOCAL_NODE_ID } from './nodes'
 
@@ -14,6 +15,8 @@ export const accessPolicy = z.object({
   mcps: z.array(id).max(100).nullable().default(null),
   mcpTools: z.record(id, z.array(z.string().min(1).max(200)).max(500)).default({}),
   installation: z.boolean().default(false),
+  // Hands tasks to conversations of agents it covers, on any coding agent and model.
+  delegation: z.boolean().default(false),
   sandbox: z.enum(['yolo', 'workspace-write', 'read-only']).default('yolo'),
 })
 export const agentInput = z.object({
@@ -48,20 +51,11 @@ export const agentUpdate = z.object({
     nodes: accessPolicy.shape.nodes.removeDefault().optional(),
     backend: accessPolicy.shape.backend.removeDefault().optional(),
     installation: accessPolicy.shape.installation.removeDefault().optional(),
+    delegation: accessPolicy.shape.delegation.removeDefault().optional(),
   }).optional(),
   exclusiveNodes: agentInput.shape.exclusiveNodes.removeDefault().optional(),
   plugins: agentInput.shape.plugins.removeDefault().optional(),
   nativeNodeReviews: agentInput.shape.nativeNodeReviews,
-})
-export const projectInput = z.object({
-  name,
-  path: z.string().min(1).max(2000),
-  description: z.string().max(500).default(''),
-  sourceMode: z.enum(['remote', 'local']).default('remote'),
-  baseBranch: z
-    .string()
-    .regex(/^[a-z0-9][\w/.-]*$/i)
-    .default('main'),
 })
 export const taskInput = z.object({
   name,
@@ -89,11 +83,7 @@ export type Agent = z.infer<typeof agentInput> & {
   // Changes on every save; sent back so a stale editor cannot overwrite newer access.
   revision?: string
 }
-export type Project = z.infer<typeof projectInput> & {
-  origin?: string
-  id: string
-  createdAt: number
-}
+export type { Project } from './generated/typescript/Project'
 export type Task = z.infer<typeof taskInput> & {
   id: string
   createdAt: number
@@ -125,7 +115,10 @@ export interface Run {
     attempt: number
     limit: number
     nextAttemptAt: number | null
-    cause: { kind: 'connection' | 'timeout' | 'rate-limit' | 'server', message: string }
+    /** Optional on retained records written by older installations. */
+    startedAt?: number | null
+    deadlineAt?: number | null
+    cause: { kind: 'connection' | 'timeout' | 'rate-limit' | 'server', message: string, startup?: boolean }
   } | null
   nodeId?: string | null
   storage?: {

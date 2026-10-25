@@ -476,7 +476,7 @@ struct OperationDescriptor {
 }
 
 pub(crate) fn operations() -> Vec<Value> {
-    CATALOG
+    let mut operations: Vec<Value> = CATALOG
         .iter()
         .map(|tool| {
             let name = tool.name.as_str();
@@ -499,7 +499,15 @@ pub(crate) fn operations() -> Vec<Value> {
             })
             .expect("serializable tool descriptor")
         })
-        .collect()
+        .collect();
+    operations.push(crate::capabilities::RESUME_RUN.descriptor());
+    operations.push(cairn_contracts::beacon::list_account_methods_descriptor());
+    operations.extend(
+        crate::capabilities::PROJECT_OPERATIONS
+            .iter()
+            .map(crate::capabilities::ProjectOperation::descriptor),
+    );
+    operations
 }
 
 pub(crate) fn catalog() -> Vec<Value> {
@@ -529,6 +537,29 @@ pub(crate) async fn operation(
     name: &str,
     args: Value,
 ) -> Result<Value> {
+    if name == cairn_contracts::beacon::LIST_ACCOUNT_METHODS_ID {
+        let input = serde_json::from_value(args).map_err(|error| Error::bad(error.to_string()))?;
+        return Ok(serde_json::to_value(
+            cairn_contracts::beacon::account_methods_proof_required(input),
+        )?);
+    }
+    if let Some(op) = crate::capabilities::project_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(scopes.to_vec()),
+            )
+            .await;
+    }
+    if name == cairn_contracts::RESUME_RUN_ID {
+        let input = crate::capabilities::RESUME_RUN.decode(args)?;
+        let context = crate::capabilities::ResumeContext::Public(scopes.to_vec());
+        let output = crate::capabilities::RESUME_RUN
+            .invoke(s, input, context)
+            .await?;
+        return Ok(serde_json::to_value(output)?);
+    }
     let tool = CATALOG
         .iter()
         .find(|tool| tool.name == name)
@@ -714,13 +745,11 @@ pub(crate) async fn invoke(
         | "stop_chat"
         | "delete_chat" => chat_tools::invoke(s, name, args, bearer).await,
         "list_agents" => Ok(s.store.list("agents").await?.into()),
-        "list_projects" => Ok(s.store.list("projects").await?.into()),
         "list_tasks" => Ok(s.store.list("tasks").await?.into()),
         "save_agent" => {
             s.agent_authorized(args, None, AgentEditor::Installation, authorize)
                 .await
         }
-        "save_project" => s.project_authorized(args, None, authorize).await,
         "create_task" => s.task(args, None).await,
         "update_agent" => {
             let id = text(&args, "id");
@@ -780,10 +809,9 @@ pub(crate) async fn invoke(
 async fn skills_tool(s: &Service, name: &str, args: &Value, bearer: Option<&str>) -> Result<Value> {
     let project_id = args["projectId"].as_str();
     let project = match project_id {
-        Some(id) => Some(std::path::PathBuf::from(text(
-            &s.get("projects", id).await?,
-            "path",
-        ))),
+        Some(id) => Some(std::path::PathBuf::from(
+            s.get_project(id).await?.settings.path,
+        )),
         None => None,
     };
     let project = project.as_deref();

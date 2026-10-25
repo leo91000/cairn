@@ -46,6 +46,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.SecureFlagPolicy
 import build.cairn.app.data.*
+import build.cairn.contracts.ResumeRunInput
+import build.cairn.contracts.resumeRun
 import java.io.File
 import java.util.UUID
 import kotlinx.serialization.json.*
@@ -444,7 +446,11 @@ internal fun ChatPage(
                 live.state?.artifacts.orEmpty(),
             )
         }
-    val timeline = remember(history, live.events) { quotaTimeline(history, live.events) }
+    val chats = conversations.state?.chats
+    val timeline =
+        remember(history, live.events, chats) {
+            quotaTimeline(history, live.events).followingDelegations(chats)
+        }
     var asking by remember { mutableStateOf<ChatQuestion?>(null) }
     var stopping by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf<ChatMessage?>(null) }
@@ -474,8 +480,15 @@ internal fun ChatPage(
     // A subagent's full activity opens in a sheet. The current request's subagents stay in sight
     // above the composer while one of them works.
     var openedSubagent by rememberSaveable(id) { mutableStateOf<String?>(null) }
-    val openSubagent = remember { { agent: String -> openedSubagent = agent } }
     val subagentTeams = remember(timeline) { subagentTeams(timeline) }
+    // A delegated task is a conversation of its own: open it rather than a sheet.
+    val openSubagent =
+        remember(subagentTeams) {
+            { agent: String ->
+                val delegation = subagentTeams.flatten().find { it.id == agent }?.delegation
+                if (delegation != null) openChat(delegation.chatId) else openedSubagent = agent
+            }
+        }
     val currentSubagents = remember(timeline) { currentSubagents(timeline) }
     val subagentBar =
         !fullscreen && currentSubagents.any { it.state(active) == SubagentState.RUNNING }
@@ -805,6 +818,11 @@ internal fun ChatPage(
                         agentKey = chat?.agentId ?: agent,
                         status = conversation.status,
                         wakeup = scheduledWakeup(chat),
+                        requester = chat?.requester,
+                        openRequester = {
+                            persistDraft()
+                            openChat(it)
+                        },
                         live = conversation.live,
                         harness = chat?.provider,
                         liveSince = waitingTasks?.since ?: chat?.run?.startedAt,
@@ -1014,6 +1032,9 @@ internal fun ChatPage(
                         )
                         Text(chat?.agentName ?: selectedAgent?.name.orEmpty())
                         Text(chat?.projectName ?: "Tous les projets autorisés")
+                        chat?.requester?.let {
+                            Text("Délégué par ${it.title.ifBlank { "Nouvelle conversation" }}")
+                        }
                         Text(
                             if (chat?.paused == true) "En pause"
                             else if (chat?.exclusiveSuspended == true) "Suspendue (exclusivité)"
@@ -1057,7 +1078,20 @@ internal fun ChatPage(
                         )
                         ActionIcon("Masquer l’erreur", CairnIcons.Close) { errorDismissed = true }
                     }
-                if (quota == null) ChatRunWaitingNotice(chat?.run, openConnections, state.isOwner)
+                if (quota == null)
+                    ChatRunWaitingNotice(
+                        chat?.run,
+                        openConnections,
+                        state.isOwner,
+                        state.busy,
+                        {
+                            chat?.let { current ->
+                                vm.perform {
+                                    api.request("POST", "/chats/${segment(current.id)}/stop")
+                                }
+                            }
+                        },
+                    )
                 if (gallery) {
                     ModalBottomSheet(
                         onDismissRequest = { gallery = false },
@@ -1219,6 +1253,8 @@ internal fun ChatPage(
                                                         pauseWait,
                                                         settled = it.run?.status == "succeeded",
                                                         busy = state.busy,
+                                                        openRun = openRun,
+                                                        openChat = openChat,
                                                     )
                                                 },
                                         ) {
@@ -1244,9 +1280,8 @@ internal fun ChatPage(
                                                     chat?.let { current ->
                                                         vm.perform {
                                                             if (current.run?.status == "failed")
-                                                                api.request(
-                                                                    "POST",
-                                                                    "/runs/${segment(current.run.id)}/resume",
+                                                                api.resumeRun(
+                                                                    ResumeRunInput(current.run.id)
                                                                 )
                                                             api.request(
                                                                 "POST",

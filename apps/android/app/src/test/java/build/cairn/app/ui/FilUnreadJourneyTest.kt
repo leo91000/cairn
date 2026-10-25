@@ -169,7 +169,16 @@ class FilUnreadJourneyTest {
                             path == "/api/installations/fixture/api/overview" ||
                                 path.endsWith("/models") ||
                                 path == "/api/installations/fixture/api/accounts" -> json("{}")
-                            else -> json("[]")
+                            else ->
+                                json(
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
+                                )
                         }
                     }
                 }
@@ -283,7 +292,14 @@ class FilUnreadJourneyTest {
                                     "{\"read\":1}"
                                 }
                                 path.endsWith("/overview") || path.endsWith("/models") -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")
@@ -368,7 +384,14 @@ class FilUnreadJourneyTest {
                                     "{\"read\":1}"
                                 }
                                 path.endsWith("/overview") || path.endsWith("/models") -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")
@@ -464,7 +487,14 @@ class FilUnreadJourneyTest {
                                     "{\"read\":1}"
                                 }
                                 path.endsWith("/overview") || path.endsWith("/models") -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")

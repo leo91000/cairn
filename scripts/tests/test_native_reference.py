@@ -1,5 +1,7 @@
 """Exercise the shipped selector against real shallow Git histories, offline."""
 import importlib.util
+import io
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -54,6 +56,47 @@ class NativeReferenceTests(unittest.TestCase):
         for preferred, current in [('main', self.commits[-1]), ('', '0' * 40), ('', self.commits[0])]:
             with self.assertRaises(ValueError):
                 reference.select_reference(preferred, current, self.checkout)
+
+
+class NativeArtifactTests(unittest.TestCase):
+    environment = dict(GITHUB_REPOSITORY='leo91000/cairn', GITHUB_RUN_ID='123', GITHUB_TOKEN='synthetic-fixture')
+
+    def test_only_unexpired_exact_name_in_current_run_is_reused(self):
+        def opener(request, timeout):
+            self.assertEqual(request.full_url, 'https://api.github.com/repos/leo91000/cairn/actions/runs/123/artifacts?per_page=100&page=1')
+            self.assertEqual(timeout, 30)
+            self.assertEqual(request.get_header('Authorization'), 'Bearer synthetic-fixture')
+            return io.BytesIO(json.dumps(dict(artifacts=[dict(name='exact-reference', expired=False)])).encode())
+        self.assertTrue(reference.current_run_artifact('exact-reference', self.environment, opener))
+
+    def test_missing_expired_and_other_image_artifacts_require_a_build(self):
+        for artifacts in [[], [dict(name='exact-reference', expired=True)], [dict(name='other-image', expired=False)]]:
+            def opener(*args, **kwargs):
+                return io.BytesIO(json.dumps(dict(artifacts=artifacts)).encode())
+            self.assertFalse(reference.current_run_artifact('exact-reference', self.environment, opener))
+
+    def test_follows_every_page_before_building_again(self):
+        pages = []
+        def opener(request, timeout):
+            pages.append(request.full_url)
+            artifacts = [dict(name='other', expired=False)] * 100 if len(pages) == 1 else [dict(name='exact-reference', expired=False)]
+            return io.BytesIO(json.dumps(dict(artifacts=artifacts)).encode())
+        self.assertTrue(reference.current_run_artifact('exact-reference', self.environment, opener))
+        self.assertEqual(len(pages), 2)
+        self.assertTrue(pages[-1].endswith('page=2'))
+
+    def test_lookup_errors_are_not_silently_treated_as_missing(self):
+        def opener(*args, **kwargs):
+            raise OSError('fixture API unavailable')
+        with self.assertRaises(OSError):
+            reference.current_run_artifact('exact-reference', self.environment, opener)
+
+    def test_invalid_scope_is_rejected_before_sending_credentials(self):
+        def opener(*args, **kwargs):
+            self.fail('Invalid scope must not make a request')
+        for field, value in [('GITHUB_REPOSITORY', 'other/path/extra'), ('GITHUB_RUN_ID', 'latest')]:
+            with self.assertRaises(ValueError):
+                reference.current_run_artifact('exact-reference', dict(self.environment, **{field: value}), opener)
 
 
 if __name__ == '__main__':

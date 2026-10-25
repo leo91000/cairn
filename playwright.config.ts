@@ -17,7 +17,7 @@ export default defineConfig({
   projects: [
     { name: 'journeys-beacon-account', testMatch: ['beacon-account.spec.ts', 'beacon-oauth.spec.ts'] },
     { name: 'journeys-beacon-notifications', testMatch: 'beacon-notifications.spec.ts' },
-    { name: 'journeys-beacon-relay', testMatch: ['beacon-relay.spec.ts', 'beacon-relay-v1.spec.ts', 'beacon-installations.spec.ts', 'beacon-claim.spec.ts', 'beacon-sharing.spec.ts', 'beacon-sensitive-access.spec.ts', 'direct-capacity.spec.ts', 'beacon-settings.spec.ts'] },
+    { name: 'journeys-beacon-relay', testMatch: ['beacon-relay.spec.ts', 'beacon-installations.spec.ts', 'beacon-claim.spec.ts', 'beacon-sharing.spec.ts', 'beacon-sensitive-access.spec.ts', 'direct-capacity.spec.ts', 'beacon-settings.spec.ts'] },
     { name: 'layout-webkit-settings', testMatch: 'beacon-settings.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
     { name: 'journeys-nodes', testMatch: 'nodes.spec.ts' },
     { name: 'layout-webkit-nodes', testMatch: 'nodes.spec.ts', use: { browserName: 'webkit', hasTouch: true } },

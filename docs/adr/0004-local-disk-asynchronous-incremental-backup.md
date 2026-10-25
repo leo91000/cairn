@@ -1,4 +1,4 @@
-> Décision révisée par [ADR-0008](0008-current-disk-publication-without-archives.md) : publication S3 courante, sans archivage ni historique de restauration.
+> Statut : Remplacée par [ADR-0008](0008-current-disk-publication-without-archives.md) pour les points de restauration ; la durabilité locale et la publication asynchrone restent applicables.
 
 # Disque local et sauvegarde incrémentale asynchrone
 
@@ -12,5 +12,4 @@ modifications non sauvegardées pour éviter de faire dépendre l’acquittement
 Le format et la capture doivent permettre de réutiliser les données déjà reçues
 et de préserver toutes les dépendances des points conservés. Ce choix ne promet
 ni délai chiffré avant mesure, ni cohérence applicative sans coordination, ni copie
-de la RAM. Voir [la recherche](../INCREMENTAL-VM-BACKUP-RESEARCH.md) et
-[la synthèse](../DISTRIBUTED-NODES-SPEC.md).
+de la RAM.

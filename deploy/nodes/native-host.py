@@ -275,10 +275,8 @@ def validate_release(value):
     for field in ('sha256', 'toolsSha256'):
         if not re.fullmatch('[0-9a-f]{64}', value.get(field, '')):
             raise ValueError('Invalid native release digest.')
-    if value.get('os') != 'linux' or value.get('arch') != 'x86_64' or not value.get('protocolMin', 99) <= 2 <= value.get('protocolMax', 0):
+    if value.get('os') != 'linux' or value.get('arch') != 'x86_64' or value.get('nodeProtocol') != 2:
         raise ValueError('Native release platform/protocol is incompatible.')
-    if not isinstance(value.get('dataEpoch'), int) or value['dataEpoch'] < 1:
-        raise ValueError('Missing installation data compatibility epoch.')
     if value.get('binaryPath') != '/internal/nodes/native-binary' or value.get('toolsPath') != '/internal/nodes/native-tools':
         raise ValueError('Unexpected native artifact endpoint.')
     for field, maximum in (('size', 256 * 1024 * 1024), ('toolsSize', 512 * 1024 * 1024)):
@@ -317,11 +315,10 @@ def download(manager, release, directory, tools=False, code=None, token=None):
 def tool_inventory(manifest):
     if manifest.get('version') != 1 or manifest.get('os') != 'linux' or manifest.get('arch') != 'x86_64':
         raise ValueError('Unknown native tool manifest.')
-    expected = {'bin/codex', 'bin/claude', 'bin/opencode', 'bin/node', 'bin/gh'}
+    expected = {'bin/codex', 'bin/codex-code-mode-host', 'bin/claude', 'bin/opencode', 'bin/node', 'bin/gh'}
     entries = manifest.get('files', [])
     paths = {entry.get('path') for entry in entries}
-    # Older pinned runtimes remain recoverable with their original inventory.
-    if paths not in (expected, expected | {'bin/codex-code-mode-host'}) or len(entries) != len(paths):
+    if paths != expected or len(entries) != len(paths):
         raise ValueError('Incomplete native tool inventory.')
     return entries
 
@@ -526,8 +523,8 @@ def install(manager):
     select(directory)
     Path('/etc/systemd/system/' + SERVICE).write_text('''[Unit]
 Description=Cairn native execution node
-After=network-online.target
-Wants=network-online.target
+After=network-online.target cairn-node-gateway.service
+Wants=network-online.target cairn-node-gateway.service
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 /opt/cairn-native/host.py run
@@ -580,18 +577,24 @@ def start_node(directory):
     return subprocess.Popen([str(directory / 'cairn'), 'node-daemon', str(ROOT / 'data/node')], env=environment(directory))
 
 
-def activate(candidate, previous, child):
+def activate(candidate, child):
     terminate(child)
+    select(candidate)
     trial = start_node(candidate)
     if trial.poll() is None and health(candidate):
-        select(candidate)
-        return trial, candidate, None
+        return trial
     terminate(trial)
-    restored = start_node(previous)
-    if not health(previous):
-        terminate(restored)
-        raise RuntimeError('Native update and rollback both failed health checks.')
-    return restored, previous, 'Native candidate failed health checks; previous compatible version restored.'
+    raise RuntimeError('Native candidate failed health checks; candidate retained for retry.')
+
+
+def complete_update(manager, token, current):
+    pending = ROOT / 'update-pending.json'
+    if not pending.exists() or json.loads(pending.read_text())['candidate'] != current.name:
+        return
+    if not health(current):
+        raise RuntimeError('Pending native candidate is not healthy.')
+    json_request(manager, '/internal/nodes/maintenance', {'action': 'complete', 'image': '', 'error': None}, token)
+    pending.unlink()
 
 
 def run():
@@ -603,7 +606,7 @@ def run():
     token = identity['token']
     current = (INSTALL / 'current').resolve(strict=True)
     child = None
-    failed = None
+    pending_update = ROOT / 'update-pending.json'
     try:
         child = start_node(current)
         if not health(current):
@@ -613,13 +616,11 @@ def run():
                 raise RuntimeError('Native node process exited unexpectedly.')
             draining = False
             try:
+                complete_update(manager, token, current)
                 release = validate_release(json_request(manager, '/internal/nodes/native-release', token=token))
                 installed = json.loads((current / 'release.json').read_text())
                 same = release['sha256'] == installed['sha256'] and release['toolsSha256'] == installed['toolsSha256']
-                candidate_id = release['sha256'] + '-' + release['toolsSha256']
-                if not same and candidate_id != failed:
-                    if release['dataEpoch'] != installed['dataEpoch']:
-                        raise ValueError('Native update needs a reviewed installation data epoch transition.')
+                if not same:
                     candidate = prepare(manager, release, token=token)
                     require_docker_host()
                     configure_docker_apparmor(prepare_docker_tools())
@@ -636,25 +637,23 @@ def run():
                         time.sleep(1)
                     else:
                         raise RuntimeError('Native update drain did not finish; preserving current version.')
+                    atomic_json(pending_update, {'candidate': candidate.name})
                     previous = current
-                    child, selected, error = activate(candidate, current, child)
-                    current = selected
-                    if not error:
-                        try:
-                            collect_versions(current, previous)
-                        except (OSError, ValueError, KeyError):
-                            print('Native version collection postponed; local versions retained.', file=sys.stderr)
-                    if error:
-                        failed = candidate_id
-                    json_request(manager, '/internal/nodes/maintenance', {'action': 'complete', 'image': '', 'error': error}, token)
+                    child = activate(candidate, child)
+                    current = candidate
+                    try:
+                        collect_versions(current, previous)
+                    except (OSError, ValueError, KeyError):
+                        print('Native version collection postponed; local versions retained.', file=sys.stderr)
+                    complete_update(manager, token, current)
             except (OSError, ValueError, RuntimeError, zipfile.BadZipFile, KeyError, TypeError, urllib.error.URLError, subprocess.SubprocessError) as error:
                 # Do not print request bodies, response bodies, identities or credentials.
                 print('Native update postponed: ' + type(error).__name__, file=sys.stderr)
                 if child.poll() is not None:
                     raise RuntimeError('Native node is no longer running.') from None
-                if draining:
+                if draining and not pending_update.exists():
                     try:
-                        json_request(manager, '/internal/nodes/maintenance', {'action': 'complete', 'image': '', 'error': 'Native update failed; compatible prior version retained.'}, token)
+                        json_request(manager, '/internal/nodes/maintenance', {'action': 'complete', 'image': '', 'error': 'Native update failed; inspect the retained candidate.'}, token)
                     except (OSError, ValueError):
                         pass
             for _ in range(300):

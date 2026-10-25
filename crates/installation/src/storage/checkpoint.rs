@@ -185,15 +185,6 @@ pub(crate) async fn seal_target(
     let paused_at = std::time::Instant::now();
     timing.next("freeze_and_pause");
     if let Some(socket) = &socket {
-        if volume.paused() || volume.transition_pending() {
-            suspension::adopt_storage_state(
-                state,
-                &attempt,
-                volume.paused(),
-                volume.transition_pending(),
-            )
-            .await?;
-        }
         let held = suspension::inspect(state, &attempt).await?;
         // An administrative owner cannot be released by a storage checkpoint.
         // Its already-fenced disk can still produce a crash-consistent capture.
@@ -370,7 +361,12 @@ impl SealedCapture {
         timing.next("persist_snapshot");
         manifest["runtime"] =
             serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
-        if manifest["runtime"]["backend"] == "native" && manifest["runtime"]["storage"] == "ublk" {
+        if manifest["runtime"]["backend"] == "native"
+            && matches!(
+                manifest["runtime"]["storage"].as_str(),
+                Some("ublk") | Some(crate::native::block::STORAGE)
+            )
+        {
             manifest["kind"] = "native-ext4-v1".into();
         }
         manifest["capturedAt"] = captured_at.into();

@@ -4,6 +4,7 @@ use crate::error::{Error, Result};
 use std::{path::Path, time::Duration};
 
 pub(crate) const MIB: u64 = 1_048_576;
+
 const METADATA_RESERVE: u64 = MIB;
 
 pub(crate) fn available(limit: u64, used: u64) -> u64 {
@@ -24,7 +25,7 @@ pub(crate) async fn used(data: &Path, state: &Path) -> Result<u64> {
         .map_err(Error::internal)?
 }
 
-/// Count file-backed legacy work conservatively, but charge journal/cache blocks
+/// Count file-backed staging conservatively, but charge journal/cache blocks
 /// by allocated bytes. Mounted views refer to those same blocks and add no charge.
 pub(crate) fn usage_sync(data: &Path, state: &Path) -> Result<u64> {
     fn size(
@@ -182,6 +183,27 @@ pub(crate) async fn staging_budget() -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sparse_temporary_holes_never_reduce_future_host_space_promises() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("sparse");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(16 * MIB).unwrap();
+        file.sync_all().unwrap();
+        assert_eq!(
+            super::super::workspace::credit_bytes(root.path()).unwrap(),
+            0
+        );
+        std::fs::write(&path, vec![1; MIB as usize]).unwrap();
+        std::fs::File::open(&path).unwrap().sync_all().unwrap();
+        assert!(super::super::workspace::credit_bytes(root.path()).unwrap() > 0);
+        std::fs::hard_link(&path, root.path().join("shared")).unwrap();
+        assert_eq!(
+            super::super::workspace::credit_bytes(root.path()).unwrap(),
+            0
+        );
+    }
 
     #[test]
     fn archive_cache_and_conversation_pins_are_charged_once_per_inode() {

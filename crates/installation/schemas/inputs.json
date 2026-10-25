@@ -55,6 +55,7 @@
           "mcps": null,
           "mcpTools": {},
           "installation": false,
+          "delegation": false,
           "sandbox": "yolo"
         },
         "type": "object",
@@ -158,6 +159,10 @@
             "default": false,
             "type": "boolean"
           },
+          "delegation": {
+            "default": false,
+            "type": "boolean"
+          },
           "sandbox": {
             "default": "yolo",
             "type": "string",
@@ -176,6 +181,7 @@
           "mcps",
           "mcpTools",
           "installation",
+          "delegation",
           "sandbox"
         ],
         "additionalProperties": false
@@ -222,48 +228,6 @@
       "access",
       "exclusiveNodes",
       "plugins"
-    ],
-    "additionalProperties": false
-  },
-  "project": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "type": "object",
-    "properties": {
-      "name": {
-        "type": "string",
-        "minLength": 1,
-        "maxLength": 100
-      },
-      "path": {
-        "type": "string",
-        "minLength": 1,
-        "maxLength": 2000
-      },
-      "description": {
-        "default": "",
-        "type": "string",
-        "maxLength": 500
-      },
-      "sourceMode": {
-        "default": "remote",
-        "type": "string",
-        "enum": [
-          "remote",
-          "local"
-        ]
-      },
-      "baseBranch": {
-        "default": "main",
-        "type": "string",
-        "pattern": "^[a-z0-9][\\w/.-]*$"
-      }
-    },
-    "required": [
-      "name",
-      "path",
-      "description",
-      "sourceMode",
-      "baseBranch"
     ],
     "additionalProperties": false
   },

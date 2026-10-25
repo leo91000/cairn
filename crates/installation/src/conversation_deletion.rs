@@ -172,10 +172,8 @@ async fn detach_worktrees(s: &Service, chat: &Value) -> Result<()> {
         s.store.run(run_id).await?
     };
     let root = s.config.data_dir.join("runs").join(run_id);
-    let mut workspaces = array(&chat["legacyWorkspaces"]);
-    workspaces.extend(array(&run["workspaces"]));
-    let mut projects = array(&chat["legacyProjects"]);
-    projects.extend(crate::service::run_projects(&run));
+    let workspaces = array(&run["workspaces"]);
+    let projects = crate::service::run_projects(&run);
     for workspace in workspaces.iter().filter(|w| w["kind"] == "worktree") {
         let target = Path::new(text(workspace, "path"));
         if !target.is_dir() {

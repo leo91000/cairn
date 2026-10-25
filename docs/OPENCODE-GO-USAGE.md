@@ -47,8 +47,7 @@ additional capacity on the user's behalf.
 There is no database migration or storage layout change. The account already
 stores normalized `Usage` windows, attempt/check timestamps and flattened provider
 fields. `useBalance` is an optional provider field; absent values mean disabled.
-Previous releases can read these records, and this release can read existing
-accounts without usage. The installation data compatibility epoch is unchanged.
+An account may have no usage observation until its first successful check.
 
 The HTTP adapter and account-selection tests use synthetic keys and a loopback
 server. Browser journeys use the same adapter against a local fixture through the

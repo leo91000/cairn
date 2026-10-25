@@ -26,7 +26,7 @@ fn entries(path: &Path) -> io::Result<Vec<fs::DirEntry>> {
     }
 }
 
-fn reference(path: &Path, field: &str, pins: &mut HashSet<String>) -> Result<()> {
+fn reference(path: &Path, pins: &mut HashSet<String>) -> Result<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -38,7 +38,7 @@ fn reference(path: &Path, field: &str, pins: &mut HashSet<String>) -> Result<()>
     }
 
     let record: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
-    let runtime = record[field]
+    let runtime = record["runtimeId"]
         .as_str()
         .ok_or_else(|| Error::conflict("Missing runtime image reference."))?;
     if runtime.is_empty() || runtime.len() > 100 || !super::host::valid_runtime_name(runtime) {
@@ -56,11 +56,7 @@ fn collect_locked(state: &Path, current: &Path) -> Result<usize> {
 
     // All disk references live at the physical directory root; logical aliases
     // are also scanned. Do not traverse guest journals or follow symlinks.
-    for (root, file, field) in [
-        ("disks", "runtime.json", "runtimeId"),
-        ("environments", "runtime.json", "runtimeId"),
-        ("templates", "key.json", "runtime"),
-    ] {
+    for root in ["disks", "environments"] {
         for entry in entries(&state.join(root))? {
             let kind = entry.file_type()?;
             if kind.is_symlink() {
@@ -69,7 +65,7 @@ fn collect_locked(state: &Path, current: &Path) -> Result<usize> {
                 ));
             }
             if kind.is_dir() {
-                reference(&entry.path().join(file), field, &mut pins)?;
+                reference(&entry.path().join("runtime.json"), &mut pins)?;
             }
         }
     }
@@ -148,13 +144,7 @@ mod tests {
     #[tokio::test]
     async fn collection_preserves_current_and_all_pins_and_removes_unused_images() {
         let root = tempfile::tempdir().unwrap();
-        for runtime in [
-            "current",
-            "disk-pin",
-            "environment-pin",
-            "template-pin",
-            "unused",
-        ] {
+        for runtime in ["current", "disk-pin", "environment-pin", "unused"] {
             let path = root.path().join("images").join(runtime);
             tokio::fs::create_dir_all(&path).await.unwrap();
             tokio::fs::write(path.join("root.ext4"), b"image")
@@ -173,11 +163,6 @@ mod tests {
                 "runtime.json",
                 r#"{"runtimeId":"environment-pin"}"#,
             ),
-            (
-                "templates/template",
-                "key.json",
-                r#"{"runtime":"template-pin"}"#,
-            ),
         ] {
             let path = root.path().join(directory);
             tokio::fs::create_dir_all(&path).await.unwrap();
@@ -187,7 +172,7 @@ mod tests {
         let current = root.path().join("images/current");
         assert_eq!(collect(root.path(), &current).await.unwrap(), 1);
 
-        for runtime in ["current", "disk-pin", "environment-pin", "template-pin"] {
+        for runtime in ["current", "disk-pin", "environment-pin"] {
             assert!(
                 root.path()
                     .join("images")

@@ -166,7 +166,14 @@ abstract class SubagentCases {
                                 "/api/installations/fixture/api/chats/chat" ->
                                     wireJson.encodeToString(chat)
                                 "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")

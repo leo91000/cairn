@@ -78,7 +78,7 @@ class NativeParityPreviewTest {
                     nextRun = now + 86400000,
                 )
             val agent = Agent(MAIN_AGENT_ID, "Agent principal")
-            val project = Project("project", "Cairn")
+            val project = Project("46d045dd-9bce-51e3-8a99-65aa9384efc9", "Cairn")
             val outcome =
                 TaskOutcome(
                     "completed",
@@ -210,7 +210,9 @@ class NativeParityPreviewTest {
                                         listOf(Agent("custom", "Agent spécialisé"), agent)
                                     )
                                 "/api/installations/fixture/api/projects" ->
-                                    wireJson.encodeToString(listOf(project))
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListProjectsOutput(listOf(project))
+                                    )
                                 "/api/installations/fixture/api/tasks" ->
                                     wireJson.encodeToString(
                                         listOf(

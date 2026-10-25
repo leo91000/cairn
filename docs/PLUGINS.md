@@ -35,8 +35,6 @@ crates/installation/src/plugins/
   programs.rs           `exec`: declared programs without a shell
   work.rs               Admission, access requests, event queue, replies
   cli.rs                `cairn plugin <plugin> <command> …` inside conversations
-  legacy.rs             Moves earlier 1Password accounts into instances
-  legacy_github.rs      Moves the earlier GitHub connection and tokens into instances
 crates/installation/src/skills/sources.rs
                         `skillSources`: skills imported from a package's source
 plugins/                Bundled packages (1Password, Discord, GitHub), embedded by build.rs
@@ -125,7 +123,7 @@ Every plugin uses the same connection model: name, settings, optional credential
 (encrypted in the vault), and, when the package can start conversations, an owner
 delegation: the agent that answers, the people allowed (listed, approved as they ask,
 or anyone), and an hourly message limit. Any agent can answer
-([ADR-0059](adr/0059-owner-chosen-agents-for-bot-delegation.md)); the setup assistant
+([ADR-0068](adr/0068-owner-chosen-agents-for-bot-delegation.md)); the setup assistant
 warns when it can manage the installation or open several projects, and, for anyone,
 when it can also write, run commands or use MCP connections or plugins (GitHub,
 1Password…). The agent must be able to open the delegation's project. “Anyone” is
@@ -421,8 +419,8 @@ talk to it` and `Agents` when they apply. The effort defaults to `app` for OAuth
 `signin` for a device sign-in and `token` for another credential or a required
 secret setting. `GET /api/plugins` returns the resolved `setup` beside each
 `manifest` (and each version), and `manage_plugin`'s `setup` action returns it too.
-Clients of an older installation resolve it from the manifest the same way; the
-shared corpus `tests/fixtures/plugin-setup.json` checks Rust, web and Android.
+Clients use this resolved setup. The shared corpus
+`tests/fixtures/plugin-setup.json` checks server derivation and client presentation.
 
 The package's `form` view appears on the credential step, on steps with dynamic or
 `refresh` fields, and on the first step when there is no credential. A new instance
@@ -437,11 +435,6 @@ management agent may only reuse an instance it is granted.
 Required secrets must be present; an absent optional secret remains absent,
 replacing any typed draft value for that shared field. Sources with secret fields
 remain individually selectable: equal visible labels cannot prove equal secrets.
-
-Installed manifests with `[setup]` require epoch 12 / SQLite version 11, which
-fences previous readers before plugin loading. Existing package files, approvals,
-connections and vault entries are preserved. See the
-[forward migration and recovery plan](AUTOMATIC-MIGRATIONS.md#current-transition-epochs-311-to-12).
 
 The assistant's last step can grant agents to a new instance with the save's
 `agentIds`: creation only grants, never removes. A saved instance shows its agents
@@ -565,8 +558,7 @@ a `message/rfc822` handle and its `messageId`. `messageKey` produces a determini
 Message-ID scoped to the instance, useful for reconciling uncertain sends.
 `contentDigest` hashes the stable composition input and the actual attachment
 bytes, excluding generated MIME boundaries and dates. A changed attachment cannot
-silently replay an earlier send receipt. Local byte/I/O/CPU measurements and their
-limits are recorded in [the transfer measurements](PLUGIN-TRANSFER-MEASUREMENTS.md).
+silently replay an earlier send receipt.
 
 The run-local CLI transfers conversation files with any approved files-capable
 package: `cairn plugin PACKAGE --upload INSTANCE PATH`, `--download INSTANCE HANDLE
@@ -673,7 +665,9 @@ properties.sha = { type = "string", pattern = "^[0-9a-f]{40}$" }
 `wait_for` provides native `delay`, `at` and `run_finished` conditions. Plugins add
 service-specific conditions through the same `condition` handler; no host-side
 service-specific dispatch is needed. Temporal waits take no `timeoutSeconds`;
-plugin conditions require it.
+plugin conditions require it. Agents can group a plugin condition with other
+external conditions (`mode: all` or `any`); each grouped condition is observed and
+scheduled on its own, so the handler is unchanged.
 
 Granted agents see each condition in `wait_for` as type `<plugin>_<name>` (plugin
 IDs have no `_`, so types never collide), with `projectId` when `project = true`; Cairn records the plugin
@@ -817,11 +811,6 @@ also use this response when they may prepare an executable; once prepared, their
 ordinary synchronous responses are unchanged. Instance saves without a form
 handler remain synchronous and do not download programs.
 
-Locks and executables live under `<data>/plugin-programs/`, scoped by package
-digest and server platform. Failed preparation preserves the current version;
-older files remain available for rollback. See ADR-0049 for the epoch-3 migration
-and deployment recovery contract.
-
 ## 1Password
 
 The bundled 1Password package is an ordinary package (`plugins/onepassword/`):
@@ -849,10 +838,6 @@ records its output. Already delivered secrets cannot be revoked.
 The CLI expects an active conversation VM with the current Cairn binary and guest
 channel; VMs started by an earlier binary must restart to use it. Non-VM development
 commands do not acquire a new manager network route.
-
-Existing 1Password accounts migrate to plugin instances at startup. This is a data
-compatibility break (epoch 2); follow the [migration and rollback plan](PLUGIN-V2-MIGRATION.md)
-before deploying the first plugin API v2 release.
 
 ## GitHub
 
@@ -885,9 +870,6 @@ The bundled GitHub package (`plugins/github/`) is an ordinary package built on t
 Plugin HTTP follows no redirects: a repository renamed or transferred on GitHub answers
 with a redirect, which the package reports as unavailable. Register the project again
 with its new name.
-
-Installations that had the earlier built-in GitHub move into this package at startup:
-see the [migration](GITHUB-PLUGIN-MIGRATION.md).
 
 ## Discord
 
@@ -1052,32 +1034,6 @@ required text cannot trim to empty, and nonempty URLs must use HTTP(S). Optional
 empty text retains the existing pattern exemption. Secret defaults and dynamic
 choice defaults remain forbidden. A null default on a non-secret field means
 no default. No values are truncated.
-
-This tightens the set of persisted manifests that the registry can read. The
-installation compatibility epoch advances from 3 to 4. The subsequently reviewed
-[automatic transition to epoch 9](AUTOMATIC-MIGRATIONS.md) now covers this boundary
-under [the production compatibility contract](PRODUCTION-CAIRN.md#installation-data-compatibility).
-Both bundled manifests and ordinary valid installed packages
-retain their settings, serialized form and approval digests; no database, secret
-or instance record is rewritten.
-
-When qualifying an epoch transition, inspect installed manifest settings
-for negative, zero, fractional or oversized `maxLength`, reversed numeric bounds,
-and defaults that fail the rules above. The registry revalidates every version on
-read: an incompatible installed version fails with a validation error, remains on
-disk, and cannot run; catalog version errors identify it. Do not silently clamp,
-normalize or reapprove its contents.
-
-Forward repair: publish a corrected package with a new version under the same
-plugin ID, upload it, review and approve that version. Choose bounds that cover
-existing instance values, or deliberately correct those values when editing the
-instance. The registry then activates the approved version; existing instance IDs,
-settings, encrypted secrets and grants stay in place. If repair or approval fails,
-keep the original files and records and fix the package before retrying. Preserve
-the previous binary and an explicitly prepared pre-transition data backup for a
-reviewed rollback; do not run the previous binary on epoch-4 installation data or
-lower the compatibility epoch to bypass the rollout gate. No automatic data
-backup/restoration or production manifest inventory is claimed here.
 
 The Android `Int?` decoder's behavior for a fractional `maxLength` has not been
 executed on a JVM or device in this change. Backend admission now rejects that

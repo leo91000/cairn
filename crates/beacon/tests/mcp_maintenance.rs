@@ -67,7 +67,7 @@ async fn beacon_login_claim_and_token_quotas_share_each_ipv6_prefix() {
             json!({
                 "code": "unknown",
                 "name": "Test",
-                "protocol": 1,
+                "protocol": cairn_protocol::PROTOCOL_VERSION,
             }),
             StatusCode::UNAUTHORIZED,
         ),

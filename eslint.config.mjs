@@ -3,7 +3,7 @@ import antfu from '@antfu/eslint-config'
 export default antfu({
   vue: true,
   typescript: true,
-  ignores: ['docs/screenshots/**', '.data/**', 'playwright-report/**', 'test-results/**', 'vendor/**', 'apps/android/**/build/**', 'apps/android/.gradle/**', 'apps/android/.kotlin/**'],
+  ignores: ['docs/screenshots/**', '.data/**', 'playwright-report/**', 'test-results/**', 'vendor/**', 'apps/android/**/build/**', 'apps/android/.gradle/**', 'apps/android/.kotlin/**', 'scripts/contracts-kotlin/build/**', 'scripts/contracts-kotlin/.gradle/**', 'scripts/contracts-kotlin/.kotlin/**'],
   rules: {
     'style/padding-line-between-statements': [
       'error',

@@ -428,3 +428,13 @@ describe('the working indicator', () => {
     expect(identityColor('main')).toBe(identityColor('main'))
   })
 })
+
+describe('delegated conversations', () => {
+  it('name the conversation that delegated them while it remains', () => {
+    const requester = chat('requester', { title: 'Refactor the send queue', slug: 'refactor' })
+    const delegated = chat('delegated', { status: 'running', requester: { chatId: 'requester', title: 'Refactor the send queue' } })
+    const fil = filOf([requester, delegated], [], [])
+    expect(fil.live.find(item => item.chatId === 'delegated')?.requester).toEqual({ title: 'Refactor the send queue', to: '/chats/requester' })
+    expect(fil.recent.find(item => item.chatId === 'requester')?.requester).toBeUndefined()
+  })
+})

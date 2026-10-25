@@ -231,15 +231,8 @@ pub(crate) async fn convert(
         .as_u64()
         .ok_or_else(|| Error::bad("Missing saved disk size."))?;
     tokio::task::spawn_blocking(move || -> Result<()> {
-        let layout = super::layout::Layout::from_manifest(&manifest)?;
-        let system_size = layout.system_bytes(size);
-        let system = filesystem(&image, 0, system_size)?;
-        let paired = match layout {
-            super::layout::Layout::Flat => None,
-            super::layout::Layout::Paired { system_bytes } => {
-                Some(filesystem(&image, system_bytes, size - system_bytes)?)
-            }
-        };
+        super::layout::validate(&manifest)?;
+        let system = filesystem(&image, 0, size)?;
         let native_source = manifest["kind"] == "native-ext4-v1";
         if native_source && system.exists("/docker").map_err(Error::internal)? {
             for entry in system.read_dir("/docker").map_err(Error::internal)? {
@@ -270,11 +263,6 @@ pub(crate) async fn convert(
             let guest_relative = relative(guest)?;
             let (source, fs) = if native_source {
                 (Path::new("/").join(name), &system)
-            } else if let Some(paired) = paired.as_ref().filter(|_| guest.starts_with("/data")) {
-                (
-                    Path::new("/").join(guest.strip_prefix("/data").unwrap()),
-                    paired,
-                )
             } else {
                 (Path::new("/upper").join(guest_relative), &system)
             };
@@ -300,18 +288,6 @@ pub(crate) async fn convert(
                 )));
             }
             copy.tree(fs, &source, &target)?;
-        }
-        if !native_source && let Some(paired) = paired {
-            for (source, relative) in [
-                ("home-cache", ".cache"),
-                ("home-share", ".local/share"),
-                ("android", ".android"),
-            ] {
-                let source = Path::new("/.cairn-system").join(source);
-                if paired.exists(source.as_path()).map_err(Error::internal)? {
-                    copy.tree(&paired, &source, &copy_root.join("home").join(relative))?;
-                }
-            }
         }
         if backend == "firecracker" {
             let initialized = copy_root.join("upper/var/lib/cairn");

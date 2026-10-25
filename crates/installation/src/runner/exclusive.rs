@@ -747,6 +747,9 @@ mod tests {
                     .unwrap();
             }
         });
+        suspension::prepare_attempt(&broker.state, &id, &vm)
+            .await
+            .unwrap();
         atomic_write(
             &broker.state_file(&id, "vm.json"),
             &serde_json::to_vec(&json!({

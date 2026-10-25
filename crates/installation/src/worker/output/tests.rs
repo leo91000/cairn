@@ -106,6 +106,56 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn runtime_disk_notice_preserves_publication_metadata_and_redacts_all_payloads() {
+    let mut fixture = Fixture::new().await;
+    let storage = json!({ "mode": "on-demand", "grantId": "retained-grant", "dirtyBytes": 123,
+        "published": { "generation": 7, "backupId": "retained-backup" }, "policy": { "cacheMiB": 64 } });
+    fixture
+        .service
+        .store
+        .patch_run(&fixture.id, json!({ "storage": storage }))
+        .await
+        .unwrap();
+    fixture
+        .event(
+            json!({ "type": "runtime.disk_notice", "text": "Pressure sensitive-tool-credential",
+        "capacity": { "allowanceBytes": 34359738368u64, "note": "sensitive-tool-credential" } }),
+        )
+        .await;
+    let run = fixture.service.store.run(&fixture.id).await.unwrap();
+    let expected = json!({ "allowanceBytes": 34359738368u64, "note": "[redacted]" });
+    assert_eq!(run["storage"], storage);
+    assert_eq!(run["diskCapacity"], expected);
+    // Ordinary storage polling replaces its own authoritative document.
+    fixture
+        .service
+        .store
+        .patch_run(
+            &fixture.id,
+            json!({ "storage": { "mode": "on-demand", "dirtyBytes": 0 } }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.service.store.run(&fixture.id).await.unwrap()["diskCapacity"],
+        expected
+    );
+    let id = fixture.id.clone();
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.events(&id, 0, 100))
+        .await
+        .unwrap();
+    assert!(events.iter().any(|event| event["type"] == "status"));
+    assert!(
+        !serde_json::to_string(&events)
+            .unwrap()
+            .contains("sensitive-tool-credential")
+    );
+}
+
+#[tokio::test]
 async fn partial_guest_stdout_cannot_hide_controller_failure_after_exhausted_logs() {
     let mut fixture = Fixture::new().await;
     fixture.log_total = LOG_BUDGET;
@@ -263,6 +313,68 @@ async fn native_retry_notices_survive_log_budget_without_claiming_the_final_fail
     assert_eq!(
         saved.retry_cause.unwrap().unwrap().kind,
         crate::run_retry::FailureKind::Timeout,
+    );
+}
+
+#[tokio::test]
+async fn engine_reports_survive_log_budget_redacted_and_only_a_reported_limit_exhausts() {
+    let mut fixture = Fixture::new().await;
+    fixture.log_total = LOG_BUDGET;
+    for event in [
+        json!({ "type": "engine.retry", "attempt": 1, "maxRetries": 10, "delayMs": 500, "reason": "overloaded" }),
+        json!({ "type": "provider.limit", "status": "rejected", "window": "five_hour", "blocked": true }),
+        json!({ "type": "engine.notice", "level": "warning", "message": "Hook printed sensitive-tool-credential" }),
+        // A long notice is cut once redacted: a secret across the cut leaves no part behind.
+        json!({ "type": "engine.notice", "level": "warning", "message": format!("{}sensitive-tool-credential", "x".repeat(3_995)) }),
+        // Notices the conversation does not show stay within the run log's budget.
+        json!({ "type": "engine.notice", "level": "info", "message": "Tool Bash running for 30s" }),
+    ] {
+        fixture.event(event).await;
+    }
+    // None of them fails the attempt: the engine retries, and the turn reports the limit.
+    let saved = fixture.checkpoint.snapshot().await;
+    assert!(saved.last_error().is_empty());
+    assert!(saved.retry_cause.is_none());
+
+    let id = fixture.id.clone();
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.events(&id, 0, 1000))
+        .await
+        .unwrap();
+    // The run's own queued status precedes them.
+    let events: Vec<_> = events
+        .into_iter()
+        .filter(|event| event["type"] != "status")
+        .collect();
+    let kinds: Vec<_> = events.iter().map(|event| text(event, "type")).collect();
+    assert_eq!(
+        kinds,
+        [
+            "engine.retry",
+            "provider.limit",
+            "engine.notice",
+            "engine.notice"
+        ]
+    );
+    assert_eq!(events[0]["payload"]["attempt"], 1);
+    assert!(!events[2].to_string().contains("sensitive-tool-credential"));
+    assert_eq!(events[2]["payload"]["message"], "Hook printed [redacted]");
+    let long = text(&events[3]["payload"], "message");
+    // It is cut before the marker it would split, and says it was cut.
+    assert!(long.chars().count() <= 4_000);
+    assert!(long.ends_with("x…"), "{}", &long[3_980..]);
+    assert!(!events[3].to_string().contains("sensitive"));
+
+    let limit = json!({
+        "type": "turn.failed",
+        "error": { "message": "Your allowance is used up.", "code": "usage_limit_reached" },
+    });
+    assert!(crate::run_output::exhausted(&limit));
+    assert!(
+        crate::run_retry::Cause::classify(&limit["error"]).is_none(),
+        "a usage limit waits for an account, not a retry"
     );
 }
 

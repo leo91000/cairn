@@ -2,6 +2,7 @@ import type { Run, RunEvent } from '../../../packages/contracts/contracts'
 import type { ActivityEntry } from './activity'
 import { providers } from '../../../packages/contracts/accounts'
 import { activityPayload, failureReason } from './activity'
+import { limitReset } from './engine-status'
 
 const quotaMessage = /^(?:you['’]ve hit your (?:(?:usage|session|weekly|spend|individual spend) )?limit|you have hit your (?:usage )?limit|usage limit (?:has been )?(?:reached|exceeded)|claude ai usage limit reached|(?:5-hour|session|weekly|opus) limit reached)\b/i
 
@@ -36,12 +37,23 @@ export function chatQuota(run: Run | null | undefined, events: RunEvent[]): Chat
     return null
   const current = events.filter(event => event.runId === run.id)
   let failureMessage = ''
+  // When the engine reported the limit, it said when the limit resets.
+  let failureReset: unknown
   for (const event of current) {
     const turnBoundary = ['chat.user', 'turn.started', 'turn.completed'].includes(event.type)
     const executionBoundary = event.type === 'status' && ['queued', 'succeeded', 'cancelled', 'interrupted'].includes(event.text)
-    if (turnBoundary || executionBoundary)
+    if (turnBoundary || executionBoundary) {
       failureMessage = ''
-    failureMessage = quotaFailure(event) || failureMessage
+      failureReset = undefined
+    }
+
+    const failure = quotaFailure(event)
+    if (failure) {
+      // The runner repeats the engine's failure without its reset.
+      const reset = (activityPayload(event).error as Record<string, unknown> | undefined)?.resetsAt
+      failureReset = reset ?? (failure === failureMessage ? failureReset : undefined)
+      failureMessage = failure
+    }
   }
 
   const active = ['running', 'queued'].includes(run.status)
@@ -59,7 +71,7 @@ export function chatQuota(run: Run | null | undefined, events: RunEvent[]): Chat
     message,
     spend: /\bspend limit\b/i.test(message),
     // Keep the announced zone and wording: a time without a date is not a deadline.
-    reset: /\bresets\b(.*)$/i.exec(message)?.[1]?.trim().replace(/\.$/, '') || null,
+    reset: /\bresets\b(.*)$/i.exec(message)?.[1]?.trim().replace(/\.$/, '') || (message === failureMessage && limitReset(failureReset)) || null,
     // Pausing the follow-up queue does not pause an execution's capacity wait.
     automatic: waiting,
   }
@@ -70,7 +82,6 @@ export function quotaHiddenEvents(events: RunEvent[]) {
   const hidden = new Set<string>()
   const turns = new Map<string, {
     exhausted: boolean
-    legacyTool: boolean
     causes: Set<string>
     failures: Set<string>
     messages: Map<string, { text: string, ids: string[] }>
@@ -79,7 +90,6 @@ export function quotaHiddenEvents(events: RunEvent[]) {
     if (!turns.has(event.runId) || ['turn.started', 'chat.user'].includes(event.type)) {
       turns.set(event.runId, {
         exhausted: false,
-        legacyTool: false,
         causes: new Set(),
         failures: new Set(),
         messages: new Map(),
@@ -90,13 +100,7 @@ export function quotaHiddenEvents(events: RunEvent[]) {
     const id = `${event.runId}:${event.id}`
     const data = activityPayload(event)
     const item = data.item as Record<string, unknown> | undefined
-    const legacy = !event.payload && !Object.keys(data).length
-    const legacyMessage = legacy && event.type === 'item.completed' && !turn.legacyTool
-    if (legacy && event.type === 'item.started')
-      turn.legacyTool = true
-    if (legacy && event.type === 'item.completed')
-      turn.legacyTool = false
-    if ((item?.type === 'agent_message' && typeof item.text === 'string') || legacyMessage) {
+    if (item?.type === 'agent_message' && typeof item.text === 'string') {
       const key = typeof item?.id === 'string' ? item.id : id
       const message = turn.messages.get(key) ?? { text: '', ids: [] }
       message.text = typeof item?.text === 'string' ? item.text : event.text

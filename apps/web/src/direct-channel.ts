@@ -10,6 +10,11 @@ export class TransportLost extends Error {
   constructor() { super('Connection interrupted. Please check the result before trying again.') }
 }
 
+/** A wire-version refusal is terminal until the app and installation are updated. */
+export class ProtocolMismatch extends Error {
+  constructor(message = 'Protocol mismatch. Update required: update the app, Beacon and installation.') { super(message) }
+}
+
 // The peer could not dispatch this request: even mutations are safe on relay.
 export class TransportNotSent extends Error {
   constructor() { super('Direct request was not sent.') }
@@ -17,7 +22,7 @@ export class TransportNotSent extends Error {
 
 interface Frame {
   type: string
-  id: string
+  id?: string
   status?: number
   headers?: [string, string][]
   body?: string
@@ -70,7 +75,7 @@ export class DirectChannel {
   private outgoingWaiters = new Set<() => void>()
   private deadline: ReturnType<typeof setInterval>
 
-  constructor(private channel: RTCDataChannel, private identity: { account_id: string, role: string }, private failed: () => void) {
+  constructor(private channel: RTCDataChannel, private identity: { account_id: string, role: string }, private failed: (error?: unknown) => void) {
     channel.bufferedAmountLowThreshold = 32768
     channel.addEventListener('message', this.receive)
     this.deadline = setInterval(() => {
@@ -79,7 +84,7 @@ export class DirectChannel {
     }, 1000)
   }
 
-  close() {
+  close(reason?: Error) {
     if (this.closed)
       return
     this.closed = true
@@ -88,9 +93,9 @@ export class DirectChannel {
     for (const [id, pending] of this.pending) {
       this.release(id)
       if (pending.started)
-        pending.stream?.error(new TransportLost())
+        pending.stream?.error(reason ?? new TransportLost())
       else
-        pending.reject(pending.sent ? new TransportLost() : new TransportNotSent())
+        pending.reject(reason ?? (pending.sent ? new TransportLost() : new TransportNotSent()))
     }
 
     this.assemblies.clear()
@@ -280,8 +285,10 @@ export class DirectChannel {
       if (!(event.data instanceof ArrayBuffer))
         throw new Error('Binary channel required')
       const packet = new Uint8Array(event.data)
-      if (packet.length < HEADER || packet.length > MAX_PACKET || packet[0] !== 1)
+      if (packet.length < HEADER || packet.length > MAX_PACKET)
         throw new Error('Invalid fragment')
+      if (packet[0] !== 1)
+        throw new ProtocolMismatch()
       const header = new DataView(packet.buffer)
       const id = header.getUint32(1)
       const total = header.getUint32(5)
@@ -327,13 +334,16 @@ export class DirectChannel {
 
       this.dispatch(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(json)))
     }
-    catch { this.failed() }
+    catch (error) { this.failed(error) }
   }
 
   private dispatch(frame: Frame) {
+    if (frame.type === 'update_required')
+      throw new ProtocolMismatch()
     if (!['response', 'stream_start', 'stream_chunk', 'stream_end'].includes(frame.type) || typeof frame.id !== 'string')
       throw new Error('Unexpected frame')
-    const pending = this.pending.get(frame.id)
+    const id = frame.id
+    const pending = this.pending.get(id)
     if (!pending)
       return // Response to an abandoned request; never deliver to another caller.
     if (frame.type === 'response' || frame.type === 'stream_start') {
@@ -343,7 +353,7 @@ export class DirectChannel {
       headers.set('x-cairn-transport', 'direct')
       if (frame.type === 'response') {
         const body = bytes(frame.body!)
-        this.release(frame.id)
+        this.release(id)
         // Reserved transport refusal, emitted before dispatch and excluded from
         // application response headers. An ordinary application 503 is not safe
         // to replay, even if its body has the same wording.
@@ -361,14 +371,14 @@ export class DirectChannel {
       const body = new ReadableStream<Uint8Array>({
         start: controller => pending.stream = controller,
         pull: () => {
-          if (this.pending.has(frame.id) && !pending.credited) {
+          if (this.pending.has(id) && !pending.credited) {
             pending.credited = true
-            return this.send({ type: 'stream_credit', id: frame.id })
+            return this.send({ type: 'stream_credit', id })
           }
         },
         cancel: () => {
-          this.release(frame.id)
-          return this.send({ type: 'cancel', id: frame.id })
+          this.release(id)
+          return this.send({ type: 'cancel', id })
         },
       }, { highWaterMark: 0 })
       pending.resolve(new Response(body, { status: frame.status, headers }))
@@ -382,7 +392,7 @@ export class DirectChannel {
     else {
       if (!pending.started)
         throw new Error('Stream not started')
-      this.release(frame.id)
+      this.release(id)
       if (frame.failed)
         pending.stream!.error(new TransportLost())
       else

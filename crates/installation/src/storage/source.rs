@@ -129,7 +129,10 @@ mod tests {
     async fn prepared_source_rejects_reads_and_publication_until_persistence_succeeds() {
         let source = Source::prepared(tokio::runtime::Handle::current(), CancellationToken::new());
         assert_eq!(
-            source.fetch(&"a".repeat(64)).unwrap_err().kind(),
+            source
+                .fetch(&format!("b3-{}", "a".repeat(64)))
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::PermissionDenied
         );
         assert!(source.grant_id().is_err());
@@ -185,7 +188,10 @@ mod tests {
                 assert!(!source.waiting());
                 assert!(source.grant_id().is_err());
                 assert_eq!(
-                    source.fetch(&"a".repeat(64)).unwrap_err().kind(),
+                    source
+                        .fetch(&format!("b3-{}", "a".repeat(64)))
+                        .unwrap_err()
+                        .kind(),
                     io::ErrorKind::PermissionDenied
                 );
                 assert!(
@@ -234,7 +240,7 @@ mod tests {
             )
             .unwrap();
         let read = |source: Arc<Source>| {
-            tokio::task::spawn_blocking(move || source.fetch(&"a".repeat(64)))
+            tokio::task::spawn_blocking(move || source.fetch(&format!("b3-{}", "a".repeat(64))))
         };
         assert_eq!(
             read(source.clone()).await.unwrap().unwrap(),

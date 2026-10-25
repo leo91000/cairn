@@ -276,6 +276,13 @@ async fn health_and_deployment_lease_report_live_worker_ownership() {
         "createdAt": 1,
     });
     common::add_run(&service.store, &saved).await;
+    let tools = health(&app).await["tools"].clone();
+    for tool in ["codex", "gh", "claude", "opencode"] {
+        assert!(
+            tools.as_object().unwrap().contains_key(tool),
+            "Health reports the image's {tool} version"
+        );
+    }
     assert_eq!(
         health(&app).await["activeRuns"],
         0,
@@ -323,6 +330,34 @@ async fn health_and_deployment_lease_report_live_worker_ownership() {
             .await
             .unwrap()
             .is_none()
+    );
+    // An abandoned updater must not hold the worker forever or prevent the next
+    // updater from acquiring ownership after its lease expires.
+    service
+        .store
+        .set(
+            "deployment-lease",
+            json!("abandoned-owner"),
+            Some(cairn_installation::config::now() - 1),
+        )
+        .await
+        .unwrap();
+    assert!(
+        service
+            .store
+            .kv("deployment-lease")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    service
+        .worker
+        .deployment_lease(&service, "next-owner".into(), false)
+        .await
+        .unwrap();
+    assert_eq!(
+        service.store.kv("deployment-lease").await.unwrap(),
+        Some(json!("next-owner"))
     );
 }
 
@@ -652,7 +687,7 @@ async fn plugin_project_imports_require_trusted_owner_context() {
 }
 
 #[tokio::test]
-async fn agents_default_to_unlimited_and_migrate_only_the_main_agents_old_default() {
+async fn agent_bootstrap_defaults_to_unlimited_and_preserves_configured_limits() {
     let (_root, _app, s) = app().await;
     let timeout_of_main = async |service: &Service| {
         service.get("agents", MAIN_AGENT_ID).await.unwrap()["timeoutMinutes"].clone()
@@ -674,12 +709,8 @@ async fn agents_default_to_unlimited_and_migrate_only_the_main_agents_old_defaul
         assert!(s.agent(invalid, None).await.is_err());
     }
     let main_agent = |minutes: i64| json!({ "name": "Main agent", "timeoutMinutes": minutes });
-    for (previous, expected) in [(90, 90), (120, 0)] {
+    for (previous, expected) in [(90, 90), (120, 120)] {
         s.agent(main_agent(previous), Some(MAIN_AGENT_ID))
-            .await
-            .unwrap();
-        s.store
-            .write(|db| db.delete("migration:main-agent-unlimited"))
             .await
             .unwrap();
         let restarted = Service::new(s.config.clone()).await.unwrap();
@@ -690,7 +721,7 @@ async fn agents_default_to_unlimited_and_migrate_only_the_main_agents_old_defaul
     assert_eq!(
         timeout_of_main(&restarted).await,
         120,
-        "An explicit choice after migration must survive restart"
+        "An explicit limit must survive restart"
     );
 }
 

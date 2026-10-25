@@ -89,6 +89,19 @@ impl HttpEmailSender {
     }
 }
 
+/// The node gateway built with this Beacon, which it serves to new nodes.
+fn node_gateway() -> Option<Vec<u8>> {
+    let path = env::var("CAIRN_NODE_GATEWAY")
+        .unwrap_or_else(|_| "/usr/local/lib/cairn/cairn-node-gateway".to_owned());
+    match std::fs::read(&path) {
+        Ok(binary) => Some(binary),
+        Err(_) => {
+            tracing::warn!("No node gateway at CAIRN_NODE_GATEWAY; nodes need a manager address");
+            None
+        }
+    }
+}
+
 fn required(name: &str) -> Result<String, String> {
     env::var(name)
         .ok()
@@ -338,6 +351,10 @@ async fn run() -> Result<(), String> {
     .merge(cairn_beacon::installer::release_router(
         env::var("CAIRN_INSTALLATION_IMAGE").ok(),
     )?)
+    .merge(cairn_beacon::installer::gateway_router(
+        &origin,
+        node_gateway(),
+    ))
     .route(
         "/health",
         get(move || {

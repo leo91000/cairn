@@ -1,7 +1,33 @@
 """Select an immutable comparison commit for every supported CI event."""
 import os
+import json
 import re
 import subprocess
+import sys
+import urllib.request
+
+
+def current_run_artifact(name, environment=None, opener=urllib.request.urlopen):
+    environment = os.environ if environment is None else environment
+    repository, run = environment['GITHUB_REPOSITORY'], environment['GITHUB_RUN_ID']
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository) or not run.isdecimal():
+        raise ValueError('Artifact reuse requires the current repository and numeric workflow run.')
+    page = 1
+    while True:
+        # Scope reuse to this exact run (and therefore candidate commit), never
+        # another PR's artifact. The name binds reference SHA, image and profile;
+        # the workflow verifies the embedded metadata and binary checksums too.
+        request = urllib.request.Request(
+            f'https://api.github.com/repos/{repository}/actions/runs/{run}/artifacts?per_page=100&page={page}',
+            headers={'Authorization': 'Bearer ' + environment['GITHUB_TOKEN'], 'Accept': 'application/vnd.github+json'},
+        )
+        with opener(request, timeout=30) as response:
+            artifacts = json.load(response)['artifacts']
+        if any(artifact['name'] == name and artifact['expired'] is False for artifact in artifacts):
+            return True
+        if len(artifacts) < 100:
+            return False
+        page += 1
 
 
 def valid_sha(value):
@@ -36,6 +62,11 @@ def select_reference(preferred, current, cwd=None):
 
 if __name__ == '__main__':
     try:
-        print(select_reference(os.environ.get('EVENT_REFERENCE_SHA', ''), os.environ['GITHUB_SHA']))
+        if sys.argv[1:] == ['artifact-available']:
+            print(str(current_run_artifact(os.environ['NATIVE_REFERENCE_ARTIFACT'])).lower())
+        elif sys.argv[1:]:
+            raise ValueError('Unknown native reference operation.')
+        else:
+            print(select_reference(os.environ.get('EVENT_REFERENCE_SHA', ''), os.environ['GITHUB_SHA']))
     except (ValueError, subprocess.CalledProcessError) as error:
         raise SystemExit(f'Native reference selection failed: {error}') from error

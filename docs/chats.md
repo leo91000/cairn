@@ -33,7 +33,7 @@ Android through the existing live stream and do not change the chat's recency.
 
 When an agent reports completion, **Task completed** appears beneath the reply in the conversation. **View evidence** expands the report and supporting details, including clickable commit and workflow links; **Hide evidence** collapses it. Reports without evidence use **View details**. **Blocked** and **Your input needed** show their reason immediately. These are agent-reported outcomes, and a new reply clears the previous report. The composer remains available while reading the evidence.
 
-The conversation reads like the Android app. Your messages sit in a tonal bubble; the agent's replies are plain text under its name. Short conversations sit just above the composer. The agent's actions between two messages collapse into one sentence (for example *Read 2 files, searched once, edited 2 files, ran 2 commands*) with the step count and any failures; expanding it shows a timeline where consecutive reads fold into one step, and each step opens a sheet with its command, output and technical details. While the agent works, the step in progress is left to the working indicator. Deliverables appear as a compact horizontal rail beside the reply. Connection status (**Reconnecting…**, **Updating…**) floats over the conversation instead of moving it. Mission runs use the same reader; see [missions](tasks.md).
+The conversation reads like the Android app. Your messages sit in a tonal bubble; the agent's replies are plain text under its name. Short conversations sit just above the composer. The agent's actions between two messages collapse into one sentence (for example *Read 2 files, searched once, edited 2 files, ran 2 commands*) with the step count and any failures; expanding it shows a timeline where consecutive reads fold into one step, and each step opens a sheet with its command, output and technical details. While the agent works, the step in progress is left to the working indicator. Deliverables appear as a compact horizontal rail beside the reply. Connection status (**Reconnecting…**, **Updating…**) floats over the conversation instead of moving it. Mission runs use the same reader; see [missions](#missions).
 
 Routine session updates (connecting, starting, finishing and success) are hidden from chat, including inside tool groups. The working indicator and completion footer provide that status. Failures and unresolved interruptions appear as inline notices; recovered connection retries disappear. Raw lifecycle events remain in run activity for troubleshooting.
 
@@ -55,7 +55,7 @@ The message is stored and displayed exactly as typed. When a reply starts, or a 
 
 ## Execution and recovery
 
-Tasks continue to use `codex exec`. Chats use Codex app-server `thread/start`, `thread/resume`, `turn/start` and `turn/steer`, tested against Codex 0.154.0. Steering includes the active `expectedTurnId`. If that turn has already finished, the message remains pending for the next turn.
+All executions, including missions, use the chat protocol. Codex uses app-server `thread/start`, `thread/resume`, `turn/start` and `turn/steer`, tested against Codex 0.154.0. Steering includes the active `expectedTurnId`. If that turn has already finished, the message remains pending for the next turn.
 
 `Chats` owns durable user messages and dispatch. `Worker` owns account selection, project locks, timeout budgets, restart fencing and execution. `chat-process.ts` adapts app-server notifications to the shared Activity artifact format. Each active reply has a supervised process; idle chats hold no account or worker slot. Restricted agents run the same adapter inside the isolated container, with a read-only inbox containing only that run's steering messages.
 
@@ -80,3 +80,30 @@ On iPhone and iPad, install Cairn using Safari's **Share → Add to Home Screen*
 The public app must use HTTPS. No notification SaaS account is required: VAPID keys are generated automatically and encrypted with the existing persistent application key, along with browser subscription credentials. Keep the data volume and its encryption key when moving the deployment. Supported push providers are Chrome/Chromium (FCM), Firefox, Safari, and Edge's Windows notification service. The server validates provider endpoints, removes expired subscriptions, and retries temporary failures for up to an hour. It skips notifications for questions already answered. The service worker does not cache pages or authenticated API responses.
 
 Tests cover the native Codex request/response shape, blocking and nonblocking questions, late answers, replay, restart, API authorization, notification retry and expiry, private push content, device enrollment/revocation, notification routing, and desktop/mobile question screens in Chromium and WebKit. Browser automation replaces the OS permission prompt and push provider; actual delivery to a phone requires opting in on that phone.
+
+## Missions
+
+Missions follow the Android app. The list shows one card per mission: its agent and
+project, its name, the schedule in words (for example *Every Monday · 09:00*, or *Paused ·*
+before it) with the next date, and a strip of its last twelve runs in order (green
+succeeded, coral failed, accent running). A mission needing review says why: **Failed**,
+**Interrupted**, **Blocked** or **Your input needed**. The round button runs the mission;
+while it runs, the button shows the elapsed time instead. Running missions come first, then
+those needing review, then the next scheduled ones, then the rest by name.
+
+The title summarises how many missions are active and when the next one runs. **Search
+missions** filters by name and tags; the chips filter **All**, **Scheduled**, **One-off**,
+**Paused** and **Archived**, each with its count. **New mission** opens the editor.
+
+Selecting a card opens the mission: beside the list on wide screens, in a bottom sheet on
+screens up to 900 px. It shows the agent and project, the name and tags, the schedule with
+its time, cron expression, timezone and next two dates, the brief (three lines, expandable),
+and the last ten runs with their success rate. Each run opens its own page. The detail ends with
+**Edit mission**, **Pause schedule** / **Resume schedule** and **Run now**; the actions menu
+duplicates or archives the mission (both paused), opens the latest run, or deletes it. The
+selected mission stays in the URL across reloads.
+
+**Run now** opens the new run, as on Android. A run page opens on its **Conversation**, then
+offers **Result**, **Files** and **Mission brief**. The conversation reads like a chat: the
+agent's actions between messages collapse into one sentence, expand into a timeline and
+open each step's command, output and details in a sheet.

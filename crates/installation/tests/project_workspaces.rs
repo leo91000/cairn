@@ -1,3 +1,5 @@
+use common::ProjectFixture;
+
 mod common;
 
 use cairn_installation::plugins::run_credentials::RunCredentials;
@@ -33,7 +35,7 @@ async fn fixture() -> (TempDir, Arc<Service>, Vec<Value>) {
         std::fs::create_dir(&path).unwrap();
         std::fs::write(path.join("hello"), name).unwrap();
         projects.push(
-            s.project(json!({ "name": name, "path": path }), None)
+            s.project_fixture(json!({ "name": name, "path": path }), None)
                 .await
                 .unwrap(),
         );
@@ -228,12 +230,6 @@ fn access_covers_unchanged_or_wider_grants_but_not_reduced_ones() {
         reduced["access"][key] = value;
         assert!(!covers(&reduced, &granted), "{key}");
     }
-    // GitHub became a plugin grant: the setting older snapshots carry no longer counts.
-    let mut github = same.clone();
-    github["access"]["github"] = false.into();
-    let mut with_github = granted.clone();
-    with_github["access"]["github"] = true.into();
-    assert!(covers(&github, &with_github));
 }
 
 #[tokio::test]
@@ -246,7 +242,7 @@ async fn scoped_access_rejects_other_projects_expired_grants_and_reduced_permiss
     let run = run(&s, Value::Null, text(&agent, "id")).await;
     patch_run(&s, &run, json!({ "status": RunStatus::Running })).await;
     let config = s.mcps.run_configuration(&s, &run).await.unwrap();
-    assert!(config["args"].to_string().contains("cairn_workspace"));
+    assert!(config["codexConfig"].get("cairn_workspace").is_some());
     let token = text(&config["env"], "CAIRN_MCP_RUN_TOKEN");
     assert_eq!(
         s.projects
@@ -346,13 +342,6 @@ async fn open_imports_once_reuses_seed_and_restores_loaded_catalog_without_check
         .await
         .unwrap();
     assert_eq!(restored["workspaces"], saved["workspaces"]);
-    let mut legacy = restored.clone();
-    legacy.as_object_mut().unwrap().remove("projectRoot");
-    let upgraded = execution::restore(&saved, legacy, &s.config, &RunCredentials::default())
-        .await
-        .unwrap();
-    assert_eq!(upgraded["projectRoot"], restored["projectRoot"]);
-    assert_eq!(upgraded["workspaces"], restored["workspaces"]);
     assert_eq!(calls.lock().await.len(), 3);
     server.abort();
 }
@@ -531,7 +520,7 @@ async fn new_git_work_is_fresh_and_local_snapshots_preserve_the_registered_check
     let current = git(&origin, &["rev-parse", "HEAD"]);
     std::fs::write(source.join("file"), "uncommitted").unwrap();
     let mut project = s
-        .project(json!({ "name": "Git", "path": source }), None)
+        .project_fixture(json!({ "name": "Git", "path": source }), None)
         .await
         .unwrap();
     let fresh = root.path().join("fresh");
@@ -683,7 +672,7 @@ async fn partial_clone_missing_blobs_are_fetched_from_the_real_promisor() {
         "fixture must actually omit blobs"
     );
     let mut project = s
-        .project(json!({ "name": "Partial", "path": source }), None)
+        .project_fixture(json!({ "name": "Partial", "path": source }), None)
         .await
         .unwrap();
     for mode in ["remote", "local"] {

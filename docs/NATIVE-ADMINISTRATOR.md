@@ -119,15 +119,6 @@ procedure before it can be trusted again.
 
 ## Compatibility and qualification
 
-Epoch 13 / SQLite 12 fence older managers before they read administrative records.
-Old nodes remain protected by default and cannot change mode without capability
-`nativeModeProtocol: 1`. New plans carry the exact reviewed mode/generation.
-Native state budgets carry a strict `nativeModeProtocol` marker: old native
-controllers reject that on-disk budget, and the installer's independent epoch
-check forbids ordinary cross-epoch fallback. See [automatic migrations](AUTOMATIC-MIGRATIONS.md).
-No workspace, checkpoint, encryption or S3 encoding changes are introduced; the
-existing storage measurements remain the reference.
-
 `scripts/tests/native_runtime_test.py` runs only as root with
 `CAIRN_NATIVE_DISPOSABLE_HOST=1` and loopback synthetic S3. It exercises ordinary
 UID plus host sudo and a real `/etc` write, protected denial of sudo/personal
@@ -137,49 +128,9 @@ state. CI supplies the disposable VM; never run that fixture on the owner's node
 Backend tests cover unknown modes, old supervisors, unapproved users, snapshot
 races, pending/failed/stale generation admission and future wildcard grants.
 
-## Local budget metadata measurements
-
-The native budget file adds a protocol marker that older strict controllers must
-reject. The shared quota reader validates this native format only under a native
-accounting root; Firecracker's budget decoder stays strict. This changes quota
-metadata reads, not journal or immutable-object encoding.
-
-Reproduce the comparison against the flat quota-reader logic at base `87e87412`:
-
-```sh
-CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 \
-CAIRN_MEASUREMENT_DIR="$PWD/target" \
-pnpm test:backend -p cairn-installation --lib \
-  microvm::budget::tests::native_budget_metadata_measurements \
-  -- --ignored --exact --nocapture --test-threads=1
-```
-
-Measured on 2026-10-24: Linux 7.2.9-arch1-1, Intel i9-14900K, 12 visible CPUs,
-Rust 1.97.1 default test profile with debug information disabled, incremental
-compilation disabled. The host was shared, without an exclusive CPU reservation.
-The temporary fixture lived on the managed 32 GiB native block workspace. It used
-a two-slot / 512 MiB budget, an empty data root and the existing accounting cache.
-Each case had two read warmups followed by 16 groups of warm read, cold-requested
-read and durable atomic write (file plus parent-directory sync). Reference ran
-first, then protocol 1; process CPU includes the measurement harness.
-
-| Metadata | Encoded bytes | Warm read p50 / p95 µs | Cold-requested read p50 / p95 µs | Durable write p50 / p95 ms | Process CPU for 16 groups ms |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Legacy reference | 61 | 73.33 / 172.92 | 83.14 / 411.00 | 48.31 / 282.36 | 13.22 |
-| Native protocol 1 | 84 | 113.78 / 182.12 | 95.03 / 191.38 | 68.40 / 316.26 | 14.12 |
-
-“Cold-requested” uses `POSIX_FADV_DONTNEED` on the fixture file only. It requests
-kernel page-cache eviction; it does not empty the underlying block cache, clear
-host caches globally or measure production S3/network latency. The quota cache and
-block stack remain active. These small shared-host samples record the extra 23
-metadata bytes and local costs; sequential order and fsync variance prevent a
-production throughput inference. The JSON output also includes means and all
-reported percentiles. The existing [object compression measurements](STORAGE-COMPRESSION.md)
-remain the reference for unchanged disk objects.
-
 Protected conversations provide a private lazy rootless Docker daemon; administrator
 execution keeps this document's host/sudo behavior and does not receive that daemon
 or socket. Mode changes preserve Docker state: the journal translates the agent's
 file owner while retaining container users, volume permissions and reserved ranges.
 Services stop with the protected turn and can restart after returning to protected.
-See [native Docker](NATIVE-DOCKER.md) and the current epoch14/SQLite13 transition.
+See [native Docker](NATIVE-DOCKER.md).

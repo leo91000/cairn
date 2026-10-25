@@ -45,7 +45,7 @@ async fn seed_ext4(owner: &Owner, record: &Value, node: &str, master: &str) {
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(
         directory.join("runtime.json"),
-        br#"{"runtimeId":"fixture","backend":"firecracker","storage":"ublk"}"#,
+        br#"{"runtimeId":"development","backend":"firecracker","storage":"ublk"}"#,
     )
     .unwrap();
     let grant = disk_grants::new_disk(&owner.service, record, node)
@@ -160,7 +160,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
         .transaction(move |db| db.put_message(&saved))
         .await
         .unwrap();
-    owner.set_checkpoint(&run, json!({ "nodeId": vm_node, "runnerId": run, "runtimeId": "fixture", "completed": true,
+    owner.set_checkpoint(&run, json!({ "nodeId": vm_node, "runnerId": run, "runtimeId": "development", "completed": true,
         "prepared": { "backend": "firecracker", "isolated": true, "projectRoot": "/data/runs/test/workspace", "output": "/data/runs/test/output/result.md" } })).await;
     let stop = CancellationToken::new();
     let faults = MoveFaults {
@@ -182,6 +182,9 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     }
     let mut native = owner.stored("nodes", &native_node).await.unwrap();
     native["capabilities"]["backend"] = "native".into();
+    native["capabilities"]["nativeModeProtocol"] = 1.into();
+    native["nativeModeObserved"] =
+        json!({ "mode": "protected", "generation": null, "status": "applied" });
     native["capabilities"]["ublk"] = true.into();
     native["nativeEnabled"] = true.into();
     native["nativeAccounts"] = json!(["fixture-owner"]);
@@ -363,7 +366,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     let saved_point = retried["backup"]["id"].clone();
     let reservation = id();
     let mut pending = json!({ "id": id(), "reservationId": reservation, "process": "old-manager-process", "paused": false,
-        "nodeId": native_node, "runtimeId": "fixture", "snapshot": retried["snapshot"], "convertedBackup": saved_point });
+        "nodeId": native_node, "runtimeId": "development", "snapshot": retried["snapshot"], "convertedBackup": saved_point });
     pending["grant"] = json!({ "nativePrincipals": retried["nativePrincipals"], "nativeAuthorityNodes": retried["nativeAuthorityNodes"], "nativeProvenanceUnknown": false });
     owner.service.store.patch_run(&run, json!({ "snapshot": before["snapshot"], "nodeId": before["nodeId"], "backup": before["backup"], "backendMigration": pending })).await.unwrap();
     let mut source_checkpoint = checkpoint_before;
@@ -373,7 +376,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     let mut candidate = retried.clone();
     candidate["placementTransition"] = true.into();
     candidate["targetNodeId"] = native_node.clone().into();
-    candidate["requiredRuntime"] = "fixture".into();
+    candidate["requiredRuntime"] = "development".into();
     placement::reserve(&owner.service, &candidate, &reservation)
         .await
         .unwrap();

@@ -289,10 +289,8 @@ fn mappings(smaps: &str) -> Result<Vec<Mapping>> {
                 .filter(|length| *length > 0)
                 .ok_or_else(|| Error::unavailable("VM memory mappings are invalid."))?;
             let name = fields.get(5).copied().unwrap_or("");
-            let memory_backing = name.is_empty()
-                || name.starts_with('[')
-                || name.starts_with("/memfd:")
-                || name.ends_with("/snapshot.mem");
+            let memory_backing =
+                name.is_empty() || name.starts_with('[') || name.starts_with("/memfd:");
             eligible = fields[1].starts_with("rw") && memory_backing;
             current = Some(Mapping {
                 start,
@@ -445,7 +443,6 @@ mod tests {
             "1000-9000 rw-p 00000000 00:00 0\nRss: 32 kB\nVmFlags: rd wr mr mw me ac sd\n",
             "a000-b000 rw-s 00000000 00:01 123 /memfd:guest-ram (deleted)\nRss: 4 kB\nVmFlags: rd wr sh mr mw me ms sd\n",
             "c000-d000 rw-p 00000000 00:00 0 [heap]\nRss: 4 kB\nVmFlags: rd wr lo\n",
-            "e000-f000 rw-p 00000000 00:01 12 /snapshot.mem\nRss: 4 kB\nVmFlags: rd wr mr mw\n",
             "10000-11000 r-xp 00000000 00:01 13 /firecracker\nRss: 4 kB\nVmFlags: rd ex mr mw\n",
             "12000-13000 rw-s 00000000 00:01 14 /disk.blk\nRss: 4 kB\nVmFlags: rd wr sh\n",
             "14000-15000 rw-p 00000000 00:00 0\nRss: 4 kB\nVmFlags: rd wr pf\n",
@@ -461,11 +458,6 @@ mod tests {
                 },
                 Mapping {
                     start: 0xa000,
-                    length: 4096,
-                    resident: 4096
-                },
-                Mapping {
-                    start: 0xe000,
                     length: 4096,
                     resident: 4096
                 },

@@ -70,13 +70,10 @@ pub struct Connection {
     pub people: Vec<Label>,
     pub max_messages_per_hour: u32,
     /// Hourly limit for each person when anyone can use the connection.
-    #[serde(default = "per_person")]
     pub max_per_person_per_hour: u32,
     /// Agents the owner granted for the package's commands and tools.
-    #[serde(default)]
     pub agent_ids: Vec<String>,
     /// Names of the secret fields saved in the vault (values never leave the host).
-    #[serde(default)]
     pub secret_keys: Vec<String>,
     pub updated_at: i64,
 }
@@ -927,7 +924,7 @@ fn delegation_rules(db: &Db<'_>, connection: &Connection, access: &Value) -> Res
     let Some(project) = &connection.project_id else {
         return Ok(());
     };
-    if db.get("projects", project)?.is_none() {
+    if db.project(project)?.is_none() {
         return Err(Error::bad("Project not found."));
     }
     let reachable = access["projects"]
@@ -936,53 +933,6 @@ fn delegation_rules(db: &Db<'_>, connection: &Connection, access: &Value) -> Res
     if !reachable {
         return Err(Error::bad("This agent can’t open the selected project."));
     }
-    Ok(())
-}
-
-/// Runs the package's form on a saved instance and keeps the values it derives, such
-/// as the account a credential belongs to. Used after migrations; an instance edited
-/// meanwhile is left as the owner saved it.
-pub(crate) async fn refresh(s: &Service, connection: &Connection) -> Result<()> {
-    let package = registry::active(s, &connection.plugin_id).await?;
-    if !package.manifest.instance_form {
-        return Ok(());
-    }
-    let credential = s
-        .vault
-        .get(&credential_key(&connection.id))
-        .await?
-        .map(|value| text(&value, "token").to_owned());
-    let draft = forms::Draft {
-        management: None,
-        credential,
-        secrets: secret_values(s, &connection.id).await?,
-    };
-    let settings = forms::submit(
-        s,
-        &package,
-        &connection.id,
-        connection.settings.clone(),
-        draft,
-    )
-    .await?;
-    let expected = connection.revision.clone();
-    let id_ = connection.id.clone();
-    s.store
-        .transaction(move |db| {
-            let Some(mut current) = db.get(KIND, &id_)? else {
-                return Ok(());
-            };
-            if current["revision"] != expected.as_str() {
-                return Ok(());
-            }
-            current["settings"] = settings;
-            current["revision"] = id().into();
-            current["updatedAt"] = now().into();
-            db.put(KIND, &current)?;
-            Ok(())
-        })
-        .await?;
-    s.plugins.changed.notify_one();
     Ok(())
 }
 

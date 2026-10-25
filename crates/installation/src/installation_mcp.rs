@@ -157,6 +157,29 @@ pub(crate) async fn operation(
     if !known {
         return Err(Error::not_found("Unknown operation"));
     }
+    if name == cairn_contracts::beacon::LIST_ACCOUNT_METHODS_ID {
+        let input = serde_json::from_value(args).map_err(|error| Error::bad(error.to_string()))?;
+        return Ok(serde_json::to_value(
+            cairn_contracts::beacon::account_methods_proof_required(input),
+        )?);
+    }
+    if let Some(op) = crate::capabilities::project_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+            )
+            .await;
+    }
+    if name == cairn_contracts::RESUME_RUN_ID {
+        let input = crate::capabilities::RESUME_RUN.decode(args)?;
+        let context = crate::capabilities::ResumeContext::Installation(bearer.to_owned());
+        let output = crate::capabilities::RESUME_RUN
+            .invoke(s, input, context)
+            .await?;
+        return Ok(serde_json::to_value(output)?);
+    }
     let input = match name {
         "create_task" | "create_chat" => Some(&mut args),
         "update_task" => args.get_mut("task"),
@@ -198,7 +221,6 @@ async fn invoke_inner(s: &Arc<Service>, bearer: &str, name: &str, args: Value) -
 
             let result = match operation.as_str() {
                 "list_agents" => Some(db.list("agents")?.into()),
-                "list_projects" => Some(db.list("projects")?.into()),
                 "list_tasks" => Some(db.list("tasks")?.into()),
                 "list_runs" => Some(
                     db.runs(

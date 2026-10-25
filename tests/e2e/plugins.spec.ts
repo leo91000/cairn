@@ -488,6 +488,15 @@ test('required choices and Unicode text keep the shared form whitespace contract
     json: {
       packages: [{
         id: 'forms',
+        setup: {
+          effort: 'token',
+          steps: [{
+            id: 'settings',
+            kind: 'settings',
+            title: 'Settings',
+            settings: ['region', 'team', 'password'],
+          }],
+        },
         builtin: false,
         status: 'active',
         active: '1.0.0',
@@ -627,6 +636,14 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
     json: {
       packages: [{
         id: 'forms',
+        setup: {
+          steps: [{
+            id: 'settings',
+            kind: 'settings',
+            title: 'Settings',
+            settings: fields.filter(field => !field.hidden).map(field => field.key),
+          }],
+        },
         builtin: false,
         status: 'active',
         active: '1.0.0',
@@ -790,6 +807,7 @@ test('bot warnings include the current instance and new draft plugin grants', as
     json: {
       packages: [{
         id: 'hybrid',
+        setup: { steps: [{ id: 'people', kind: 'people', title: 'Who can talk to it' }, { id: 'agents', kind: 'agents', title: 'Agents' }] },
         builtin: false,
         status: 'active',
         active: '1.0.0',
@@ -851,6 +869,7 @@ test('a package with device sign-in saves an account without the token reaching 
     json: {
       packages: [{
         id: 'codehost',
+        setup: { effort: 'signin', steps: [{ id: 'credential', kind: 'credential', title: 'Sign in with Code host' }] },
         builtin: true,
         status: 'active',
         active: '1.0.0',

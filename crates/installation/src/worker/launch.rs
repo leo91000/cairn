@@ -196,8 +196,7 @@ struct RunnerPlan<'a> {
     backend: &'a Value,
     runtime_id: &'a Value,
     storage: RunnerStorage<'a>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    chat: Option<Value>,
+    chat: Value,
 }
 
 #[derive(Serialize)]
@@ -397,9 +396,44 @@ impl Execution<'_> {
         if !self.checkpoint.read(RunCheckpoint::launched).await {
             return Ok(None);
         }
-        let Some(session) =
-            saved_session(s, self.run, &workspace.state_home, workspace.cwd()).await?
-        else {
+        let pending_startup = self
+            .checkpoint
+            .read(|saved| {
+                saved
+                    .retry_cause
+                    .as_ref()
+                    .and_then(Option::as_ref)
+                    .is_some_and(|cause| cause.startup)
+            })
+            .await;
+        if !self.run["sessionId"].is_string() && pending_startup {
+            // The adapter confirmed no new turn was submitted; preserve the same
+            // prepared workspace and retry its initial authentication safely.
+            return Ok(None);
+        }
+        let session = match saved_session(s, self.run, &workspace.state_home, workspace.cwd()).await
+        {
+            Ok(session) => session,
+            Err(error) => {
+                // Local session discovery happens before any new turn is submitted.
+                // Preserve its specific transient failure instead of the previous cause.
+                if let Some(failure) = crate::run_retry::startup_failure(&error) {
+                    let cause = crate::run_retry::Cause::classify(&failure["error"]);
+                    self.checkpoint
+                        .update(|saved| {
+                            saved.completed = Some(false);
+                            saved.last_error = Some(Some(error.message.clone()));
+                            saved.retry_cause = Some(cause);
+                        })
+                        .await?;
+                    s.store
+                        .event(&self.id, "turn.failed", &error.message, Some(failure))
+                        .await?;
+                }
+                return Err(error);
+            }
+        };
+        let Some(session) = session else {
             s.store.event(
                 &self.id,
                 "status",
@@ -459,7 +493,7 @@ impl Execution<'_> {
         );
         let mut launch = Launch {
             binary: adapter.binary(&s.config).to_owned(),
-            args: adapter.legacy_args(self.run, &workspace.mcp, &output, resume),
+            args: Vec::new(),
             prompt: self.prompt(resume).await?,
         };
         let auth_broker = match self.account.as_ref() {
@@ -596,41 +630,34 @@ impl Execution<'_> {
             .collect())
     }
 
-    /// Chats, Claude runs and account-backed runs go through the `chat` protocol.
+    /// Every execution uses the coding agent’s chat protocol.
     async fn chat_plan(
         &self,
         workspace: &Workspace,
         resume: Option<&str>,
         launch: &mut Launch,
-    ) -> Result<Option<Value>> {
+    ) -> Result<Value> {
         let s = self.s;
         let adapter = self.provider.adapter();
         let chat_execution = self.run["chatExecution"].is_object();
-        if !adapter.uses_chat(chat_execution, self.account.is_some()) {
-            return Ok(None);
-        }
         private_dir(&self.directory.join("chat-input")).await?;
         s.prepare_chat_files(&self.id, &self.run["chatExecution"]["attachments"])
             .await?;
+        let run = crate::plugins::agents::with_instructions(s, self.run).await;
         let mut chat = run_output::chat_plan(
-            self.run,
+            &run,
             &workspace.prepared,
             &self.directory,
             &workspace.mcp,
             resume,
         )?;
-        // Optional fields: retained older adapters can ignore them.
         chat["runId"] = self.id.clone().into();
         chat["attemptId"] = self.attempt_id.clone().into();
         if !chat_execution {
             // Scheduled work uses the same authenticated protocol as
             // chats, while retaining its own task brief and session.
-            chat["execution"] = json!({
-                "messageId": self.run["missionTurnId"].as_str().unwrap_or(&self.id),
-                "text": launch.prompt,
-                "recovery": resume.is_some(),
-                "attachments": [],
-            });
+            let resume_prompt = resume.map(|_| launch.prompt.as_str());
+            chat["execution"] = run_output::scheduled_turn(self.run, resume_prompt);
         }
         adapter
             .configure_plan(s, &mut chat, self.account.as_ref())
@@ -638,7 +665,7 @@ impl Execution<'_> {
         launch.binary = current_exe()?;
         launch.args = vec!["chat".into(), adapter.binary(&s.config).to_owned()];
         launch.prompt = chat.to_string();
-        Ok(Some(chat))
+        Ok(chat)
     }
 
     /// Places the run on a node and routes the launch through its isolated runner.
@@ -646,7 +673,7 @@ impl Execution<'_> {
         &mut self,
         workspace: &mut Workspace,
         resume: Option<&str>,
-        chat: Option<Value>,
+        chat: Value,
         launch: &mut Launch,
     ) -> Result<()> {
         let s = self.s;
@@ -699,7 +726,7 @@ impl Execution<'_> {
         runner: &str,
         placement: &Value,
         resume: Option<&str>,
-        mut chat: Option<Value>,
+        mut chat: Value,
         launch: &Launch,
     ) -> Result<()> {
         let s = self.s;
@@ -707,20 +734,16 @@ impl Execution<'_> {
         let plans = s.config.data_dir.join("runner-plans");
         private_dir(&plans).await?;
         let mut imports = prepared["mounts"].as_array().unwrap().clone();
-        if chat.is_some() {
-            imports.push(json!({
-                "source": self.directory.join("chat-input"),
-                "target": "/run/cairn-chat",
-                "readOnly": true,
-            }));
-        }
+        imports.push(json!({
+            "source": self.directory.join("chat-input"),
+            "target": "/run/cairn-chat",
+            "readOnly": true,
+        }));
         let mut context = crate::plugins::agents::with_instructions(s, self.run).await;
         context["snapshot"]["skills"] = prepared["skills"].clone();
         context["nativeMode"] = placement["nativeMode"].clone();
-        if prepared["backend"] == "native"
-            && let Some(chat) = &mut chat
-        {
-            run_output::native_chat_privileges(chat, &context, &placement["nativeMode"]);
+        if prepared["backend"] == "native" {
+            run_output::native_chat_privileges(&mut chat, &context, &placement["nativeMode"]);
         }
         let prompt = if resume.is_some() {
             launch.prompt.clone()
@@ -908,10 +931,13 @@ impl Execution<'_> {
                     child.stop().await;
                     exit.code = Some(STOPPED);
                 }
-                _ = timeout.tick(), if running && self.checkpoint.expired() => {
+                _ = timeout.tick(), if running => {
                     // The controller owns confirmed suspension timing. An unavailable
                     // observation must not turn an administratively paused VM into a timeout.
-                    if self.checkpoint.refresh_pause(s).await.is_ok() && self.checkpoint.expired() {
+                    if self.checkpoint.expired()
+                        && self.checkpoint.refresh_pause(s).await.is_ok()
+                        && self.checkpoint.expired()
+                    {
                         exit.timed_out = true;
                         child.stop().await;
                         exit.code = Some(STOPPED);
@@ -1060,8 +1086,8 @@ impl Execution<'_> {
         if status == RunStatus::Failed
             && !exit.timed_out
             && !self.stopping()
-            && has_session
             && let Some(cause) = saved.retry_cause.as_ref().and_then(Option::as_ref)
+            && (has_session || cause.startup)
         {
             // The provider confirmed this turn failed. Recovery is scheduled by
             // the worker after the previous execution is fenced, not replayed here.
@@ -1197,7 +1223,10 @@ mod tests {
             public_url: "http://localhost:4310".into(),
             host: "127.0.0.1".into(),
             port: 0,
-            codex_bin: "/bin/false".into(),
+            codex_bin: Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/codex.mjs")
+                .to_string_lossy()
+                .into_owned(),
             claude_bin: "/bin/false".into(),
             opencode_bin: "/bin/false".into(),
             opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),

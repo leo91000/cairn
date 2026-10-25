@@ -176,8 +176,8 @@ class BlockedMissionJourneyTest {
                                 stream(LiveState(run = activity().first { it.id == id }))
                             }
                             path == "$api/accounts" -> json("{\"accounts\":[],\"required\":[]}")
-                            path == "$api/projects" ||
-                                path == "$api/skills" ||
+                            path == "$api/projects" -> json("""{"projects":[]}""")
+                            path == "$api/skills" ||
                                 path == "$api/mcps" ||
                                 path == "$api/onepassword" ||
                                 path == "$api/runs" -> json("[]")

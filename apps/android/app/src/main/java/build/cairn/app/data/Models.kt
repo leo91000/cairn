@@ -28,6 +28,7 @@ data class Installation(
     val name: String,
     val role: InstallationRole = InstallationRole.Member,
     val online: Boolean = false,
+    val updateRequired: Boolean = false,
 )
 
 const val MAIN_AGENT_ID = "00000000-0000-4000-8000-000000000001"
@@ -42,6 +43,8 @@ data class AccessPolicy(
     val mcps: List<String>? = null,
     val mcpTools: Map<String, List<String>> = emptyMap(),
     val installation: Boolean = false,
+    /** Hands tasks to conversations that report back, on any coding agent and model. */
+    val delegation: Boolean = false,
     val sandbox: String = "yolo",
     val backend: String = "firecracker",
 )
@@ -77,25 +80,11 @@ data class Agent(
     val plugins: List<String> = emptyList(),
     val provider: String = "codex",
     val avatar: AgentPortrait? = null,
-    /**
-     * Set by installations that store live grants on the agent (computed, never stored, never
-     * sent). Absent on earlier or rolled-back releases, which keep them on the resources.
-     */
-    val grantsOnAgent: Boolean = false,
     /** Changes on every save; sent back so a stale editor cannot overwrite newer access. */
     val revision: String = "",
 )
 
-@Serializable
-data class Project(
-    val id: String = "",
-    val name: String = "",
-    val path: String = "",
-    val description: String = "",
-    val baseBranch: String = "main",
-    val origin: String? = null,
-    val sourceMode: String = "remote",
-)
+typealias Project = build.cairn.contracts.Project
 
 @Serializable
 data class Task(
@@ -152,7 +141,8 @@ data class Snapshot(
     val skills: List<SnapshotSkill> = emptyList(),
 )
 
-@Serializable data class RunRetryCause(val kind: String, val message: String)
+@Serializable
+data class RunRetryCause(val kind: String, val message: String, val startup: Boolean = false)
 
 @Serializable
 data class RunRetry(
@@ -160,6 +150,8 @@ data class RunRetry(
     val limit: Int,
     val nextAttemptAt: Long? = null,
     val cause: RunRetryCause,
+    val startedAt: Long? = null,
+    val deadlineAt: Long? = null,
 )
 
 @Serializable

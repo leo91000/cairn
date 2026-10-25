@@ -200,7 +200,7 @@ class ChatJourneyTest {
                                     wireJson.encodeToString(
                                         listOf(Agent(id = MAIN_AGENT_ID, name = "Cairn"))
                                     )
-                                "/api/installations/fixture/api/projects",
+                                "/api/installations/fixture/api/projects" -> """{"projects":[]}"""
                                 "/api/installations/fixture/api/tasks",
                                 "/api/installations/fixture/api/tasks/activity",
                                 "/api/installations/fixture/api/skills",
