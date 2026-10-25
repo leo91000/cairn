@@ -1123,6 +1123,21 @@ async fn queued_speed_is_kept_and_an_unavailable_one_runs_at_standard_with_a_not
         moved.get("speed").is_none_or(|speed| speed == ""),
         "{moved}"
     );
+
+    // Turning a queued message into a steer keeps its stored speed, which the running turn's
+    // speed must match.
+    let slower_id = id();
+    let slower =
+        json!({ "id": slower_id, "text": "Slower", "provider": "codex", "speed": "standard" });
+    service.chat_send(chat_id, slower).await.unwrap();
+    let steered = service
+        .chat_edit(
+            chat_id,
+            &slower_id,
+            Some(json!({ "text": "Slower", "provider": "codex", "mode": "steer" })),
+        )
+        .await;
+    assert_eq!(steered.unwrap_err().status, 409);
 }
 
 #[tokio::test]

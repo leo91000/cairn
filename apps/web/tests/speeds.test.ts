@@ -38,8 +38,12 @@ describe('codex speeds', () => {
     const fast = model({ model: 'fast', serviceTiers: [{ id: 'priority', name: 'Fast', description: '' }] })
     expect(speedNote('priority', 'fast', [fast, deep])).toBe('Fast speed')
     expect(speedNote('priority', 'deep', [fast, deep])).toBe('Standard speed (Fast not offered)')
-    // A model the catalog does not list leaves the check to Codex.
-    expect(speedNote('priority', 'custom', [fast, deep])).toBe('Fast speed')
+    // An empty model is the catalog's default.
+    expect(speedNote('priority', '', [{ ...fast, isDefault: false }, { ...deep, isDefault: true }])).toBe('Standard speed (Fast not offered)')
+    // Without the model's speeds, the speed is only requested.
+    expect(speedNote('priority', 'custom', [fast, deep])).toBe('Fast speed requested')
+    expect(speedNote('priority', 'fast', [])).toBe('Priority speed requested')
+    expect(speedNote('standard', 'deep', [fast, deep])).toBe('Standard speed')
     expect(speedNote('', 'deep', [fast, deep])).toBe('')
   })
 

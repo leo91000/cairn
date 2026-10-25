@@ -502,7 +502,6 @@ pub(crate) fn edit_as(
         return Err(Error::conflict("A submitted answer cannot be edited."));
     }
     crate::attachments::message(db, chat_id, &mut values)?;
-    validate_steer(db, &chat, &values)?;
     // An edit without a speed, from an editor predating speeds, keeps the stored one while the
     // message still goes to Codex.
     let kept_speed = values.get("speed").is_none();
@@ -510,6 +509,8 @@ pub(crate) fn edit_as(
     if kept_speed && message_provider(db, &chat, &current)? != Provider::Codex.as_str() {
         set_speed(&mut current, "");
     }
+    // Steering joins the running turn with the message as edited, including a kept speed.
+    validate_steer(db, &chat, &current)?;
     validate_speed(db, &chat, &current)?;
     db.put_message(&current)
 }

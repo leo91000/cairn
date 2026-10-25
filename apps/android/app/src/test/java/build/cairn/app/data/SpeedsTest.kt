@@ -27,8 +27,15 @@ class SpeedsTest {
             "vitesse standard (fast non proposée)",
             speedNote("priority", "deep", listOf(fast, deep)),
         )
-        // A model the catalog does not list leaves the check to Codex.
-        assertEquals("vitesse fast", speedNote("priority", "custom", listOf(fast, deep)))
+        // An empty model is the catalog's default.
+        assertEquals(
+            "vitesse standard (fast non proposée)",
+            speedNote("priority", "", listOf(fast, deep.copy(isDefault = true))),
+        )
+        // Without the model's speeds, the speed is only requested.
+        assertEquals("vitesse fast demandée", speedNote("priority", "custom", listOf(fast, deep)))
+        assertEquals("vitesse priority demandée", speedNote("priority", "fast", emptyList()))
+        assertEquals("vitesse standard", speedNote(STANDARD_SPEED, "deep", listOf(fast, deep)))
         assertNull(speedNote("", "deep", listOf(fast, deep)))
     }
 
