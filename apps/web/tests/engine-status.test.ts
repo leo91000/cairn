@@ -52,6 +52,21 @@ function reply(type: 'item.started' | 'item.completed', text: string) {
   return event(type, { item: { id: `message-${serial}`, type: 'agent_message', text } })
 }
 
+function agent(type: 'item.started' | 'item.updated', resumed = false) {
+  return event(type, {
+    item: {
+      id: 'agent-1',
+      type: 'subagent',
+      status: 'in_progress',
+      ...(resumed && { resumed }),
+    },
+  })
+}
+
+function status(text: string) {
+  return { ...event('status'), text }
+}
+
 function runLog(events: RunEvent[]) {
   return activityEntries(events).flatMap(entry => entry.kind === 'group' ? entry.artifacts : [])
 }
@@ -86,6 +101,8 @@ describe('engine status', () => {
     expect(notices([first, event('turn.completed')])).toEqual([])
 
     expect(notices([first, reply('item.started', 'Here')])).toEqual([])
+    // Starting a subagent is the agent's own tool starting.
+    expect(notices([first, agent('item.started')])).toEqual([])
 
     // The run log keeps every retry, marking those work recovered from.
     const log = runLog([first, step()])
@@ -102,16 +119,19 @@ describe('engine status', () => {
     const retried = runLog([last, gaveUp, failed]).find(artifact => artifact.title.startsWith('Claude Code is retrying'))
     expect(retried?.statusLabel).not.toBe('Recovered')
 
-    // A subagent's progress does not mean the agent's own request went through.
-    const progress = event('item.updated', {
-      item: {
-        id: 'agent-1',
-        type: 'subagent',
-        status: 'in_progress',
-        activity: 'Reading',
-      },
-    })
-    expect(notices([last, progress]).map(notice => notice.title)).toContain('Claude Code is retrying the request · attempt 10/10')
+    // A subagent's progress, or its resumption, does not mean the agent's own request went through.
+    for (const progress of [agent('item.updated'), agent('item.started', true)])
+      expect(notices([last, progress]).map(notice => notice.title)).toContain('Claude Code is retrying the request · attempt 10/10')
+  })
+
+  it('ends the engine retries with a run that stops before its turn completes', () => {
+    for (const end of [status('cancelled'), status('interrupted'), status('failed'), event('runner.failed', { error: { message: 'Workspace sealing failed' } })]) {
+      const last = retry(3)
+      expect(notices([last, end]).map(notice => notice.title)).not.toContain('Claude Code is retrying the request · attempt 3/10')
+      // A later execution's work does not recover the stopped run's retry.
+      const retried = runLog([last, end, step()]).find(artifact => artifact.title.startsWith('Claude Code is retrying'))
+      expect(retried?.statusLabel).not.toBe('Recovered')
+    }
   })
 
   it('shows the usage limit until it no longer applies, its window resets or the turn fails', () => {

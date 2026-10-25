@@ -532,19 +532,34 @@ else {
 
     if (prompt.includes('fixture:usage-limit')) {
       const extra = prompt.includes('extra-usage')
+      const reset = prompt.includes('reset-passed')
+      // A limit on one model's window: Claude Code answers on another model, then fails for an
+      // unrelated reason.
+      const answered = prompt.includes('answered')
       out(value)
       out({
         type: 'rate_limit_event',
         rate_limit_info: {
           status: 'rejected',
-          rateLimitType: 'five_hour',
-          resetsAt: 1893499200,
+          rateLimitType: answered ? 'seven_day_opus' : 'five_hour',
+          resetsAt: reset ? 1000000000 : 1893499200,
           overageStatus: extra ? 'allowed' : 'rejected',
           isUsingOverage: extra,
         },
       })
       if (extra) {
         complete('Finished on extra usage', false, correlation)
+        return
+      }
+
+      if (answered) {
+        out({ type: 'stream_event', parent_tool_use_id: null, event: { type: 'message_start', message: { id: 'fallback' } } })
+        out({
+          type: 'result',
+          subtype: 'success',
+          is_error: true,
+          result: 'API Error: 500 Internal server error',
+        })
         return
       }
 
@@ -604,6 +619,16 @@ else {
         tool_use_id: 'workflow-call',
         description: 'Workflow step',
         task_type: 'local_agent',
+      })
+      // Nor is a housekeeping agent Claude Code starts itself.
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-housekeeping',
+        description: 'Summarize the session',
+        task_type: 'local_agent',
+        skip_transcript: true,
+        ambient: true,
       })
       out({
         type: 'assistant',

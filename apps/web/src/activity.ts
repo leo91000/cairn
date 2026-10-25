@@ -527,6 +527,14 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       usageLimits = []
     }
 
+    // A run that ends without its turn completing, stopped or failed by the runner, ends the
+    // engine's retries with it: they did not recover.
+    if (event.type === 'runner.failed' || (event.type === 'status' && terminalStatuses.has(event.text))) {
+      for (const notice of engineRetries)
+        notice.attention = false
+      engineRetries = []
+    }
+
     // A run that ends, or is stopped while it waits, ends its retry chain: a resume starts afresh.
     if (event.type === 'status' && terminalStatuses.has(event.text)) {
       retried.delete(event.runId)
@@ -580,9 +588,13 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
 
     if (event.type === 'turn.completed' || (type === 'command_execution' && event.type === 'item.completed' && item.exit_code === 0 && item.status !== 'failed'))
       recovered()
-    // Work continues once the agent's own reply streams or its tools start. Claude Code reports
-    // a request it gave up on as a completed message, which the turn's failure follows.
-    if (event.type === 'turn.completed' || (['item.started', 'item.updated'].includes(event.type) && type !== 'subagent' && !text(item.parent_id)))
+    // Work continues once the agent's own reply streams or its tools start, a subagent among them.
+    // Claude Code reports a request it gave up on as a completed message, which the turn's failure
+    // follows; a subagent's progress, or its resumption, says nothing about the agent's request.
+    const ownWork = !text(item.parent_id) && (
+      (event.type === 'item.started' && !(type === 'subagent' && item.resumed === true))
+      || (event.type === 'item.updated' && type !== 'subagent'))
+    if (event.type === 'turn.completed' || ownWork)
       retriesRecovered()
     const itemId = text(item.id)
     // A subagent keeps its row when its updates arrive after the turn that started it.

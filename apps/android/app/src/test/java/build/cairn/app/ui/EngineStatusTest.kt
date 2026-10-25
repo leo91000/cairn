@@ -73,6 +73,21 @@ class EngineStatusTest {
             )
         }
 
+    private fun agent(type: String, resumed: Boolean = false) =
+        event(type) {
+            put(
+                "item",
+                buildJsonObject {
+                    put("id", "agent-1")
+                    put("type", "subagent")
+                    put("status", "in_progress")
+                    if (resumed) put("resumed", true)
+                },
+            )
+        }
+
+    private fun status(text: String) = event("status").copy(text = text)
+
     private fun notices(events: List<RunEvent>) =
         timelineEntries(events, chat = true).filter { it.notice }.map { it.events.single() }
 
@@ -124,6 +139,8 @@ class EngineStatusTest {
         assertTrue(notices(listOf(first, second, step())).isEmpty())
         assertTrue(notices(listOf(first, event("turn.completed"))).isEmpty())
         assertTrue(notices(listOf(first, reply("item.started", "Here"))).isEmpty())
+        // Starting a subagent is the agent's own tool starting.
+        assertTrue(notices(listOf(first, agent("item.started"))).isEmpty())
 
         // The run log keeps every retry, marking the one work recovered from.
         val log = timelineEntries(listOf(first, second, step())).flatMap { it.events }
@@ -146,19 +163,26 @@ class EngineStatusTest {
         val log = timelineEntries(listOf(last, gaveUp, failed)).flatMap { it.events }
         assertNotEquals("Rétablie", presentActivity(log.first { it.id == last.id }).state)
 
-        // A subagent's progress does not mean the agent's own request went through.
-        val progress =
-            event("item.updated") {
-                put(
-                    "item",
-                    buildJsonObject {
-                        put("id", "agent-1")
-                        put("type", "subagent")
-                        put("status", "in_progress")
-                    },
-                )
-            }
-        assertEquals(listOf(last.id), notices(listOf(last, progress)).map { it.id })
+        // A subagent's progress, or its resumption, does not mean the agent's own request went
+        // through.
+        for (progress in listOf(agent("item.updated"), agent("item.started", resumed = true))) {
+            assertEquals(listOf(last.id), notices(listOf(last, progress)).map { it.id })
+        }
+    }
+
+    @Test
+    fun `retries end with a run that stops before its turn completes`() {
+        val ends =
+            listOf("cancelled", "interrupted", "failed").map { status(it) } +
+                event("runner.failed") {
+                    put("error", buildJsonObject { put("message", "Workspace sealing failed") })
+                }
+        for (end in ends) {
+            val last = retry(3)
+            assertFalse(last.id in notices(listOf(last, end)).map { it.id })
+            // A later execution's work does not recover the stopped run's retry.
+            assertTrue(recoveredEngineRetries(listOf(last, end, step())).isEmpty())
+        }
     }
 
     @Test

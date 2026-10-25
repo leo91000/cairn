@@ -75,17 +75,21 @@ kind of wait stays separate:
   delay, HTTP status, reason and, for a first-byte timeout, `noResponse`. Claude Code
   retries the request itself. The turn continues, so this is neither a failure nor a
   receipt. The conversation shows the latest retry until work continues: the reply
-  streams, a tool starts or the turn completes. The run log then marks it recovered.
-  When Claude Code gives up, it reports the last API error as a message and the turn
-  fails; that retry is not marked recovered.
+  streams, a tool (a subagent among them) starts or the turn completes. The run log
+  then marks it recovered. A subagent's progress or resumption does not count. When
+  Claude Code gives up, it reports the last API error as a message and the turn fails;
+  that retry is not marked recovered. Neither is a retry whose run is stopped,
+  interrupted or failed by the runner: the conversation stops showing it.
 - **Provider usage limit.** `rate_limit_event` becomes `provider.limit` when its state
   changes. That covers a warning, a limit covered by extra usage, a limit that stops
   requests (`blocked`), and the return to normal after one of these. Window and reset
   time are included. The conversation shows it until the limit no longer applies, its
-  reset time passes or the turn fails. If a turn fails while the latest state blocks requests, the
-  adapter fails it with `code: usage_limit_reached`, the window and `resetsAt`. The
-  worker then takes Cairn's durable account wait or fails over, without matching
-  Claude's wording.
+  reset time passes or the turn fails. If a turn fails while the latest state blocks
+  requests, the adapter fails it with `code: usage_limit_reached`, the window and
+  `resetsAt`. The worker then takes Cairn's durable account wait or fails over, without
+  matching Claude's wording. A limit Claude Code answered after (for example a limit on
+  one model's weekly window, with the reply coming from another model), or whose reset
+  time has passed, does not explain the failure: the turn fails as usual.
 - **Cairn durable wait.** Account waits, `wait_for` and automatic retries are Cairn's
   own. They release the execution's resources. Léo does not enable Claude's unattended
   `CLAUDE_CODE_RETRY_WATCHDOG`, which would keep the process waiting for a usage window
@@ -112,10 +116,12 @@ that a task's run IDs sort, by plain string comparison, in the order its runs op
 so a frame naming an earlier run is late and ignored. A subagent an earlier execution
 started, resumed by a `SendMessage` call or by Claude Code itself, shows as a new row
 of the current execution marked `resumed`, keyed by its task ID: Cairn rows belong to
-one execution. Other unknown agent tasks, such as a workflow's agents, are ignored.
-Nested subagents keep their parent and `parent_task_id`. The minimum supported CLI stays **2.1.280**: older frames without
-these fields keep the earlier correlation, and the fixtures cover both shapes. The
-events reach the public MCP and `cairn_installation` through `get_run`.
+one execution. Other unknown agent tasks, such as a workflow's agents or housekeeping
+agents Claude Code marks `skip_transcript` or `ambient`, are ignored. Nested subagents
+keep their parent and `parent_task_id`. The minimum supported CLI stays **2.1.280**:
+older frames without these fields keep the earlier correlation, and the fixtures cover
+both shapes. The events reach the public MCP and `cairn_installation` through
+`get_run`.
 
 An explicit provider choice is saved with each queued message. Steering cannot
 change the running turn's provider. Older clients that omit the provider continue

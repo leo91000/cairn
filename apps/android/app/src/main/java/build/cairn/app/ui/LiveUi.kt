@@ -1168,7 +1168,7 @@ private val WAIT_BOUNDARIES =
         "run.wait_ready",
         "run.wakeup",
     )
-private val TERMINAL_STATUSES = setOf("succeeded", "failed", "cancelled", "interrupted")
+internal val TERMINAL_STATUSES = setOf("succeeded", "failed", "cancelled", "interrupted")
 
 /**
  * Match the web feed: attach each publication beside its response, keeping versions per message.

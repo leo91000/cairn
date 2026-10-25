@@ -463,6 +463,8 @@ struct Turn<'a> {
     tasks: HashMap<String, String>,
     /// The usage limit Claude Code last reported, unless requests run normally.
     limit: Option<UsageLimit>,
+    /// Whether a response streamed since the usage limit was reported: requests went through.
+    answered: bool,
     /// Tool uses whose progress notice was reported: Claude Code repeats it while the tool runs.
     tool_notices: HashSet<String>,
     /// Streamed blocks of the current message, by index.
@@ -639,7 +641,8 @@ impl Turn<'_> {
     async fn engine_retry(&self, value: &Value) -> Result<()> {
         let delay = value["retry_delay_ms"].as_u64().unwrap_or(0);
         let reason = text(value, "error");
-        let reason = if reason.len() <= 64
+        let reason = if !reason.is_empty()
+            && reason.len() <= 64
             && reason
                 .bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
@@ -704,6 +707,7 @@ impl Turn<'_> {
         }
         self.emit(limit.event()).await?;
         self.limit = (limit.status != "allowed").then_some(limit);
+        self.answered = false;
         Ok(())
     }
 
@@ -1043,8 +1047,11 @@ impl Turn<'_> {
             .tools
             .get(tool_use)
             .is_some_and(|tool| tool["tool"] == "SendMessage");
+        // Housekeeping agents Claude Code starts itself stay out of the transcript.
         if value["subtype"] != "task_started"
             || value["task_type"] != "local_agent"
+            || value["skip_transcript"] == true
+            || value["ambient"] == true
             || task.is_empty()
             || !(tool_use.is_empty() || by_message)
         {
@@ -1078,6 +1085,7 @@ impl Turn<'_> {
         match text(event, "type") {
             "message_start" => {
                 self.waiting_for_background = false;
+                self.answered = true;
                 self.stream_message = text(&event["message"], "id").into();
                 self.streams.clear();
             }
@@ -1187,8 +1195,12 @@ impl Turn<'_> {
                 result
             };
             // Claude Code said the usage limit stops requests: report it as such rather than
-            // leaving its wording to be recognized.
-            if let Some(limit) = self.limit.as_ref().filter(|limit| limit.blocks()) {
+            // leaving its wording to be recognized. A limit it answered after (a limit on another
+            // model's window), or whose reset passed, does not explain the failure.
+            let now = crate::config::now();
+            if let Some(limit) = self.limit.as_ref().filter(|limit| {
+                limit.blocks() && !self.answered && limit.resets_at.is_none_or(|reset| reset > now)
+            }) {
                 self.emit(json!({
                     "type": "turn.failed",
                     "error": {
@@ -1391,6 +1403,7 @@ pub async fn run(
         settled: HashMap::new(),
         tasks: HashMap::new(),
         limit: None,
+        answered: false,
         tool_notices: HashSet::new(),
         streams: HashMap::new(),
         blocks: HashMap::new(),

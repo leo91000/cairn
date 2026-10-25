@@ -1539,6 +1539,26 @@ async fn a_usage_limit_that_stops_requests_fails_the_turn_with_its_reset() {
     assert!(cairn_installation::run_output::exhausted(failure));
     assert!(!root.path().join("result.claude-receipt.json").exists());
 
+    // A limit that no longer stops requests does not explain a later failure: Claude Code
+    // answered after it (on another model), or its reset time passed.
+    for scenario in [
+        "fixture:usage-limit answered",
+        "fixture:usage-limit reset-passed",
+    ] {
+        let root = TempDir::new().unwrap();
+        let c = setup(&root);
+        let (result, events) = run_to_end(&c, plan(&root, scenario)).await;
+        assert!(result.is_err(), "{scenario}");
+        assert!(
+            events
+                .iter()
+                .filter(|event| event["type"] == "turn.failed")
+                .all(|failure| failure["error"]["code"] != "usage_limit_reached"
+                    && !cairn_installation::run_output::exhausted(failure)),
+            "{scenario}: {events:?}"
+        );
+    }
+
     // Extra usage takes over: the limit is shown, and the turn goes on.
     let root = TempDir::new().unwrap();
     let c = setup(&root);
@@ -1641,7 +1661,8 @@ async fn a_subagent_resumed_by_a_later_execution_shows_as_resumed() {
         .iter()
         .filter(|event| event["item"]["type"] == "subagent")
         .collect();
-    // Only the subagent the agent resumed: an agent its workflow starts is not one.
+    // Only the subagent the agent resumed: an agent its workflow starts, or a housekeeping agent
+    // Claude Code starts itself, is not one.
     assert!(
         subagents
             .iter()

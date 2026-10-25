@@ -134,15 +134,26 @@ internal fun engineAttention(
     }
 
 /**
- * Whether the agent's own work goes on: its reply streams or its tools start. Claude Code reports a
- * request it gave up on as a completed message, which the turn's failure follows.
+ * Whether the agent's own work goes on: its reply streams or its tools start, a subagent among
+ * them. Claude Code reports a request it gave up on as a completed message, which the turn's
+ * failure follows; a subagent's progress, or its resumption, says nothing about the agent's
+ * request.
  */
 private fun workContinues(event: RunEvent): Boolean {
     if (event.type == "turn.completed") return true
-    if (event.type != "item.started" && event.type != "item.updated") return false
     val item = event.item()
-    return item.string("type") != "subagent" && item.string("parent_id").isEmpty()
+    if (item.string("parent_id").isNotEmpty()) return false
+    val subagent = item.string("type") == "subagent"
+    return when (event.type) {
+        "item.started" -> !subagent || !item.flag("resumed")
+        "item.updated" -> !subagent
+        else -> false
+    }
 }
+
+/** A run that ends without its turn completing, stopped or failed by the runner. */
+private fun runEnds(event: RunEvent): Boolean =
+    event.type == "runner.failed" || (event.type == "status" && event.text in TERMINAL_STATUSES)
 
 /** The engine's latest retry before work continued, which the run log marks recovered. */
 internal fun recoveredEngineRetries(events: List<RunEvent>): Set<Long> {
@@ -150,7 +161,8 @@ internal fun recoveredEngineRetries(events: List<RunEvent>): Set<Long> {
     var retry: Long? = null
     for (event in events) {
         when {
-            event.type == "turn.started" || event.type == "turn.failed" -> retry = null
+            event.type == "turn.started" || event.type == "turn.failed" || runEnds(event) ->
+                retry = null
             workContinues(event) -> {
                 retry?.let(recovered::add)
                 retry = null
@@ -183,6 +195,11 @@ internal fun hiddenEngineNotices(
                 hidden.addAll(retries + limits)
                 retries.clear()
                 limits.clear()
+            }
+            // The engine's retries end with the run: they did not recover.
+            runEnds(event) -> {
+                hidden.addAll(retries)
+                retries.clear()
             }
             workContinues(event) -> {
                 hidden.addAll(retries)
