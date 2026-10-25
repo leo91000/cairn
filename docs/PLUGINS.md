@@ -906,7 +906,9 @@ The transport worker follows Discord's Gateway lifecycle, checked against
   instances, and Identify writes are paced five seconds apart without blocking
   heartbeats. Failed budget lookups retry without identifying, and resets trigger a
   fresh lookup. Observation expiry includes the time spent dialing and waiting for
-  Hello, so an old window never lowers the new window’s balance. Resumes use the session's `resume_gateway_url`;
+  Hello, so an old window never lowers the new window’s balance. An unused bot's
+  positive budget with `reset_after: 0` can identify immediately, with a bounded
+  daily reservation until Discord reports its reset countdown. Resumes use the session's `resume_gateway_url`;
 - Hello must arrive within 60 seconds and READY within 15 seconds of Identify,
   otherwise it reconnects (starting over after a missing READY);
 - heartbeats start after a random part of the interval and carry the last sequence;

@@ -1,52 +1,32 @@
-# Beacon account capabilities (B6)
+# Beacon account actions
 
-First slice of #421, under #397 / #395: `list_account_methods`. The ticket permits
-splitting by complete command across web, Android, public MCP and
-`cairn_installation`. This slice converts that command on all four clients. The
-inventory below records the remaining commands; it does not claim their conversion.
+The [owner arbitration for campaign #395](https://github.com/leo91000/cairn/issues/395#issuecomment-6401632363)
+closes B6 (#421): Cairn account actions managed by Beacon (sessions, sign-in
+methods, invitations, members, MCP authorizations and notification devices) stay
+in the web and Android apps, with web/Android parity. They are excluded from the
+public MCP and `cairn_installation`: installation access does not confer authority
+over a person's Cairn account. No delegated account-proof protocol is planned by B6.
+This supersedes the agent exposure and follow-up plan introduced by #436.
 
-Campaign decision 3 is **not accepted**. Installation access is not account
-access, even when a run's task author is an owner. No account ID, cookie, proof,
-confirmation flag or owner boolean is accepted as command input. There is no new
-challenge or delegated-proof protocol in this slice. Existing email, OAuth and
-passkey protocols remain the only human validation channels. Future challenge
-start/status commands must not expose their completion as a proof an execution
-can manufacture; their authority design still needs the owner's decision.
+## Shared app read
 
-## Converted command
+`crates/contracts/src/beacon.rs` retains the generated Rust/TS/Kotlin method models
+and response used by both apps. Generated calls use `GET /api/account/methods`;
+`methods::list` authenticates the Beacon session and reads its unremoved methods
+in one Postgres snapshot. The response is `{methods: [...]}`; the agent-only
+`accountProofRequired` variant, empty command input and tool descriptor are removed.
+Missing or revoked sessions retain the existing HTTP unauthorized response.
 
-`crates/contracts/src/beacon.rs` owns `ListAccountMethodsInput`, the generated
-`AccountSignInMethod` and the `ListAccountMethodsOutput` tagged union, descriptor,
-HTTP binding and installation denial. This extends B1's static catalogue and
-schemars + ts-rs + json-kotlin-schema-codegen pipeline, without a new dispatcher.
-
-| Surface / actor | Execution and result |
-| --- | --- |
-| Web / Android, authenticated account | Generated call to `GET /api/account/methods`; Beacon verifies the current account session and reads its unremoved methods in one Postgres read snapshot. Returns `listed`. An installation owner and a member both read only their own account. No new recent-proof requirement is imposed on the existing read. |
-| Public MCP with a current installation grant, any scopes | The existing Beacon grant authentication and relay remain in force. The shared installation catalogue discovers the command. Its policy returns `accountProofRequired`, with no account read or new grant. It never treats scopes as a Beacon session. |
-| `cairn_installation` with a current execution grant | The existing run/message/permission checks remain in force, before discovery and invocation. The same contract returns `accountProofRequired`, with no call to Beacon and no local account replica. |
-| Missing, expired or revoked transport credential | Existing unauthorized error, before invocation. No method list is returned. |
-
-The tools' typed refusal is a result variant, within the existing MCP code-mode
-`structuredContent.result` envelope. Invalid command input remains a protocol
-error. Neither tool can obtain the `listed` variant under its current authority.
-The HTTP success now includes `kind: "listed"`; both apps consume that contract.
-The wire fields for each method remain `id`, `kind`, `label`, never a credential.
-
-Beacon account routes always use the account connection. They are not installation
-routes and never switch onto the direct DataChannel. An offline installation does
-not prevent an authenticated app from listing account methods. Public MCP retains
-its existing installation availability requirement: while offline, the relay
-returns its existing unavailable error before an operation can execute. Neither
-transport fallback nor reconnection converts an installation grant into a session.
+Account reads use the Beacon connection, including while an installation is
+offline. Direct/relay installation transport supplies no account identity. Both
+tool catalogues omit `list_account_methods` and reject invocation as an unknown
+operation, including under a current owner-issued installation grant.
 
 ## Existing action inventory
 
-Reference: main `40349271` (includes B1 #435 and legacy removal #394). Paths below
-are HTTP adapters, not a second registry. Each row identifies an explicit server
-action, its handler and its present authority. All unmarked rows remain to be
-converted in later slices of #421, with generated clients and tool refusals/proofs.
-`A` means an authenticated Beacon account, `P` a recent human proof on that same
+Paths below are Beacon HTTP adapters, not an agent capability registry. They
+record existing account authority; B6 requires no further conversion into agent
+commands. `A` means an authenticated Beacon account, `P` a recent human proof on that same
 session, `O` the installation's current owner, and `B` a bootstrap protocol proof.
 These are existing requirements, not proposed delegated rights.
 
@@ -70,7 +50,7 @@ These are existing requirements, not proposed delegated rights.
 | POST account/passkeys/reauth/finish | passkeys::reauth_finish | A + B: signed response; proof for this session |
 | POST account/passkeys/register/start | passkeys::register_start | A + P: registration challenge |
 | POST account/passkeys/register/finish | passkeys::register_finish | A + P + B: validated registration |
-| **GET account/methods** | **capabilities::LIST_ACCOUNT_METHODS via methods::list** | **Converted: A, generated contract; tools return typed refusal** |
+| GET account/methods | methods::list | A: generated app contract |
 | POST account/methods/remove | methods::remove | A + P; retain at least one method |
 | GET account/sessions | account::sessions | A: own sessions, no bearer/digest |
 | DELETE account/sessions/{session} | account::revoke_session | A; P unless revoking current session |
@@ -104,32 +84,16 @@ These are existing requirements, not proposed delegated rights.
 | DELETE account/notifications/subscriptions/{id} | notifications::unsubscribe | A: owned registration |
 
 The external MCP OAuth endpoints `/oauth/register`, `/oauth/authorize`,
-`/oauth/token` and `/oauth/revoke` retain their client-registration, browser-consent,
-PKCE/code/refresh-token and revocation proofs. Discovery metadata is public.
-They are protocol adapters, not evidence of permission to issue an account grant.
+`/oauth/token` and `/oauth/revoke` retain their existing protocol proofs. Account
+ownership and membership remain authoritative only in Beacon Postgres. Machine
+claim/rotation, relay and direct signalling remain transport protocols; this
+boundary changes none of their behavior or other installation capabilities.
 
-Installation-machine claim/start/poll/rotation (`/api/relay/claim`,
-`/api/relay/device-claim/start`, `/api/relay/device-claim/poll`, token rotation), internal
-membership/author reconciliation, direct signalling, relay frames and notification
-delivery are machine/transport protocols. They are not account UI commands and
-are not newly exposed. Telemetry read/write is a separate diagnostics capability.
-No UI-only local operation (menus, language, sorting) needs a server capability.
+## Validation
 
-## Follow-up boundary
-
-Continue by complete command or cohesive family: session management; method
-mutation and login bootstrap/challenge start/status; claim and installation
-lifecycle; invitations/members; MCP authorization; notification devices. Preserve
-current proof binding and transaction revalidation. The inventory is the starting
-point, not permission to enable these actions for an installation grant. No new
-proof issuer, account persistence change, historical migration, or visual redesign
-is part of this slice. Account ownership and membership remain authoritative only
-in Beacon Postgres.
-
-Contract qualification uses `tests/fixtures/account-methods-contracts.json` in
-Rust, TS/JSON Schema and generated Kotlin. Existing Beacon account/security,
-sharing, installation, MCP and relay suites exercise the unchanged authority.
-Browser account/provider journeys and shared native account cases cover the two
-apps. The focused installation regression covers shared discovery, refusal,
-caller-supplied proofs and revoked execution grants; the public Beacon regression
-covers the real grant/relay path, including revoked public access.
+The shared account corpus qualifies app responses in Rust, TS/JSON Schema and
+Kotlin. Beacon account/security tests cover different accounts, revoked sessions,
+removed methods and offline installations. Tool regressions check absence from
+both catalogues and unknown-operation rejection; the public Beacon regression
+also exercises a real grant and relay. Browser account/provider journeys and
+`NativeAccountCases` cover the two apps.

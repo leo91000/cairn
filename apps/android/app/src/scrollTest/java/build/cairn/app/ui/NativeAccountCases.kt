@@ -53,7 +53,7 @@ abstract class NativeAccountCases {
                             path == "/api/account/methods" ->
                                 return MockResponse()
                                     .setBody(
-                                        """{"kind":"listed","methods":[{"id":"email","kind":"email","label":"alice@example.test"}]}"""
+                                        """{"methods":[{"id":"email","kind":"email","label":"alice@example.test"}]}"""
                                     )
                             path == "/api/installations" -> return MockResponse().setBody("[]")
                             path == "/api/account/options" ->

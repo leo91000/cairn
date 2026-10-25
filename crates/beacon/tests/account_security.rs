@@ -307,9 +307,7 @@ async fn generated_account_methods_are_scoped_to_the_beacon_session_without_an_i
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let output: ListAccountMethodsOutput = response.json().await.unwrap();
-        let ListAccountMethodsOutput::Listed { methods } = output else {
-            panic!("human account read must succeed")
-        };
+        let methods = output.methods;
         assert_eq!(methods.len(), 1);
         assert_eq!(methods[0].kind, "email");
         assert_eq!(
@@ -401,9 +399,6 @@ async fn account_methods_remain_at_beacon_when_the_installation_goes_offline() {
         .await
         .unwrap();
     assert_eq!(before, after);
-    assert!(matches!(
-        after,
-        cairn_contracts::beacon::ListAccountMethodsOutput::Listed { .. }
-    ));
+    assert!(!after.methods.is_empty());
     relay.close().await;
 }

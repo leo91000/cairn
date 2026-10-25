@@ -38,14 +38,30 @@ pub(super) async fn list(
     State(service): State<Service>,
     headers: HeaderMap,
 ) -> Result<Json<cairn_contracts::beacon::ListAccountMethodsOutput>, ApiError> {
-    let output = capabilities::LIST_ACCOUNT_METHODS
-        .invoke(
-            &service,
-            &headers,
-            cairn_contracts::beacon::ListAccountMethodsInput {},
-        )
+    let mut transaction = service.pool.begin().await?;
+    // Authentication and data use one snapshot. No identity comes from input JSON,
+    // an installation grant or the installation's direct/relay connection.
+    query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *transaction)
         .await?;
-    Ok(Json(output))
+
+    let (account, _) = authenticated_on(&mut transaction, &headers, false).await?;
+    let rows: Vec<(String, String, String)> = query_as(
+        "SELECT id, kind, label FROM sign_in_methods WHERE account_id = $1 AND NOT removed ORDER BY kind, id",
+    )
+    .bind(account)
+    .fetch_all(&mut *transaction)
+    .await?;
+
+    let methods = rows
+        .into_iter()
+        .map(|(id, kind, label)| cairn_contracts::beacon::AccountSignInMethod { id, kind, label })
+        .collect();
+    transaction.commit().await?;
+
+    Ok(Json(cairn_contracts::beacon::ListAccountMethodsOutput {
+        methods,
+    }))
 }
 
 #[derive(Deserialize)]
