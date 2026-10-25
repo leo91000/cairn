@@ -18,6 +18,10 @@ use tokio::sync::Semaphore;
 pub struct Owner(cairn_protocol::TaskAuthorGrant);
 
 impl Owner {
+    pub(crate) fn access_id(&self) -> &str {
+        &self.0.access_id
+    }
+
     pub(crate) fn account_id(&self) -> &str {
         &self.0.account_id
     }

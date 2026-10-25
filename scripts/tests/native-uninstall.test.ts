@@ -19,11 +19,21 @@ const script = command.slice('sudo sh -c \''.length, -1)
 // findmnt and grep failures must stop before even a simulated removal.
 const policyHeader = readFileSync(new URL('../../crates/installation/src/native/mode.rs', import.meta.url), 'utf8').match(/const SUDO_HEADER: &str = "([^"]+)";/)![1]
 
-function uninstall(scenario: string, policies: Record<string, string> = {}) {
+function uninstall(scenario: string, policies: Record<string, string> = {}, vmNode = false) {
   const directory = mkdtempSync(join(tmpdir(), 'cairn-uninstall-policies-'))
   for (const [name, contents] of Object.entries(policies))
     writeFileSync(join(directory, name), contents)
-  const isolatedScript = script.replaceAll('/etc/sudoers.d', '"$CAIRN_TEST_POLICY_DIR"')
+  const nativeUnitCheck = '[ -e /etc/systemd/system/cairn-native-node.service ]'
+  const vmStateCheck = '[ ! -e /var/lib/cairn-node ]'
+  expect(script).toContain(nativeUnitCheck)
+  expect(script).toContain(vmStateCheck)
+  writeFileSync(join(directory, 'native-unit'), 'Synthetic native unit')
+  if (vmNode)
+    writeFileSync(join(directory, 'vm-state'), 'Synthetic Firecracker state')
+  const isolatedScript = script
+    .replaceAll('/etc/sudoers.d', '"$CAIRN_TEST_POLICY_DIR"')
+    .replaceAll(nativeUnitCheck, '[ -e "$CAIRN_TEST_NATIVE_UNIT" ]')
+    .replaceAll(vmStateCheck, '[ ! -e "$CAIRN_TEST_VM_STATE" ]')
   try {
     return spawnSync('sh', ['-c', `
 systemctl() { echo "SYSTEMCTL $*"; [ "$scenario" != reload-failure ]; }
@@ -52,7 +62,16 @@ rm() {
 userdel() { echo "USERDEL $*"; [ "$scenario" != userdel-failure ]; }
 id() { [ "$scenario" = userdel-failure ]; }
 ${isolatedScript}
-`], { env: { PATH: '/usr/bin:/bin', scenario, CAIRN_TEST_POLICY_DIR: directory }, encoding: 'utf8' })
+`], {
+      env: {
+        PATH: '/usr/bin:/bin',
+        scenario,
+        CAIRN_TEST_POLICY_DIR: directory,
+        CAIRN_TEST_NATIVE_UNIT: join(directory, 'native-unit'),
+        CAIRN_TEST_VM_STATE: join(directory, 'vm-state'),
+      },
+      encoding: 'utf8',
+    })
   }
   finally {
     rmSync(directory, { recursive: true, force: true })
@@ -83,6 +102,14 @@ it('finishes an unmounted uninstall and reports a failed daemon reload', () => {
   // Without a Firecracker node left on the machine, the shared gateway goes too.
   expect(uninstall('success').stdout).toContain('REMOVE -rf /etc/systemd/system/cairn-node-gateway.service /opt/cairn-gateway /var/lib/cairn-gateway')
   expect(uninstall('reload-failure').status).not.toBe(0)
+})
+
+it('keeps the shared gateway while a Firecracker node remains', () => {
+  const result = uninstall('success', {}, true)
+  expect(result.status).toBe(0)
+  expect(result.stdout).toContain('REMOVE -f /etc/systemd/system/cairn-native-node.service')
+  expect(result.stdout).not.toContain('cairn-node-gateway')
+  expect(result.stdout).not.toContain('REMOVE -rf /etc/systemd/system/cairn-node-gateway.service /opt/cairn-gateway /var/lib/cairn-gateway')
 })
 
 it('removes owned sudo grants across UID changes before deleting their account', () => {

@@ -63,6 +63,12 @@ slice nor its fixture success is a clean full review, complete CI or release gat
     resource/route/owner/package revisions fence accepted work. Access requests
     and people approvals stay local to their route. External turns retain their
     own subject, and stale or cross-author answer/stop controls are refused.
+  - `manage_plugin_route` now shares owner HTTP route eligibility, CRUD and
+    route-local request/people actions with public MCP and the installation tool.
+    Management retains run/requester checks after authority I/O and in the
+    mutation transaction, without agent self-grants or saved private credentials.
+    Participant edit tokens remain distinct from admitted route/person authority.
+    Broader grant/OAuth parity and guided inert setup remain required.
   - Shared turns may reuse a question ID. Notification deduplication belongs to
     the issuing delivery, so a later author's question remains visible and an
     earlier turn's controls cannot answer it. `newTurn` queues an independent

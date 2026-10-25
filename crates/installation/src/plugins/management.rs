@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub(crate) mod resources;
+pub(crate) mod routes;
 pub(crate) mod setup;
 
 /// Management access does not replace a saved instance's separate agent grant, for

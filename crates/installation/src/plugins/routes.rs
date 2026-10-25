@@ -2,7 +2,7 @@
 //! context before storing content; packages never supply its agent or authority.
 use super::{
     connections::{self, AccessMode, Connection, Label},
-    resources::{self, Resource, target::Target},
+    resources::{self, Resource, configuration::Configuration, target::Target},
 };
 use crate::{
     config::{id, now},
@@ -15,7 +15,7 @@ use cairn_plugin_api::Manifest;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 pub const KIND: &str = "plugin-routes";
 
@@ -180,6 +180,29 @@ pub async fn eligibility(
     account: &str,
     query: &std::collections::HashMap<String, String>,
 ) -> Result<Value> {
+    let owner = Arc::new(super::operations::Owner::for_account(s, account).await?);
+    eligibility_configured(
+        s,
+        plugin,
+        instance,
+        collection,
+        resource,
+        query,
+        Configuration::owner(owner),
+    )
+    .await
+}
+
+pub(in crate::plugins) async fn eligibility_configured(
+    s: &Service,
+    plugin: &str,
+    instance: &str,
+    collection: &str,
+    resource: &str,
+    query: &std::collections::HashMap<String, String>,
+    configuration: Configuration,
+) -> Result<Value> {
+    configuration.recheck(s).await?;
     let target = Target::active(s, plugin, instance).await?;
     declared(target.manifest(), collection)?;
     let resource = resources::get_for(s, target.clone(), collection, resource).await?;
@@ -191,9 +214,9 @@ pub async fn eligibility(
         query.get("accessMode").map_or("allowlist", String::as_str)
     ))
     .map_err(|_| Error::bad("Choose a valid access mode."))?;
-    super::operations::Owner::for_account(s, account).await?;
     s.store
         .transaction(move |db| {
+            configuration.current(db)?;
             current_resource(db, &target, &resource)?;
             connections::delegation_eligibility(db, project.as_deref(), mode)
         })
@@ -262,18 +285,37 @@ pub async fn save(
     value: &Value,
     existing: Option<&str>,
 ) -> Result<Value> {
+    let owner = Arc::new(super::operations::Owner::for_account(s, account).await?);
+    let configuration = Configuration::owner(owner);
+    // Keep the shared configured future off the owner request stack.
+    Box::pin(save_configured(
+        s,
+        plugin,
+        instance,
+        collection,
+        resource,
+        value,
+        existing,
+        configuration,
+    ))
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::plugins) async fn save_configured(
+    s: &Service,
+    plugin: &str,
+    instance: &str,
+    collection: &str,
+    resource: &str,
+    value: &Value,
+    existing: Option<&str>,
+    configuration: Configuration,
+) -> Result<Value> {
+    configuration.recheck(s).await?;
     let target = Target::active(s, plugin, instance).await?;
     declared(target.manifest(), collection)?;
     let resource = resources::get_for(s, target.clone(), collection, resource).await?;
-    let owner = crate::relay::task_author_policy(s)
-        .await?
-        .ok_or_else(|| Error::forbidden("The installation has no verified owner."))?
-        .owner;
-    if owner.account_id != account {
-        return Err(Error::forbidden(
-            "Only the current owner can configure a resource route.",
-        ));
-    }
     let input: Input =
         serde_json::from_value(value.clone()).map_err(|_| Error::bad("Invalid route fields."))?;
     uuid(&input.agent_id)?;
@@ -327,7 +369,7 @@ pub async fn save(
         agent_id: input.agent_id,
         project_id: input.project_id,
         granted_access: Value::Null,
-        owner_access_id: owner.access_id,
+        owner_access_id: configuration.owner.access_id().to_owned(),
         access_mode: input.access_mode,
         user_ids: input.user_ids,
         people,
@@ -340,9 +382,11 @@ pub async fn save(
     };
     let previous_revision = input.revision;
     let updating = existing.is_some();
+    configuration.recheck(s).await?;
     target.recheck_package(s).await?;
     s.store
         .transaction(move |db| {
+            configuration.current(db)?;
             current_resource(db, &target, &resource)?;
 
             if updating {
@@ -388,6 +432,29 @@ pub async fn list(
     resource: &str,
     cursor: Option<&str>,
 ) -> Result<Value> {
+    let configuration = Configuration::managed(s, None).await?;
+    list_configured(
+        s,
+        plugin,
+        instance,
+        collection,
+        resource,
+        cursor,
+        configuration,
+    )
+    .await
+}
+
+pub(in crate::plugins) async fn list_configured(
+    s: &Service,
+    plugin: &str,
+    instance: &str,
+    collection: &str,
+    resource: &str,
+    cursor: Option<&str>,
+    configuration: Configuration,
+) -> Result<Value> {
+    configuration.recheck(s).await?;
     let target = Target::active(s, plugin, instance).await?;
     declared(target.manifest(), collection)?;
     let resource = resources::get_for(s, target.clone(), collection, resource).await?;
@@ -395,6 +462,7 @@ pub async fn list(
     let cursor = cursor.map(str::to_owned);
     s.store
         .transaction(move |db| {
+            configuration.current(db)?;
             current_resource(db, &target, &resource)?;
             let hour = now() / 3_600_000;
             let mut pending = BTreeMap::<String, usize>::new();
@@ -445,26 +513,46 @@ pub async fn remove(
     account: &str,
     input: &Value,
 ) -> Result<Value> {
+    let owner = Arc::new(super::operations::Owner::for_account(s, account).await?);
+    let configuration = Configuration::owner(owner);
+    remove_configured(
+        s,
+        plugin,
+        instance,
+        collection,
+        resource,
+        route,
+        input,
+        configuration,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::plugins) async fn remove_configured(
+    s: &Service,
+    plugin: &str,
+    instance: &str,
+    collection: &str,
+    resource: &str,
+    route: &str,
+    input: &Value,
+    configuration: Configuration,
+) -> Result<Value> {
+    configuration.recheck(s).await?;
     let target = Target::active(s, plugin, instance).await?;
     let resource = resources::get_for(s, target.clone(), collection, resource).await?;
-    let owner = crate::relay::task_author_policy(s)
-        .await?
-        .ok_or_else(|| Error::forbidden("The installation has no verified owner."))?
-        .owner;
-    if owner.account_id != account {
-        return Err(Error::forbidden(
-            "Only the current owner can remove a route.",
-        ));
-    }
     uuid(route)?;
     let (instance, route, revision) = (
         instance.to_owned(),
         route.to_owned(),
         input["revision"].as_str().map(str::to_owned),
     );
+    configuration.recheck(s).await?;
     target.recheck_package(s).await?;
     s.store
         .transaction(move |db| {
+            configuration.current(db)?;
             current_resource(db, &target, &resource)?;
             route_in(db, &instance, &resource.id, &route)?.require_revision(revision.as_deref())?;
             remove_in(db, &route)?;
@@ -633,11 +721,38 @@ pub async fn requests(
     resource: &str,
     route: &str,
 ) -> Result<Value> {
-    resources::get(s, plugin, instance, collection, resource).await?;
-    let (instance, resource, route) = (instance.to_owned(), resource.to_owned(), route.to_owned());
+    let configuration = Configuration::managed(s, None).await?;
+    requests_configured(
+        s,
+        plugin,
+        instance,
+        collection,
+        resource,
+        route,
+        configuration,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::plugins) async fn requests_configured(
+    s: &Service,
+    plugin: &str,
+    instance: &str,
+    collection: &str,
+    resource: &str,
+    route: &str,
+    configuration: Configuration,
+) -> Result<Value> {
+    configuration.recheck(s).await?;
+    let target = Target::active(s, plugin, instance).await?;
+    let resource = resources::get_for(s, target.clone(), collection, resource).await?;
+    let (instance, resource, route) = (instance.to_owned(), resource, route.to_owned());
     s.store
         .read(move |db| {
-            route_in(db, &instance, &resource, &route)?;
+            configuration.current(db)?;
+            current_resource(db, &target, &resource)?;
+            route_in(db, &instance, &resource.id, &route)?;
             let items = db
                 .list("plugin-requests")?
                 .into_iter()
@@ -670,17 +785,36 @@ pub async fn people(
     user: &str,
     input: &Value,
 ) -> Result<Value> {
+    let owner = Arc::new(super::operations::Owner::for_account(s, account).await?);
+    people_configured(
+        s,
+        plugin,
+        instance,
+        collection,
+        resource,
+        route,
+        user,
+        input,
+        Configuration::owner(owner),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::plugins) async fn people_configured(
+    s: &Service,
+    plugin: &str,
+    instance: &str,
+    collection: &str,
+    resource: &str,
+    route: &str,
+    user: &str,
+    input: &Value,
+    configuration: Configuration,
+) -> Result<Value> {
+    configuration.recheck(s).await?;
     let target = Target::active(s, plugin, instance).await?;
     let resource = resources::get_for(s, target.clone(), collection, resource).await?;
-    let owner = crate::relay::task_author_policy(s)
-        .await?
-        .ok_or_else(|| Error::forbidden("The installation has no verified owner."))?
-        .owner;
-    if owner.account_id != account {
-        return Err(Error::forbidden(
-            "Only the current owner can manage this route.",
-        ));
-    }
     let action = text(input, "action");
     if !connections::external_id(user) || !matches!(action, "approve" | "deny" | "remove") {
         return Err(Error::bad("Choose a person and an access action."));
@@ -692,13 +826,15 @@ pub async fn people(
         user.to_owned(),
         action.to_owned(),
     );
+    configuration.recheck(s).await?;
     target.recheck_package(s).await?;
     s.store
         .transaction(move |db| {
+            configuration.current(db)?;
             current_resource(db, &target, &resource)?;
             let mut route = route_in(db, &instance, &resource.id, &route)?;
             route.require_revision(revision.as_deref())?;
-            if route.owner_access_id != owner.access_id {
+            if route.owner_access_id != configuration.owner.access_id() {
                 return Err(Error::forbidden("Review this route for the current owner."));
             }
             if route.access_mode == AccessMode::Everyone {

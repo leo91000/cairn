@@ -126,7 +126,7 @@ test('older hosts keep existing plugin pages without a setup drafts endpoint', a
   }
 })
 
-test('closing an editor during its exact grant read keeps the original update target and typed secret', async ({ page }) => {
+test('closing an editor during its save keeps the original update target and typed secret', async ({ page }) => {
   await useRelayForHttpMocks(page)
   const manifest = {
     id: 'held',
@@ -163,17 +163,11 @@ test('closing an editor during its exact grant read keeps the original update ta
     activity: [],
   }
   let globalReads = 0
-  let exactStarted = false
+  let writeStarted = false
+  let writeFinished = false
   let release!: () => void
   const held = new Promise<void>(resolve => release = resolve)
   const writes: { method: string, path: string, body: any }[] = []
-  await page.route('**/api/agents', async (route) => {
-    const response = await route.fetch()
-    const agents = await response.json()
-    for (const agent of agents)
-      delete agent.grantsOnAgent
-    await route.fulfill({ response, json: agents })
-  })
   await page.route('**/api/plugins', (route) => {
     globalReads++
     return route.fulfill({ status: 503, json: { error: 'No global catalogue' } })
@@ -185,6 +179,17 @@ test('closing an editor during its exact grant read keeps the original update ta
       status: 'active',
       active: '1',
       manifest,
+      setup: {
+        steps: [
+          {
+            id: 'settings',
+            kind: 'settings',
+            title: 'Settings',
+            settings: ['token'],
+          },
+          { id: 'agents', kind: 'agents', title: 'Agent access' },
+        ],
+      },
       instanceReads: true,
       accessReads: true,
       setupDrafts: false,
@@ -193,14 +198,13 @@ test('closing an editor during its exact grant read keeps the original update ta
   }))
   await page.route('**/api/plugins/packages/held/connections', route => route.fulfill({ json: { items: [instance] } }))
   await page.route('**/api/plugins/instance-access', route => route.fulfill({ json: { items: [] } }))
-  await page.route('**/api/plugins/packages/held/connections/saved', async (route) => {
-    exactStarted = true
-    await held
-    await route.fulfill({ json: { ...instance, agentIds: ['concurrent'] } })
-  })
+  await page.route('**/api/plugins/packages/held/connections/saved', route => route.fulfill({ json: { ...instance, agentIds: ['concurrent'] } }))
   await page.route(/\/api\/plugins\/held\/connections(?:\/saved)?$/, async (route) => {
     writes.push({ method: route.request().method(), path: new URL(route.request().url()).pathname, body: route.request().postDataJSON() })
+    writeStarted = true
+    await held
     await route.fulfill({ json: {} })
+    writeFinished = true
   })
   try {
     await page.goto(workspacePath('/plugins/held'))
@@ -210,21 +214,24 @@ test('closing an editor during its exact grant read keeps the original update ta
     await editor.getByLabel('Name', { exact: true }).fill('Typed name')
     await editor.getByLabel('Credential', { exact: true }).fill('synthetic_changed_credential')
     await editor.getByRole('button', { name: 'Save account', exact: true }).click()
-    await expect.poll(() => exactStarted).toBe(true)
+    await expect.poll(() => writeStarted).toBe(true)
+    instance.agentIds = ['concurrent']
     await editor.getByRole('button', { name: 'Close dialog', exact: true }).click()
     await expect(editor).not.toBeVisible()
     release()
+    await expect.poll(() => writeFinished).toBe(true)
     await expect.poll(() => writes.length).toBe(1)
     expect(writes[0].method).toBe('PUT')
     expect(writes[0].path).toMatch(/\/plugins\/held\/connections\/saved$/)
-    expect(writes[0].body).toMatchObject({ name: 'Typed name', agentIds: ['concurrent'], secrets: { token: 'synthetic_changed_credential' } })
+    expect(writes[0].body).toMatchObject({ name: 'Typed name', secrets: { token: 'synthetic_changed_credential' } })
+    expect(writes[0].body).not.toHaveProperty('agentIds')
     expect(globalReads).toBe(0)
   }
   finally { release() }
 })
 
 for (const grant of ['root', 'resource'] as const) {
-  test(`selected package pages preserve cross-package ${grant} access restrictions without full catalogue reads`, async ({ page, workspace }) => {
+  test(`selected package pages warn about cross-package ${grant} access without full catalogue reads`, async ({ page, workspace }) => {
     const agent = await workspace.api('/api/agents', 'POST', {
       name: `Public helper ${grant}`,
       access: {
@@ -257,6 +264,7 @@ for (const grant of ['root', 'resource'] as const) {
         status: 'active',
         active: '1',
         manifest,
+        setup: { steps: [{ id: 'people', kind: 'people', title: 'Who can talk to it' }] },
         instanceReads: true,
         accessReads: true,
         setupDrafts: false,
@@ -310,9 +318,10 @@ for (const grant of ['root', 'resource'] as const) {
       await expect(page.getByRole('article', { name: 'First instance', exact: true })).toBeVisible()
       await second.getByRole('button', { name: 'Edit Second instance', exact: true }).click()
       const editor = page.getByRole('dialog', { name: 'Edit Second instance', exact: true })
-      await expect(editor.getByRole('radio', { name: new RegExp(agent.name) })).toBeDisabled()
-      await expect(editor.getByText('Has plugin access').first()).toBeVisible()
-      await expect(editor.getByRole('button', { name: 'Save instance', exact: true })).toBeDisabled()
+      await expect(editor.getByRole('radio', { name: new RegExp(agent.name) })).toBeEnabled()
+      await expect(editor.getByRole('radio', { name: new RegExp(agent.name) })).toBeChecked()
+      await expect(editor.getByRole('status').filter({ hasText: 'can use everything' })).toContainText('use its plugins')
+      await expect(editor.getByRole('button', { name: 'Save instance', exact: true })).toBeEnabled()
       expect(globalReads).toBe(0)
     }
     finally {
@@ -2237,7 +2246,7 @@ test('resource routes preserve exact conditions, require explicit grants and edi
   await selectField(routes, 'Project', 'No project')
   const agentSelect = routes.getByRole('combobox', { name: 'Agent', exact: true })
   await agentSelect.fill(broad.name)
-  await expect(routes.getByRole('option', { name: broad.name, exact: true })).toHaveAttribute('aria-disabled', 'false')
+  await expect(routes.getByRole('option', { name: broad.name, exact: true })).toBeEnabled()
   await routes.getByRole('option', { name: broad.name, exact: true }).click()
   await expect(routes.getByRole('status').filter({ hasText: 'can use everything' })).toBeVisible()
   await selectField(routes, 'Agent', agent.name)
