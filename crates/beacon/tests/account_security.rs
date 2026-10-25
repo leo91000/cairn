@@ -351,21 +351,59 @@ async fn generated_account_methods_are_scoped_to_the_beacon_session_without_an_i
 #[tokio::test]
 async fn account_methods_remain_at_beacon_when_the_installation_goes_offline() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
-    let route = format!("{}{}", relay.app.url, cairn_contracts::beacon::LIST_ACCOUNT_METHODS_PATH);
-    let before: cairn_contracts::beacon::ListAccountMethodsOutput = relay.app.client.get(&route)
-        .header("cookie", &relay.cookie).send().await.unwrap().json().await.unwrap();
+    let route = format!(
+        "{}{}",
+        relay.app.url,
+        cairn_contracts::beacon::LIST_ACCOUNT_METHODS_PATH
+    );
+    let before: cairn_contracts::beacon::ListAccountMethodsOutput = relay
+        .app
+        .client
+        .get(&route)
+        .header("cookie", &relay.cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     relay.stop.cancel();
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            let status: Value = relay.app.client.get(format!("{}/api/account/session", relay.app.url))
-                .header("cookie", &relay.cookie).send().await.unwrap().json().await.unwrap();
-            if status["installations"][0]["online"] == false { break; }
+            let status: Value = relay
+                .app
+                .client
+                .get(format!("{}/api/account/session", relay.app.url))
+                .header("cookie", &relay.cookie)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if status["installations"][0]["online"] == false {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-    }).await.expect("installation must go offline");
-    let after: cairn_contracts::beacon::ListAccountMethodsOutput = relay.app.client.get(&route)
-        .header("cookie", &relay.cookie).send().await.unwrap().json().await.unwrap();
+    })
+    .await
+    .expect("installation must go offline");
+    let after: cairn_contracts::beacon::ListAccountMethodsOutput = relay
+        .app
+        .client
+        .get(&route)
+        .header("cookie", &relay.cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(before, after);
-    assert!(matches!(after, cairn_contracts::beacon::ListAccountMethodsOutput::Listed { .. }));
+    assert!(matches!(
+        after,
+        cairn_contracts::beacon::ListAccountMethodsOutput::Listed { .. }
+    ));
     relay.close().await;
 }
