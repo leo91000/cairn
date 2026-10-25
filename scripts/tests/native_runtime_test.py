@@ -94,6 +94,7 @@ def main():
                             loadAverageStart=os.getloadavg(), cpuTicksStart=Path('/proc/stat').read_text().splitlines()[0]),
                    s3Emulator=dict(name='Moto', version=importlib.metadata.version('moto'),
                                    keyBufferBytes=int(os.environ['MOTO_S3_DEFAULT_KEY_BUFFER_SIZE']),
+                                   openFileLimits=resource.getrlimit(resource.RLIMIT_NOFILE),
                                    backing='SpooledTemporaryFile; larger payloads and version-list copies spill to local disk.'),
                    conditions='Disposable hosted Linux VM; loopback Moto S3 with 64KiB per-key memory buffers, synthetic credentials; no WAN latency. '
                               'Cold file reads use advisory POSIX_FADV_DONTNEED; post-eviction controller restart clears userspace cache.',

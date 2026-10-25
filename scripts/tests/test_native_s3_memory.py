@@ -2,6 +2,11 @@
 import copy
 import hashlib
 import os
+from pathlib import Path
+import resource
+import subprocess
+import sys
+import textwrap
 import unittest
 from unittest.mock import patch
 
@@ -12,6 +17,61 @@ import node_s3_test as fixture
 
 
 class NativeS3MemoryTests(unittest.TestCase):
+    def test_insufficient_hard_limit_fails_before_starting_server(self):
+        with patch.object(resource, 'getrlimit', return_value=(128, 1024)), \
+                patch.object(resource, 'setrlimit') as change:
+            with self.assertRaisesRegex(RuntimeError, 'hard limit of at least 65536'):
+                fixture.configure_native_s3()
+            change.assert_not_called()
+
+    def test_sufficient_soft_limit_does_not_change_inherited_limits(self):
+        for limits in [(131072, 131072), (resource.RLIM_INFINITY, resource.RLIM_INFINITY)]:
+            with self.subTest(limits=limits), patch.object(resource, 'getrlimit', return_value=limits), \
+                    patch.object(resource, 'setrlimit') as change:
+                fixture.configure_native_s3()
+                change.assert_not_called()
+
+    def test_real_spooled_version_copies_exceed_initial_soft_limit(self):
+        # Alter only a disposable child process, never this runner's limits.
+        program = textwrap.dedent('''
+            import os
+            import resource
+            import boto3
+            from moto import mock_aws
+            from moto.s3.models import s3_backends
+            import node_s3_test as fixture
+
+            soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (128, hard))
+            fixture.configure_native_s3()
+            assert resource.getrlimit(resource.RLIMIT_NOFILE) == (65536, hard)
+            with mock_aws():
+                client = boto3.client('s3', region_name='us-east-1',
+                                      aws_access_key_id='fixture', aws_secret_access_key='fixture')
+                client.create_bucket(Bucket='native-descriptor-test')
+                client.put_bucket_versioning(Bucket='native-descriptor-test',
+                                             VersioningConfiguration={'Status': 'Enabled'})
+                for index in range(48):
+                    client.put_object(Bucket='native-descriptor-test', Key=str(index), Body=b'x' * 131072)
+                backend = s3_backends['123456789012']['aws']
+                copies = [backend.list_object_versions('native-descriptor-test')[0] for _ in range(4)]
+                assert len(os.listdir('/proc/self/fd')) > 128
+                for keys in copies:
+                    assert len(keys) == 48
+                    for key in keys:
+                        assert key._value_buffer._rolled
+                        assert key.value == b'x' * 131072
+                        key.dispose()
+                entries = client.list_object_versions(Bucket='native-descriptor-test')['Versions']
+                client.delete_objects(Bucket='native-descriptor-test', Delete={'Objects': [
+                    dict(Key=item['Key'], VersionId=item['VersionId']) for item in entries]})
+                assert client.list_objects_v2(Bucket='native-descriptor-test')['KeyCount'] == 0
+        ''')
+        environment = dict(os.environ, AWS_EC2_METADATA_DISABLED='true', AWS_CONFIG_FILE='/dev/null',
+                           AWS_SHARED_CREDENTIALS_FILE='/dev/null')
+        subprocess.run([sys.executable, '-c', program], cwd=Path(__file__).parent,
+                       env=environment, check=True, timeout=60)
+
     def test_large_version_payloads_and_listing_copies_spill_without_changing_data(self):
         environment = dict(AWS_EC2_METADATA_DISABLED='true', AWS_CONFIG_FILE='/dev/null',
                            AWS_SHARED_CREDENTIALS_FILE='/dev/null')

@@ -167,11 +167,15 @@ Primary references: [Docker rootless requirements](https://docs.docker.com/engin
 
 The `native-runtime` CI job uses a disposable Linux host, synthetic credentials
 and loopback Moto S3. Moto 5.2.3 payload buffers are fixed at 64 KiB for both
-reference and candidate.
+reference and candidate. The native S3 fixture provisions a soft open-file limit
+of at least 65,536 within its inherited hard limit before starting server threads;
+an insufficient hard limit fails explicitly. Spilled originals and concurrent
+version-list copies each consume a descriptor. This changes only the test process
+and its children, without changing host configuration or production unit limits.
 Larger emulator payloads and version-list copies spill to local temporary files:
 Moto otherwise copies the entire bucket into RAM before filtering each concurrent
 version-list request during purge. The real list/version/delete API path and final
-empty-bucket checks remain mandatory. This emulator setting is recorded in the
+empty-bucket checks remain mandatory. These emulator settings are recorded in the
 measurement JSON and adds local disk/cache effects; it is not production S3 latency.
 The job executes the shipped native controller and entrypoint, the real
 systemd/ublk/ext4 stack and the managed Docker tools. Reference binaries

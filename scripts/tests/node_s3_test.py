@@ -6,12 +6,14 @@ Requires the AWS CLI and the project's pinned pnpm/Rust tools.
 import argparse
 import os
 from pathlib import Path
+import resource
 import subprocess
 
 import boto3
 from moto.server import ThreadedMotoServer
 
 NATIVE_S3_KEY_BUFFER_BYTES = 64 * 1024
+NATIVE_S3_OPEN_FILES = 65536
 
 
 def configure_native_s3():
@@ -20,6 +22,14 @@ def configure_native_s3():
     # store into several GiB of emulator RAM. Use Moto's supported file-spooling
     # setting; preserve the real version-list/delete APIs and every purge check.
     os.environ['MOTO_S3_DEFAULT_KEY_BUFFER_SIZE'] = str(NATIVE_S3_KEY_BUFFER_BYTES)
+    # Spilled originals and simultaneous version-list copies each hold a file.
+    # Provision this test process before starting threads, within its inherited
+    # hard limit. Never change the host configuration or production unit limits.
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if hard != resource.RLIM_INFINITY and hard < NATIVE_S3_OPEN_FILES:
+        raise RuntimeError('Native Moto fixture requires an open-file hard limit of at least 65536.')
+    if soft != resource.RLIM_INFINITY and soft < NATIVE_S3_OPEN_FILES:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (NATIVE_S3_OPEN_FILES, hard))
 
 
 def main():
