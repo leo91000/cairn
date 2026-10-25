@@ -1,5 +1,6 @@
 """Qualification readiness regressions without Docker or host services."""
 from pathlib import Path
+import itertools
 import subprocess
 from types import SimpleNamespace
 import unittest
@@ -9,9 +10,11 @@ import native_docker_workload as workload
 
 
 class ComposeReadinessTests(unittest.TestCase):
-    def run_probe(self, redis_results):
+    def run_probe(self, redis_results, postgres_results=None):
         elapsed, calls = [0.0], []
         results = iter(redis_results)
+        postgres = iter(postgres_results) if postgres_results is not None else itertools.repeat(
+            SimpleNamespace(returncode=0, stdout='1\n', stderr=''))
 
         def run(args, **options):
             self.assertGreater(options['timeout'], 0)
@@ -19,8 +22,13 @@ class ComposeReadinessTests(unittest.TestCase):
             service = args[args.index('-T') + 1]
             calls.append((service, options['timeout']))
             if service == 'db':
-                return SimpleNamespace(returncode=0, stdout='accepting connections', stderr='')
-            result = next(results)
+                # A Unix-only initialization server must never qualify as an
+                # application server, even when pg_isready would report success.
+                self.assertIn('-h 127.0.0.1', args[-1])
+                self.assertIn('SELECT 1', args[-1])
+                result = next(postgres)
+            else:
+                result = next(results)
             if isinstance(result, Exception):
                 elapsed[0] += options['timeout']
                 raise result
@@ -44,6 +52,13 @@ class ComposeReadinessTests(unittest.TestCase):
         ])
         self.assertEqual([service for service, _ in calls], ['db', 'redis', 'redis', 'redis'])
         self.assertGreater(elapsed, 0)
+
+    def test_initialization_socket_does_not_satisfy_application_readiness(self):
+        pong = SimpleNamespace(returncode=0, stdout='PONG', stderr='')
+        refused = SimpleNamespace(returncode=1, stdout='', stderr='TCP connection refused')
+        ready = SimpleNamespace(returncode=0, stdout='1\n', stderr='')
+        _, calls = self.run_probe([pong], postgres_results=[refused, ready])
+        self.assertEqual([service for service, _ in calls], ['db', 'redis', 'db'])
 
     def test_failed_readiness_keeps_the_original_shared_deadline(self):
         refused = SimpleNamespace(returncode=1, stdout='', stderr='Connection refused')

@@ -52,7 +52,11 @@ def wait_compose_services(compose_path):
     # Detached startup does not imply application readiness. In particular,
     # Postgres can already accept connections while resumed Redis is starting.
     deadline = time.monotonic() + 45
-    probes = [('db', ['pg_isready']), ('redis', ['redis-cli', 'ping'])]
+    # The image's initialization server accepts Unix-socket connections before
+    # the real TCP server starts. Exercise authenticated SQL over TCP instead.
+    postgres = ['sh', '-c', 'PGPASSWORD="$POSTGRES_PASSWORD" PGCONNECT_TIMEOUT=5 exec '
+                'psql -X -w -h 127.0.0.1 -U postgres -d postgres -Atqc "SELECT 1"']
+    probes = [('db', postgres), ('redis', ['redis-cli', 'ping'])]
     pending = dict(probes)
     diagnostics = {}
     while pending:
@@ -67,7 +71,7 @@ def wait_compose_services(compose_path):
             except subprocess.TimeoutExpired:
                 diagnostics[service] = 'readiness command timed out'
                 continue
-            expected = 'accepting connections' in ready.stdout if service == 'db' else ready.stdout.strip() == 'PONG'
+            expected = ready.stdout.strip() == ('1' if service == 'db' else 'PONG')
             if ready.returncode == 0 and expected:
                 del pending[service]
                 diagnostics.pop(service, None)
