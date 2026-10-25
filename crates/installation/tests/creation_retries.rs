@@ -1,3 +1,5 @@
+use common::ProjectFixture;
+
 mod common;
 
 use cairn_installation::{
@@ -51,7 +53,18 @@ async fn creation_replays_survive_restart_without_overwriting_later_edits() {
             "{kind} replay must preserve later edits and schedule"
         );
         assert_eq!(replay["createdAt"], first["createdAt"]);
-        let records = restarted.store.list(kind).await.unwrap();
+        let records = if kind == "projects" {
+            restarted
+                .store
+                .projects()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|project| serde_json::to_value(project).unwrap())
+                .collect::<Vec<_>>()
+        } else {
+            restarted.store.list(kind).await.unwrap()
+        };
         assert_eq!(
             records
                 .iter()
@@ -80,7 +93,7 @@ async fn creation_identity_is_validated_and_cannot_replace_an_update_identity() 
         );
         assert!(
             service
-                .project(
+                .project_fixture(
                     json!({ "name": "Project", "path": root.path(), "creationId": invalid }),
                     None
                 )
@@ -165,7 +178,7 @@ async fn creation_identity_cannot_overwrite_another_resource_kind() {
         .unwrap();
     assert!(
         service
-            .project(
+            .project_fixture(
                 json!({ "name": "Project", "path": root.path(), "creationId": creation_id }),
                 None
             )
@@ -187,7 +200,7 @@ async fn creation_identity_cannot_overwrite_another_resource_kind() {
             .is_err()
     );
     assert_eq!(service.get("agents", &creation_id).await.unwrap(), original);
-    assert!(service.store.list("projects").await.unwrap().is_empty());
+    assert!(service.store.projects().await.unwrap().is_empty());
     assert!(service.store.list("tasks").await.unwrap().is_empty());
 }
 
@@ -199,7 +212,7 @@ async fn save(
 ) -> Value {
     match kind {
         "agents" => service.agent(input, existing).await,
-        "projects" => service.project(input, existing).await,
+        "projects" => service.project_fixture(input, existing).await,
         _ => service.task(input, existing).await,
     }
     .unwrap()

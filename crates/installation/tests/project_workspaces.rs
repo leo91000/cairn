@@ -1,3 +1,5 @@
+use common::ProjectFixture;
+
 mod common;
 
 use cairn_installation::plugins::run_credentials::RunCredentials;
@@ -33,7 +35,7 @@ async fn fixture() -> (TempDir, Arc<Service>, Vec<Value>) {
         std::fs::create_dir(&path).unwrap();
         std::fs::write(path.join("hello"), name).unwrap();
         projects.push(
-            s.project(json!({ "name": name, "path": path }), None)
+            s.project_fixture(json!({ "name": name, "path": path }), None)
                 .await
                 .unwrap(),
         );
@@ -518,7 +520,7 @@ async fn new_git_work_is_fresh_and_local_snapshots_preserve_the_registered_check
     let current = git(&origin, &["rev-parse", "HEAD"]);
     std::fs::write(source.join("file"), "uncommitted").unwrap();
     let mut project = s
-        .project(json!({ "name": "Git", "path": source }), None)
+        .project_fixture(json!({ "name": "Git", "path": source }), None)
         .await
         .unwrap();
     let fresh = root.path().join("fresh");
@@ -670,7 +672,7 @@ async fn partial_clone_missing_blobs_are_fetched_from_the_real_promisor() {
         "fixture must actually omit blobs"
     );
     let mut project = s
-        .project(json!({ "name": "Partial", "path": source }), None)
+        .project_fixture(json!({ "name": "Partial", "path": source }), None)
         .await
         .unwrap();
     for mode in ["remote", "local"] {

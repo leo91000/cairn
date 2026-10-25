@@ -171,19 +171,19 @@ fn project(db: &Db<'_>, run: &Value, condition: &Value) -> Result<Value> {
         .find(|p| p["id"] == id)
         .ok_or_else(|| Error::forbidden("This project is not authorized for the wait."))?;
     let current = db
-        .get("projects", id)?
+        .project(id)?
         .ok_or_else(|| Error::not_found("Project no longer exists."))?;
-    if current["origin"] != granted["origin"] {
+    if current.origin != granted["origin"].as_str().unwrap_or("") {
         return Err(Error::conflict(
             "Project origin changed; register a new wait.",
         ));
     }
     Ok(json!({
-        "id": current["id"],
-        "name": current["name"],
-        "origin": current["origin"],
-        "baseBranch": current["baseBranch"],
-        "source": current["source"],
+        "id": current.id,
+        "name": current.settings.name,
+        "origin": current.origin,
+        "baseBranch": current.settings.base_branch,
+        "source": current.source,
     }))
 }
 

@@ -48,7 +48,14 @@ abstract class InstallationAccessCases {
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path.endsWith("/models") -> """{"models":[]}"""
                                 path.endsWith("/overview") -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")

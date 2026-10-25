@@ -1,3 +1,5 @@
+use common::ProjectFixture;
+
 mod common;
 
 use axum::{
@@ -1346,7 +1348,7 @@ async fn rate_limits_and_changed_agent_access_stop_admission() {
     .unwrap();
     // The agent still has to reach the delegation's project.
     let project = s
-        .project(json!({ "name": "Elsewhere", "path": root.path() }), None)
+        .project_fixture(json!({ "name": "Elsewhere", "path": root.path() }), None)
         .await
         .unwrap();
     let elsewhere = s

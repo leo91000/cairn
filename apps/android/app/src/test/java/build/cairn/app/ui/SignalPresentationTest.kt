@@ -456,24 +456,34 @@ class SignalPresentationTest {
         val scheduled = Task("s", "B planifiée", cron = "0 9 * * *", nextRun = 200)
         val soon = Task("n", "C planifiée", cron = "0 8 * * *", nextRun = 100)
         val once = Task("o", "A ponctuelle")
-        val paused = Task("p", "En pause", cron = "0 9 * * *", enabled = false)
+        val paused =
+            Task(
+                "5bfed223-205d-577b-a9eb-2561157d92ff",
+                "En pause",
+                cron = "0 9 * * *",
+                enabled = false,
+            )
         val archived = Task("x", "Archivée", archived = true, enabled = false)
         val all = listOf(scheduled, soon, once, paused, archived)
         assertEquals(
-            listOf("s", "n", "o", "p"),
+            listOf("s", "n", "o", "5bfed223-205d-577b-a9eb-2561157d92ff"),
             all.filter { missionFilter(it, "all") }.map { it.id },
         )
         assertEquals(listOf("s", "n"), all.filter { missionFilter(it, "scheduled") }.map { it.id })
         assertEquals(listOf("o"), all.filter { missionFilter(it, "once") }.map { it.id })
-        assertEquals(listOf("p"), all.filter { missionFilter(it, "paused") }.map { it.id })
+        assertEquals(
+            listOf("5bfed223-205d-577b-a9eb-2561157d92ff"),
+            all.filter { missionFilter(it, "paused") }.map { it.id },
+        )
         assertEquals(listOf("x"), all.filter { missionFilter(it, "archived") }.map { it.id })
         val latest =
             mapOf(
                 "o" to Run("r1", taskId = "o", status = "failed"),
-                "p" to Run("r2", taskId = "p", status = "running"),
+                "5bfed223-205d-577b-a9eb-2561157d92ff" to
+                    Run("r2", taskId = "5bfed223-205d-577b-a9eb-2561157d92ff", status = "running"),
             )
         assertEquals(
-            listOf("p", "o", "n", "s"),
+            listOf("5bfed223-205d-577b-a9eb-2561157d92ff", "o", "n", "s"),
             missionOrder(listOf(scheduled, soon, once, paused), latest).map { it.id },
         )
     }
@@ -487,7 +497,14 @@ class SignalPresentationTest {
                         Agent("rev", "Revue de code", description = "Relit les PR"),
                         Agent("ops", "Ops", description = "Revue des déploiements"),
                     ),
-                projects = listOf(Project("p", "Cairn", description = "Revue continue")),
+                projects =
+                    listOf(
+                        Project(
+                            "5bfed223-205d-577b-a9eb-2561157d92ff",
+                            "Cairn",
+                            description = "Revue continue",
+                        )
+                    ),
                 tasks =
                     listOf(
                         Task("t", "Revue hebdomadaire", cron = "0 9 * * 1"),

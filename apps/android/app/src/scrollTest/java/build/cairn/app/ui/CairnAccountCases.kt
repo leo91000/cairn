@@ -176,7 +176,14 @@ abstract class CairnAccountCases {
                                                 .setBody(
                                                     "event: batch\ndata: {\"state\":{\"chats\":[]},\"events\":[],\"cursor\":0}\n\n"
                                                 )
-                                        else -> "[]"
+                                        else ->
+                                            if (
+                                                request.requestUrl
+                                                    ?.encodedPath
+                                                    ?.endsWith("/api/projects") == true
+                                            )
+                                                """{"projects":[]}"""
+                                            else "[]"
                                     }
                                 }
                             }
@@ -422,7 +429,14 @@ abstract class CairnAccountCases {
                                                 .setBody(
                                                     "event: snapshot\ndata: {\"state\":{\"chats\":[]},\"cursor\":0}\n\n"
                                                 )
-                                        else -> "[]"
+                                        else ->
+                                            if (
+                                                request.requestUrl
+                                                    ?.encodedPath
+                                                    ?.endsWith("/api/projects") == true
+                                            )
+                                                """{"projects":[]}"""
+                                            else "[]"
                                     }
                                 }
                             }

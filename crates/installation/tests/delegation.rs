@@ -1,5 +1,7 @@
 mod common;
 
+use common::ProjectFixture;
+
 use cairn_installation::{
     chats::wait_for,
     config::{MAIN_AGENT_ID, id},
@@ -668,13 +670,12 @@ async fn preparation_failures_reach_the_requester_and_are_redacted_after_deletio
     let f = Fixture::new(true).await;
     let turn = f.conversation(MAIN_AGENT_ID).await;
     let project = id();
-    f.s.store
-        .put(
-            "projects",
-            json!({ "id": project, "name": "Review project", "path": f._root.path() }),
-        )
-        .await
-        .unwrap();
+    f.s.project_fixture(
+        json!({ "creationId": project, "name": "Review project", "path": f._root.path() }),
+        None,
+    )
+    .await
+    .unwrap();
     let agent =
         f.s.agent(
             json!({ "name": "Reviewer", "access": { "projects": [project] } }),

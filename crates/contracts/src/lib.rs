@@ -130,3 +130,7 @@ mod tests {
         }
     }
 }
+
+mod projects;
+
+pub use projects::*;

@@ -21,6 +21,34 @@
       ],
       "type": "object"
     },
+    "CreateProjectInput": {
+      "additionalProperties": false,
+      "properties": {
+        "creationId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "settings": {
+          "$ref": "#/definitions/ProjectSettings"
+        }
+      },
+      "required": [
+        "settings"
+      ],
+      "type": "object"
+    },
+    "DeleteProjectOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "deleted"
+      ],
+      "type": "object"
+    },
     "ListAccountMethodsInput": {
       "additionalProperties": false,
       "type": "object"
@@ -65,6 +93,168 @@
           "type": "object"
         }
       ]
+    },
+    "ListProjectsInput": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "ListProjectsOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "projects": {
+          "items": {
+            "$ref": "#/definitions/Project"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "projects"
+      ],
+      "type": "object"
+    },
+    "Project": {
+      "properties": {
+        "baseBranch": {
+          "default": "main",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_/.-]*$",
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "description": {
+          "default": "",
+          "maxLength": 500,
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "origin": {
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProjectSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourceMode": {
+          "default": "remote",
+          "pattern": "^(remote|local)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "path",
+        "description",
+        "sourceMode",
+        "baseBranch",
+        "origin",
+        "source",
+        "revision",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "ProjectInput": {
+      "additionalProperties": false,
+      "properties": {
+        "projectId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectId"
+      ],
+      "type": "object"
+    },
+    "ProjectSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "baseBranch": {
+          "default": "main",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_/.-]*$",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "maxLength": 500,
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "sourceMode": {
+          "default": "remote",
+          "pattern": "^(remote|local)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "path",
+        "description",
+        "sourceMode",
+        "baseBranch"
+      ],
+      "type": "object"
+    },
+    "ProjectSource": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "instance": {
+          "type": "string"
+        },
+        "pluginId": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pluginId",
+        "source",
+        "instance",
+        "id"
+      ],
+      "type": "object"
     },
     "QualificationFixture": {
       "additionalProperties": false,
@@ -162,6 +352,27 @@
           "type": "object"
         }
       ]
+    },
+    "ReplaceProjectInput": {
+      "additionalProperties": false,
+      "properties": {
+        "projectId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "settings": {
+          "$ref": "#/definitions/ProjectSettings"
+        }
+      },
+      "required": [
+        "projectId",
+        "revision",
+        "settings"
+      ],
+      "type": "object"
     },
     "ResumeRunError": {
       "additionalProperties": false,

@@ -1,3 +1,5 @@
+use common::ProjectFixture;
+
 mod common;
 
 use axum::{body::Body, http::StatusCode};
@@ -858,6 +860,13 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         .collect();
     public_names.insert(cairn_contracts::RESUME_RUN_ID);
     public_names.insert(cairn_contracts::beacon::LIST_ACCOUNT_METHODS_ID);
+    public_names.extend([
+        "list_projects",
+        "get_project",
+        "save_project",
+        "replace_project",
+        "delete_project",
+    ]);
     assert_eq!(installed_names, public_names);
     assert!(tools.iter().all(|tool| tool.get("_meta").is_none()));
     let deletion = tools
@@ -1220,16 +1229,14 @@ async fn installation_access_manages_resources_and_other_agents_work() {
         &configuration,
         "save_project",
         json!({
-            "name": "Managed project",
-            "path": project_path,
-            "sourceMode": "local"
+            "settings": { "name": "Managed project", "path": project_path, "sourceMode": "local" }
         }),
     )
     .await;
     let project_id = result(&project)["id"].clone();
     let projects = call(&s, &configuration, "list_projects", json!({})).await;
     assert!(
-        result(&projects)
+        result(&projects)["projects"]
             .as_array()
             .unwrap()
             .iter()
@@ -1389,7 +1396,7 @@ async fn installation_access_can_save_global_and_project_skills() {
     let project_path = root.path().join("project");
     std::fs::create_dir(&project_path).unwrap();
     let project = s
-        .project(
+        .project_fixture(
             json!({
                 "name": "Skill project",
                 "path": project_path,
@@ -3251,4 +3258,88 @@ async fn account_methods_never_derive_account_authority_from_installation_grants
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn typed_project_lifecycle_has_the_same_contract_on_both_tools() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let agent_token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let owner_token = common::relay_fixture::grant(&s, &["read", "manage"]).await;
+    let read_token = common::relay_fixture::grant(&s, &["read"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    for (endpoint, token) in [
+        ("/mcp", owner_token.as_str()),
+        ("/mcp-installation", agent_token),
+    ] {
+        let input = json!({ "creationId": cairn_installation::config::id(), "settings": { "name": "Typed project", "path": root.path() } });
+        let (_, created) =
+            node_management_call(&app, endpoint, token, "save_project", input.clone()).await;
+        let first = result(&created).clone();
+        let project_id = first["id"].clone();
+        let (_, read) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "get_project",
+            json!({ "projectId": project_id }),
+        )
+        .await;
+        assert_eq!(result(&read), &first);
+        let replacement = json!({ "projectId": project_id, "revision": first["revision"], "settings": { "name": "Replaced", "path": root.path(), "sourceMode": "local" } });
+        let (_, replaced) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "replace_project",
+            replacement.clone(),
+        )
+        .await;
+        assert_eq!(result(&replaced)["name"], "Replaced");
+        let (_, stale) =
+            node_management_call(&app, endpoint, token, "replace_project", replacement).await;
+        assert_eq!(stale["result"]["isError"], true, "{stale}");
+        let (_, replay) = node_management_call(&app, endpoint, token, "save_project", input).await;
+        assert_eq!(result(&replay), result(&replaced));
+        let (_, listing) =
+            node_management_call(&app, endpoint, token, "list_projects", json!({})).await;
+        assert!(
+            result(&listing)["projects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p == result(&replaced))
+        );
+        let (_, denied) = node_management_call(
+            &app,
+            "/mcp",
+            &read_token,
+            "delete_project",
+            json!({ "projectId": project_id }),
+        )
+        .await;
+        assert_eq!(denied["result"]["isError"], true);
+        let (_, deleted) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "delete_project",
+            json!({ "projectId": project_id }),
+        )
+        .await;
+        assert_eq!(result(&deleted)["deleted"], true);
+        let (_, missing) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "get_project",
+            json!({ "projectId": project_id }),
+        )
+        .await;
+        assert_eq!(missing["result"]["isError"], true);
+    }
 }

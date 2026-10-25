@@ -56,18 +56,20 @@ impl Fixture {
         let project = id();
         let path = root.path().join("project");
         std::fs::create_dir(&path).unwrap();
+        let registered = cairn_contracts::Project {
+            id: cairn_contracts::ProjectId(uuid::Uuid::parse_str(&project).unwrap()),
+            settings: serde_json::from_value(json!({
+                "name": "Wait fixture", "path": path,
+                "sourceMode": "remote", "baseBranch": "main",
+            }))
+            .unwrap(),
+            origin: origin.to_owned(),
+            source: None,
+            revision: id(),
+            created_at: cairn_installation::config::now(),
+        };
         s.store
-            .put(
-                "projects",
-                json!({
-                        "id": project,
-                        "name": "Wait fixture",
-                        "path": path,
-                        "sourceMode": "remote",
-                        "baseBranch": "main",
-                "origin": origin,
-                    }),
-            )
+            .transaction(move |db| db.save_project(&registered, None))
             .await
             .unwrap();
         let chat = s.chat_create(json!({})).await.unwrap();
@@ -577,9 +579,12 @@ async fn permissions_origins_and_workflow_commit_mismatches_are_rechecked() {
     f.schedule(f.github_condition()).await;
     f.finish().await;
     let calls = f.calls().len();
-    let mut project = f.s.get("projects", &f.project).await.unwrap();
-    project["origin"] = "https://github.com/another/repository.git".into();
-    f.s.store.put("projects", project).await.unwrap();
+    let mut project = f.s.get_project(&f.project).await.unwrap();
+    project.origin = "https://github.com/another/repository.git".into();
+    f.s.store
+        .transaction(move |db| db.save_project(&project, Some(&project.revision)))
+        .await
+        .unwrap();
     conditions::poll_once(&f.s).await.unwrap();
     assert_eq!(f.calls().len(), calls);
     assert_eq!(
@@ -859,9 +864,12 @@ async fn watchers_share_requests_only_for_the_same_granted_project_origin() {
         f.schedule(f.github_condition()).await;
         f.finish().await;
         if origin_changed {
-            let mut project = f.s.get("projects", &f.project).await.unwrap();
-            project["origin"] = "git@github.com:fixture/repo.git".into();
-            f.s.store.put("projects", project).await.unwrap();
+            let mut project = f.s.get_project(&f.project).await.unwrap();
+            project.origin = "git@github.com:fixture/repo.git".into();
+            f.s.store
+                .transaction(move |db| db.save_project(&project, Some(&project.revision)))
+                .await
+                .unwrap();
         }
         let second = f.s.chat_create(json!({})).await.unwrap();
         let chat = text(&second, "id");

@@ -565,7 +565,14 @@ abstract class BackgroundWaitCases {
                                     wireJson.encodeToString(
                                         build.cairn.contracts.ResumeRunOutput(SAVED_RUN_ID)
                                     )
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")

@@ -56,7 +56,14 @@ class AccountsDeviceTest {
                                 "GET /api/installations/fixture/api/overview",
                                 "GET /api/installations/fixture/api/codex/models",
                                 "GET /api/installations/fixture/api/claude/models" -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(result)
                     }

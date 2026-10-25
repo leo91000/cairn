@@ -819,66 +819,6 @@
     }
   },
   {
-    "name": "list_projects",
-    "description": "List registered project workspaces.",
-    "scope": "read",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {},
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "save_project",
-    "description": "Register an existing directory inside an allowed workspace root.",
-    "scope": "manage",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 100
-        },
-        "path": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 2000
-        },
-        "description": {
-          "default": "",
-          "type": "string",
-          "maxLength": 500
-        },
-        "baseBranch": {
-          "default": "main",
-          "type": "string",
-          "pattern": "^[a-z0-9][\\w/.-]*$"
-        },
-        "sourceMode": {
-          "type": "string",
-          "enum": [
-            "remote",
-            "local"
-          ],
-          "default": "remote"
-        }
-      },
-      "required": [
-        "name",
-        "path",
-        "description",
-        "baseBranch",
-        "sourceMode"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
     "name": "list_tasks",
     "description": "List task instructions and schedules.",
     "scope": "read",

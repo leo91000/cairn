@@ -144,7 +144,14 @@ abstract class ConversationLifecycleCases {
                                     )
                                 path == "/api/installations/fixture/api/overview" -> "{}"
                                 path.endsWith("/models") -> """{"models":[]}"""
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
