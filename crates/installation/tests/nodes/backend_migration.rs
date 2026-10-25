@@ -142,7 +142,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     let (listener, address) = common::bind().await;
     let owner = Owner::at(address.to_string()).await;
     let (run, agent, chat, vm_node, native_node) = (id(), id(), id(), id(), id());
-    let original_agent = json!({ "id": agent, "revision": 1, "access": { "backend": "firecracker", "nodes": [vm_node] } });
+    let original_agent = json!({ "id": agent, "revision": id(), "access": { "backend": "firecracker", "nodes": [vm_node] } });
     owner.put("agents", original_agent.clone()).await;
     let mut record = run_record(&run, RunStatus::Succeeded);
     record["isolated"] = true.into();
