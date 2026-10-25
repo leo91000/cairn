@@ -811,7 +811,7 @@ async fn model_speeds_and_agent_speeds_match_public_mcp_and_installation_tools()
     let kept = public_call(
         &s,
         &["manage"],
-        "update_agent",
+        "replace_agent",
         json!({ "id": agent["id"], "agent": { "description": "Keeps its speed" } }),
     )
     .await;
@@ -819,7 +819,7 @@ async fn model_speeds_and_agent_speeds_match_public_mcp_and_installation_tools()
     let standard = call(
         &s,
         &configuration,
-        "update_agent",
+        "replace_agent",
         json!({ "id": agent["id"], "agent": { "speed": "standard" } }),
     )
     .await;
@@ -837,7 +837,7 @@ async fn model_speeds_and_agent_speeds_match_public_mcp_and_installation_tools()
     let rejected = call(
         &s,
         &configuration,
-        "update_agent",
+        "replace_agent",
         json!({ "id": agent["id"], "agent": { "provider": "claude", "speed": "priority" } }),
     )
     .await;
@@ -845,8 +845,8 @@ async fn model_speeds_and_agent_speeds_match_public_mcp_and_installation_tools()
     let switched = call(
         &s,
         &configuration,
-        "update_agent",
-        json!({ "id": agent["id"], "agent": { "provider": "claude", "reasoning": "max" } }),
+        "replace_agent",
+        json!({ "id": agent["id"], "agent": { "provider": "claude", "reasoning": "max", "speed": "" } }),
     )
     .await;
     assert_eq!(result(&switched)["provider"], "claude");
@@ -1916,6 +1916,13 @@ async fn legacy_grants_do_not_acquire_installation_access_and_vm_channels_bind_t
 }
 
 async fn public_call(s: &Arc<Service>, scopes: &[&str], name: &str, args: Value) -> Value {
+    let args = if name == "save_agent" && args.get("settings").is_none() {
+        create_profile(args)
+    } else if name == "replace_agent" && args.get("settings").is_none() {
+        replacement(s, args).await
+    } else {
+        args
+    };
     let token = common::relay_fixture::grant(s, scopes).await;
     let app = common::relay_fixture::router(s.clone()).await.unwrap();
     let request = common::request("POST", "/mcp")

@@ -105,7 +105,7 @@ export function draftOf(agent: Agent): AgentDraft {
     provider: agent.provider ?? 'codex',
     model: agent.model ?? '',
     reasoning: agent.reasoning ?? '',
-    speed: agent.speed ?? '',
+    speed: agent.speed,
     timeoutMinutes: agent.timeoutMinutes ?? 0,
     access: {
       backend: access.backend ?? 'firecracker',

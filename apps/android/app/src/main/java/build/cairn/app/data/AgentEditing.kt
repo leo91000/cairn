@@ -904,8 +904,8 @@ fun AgentDraft.rebased(base: Agent, theirs: Agent, mcpIds: Set<String>? = null):
 
 /**
  * The body of `POST /agents`, `PUT /agents/{id}` and its preview. "All" selections are sent as
- * explicit nulls: an omitted key keeps the saved value on the server. The loaded revision is sent
- * back so a concurrent save is refused instead of overwritten.
+ * explicit nulls in the complete settings. The loaded revision is sent back so a concurrent save is
+ * refused instead of overwritten.
  */
 fun agentSaveBody(
     agent: Agent,
@@ -938,6 +938,7 @@ fun agentSettings(agent: Agent, mcpIds: Set<String>? = null): build.cairn.contra
         description = agent.description,
         model = agent.model,
         reasoning = agent.reasoning,
+        speed = agent.speed,
         instructions = agent.instructions,
         timeoutMinutes = agent.timeoutMinutes,
         access = agent.access.withGrantedTools(mcpIds),

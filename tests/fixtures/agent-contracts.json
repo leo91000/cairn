@@ -54,6 +54,18 @@
         "nativeNodeReviews": [],
         "reapproveDelegations": []
       }
+    },
+    {
+      "settings": {
+        "name": "Fast agent",
+        "access": {
+          "mcpTools": {}
+        },
+        "plugins": [],
+        "exclusiveNodes": [],
+        "speed": "priority"
+      },
+      "review": {}
     }
   ],
   "invalidCreates": [
@@ -289,6 +301,18 @@
         },
         "plugins": [],
         "exclusiveNodes": []
+      },
+      "review": {}
+    },
+    {
+      "settings": {
+        "name": "Default agent",
+        "access": {
+          "mcpTools": {}
+        },
+        "plugins": [],
+        "exclusiveNodes": [],
+        "speed": "INVALID!"
       },
       "review": {}
     }

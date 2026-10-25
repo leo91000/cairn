@@ -952,6 +952,14 @@ pub(crate) fn touch(agent: &mut Value) {
 }
 
 fn validate_profile(agent: &cairn_contracts::Agent) -> Result<()> {
+    crate::models::validate_speed(&agent.settings.speed)?;
+    if agent.settings.provider != cairn_contracts::AgentProvider::Codex
+        && !agent.settings.speed.is_empty()
+    {
+        return Err(Error::bad(
+            "Speed applies only to Codex agents. Remove it or choose Codex.",
+        ));
+    }
     let access = &agent.settings.access;
     let restricted = access.projects.is_some()
         || access.skills.is_some()

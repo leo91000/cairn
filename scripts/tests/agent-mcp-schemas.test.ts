@@ -23,6 +23,7 @@ it('requires explicit permissions and revisions while sharing scalar defaults', 
   expect(value.settings).toMatchObject({
     provider: 'codex',
     reasoning: 'high',
+    speed: '',
     timeoutMinutes: 0,
     access: { nodes: ['00000000-0000-4000-8000-000000000002'], projects: null },
   })

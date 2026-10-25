@@ -17,6 +17,7 @@ CREATE TABLE agents(
  description TEXT NOT NULL CHECK(length(description)<=500),
  model TEXT NOT NULL CHECK(length(model)<=100),
  reasoning TEXT NOT NULL CHECK(length(reasoning)<=40),
+ speed TEXT NOT NULL CHECK(length(speed)<=40),
  instructions TEXT NOT NULL CHECK(length(instructions)<=20000),
  timeout_minutes INTEGER NOT NULL CHECK(timeout_minutes BETWEEN 0 AND 720),
  access TEXT NOT NULL,
@@ -34,7 +35,7 @@ CREATE TABLE agents(
 CREATE INDEX agents_updated ON agents(updated_at DESC,id);
 ";
 
-const COLUMNS: &str = "id,name,provider,description,model,reasoning,instructions,timeout_minutes,access,exclusive_nodes,plugins,revision,created_at,updated_at,avatar_status,avatar_revision,avatar_url,avatar_error";
+const COLUMNS: &str = "id,name,provider,description,model,reasoning,speed,instructions,timeout_minutes,access,exclusive_nodes,plugins,revision,created_at,updated_at,avatar_status,avatar_revision,avatar_url,avatar_error";
 
 fn decode<T: serde::de::DeserializeOwned>(index: usize, value: &str) -> rusqlite::Result<T> {
     serde_json::from_str(value).map_err(|error| {
@@ -52,7 +53,7 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Agent> {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
     })?;
     let provider: String = row.get(2)?;
-    let status: Option<String> = row.get(14)?;
+    let status: Option<String> = row.get(15)?;
     Ok(Agent {
         id: AgentId(identifier),
         settings: AgentSettings {
@@ -61,20 +62,21 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Agent> {
             description: row.get(3)?,
             model: row.get(4)?,
             reasoning: row.get(5)?,
-            instructions: row.get(6)?,
-            timeout_minutes: row.get(7)?,
-            access: decode(8, &row.get::<_, String>(8)?)?,
-            exclusive_nodes: decode(9, &row.get::<_, String>(9)?)?,
-            plugins: decode(10, &row.get::<_, String>(10)?)?,
+            speed: row.get(6)?,
+            instructions: row.get(7)?,
+            timeout_minutes: row.get(8)?,
+            access: decode(9, &row.get::<_, String>(9)?)?,
+            exclusive_nodes: decode(10, &row.get::<_, String>(10)?)?,
+            plugins: decode(11, &row.get::<_, String>(11)?)?,
         },
-        revision: row.get(11)?,
-        created_at: row.get(12)?,
+        revision: row.get(12)?,
+        created_at: row.get(13)?,
         avatar: match status {
             Some(status) => Some(cairn_contracts::AgentAvatar {
                 status,
-                revision: row.get(15)?,
-                url: row.get(16)?,
-                error: row.get(17)?,
+                revision: row.get(16)?,
+                url: row.get(17)?,
+                error: row.get(18)?,
             }),
             None => None,
         },
@@ -104,9 +106,9 @@ impl Db<'_> {
         let settings = &agent.settings;
         let provider = serde_json::to_value(settings.provider)?;
         let avatar = agent.avatar.as_ref();
-        self.0.prepare_cached("INSERT INTO agents VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
-ON CONFLICT(id) DO UPDATE SET name=excluded.name,provider=excluded.provider,description=excluded.description,model=excluded.model,reasoning=excluded.reasoning,instructions=excluded.instructions,timeout_minutes=excluded.timeout_minutes,access=excluded.access,exclusive_nodes=excluded.exclusive_nodes,plugins=excluded.plugins,revision=excluded.revision,created_at=excluded.created_at,updated_at=excluded.updated_at,avatar_status=excluded.avatar_status,avatar_revision=excluded.avatar_revision,avatar_url=excluded.avatar_url,avatar_error=excluded.avatar_error")?.execute(params![
- agent.id.to_string(), settings.name, provider.as_str().unwrap(), settings.description, settings.model, settings.reasoning, settings.instructions, settings.timeout_minutes,
+        self.0.prepare_cached("INSERT INTO agents VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
+ON CONFLICT(id) DO UPDATE SET name=excluded.name,provider=excluded.provider,description=excluded.description,model=excluded.model,reasoning=excluded.reasoning,speed=excluded.speed,instructions=excluded.instructions,timeout_minutes=excluded.timeout_minutes,access=excluded.access,exclusive_nodes=excluded.exclusive_nodes,plugins=excluded.plugins,revision=excluded.revision,created_at=excluded.created_at,updated_at=excluded.updated_at,avatar_status=excluded.avatar_status,avatar_revision=excluded.avatar_revision,avatar_url=excluded.avatar_url,avatar_error=excluded.avatar_error")?.execute(params![
+ agent.id.to_string(), settings.name, provider.as_str().unwrap(), settings.description, settings.model, settings.reasoning, settings.speed, settings.instructions, settings.timeout_minutes,
  serde_json::to_string(&settings.access)?, serde_json::to_string(&settings.exclusive_nodes)?, serde_json::to_string(&settings.plugins)?, agent.revision, agent.created_at, now(),
  avatar.map(|a| &a.status), avatar.map(|a| &a.revision), avatar.and_then(|a| a.url.as_ref()), avatar.and_then(|a| a.error.as_ref())
  ])?;

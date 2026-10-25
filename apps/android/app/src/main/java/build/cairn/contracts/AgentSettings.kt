@@ -15,11 +15,13 @@ data class AgentSettings(
     val plugins: List<String>,
     val provider: String = "codex",
     val reasoning: String = "high",
+    val speed: String = "",
     val timeoutMinutes: Int = 0,
 ) {
     init {
         require(Regex("^(codex|claude|opencode)\$").containsMatchIn(provider))
         require(Regex("^(?:[a-z][a-z0-9_-]*)?\$").containsMatchIn(reasoning))
+        require(Regex("^(?:[a-z][a-z0-9_-]*)?\$").containsMatchIn(speed))
         require(timeoutMinutes <= 720)
     }
 }

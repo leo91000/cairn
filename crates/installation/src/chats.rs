@@ -293,7 +293,7 @@ fn message_provider(db: &Db<'_>, chat: &Value, message: &Value) -> Result<String
         return Ok(Provider::of_run(&run)?.as_str().to_owned());
     }
     let agent = required(
-        db.get("agents", text(chat, "agentId"))?,
+        db.agent_snapshot(text(chat, "agentId"))?,
         "This agent is no longer available.",
     )?;
     Ok(Provider::of_agent(&agent)?.as_str().to_owned())
@@ -1664,8 +1664,18 @@ mod tests {
         let store = crate::store::Store::open(root.path()).unwrap();
         store
             .transaction(|db| {
-                db.put("agents", &json!({ "id": "codex", "provider": "codex" }))?;
-                db.put("agents", &json!({ "id": "claude", "provider": "claude" }))?;
+                let codex = cairn_contracts::AgentId(uuid::Uuid::new_v4());
+                let claude = cairn_contracts::AgentId(uuid::Uuid::new_v4());
+                for (agent_id, provider) in [(codex, "codex"), (claude, "claude")] {
+                    let settings = serde_json::from_value(json!({
+                        "name": provider,
+                        "provider": provider,
+                        "access": cairn_contracts::AccessPolicy::default(),
+                        "exclusiveNodes": [],
+                        "plugins": [],
+                    }))?;
+                    db.save_agent(&crate::agents::new_agent(settings, Some(agent_id)))?;
+                }
                 let run = json!({
                     "id": "claude-run",
                     "taskId": "switched",
@@ -1674,9 +1684,9 @@ mod tests {
                     "snapshot": { "agent": { "provider": "claude" } },
                 });
                 db.add_run(&run, None)?;
-                let new_codex = json!({ "id": "new-codex", "runId": null, "agentId": "codex" });
-                let new_claude = json!({ "id": "new-claude", "runId": null, "agentId": "claude" });
-                let switched = json!({ "id": "switched", "runId": "claude-run", "agentId": "codex" });
+                let new_codex = json!({ "id": "new-codex", "runId": null, "agentId": codex });
+                let new_claude = json!({ "id": "new-claude", "runId": null, "agentId": claude });
+                let switched = json!({ "id": "switched", "runId": "claude-run", "agentId": codex });
                 let fast = |provider: &str| json!({ "id": id(), "provider": provider, "speed": "priority" });
                 let refused = |chat: &Value, message: &Value| {
                     validate_speed(db, chat, message).unwrap_err().status == 400
@@ -1715,7 +1725,7 @@ mod tests {
                     "snapshot": { "agent": { "provider": "codex", "speed": "priority" } },
                 });
                 db.add_run(&running, None)?;
-                let steering = json!({ "id": "steering", "runId": "codex-run", "agentId": "codex" });
+                let steering = json!({ "id": "steering", "runId": "codex-run", "agentId": codex });
                 let switching = json!({
                     "id": "switching",
                     "chatId": "steering",

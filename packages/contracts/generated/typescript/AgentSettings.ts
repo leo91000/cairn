@@ -8,6 +8,7 @@ export interface AgentSettings {
   description: string
   model: string
   reasoning: string
+  speed: string
   instructions: string
   timeoutMinutes: number
   access: AccessPolicy

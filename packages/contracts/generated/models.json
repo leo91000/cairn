@@ -198,6 +198,12 @@
         "revision": {
           "type": "string"
         },
+        "speed": {
+          "default": "",
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": "string"
+        },
         "timeoutMinutes": {
           "default": 0,
           "format": "uint16",
@@ -213,6 +219,7 @@
         "description",
         "model",
         "reasoning",
+        "speed",
         "instructions",
         "timeoutMinutes",
         "access",
@@ -425,6 +432,12 @@
           "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
           "type": "string"
         },
+        "speed": {
+          "default": "",
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": "string"
+        },
         "timeoutMinutes": {
           "default": 0,
           "format": "uint16",
@@ -439,6 +452,7 @@
         "description",
         "model",
         "reasoning",
+        "speed",
         "instructions",
         "timeoutMinutes",
         "access",

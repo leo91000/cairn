@@ -173,6 +173,7 @@ async fn agent_storage_layouts() {
             "provider": (["codex", "claude", "opencode"][n as usize % 3]),
             "model": "provider/model",
             "reasoning": "high",
+            "speed": if n % 6 == 0 { "priority" } else { "" },
             "description": "Deterministic agent storage qualification. ".repeat(8),
             "instructions": "Inspect the current repository and preserve authorization. ".repeat(20),
             "access": {

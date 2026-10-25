@@ -114,6 +114,9 @@ pub struct AgentSettings {
     #[schemars(length(max = 40), pattern("^(?:[a-z][a-z0-9_-]*)?$"))]
     pub reasoning: String,
     #[serde(default)]
+    #[schemars(length(max = 40), pattern("^(?:[a-z][a-z0-9_-]*)?$"))]
+    pub speed: String,
+    #[serde(default)]
     #[schemars(length(max = 20000))]
     pub instructions: String,
     #[serde(default)]
@@ -145,12 +148,18 @@ impl AgentSettings {
         if self.timeout_minutes > 720 {
             return Err("Choose a time limit between 0 and 720 minutes.");
         }
-        let valid_reasoning = self.reasoning.is_empty()
-            || self.reasoning.bytes().enumerate().all(|(i, c)| {
-                c.is_ascii_lowercase() || (i > 0 && (c.is_ascii_digit() || c == b'_' || c == b'-'))
-            });
-        if self.reasoning.len() > 40 || !valid_reasoning {
-            return Err("Enter a valid reasoning effort.");
+        for (value, message) in [
+            (&self.reasoning, "Enter a valid reasoning effort."),
+            (&self.speed, "Enter a valid speed."),
+        ] {
+            let valid = value.is_empty()
+                || value.bytes().enumerate().all(|(i, c)| {
+                    c.is_ascii_lowercase()
+                        || (i > 0 && (c.is_ascii_digit() || c == b'_' || c == b'-'))
+                });
+            if value.len() > 40 || !valid {
+                return Err(message);
+            }
         }
         if !matches!(self.access.backend.as_str(), "native" | "firecracker")
             || !matches!(
