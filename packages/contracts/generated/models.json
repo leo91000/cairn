@@ -1,6 +1,71 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
+    "AccountSignInMethod": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "label"
+      ],
+      "type": "object"
+    },
+    "ListAccountMethodsInput": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "ListAccountMethodsOutput": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "listed",
+              "type": "string"
+            },
+            "methods": {
+              "items": {
+                "$ref": "#/definitions/AccountSignInMethod"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "methods"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "accountProofRequired",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "QualificationFixture": {
       "additionalProperties": false,
       "properties": {

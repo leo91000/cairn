@@ -7,6 +7,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import build.cairn.app.data.*
+import build.cairn.contracts.AccountSignInMethod
 import kotlinx.coroutines.CancellationException
 
 val LocalCairnCredentials = staticCompositionLocalOf<CairnCredentials?> { null }
@@ -56,7 +57,8 @@ fun ProviderButtons(vm: CairnViewModel, state: Workspace, linking: Boolean = fal
 @Composable
 fun AccountSettings(vm: CairnViewModel, state: Workspace) {
     val credentials = accountCredentials()
-    var methods by remember(state.session.account?.id) { mutableStateOf(AccountMethods()) }
+    var methods by
+        remember(state.session.account?.id) { mutableStateOf(emptyList<AccountSignInMethod>()) }
     var label by remember { mutableStateOf("Téléphone") }
     var code by remember { mutableStateOf("") }
     var challenge by remember { mutableStateOf<String?>(null) }
@@ -102,7 +104,7 @@ fun AccountSettings(vm: CairnViewModel, state: Workspace) {
             }
         }
         if (Build.VERSION.SDK_INT >= 28) {
-            if (methods.methods.any { it.kind == "passkey" })
+            if (methods.any { it.kind == "passkey" })
                 TextButton(
                     onClick = {
                         vm.perform {
@@ -133,7 +135,7 @@ fun AccountSettings(vm: CairnViewModel, state: Workspace) {
                 Text("Créer une passkey")
             }
         }
-        methods.methods.forEach { method ->
+        methods.forEach { method ->
             val name =
                 when (method.kind) {
                     "google" -> "Google"
@@ -150,7 +152,7 @@ fun AccountSettings(vm: CairnViewModel, state: Workspace) {
                         methods = accountMethods()
                     }
                 },
-                enabled = !state.busy && methods.methods.size > 1,
+                enabled = !state.busy && methods.size > 1,
             ) {
                 Text("Retirer $name")
             }

@@ -87,3 +87,15 @@ Generated clients replace the raw resume routes in the web and Android run scree
 and chat recovery controls. The remaining catalogue, persistence and other client
 models are outside this pilot. Their existing writers and schemas stay in place
 until their own conversion tickets; no new compatibility layer or SQL adapter was added.
+
+## Beacon account first slice
+
+B6 (#421) adds `list_account_methods` to the same static catalogue and generation
+pipeline. Its DTOs and descriptor live in `crates/contracts/src/beacon.rs`; the
+business read and account-session policy execute at Beacon. Both tools can
+discover it and return the typed `accountProofRequired` variant under their
+existing installation grants. They never read a local account copy or manufacture
+a proof. Both apps use generated calls and method models. The bounded Kotlin
+object template now handles an empty command input as a serializable ordinary
+class; the shared account corpus qualifies this case and the new result union.
+See [the action inventory and follow-up boundary](BEACON-CAPABILITIES.md).

@@ -18,10 +18,13 @@ application { mainClass.set("GenerateKt") }
 
 sourceSets.test {
     kotlin.srcDir("../../apps/android/app/src/main/java/build/cairn/contracts")
-    kotlin.exclude("**/ResumeRunClient.kt")
+    kotlin.exclude("**/*Client.kt")
 }
 
 tasks.test {
+    val accountMethods = rootProject.file("../../tests/fixtures/account-methods-contracts.json")
+    inputs.file(accountMethods)
+    systemProperty("cairn.accountMethodsFixtures", accountMethods.absolutePath)
     val wire = rootProject.file("../../packages/contracts/generated/qualification-wire.json")
     inputs.file(wire)
     systemProperty("cairn.contractWire", wire.absolutePath)
@@ -37,8 +40,10 @@ tasks.register<JavaExec>("formatClient") {
     mainClass.set("FormatClientKt")
     args(
         rootProject
-            .file("../../apps/android/app/src/main/java/build/cairn/contracts/ResumeRunClient.kt")
-            .absolutePath
+            .file("../../apps/android/app/src/main/java/build/cairn/contracts")
+            .listFiles()!!
+            .filter { it.name.endsWith("Client.kt") }
+            .map { it.absolutePath }
     )
 }
 

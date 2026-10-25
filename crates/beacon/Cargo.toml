@@ -10,6 +10,7 @@ name = "cairn-beacon"
 path = "src/main.rs"
 
 [dependencies]
+cairn-contracts = { path = "../contracts" }
 cairn-protocol = { path = "../protocol" }
 axum = { version = "0.8.9", features = [ "ws" ] }
 tokio = { version = "1", features = [ "full" ] }
