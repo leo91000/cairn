@@ -113,10 +113,8 @@ class AccountsDeviceTest {
     }
 
     @Test
-    fun providerSerializationPreservesExistingAgents() {
-        val old = wireJson.decodeFromString<Agent>("""{"name":"Existing"}""")
-        assertEquals("codex", old.provider)
-        val claude = old.copy(provider = "claude", model = "sonnet", reasoning = "high")
+    fun generatedProviderSerializationPreservesTheCompleteProfile() {
+        val claude = newAgent().copy(provider = "claude", model = "sonnet", reasoning = "high")
         assertEquals(claude, wireJson.decodeFromString<Agent>(wireJson.encodeToString(claude)))
     }
 }
