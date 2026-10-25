@@ -427,7 +427,15 @@ console.log('probe.done');
       process.stdout.write(`${JSON.stringify({ mode, durationMs: Date.now() - start, status: 'passed' })}\n`)
     }
 
-    await entrypointSmoke({ root, api, storage })
+    await entrypointSmoke({
+      root,
+      api,
+      storage,
+      docker,
+      image,
+      networkName,
+      until,
+    })
 
     // Independent disks must run concurrently and enforce each guest policy.
     const probes = []

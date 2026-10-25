@@ -263,37 +263,28 @@ async fn runner_entry(stop: CancellationToken) -> Result<i32> {
         }
     }
     let cwd = Path::new(text(&plan, "cwd"));
-    if plan["chat"].is_object() {
-        // Launch a Rust chat process with its complete private environment;
-        // changing global process environment after Tokio starts is unsafe.
-        let binary = std::env::current_exe()?;
-        let provider = cairn_installation::provider::Provider::of_agent(&plan["chat"])?;
-        let adapter = provider.adapter();
-        let state_home = Path::new("/home/node").join(adapter.state_directory());
-        for engine in cairn_installation::provider::Provider::ALL {
-            let adapter = engine.adapter();
-            adapter.isolate_environment(
-                &mut env,
-                &Path::new("/home/node").join(adapter.state_directory()),
-            );
-        }
-        adapter.configure_environment(&mut env, &state_home);
-        let args = vec!["chat".to_owned(), provider.as_str().to_owned()];
-        let binary = binary
-            .to_str()
-            .ok_or_else(|| Error::bad("Invalid executable path."))?;
-        let command = cairn_installation::process::command(binary, &args, &env, Some(cwd));
-        return agent_command(command, plan["chat"].to_string(), stop).await;
+
+    // Launch a Rust chat process with its complete private environment;
+    // changing global process environment after Tokio starts is unsafe.
+    let binary = std::env::current_exe()?;
+    let provider = cairn_installation::provider::Provider::of_agent(&plan["chat"])?;
+    let adapter = provider.adapter();
+    let state_home = Path::new("/home/node").join(adapter.state_directory());
+    for engine in cairn_installation::provider::Provider::ALL {
+        let adapter = engine.adapter();
+        adapter.isolate_environment(
+            &mut env,
+            &Path::new("/home/node").join(adapter.state_directory()),
+        );
     }
-    let invalid = || Error::bad("Invalid runner command.");
-    let args = plan["args"]
-        .as_array()
-        .ok_or_else(invalid)?
-        .iter()
-        .map(|v| v.as_str().map(str::to_owned).ok_or_else(invalid))
-        .collect::<Result<Vec<_>>>()?;
-    let command = cairn_installation::process::command("codex", &args, &env, Some(cwd));
-    agent_command(command, text(&plan, "prompt").into(), stop).await
+
+    adapter.configure_environment(&mut env, &state_home);
+    let args = vec!["chat".to_owned(), provider.as_str().to_owned()];
+    let binary = binary
+        .to_str()
+        .ok_or_else(|| Error::bad("Invalid executable path."))?;
+    let command = cairn_installation::process::command(binary, &args, &env, Some(cwd));
+    agent_command(command, plan["chat"].to_string(), stop).await
 }
 
 /// Runs a periodic maintenance job until shutdown; failures are logged and retried.
