@@ -414,7 +414,7 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
                 title = title,
                 subtitle = subtitle,
                 state =
-                    if (data?.get(RECOVERED.first) == JsonPrimitive(true)) "Rétablie"
+                    if (data?.get(RECOVERED.first) == JsonPrimitive(true)) RECOVERED_STATE
                     else base.state,
                 output =
                     if (

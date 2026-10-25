@@ -466,6 +466,8 @@ struct Turn<'a> {
     /// Subagents by the tool use that resumed them, such as a SendMessage call: before 2.1.292,
     /// a resumed subagent's messages may name that call rather than an agent ID.
     resumed_by: HashMap<String, String>,
+    /// Every tool use of this execution, by tool name, including those that already returned.
+    called: HashMap<String, String>,
     /// Whether a response streamed since the usage limit was reported: requests went through.
     answered: bool,
     /// The error Claude Code gave the agent's latest message: `rate_limit` when the usage limit
@@ -886,6 +888,8 @@ impl Turn<'_> {
             let running = block["type"] == "tool_use";
             if running {
                 self.tools.insert(text(&item, "id").into(), item.clone());
+                self.called
+                    .insert(text(&item, "id").into(), text(block, "name").into());
             }
             // The plan counts once Claude Code accepts it, with the call's result.
             if item["type"] == "todo_list" {
@@ -1060,21 +1064,23 @@ impl Turn<'_> {
 
     /// A subagent an earlier execution started, resumed in this one: by a SendMessage call, or
     /// by Claude Code itself. It keeps its task ID, but this execution never saw the tool use that
-    /// started it, so it shows as a new row marked resumed.
+    /// started it, so it shows as a new row marked resumed. Its run names the SendMessage call,
+    /// or, when Claude Code resumed it, the earlier execution's call that started it, or none.
+    /// Another tool use of this execution, such as a workflow's, starts its own agents.
     async fn subagent_resumed(&mut self, value: &Value) -> Result<()> {
         let task = text(value, "task_id");
         let tool_use = text(value, "tool_use_id");
-        let by_message = self
-            .tools
+        let resumes = self
+            .called
             .get(tool_use)
-            .is_some_and(|tool| tool["tool"] == "SendMessage");
+            .is_none_or(|tool| tool == "SendMessage");
         // Housekeeping agents Claude Code starts itself stay out of the transcript.
         if value["subtype"] != "task_started"
             || value["task_type"] != "local_agent"
             || value["skip_transcript"] == true
             || value["ambient"] == true
             || task.is_empty()
-            || !(tool_use.is_empty() || by_message)
+            || !resumes
         {
             return Ok(());
         }
@@ -1096,7 +1102,7 @@ impl Turn<'_> {
             item["parent_id"] = parent.as_str().into();
         }
         self.tasks.insert(task.to_owned(), task.to_owned());
-        if by_message {
+        if !tool_use.is_empty() {
             self.resumed_by.insert(tool_use.to_owned(), task.to_owned());
         }
         self.subagents.insert(task.to_owned(), item.clone());
@@ -1432,6 +1438,7 @@ pub async fn run(
         tasks: HashMap::new(),
         limit: None,
         resumed_by: HashMap::new(),
+        called: HashMap::new(),
         answered: false,
         api_error: String::new(),
         tool_notices: HashSet::new(),

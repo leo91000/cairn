@@ -600,6 +600,24 @@ else {
         type: 'assistant',
         parent_tool_use_id: null,
         message: {
+          id: 'workflow',
+          content: [{
+            type: 'tool_use',
+            id: 'workflow-call',
+            name: 'Workflow',
+            input: { script: 'agent()' },
+          }],
+        },
+      })
+      out({
+        type: 'user',
+        parent_tool_use_id: null,
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'workflow-call', content: [{ type: 'text', text: 'Workflow started.' }] }] },
+      })
+      out({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: {
           id: 'send',
           content: [{
             type: 'tool_use',
@@ -637,6 +655,23 @@ else {
         tool_use_id: 'workflow-call',
         description: 'Workflow step',
         task_type: 'local_agent',
+      })
+      // Claude Code resumes another subagent itself: its run names the earlier execution's call.
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-orphan',
+        run_id: 'run-5',
+        tool_use_id: 'agent-earlier',
+        description: 'Finish the migration',
+        subagent_type: 'general-purpose',
+        is_backgrounded: true,
+        task_type: 'local_agent',
+      })
+      out({
+        type: 'assistant',
+        parent_tool_use_id: 'agent-earlier',
+        message: { id: 'orphan-1', content: [{ type: 'text', text: 'Migration done.' }] },
       })
       // Nor is a housekeeping agent Claude Code starts itself.
       out({

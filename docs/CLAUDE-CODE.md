@@ -120,8 +120,9 @@ When the agent resumes a subagent, its new run reopens the same item, marked
 that a task's run IDs sort, by plain string comparison, in the order its runs opened,
 so a frame naming an earlier run, or repeating the start of the run that reported, is
 late and ignored. A subagent an earlier execution started, resumed by a `SendMessage`
-call or by Claude Code itself, shows as a new row of the current execution marked
-`resumed`, keyed by its task ID: Cairn rows belong to one execution. Other unknown agent tasks, such as a workflow's agents or housekeeping
+call or by Claude Code itself (its run then names the earlier execution's call, or no
+call), shows as a new row of the current execution marked `resumed`, keyed by its task
+ID: Cairn rows belong to one execution. Other unknown agent tasks, such as a workflow's agents or housekeeping
 agents Claude Code marks `skip_transcript` or `ambient`, are ignored. Nested subagents
 keep their parent and `parent_task_id`. Without `agent_id`, a resumed subagent's
 messages may name the call that resumed it (such as `SendMessage`) in

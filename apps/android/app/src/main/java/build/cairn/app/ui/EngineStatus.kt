@@ -21,6 +21,9 @@ internal val ENGINE_EVENTS = setOf("engine.retry", "engine.notice", "provider.li
 /** Marks, for the run log, an engine retry that work continued after. */
 internal val RECOVERED = "recovered" to JsonPrimitive(true)
 
+/** The run log's state for a recovered engine retry. */
+internal const val RECOVERED_STATE = "Rétablie"
+
 private val RETRY_REASONS =
     mapOf(
         "rate_limit" to "Limite de débit",

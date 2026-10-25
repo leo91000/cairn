@@ -1666,17 +1666,29 @@ async fn a_subagent_resumed_by_a_later_execution_shows_as_resumed() {
     let root = TempDir::new().unwrap();
     let c = setup(&root);
     let events = run_events(&c, plan(&root, "fixture:resumed-later")).await;
-    let subagents: Vec<_> = events
+    let all: Vec<_> = events
         .iter()
         .filter(|event| event["item"]["type"] == "subagent")
         .collect();
-    // Only the subagent the agent resumed: an agent its workflow starts, or a housekeeping agent
-    // Claude Code starts itself, is not one.
+    // Only the subagents resumed, by the agent or by Claude Code: an agent its workflow starts,
+    // or a housekeeping agent Claude Code starts itself, is not one.
     assert!(
-        subagents
-            .iter()
-            .all(|event| event["item"]["id"] == "task-old")
+        all.iter()
+            .all(|event| ["task-old", "task-orphan"]
+                .contains(&event["item"]["id"].as_str().unwrap()))
     );
+    // Claude Code resumed this one itself: its run names the earlier execution's call.
+    let orphan = all
+        .iter()
+        .find(|event| event["item"]["id"] == "task-orphan")
+        .unwrap();
+    assert_eq!(orphan["item"]["resumed"], true);
+    assert_eq!(orphan["item"]["run_id"], "run-5");
+    assert_eq!(orphan["item"]["name"], "Finish the migration");
+    let subagents: Vec<_> = all
+        .into_iter()
+        .filter(|event| event["item"]["id"] == "task-old")
+        .collect();
     let started = subagents.first().unwrap();
     assert_eq!(started["type"], "item.started");
     assert_eq!(started["item"]["resumed"], true);
@@ -1687,14 +1699,14 @@ async fn a_subagent_resumed_by_a_later_execution_shows_as_resumed() {
     assert_eq!(last["status"], "completed");
     assert_eq!(last["result"], "Picked up again.");
 
-    // Its messages are its steps, never the agent's reply, whether they carry its agent ID or
-    // name the call that resumed it.
+    // Their messages are their steps, never the agent's reply, whether they carry an agent ID or
+    // name the call that resumed or started the subagent.
     let steps: Vec<_> = events
         .iter()
         .filter(|event| event["item"]["type"] == "subagent_message")
         .map(|event| event["item"]["parent_id"].as_str().unwrap())
         .collect();
-    assert_eq!(steps, vec!["task-old", "task-old"]);
+    assert_eq!(steps, vec!["task-orphan", "task-old", "task-old"]);
     assert_eq!(
         std::fs::read_to_string(root.path().join("result.md")).unwrap(),
         "Resumed in a later turn"
