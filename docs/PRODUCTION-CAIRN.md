@@ -6,8 +6,6 @@ migration, DNS setup, provider registration or installation claim.
 
 - [Production configuration](PRODUCTION-CAIRN-SETUP.md): provisioning and changes
   to the host, Coolify, proxy, DNS/TLS, providers and installation networking.
-- [Historical v0.53 migration](archive/CAIRN-V0.53-MIGRATION.md): first-launch
-  qualification, old public manager retirement and naming cutover.
 
 A documentation or implementation task alone does not authorize a release or
 production change. Creating an authorized stable release tag starts the automatic
@@ -138,4 +136,3 @@ The setup details have moved to [production configuration](PRODUCTION-CAIRN-SETU
 [Coolify and proxy trust](PRODUCTION-CAIRN-SETUP.md#coolify-service-and-trusted-proxy),
 [installation claim](PRODUCTION-CAIRN-SETUP.md#install-and-claim-on-the-same-server),
 and [STUN](PRODUCTION-CAIRN-SETUP.md#stun-and-direct-installation-connectivity).
-The [v0.53 archive](archive/CAIRN-V0.53-MIGRATION.md) records the naming cutover.

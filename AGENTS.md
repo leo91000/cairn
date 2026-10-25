@@ -2,9 +2,10 @@
 
 - Keep changes focused on the requested behavior. Preserve existing contracts and
   use the tests around the affected code to check them.
-- For storage behavior changes, record reproducible read/write measurements against
-  a reference: encoded bytes, cold/warm read latency, write latency, CPU, workload
-  and host conditions. See [object compression measurements](docs/STORAGE-COMPRESSION.md).
+- For storage behavior changes, include reproducible read/write measurements in
+  the PR description against a reference: encoded bytes, cold/warm read latency,
+  write latency, CPU, workload and host conditions. Commit no measurement artifacts.
+  See [storage measurement guidance](docs/STORAGE-COMPRESSION.md#qualification).
   Distinguish local measurements from production network latency.
 - For persisted-format changes or releases, follow the reviewed compatibility
   contract in [production releases](docs/PRODUCTION-CAIRN.md#installation-data-compatibility).

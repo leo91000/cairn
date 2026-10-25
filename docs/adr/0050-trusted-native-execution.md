@@ -1,3 +1,5 @@
+> Statut : Remplacée par [ADR-0052](0052-native-ublk-workspaces-and-idle-eviction.md) pour les checkpoints arrêtés native-files-v1 : les environnements natifs utilisent un journal ext4 sur ublk et une publication périodique. Les décisions de confiance et d’admission natives restent applicables.
+
 # Trusted native execution alongside Firecracker
 
 Date: 2026-10-18.

@@ -126,13 +126,7 @@ Beacon's memory and logs; it is not end-to-end encryption against it.
 - TURN would add an end-to-end encrypted relay between direct and the
   application relay; it is deferred (ADR-0033).
 
-Sources and library options: [DIRECT-TRANSPORT-RESEARCH.md](DIRECT-TRANSPORT-RESEARCH.md).
-
 ## Validation plan
-
-The [framing corpus inventory](DIRECT-FRAMING-CORPUS.md) records existing Rust,
-web and Android scenarios and the decision to defer shared fixtures until a
-protocol change demonstrates a maintenance benefit.
 
 The reproducible Linux bench, commands and current direct/relay evidence are in
 [NETWORK-BENCH.md](NETWORK-BENCH.md). It runs without KVM; Android device

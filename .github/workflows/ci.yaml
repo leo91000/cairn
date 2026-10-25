@@ -724,7 +724,7 @@ jobs:
       - name: Qualify exclusive pause, private memory paging and live nested KVM
         env:
           CAIRN_EXCLUSIVE_REQUIRE_RECLAIM: 'true'
-          # Hosted AMD nested Android remains unqualified (NESTED-KVM-RESEARCH.md).
+          # Hosted AMD nested Android remains unqualified.
           # Keep the same-emulator mode available for explicit qualification.
           CAIRN_EXCLUSIVE_ANDROID: ${{ inputs.exclusive-android && 'true' || 'false' }}
         run: |

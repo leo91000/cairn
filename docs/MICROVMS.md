@@ -83,7 +83,7 @@ end marker, avoiding Base64 expansion and JSON encoding of repository contents.
 Control messages remain bounded JSON. Both sides retain the legacy JSON/Base64
 path for compatibility with older images. Imports still stream directly to guest
 extraction and preserve the existing authorization, atomic publication and
-read-only policy. See [startup measurements](STARTUP-PERFORMANCE.md).
+read-only policy.
 
 Each VM boots a pinned kernel and a read-only root image. A sparse 32 GiB ext4
 private disk supplies the writable overlay, repositories, home, sessions, installed
@@ -225,10 +225,8 @@ worker recovery can settle it without relaunching the agent.
 
 The `chat_binary_compacts_large_mcp_pages_before_guest_transport` regression
 test sends 160 synthetic MCP pages with 350,000-byte text and structured results.
-On 2026-10-18 the local debug binary emitted 112,050,698 bytes before this change
-and 60,408 bytes afterward, with all 160 outcomes and the final turn marker
-preserved. The test also verifies that the native result remains complete. These
-are serialized transport bytes, not production network-latency measurements.
+It verifies that all outcomes and the final turn marker survive compaction while
+the coding agent's native result remains complete.
 Run it with `pnpm test:backend -p cairn-installation --test codex
 chat_binary_compacts_large_mcp_pages_before_guest_transport`.
 
@@ -331,8 +329,7 @@ cannot compensate for unavailable host capabilities.
 
 The image CI requires a nested `KVM_RUN` probe and an actual Android boot/tap and
 restart scenario. The supported lifecycle remains fresh guest boot from disk;
-we do not serialize Firecracker snapshots containing running nested VMs. See
-[research and limitations](NESTED-KVM-RESEARCH.md).
+we do not serialize Firecracker snapshots containing running nested VMs.
 
 ## Required block transport
 

@@ -114,9 +114,8 @@ on the affected physical phone.
 ## Inspecting received reports
 
 For the bounded writer that keeps cache persistence off the live publication path,
-its JVM/device regression, and opt-in before/after measurements, see
-[Android cache persistence](../../../docs/ANDROID-CACHE-DIAGNOSIS.md).
-Measurements exclude Android Keystore and do not establish affected-phone performance.
+and its lifecycle rules, see
+[Android cache persistence](../../../docs/CONVERSATION-OPENING.md).
 
 `GET /api/account/telemetry/performance` returns the signed-in account's latest 20
 unexpired reports with `Cache-Control: no-store`. Mutations require the account

@@ -6,10 +6,6 @@ application release keeps the existing setup and follows the
 [release runbook](PRODUCTION-CAIRN.md). Infrastructure changes need authorization
 for their own scope.
 
-The [v0.53 migration archive](archive/CAIRN-V0.53-MIGRATION.md) records the initial
-cutover and retirement of the old public manager. It is not a setup prerequisite
-for an installation already using Beacon.
-
 ## Host and release images
 
 Choose a fully successful `Quality and container` run for the intended Git tree.
@@ -245,7 +241,7 @@ traffic resumes. Never widen trust to fix a mismatch. Sources:
 [Coolify main proxy configuration](https://coolify.io/docs/core/networking/proxy/traefik/overview),
 [Compose static network addresses](https://docs.docker.com/reference/compose-file/services/#ipv4_address-ipv6_address).
 
-**Lessons from the first deployment (2026-10-10).**
+**Proxy recreation requirements.**
 
 - Recreating `coolify-proxy` outside Coolify drops the networks that Coolify had attached
   to it dynamically (`docker network connect`), one per service. Every service routed through

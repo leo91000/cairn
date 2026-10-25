@@ -89,28 +89,5 @@ path extracts ZIP and finishes with filesystem synchronization. Archive encoding
 and frame encoding are timed separately. The command prints process CPU time,
 encoded bytes, installation latency, first/warm archive read latency and host load.
 
-On 2026-10-23, an i9-14900K, Linux 7.2.9, local ext4/NVMe, 94 GiB RAM, with
-concurrent builds/tests, produced these samples (host load at the end: 18.29 / 17.56 / 13.95):
-
-| Metric | File frames | Prepared ZIP |
-| --- | ---: | ---: |
-| Encoded bytes | 33,854,028 | 8,924,901 |
-| First installation | 48,818 ms | 6,047 ms |
-| Second installation | 41,313 ms | 2,738 ms |
-| Third installation | 41,229 ms | 2,874 ms |
-| First installation CPU | 2.152 s | 0.347 s |
-| Second installation CPU | 2.043 s | 0.341 s |
-| Third installation CPU | 2.136 s | 0.330 s |
-| Encoding | 1,032 ms | 861 ms |
-| First / warm archive read | Not applicable | 3.85 / 2.65 ms |
-
-The ZIP reduces transferred bytes by 73.6%; these local installation samples are
-8.1–15.1 times faster. The extraction target is a regular local filesystem, not
-the production ublk journal, so this is not a production startup forecast.
-First/warm reads are page-cache eligible; a genuinely cold device read and the
-production network path are not measured by this harness. An earlier tmpfs run
-gave median 483 ms versus 305 ms installation, demonstrating why tmpfs results
-must not be presented as physical disk measurements.
-
 Native nodes can also prepare [local disk bases](NATIVE-BASES.md) from verified
 ZIPs to avoid expanding the same project for each new conversation.

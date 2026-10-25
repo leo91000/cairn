@@ -5,7 +5,7 @@ résultat d’une tâche ou réponse d’un service. Cairn peut effectuer les
 vérifications pendant que la conversation libère son exécution, puis reprendre le
 travail autorisé avec un résultat précis.
 
-## Ce que cette PR permet déjà
+## Conditions disponibles
 
 Cairn fournit les conditions temporelles `delay` et `at`, ainsi que `run_finished`
 et `task_finished` pour les conversations qui peuvent déléguer ;
@@ -351,12 +351,6 @@ durables, des résultats différés et l’annulation. Elles pourraient servir a
 jobs gérés et à leur interopérabilité. Le réveil de la conversation reste une
 responsabilité du scheduler Cairn. Les conditions livrées utilisent le
 protocole ordinaire des outils MCP.
-
-## Mesures et suite proposée
-
-Les [mesures reproductibles](WAIT-FOR-MEASUREMENTS.md) comparent les métadonnées
-et les lectures/écritures à la référence `sleep`. Les latences réseau GitHub et
-la capacité de production sont distinctes de ces mesures locales.
 
 Les groupes de dépendances sont disponibles. Les autres sources peuvent suivre
 les usages observés, avec un identifiant stable, une lecture autorisée, un

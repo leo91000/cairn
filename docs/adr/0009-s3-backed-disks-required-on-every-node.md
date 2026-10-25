@@ -1,3 +1,5 @@
+> Statut : Remplacée par [ADR-0055](0055-ublk-only-vm-storage.md) pour le transport FUSE et [ADR-0019](0019-booted-vms-with-ready-codex.md) pour le retrait du préchauffage anonyme et [ADR-0070](0070-automatic-native-disk-growth.md) pour la restriction d’agrandissement des disques plats natifs compatibles ; le stockage S3 obligatoire reste applicable.
+
 # Disques S3 obligatoires sur toutes les nodes
 
 Le stockage à la demande devient le seul mode d’exécution des conversations isolées. Chaque nouvelle VM démarre avec un journal local durable et un manifeste de blocs publié sur S3. Le manager doit disposer de la configuration S3 ; chaque node d’exécution doit disposer de FUSE et pouvoir lire les blocs via le manager. Les limites de cache, la réserve de disque et la cadence de synchronisation restent configurables par node, mais il n’existe plus d’activation par node.
@@ -12,4 +14,4 @@ Ce choix réduit les parcours de disque et évite qu’une node démarre silenci
 
 Cette décision remplace l’activation par node et la migration progressive des ADR-0006 et ADR-0007, ainsi que le suivi dm-era des disques locaux de l’ADR-0005.
 
-L’[agrandissement natif automatique](0060-automatic-native-disk-growth.md) remplace la restriction de l’image temporaire pour les disques plats natifs sur un kernel compatible. Les disques Firecracker conservent leur parcours existant.
+L’[agrandissement natif automatique](0070-automatic-native-disk-growth.md) remplace la restriction de l’image temporaire pour les disques plats natifs sur un kernel compatible. Les disques Firecracker conservent leur parcours existant.
