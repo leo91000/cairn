@@ -5,9 +5,12 @@ import { STANDARD_SPEED } from '../../../packages/contracts/models'
 // A speed is independent of the model and the reasoning level: it is kept when either
 // changes. Only Codex lists speeds, per model and account, in its catalog.
 
-/** The speed a run uses: the chosen one, else the inherited one, else the model's own default. */
-export function effectiveSpeed(speed: string, inherited: string, model?: CodingAgentModel) {
-  return speed || inherited || model?.defaultServiceTier || STANDARD_SPEED
+/**
+ * The speed a run uses: the chosen one, else the inherited one, else Standard. Codex's app
+ * server does not apply a model's `defaultServiceTier`, so Cairn never claims it.
+ */
+export function effectiveSpeed(speed: string, inherited: string) {
+  return speed || inherited || STANDARD_SPEED
 }
 
 /**

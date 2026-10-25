@@ -34,7 +34,7 @@ export interface CodingAgentModel {
   supportedReasoningEfforts: { reasoningEffort: string, description: string }[]
   /** Codex speeds besides standard. Absent from catalogs cached before speeds were listed. */
   serviceTiers?: ServiceTier[]
-  /** The tier Codex uses when no speed is chosen, when its catalog names one. */
+  /** Codex's catalog default tier, applied only by Codex's own terminal client. Cairn runs Standard when no speed is chosen. */
   defaultServiceTier?: string | null
 }
 export interface ModelCatalog {

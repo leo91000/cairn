@@ -935,7 +935,7 @@ async fn speeds_come_from_each_account_and_route_runs_to_an_account_offering_the
     );
     assert_eq!(
         tier(&ids[1], "fixture-deep", "").await,
-        ServiceTierChoice::Inherit
+        ServiceTierChoice::Send("default".into())
     );
 
     // Without an enabled account offering it, the run is not held back: it runs at
@@ -1054,12 +1054,11 @@ async fn queued_speed_is_kept_and_an_unavailable_one_runs_at_standard_with_a_not
         configure("fixture-deep", "standard").await["serviceTier"],
         "default"
     );
-    assert!(
-        configure("fixture-deep", "")
-            .await
-            .get("serviceTier")
-            .is_none()
-    );
+    // Without a chosen speed the turn asks for Standard: Codex's app server neither applies
+    // the model's catalog default nor resets a thread that ran at another speed.
+    for model in ["fixture-deep", "fixture-fast"] {
+        assert_eq!(configure(model, "").await["serviceTier"], "default");
+    }
 }
 
 #[tokio::test]

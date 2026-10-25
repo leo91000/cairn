@@ -198,7 +198,7 @@ fun ModelPicker(
     // Speeds Codex names in this catalog, to label a saved speed the selected model lacks.
     val knownTiers = catalog.models.flatMap { it.serviceTiers.orEmpty() }
     val inheritedSpeed = if (inherit) defaultSpeed else ""
-    val currentSpeed = effectiveSpeed(speed, inheritedSpeed, selected)
+    val currentSpeed = effectiveSpeed(speed, inheritedSpeed)
     val speedShown =
         changeSpeed != null && showsSpeed(provider, selected, speed.ifBlank { inheritedSpeed })
     // A speed the model lacks runs at standard speed, so the trigger never claims it.
@@ -270,8 +270,8 @@ fun ModelPicker(
                             speed,
                             inheritedSpeed,
                             if (inheritedSpeed.isNotBlank()) {
-                                if (conversationDefault) "Conversation" else "Agent"
-                            } else "Codex",
+                                if (conversationDefault) "Défaut Conversation" else "Défaut Agent"
+                            } else "Défaut",
                             enabled,
                             changeSpeed,
                         )
@@ -1037,13 +1037,13 @@ private fun SpeedControl(
     knownTiers: List<ServiceTier>,
     value: String,
     inherited: String,
-    owner: String,
+    defaultLabel: String,
     enabled: Boolean,
     change: (String) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     val tiers = model?.serviceTiers.orEmpty()
-    val current = effectiveSpeed(value, inherited, model)
+    val current = effectiveSpeed(value, inherited)
     val offered = offersSpeed(model, current)
     val applied = if (offered) current else STANDARD_SPEED
     val tier = tiers.find { it.id == applied }
@@ -1066,7 +1066,7 @@ private fun SpeedControl(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         EffortChip(
-            "Défaut $owner · ${speedLabel(effectiveSpeed("", inherited, model), knownTiers)}",
+            "$defaultLabel · ${speedLabel(effectiveSpeed("", inherited), knownTiers)}",
             value.isBlank(),
             enabled,
             Modifier.testTag("speed-default"),

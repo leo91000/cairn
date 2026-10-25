@@ -118,7 +118,6 @@ impl ExecutionAdapter for Codex {
         let speed = text(plan, "speed").to_owned();
         let tier = crate::models::service_tier(s, source, text(plan, "model"), &speed).await?;
         match tier {
-            ServiceTierChoice::Inherit => {}
             ServiceTierChoice::Send(tier) => plan["serviceTier"] = tier.into(),
             ServiceTierChoice::Unavailable => {
                 // Codex would silently omit the tier; say so instead of implying a faster run.

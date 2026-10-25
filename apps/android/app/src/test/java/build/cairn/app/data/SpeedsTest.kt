@@ -12,15 +12,10 @@ class SpeedsTest {
     private val astra = CodingAgentModel("gpt-6-astra", serviceTiers = listOf(fast))
 
     @Test
-    fun usesTheChosenSpeedThenTheInheritedOneThenTheModelDefault() {
-        assertEquals(STANDARD_SPEED, effectiveSpeed("", "", astra))
-        assertEquals(
-            "priority",
-            effectiveSpeed("", "", astra.copy(defaultServiceTier = "priority")),
-        )
-        assertEquals("priority", effectiveSpeed("", "priority", astra))
-        assertEquals(STANDARD_SPEED, effectiveSpeed(STANDARD_SPEED, "priority", astra))
-        assertEquals(STANDARD_SPEED, effectiveSpeed("", "", null))
+    fun usesTheChosenSpeedThenTheInheritedOneThenStandard() {
+        assertEquals(STANDARD_SPEED, effectiveSpeed("", ""))
+        assertEquals("priority", effectiveSpeed("", "priority"))
+        assertEquals(STANDARD_SPEED, effectiveSpeed(STANDARD_SPEED, "priority"))
     }
 
     @Test

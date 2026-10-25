@@ -92,14 +92,14 @@ const effectiveEffort = computed(() => reasoning.value || defaultEffort.value)
 const knownTiers = computed(() => catalog.value.models.flatMap(item => item.serviceTiers ?? []))
 const tiers = computed(() => selected.value?.serviceTiers ?? [])
 const inheritedSpeed = computed(() => props.inherit ? props.defaultSpeed : '')
-const currentSpeed = computed(() => effectiveSpeed(speed.value, inheritedSpeed.value, selected.value))
+const currentSpeed = computed(() => effectiveSpeed(speed.value, inheritedSpeed.value))
 const speedShown = computed(() => showsSpeed(provider.value, selected.value, speed.value || inheritedSpeed.value))
 const speedOffered = computed(() => offersSpeed(selected.value, currentSpeed.value))
 // A speed the model lacks runs at standard speed, so the trigger never claims it.
 const appliedSpeed = computed(() => speedShown.value && speedOffered.value ? currentSpeed.value : STANDARD_SPEED)
 const appliedTier = computed(() => speedTier(selected.value, appliedSpeed.value))
-const speedOwner = computed(() => inheritedSpeed.value ? props.defaultSource === 'conversation' ? 'Conversation' : 'Agent' : 'Codex')
-const defaultSpeedLabel = computed(() => speedLabel(effectiveSpeed('', inheritedSpeed.value, selected.value), knownTiers.value))
+const speedDefault = computed(() => inheritedSpeed.value ? props.defaultSource === 'conversation' ? 'Conversation default' : 'Agent default' : 'Default')
+const defaultSpeedLabel = computed(() => speedLabel(effectiveSpeed('', inheritedSpeed.value), knownTiers.value))
 const unsupportedSpeed = computed(() => !!speed.value && speed.value !== STANDARD_SPEED && !tiers.value.some(tier => tier.id === speed.value))
 const summary = computed(() => [current.value.label, modelLabel.value, effectiveEffort.value && `${effortLabel(effectiveEffort.value)} reasoning`, appliedSpeed.value !== STANDARD_SPEED && `${speedLabel(appliedSpeed.value, knownTiers.value)} speed`].filter(Boolean).join(' · '))
 // Claude lists its own "default" alias. When the default row already resolves to it,
@@ -519,7 +519,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
                         :disabled="disabled"
                         @click="speed = ''"
                       >
-                        <Icon v-if="!speed" :name="Check" :size="12" />{{ speedOwner }} default · {{ defaultSpeedLabel }}
+                        <Icon v-if="!speed" :name="Check" :size="12" />{{ speedDefault }} · {{ defaultSpeedLabel }}
                       </button>
                       <button
                         type="button"

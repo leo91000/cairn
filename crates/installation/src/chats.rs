@@ -252,10 +252,42 @@ fn changes_running_agent(message: &Value, run: &Value) -> Result<bool> {
         || differs("speed", &agent["speed"]))
 }
 
-/// Only Codex offers a speed choice. A message naming another coding agent cannot ask for one.
-fn validate_speed(message: &Value) -> Result<()> {
-    let provider = text(message, "provider");
-    if !text(message, "speed").is_empty() && !provider.is_empty() && provider != "codex" {
+/// The coding agent a message's turn runs with: the one it names, else the one the
+/// queued messages ahead of it, the conversation's latest turn or its agent select.
+fn message_provider(db: &Db<'_>, chat: &Value, message: &Value) -> Result<String> {
+    if !text(message, "provider").is_empty() {
+        return Ok(text(message, "provider").to_owned());
+    }
+
+    let ahead = db
+        .messages(text(chat, "id"))?
+        .into_iter()
+        .take_while(|queued| queued["id"] != message["id"])
+        .filter(|queued| {
+            queued["status"] == MessageStatus::Queued || queued["status"] == MessageStatus::Sending
+        })
+        .filter(|queued| !text(queued, "provider").is_empty())
+        .last();
+    if let Some(queued) = ahead {
+        return Ok(text(&queued, "provider").to_owned());
+    }
+
+    if let Some(run) = db.run(text(chat, "runId"))? {
+        return Ok(Provider::of_run(&run)?.as_str().to_owned());
+    }
+    let agent = required(
+        db.get("agents", text(chat, "agentId"))?,
+        "This agent is no longer available.",
+    )?;
+    Ok(Provider::of_agent(&agent)?.as_str().to_owned())
+}
+
+/// Only Codex offers a speed choice; a turn with another coding agent cannot ask for one.
+fn validate_speed(db: &Db<'_>, chat: &Value, message: &Value) -> Result<()> {
+    if text(message, "speed").is_empty() {
+        return Ok(());
+    }
+    if message_provider(db, chat, message)? != Provider::Codex.as_str() {
         return Err(Error::bad(
             "Speed applies only to Codex. Remove it or choose Codex for this message.",
         ));
@@ -359,7 +391,7 @@ pub(crate) fn send(
         return Ok(existing.clone());
     }
     require_sendable(db, &chat, &messages, text(&values, "id"))?;
-    validate_speed(&values)?;
+    validate_speed(db, &chat, &values)?;
     validate_steer(db, &chat, &values)?;
     if messages.is_empty() {
         let private_answer = answer
@@ -442,9 +474,9 @@ pub(crate) fn edit_as(
         return Err(Error::conflict("A submitted answer cannot be edited."));
     }
     crate::attachments::message(db, chat_id, &mut values)?;
-    validate_speed(&values)?;
     validate_steer(db, &chat, &values)?;
     crate::store::merge(&mut current, &values);
+    validate_speed(db, &chat, &current)?;
     db.put_message(&current)
 }
 
@@ -1569,15 +1601,56 @@ mod tests {
         assert!(agent.get("speed").is_none());
         let agent = select(&claude, json!({ "provider": "codex", "speed": "priority" }));
         assert_eq!(agent["speed"], "priority");
+    }
 
-        assert!(validate_speed(&json!({ "provider": "codex", "speed": "priority" })).is_ok());
-        assert!(validate_speed(&json!({ "speed": "priority" })).is_ok());
-        assert!(validate_speed(&json!({ "provider": "opencode", "speed": "" })).is_ok());
-        assert_eq!(
-            validate_speed(&json!({ "provider": "claude", "speed": "priority" }))
-                .unwrap_err()
-                .status,
-            400
-        );
+    #[tokio::test]
+    async fn a_speed_is_refused_for_turns_another_coding_agent_runs() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.put("agents", &json!({ "id": "codex", "provider": "codex" }))?;
+                db.put("agents", &json!({ "id": "claude", "provider": "claude" }))?;
+                let run = json!({
+                    "id": "claude-run",
+                    "taskId": "switched",
+                    "createdAt": 0,
+                    "status": "succeeded",
+                    "snapshot": { "agent": { "provider": "claude" } },
+                });
+                db.add_run(&run, None)?;
+                let new_codex = json!({ "id": "new-codex", "runId": null, "agentId": "codex" });
+                let new_claude = json!({ "id": "new-claude", "runId": null, "agentId": "claude" });
+                let switched = json!({ "id": "switched", "runId": "claude-run", "agentId": "codex" });
+                let fast = |provider: &str| json!({ "id": id(), "provider": provider, "speed": "priority" });
+                let refused = |chat: &Value, message: &Value| {
+                    validate_speed(db, chat, message).unwrap_err().status == 400
+                };
+
+                // Without a provider, the message runs with the conversation's coding agent.
+                validate_speed(db, &new_codex, &fast(""))?;
+                assert!(refused(&new_claude, &fast("")));
+                assert!(refused(&switched, &fast("")));
+                validate_speed(db, &switched, &fast("codex"))?;
+                assert!(refused(&new_codex, &fast("opencode")));
+                validate_speed(db, &new_claude, &json!({ "id": id(), "speed": "" }))?;
+
+                // A queued message switching coding agent decides for the ones after it.
+                let mut ahead = json!({
+                    "id": "ahead",
+                    "chatId": "switched",
+                    "createdAt": 1,
+                    "status": "queued",
+                    "provider": "codex",
+                });
+                db.put_message(&ahead)?;
+                validate_speed(db, &switched, &fast(""))?;
+                ahead["status"] = "delivered".into();
+                db.put_message(&ahead)?;
+                assert!(refused(&switched, &fast("")));
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 }

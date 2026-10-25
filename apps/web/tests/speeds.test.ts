@@ -25,12 +25,11 @@ const fast = { id: 'priority', name: 'Fast', description: '2x speed, increased u
 const astra = model({ serviceTiers: [fast], defaultServiceTier: null })
 
 describe('codex speeds', () => {
-  it('uses the chosen speed, then the inherited one, then the model default', () => {
-    expect(effectiveSpeed('', '', astra)).toBe('standard')
-    expect(effectiveSpeed('', '', model({ serviceTiers: [fast], defaultServiceTier: 'priority' }))).toBe('priority')
-    expect(effectiveSpeed('', 'priority', astra)).toBe('priority')
-    expect(effectiveSpeed('standard', 'priority', astra)).toBe('standard')
-    expect(effectiveSpeed('', '', undefined)).toBe('standard')
+  // Codex's app server ignores a model's defaultServiceTier: without a choice, turns run at Standard.
+  it('uses the chosen speed, then the inherited one, then standard', () => {
+    expect(effectiveSpeed('', '')).toBe('standard')
+    expect(effectiveSpeed('', 'priority')).toBe('priority')
+    expect(effectiveSpeed('standard', 'priority')).toBe('standard')
   })
 
   it('treats catalogs without speeds as unknown rather than unsupported', () => {

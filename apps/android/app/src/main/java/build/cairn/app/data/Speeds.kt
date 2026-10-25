@@ -9,14 +9,12 @@ const val STANDARD_SPEED = "standard"
 /** Where OpenAI documents how each speed uses plan limits and credits. */
 const val SPEED_USAGE_URL = "https://learn.chatgpt.com/docs/agent-configuration/speed"
 
-/** The speed a run uses: the chosen one, else the inherited one, else the model's own default. */
-fun effectiveSpeed(speed: String, inherited: String, model: CodingAgentModel?): String =
-    speed
-        .ifBlank { inherited }
-        .ifBlank { model?.defaultServiceTier.orEmpty() }
-        .ifBlank {
-            STANDARD_SPEED
-        }
+/**
+ * The speed a run uses: the chosen one, else the inherited one, else Standard. Codex's app server
+ * does not apply a model's `defaultServiceTier`, so Cairn never claims it.
+ */
+fun effectiveSpeed(speed: String, inherited: String): String =
+    speed.ifBlank { inherited }.ifBlank { STANDARD_SPEED }
 
 /**
  * Whether the model offers [speed]. A catalog without speeds, cached before they were listed or

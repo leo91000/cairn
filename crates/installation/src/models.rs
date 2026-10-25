@@ -396,8 +396,6 @@ async fn account_offers_speed(
 /// The `serviceTier` sent to Codex for a run's speed.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ServiceTierChoice {
-    /// No speed chosen: the thread keeps its tier, or Codex's default for a new one.
-    Inherit,
     /// The account's fresh catalog does not offer the chosen speed for this model.
     Unavailable,
     /// Sent as is; Codex itself omits a tier its own catalog does not offer.
@@ -417,8 +415,9 @@ pub async fn service_tier(
 
 fn resolve_tier(cached: Option<&Value>, model: &str, speed: &str) -> ServiceTierChoice {
     match speed {
-        "" => ServiceTierChoice::Inherit,
-        STANDARD_SPEED => ServiceTierChoice::Send(CODEX_STANDARD_TIER.to_owned()),
+        // Codex's app server applies no model default and keeps a thread's earlier tier:
+        // a turn without a chosen speed asks for Standard, as it runs.
+        "" | STANDARD_SPEED => ServiceTierChoice::Send(CODEX_STANDARD_TIER.to_owned()),
         tier if cached.and_then(|cached| offers_tier(cached, model, tier)) == Some(false) => {
             ServiceTierChoice::Unavailable
         }
@@ -632,8 +631,10 @@ mod tests {
         let send = |tier: &str| ServiceTierChoice::Send(tier.to_owned());
         let resolve = |model: &str, speed: &str| resolve_tier(Some(&cached), model, speed);
 
-        // Older messages and agents have no speed and leave the thread's tier alone.
-        assert_eq!(resolve("gpt-6-astra", ""), ServiceTierChoice::Inherit);
+        // Without a chosen speed, including older messages and agents, a turn runs at Standard
+        // even after one at another speed, and whatever the model's catalog default.
+        assert_eq!(resolve("gpt-6-astra", ""), send("default"));
+        assert_eq!(resolve("custom-alias", ""), send("default"));
         assert_eq!(resolve("gpt-6-luna", "standard"), send("default"));
         assert_eq!(resolve("gpt-6-astra", "priority"), send("priority"));
         assert_eq!(resolve("", "priority"), send("priority"));

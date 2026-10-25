@@ -106,7 +106,7 @@ test('keeps the Codex speed across models, for agents and queued chat turns', as
   const speeds = menu.getByRole('radiogroup', { name: 'Speed' })
   const speed = (name: string) => speeds.getByRole('radio', { name, exact: true })
   await picker.click()
-  await expect(speed('Codex default · Standard')).toHaveAttribute('aria-checked', 'true')
+  await expect(speed('Default · Standard')).toHaveAttribute('aria-checked', 'true')
   await speed('Fast').click()
   // Codex's own words for the speed's usage, and where OpenAI explains the rates.
   await expect(menu.getByText('1.5x speed, increased usage')).toBeVisible()
