@@ -1,5 +1,5 @@
 // Prove that a retained guest's obsolete runner cannot shadow the controller's
-// current chat adapter. The guest OS, provider CLI and writable disk stay intact.
+// current entrypoint. The guest OS, provider CLI and writable disk stay intact.
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import { randomUUID } from 'node:crypto'
@@ -31,8 +31,9 @@ export async function entrypointSmoke({ root, api, storage }) {
       cwd: workspace,
       resources: { cpu: 1, memoryMiB: 1024, diskMiB: 512 },
       imports: [{ source: workspace, target: workspace }],
-      args: ['--version'],
-      ...(retained ? {} : { command: ['/usr/local/bin/node', '-e', prepare] }),
+      command: retained
+        ? ['/run/cairn-entrypoint/cairn', 'toolkit-env']
+        : ['/usr/local/bin/node', '-e', prepare],
     }
     await writeFile(path.join(root, 'data/runner-plans', `${id}.json`), JSON.stringify(plan))
     await api(`/runs/${id}`, 'POST')
@@ -59,7 +60,7 @@ export async function entrypointSmoke({ root, api, storage }) {
     const output = await logs
     assert.equal(result.StatusCode, 0, output)
     if (retained) {
-      assert.match(output, /codex-cli /)
+      assert.equal(JSON.parse(output).CAIRN_TOOLKIT_DIR, '/opt/cairn-toolkit')
       assert.ok(!output.includes('OBSOLETE_RUNNER'))
     }
 
