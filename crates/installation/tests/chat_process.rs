@@ -474,6 +474,32 @@ async fn model_and_reasoning_reach_codex_and_model_changes_resolve_the_new_defau
 }
 
 #[tokio::test]
+async fn resolved_speed_reaches_codex_and_a_plan_without_a_tier_sends_none() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    for (index, tier) in [Some("priority"), None, Some("default")]
+        .into_iter()
+        .enumerate()
+    {
+        let mut plan = plan(&root, "Check the speed setting");
+        if let Some(tier) = tier {
+            plan["serviceTier"] = tier.into();
+        }
+        plan["execution"]["messageId"] = format!("message-{index}").into();
+        if index > 0 {
+            plan["sessionId"] = "fixture-chat".into();
+        }
+        run_quietly(&config, &home, plan).await;
+        let thread = conversation(&home);
+        assert_eq!(
+            thread["turns"][index]["serviceTier"],
+            tier.map_or(Value::Null, Value::from)
+        );
+    }
+}
+
+#[tokio::test]
 async fn disk_notice_reaches_codex_without_a_user_delivery_receipt() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);

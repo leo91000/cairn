@@ -54,7 +54,9 @@ for (const tool of tools) {
     const message = z.toJSONSchema(chatMessageInput, { unrepresentable: 'any' })
     if (tool.name === 'edit_chat_message') {
       delete message.properties.id
-      message.required = message.required.filter(key => key !== 'id')
+      // An edit without a speed keeps the stored one, so none is filled in.
+      delete message.properties.speed.default
+      message.required = message.required.filter(key => !['id', 'speed'].includes(key))
     }
 
     tool.inputSchema.properties.message = message

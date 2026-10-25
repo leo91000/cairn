@@ -141,6 +141,9 @@ struct TurnParams<'a> {
     client_user_message_id: Option<&'a Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<&'a Value>,
+    /// Kept by the thread for later turns, as `effort` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_tier: Option<&'a str>,
 }
 
 /// The plan's model, unless it leaves the choice to Codex.
@@ -949,6 +952,7 @@ impl Chat<'_> {
             effort: (!effort.is_empty()).then_some(effort),
             client_user_message_id: (!continuing).then(|| &plan["execution"]["messageId"]),
             model: model(plan),
+            service_tier: Some(text(plan, "serviceTier")).filter(|tier| !tier.is_empty()),
         };
         let params = serde_json::to_value(params)?;
         self.turn_submitted = true;

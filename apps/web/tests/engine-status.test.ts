@@ -166,6 +166,17 @@ describe('engine status', () => {
     expect(activityEntries(events).flatMap(entry => entry.kind === 'group' ? entry.artifacts : [])).toHaveLength(3)
   })
 
+  it('tells the conversation a turn runs at Standard when Codex lacks the selected speed', () => {
+    const fallback = {
+      ...event('status', { speed: { requested: 'priority', applied: 'standard' } }),
+      text: 'Codex doesn’t offer the selected speed for this model here. This turn runs at Standard speed.',
+    }
+    expect(notices([fallback, step()]).map(notice => [notice.title, notice.subtitle])).toEqual([
+      ['This turn runs at Standard speed', 'Codex doesn’t offer the selected speed for this model here'],
+    ])
+    expect(runLog([fallback])).toHaveLength(1)
+  })
+
   it('gives the usage banner the reset the engine reported', () => {
     const resetsAt = new Date(2030, 0, 1, 12, 0).getTime()
     const message = 'Your usage allowance is used up for now.'

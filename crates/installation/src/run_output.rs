@@ -540,6 +540,7 @@ pub fn chat_plan(
         "cwd": prepared["cwd"],
         "model": agent["model"],
         "reasoning": agent["reasoning"],
+        "speed": agent["speed"],
         "sandbox": policy(agent)["sandbox"],
         "writableRoots": roots,
     });

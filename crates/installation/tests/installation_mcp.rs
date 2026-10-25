@@ -733,6 +733,129 @@ async fn agent_updates_preserve_omitted_settings_and_accept_new_engine_settings(
 }
 
 #[tokio::test]
+async fn model_speeds_and_agent_speeds_match_public_mcp_and_installation_tools() {
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let config = cairn_installation::config::Config {
+        codex_bin: common::fixture("codex.mjs"),
+        ..common::config(root.path())
+    };
+    let s = Service::new(config).await.unwrap();
+    common::relay_fixture::claimed(&s).await.unwrap();
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+
+    let internal = call(&s, &configuration, "list_models", json!({})).await;
+    let public = public_call(&s, &["read"], "list_models", json!({ "provider": "codex" })).await;
+    assert_eq!(result(&internal), result(&public));
+    let fast = result(&public)["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["model"] == "fixture-fast")
+        .unwrap()
+        .clone();
+    assert_eq!(fast["serviceTiers"][0]["id"], "priority");
+    assert_eq!(fast["serviceTiers"][0]["name"], "Fast");
+    let denied = public_call(&s, &["run"], "list_models", json!({})).await;
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+
+    let saved = call(
+        &s,
+        &configuration,
+        "save_agent",
+        json!({ "name": "Fast reviewer", "speed": "priority" }),
+    )
+    .await;
+    let agent = result(&saved).clone();
+    assert_eq!(agent["speed"], "priority");
+    let kept = public_call(
+        &s,
+        &["manage"],
+        "update_agent",
+        json!({ "id": agent["id"], "agent": { "description": "Keeps its speed" } }),
+    )
+    .await;
+    assert_eq!(result(&kept)["speed"], "priority");
+    let standard = call(
+        &s,
+        &configuration,
+        "update_agent",
+        json!({ "id": agent["id"], "agent": { "speed": "standard" } }),
+    )
+    .await;
+    assert_eq!(result(&standard)["speed"], "standard");
+
+    // Speed belongs to Codex: other coding agents reject it, and switching drops it.
+    let rejected = public_call(
+        &s,
+        &["manage"],
+        "save_agent",
+        json!({ "name": "Claude", "provider": "claude", "speed": "priority" }),
+    )
+    .await;
+    assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+    let rejected = call(
+        &s,
+        &configuration,
+        "update_agent",
+        json!({ "id": agent["id"], "agent": { "provider": "claude", "speed": "priority" } }),
+    )
+    .await;
+    assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+    let switched = call(
+        &s,
+        &configuration,
+        "update_agent",
+        json!({ "id": agent["id"], "agent": { "provider": "claude", "reasoning": "max" } }),
+    )
+    .await;
+    assert_eq!(result(&switched)["provider"], "claude");
+    assert_eq!(result(&switched)["speed"], "");
+
+    // A queued message keeps its speed through edits that do not send one, on both tools.
+    let chat = s.chat_create(json!({})).await.unwrap();
+    let chat_id = chat["id"].as_str().unwrap();
+    s.chat_pause(chat_id, true).await.unwrap();
+    let message_id = uuid::Uuid::new_v4().to_string();
+    let sent = public_call(
+        &s,
+        &["run"],
+        "send_chat_message",
+        json!({
+            "chatId": chat_id,
+            "message": { "id": message_id, "text": "Next", "provider": "codex", "speed": "priority" },
+        }),
+    )
+    .await;
+    assert_eq!(result(&sent)["speed"], "priority", "{sent}");
+    let edited = public_call(
+        &s,
+        &["run"],
+        "edit_chat_message",
+        json!({ "chatId": chat_id, "messageId": message_id, "message": { "text": "Reworded" } }),
+    )
+    .await;
+    assert_eq!(result(&edited)["speed"], "priority", "{edited}");
+    let edited = call(
+        &s,
+        &configuration,
+        "edit_chat_message",
+        json!({ "chatId": chat_id, "messageId": message_id, "message": { "text": "Again" } }),
+    )
+    .await;
+    assert_eq!(result(&edited)["speed"], "priority", "{edited}");
+    let standard = call(
+        &s,
+        &configuration,
+        "edit_chat_message",
+        json!({ "chatId": chat_id, "messageId": message_id, "message": { "text": "Again", "speed": "standard" } }),
+    )
+    .await;
+    assert_eq!(result(&standard)["speed"], "standard", "{standard}");
+}
+
+#[tokio::test]
 async fn installation_access_is_opt_in_and_older_profile_updates_preserve_it() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;

@@ -890,4 +890,5 @@ data class ChatDraft(
     val submissionKey: String = "",
     val provider: String = "",
     val rejected: List<RejectedAttachment> = emptyList(),
+    val speed: String = "",
 )

@@ -2,7 +2,7 @@ import type { Provider } from './accounts'
 import type { Run } from './contracts'
 import { z } from 'zod'
 import { MAIN_AGENT_ID } from './constants'
-import { reasoningEffort } from './contracts'
+import { reasoningEffort, serviceSpeed } from './contracts'
 
 export const chatInput = z.object({
   agentId: z.string().uuid().default(MAIN_AGENT_ID),
@@ -18,6 +18,7 @@ export const chatMessageInput = z.object({
   // eslint-disable-next-line regexp/no-useless-escape
   model: z.string().trim().max(120).regex(/^[\w./:\[\]-]*$/).default(''),
   reasoning: reasoningEffort.default(''),
+  speed: serviceSpeed.default(''),
 }).refine(message => message.text.length > 0 || message.attachmentIds.length > 0, 'Write a message or attach a file')
 export interface ChatAttachment {
   id: string
@@ -116,6 +117,8 @@ export interface ChatMessage {
   provider?: '' | 'codex' | 'claude' | 'opencode'
   model: string
   reasoning?: string
+  /** The Codex speed this message asked for; absent on earlier messages. */
+  speed?: string
   mode: 'queue' | 'steer'
   status: 'queued' | 'sending' | 'delivered' | 'cancelled'
   createdAt: number
