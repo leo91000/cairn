@@ -188,6 +188,8 @@ struct Chat<'a> {
     events: mpsc::Sender<Value>,
     cancel: CancellationToken,
     thread: String,
+    /// The model Codex reports for the thread, which a plan without one runs.
+    thread_model: String,
     turn: String,
     completed: Option<Value>,
     last_message: String,
@@ -762,6 +764,7 @@ impl Chat<'_> {
         };
         let result = self.request(method, serde_json::to_value(params)?).await?;
         self.thread = text(&result["thread"], "id").to_owned();
+        self.thread_model = text(&result, "model").to_owned();
         if self.thread.is_empty() {
             return Err(Error::bad_gateway(
                 "Codex returned an invalid conversation.",
@@ -972,7 +975,13 @@ impl Chat<'_> {
             return Ok(tier);
         }
 
-        let check = crate::models::check_tier(self.session, text(plan, "model"), &tier).await;
+        // Without a chosen model, Codex runs the thread's, which its configuration may set
+        // rather than the catalog's default.
+        let model = match text(plan, "model") {
+            "" => self.thread_model.clone(),
+            model => model.to_owned(),
+        };
+        let check = crate::models::check_tier(self.session, &model, &tier).await;
         let speed = match check {
             crate::models::TierCheck::Offered => return Ok(tier),
             crate::models::TierCheck::Lacking => json!({
@@ -1186,6 +1195,7 @@ async fn run_session(
         events,
         cancel,
         thread: String::new(),
+        thread_model: String::new(),
         turn: String::new(),
         completed: None,
         last_message: String::new(),

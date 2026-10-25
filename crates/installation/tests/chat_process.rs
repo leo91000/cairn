@@ -511,8 +511,15 @@ async fn a_faster_tier_is_checked_against_codex_own_model_list_before_the_turn()
             Some("unconfirmed"),
         ),
         ("fixture-deep", "default", false, "default", None),
+        // Without a chosen model, Codex runs the one its configuration sets, not the catalog's
+        // default: fixture-deep lists no Fast.
+        ("", "priority", false, "default", Some("applied")),
     ];
     for (index, (model, tier, list_fails, sent, notice)) in cases.into_iter().enumerate() {
+        let configured = home.join("fixture-config-model");
+        if index == 7 {
+            std::fs::write(&configured, "fixture-deep").unwrap();
+        }
         let failure = home.join("fixture-model-list-error");
         if list_fails {
             std::fs::write(&failure, "").unwrap();
