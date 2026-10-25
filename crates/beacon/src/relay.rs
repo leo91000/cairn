@@ -306,13 +306,13 @@ async fn serve_socket(
     // Refusing a second peer must not mark an active current tunnel as outdated.
     if !(update_required && relay.online(&installation)) {
         let updated_installation: Result<Option<(String,)>, _> = query_as(
-        "UPDATE installations SET update_required = $3 WHERE id = $1 AND token_digest = $2 AND owner_id IS NOT NULL RETURNING id",
-    )
-    .bind(&installation)
-    .bind(&token_digest)
-    .bind(update_required)
-    .fetch_optional(&service.pool)
-    .await;
+            "UPDATE installations SET update_required = $3 WHERE id = $1 AND token_digest = $2 AND owner_id IS NOT NULL RETURNING id",
+        )
+        .bind(&installation)
+        .bind(&token_digest)
+        .bind(update_required)
+        .fetch_optional(&service.pool)
+        .await;
         if !matches!(updated_installation, Ok(Some(_))) {
             let _ = socket.close().await;
             return;
