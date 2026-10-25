@@ -830,10 +830,10 @@ def main():
                     incomplete.mkdir(mode=0o700)
                     os.chown(incomplete, owner.st_uid, owner.st_gid)
                     if digit == 'e':
-                        host = incomplete / 'hostconfig.json'
-                        host.write_text('{')
-                        host.chmod(0o600)
-                        os.chown(host, owner.st_uid, owner.st_gid)
+                        host_config = incomplete / 'hostconfig.json'
+                        host_config.write_text('{')
+                        host_config.chmod(0o600)
+                        os.chown(host_config, owner.st_uid, owner.st_gid)
                 progress('docker-publish-resume')
                 point = manager('publish', run=docker_run)
                 resumed_docker = start(docker_run, lease=300000, docker_script=docker_script('resume'))
