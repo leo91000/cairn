@@ -84,8 +84,9 @@ the rollback checks are skipped with a warning, and the evidence records
 `served: null`. Such evidence is never reused, and a tag fails at once, before
 building. Before deploying, the release job reads the served release again and
 stops unless it still matches the versions its rollback checks used, or already
-runs this release's own engines, as when a deploy is retried. The served release runs through the candidate's adapter, while a real
-rollback runs its own image's adapter. When an adapter change needs a newer
+runs this release's own engines, as when a deploy is retried. The served release
+runs through the candidate's adapter, while a real rollback runs its own image's
+adapter. When an adapter change needs a newer
 engine release, set that engine's `minimum`: an older served release is then
 skipped, with a warning. Main and tags reuse evidence only when its served
 versions still match the release production serves.

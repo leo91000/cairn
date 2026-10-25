@@ -735,8 +735,13 @@ impl Driver for Claude {
         false
     }
 
-    fn usage_model<'a>(&self, model: &'a str) -> Cow<'a, str> {
-        family(model)
+    /// A model a window names, such as a catalog alias, keeps its own windows.
+    fn usage_model<'a>(&self, usage: &Usage, model: &'a str) -> Cow<'a, str> {
+        if usage.names(model) {
+            Cow::Borrowed(model)
+        } else {
+            family(model)
+        }
     }
 
     async fn supports(&self, _s: &Service, _id: &str, _model: &str) -> Result<bool> {
@@ -911,10 +916,24 @@ mod tests {
                 "{saved}"
             );
         }
+        // A name a window already lists keeps it, even when its family differs.
+        let catalog = Catalog::read(Some(json!({
+            "models": [{ "model": "opusplan[1m]", "resolvedModel": "claude-opus-fixture" }],
+        })));
+        let mut windows = vec![window(&["opus"])];
+        scope(&mut windows, &catalog);
+        let usage = Usage {
+            windows,
+            ..Usage::default()
+        };
+        let driver = Provider::Claude.driver();
+        assert_eq!(driver.usage_model(&usage, "opusplan[1m]"), "opusplan[1m]");
+        assert_eq!(driver.usage_model(&usage, "opus[1m]"), "opus");
         // Other engines match their usage windows by the exact saved model.
         for provider in [Provider::Codex, Provider::Opencode] {
             for saved in ["opus[1m]", "gpt-5.5[1m]", "opencode-go/claude-opus-4-6"] {
-                assert_eq!(provider.driver().usage_model(saved), saved, "{provider:?}");
+                let model = provider.driver().usage_model(&usage, saved);
+                assert_eq!(model, saved, "{provider:?}");
             }
         }
     }
