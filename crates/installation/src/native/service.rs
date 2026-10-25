@@ -73,6 +73,13 @@ fn supervision_stop_reason(
 }
 
 pub(crate) fn native_budget(value: &Value) -> Result<crate::microvm::budget::Budget> {
+    if value["nativeModeProtocol"] != 1 {
+        return Err(Error::bad("Unknown native mode storage protocol."));
+    }
+    budget_request(value)
+}
+
+fn budget_request(value: &Value) -> Result<crate::microvm::budget::Budget> {
     let mut value = value.clone();
     if let Some(protocol) = value
         .as_object_mut()
@@ -93,6 +100,19 @@ fn budget_record(budget: &Value) -> Value {
     let mut record = budget.clone();
     record["nativeModeProtocol"] = 1.into();
     record
+}
+
+async fn load_budget(path: &Path) -> Result<crate::microvm::budget::Budget> {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => {
+            let value: Value = serde_json::from_slice(&bytes)?;
+            native_budget(&value)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            budget_request(&json!({ "slots": 1, "limits": crate::nodes::placement::defaults() }))
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 struct Attempt {
@@ -1440,7 +1460,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         ("POST", ["native-mode"]) => controller.change_mode(input(request, 16384).await?).await?,
         ("POST", ["node-budget"]) => {
             let value = input(request, 16384).await?;
-            let budget = native_budget(&value)?;
+            let budget = budget_request(&value)?;
             let _admission = controller.admission.lock().await;
             let previous = controller.budget.lock().await.clone();
             if value != previous {
@@ -1986,14 +2006,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     }
     recover_preparations(&data, &state).await?;
     let budget_path = state.join(crate::microvm::budget::FILE);
-    let budget: Value = match tokio::fs::read(&budget_path).await {
-        Ok(bytes) => serde_json::from_slice(&bytes)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            json!({ "slots": 1, "limits": crate::nodes::placement::defaults() })
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let checked = native_budget(&budget)?;
+    let checked = load_budget(&budget_path).await?;
     let budget = serde_json::to_value(&checked)?;
     systemd::apply_budget(&checked).await?;
     atomic_write(&budget_path, &serde_json::to_vec(&budget_record(&budget))?).await?;
@@ -2055,6 +2068,36 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_budget_validates_persisted_protocol_and_keeps_fresh_bootstrap() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(crate::microvm::budget::FILE);
+        assert_eq!(load_budget(&path).await.unwrap().slots, 1);
+        let request = json!({
+            "slots": 6,
+            "limits": { "cpu": 1, "memoryMiB": 1024, "diskMiB": 1024 },
+        });
+        assert_eq!(budget_request(&request).unwrap().slots, 6);
+        for protocol in [None, Some(json!(null)), Some(json!(2)), Some(json!("1"))] {
+            let mut record = request.clone();
+            if let Some(protocol) = protocol {
+                record["nativeModeProtocol"] = protocol;
+            }
+            let bytes = serde_json::to_vec(&record).unwrap();
+            atomic_write(&path, &bytes).await.unwrap();
+            let error = load_budget(&path).await.unwrap_err();
+            assert!(error.message.contains("native mode storage protocol"));
+            assert_eq!(tokio::fs::read(&path).await.unwrap(), bytes);
+        }
+        atomic_write(
+            &path,
+            &serde_json::to_vec(&budget_record(&request)).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(load_budget(&path).await.unwrap().slots, 6);
+    }
 
     #[tokio::test]
     async fn native_startup_reclaims_interrupted_preparations_and_preserves_committed_disks() {
