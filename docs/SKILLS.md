@@ -236,6 +236,11 @@ command; a resumed run sends its resume prompt instead. Codex runs without a
 managed account keep the single legacy prompt. Codex also lists the skills
 installed under `~/.agents/skills` itself.
 
+Claude Code and OpenCode apply the instructions again at every launch. Codex
+keeps the instructions a thread started with, even when it is resumed with new
+ones. A Codex mission continued in chat therefore receives the interactive rule
+in its first chat message.
+
 ## Screens
 
 | Web | Android |

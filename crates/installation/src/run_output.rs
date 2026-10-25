@@ -345,6 +345,17 @@ pub fn args(run: &Value, output: &str, session: Option<&str>) -> Vec<String> {
     crate::coding_agent::codex_args(run, output, session)
 }
 
+/// The rule that sets chat turns apart from scheduled work.
+pub const INTERACTIVE: &str = "This is an interactive chat. Use native user-input questions when \
+    clarification is useful. Nonblocking questions let you continue independent \
+    work while the user considers the options; a suggested answer is never user \
+    approval. Follow the latest user instructions and do not treat a question \
+    as authorization to publish changes. Use cairn_workspace.pending_questions and \
+    cairn_workspace.withdraw_question to retire a question that became unnecessary \
+    or was answered in ordinary chat. Withdrawal never supplies approval. A completed \
+    outcome retires unanswered questions at the end of the turn; report needs_input \
+    when an answer is still required.";
+
 pub fn prompt(run: &Value, chat: bool) -> String {
     // Set at launch from the plugins granting this run's agent (`agents::with_instructions`).
     let plugins = if run["isolated"] == true {
@@ -372,15 +383,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
         ""
     };
     let interaction = if chat {
-        "This is an interactive chat. Use native user-input questions when \
-            clarification is useful. Nonblocking questions let you continue independent \
-            work while the user considers the options; a suggested answer is never user \
-            approval. Follow the latest user instructions and do not treat a question \
-            as authorization to publish changes. Use cairn_workspace.pending_questions and \
-            cairn_workspace.withdraw_question to retire a question that became unnecessary \
-            or was answered in ordinary chat. Withdrawal never supplies approval. A completed \
-            outcome retires unanswered questions at the end of the turn; report needs_input \
-            when an answer is still required."
+        INTERACTIVE
     } else {
         "This unattended task cannot answer clarification questions; report a \
             concrete blocker if required information is missing."

@@ -619,6 +619,10 @@ fn continue_run(
             provider.label()
         );
         db.event(run_id, "status", &status, None)?;
+    } else if provider == Provider::Codex && continues_mission(db, run)? {
+        // Codex keeps the developer instructions a thread started with, so a
+        // resumed mission thread would stay unattended.
+        execution.text = format!("{}\n\n{}", crate::run_output::INTERACTIVE, execution.text);
     }
     checkpoint["completed"] = false.into();
     checkpoint["remainingMs"] = crate::run_limits::budget_ms(agent).into();
@@ -639,6 +643,19 @@ fn continue_run(
         }),
     )?;
     Ok(())
+}
+
+/// A mission continued in chat whose first chat message has not reached the agent.
+fn continues_mission(db: &Db<'_>, run: &Value) -> Result<bool> {
+    if !run["sourceTaskPrompt"].is_string() {
+        return Ok(false);
+    }
+    let delivered: bool = db.0.query_row(
+        "SELECT EXISTS(SELECT 1 FROM events WHERE run_id=? AND type='chat.user')",
+        [text(run, "id")],
+        |row| row.get(0),
+    )?;
+    Ok(!delivered)
 }
 
 fn remove_keys(value: &mut Value, keys: &[&str]) {
@@ -1302,6 +1319,59 @@ mod tests {
                     .await
                     .unwrap();
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_missions_continued_in_chat_receive_the_interactive_rule_once() {
+        for (provider, converted, expected) in [
+            ("codex", true, true),
+            ("codex", false, false),
+            ("claude", true, false),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let store = crate::store::Store::open(root.path()).unwrap();
+            store
+                .transaction(move |db| {
+                    let mut run = json!({
+                        "id": "run",
+                        "taskId": "chat",
+                        "createdAt": 0,
+                        "status": "succeeded",
+                        "trigger": "chat",
+                        "sessionId": "mission-thread",
+                        "snapshot": { "agent": { "provider": provider } },
+                    });
+                    if converted {
+                        run["sourceTaskPrompt"] = "Check the deployment.".into();
+                    }
+                    db.add_run(&run, None)?;
+                    db.set("run-checkpoint:run", &json!({ "completed": true }), None)?;
+                    let chat = json!({ "id": "chat", "runId": "run" });
+                    db.put("chats", &chat)?;
+                    let execution = |text: &str| ChatExecution {
+                        message_id: "message".into(),
+                        text: text.into(),
+                        attachments: json!([]),
+                        recovery: false,
+                        context: None,
+                    };
+
+                    continue_run(db, &chat, &run, &run, execution("Now fix it"))?;
+                    let turn = db.run("run")?.unwrap()["chatExecution"]["text"].clone();
+                    let turn = turn.as_str().unwrap();
+                    assert_eq!(turn.starts_with(crate::run_output::INTERACTIVE), expected);
+                    assert!(turn.ends_with("Now fix it"));
+                    assert_eq!(db.run("run")?.unwrap()["sessionId"], "mission-thread");
+
+                    // The thread keeps the rule once a chat message reached it.
+                    db.event("run", "chat.user", "Now fix it", None)?;
+                    continue_run(db, &chat, &run, &run, execution("Thanks"))?;
+                    assert_eq!(db.run("run")?.unwrap()["chatExecution"]["text"], "Thanks");
+                    Ok(())
+                })
+                .await
+                .unwrap();
         }
     }
 
