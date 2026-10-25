@@ -224,15 +224,14 @@ freeze sees one complete saved version.
 The prompt lists each selected skill by name, description and `SKILL.md` path.
 The agent reads `SKILL.md` and its supporting files when it uses the skill.
 
-Runs that use the chat protocol (chats, Claude Code and OpenCode runs, Codex
-runs on a managed account) receive this prompt once, in their instructions.
+Every coding-agent execution uses the chat protocol and receives this prompt
+once, in its instructions.
 Isolated runs list skill paths inside the run and include the
 [plugin instructions](PLUGINS.md) of their agent. Only chat turns are
 interactive; scheduled work states that it cannot answer questions, as
 [waits](WAIT-FOR.md) require. Its first turn is the task brief after a fixed
 lead-in, so a brief that starts with `/clear` is not run as a Claude Code
-command; a resumed run sends its resume prompt instead. Codex runs without a
-managed account keep the single legacy prompt. Codex also lists the skills
+command; a resumed run sends its resume prompt instead. Codex also lists the skills
 installed under `~/.agents/skills` itself.
 
 Claude Code and OpenCode apply the instructions again at every launch. Codex

@@ -83,13 +83,13 @@ The chosen address is visible as an argument in the generated command:
 `curl …/internal/nodes/install.sh | sudo bash -s -- 'https://manager.vpn.example'`.
 The installer refuses URL query parameters that could hide a different download
 origin, and validates its argument before downloading the supervisor or changing
-the host. A usable configured manager origin remains the default for older
-commands without an argument, and for unclaimed installations; a Docker-only
+the host. Without an address argument, a usable configured manager origin is
+the default, including for unclaimed installations; a Docker-only
 origin requires the explicit address. The address is saved in the node’s
 protected identity and supervisor configuration. The node uses this
 authenticated connection address for disk preparation and restoration, even if
 the manager’s internal origin is loopback. The manager’s optional `PUBLIC_URL`
-remains a fallback for older enrollment clients and manager-local calls; it need
+provides the default for enrollment and manager-local calls; it need
 not be the browser’s origin. Installers require `CAIRN_NODE_IMAGE` to pin the
 manager’s approved image digest. Without it, use the matching `cairn node-enroll`
 binary with the address and temporary code shown in the app. Changes of address

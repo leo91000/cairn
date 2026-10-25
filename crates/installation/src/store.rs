@@ -308,12 +308,12 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
 }
 
 /// Run list projection: drops the heavy snapshot and summary, keeps display names and the
-/// coding agent (agents saved before Claude Code support run on Codex).
+/// explicit coding agent saved in the snapshot.
 pub const RUN_SUMMARY: &str = "json_set(
     json_remove(data,'$.snapshot','$.summary'),
     '$.taskName',json_extract(data,'$.snapshot.task.name'),
     '$.agentName',json_extract(data,'$.snapshot.agent.name'),
-    '$.provider',COALESCE(json_extract(data,'$.snapshot.agent.provider'),'codex')
+    '$.provider',json_extract(data,'$.snapshot.agent.provider')
 )";
 
 // Database transactions and statement caches stay on their owning database thread.

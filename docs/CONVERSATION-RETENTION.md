@@ -38,7 +38,8 @@ Deleted conversations cannot be restored by changing the policy.
 ## Validation
 
 Backend lifecycle tests cover default/configured/disabled retention, invalid
-values, owner permissions, policy persistence, the legacy activity fallback,
+values, owner permissions, policy persistence, activity initialization for empty
+and converted chats,
 recent run completion, pending work, finalization, concurrency and physical
 cleanup including public links. The settings browser journey covers confirmation,
 cancellation, persistence and disabling; shared Android Compose cases cover the

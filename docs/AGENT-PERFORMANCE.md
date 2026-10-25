@@ -9,8 +9,8 @@ default binary filter. With a custom filter, include `cairn_performance=info` in
 Worker logs include `run_id`. Every process launch receives a fresh `attempt_id`,
 also passed as optional `runId`/`attemptId` fields in the chat plan. The adapter
 places native RPC and output logs in the same `agent_attempt` tracing span.
-Retained older adapters ignore the optional fields; plans without them log
-`unknown`. Invalid correlation values also become `unknown`.
+Plans without correlation fields log `unknown`. Invalid correlation values also
+become `unknown`.
 
 Activity records have `side=adapter` (normalized events inside the agent process)
 or `side=worker` (events received by the manager). The agent process writes its
@@ -164,8 +164,8 @@ The optional `traceId` in import requests links host and guest records by `id`.
 | `vm_archive_stream` | Total archive `bytes`, `chunks`, cumulative `read_ms` and `write_ms`, labelled `side="host"` or `side="guest"`. |
 
 Host stream reads wait on the archive-producing process; host writes wait on the
-VM transport. Guest reads wait on that transport (and include Base64 decoding
-for legacy JSON transfers); guest writes wait on the archive extractor's stdin.
+VM transport. Guest reads wait on that binary transport; guest writes wait on
+the archive extractor's stdin.
 These are elapsed waits including scheduling, not exclusive CPU measurements.
 Host and guest work overlaps, so do not add their durations together. There is
 one aggregate stream record per side, rather than one log per chunk.

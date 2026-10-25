@@ -526,6 +526,13 @@ fn claim_reservation(
             "Destination version mismatch; deploy all components at the same version.",
         ));
     }
+    if !local_unconfigured
+        && (record["executionReady"] != true || !super::seen_within(record, FRESH_HEARTBEAT_MS))
+    {
+        return Err(Error::unavailable(
+            "Destination execution is not ready; restore a healthy controller with matching component versions.",
+        ));
+    }
     let native = crate::native::policy::native(&request.run["snapshot"]["agent"]);
     if native != crate::native::policy::node_native(record)
         || native && record["capabilities"]["ublk"] != true
@@ -867,7 +874,7 @@ mod tests {
                 let checkpoint = Value::Null;
                 let request = Request::new(&run, &access, &checkpoint);
                 let mut node = json!({
-                    "id": node_id, "runtimeId": "previous-build",
+                    "id": node_id, "runtimeId": "previous-build", "executionReady": true,
                     "capabilities": { "backend": backend, "ublk": true },
                 });
                 let error = claim_reservation(db, &request, &[node.clone()], &held_id, &attempt, true).unwrap_err();
@@ -877,6 +884,11 @@ mod tests {
                 assert_eq!(db.run(&run_id)?.unwrap()["moveReservation"], held_id);
 
                 node["runtimeId"] = super::super::component_runtime().into();
+                node["lastSeen"] = (now() - FRESH_HEARTBEAT_MS).into();
+                assert!(claim_reservation(db, &request, &[node.clone()], &held_id, &attempt, true).is_err());
+                assert_eq!(db.get("node-attempts", &held_id)?.unwrap()["released"], false);
+                assert!(db.get("node-attempts", &attempt)?.is_none());
+                node["lastSeen"] = now().into();
                 let placement = claim_reservation(db, &request, &[node], &held_id, &attempt, true)?;
                 assert_eq!(placement["runtimeId"], super::super::component_runtime());
                 assert_eq!(db.get("node-attempts", &attempt)?.unwrap()["runtimeId"], placement["runtimeId"]);

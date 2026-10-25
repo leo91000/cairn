@@ -513,12 +513,14 @@ async fn component_version_mismatches_are_explicitly_rejected() {
     let node_id = identity["nodeId"].as_str().unwrap();
     let mut node = owner.stored("nodes", node_id).await.unwrap();
     node["slots"] = 2.into();
+    node["accepting"] = true.into();
     let valid = json!({
         "runtimeId": "development", "nodeProtocol": 2, "executionReady": true,
         "sharedResources": true, "dataRoot": owner.service.config.data_dir,
         "budget": { "slots": 2, "limits": node["limits"] },
     });
     owner.put("nodes", node).await;
+    owner.grant_nodes(MAIN_AGENT_ID, json!([node_id])).await;
     for request in [
         json!({ "runtimeId": "other-version", "nodeProtocol": 2 }),
         json!({ "runtimeId": "development", "nodeProtocol": 3 }),
@@ -536,6 +538,30 @@ async fn component_version_mismatches_are_explicitly_rejected() {
             owner.stored("nodes", node_id).await.unwrap()["executionReady"],
             true
         );
+        let (run_id, reservation, attempt) = (id(), id(), id());
+        let mut run = run_record(&run_id, RunStatus::Queued);
+        run["taskId"] = run_id.clone().into();
+        run["snapshot"] = json!({ "agent": { "id": MAIN_AGENT_ID, "provider": "codex" } });
+        run["isolated"] = true.into();
+        run["resources"] = limits(1, 512, 1024);
+        run["placementTransition"] = true.into();
+        owner.add_run(&run).await;
+        placement::reserve(&owner.service, &run, &reservation)
+            .await
+            .unwrap();
+        run["placementTransition"] = false.into();
+        run["moveReservation"] = reservation.clone().into();
+        owner
+            .service
+            .store
+            .patch_run(
+                &run_id,
+                json!({
+                    "placementTransition": false, "moveReservation": reservation,
+                }),
+            )
+            .await
+            .unwrap();
         let (status, error) = owner
             .call("POST", HEARTBEAT, request, identity["token"].as_str())
             .await;
@@ -545,6 +571,27 @@ async fn component_version_mismatches_are_explicitly_rejected() {
             false,
             "A rejected or unavailable controller must not retain its previous readiness"
         );
+        let error = placement::reserve(&owner.service, &run, &attempt)
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("not ready"), "{error:?}");
+        assert_eq!(
+            owner.stored("node-attempts", &reservation).await.unwrap()["released"],
+            false
+        );
+        assert!(owner.stored("node-attempts", &attempt).await.is_none());
+        assert_eq!(owner.run(&run_id).await["moveReservation"], reservation);
+        assert_eq!(
+            owner
+                .call("POST", HEARTBEAT, valid.clone(), identity["token"].as_str())
+                .await
+                .0,
+            StatusCode::OK
+        );
+        placement::reserve(&owner.service, &run, &attempt)
+            .await
+            .unwrap();
+        placement::release(&owner.service, &attempt).await.unwrap();
     }
 }
 

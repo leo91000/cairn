@@ -29,7 +29,9 @@ export function chatFixture() {
   const finish = () => {
     if (!active)
       return
-    const text = completionText || (thread.fixtureInstructions.includes('This unattended task cannot answer clarification questions')
+    const scheduledBrief = thread.fixtureInstructions.includes('This unattended task cannot answer clarification questions')
+      && active.items.some(item => item.type === 'userMessage' && item.content[0].text.startsWith('Task brief:\n'))
+    const text = completionText || (scheduledBrief
       ? '# Complete\nThe fixture task passed.'
       : `I reviewed the workspace. **The approach looks good.**\n\n${active.items.filter(item => item.type === 'userMessage').map(item => item.content[0].text).join('\n\n')}\n\nReady for the next step.`)
     const item = { id: `reply-${thread.fixtureGeneration || 'legacy'}-${active.id}`, type: 'agentMessage', text }

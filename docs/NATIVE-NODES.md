@@ -47,9 +47,8 @@ and the other backend. Run the generated installer on the same machine: the new
 runtime enrolls as a separate node with its own identity, grants and storage,
 alongside the existing one. After its configuration and agent step, Cairn offers to
 retire the previous node. The invitation assigns the replacement's identity before
-it connects, so another enrollment cannot advance this switch. Older invitations
-remain consumable; installations without identity tracking keep the previous node
-and ask for an update before completing a guided switch.
+it connects, so another enrollment cannot advance this switch. Every invitation
+and enrolling component must carry the current identity and version.
 Revoking it from there also returns conversations fixed
 to or preferring that node to automatic placement; a plain revocation keeps those
 explicit choices waiting. Switch each agent's backend on its page and allow the
@@ -61,7 +60,6 @@ System packages and running processes do not transfer; dependencies may need
 reinstalling. Migration needs a coherent source capture, S3 access, temporary
 manager disk space (including the logical destination disk budget), fakeroot and e2fsprogs. An interrupted or
 failed migration retains the source and stays paused; retry from the same action.
-Legacy native file archives must resume once on their original node first.
 Finally run the uninstall command shown for the previous runtime after the
 conversations you want to keep have migrated.
 
