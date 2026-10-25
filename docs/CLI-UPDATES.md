@@ -65,7 +65,8 @@ production, the CLIs may still contact their vendors' public endpoints:
   on the resolved one.
 - Claude Code answers the `initialize` and `get_usage` control requests that model
   discovery and account usage use, with synthetic credentials, and lists a catalog
-  with its `default` alias. An account refresh reads its `auth status` JSON. It
+  with its `default` alias, offering exactly the effort levels agents may save
+  (`EFFORTS` in `claude.rs`). An account refresh reads its `auth status` JSON. It
   executes a turn through the adapter against a local Messages API with a
   synthetic API key, and its session resumes with its history. Sessions created by
   its `legacy` release resume on the resolved one.

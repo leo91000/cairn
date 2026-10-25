@@ -283,6 +283,17 @@ async fn native_cli_lists_its_model_catalog_without_inference() {
         }),
         "{catalog}"
     );
+    // Agents can save exactly the effort levels the catalog offers: a level the
+    // release adds would be refused, and one it drops would still be passed to it.
+    let offered = models
+        .iter()
+        .flat_map(|model| model["supportedReasoningEfforts"].as_array().unwrap())
+        .map(|effort| effort["reasoningEffort"].as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    let saved = claude::EFFORTS
+        .into_iter()
+        .filter(|effort| !effort.is_empty());
+    assert_eq!(offered, saved.collect(), "{catalog}");
     // Account usage uses the same protocol. Without a subscription, the CLI answers
     // that no limits are available, in the fields the adapter reads.
     let usage = claude::query_metadata(
