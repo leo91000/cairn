@@ -1,4 +1,6 @@
 """Downloader and update recovery tests; no services, drivers or real credentials."""
+import ast
+import contextlib
 import hashlib
 import importlib.util
 import io
@@ -25,6 +27,48 @@ def release(**changes):
 
 
 class NativeHostTests(unittest.TestCase):
+    def test_entrypoint_exposes_only_allowlisted_prerequisite_diagnostics(self):
+        source = Path(SPEC.origin).read_text()
+        entrypoint = ast.parse(source).body[-1]
+        self.assertIsInstance(entrypoint, ast.If)
+        code = compile(ast.Module(body=[entrypoint], type_ignores=[]), SPEC.origin, 'exec')
+        for error, expected in [
+            (host.PrerequisiteError('uidmap'), 'distribution uidmap package'),
+            (host.PrerequisiteError('subids'), '/etc/subuid and /etc/subgid'),
+            (host.PrerequisiteError('tun'), '/dev/net/tun'),
+            (host.PrerequisiteError('systemd'), 'systemd 255'),
+            (ValueError('synthetic-private-credential'), 'Native node failed: ValueError'),
+            (OSError('synthetic-private-credential'), 'Native node failed: OSError'),
+        ]:
+            with self.subTest(error=type(error).__name__, expected=expected):
+                scope = dict(vars(host), __name__='__main__', install=Mock(side_effect=error))
+                output = io.StringIO()
+                with patch.object(host.os, 'geteuid', return_value=0), \
+                        patch.object(host.signal, 'signal'), \
+                        patch.object(host.sys, 'argv', ['native-host.py', 'install', 'https://manager.example.test']), \
+                        contextlib.redirect_stderr(output), self.assertRaises(SystemExit) as exit_status:
+                    exec(code, scope)
+                self.assertEqual(exit_status.exception.code, 1)
+                scope['install'].assert_called_once_with('https://manager.example.test')
+                self.assertIn(expected, output.getvalue())
+                self.assertNotIn('synthetic-private-credential', output.getvalue())
+
+    def test_missing_uidmap_reports_a_controlled_prerequisite(self):
+        with patch.object(host.subprocess, 'run', return_value=Mock(stdout='systemd 255')), \
+                patch.object(host.Path, 'exists', return_value=False), \
+                patch.object(host.shutil, 'which', return_value=None), \
+                self.assertRaisesRegex(host.PrerequisiteError, 'distribution uidmap package'):
+            host.require_docker_host()
+
+    def test_apparmor_profile_failure_does_not_expose_arbitrary_os_error(self):
+        with patch.object(host.Path, 'exists', return_value=True), \
+                patch.object(host.Path, 'read_text', return_value='1'), \
+                patch.object(host.Path, 'write_text', side_effect=PermissionError('synthetic-private-credential')), \
+                patch.object(host.shutil, 'which', return_value='/synthetic/apparmor_parser'), \
+                self.assertRaisesRegex(host.PrerequisiteError, 'AppArmor tooling') as error:
+            host.configure_docker_apparmor(Path('/synthetic/docker'))
+        self.assertNotIn('synthetic-private-credential', str(error.exception))
+
     def test_mapping_helpers_accept_only_their_effective_global_file_capability(self):
         metadata = Mock(st_uid=0, st_mode=host.stat.S_IFREG | 0o755)
         def capability(*words):

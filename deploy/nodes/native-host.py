@@ -33,6 +33,31 @@ SERVICE = 'cairn-native-node.service'
 CGROUP_ROOT = Path('/sys/fs/cgroup')
 STOP = False
 
+# Only fixed, credential-free prerequisite messages reach the CLI. Other
+# exceptions can carry manager URLs, credentials or response bodies and remain
+# masked by the entrypoint's generic handler.
+PREREQUISITES = {
+    'systemd': 'Native rootless enclaves require systemd 255 or newer; older versions force NoNewPrivileges on mapping helpers.',
+    'userns': 'Native Docker requires enabled unprivileged user namespaces; global restrictions are not changed automatically.',
+    'uidmap': 'Native Docker requires the distribution uidmap package (newuidmap/newgidmap).',
+    'mapping': 'Native Docker requires root-owned non-writable mapping helpers with setuid or the exact effective CAP_SETUID/CAP_SETGID file capability.',
+    'accounts': 'Native Docker requires iptables, iproute2 and account tools (useradd/groupadd/usermod/getent); install distribution packages before enrollment.',
+    'subids': 'Native Docker requires root-managed /etc/subuid and /etc/subgid databases.',
+    'tun': 'Native Docker requires the existing /dev/net/tun character device.',
+    'kernel': 'Native Docker bind isolation requires Linux 5.12 or newer.',
+    'apparmor': 'Restricted user namespaces require AppArmor tooling and a writable root-managed profile for the managed RootlessKit binary.',
+    'e2fsprogs': 'Native ublk storage requires e2fsprogs (mkfs.ext4/e2fsck/resize2fs).',
+    'ublk': 'Native storage requires the ublk_drv kernel module and /dev/ublk-control character device; install the matching kernel modules before enrolling.',
+    'cgroup': 'Native execution requires cgroup v2 with CPU, memory and PID controllers.',
+}
+
+
+class PrerequisiteError(ValueError):
+    def __init__(self, requirement):
+        self.diagnostic = PREREQUISITES[requirement]
+        super().__init__(self.diagnostic)
+
+
 # Managed tools are independent of the conversation's pinned coding engines.
 # No host Docker service is installed, joined, stopped or reconfigured.
 DOCKER_TOOLS = (
@@ -98,31 +123,58 @@ def trusted_mapping_helper(path, required_bit):
     return words[0] == expected_revision and words[1:5] == [required_bit, 0, 0, 0] and (len(words) == 5 or words[5] == 0)
 
 
+def require_systemd():
+    try:
+        version = subprocess.run(['systemctl', '--version'], check=True, capture_output=True, text=True, timeout=10).stdout.split()[1]
+        version = int(version)
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError) as error:
+        raise PrerequisiteError('systemd') from error
+    if version < 255:
+        raise PrerequisiteError('systemd')
+
+
 def require_docker_host():
-    version = subprocess.run(['systemctl', '--version'], check=True, capture_output=True, text=True, timeout=10).stdout.split()[1]
-    if int(version) < 255:
-        raise ValueError('Native rootless enclaves require systemd 255 or newer; older versions force NoNewPrivileges on mapping helpers.')
+    require_systemd()
     for name in ('/proc/sys/user/max_user_namespaces', '/proc/sys/kernel/unprivileged_userns_clone'):
         path = Path(name)
-        if path.exists() and int(path.read_text().strip()) == 0:
-            raise ValueError('Native Docker requires enabled unprivileged user namespaces; global restrictions are not changed automatically.')
+        try:
+            disabled = path.exists() and int(path.read_text().strip()) == 0
+        except (OSError, ValueError) as error:
+            raise PrerequisiteError('userns') from error
+        if disabled:
+            raise PrerequisiteError('userns')
     for name, required_bit in (('newuidmap', 1 << 7), ('newgidmap', 1 << 6)):
         path = shutil.which(name)
         if not path:
-            raise ValueError('Native Docker requires the distribution uidmap package (newuidmap/newgidmap).')
-        if not trusted_mapping_helper(path, required_bit):
-            raise ValueError('Native Docker requires root-owned non-writable mapping helpers with setuid or the exact effective CAP_SETUID/CAP_SETGID file capability.')
+            raise PrerequisiteError('uidmap')
+        try:
+            trusted = trusted_mapping_helper(path, required_bit)
+        except OSError as error:
+            raise PrerequisiteError('mapping') from error
+        if not trusted:
+            raise PrerequisiteError('mapping')
     for name in ('iptables', 'ip6tables', 'ip', 'usermod', 'useradd', 'groupadd', 'getent'):
         if not shutil.which(name):
-            raise ValueError('Native Docker requires iptables, iproute2 and account tools (useradd/groupadd/usermod/getent); install distribution packages before enrollment.')
+            raise PrerequisiteError('accounts')
     for name in ('/etc/subuid', '/etc/subgid'):
-        metadata = Path(name).stat()
+        try:
+            metadata = Path(name).stat()
+        except OSError as error:
+            raise PrerequisiteError('subids') from error
         if metadata.st_uid != 0 or metadata.st_mode & 0o022:
-            raise ValueError('Native Docker requires root-managed subordinate UID/GID databases.')
-    if not stat.S_ISCHR(Path('/dev/net/tun').stat().st_mode):
-        raise ValueError('Native Docker requires the existing /dev/net/tun device.')
-    if tuple(int(part) for part in os.uname().release.split('.')[:2]) < (5, 12):
-        raise ValueError('Native Docker bind isolation requires Linux 5.12 or newer.')
+            raise PrerequisiteError('subids')
+    try:
+        tun = Path('/dev/net/tun').stat()
+    except OSError as error:
+        raise PrerequisiteError('tun') from error
+    if not stat.S_ISCHR(tun.st_mode):
+        raise PrerequisiteError('tun')
+    try:
+        kernel = tuple(int(part) for part in os.uname().release.split('.')[:2])
+    except ValueError as error:
+        raise PrerequisiteError('kernel') from error
+    if kernel < (5, 12):
+        raise PrerequisiteError('kernel')
 
 
 def prepare_docker_tools():
@@ -194,16 +246,19 @@ def configure_docker_apparmor(target):
         return
     parser = shutil.which('apparmor_parser')
     if not parser:
-        raise ValueError('Restricted user namespaces require AppArmor tooling for the managed RootlessKit profile.')
+        raise PrerequisiteError('apparmor')
     executable = str(target / 'bin/rootlesskit')
     if any(character in executable for character in ('"', '\n', '\r')):
         raise ValueError('Invalid managed RootlessKit path.')
     profile = Path('/etc/apparmor.d/cairn-native-rootlesskit')
-    profile.write_text('abi <abi/4.0>,\ninclude <tunables/global>\n'
-                       'profile cairn-native-rootlesskit "' + executable + '" flags=(unconfined) {\n  userns,\n}\n'
-                       'profile cairn-native-rootlesskit-enclave "/opt/cairn-docker/bin/rootlesskit" flags=(unconfined) {\n  userns,\n}\n')
-    profile.chmod(0o644)
-    subprocess.run([parser, '--replace', str(profile)], check=True, capture_output=True, timeout=30)
+    try:
+        profile.write_text('abi <abi/4.0>,\ninclude <tunables/global>\n'
+                           'profile cairn-native-rootlesskit "' + executable + '" flags=(unconfined) {\n  userns,\n}\n'
+                           'profile cairn-native-rootlesskit-enclave "/opt/cairn-docker/bin/rootlesskit" flags=(unconfined) {\n  userns,\n}\n')
+        profile.chmod(0o644)
+        subprocess.run([parser, '--replace', str(profile)], check=True, capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise PrerequisiteError('apparmor') from error
 
 
 class UnixControllerConnection(http.client.HTTPConnection):
@@ -464,33 +519,31 @@ def environment(directory):
 def require_storage():
     for binary in ('mkfs.ext4', 'e2fsck', 'resize2fs'):
         if shutil.which(binary) is None:
-            raise ValueError('Native ublk storage requires e2fsprogs (' + binary + ').')
+            raise PrerequisiteError('e2fsprogs')
     if not Path('/sys/module/ublk_drv').is_dir():
         try:
             subprocess.run(['modprobe', 'ublk_drv'], check=True, capture_output=True, timeout=10)
         except (OSError, subprocess.SubprocessError) as error:
-            raise ValueError('Native storage requires a kernel with the ublk_drv module. Install the matching kernel modules before enrolling.') from error
+            raise PrerequisiteError('ublk') from error
     try:
         control = Path('/dev/ublk-control').stat()
     except OSError as error:
-        raise ValueError('Native storage requires /dev/ublk-control.') from error
+        raise PrerequisiteError('ublk') from error
     if not stat.S_ISCHR(control.st_mode):
-        raise ValueError('Native storage control must be a character device.')
+        raise PrerequisiteError('ublk')
 
 
 def install(manager):
     manager = origin(manager)
     if (ROOT / 'data/node/identity.json').exists():
         raise ValueError('Native node is already enrolled.')
-    version = subprocess.run(['systemctl', '--version'], check=True, capture_output=True, text=True).stdout.split()[1]
-    if int(version) < 255:
-        raise ValueError('Native rootless execution requires systemd 255 or newer.')
+    require_systemd()
     try:
         controllers = set((CGROUP_ROOT / 'cgroup.controllers').read_text().split())
     except OSError as error:
-        raise ValueError('Native execution requires cgroup v2 with CPU, memory and PID controllers.') from error
+        raise PrerequisiteError('cgroup') from error
     if not {'cpu', 'memory', 'pids'} <= controllers:
-        raise ValueError('Native execution requires cgroup v2 with CPU, memory and PID controllers.')
+        raise PrerequisiteError('cgroup')
     require_storage()
     require_docker_host()
     configure_docker_apparmor(prepare_docker_tools())
@@ -648,7 +701,8 @@ def run():
                     complete_update(manager, token, current)
             except (OSError, ValueError, RuntimeError, zipfile.BadZipFile, KeyError, TypeError, urllib.error.URLError, subprocess.SubprocessError) as error:
                 # Do not print request bodies, response bodies, identities or credentials.
-                print('Native update postponed: ' + type(error).__name__, file=sys.stderr)
+                diagnostic = error.diagnostic if isinstance(error, PrerequisiteError) else type(error).__name__
+                print('Native update postponed: ' + diagnostic, file=sys.stderr)
                 if child.poll() is not None:
                     raise RuntimeError('Native node is no longer running.') from None
                 if draining and not pending_update.exists():
@@ -682,6 +736,9 @@ if __name__ == '__main__':
             run()
         else:
             raise ValueError('Use install <manager HTTPS origin> or run.')
+    except PrerequisiteError as error:
+        print('Native node prerequisites unavailable: ' + error.diagnostic, file=sys.stderr)
+        sys.exit(1)
     except Exception as error:
         print('Native node failed: ' + type(error).__name__, file=sys.stderr)
         sys.exit(1)
