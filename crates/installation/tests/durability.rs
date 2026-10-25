@@ -1,3 +1,5 @@
+use common::ProjectFixture;
+
 mod common;
 
 use cairn_installation::plugins::run_credentials::RunCredentials;
@@ -185,7 +187,7 @@ async fn restricted_agents_cannot_escalate_projects_skills_or_the_main_policy() 
     tokio::fs::create_dir(&config.home).await.unwrap();
     let s = Service::new(config).await.unwrap();
     let project = s
-        .project(json!({ "name": "Allowed", "path": root.path() }), None)
+        .project_fixture(json!({ "name": "Allowed", "path": root.path() }), None)
         .await
         .unwrap();
     let restricted = json!({
@@ -235,7 +237,7 @@ async fn restricted_agents_cannot_escalate_projects_skills_or_the_main_policy() 
     let link = root.path().join("escape");
     std::os::unix::fs::symlink(outside.path(), &link).unwrap();
     assert!(
-        s.project(json!({ "name": "Escape", "path": link }), None)
+        s.project_fixture(json!({ "name": "Escape", "path": link }), None)
             .await
             .is_err()
     );

@@ -108,3 +108,162 @@ impl ResumeRun {
         })
     }
 }
+
+/// Project operations extend the B1 registry. Legacy domains keep their catalogue.
+pub(crate) struct ProjectOperation {
+    pub name: &'static str,
+    scope: &'static str,
+    description: &'static str,
+}
+
+pub(crate) const PROJECT_OPERATIONS: &[ProjectOperation] = &[
+    ProjectOperation {
+        name: "list_projects",
+        scope: "read",
+        description: "List registered projects.",
+    },
+    ProjectOperation {
+        name: "get_project",
+        scope: "read",
+        description: "Read a registered project.",
+    },
+    ProjectOperation {
+        name: "save_project",
+        scope: "manage",
+        description: "Create a project; creationId makes retries return the same project.",
+    },
+    ProjectOperation {
+        name: "replace_project",
+        scope: "manage",
+        description: "Replace all project settings using the current revision.",
+    },
+    ProjectOperation {
+        name: "delete_project",
+        scope: "manage",
+        description: "Delete an unused project; assigned projects, tasks and active work prevent deletion.",
+    },
+];
+
+pub(crate) fn project_operation(name: &str) -> Option<&'static ProjectOperation> {
+    PROJECT_OPERATIONS.iter().find(|op| op.name == name)
+}
+
+fn decode<T: serde::de::DeserializeOwned>(input: Value) -> Result<T> {
+    serde_json::from_value(input).map_err(|error| Error::bad(error.to_string()))
+}
+
+impl ProjectOperation {
+    pub(crate) fn descriptor(&self) -> Value {
+        use cairn_contracts::*;
+        let (input, output) = match self.name {
+            "list_projects" => (
+                schema_for::<ListProjectsInput>(Contract::Deserialize),
+                schema_for::<ListProjectsOutput>(Contract::Serialize),
+            ),
+            "save_project" => (
+                schema_for::<CreateProjectInput>(Contract::Deserialize),
+                schema_for::<Project>(Contract::Serialize),
+            ),
+            "replace_project" => (
+                schema_for::<ReplaceProjectInput>(Contract::Deserialize),
+                schema_for::<Project>(Contract::Serialize),
+            ),
+            "delete_project" => (
+                schema_for::<ProjectInput>(Contract::Deserialize),
+                schema_for::<DeleteProjectOutput>(Contract::Serialize),
+            ),
+            _ => (
+                schema_for::<ProjectInput>(Contract::Deserialize),
+                schema_for::<Project>(Contract::Serialize),
+            ),
+        };
+        serde_json::json!({
+            "name": self.name,
+            "description": self.description,
+            "inputSchema": input,
+            "outputSchema": output,
+            "_meta": { "securitySchemes": [{ "type": "oauth2", "scopes": [self.scope] }] },
+            "annotations": {
+                "readOnlyHint": self.scope == "read",
+                "destructiveHint": self.scope != "read",
+                "openWorldHint": self.scope != "read",
+            },
+        })
+    }
+
+    pub(crate) async fn invoke(
+        &self,
+        s: &Service,
+        input: Value,
+        context: ResumeContext,
+    ) -> Result<Value> {
+        use cairn_contracts::*;
+        let bearer = match context {
+            ResumeContext::Human(_) => None, // HTTP enforces owner writes before dispatch.
+            ResumeContext::Public(scopes) => {
+                if !scopes.iter().any(|scope| scope == self.scope) {
+                    return Err(Error::forbidden(format!(
+                        "The {} scope is required.",
+                        self.scope
+                    )));
+                }
+                None
+            }
+            ResumeContext::Installation(bearer) => {
+                crate::installation_mcp::authorize(s, &bearer).await?;
+                Some(bearer)
+            }
+        };
+        let authorize = crate::installation_mcp::management_authorization(bearer.as_deref());
+        match self.name {
+            "save_project" => Ok(serde_json::to_value(
+                s.create_project(decode(input)?, None, authorize).await?,
+            )?),
+            "replace_project" => Ok(serde_json::to_value(
+                s.replace_project(decode(input)?, authorize).await?,
+            )?),
+            "delete_project" => {
+                let input: ProjectInput = decode(input)?;
+                s.delete_project(input.project_id, authorize).await?;
+                Ok(serde_json::to_value(DeleteProjectOutput { deleted: true })?)
+            }
+            "list_projects" => {
+                let _: ListProjectsInput = decode(input)?;
+                s.store
+                    .read(move |db| {
+                        let tx = rusqlite::Transaction::new_unchecked(
+                            db.0,
+                            rusqlite::TransactionBehavior::Deferred,
+                        )?;
+                        let db = Db(&tx);
+                        authorize(&db)?;
+                        let output = ListProjectsOutput {
+                            projects: db.projects()?,
+                        };
+                        tx.commit()?;
+                        Ok(serde_json::to_value(output)?)
+                    })
+                    .await
+            }
+            _ => {
+                let input: ProjectInput = decode(input)?;
+                s.store
+                    .read(move |db| {
+                        let tx = rusqlite::Transaction::new_unchecked(
+                            db.0,
+                            rusqlite::TransactionBehavior::Deferred,
+                        )?;
+                        let db = Db(&tx);
+                        authorize(&db)?;
+                        let project = crate::error::required(
+                            db.project(&input.project_id.to_string())?,
+                            "Project not found",
+                        )?;
+                        tx.commit()?;
+                        Ok(serde_json::to_value(project)?)
+                    })
+                    .await
+            }
+        }
+    }
+}

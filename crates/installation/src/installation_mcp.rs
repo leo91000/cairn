@@ -163,6 +163,15 @@ pub(crate) async fn operation(
             cairn_contracts::beacon::account_methods_proof_required(input),
         )?);
     }
+    if let Some(op) = crate::capabilities::project_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+            )
+            .await;
+    }
     if name == cairn_contracts::RESUME_RUN_ID {
         let input = crate::capabilities::RESUME_RUN.decode(args)?;
         let context = crate::capabilities::ResumeContext::Installation(bearer.to_owned());
@@ -212,7 +221,6 @@ async fn invoke_inner(s: &Arc<Service>, bearer: &str, name: &str, args: Value) -
 
             let result = match operation.as_str() {
                 "list_agents" => Some(db.list("agents")?.into()),
-                "list_projects" => Some(db.list("projects")?.into()),
                 "list_tasks" => Some(db.list("tasks")?.into()),
                 "list_runs" => Some(
                     db.runs(

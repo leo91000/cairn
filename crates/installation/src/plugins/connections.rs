@@ -924,7 +924,7 @@ fn delegation_rules(db: &Db<'_>, connection: &Connection, access: &Value) -> Res
     let Some(project) = &connection.project_id else {
         return Ok(());
     };
-    if db.get("projects", project)?.is_none() {
+    if db.project(project)?.is_none() {
         return Err(Error::bad("Project not found."));
     }
     let reachable = access["projects"]

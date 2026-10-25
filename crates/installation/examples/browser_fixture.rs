@@ -33,7 +33,34 @@ async fn main() -> Result<()> {
             let existing = args.get(1).and_then(Value::as_str);
             match operation {
                 "agent" => service.agent(arg(0), existing).await?,
-                "project" => service.project(arg(0), existing).await?,
+                "project" => {
+                    let settings = serde_json::from_value(arg(0))?;
+                    let project = if let Some(id) = existing {
+                        let current = service.get_project(id).await?;
+                        service
+                            .replace_project(
+                                cairn_contracts::ReplaceProjectInput {
+                                    project_id: current.id,
+                                    revision: current.revision,
+                                    settings,
+                                },
+                                |_| Ok(()),
+                            )
+                            .await?
+                    } else {
+                        service
+                            .create_project(
+                                cairn_contracts::CreateProjectInput {
+                                    creation_id: None,
+                                    settings,
+                                },
+                                None,
+                                |_| Ok(()),
+                            )
+                            .await?
+                    };
+                    serde_json::to_value(project)?
+                }
                 "task" => service.task(arg(0), existing).await?,
                 "enqueue" => service.enqueue(string(0), "manual", None).await?,
                 "skill" => service.skills.save(string(0), string(1), None).await?,
@@ -64,6 +91,7 @@ async fn main() -> Result<()> {
             let result = match operation {
                 "get" => db.get(string(0), string(1))?.unwrap_or(Value::Null),
                 "list" => db.list(string(0))?.into(),
+                "projects" => serde_json::to_value(db.projects()?)?,
                 "put" => db.put(string(0), &arg(1))?,
                 "run" => db.run(string(0))?.unwrap_or(Value::Null),
                 "runs" => db.runs(None, None, 10000, 0, true)?.into(),

@@ -111,7 +111,14 @@ class AttachmentViewsTest {
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path.endsWith("/overview") -> "{}"
                                 path.endsWith("/models") -> """{"models":[]}"""
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")
@@ -299,7 +306,14 @@ class AttachmentViewsTest {
                                         path == "/api/installations" -> beaconInstallationsFixture()
                                         path.endsWith("/overview") -> "{}"
                                         path.endsWith("/models") -> """{"models":[]}"""
-                                        else -> "[]"
+                                        else ->
+                                            if (
+                                                request.requestUrl
+                                                    ?.encodedPath
+                                                    ?.endsWith("/api/projects") == true
+                                            )
+                                                """{"projects":[]}"""
+                                            else "[]"
                                     }
                                 return MockResponse()
                                     .setHeader("Content-Type", "application/json")
