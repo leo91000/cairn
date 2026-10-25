@@ -41,7 +41,7 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharin
     && printf '' > crates/installation/src/lib.rs \
     && printf 'fn main() {}\n' > crates/beacon/src/main.rs \
     && printf '' > crates/protocol/src/lib.rs \
-    && printf '' > crates/beacon/src/lib.rs && cargo build --locked --release --bin cairn --features ublk
+    && printf '' > crates/beacon/src/lib.rs && cargo build --locked --release --bin cairn
 COPY crates/plugin-api ./crates/plugin-api
 COPY crates/plugin-host ./crates/plugin-host
 COPY crates/plugin-runtime ./crates/plugin-runtime
@@ -53,7 +53,7 @@ COPY deploy/installations/data-compatibility.json ./deploy/installations/data-co
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     touch crates/installation/src/main.rs crates/installation/src/lib.rs crates/protocol/src/lib.rs \
     crates/plugin-api/src/lib.rs crates/plugin-host/src/lib.rs crates/plugin-runtime/src/lib.rs && \
-    cargo build --locked --release --bin cairn --features ublk && cp target/release/cairn /usr/local/bin/cairn
+    cargo build --locked --release --bin cairn && cp target/release/cairn /usr/local/bin/cairn
 
 # Beacon builds independently: no worker CLI, VM or kernel layers.
 FROM rust:1.97.1-bookworm AS beacon-backend
@@ -148,7 +148,7 @@ ARG PLAYWRIGHT_VERSION=1.63.0
 # Keep this layer independent of application code and package versions.
 RUN npm exec --yes --package="playwright@${PLAYWRIGHT_VERSION}" -- playwright install-deps chromium firefox webkit \
     && rm -rf /var/lib/apt/lists/* /root/.npm
-ENV NODE_ENV=production HOST=0.0.0.0 PORT=4310 DATA_DIR=/data AGENT_HOME=/home/node WORKSPACE_ROOTS=/workspaces
+ENV HOST=0.0.0.0 PORT=4310 DATA_DIR=/data AGENT_HOME=/home/node WORKSPACE_ROOTS=/workspaces
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl wget git git-lfs openssh-client python3 awscli build-essential bubblewrap socat \
     zip unzip xz-utils zstd bzip2 rsync file less tree sqlite3 postgresql-client util-linux \
     dnsutils iproute2 iputils-ping netcat-openbsd procps lsof strace patch diffutils \
@@ -207,7 +207,7 @@ COPY deploy/microvm/kernel.config /tmp/cairn.config
 # Guests use virtio and a serial console; omit unused physical-device families.
 RUN make x86_64_defconfig && scripts/kconfig/merge_config.sh -m .config /tmp/cairn.config \
     && scripts/config --disable USB --disable DRM --disable FB --disable SOUND --disable MEDIA_SUPPORT \
-        --disable WLAN --disable WIRELESS --disable BT --disable HID --disable INPUT \
+        --disable WLAN --disable WIRELESS --disable BT --disable HID --disable INPUT --disable FUSE_FS \
         --disable SCSI --disable ATA --disable BLK_DEV_MD --disable MMC --disable FIREWIRE \
         --disable MODULES --disable DEBUG_INFO --disable DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT \
     && make olddefconfig \
@@ -238,7 +238,7 @@ RUN mksquashfs /control /control.squashfs -comp xz -processors 2 -noappend -all-
 
 FROM runtime AS final
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends iptables e2fsprogs fakeroot util-linux fuse3 \
+RUN apt-get update && apt-get install -y --no-install-recommends iptables e2fsprogs fakeroot util-linux \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://github.com/firecracker-microvm/firecracker/releases/download/v1.17.0/firecracker-v1.17.0-x86_64.tgz -o /tmp/firecracker.tgz \
     && echo '06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558  /tmp/firecracker.tgz' | sha256sum -c - \

@@ -15,8 +15,8 @@ and verifies the embedded SHA-256 of `host.py` before installing it. No local pa
 is needed. The installation connects out using the existing claim and relay.
 
 Use a host with systemd. Install Docker Engine with its Compose plugin, Python 3 and curl first. Enable
-hardware virtualization, `/dev/kvm`, `/dev/net/tun` and `/dev/fuse` (install
-`fuse3` and load the kernel modules). The script checks each requirement before
+hardware virtualization, `/dev/kvm`, `/dev/net/tun` and a working `ublk_drv` kernel module
+(`/dev/ublk-control`, with io_uring enabled). The script checks each requirement before
 downloading or starting services, including a working Docker daemon and 16 GiB
 of free disk for runtime images and recovery staging. Conversation disks need
 additional space. It does not install Docker or change virtualization settings.

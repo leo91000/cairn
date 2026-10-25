@@ -44,7 +44,8 @@ concurrency. Monitor disk space and memory under real work. Rerunning the
 installer regenerates its Compose defaults; reapply reviewed budgets afterwards.
 
 The installation host needs Linux x86-64, systemd, Docker Engine/Compose,
-Python 3, curl, working `/dev/kvm`, `/dev/net/tun`, `/dev/fuse`, and at least
+Python 3, curl, working `/dev/kvm`, `/dev/net/tun`, `ublk_drv` with
+`/dev/ublk-control` and io_uring enabled, and at least
 16 GiB free **in addition to** Postgres and conversation disks. See
 [installation prerequisites](INSTALLATION.md). KVM is for the installation,
 not the beacon process. Do not give the beacon container privileged mode,

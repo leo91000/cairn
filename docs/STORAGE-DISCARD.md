@@ -53,7 +53,7 @@ No userspace worker or additional seccomp syscall is needed.
 
 Discard starts after prior completion receipts are consumed and fences subsequent
 read/write/flush requests until its own receipt is consumed, including on error.
-The VMM control thread never waits for the backing discard: paired-view remote
+The VMM control thread never waits for the backing discard: remote
 reads, queued publication and dirty-page writeback can block the kernel operation
 without preventing a storage-pressure pause. Both the native frontend and ublk
 advertise a maximum 8 MiB request to bound each maintenance ordering boundary.
@@ -90,9 +90,8 @@ runs from its original root image; maintenance runs from the immutable control
 disk. The control disk is local to the node and is not part of the conversation's
 S3 manifest. The guest kernel already enables SquashFS/XZ; the build asserts it.
 
-This covers both old flat disks and paired system/workspace disks without moving
-their device names. The system stays `/dev/vdb`, the paired workspace `/dev/vdc`;
-the control disk follows them. The root image remains read-only. An interrupted
+The conversation filesystem stays on `/dev/vdb`;
+the read-only control disk uses `/dev/vdc`. The root image remains read-only. An interrupted
 node asset copy retries its private staging file and installs only synced bytes.
 
 The root helper starts after the mounts and acknowledges readiness before the
@@ -116,17 +115,9 @@ resumed from their durable disk. Dormant remote conversations are not automatica
 started or bucket-scanned by this feature. Their bytes are reclaimed after they
 are resumed and a trimmed publication replaces the previous one.
 
-Anonymous template identity advances to version 2 and includes the control image
-in the entrypoint identity. An older template cannot restore the previous device
-topology. Fresh templates retain the helper and the same immutable control disk
-when cloned; live conversation VMs are never copied as templates.
-
 This storage change preserves the existing installation compatibility epoch.
 Disk frames, database schemas,
-manifest/envelope formats and runtime records are unchanged. Template identity
-uses the existing fields; its version prevents reuse across the topology change.
-A release compatible with the installation's data epoch can ignore the new cached
-templates and boot the retained disk. Rollback must follow the installation's
+manifest/envelope formats and runtime records are unchanged. Rollback must follow the installation's
 [compatibility policy](PRODUCTION-CAIRN.md#installation-data-compatibility).
 The updated init tolerates a missing control disk on rollback, so ordinary disk
 reads and the older bridge remain usable. Rolling back disables new maintenance;
@@ -151,7 +142,7 @@ python3 tests/storage-discard-bootstrap.py \
   --output /path/to/bootstrap-reference.json
 ```
 
-This boots a deliberately old bridge in flat and paired guests, compares with
+This boots a deliberately old bridge with a flat disk, compares with
 maintenance disabled, deletes controlled files, verifies live files after FITRIM
 and checks that the retained root image never changed. It uses file-backed Async
 drives, so it does not substitute for ublk or production-network qualification.

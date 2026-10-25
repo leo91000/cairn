@@ -15,7 +15,6 @@ impl LazyDisk {
             || size > 1 << 40
             || !size.is_multiple_of(BLOCK)
             || !current.is_multiple_of(BLOCK)
-            || self.layout()? != super::super::layout::Layout::Flat
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -144,26 +143,6 @@ mod tests {
             .unwrap()
             .grow(2 * BLOCK)
             .unwrap();
-    }
-
-    #[test]
-    fn growth_rejects_paired_disks_without_rewriting_their_geometry() {
-        let root = tempfile::tempdir().unwrap();
-        let mut manifest = manifest();
-        let size = 256 * 1024 * 1024;
-        manifest["size"] = size.into();
-        manifest["blocks"] = (0..size)
-            .step_by(BLOCK as usize)
-            .map(|offset| serde_json::json!({ "offset": offset, "size": BLOCK, "hash": null }))
-            .collect();
-        super::super::super::layout::Layout::paired(size)
-            .unwrap()
-            .store(&mut manifest)
-            .unwrap();
-        let disk = LazyDisk::create(root.path(), &manifest, Arc::new(Empty)).unwrap();
-        assert!(disk.grow(2 * size).is_err());
-        assert_eq!(disk.size(), size);
-        assert_eq!(LazyDisk::geometry(root.path()).unwrap().0, size);
     }
 
     #[test]

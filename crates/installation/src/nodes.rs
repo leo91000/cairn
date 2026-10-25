@@ -254,8 +254,6 @@ struct Capabilities {
     backend: String,
     kvm: bool,
     #[serde(default)]
-    fuse: bool,
-    #[serde(default)]
     ublk: bool,
     #[serde(default)]
     native_mode_protocol: u32,
@@ -1388,7 +1386,6 @@ fn execution_ready(node: &Value, body: &Value, expected: &Expectations) -> bool 
         && body["pool"]["quarantined"] != true
         && body["sharedResources"] == true
         && body["budget"] == json!({ "slots": slots(node), "limits": node["limits"] })
-        && node["capabilities"]["fuse"] == true
         && body["dataRoot"] == expected.data_root
         && current_image
 }
@@ -1502,7 +1499,6 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
             record["runtimeId"] = health["runtimeId"].clone();
             record["storage"] = serde_json::to_value(Policy::for_node(&record["storage"])?)?;
             record["executionReady"] = (health["status"] == "ok"
-                && detected.fuse
                 && health["sharedResources"] == true
                 && health["budget"]
                     == json!({ "slots": slots(&record), "limits": record["limits"] }))

@@ -1,3 +1,5 @@
+> Statut : Les snapshots mémoire anonymes sont abandonnés ; la suspension, la pagination de VM vivantes et les réservations exclusives restent applicables.
+
 # 0040 — Durable exclusive node reservations
 
 Date: 2026-10-13

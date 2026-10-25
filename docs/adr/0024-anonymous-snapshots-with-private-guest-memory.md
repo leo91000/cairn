@@ -1,3 +1,5 @@
+> Statut : Abandonnée : les snapshots mémoire Firecracker et le layout à deux systèmes de fichiers n’ont jamais été activés en production et sont supprimés. Les VM démarrent normalement, avec le pool de VM prêtes conservé.
+
 # Templates anonymes avec mémoire privée partagée
 
 Date : 2026-10-02. Statut : prototype intégré et mesuré localement ; activation

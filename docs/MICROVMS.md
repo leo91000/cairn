@@ -89,7 +89,8 @@ Each VM boots a pinned kernel and a read-only root image. A sparse 32 GiB ext4
 private disk supplies the writable overlay, repositories, home, sessions, installed
 tools and Docker cache. Docker and containerd data are mounted directly from that disk. The daemon
 starts only when the `docker` command first needs it. VM recreation retains the disk;
-RAM snapshots are not part of correctness or recovery.
+VMs boot normally or come from the ready VM pool. RAM snapshots are not supported;
+disk checkpoints and publication provide recovery.
 Docker Engine, Buildx and Compose come from Docker's signed Debian repository.
 The CLI-update guest build refreshes those packages as well.
 
@@ -329,21 +330,21 @@ cannot compensate for unavailable host capabilities.
 
 The image CI requires a nested `KVM_RUN` probe and an actual Android boot/tap and
 restart scenario. The supported lifecycle remains fresh guest boot from disk;
-we do not serialize Firecracker snapshots containing running nested VMs.
+VM suspension keeps the live process and nested KVM state; it does not serialize
+Firecracker memory snapshots.
 
 ## Required block transport
 
 VM data disks use managed ublk devices through Firecracker native virtio-blk Async.
-Flat and paired ext4 layouts keep their existing journals, manifests, publication
+A single flat ext4 filesystem keeps the existing journal, manifest, publication
 receipts and recovery rules. Transport changes do not convert persisted disks.
 Native host execution continues to mount ext4 on the same managed ublk backend.
 
 Every VM host needs `ublk_drv`, `/dev/ublk-control`, enabled io_uring and the
 runner's `SYS_RESOURCE` capability for I/O flusher progress. The host supervisors
 check these requirements and detect the character and block device classes before
-stopping an existing workload. They upgrade the former `blockTransport` selection
-to ublk. A manually configured runner must remove a stale
-`CAIRN_BLOCK_TRANSPORT=vhost-user` setting; unset and `ublk` both select ublk.
+stopping an existing workload. Block transport and filesystem layout have no selector: VM disks always use
+ublk and a single flat ext4 filesystem.
 There is no fallback backend.
 
 For direct Compose deployments, load `ublk_drv` and set `CAIRN_UBLK_CHAR_MAJOR`

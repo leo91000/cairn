@@ -90,7 +90,6 @@ impl Fixture {
         let mut child = command
             .env("CAIRN_CONFIG", file)
             .env_remove("CAIRN_TOOLKIT_DIR")
-            .env("NODE_ENV", "test")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
             .kill_on_drop(true)
@@ -1701,7 +1700,6 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
                 "os": "linux",
                 "arch": "x86_64",
                 "kvm": true,
-                "fuse": true,
                 "cpu": 8,
                 "memoryMiB": 16384,
                 "diskMiB": 131_072,
@@ -2855,7 +2853,7 @@ async fn queued_work_waits_for_node_capacity_without_failing() {
             "accepting": true,
             "executionReady": true,
             "lastSeen": now() + 60_000,
-            "capabilities": {"kvm": true, "fuse": true},
+            "capabilities": {"kvm": true },
             "limits": {"cpu": 1, "memoryMiB": 8192, "diskMiB": 65536},
             "pressure": "memory"
         })

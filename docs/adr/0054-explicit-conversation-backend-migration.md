@@ -1,3 +1,5 @@
+> Statut : Le support du layout paired est abandonné ; les migrations explicites entre le disque ext4 plat des VM et le mode natif restent applicables.
+
 # Existing conversations can explicitly migrate between Linux backends
 
 Date: 2026-10-21.

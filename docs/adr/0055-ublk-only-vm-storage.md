@@ -1,3 +1,5 @@
+> Statut : Le transport ublk reste l’unique transport. Les anciens sélecteurs Cargo/environnement, l’adaptateur FUSE, les snapshots mémoire et le layout paired sont supprimés ; le pool prêt et la publication des disques restent applicables.
+
 # ublk as the sole VM block transport
 
 Date: 2026-10-21

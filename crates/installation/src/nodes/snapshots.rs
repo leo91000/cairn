@@ -143,8 +143,7 @@ pub(crate) async fn index_with_stop(
 }
 
 pub fn validate(manifest: &Value) -> Result<()> {
-    let layout = crate::storage::layout::Layout::from_manifest(manifest)
-        .map_err(|error| Error::bad(error.to_string()))?;
+    crate::storage::layout::validate(manifest).map_err(|error| Error::bad(error.to_string()))?;
     let blocks = manifest["blocks"]
         .as_array()
         .ok_or_else(|| Error::bad("Missing backup blocks."))?;
@@ -152,7 +151,7 @@ pub fn validate(manifest: &Value) -> Result<()> {
         .as_u64()
         .filter(|s| *s > 0 && *s <= 1024 * 1024 * 1024 * 1024)
         .ok_or_else(|| Error::bad("Invalid backup size."))?;
-    if manifest["version"] != layout.manifest_version()
+    if manifest["version"] != 1
         || manifest["blockSize"] != BLOCK
         || blocks.len() as u64 != size.div_ceil(BLOCK)
     {
@@ -871,9 +870,7 @@ mod tests {
     async fn stopped_publication_reader_benchmark() {
         use crate::storage::Disk;
         use futures_util::StreamExt;
-        let count: usize = std::env::var("CAIRN_PUBLICATION_BENCH_BLOCKS")
-            .ok()
-            .map_or(128, |value| value.parse().unwrap());
+        let count = 128;
         assert!((READ_BATCH + 1..=2048).contains(&count));
         let root = tempfile::Builder::new()
             .prefix("cairn-publication-bench-")

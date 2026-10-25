@@ -181,3 +181,8 @@ on-demand S3 block journal and synchronization status as VM conversations. The
 installation reclaims acknowledged clean native cache after one idle hour and
 reloads missing blocks on demand. Web and Android consume the same backend status;
 neither client adds a retention control. Chat and published artifact links remain.
+
+VM nodes no longer expose a FUSE capability or diagnostic. Web removes its stale
+FUSE message; Android already has no FUSE field or message. Both use the existing
+execution-readiness, KVM and storage diagnostics, and the same node capability
+payload is returned by public MCP and `cairn_installation`.

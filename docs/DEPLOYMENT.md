@@ -438,3 +438,7 @@ new scheduled admissions wait and already admitted work continues. On first
 reconciliation, old tasks without authors belong to the current owner. Removed
 members' tasks and admitted runs remain available; re-invitation does not resume
 old schedules. Public links remain owner-managed until explicitly revoked.
+
+VM runners use ublk and a single flat ext4 conversation disk. No block-transport,
+disk-layout or RAM-snapshot selector is required. The ready VM pool remains
+configurable with `CAIRN_READY_VM_POOL` and `CAIRN_READY_VM_POOL_SIZE` on the runner.

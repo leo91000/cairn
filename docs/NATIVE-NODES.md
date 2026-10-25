@@ -251,3 +251,8 @@ pending or unconfirmed failure blocks new placements. Returning to protected doe
 not clean/restore the machine, undo changes or establish a new trust boundary.
 Root can read local credentials and defeat its own supervisor and cooperative
 limits. See [privilege admission, APIs, recovery and limitations](NATIVE-ADMINISTRATOR.md).
+
+VM nodes use the same mandatory ublk backend and a single flat ext4 filesystem.
+Neither backend advertises or requires a host FUSE capability. VM suspension and
+live memory reclamation preserve the running VMM; memory snapshots and the paired
+filesystem layout are no longer supported.
