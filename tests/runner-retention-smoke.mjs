@@ -197,7 +197,7 @@ async function main() {
         signal: AbortSignal.timeout(120000),
       })
       if ([404, 412].includes(response.status))
-        return (await api(`/disks/${runId}/snapshot`, 'POST', {})).json()
+        return (await api(`/disks/${runId}/snapshot`, 'POST', { consistency: 'filesystem' })).json()
       assert.ok(response.ok, `Completed generation capture: ${response.status}`)
       return response.json()
     }
@@ -219,7 +219,7 @@ async function main() {
       // A completed-turn prefix can precede queued block writes. Publish the
       // current paused disk at each eviction boundary; other guest starts can
       // give those queued writes time to land after an earlier acknowledgement.
-      const current = await (await api(`/disks/${runId}/snapshot`, 'POST', {})).json()
+      const current = await (await api(`/disks/${runId}/snapshot`, 'POST', { consistency: 'filesystem' })).json()
       await flushPublication(current)
       const status = await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json()
       assert.equal(status.dirtyBytes, 0, 'Eviction requires the current journal to be acknowledged')
@@ -347,7 +347,7 @@ async function main() {
         }
 
         for (let index = 0; index < 2; index++) {
-          const snapshot = await (await api(`/disks/${runId}/snapshot`, 'POST', {})).json()
+          const snapshot = await (await api(`/disks/${runId}/snapshot`, 'POST', { consistency: 'filesystem' })).json()
           assert.ok(snapshot.manifest.generation > 0)
           assert.equal(snapshot.manifest.consistency, 'crash', 'CPU pause does not promise filesystem freeze')
           assert.equal(state(vmId), 'Paused', 'Publication never wakes retained CPUs')

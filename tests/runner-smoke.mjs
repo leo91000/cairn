@@ -336,7 +336,7 @@ console.log('probe.done');
 
               if (data.includes('probe.pause') && mode === 'cancel') {
                 const captureStarted = Date.now()
-                const point = await (await api(`/runs/${id}/snapshot`, 'POST')).json()
+                const point = await (await api(`/runs/${id}/snapshot`, 'POST', { consistency: 'filesystem' })).json()
                 const firstCaptureMs = Date.now() - captureStarted
                 assert.ok(point.manifest.size > 0)
                 assert.equal(point.manifest.onDemand, true)
@@ -351,7 +351,7 @@ console.log('probe.done');
                 assert.deepEqual(original, bytes, 'The sealed capture stays immutable while the guest writes')
                 // Starting the next capture retires the previous capture handle.
                 const nextStarted = Date.now()
-                const next = await (await api(`/runs/${id}/snapshot`, 'POST')).json()
+                const next = await (await api(`/runs/${id}/snapshot`, 'POST', { consistency: 'filesystem' })).json()
                 const nextCaptureMs = Date.now() - nextStarted
                 assert.equal(next.manifest.onDemand, true)
                 assert.ok(next.manifest.generation > point.manifest.generation, 'New writes advance the journal generation')
