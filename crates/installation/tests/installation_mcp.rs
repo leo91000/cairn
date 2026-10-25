@@ -3494,6 +3494,18 @@ async fn typed_agent_profiles_preview_and_avatars_match_on_both_tools() {
                 }
             }
         };
+        let malformed: Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/agent-contracts.json"))
+                .unwrap();
+        for command in malformed["invalidCreates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .skip(7)
+        {
+            let rejected = invoke("save_agent", command.clone()).await;
+            assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+        }
         let command = create_profile(json!({ "name": "Typed profile" }));
         let created = invoke("save_agent", command).await;
         let created: cairn_contracts::Agent =

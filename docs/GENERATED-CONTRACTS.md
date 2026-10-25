@@ -193,7 +193,11 @@ Kotlin templates. Commands use the generated canonical JSON encoder with default
 and explicit nulls, preserving null (all resources) versus an empty selection.
 The permission object, tool map, plugin/exclusivity lists and review object are
 required so omitted settings cannot silently clear grants on replacement.
-Unknown providers are rejected, including in saved snapshots.
+Unknown providers are rejected, including in saved snapshots. Schemars metadata
+also carries resource/review UUID formats and selection counts, skill lengths,
+and MCP map-key, tool-count and tool-name bounds. The shared malformed selection
+corpus and schema boundary cases check these against Rust validation and both MCP
+capabilities.
 
 `tests/fixtures/agent-contracts.json` qualifies the same values in Rust, JSON
 Schema/TypeScript and Kotlin. Agent editor journeys exercise both apps; the two

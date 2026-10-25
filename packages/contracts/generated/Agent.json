@@ -21,17 +21,26 @@
         "mcpTools": {
           "additionalProperties": {
             "items": {
+              "maxLength": 200,
+              "minLength": 1,
               "type": "string"
             },
+            "maxItems": 500,
             "type": "array"
+          },
+          "propertyNames": {
+            "format": "uuid",
+            "type": "string"
           },
           "type": "object"
         },
         "mcps": {
           "default": null,
           "items": {
+            "format": "uuid",
             "type": "string"
           },
+          "maxItems": 100,
           "type": [
             "array",
             "null"
@@ -42,8 +51,10 @@
             "00000000-0000-4000-8000-000000000002"
           ],
           "items": {
+            "format": "uuid",
             "type": "string"
           },
+          "maxItems": 100,
           "type": [
             "array",
             "null"
@@ -52,8 +63,10 @@
         "projects": {
           "default": null,
           "items": {
+            "format": "uuid",
             "type": "string"
           },
+          "maxItems": 100,
           "type": [
             "array",
             "null"
@@ -67,8 +80,10 @@
         "skills": {
           "default": null,
           "items": {
+            "maxLength": 160,
             "type": "string"
           },
+          "maxItems": 100,
           "type": [
             "array",
             "null"
@@ -146,8 +161,10 @@
     },
     "exclusiveNodes": {
       "items": {
+        "format": "uuid",
         "type": "string"
       },
+      "maxItems": 100,
       "type": "array"
     },
     "id": {
@@ -171,8 +188,10 @@
     },
     "plugins": {
       "items": {
+        "format": "uuid",
         "type": "string"
       },
+      "maxItems": 100,
       "type": "array"
     },
     "provider": {

@@ -1,3 +1,4 @@
+import type { CreateAgentInput } from '../../packages/contracts/generated/typescript/CreateAgentInput'
 import Ajv from 'ajv'
 import addFormats from 'ajv-formats'
 import { expect, it } from 'vitest'
@@ -45,4 +46,51 @@ it('qualifies the shared agent wire corpus using generated schemas', () => {
       continue // UUID version 4 is an additional server invariant.
     expect(create(structuredClone(input)), JSON.stringify(input)).toBe(false)
   }
+})
+
+it('publishes resource, skill and MCP tool bounds from the Rust contract', () => {
+  const ajv = new Ajv({ strict: false })
+  addFormats(ajv)
+  const create = ajv.compile(createSchema)
+  const id = '00000000-0000-4000-8000-000000000003'
+
+  for (const field of ['nodes', 'projects', 'mcps', 'skills'] as const) {
+    const input = structuredClone(wire.creates[0]) as CreateAgentInput
+    input.settings.access[field] = Array.from({ length: 100 }).fill(field === 'skills' ? 'global/review' : id)
+    expect(create(input), JSON.stringify(create.errors)).toBe(true)
+    input.settings.access[field]!.push(field === 'skills' ? 'global/extra' : id)
+    expect(create(input)).toBe(false)
+  }
+
+  for (const field of ['plugins', 'exclusiveNodes'] as const) {
+    const input = structuredClone(wire.creates[0]) as CreateAgentInput
+    input.settings[field] = Array.from({ length: 100 }).fill(id)
+    expect(create(input), JSON.stringify(create.errors)).toBe(true)
+    input.settings[field].push(id)
+    expect(create(input)).toBe(false)
+    input.settings[field] = ['not-a-uuid']
+    expect(create(input)).toBe(false)
+  }
+
+  for (const field of ['nativeNodeReviews', 'reapproveDelegations'] as const) {
+    const input = structuredClone(wire.creates[0]) as CreateAgentInput
+    input.review[field] = Array.from({ length: 100 }).fill(id)
+    expect(create(input), JSON.stringify(create.errors)).toBe(true)
+    input.review[field]!.push(id)
+    expect(create(input)).toBe(false)
+    input.review[field] = ['not-a-uuid']
+    expect(create(input)).toBe(false)
+  }
+
+  const input = structuredClone(wire.creates[0]) as CreateAgentInput
+  input.settings.access.skills = ['é'.repeat(160)]
+  input.settings.access.mcpTools = { [id]: Array.from({ length: 500 }).fill('r'.repeat(200)) }
+  expect(create(input), JSON.stringify(create.errors)).toBe(true)
+  for (const invalid of [Array.from({ length: 501 }).fill('read'), [''], ['r'.repeat(201)]]) {
+    input.settings.access.mcpTools = { [id]: invalid }
+    expect(create(input)).toBe(false)
+  }
+
+  input.settings.access.mcpTools = { 'not-a-uuid': ['read'] }
+  expect(create(input)).toBe(false)
 })

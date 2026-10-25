@@ -31,13 +31,32 @@ pub struct AccessPolicy {
     #[ts(type = "\"firecracker\" | \"native\"")]
     pub backend: String,
     #[serde(default = "local_nodes")]
+    #[schemars(with = "Option<Vec<Uuid>>", length(max = 100))]
     pub nodes: Option<Vec<String>>,
     #[serde(default)]
+    #[schemars(with = "Option<Vec<Uuid>>", length(max = 100))]
     pub projects: Option<Vec<String>>,
     #[serde(default)]
+    #[schemars(length(max = 100), inner(length(max = 160)))]
     pub skills: Option<Vec<String>>,
     #[serde(default)]
+    #[schemars(with = "Option<Vec<Uuid>>", length(max = 100))]
     pub mcps: Option<Vec<String>>,
+    #[schemars(extend(
+        "propertyNames" = schemars::json_schema!({
+            "type": "string",
+            "format": "uuid",
+        }),
+        "additionalProperties" = schemars::json_schema!({
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+            },
+        })
+    ))]
     pub mcp_tools: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub installation: bool,
@@ -101,7 +120,9 @@ pub struct AgentSettings {
     #[schemars(range(min = 0, max = 720))]
     pub timeout_minutes: u16,
     pub access: AccessPolicy,
+    #[schemars(with = "Vec<Uuid>", length(max = 100))]
     pub exclusive_nodes: Vec<String>,
+    #[schemars(with = "Vec<Uuid>", length(max = 100))]
     pub plugins: Vec<String>,
 }
 
@@ -214,8 +235,10 @@ pub struct Agent {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentReview {
     #[serde(default)]
+    #[schemars(with = "Vec<Uuid>", length(max = 100))]
     pub native_node_reviews: Vec<String>,
     #[serde(default)]
+    #[schemars(with = "Vec<Uuid>", length(max = 100))]
     pub reapprove_delegations: Vec<String>,
 }
 
