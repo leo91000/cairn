@@ -695,6 +695,10 @@ impl Turn<'_> {
             return Ok(());
         }
         if self.limit.as_ref() == Some(&limit) {
+            // Claude Code repeats an unchanged limit when it refuses another request.
+            if limit.blocks() {
+                self.answered = false;
+            }
             return Ok(());
         }
         self.emit(limit.event()).await?;

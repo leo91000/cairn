@@ -1534,6 +1534,28 @@ async fn a_usage_limit_that_stops_requests_fails_the_turn_with_its_reset() {
     assert!(cairn_installation::run_output::exhausted(failure));
     assert!(!root.path().join("result.claude-receipt.json").exists());
 
+    // A limit Claude Code answered after explains a later failure once it refuses a request
+    // again: it repeats the unchanged limit, and the agent's request fails with rate_limit.
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let (result, events) = run_to_end(
+        &c,
+        plan(&root, "fixture:usage-limit answered refused-again"),
+    )
+    .await;
+    assert!(result.is_err());
+    let limits = events
+        .iter()
+        .filter(|event| event["type"] == "provider.limit")
+        .count();
+    assert_eq!(limits, 1, "an unchanged limit is shown once");
+    let failure = events
+        .iter()
+        .find(|event| event["type"] == "turn.failed")
+        .unwrap();
+    assert_eq!(failure["error"]["code"], "usage_limit_reached");
+    assert_eq!(failure["error"]["window"], "seven_day_opus");
+
     // A limit does not explain a failure it did not cause: Claude Code answered after it (on
     // another model), its reset time passed, or the agent's request failed for another reason.
     for scenario in [

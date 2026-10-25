@@ -100,8 +100,9 @@ kind of wait stays separate:
   own. They release the execution's resources. Léo does not enable Claude's unattended
   `CLAUDE_CODE_RETRY_WATCHDOG`, which would keep the process waiting for a usage window
   instead of releasing it.
-- **Notices.** `system/informational` (already emitted by 2.1.280) becomes
-  `engine.notice` with its level, cut at 4,000 characters. Like all run output, it is
+- **Notices.** `system/informational` becomes `engine.notice` with its level, cut at
+  4,000 characters. Claude Code adds these frames to its stream-json output from
+  2.1.283; 2.1.280 drops its turn warnings there, so it runs without notices. Like all run output, it is
   redacted before storage. Warnings, suggestions and notices that stop the turn show in
   the conversation and are always recorded. Notices and info lines stay in the run log,
   within its diagnostic budget. Claude Code repeats a running tool's progress line

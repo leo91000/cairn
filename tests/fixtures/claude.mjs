@@ -554,6 +554,29 @@ else {
 
       if (answered) {
         out({ type: 'stream_event', parent_tool_use_id: null, event: { type: 'message_start', message: { id: 'fallback' } } })
+        if (prompt.includes('refused-again')) {
+          // A later request is refused again: Claude Code repeats the unchanged limit.
+          out({
+            type: 'rate_limit_event',
+            rate_limit_info: {
+              status: 'rejected',
+              rateLimitType: 'seven_day_opus',
+              resetsAt: 1893499200,
+              overageStatus: 'rejected',
+              isUsingOverage: false,
+            },
+          })
+          const message = 'Your usage allowance is used up for now.'
+          out({ type: 'assistant', error: 'rate_limit', message: { id: 'refused-again', content: [{ type: 'text', text: message }] } })
+          out({
+            type: 'result',
+            subtype: 'success',
+            is_error: true,
+            result: message,
+          })
+          return
+        }
+
         out({
           type: 'result',
           subtype: 'success',
