@@ -695,6 +695,12 @@ impl Turn<'_> {
             return Ok(());
         }
         if self.limit.as_ref() == Some(&limit) {
+            // While the limit refuses requests, Claude Code re-emits it (at most about every 30
+            // seconds per window): a refusal after an answered request. One within that time
+            // falls back to recognizing Claude's wording.
+            if limit.blocks() {
+                self.answered = false;
+            }
             return Ok(());
         }
         self.emit(limit.event()).await?;
@@ -903,6 +909,16 @@ impl Turn<'_> {
                 item["task_id"] = agent.into();
             }
         }
+        // The call that started the subagent can return after a later run resumed it: that run
+        // reports for itself, whether it still works or already reported.
+        if item["resumed"] == true {
+            if item["status"] == "in_progress" {
+                self.subagents.insert(id, item);
+            } else {
+                self.settled.insert(id, item);
+            }
+            return Ok(());
+        }
         let launched = matches!(
             text(outcome, "status"),
             "async_launched" | "remote_launched"
@@ -991,8 +1007,14 @@ impl Turn<'_> {
         let usage = &value["usage"];
         match text(value, "subtype") {
             "task_started" => {
-                let resumed = before["status"] != "in_progress"
-                    || (!current.is_empty() && !run.is_empty() && run != current);
+                // A start naming another run is a resumption, even before the earlier run's tool
+                // result; another start of the current run is not. Frames without run IDs
+                // (before 2.1.292) only start again once the subagent finished.
+                let resumed = if !current.is_empty() && !run.is_empty() {
+                    run != current
+                } else {
+                    before["status"] != "in_progress"
+                };
                 if resumed {
                     item["status"] = "in_progress".into();
                     item["resumed"] = true.into();
@@ -1048,10 +1070,11 @@ impl Turn<'_> {
 
     /// A subagent an earlier execution started, resumed in this one: by a SendMessage call, or
     /// by Claude Code itself. It keeps its task ID, but this execution never saw the tool use that
-    /// started it, so it shows as a new row of this execution marked resumed. Its run names the SendMessage call,
-    /// or, when Claude Code resumed it, the earlier execution's call that started it, or none.
-    /// Another tool use of this execution, such as a workflow's, starts its own agents. A call
-    /// this execution never made only names a resumed subagent the agent itself started: a nested
+    /// started it, so it shows as a new row of this execution marked resumed. Its run names the
+    /// SendMessage call or, when Claude Code resumed it, the earlier execution's call that
+    /// started it. Another tool use of this execution, such as a workflow's, starts its own
+    /// agents; a start naming no call is a new agent, such as a forked slash command. A call this
+    /// execution never made only names a resumed subagent the agent itself started: a nested
     /// agent may start from work this execution does not see.
     async fn subagent_resumed(&mut self, value: &Value) -> Result<()> {
         let task = text(value, "task_id");
@@ -1060,7 +1083,7 @@ impl Turn<'_> {
             && value["spawn_depth"].as_u64().is_none_or(|depth| depth <= 1);
         let resumes = match self.called.get(tool_use) {
             Some(tool) => tool == "SendMessage",
-            None => tool_use.is_empty() || top_level,
+            None => !tool_use.is_empty() && top_level,
         };
         // Housekeeping agents Claude Code starts itself stay out of the transcript.
         if value["subtype"] != "task_started"

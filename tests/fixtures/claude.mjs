@@ -554,6 +554,29 @@ else {
 
       if (answered) {
         out({ type: 'stream_event', parent_tool_use_id: null, event: { type: 'message_start', message: { id: 'fallback' } } })
+        if (prompt.includes('refused-again')) {
+          // A later request is refused again: Claude Code repeats the unchanged limit.
+          out({
+            type: 'rate_limit_event',
+            rate_limit_info: {
+              status: 'rejected',
+              rateLimitType: 'seven_day_opus',
+              resetsAt: 1893499200,
+              overageStatus: 'rejected',
+              isUsingOverage: false,
+            },
+          })
+          const message = 'Your usage allowance is used up for now.'
+          out({ type: 'assistant', error: 'rate_limit', message: { id: 'refused-again', content: [{ type: 'text', text: message }] } })
+          out({
+            type: 'result',
+            subtype: 'success',
+            is_error: true,
+            result: message,
+          })
+          return
+        }
+
         out({
           type: 'result',
           subtype: 'success',
@@ -682,6 +705,14 @@ else {
         parent_tool_use_id: 'agent-earlier',
         message: { id: 'orphan-1', content: [{ type: 'text', text: 'Migration done.' }] },
       })
+      // Nor is a new agent started without a call, such as a forked slash command.
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-forked',
+        description: 'Forked command',
+        task_type: 'local_agent',
+      })
       // Nor is an agent a subagent starts from work this execution does not see.
       out({
         type: 'system',
@@ -730,6 +761,101 @@ else {
         message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'send-later', content: [{ type: 'text', text: 'Message delivered.' }] }] },
       })
       complete('Resumed in a later turn', false, correlation)
+      return
+    }
+
+    if (prompt.includes('fixture:resumed-before-result')) {
+      // A foreground subagent reports, and is resumed before the call that started it returns.
+      out(value)
+      out({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: {
+          id: 'spawn',
+          content: [{
+            type: 'tool_use',
+            id: 'agent-a',
+            name: 'Agent',
+            input: { description: 'Check A', subagent_type: 'general-purpose', prompt: 'Check A' },
+          }],
+        },
+      })
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-a',
+        run_id: 'run-1',
+        tool_use_id: 'agent-a',
+        description: 'Check A',
+        task_type: 'local_agent',
+      })
+      out({
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: 'task-a',
+        run_id: 'run-1',
+        tool_use_id: 'agent-a',
+        status: 'completed',
+        summary: 'A done.',
+        output_file: '',
+      })
+      out({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: {
+          id: 'send',
+          content: [{
+            type: 'tool_use',
+            id: 'send-a',
+            name: 'SendMessage',
+            input: { to: 'task-a', message: 'One more thing.' },
+          }],
+        },
+      })
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-a',
+        run_id: 'run-2',
+        tool_use_id: 'send-a',
+        description: 'Check A',
+        is_backgrounded: true,
+        task_type: 'local_agent',
+      })
+      const firstResult = () => out({
+        type: 'user',
+        parent_tool_use_id: null,
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'agent-a', content: [{ type: 'text', text: 'A done.' }] }] },
+        tool_use_result: {
+          status: 'completed',
+          agentId: 'task-a',
+          totalTokens: 10,
+          content: [{ type: 'text', text: 'A done.' }],
+        },
+      })
+      // The call may return while the new run works, or only once it reported too.
+      const late = prompt.includes('after-report')
+      if (!late)
+        firstResult()
+      out({
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: 'task-a',
+        run_id: 'run-2',
+        tool_use_id: 'send-a',
+        status: 'completed',
+        summary: 'A second report.',
+        output_file: '',
+        usage: { total_tokens: 700, tool_uses: 2, duration_ms: 400 },
+      })
+      if (late)
+        firstResult()
+      out({
+        type: 'user',
+        parent_tool_use_id: null,
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'send-a', content: [{ type: 'text', text: 'Message delivered.' }] }] },
+      })
+      complete('Both checks done', false, correlation)
       return
     }
 
@@ -813,6 +939,16 @@ else {
         status: 'completed',
         summary: 'Looks good.',
         output_file: '',
+      })
+      // A repeated start of the run that reported, before its tool result, does not resume it.
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-review',
+        run_id: 'run-1',
+        tool_use_id: 'agent-review',
+        description: 'Review the change',
+        task_type: 'local_agent',
       })
       result(null, null, 'agent-review', 'Looks good.', { status: 'completed', agentId: 'task-review', content: [{ type: 'text', text: 'Looks good.' }] })
       // Frames of the first run may still arrive after it reported back.

@@ -91,17 +91,21 @@ kind of wait stays separate:
   attempt on another account, reports its own state. If a
   turn fails because the usage limit refused the agent's request (its message carries
   `error: "rate_limit"`) while the latest state blocks requests, the adapter fails it
-  with `code: usage_limit_reached`, the window and `resetsAt`. The worker then takes Cairn's durable account wait or fails over, without
-  matching Claude's wording. A limit Claude Code answered after (for example a limit on
-  one model's weekly window, with the reply coming from another model), one that only
-  refused a subagent's request, or one whose reset time has passed does not explain the
-  failure: the turn fails as usual.
+  with `code: usage_limit_reached`, the window and `resetsAt`. The worker then takes
+  Cairn's durable account wait or fails over, without matching Claude's wording. A limit
+  Claude Code answered after (for example a limit on one model's weekly window, with the
+  reply coming from another model), one that only refused a subagent's request, or one
+  whose reset time has passed does not explain the failure: the turn fails as usual.
+  While a limit refuses requests, Claude Code re-emits it at most about every 30 seconds
+  per window, which counts as a new refusal. A refusal after an answered request with no
+  such repeat falls back to recognizing Claude's wording.
 - **Cairn durable wait.** Account waits, `wait_for` and automatic retries are Cairn's
   own. They release the execution's resources. Léo does not enable Claude's unattended
   `CLAUDE_CODE_RETRY_WATCHDOG`, which would keep the process waiting for a usage window
   instead of releasing it.
-- **Notices.** `system/informational` (already emitted by 2.1.280) becomes
-  `engine.notice` with its level, cut at 4,000 characters. Like all run output, it is
+- **Notices.** `system/informational` becomes `engine.notice` with its level, cut at
+  4,000 characters. Claude Code adds these frames to its stream-json output from
+  2.1.283; 2.1.280 drops its turn warnings there, so it runs without notices. Like all run output, it is
   redacted before storage. Warnings, suggestions and notices that stop the turn show in
   the conversation and are always recorded. Notices and info lines stay in the run log,
   within its diagnostic budget. Claude Code repeats a running tool's progress line
@@ -117,26 +121,27 @@ Subagents are followed by the tool use that started them and by their task ID. C
 Code 2.1.292 and later add `agent_id` to a subagent's messages (equal to its task ID,
 kept when resumed), plus `parent_task_id` and `run_id` to task frames. From then on, a
 subagent's messages are never taken as the agent's reply, even without
-`parent_tool_use_id`. Older frames rely on `parent_tool_use_id` alone.
-When the agent resumes a subagent, its new run reopens the same item, marked
-`resumed`. That holds even when the run names another tool use. Claude Code promises
-that a task's run IDs sort, by plain string comparison, in the order its runs opened,
-so a frame naming an earlier run, or repeating the start of the run that reported, is
-late and ignored. A subagent an earlier execution started, resumed by a `SendMessage`
-call or by Claude Code itself (its run then names the earlier execution's call, or no
-call), shows as a new row of the current execution marked `resumed`, keyed by its task
-and run IDs: Cairn rows belong to one execution, and a later execution that resumes it
-again gets its own row. A call this execution never made only counts
+`parent_tool_use_id`. Older frames rely on `parent_tool_use_id` alone. When the agent
+resumes a subagent, its new run reopens the same item, marked `resumed`. That holds
+even when the run names another tool use. Claude Code promises that a task's run IDs
+sort, by plain string comparison, in the order its runs opened, so a frame naming an
+earlier run, or repeating the start of the run that reported, is late and ignored. The
+call that started a subagent can return after a later run resumed it; that run then
+reports for itself. A subagent an earlier execution started, resumed by a
+`SendMessage` call or by Claude Code itself (its run then names the earlier
+execution's call), shows as a new row of the current execution marked `resumed`, keyed
+by its task and run IDs: Cairn rows belong to one execution, and a later execution
+that resumes it again gets its own row. A call this execution never made only counts
 for a top-level subagent (no `parent_task_id`, `spawn_depth` 1). Other unknown agent
-tasks, such as a workflow's agents, nested agents started from work this execution does
-not see, or housekeeping agents Claude Code marks `skip_transcript` or `ambient`, are
-ignored. Nested subagents keep their parent and `parent_task_id`. Without `agent_id`,
-a resumed subagent's messages may name the call that resumed it (such as
-`SendMessage`) in `parent_tool_use_id`; once a task frame ties that call to the
-subagent, they stay its steps. The minimum supported CLI stays **2.1.280**: older
-frames without these fields keep the earlier correlation, and the fixtures cover both
-shapes. The events reach the public MCP and `cairn_installation` through
-`get_run`.
+tasks, such as a workflow's agents, nested agents started from work this execution
+does not see, new agents started without a call (forked slash commands or skills), or
+housekeeping agents Claude Code marks `skip_transcript` or `ambient`, are ignored.
+Nested subagents keep their parent and `parent_task_id`. Without `agent_id`, a resumed
+subagent's messages may name the call that resumed it (such as `SendMessage`) in
+`parent_tool_use_id`; once a task frame ties that call to the subagent, they stay its
+steps. The minimum supported CLI stays **2.1.280**: older frames without these fields
+keep the earlier correlation, and the fixtures cover both shapes. The events reach the
+public MCP and `cairn_installation` through `get_run`.
 
 An explicit provider choice is saved with each queued message. Steering cannot
 change the running turn's provider. Messages that omit the provider continue

@@ -1534,6 +1534,28 @@ async fn a_usage_limit_that_stops_requests_fails_the_turn_with_its_reset() {
     assert!(cairn_installation::run_output::exhausted(failure));
     assert!(!root.path().join("result.claude-receipt.json").exists());
 
+    // A limit Claude Code answered after explains a later failure once it refuses a request
+    // again: it repeats the unchanged limit, and the agent's request fails with rate_limit.
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let (result, events) = run_to_end(
+        &c,
+        plan(&root, "fixture:usage-limit answered refused-again"),
+    )
+    .await;
+    assert!(result.is_err());
+    let limits = events
+        .iter()
+        .filter(|event| event["type"] == "provider.limit")
+        .count();
+    assert_eq!(limits, 1, "an unchanged limit is shown once");
+    let failure = events
+        .iter()
+        .find(|event| event["type"] == "turn.failed")
+        .unwrap();
+    assert_eq!(failure["error"]["code"], "usage_limit_reached");
+    assert_eq!(failure["error"]["window"], "seven_day_opus");
+
     // A limit does not explain a failure it did not cause: Claude Code answered after it (on
     // another model), its reset time passed, or the agent's request failed for another reason.
     for scenario in [
@@ -1657,6 +1679,40 @@ async fn nested_and_resumed_subagents_keep_their_identity_and_the_parent_reply()
 }
 
 #[tokio::test]
+async fn a_subagent_resumed_before_its_call_returns_keeps_its_new_run() {
+    for prompt in [
+        "fixture:resumed-before-result",
+        "fixture:resumed-before-result after-report",
+    ] {
+        resumed_before_result(prompt).await;
+    }
+}
+
+async fn resumed_before_result(prompt: &str) {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let events = run_events(&c, plan(&root, prompt)).await;
+    let rows: Vec<_> = events
+        .iter()
+        .filter(|event| event["item"]["type"] == "subagent" && event["item"]["id"] == "agent-a")
+        .map(|event| &event["item"])
+        .collect();
+    // The call that started it returns during the new run, or after it, which reports for
+    // itself.
+    let last = rows.last().unwrap();
+    assert_eq!(last["status"], "completed", "{prompt}");
+    assert_eq!(last["run_id"], "run-2");
+    assert_eq!(last["resumed"], true);
+    assert_eq!(last["result"], "A second report.", "{prompt}");
+    assert_eq!(last["tokens"], 700, "{prompt}");
+    assert!(
+        rows.iter()
+            .filter(|item| item["run_id"] == "run-2")
+            .all(|item| item["result"] != "A done.")
+    );
+}
+
+#[tokio::test]
 async fn a_subagent_resumed_by_a_later_execution_shows_as_resumed() {
     let root = TempDir::new().unwrap();
     let c = setup(&root);
@@ -1666,8 +1722,8 @@ async fn a_subagent_resumed_by_a_later_execution_shows_as_resumed() {
         .filter(|event| event["item"]["type"] == "subagent")
         .collect();
     // Only the subagents resumed, by the agent or by Claude Code: an agent its workflow starts,
-    // one a subagent starts from work this execution does not see, or a housekeeping agent
-    // Claude Code starts itself, is not one.
+    // one a subagent starts from work this execution does not see, a new agent started without
+    // a call, or a housekeeping agent Claude Code starts itself, is not one.
     assert!(all.iter().all(|event| {
         ["task-old:run-3", "task-orphan:run-5"].contains(&event["item"]["id"].as_str().unwrap())
     }));
