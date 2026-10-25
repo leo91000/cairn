@@ -67,6 +67,7 @@ struct NewChat {
     paused: bool,
     created_at: i64,
     updated_at: i64,
+    last_activity_at: i64,
 }
 
 /// `chatExecution` on a run: the user message the next agent turn delivers,
@@ -783,6 +784,7 @@ fn from_run(db: &Db<'_>, run_id: &str, origin: &crate::native::policy::Origin) -
         ));
     }
 
+    let created_at = now();
     let mut chat = json!({
         "id": id(),
         "title": run["snapshot"]["task"]["name"],
@@ -790,8 +792,9 @@ fn from_run(db: &Db<'_>, run_id: &str, origin: &crate::native::policy::Origin) -
         "projectId": run["projectId"],
         "runId": run_id,
         "paused": false,
-        "createdAt": now(),
-        "updatedAt": now(),
+        "createdAt": created_at,
+        "updatedAt": created_at,
+        "lastActivityAt": created_at,
     });
     crate::native::policy::apply(&mut chat, &run);
     task_projects(&agent, &chat, &db.list("projects")?)?;
@@ -844,6 +847,7 @@ pub(crate) fn create_as(
         paused: false,
         created_at,
         updated_at: created_at,
+        last_activity_at: created_at,
     })?;
     crate::native::policy::authorize_chat(db, &mut chat, origin)?;
     task_projects(&agent, &chat, &db.list("projects")?)?;

@@ -8,10 +8,10 @@ The default is **7 days**. Choose a whole number from 0 to 36500; **0 disables
 future automatic deletion**. Both apps ask for confirmation before saving and
 explain that existing conversations are included.
 
-Inactivity starts at the last conversation activity (`lastActivityAt`, falling
-back to `updatedAt`, then `createdAt` for older records), or the last run's
-`finishedAt`, whichever is later. Merely reading a conversation does not extend
-its life. A queued/running agent, pending message, open question (including a
+Inactivity starts at the last conversation activity (`lastActivityAt`), or the
+last run's `finishedAt`, whichever is later. New empty chats and conversations
+converted from completed missions initialize `lastActivityAt` at creation. Merely
+reading a conversation does not extend its life. A queued/running agent, pending message, open question (including a
 nonblocking question), scheduled wakeup, run preparation or worker finalization
 protects the conversation. Pausing a conversation does not exempt it once its
 pending work is resolved.

@@ -579,6 +579,66 @@ async fn old_chat(app: &App, days: i64) -> Value {
 }
 
 #[tokio::test]
+async fn empty_and_converted_chats_start_their_inactivity_clock_at_creation() {
+    for converted in [false, true] {
+        let app = App::new().await;
+        let mut chat = if converted {
+            let run = id();
+            let agent = app
+                .service
+                .store
+                .get("agents", cairn_installation::config::MAIN_AGENT_ID)
+                .await
+                .unwrap()
+                .unwrap();
+            app.add_finished_run(
+                &run,
+                RunStatus::Succeeded,
+                json!({
+                    "snapshot": {
+                        "agent": agent,
+                        "task": { "name": "Completed mission", "prompt": "Inspect the workspace" },
+                    },
+                    "sessionId": "mission-session",
+                    "finishedAt": cairn_installation::config::now() - 8 * DAY,
+                }),
+                "Completed mission history",
+            )
+            .await;
+            app.service
+                .store
+                .set(
+                    &format!("run-checkpoint:{run}"),
+                    json!({ "prepared": {}, "completed": true }),
+                    None,
+                )
+                .await
+                .unwrap();
+            let (status, chat) = app
+                .request("POST", &format!("/api/runs/{run}/chat"), json!({}))
+                .await;
+            assert_eq!(status, StatusCode::OK, "{chat}");
+            chat
+        } else {
+            app.create_chat().await
+        };
+        let activity = chat["lastActivityAt"].as_i64().unwrap();
+        assert_eq!(chat["lastActivityAt"], chat["createdAt"]);
+        assert_eq!(chat["lastActivityAt"], chat["updatedAt"]);
+        app.service.cleanup_conversations().await.unwrap();
+        assert_eq!(app.get(&chat_path(&chat)).await.0, StatusCode::OK);
+
+        let expired = activity - 8 * DAY;
+        for field in ["createdAt", "updatedAt", "lastActivityAt"] {
+            chat[field] = expired.into();
+        }
+        app.service.store.put("chats", chat.clone()).await.unwrap();
+        app.service.cleanup_conversations().await.unwrap();
+        assert_eq!(app.get(&chat_path(&chat)).await.0, StatusCode::NOT_FOUND);
+    }
+}
+
+#[tokio::test]
 async fn retention_defaults_to_seven_days_and_validates_persisted_owner_settings() {
     let app = App::new().await;
     assert_eq!(app.get(RETENTION).await.1, json!({ "inactivityDays": 7 }));
