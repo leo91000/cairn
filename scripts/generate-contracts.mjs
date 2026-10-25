@@ -88,7 +88,10 @@ package build.cairn.contracts
 import kotlinx.serialization.json.Json
 
 // Null selections mean all resources. They must never be dropped as omissions.
-internal val contractJson = Json { encodeDefaults = true; explicitNulls = true }
+internal val contractJson = Json {
+    encodeDefaults = true
+    explicitNulls = true
+}
 `)
 
 // The same pinned formatters used by the repository; generated models are never patched.

@@ -201,7 +201,7 @@ test('Discord bots are set up through the package’s own form and keep the toke
   await expect(review.getByRole('checkbox', { name: /Reapprove the new access for #support on Acme/ })).toBeChecked()
   const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
   await review.getByRole('button', { name: 'Save', exact: true }).click()
-  expect((await saving).postDataJSON().reapproveDelegations).toEqual([botId])
+  expect((await saving).postDataJSON().review.reapproveDelegations).toEqual([botId])
   await expect(review).toHaveCount(0)
 
   // An earlier change elsewhere already suspended the bot: a later edit never reapproves it by default.
