@@ -67,12 +67,16 @@ abstract class ResourceSaveCases {
     fun restoredTaskEditorReplaysItsUncertainCreation() =
         saveAfterFailure("tasks", true, restore = true)
 
+    @Test
+    fun projectBaseBranchCanBeReplaced() = saveAfterFailure("projects", false, editBranch = true)
+
     private fun saveAfterFailure(
         kind: String,
         loseResponse: Boolean,
         rejectReplay: Boolean = false,
         restore: Boolean = false,
         malformedResponse: Boolean = false,
+        editBranch: Boolean = false,
     ) {
         val savedId = if (kind == "tasks") "saved" else "00000000-0000-4000-8000-000000000005"
         val uncertainResponse = loseResponse || malformedResponse
@@ -278,6 +282,22 @@ abstract class ResourceSaveCases {
                     }
                     compose.onNodeWithText("owner/repository").performScrollTo().performClick()
                 }
+                if (editBranch) {
+                    compose
+                        .onNodeWithText("Branche de base")
+                        .performScrollTo()
+                        .performTextReplacement("")
+                    compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                    compose
+                        .onNodeWithText("Branche de base")
+                        .performTextReplacement("invalid branch")
+                    compose.onNodeWithText("Enregistrer").performClick()
+                    compose
+                        .onNodeWithText("Saisissez un nom de branche de base valide.")
+                        .assertExists()
+                    assertTrue(mutations.isEmpty())
+                    compose.onNodeWithText("Branche de base").performTextReplacement("develop")
+                }
                 compose
                     .onNode(hasScrollAction() and hasAnyDescendant(hasText("Nom")))
                     .performTouchInput { swipeUp() }
@@ -365,6 +385,26 @@ abstract class ResourceSaveCases {
                         .jsonPrimitive
                         .content,
                 )
+                if (editBranch) {
+                    assertEquals(
+                        "develop",
+                        mutations
+                            .first()
+                            .second["settings"]!!
+                            .jsonObject["baseBranch"]!!
+                            .jsonPrimitive
+                            .content,
+                    )
+                    assertEquals(
+                        "develop",
+                        mutations
+                            .last()
+                            .second["settings"]!!
+                            .jsonObject["baseBranch"]!!
+                            .jsonPrimitive
+                            .content,
+                    )
+                }
                 if (kind == "import") {
                     val import = mutations.first().second
                     assertEquals("github", import["pluginId"]!!.jsonPrimitive.content)
