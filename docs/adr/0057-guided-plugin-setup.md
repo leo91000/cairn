@@ -27,9 +27,9 @@ settings may declare a `risk`.
 
 The installation resolves the setup (`setup` beside each catalogue manifest and in
 the management `setup` action). Web and Android render it as the same assistant,
-natively. Clients served to an older installation derive the same steps from the
-manifest; a shared corpus (`tests/fixtures/plugin-setup.json`) keeps Rust, web and
-Android equal.
+natively. Clients consume this resolved setup and require a current installation.
+A shared corpus (`tests/fixtures/plugin-setup.json`) keeps Rust, web and Android
+equal.
 
 A step marked `shared` holds values that serve every instance, such as an OAuth
 client and its secret. A new instance names a saved instance of the same package

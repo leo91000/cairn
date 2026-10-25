@@ -158,9 +158,7 @@ send a new code within the same per-address delivery budgets. During the cooldow
 or after those budgets are exhausted it returns 429, never a challenge for a dead
 code. A distributed attacker can still exhaust global codes and the address's
 delivery budgets to deny email sign-in temporarily; passkeys and OAuth remain
-available. Already issued challenges preserve their consumed attempts during the
-per-challenge migration, and code failures count toward the new global ceiling.
-Existing codes retain their original challenges when the migration is applied.
+available.
 Code requests are limited to ten per minute per resolved client. New email deliveries
 are limited to one per minute per normalized email;
 verification is limited to thirty per minute per resolved client. Each address
@@ -382,9 +380,7 @@ Dynamic registration permits ten attempts per minute per resolved client
 and per-grant call budgets remain separate. MCP authorization and personal
 tokens stay reserved to installation owners, including the `manage` scope.
 
-The additive `202610080600_mcp_client_retention` migration records `created_at`
-for registrations. Existing rows receive the migration time, giving them thirty
-days of grace rather than guessing their age. Hourly maintenance removes expired
+Registrations record `created_at` when created. Hourly maintenance removes expired
 MCP tokens and grants (cascading their tokens/code tombstones), and expired unused
 codes. Consumed codes of active grants and unexpired used refresh tokens remain
 for replay detection. It then
@@ -427,7 +423,8 @@ other device. Revoking the current session also clears its cookie. Mutations
 require the exact origin and CSRF, are limited to 30 per minute per account,
 and close that session's relay bodies before returning. Other sessions and
 already admitted agent work continue. Session creation and expiry remain the
-same for email, OAuth and passkeys; migrations preserve existing sessions.
+same for email, OAuth and passkeys. The database recreation required for this
+release ends all existing Beacon sessions; users must sign in again.
 
 Deletion requires typing the verified account email and confirmation in the
 web. `POST /api/account/delete` accepts `{ "email": "…" }`, uses the caller's
@@ -508,9 +505,9 @@ audience IDs in the same transaction and retains only pseudonymous incident data
 The journal is **not append-only at database level**: account deletion updates
 its audience IDs to NULL and maintenance deletes expired records. Application
 mutations use a closed action enum and named event fields; operators with write
-access can still alter the database. Existing migration checksums (including the
-audience FK creation/removal) are preserved; the new actor index and proof column
-use an additive migration rather than rewriting an applied migration history.
+access can still alter the database. The initial schema includes the actor index
+and proof column. The release recreation procedure above removes the previous
+Beacon database and its audit history.
 Reads enforce retention immediately; hourly maintenance removes expired rows.
 
 Operators investigate the full retained history using their protected Postgres
@@ -655,8 +652,8 @@ requires the original Cairn session's recent independent email/passkey proof.
 The app session is checked before the provider callback and again under the
 account lock at consent, then at the final exchange. Browser consent does not
 replace this proof. Google native linking applies the same checks before its
-quota, before JWT/JWKS verification and after the account lock. The additive
-consent migration invalidates older in-flight handovers. Never log handover URLs,
+quota, before JWT/JWKS verification and after the account lock. Recreating Beacon
+ends all in-flight handovers; users must restart sign-in. Never log handover URLs,
 confirmation proofs or secrets.
 
 Set `CAIRN_BEACON_ANDROID_CERTIFICATES` to comma-separated SHA-256 fingerprints
@@ -740,7 +737,7 @@ stays unchanged for login, OAuth callbacks, passkeys, account settings,
 notifications, MCP and installation enrollment. Workspace URLs become
 `https://{installation-slug}.cairn.build/chats/{chat-slug}`. Legacy paths and UUID
 links remain usable. See [readable-workspace-URLs decision](adr/0066-readable-workspace-urls.md) for the
-shared-cookie trust boundary and browser-storage migration.
+shared-cookie trust boundary and current workspace routing.
 
 For local testing, use the bundled Beacon web build, set the origin to
 `http://cairn.localhost:<port>`, and enable the flag. Plain `localhost` and IP

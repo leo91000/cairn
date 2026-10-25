@@ -419,27 +419,21 @@ The recorded commit status documents the result; CI does not wait for it.
 Image promotion requires the ordinary CI checks. Tag releases reuse the successful
 main pipeline's exact image.
 
-### Task-author security upgrade (#59)
+### Task-author security and coordinated upgrades (#59)
 
-Deploy Beacon before upgrading installations for the task-author
-checks. Startup applies the additive `202610072155_task_author_access` migration
-with the existing SQLx migrator; historical migration numbers and checksums stay
-unchanged. Existing memberships receive access identifiers automatically.
-An upgraded manager cannot reconnect to an older beacon binary that lacks
-`/api/relay/{installation}/task-authors`: its 404 defers scheduled admissions
-and keeps the relay offline. Keep the upgraded Beacon while rolling
-back an installation. Rolling back Beacon requires confirmation that the older binary and managers
-can read the current database. Use a forward fix for incompatible migrations.
-Older managers also restore the previous task-author/public-link rules, so
-suspend shared access during any compatible rollback.
+Deploy matching current Beacon and installation binaries. Follow the
+[Beacon database recreation runbook](BEACON.md#next-release-recreate-the-beacon-database)
+for this release; historical migration ledgers cannot be upgraded in place.
+Recreate Beacon before reopening access, then claim the installations again.
+A protocol mismatch requires an update and prevents reconnection. Rollback also
+requires a matching binary set and a database created by that Beacon version;
+keep access closed until the set is consistent.
 
-Upgrade every shared installation: older binaries do not enforce the task-author
-policy. Upgraded installations require the beacon task-author endpoint before
-reconnecting and before admitting scheduled work. During an beacon outage,
-new scheduled admissions wait and already admitted work continues. On first
-reconciliation, old tasks without authors belong to the current owner. Removed
-members' tasks and admitted runs remain available; re-invitation does not resume
-old schedules. Public links remain owner-managed until explicitly revoked.
+Installations require the Beacon task-author endpoint before reconnecting and
+before admitting scheduled work. During a Beacon outage, new scheduled admissions
+wait and already admitted work continues. Removed members' tasks and admitted
+runs remain available; re-invitation does not resume old schedules. Public links
+remain owner-managed until explicitly revoked.
 
 VM runners use ublk and a single flat ext4 conversation disk. No block-transport,
 disk-layout or RAM-snapshot selector is required. The ready VM pool remains
