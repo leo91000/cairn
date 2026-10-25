@@ -21,11 +21,10 @@ Claude Code follows Anthropic's
 [stable release channel](https://code.claude.com/docs/en/setup#configure-release-channel):
 a version "typically about one week old, skipping releases with major
 regressions", published as the npm `stable` dist-tag. Its `latest` channel is
-never used, even when it names a newer release: when `stable` named 2.1.308 and
-`latest` 2.1.310, builds installed 2.1.308. Anthropic notes that a newly launched model can
-require a version newer than the stable channel serves. Such a model becomes
-available to Cairn when the stable channel reaches that version. Builds only
-install a release the stable channel serves.
+never used, even when it names a newer release. Anthropic notes that a newly
+launched model can require a version newer than the stable channel serves. Such
+a model becomes available to Cairn when the stable channel reaches that version.
+Builds only install a release the stable channel serves.
 
 OpenCode documents its npm package `opencode-ai` as the install path and
 publishes releases on the `latest` dist-tag. Only that dist-tag is read; the
@@ -113,11 +112,20 @@ checks above. A release that fails them blocks validation. There is no hold or
 override setting: the remedy is a reviewed change that adapts the adapter, or that
 sets the engine's `channel` in `scripts/cli-updates.mjs` to the last working
 version until it does. npm serves an exact version at the same URL as a dist-tag,
-so the same validation applies. Claude Code
-behavior those checks cannot reach without a subscription relies on Anthropic's
-stable channel between qualifications: the `auth login --claudeai` flow, quota
-values from `get_usage`, token rotation against the endpoint, and subscription
-inference. A change in an adapter
+so the same validation applies.
+
+Claude Code behavior those checks do not reach relies on Anthropic's stable
+channel between qualifications:
+
+- Without a subscription: the `auth login --claudeai` flow, quota values from
+  `get_usage`, token rotation against the endpoint, and subscription inference.
+- The native turn runs with YOLO access and calls no tool. How a release applies
+  the sandbox settings of restricted agents (`settings` in `claude_process.rs`),
+  the `--permission-prompt-tool` approval flow, and MCP tool calls under
+  `--strict-mcp-config` has no per-release native check. Production runner
+  isolation still applies.
+
+A change in an adapter
 that depends on engine behavior, or a reported engine regression, needs the
 following checks before merge:
 
@@ -128,8 +136,10 @@ following checks before merge:
 - Claude Code: run the ignored native tests in `tests/claude.rs` the same way,
   with `CLAUDE_NATIVE_BIN` and `CLAUDE_NATIVE_RESUME_BIN`. Compare the credential-free
   `initialize` response with the current release's: the model catalog fields and
-  aliases, and whether stored agent models remain valid `--model` values. With a test
-  account, check `claude auth login --claudeai`, `get_usage` quota values and
+  aliases, and whether stored agent models remain valid `--model` values. In a
+  restricted agent, check that a write outside its writable roots is refused, that
+  a permission prompt reaches Cairn, and that an MCP tool call completes. With a
+  test account, check `claude auth login --claudeai`, `get_usage` quota values and
   resuming a subscription session.
 - All engines: keep their autoupdaters disabled at runtime. Engine session state
   in account homes is persisted installation data. The
