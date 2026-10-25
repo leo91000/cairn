@@ -463,8 +463,14 @@ struct Turn<'a> {
     tasks: HashMap<String, String>,
     /// The usage limit Claude Code last reported, unless requests run normally.
     limit: Option<UsageLimit>,
+    /// Subagents by the tool use that resumed them, such as a SendMessage call: before 2.1.292,
+    /// a resumed subagent's messages may name that call rather than an agent ID.
+    resumed_by: HashMap<String, String>,
     /// Whether a response streamed since the usage limit was reported: requests went through.
     answered: bool,
+    /// The error Claude Code gave the agent's latest message: `rate_limit` when the usage limit
+    /// refused its request.
+    api_error: String,
     /// Tool uses whose progress notice was reported: Claude Code repeats it while the tool runs.
     tool_notices: HashSet<String>,
     /// Streamed blocks of the current message, by index.
@@ -837,6 +843,9 @@ impl Turn<'_> {
             return Some(id.clone());
         }
         let tool_use = value["parent_tool_use_id"].as_str();
+        if let Some(id) = tool_use.and_then(|tool_use| self.resumed_by.get(tool_use)) {
+            return Some(id.clone());
+        }
         tool_use
             .or_else(|| (!agent.is_empty()).then_some(agent))
             .map(str::to_owned)
@@ -850,6 +859,7 @@ impl Turn<'_> {
         if parent.is_none() {
             // The agent responds again, so it no longer only waits for background tasks.
             self.waiting_for_background = false;
+            self.api_error = text(value, "error").to_owned();
         }
         let message = text(&value["message"], "id").to_owned();
         for block in value["message"]["content"].as_array().into_iter().flatten() {
@@ -954,6 +964,9 @@ impl Turn<'_> {
         };
         if !task.is_empty() {
             self.tasks.insert(task.to_owned(), id.clone());
+        }
+        if !tool_use.is_empty() && tool_use != id {
+            self.resumed_by.insert(tool_use.to_owned(), id.clone());
         }
         let started = value["subtype"] == "task_started";
         if !self.subagents.contains_key(&id) {
@@ -1075,6 +1088,9 @@ impl Turn<'_> {
             item["parent_id"] = parent.as_str().into();
         }
         self.tasks.insert(task.to_owned(), task.to_owned());
+        if by_message {
+            self.resumed_by.insert(tool_use.to_owned(), task.to_owned());
+        }
         self.subagents.insert(task.to_owned(), item.clone());
         self.emit(json!({ "type": "item.started", "item": item }))
             .await
@@ -1194,12 +1210,16 @@ impl Turn<'_> {
             } else {
                 result
             };
-            // Claude Code said the usage limit stops requests: report it as such rather than
-            // leaving its wording to be recognized. A limit it answered after (a limit on another
-            // model's window), or whose reset passed, does not explain the failure.
+            // Claude Code said the usage limit stops requests, and refused the agent's request
+            // for it: report it as such rather than leaving its wording to be recognized. A limit
+            // it answered after (a limit on another model's window, or one a subagent hit), or
+            // whose reset passed, does not explain the failure.
             let now = crate::config::now();
             if let Some(limit) = self.limit.as_ref().filter(|limit| {
-                limit.blocks() && !self.answered && limit.resets_at.is_none_or(|reset| reset > now)
+                limit.blocks()
+                    && self.api_error == "rate_limit"
+                    && !self.answered
+                    && limit.resets_at.is_none_or(|reset| reset > now)
             }) {
                 self.emit(json!({
                     "type": "turn.failed",
@@ -1403,7 +1423,9 @@ pub async fn run(
         settled: HashMap::new(),
         tasks: HashMap::new(),
         limit: None,
+        resumed_by: HashMap::new(),
         answered: false,
+        api_error: String::new(),
         tool_notices: HashSet::new(),
         streams: HashMap::new(),
         blocks: HashMap::new(),

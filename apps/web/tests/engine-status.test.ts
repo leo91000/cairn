@@ -134,7 +134,7 @@ describe('engine status', () => {
     }
   })
 
-  it('shows the usage limit until it no longer applies, its window resets or the turn fails', () => {
+  it('shows the usage limit until it no longer applies, its window resets or its run ends', () => {
     const warning = limit('allowed_warning')
     expect(notices([warning, step()]).map(notice => notice.title)).toEqual(['Approaching the 5-hour limit'])
     expect(notices([warning, limit('allowed')])).toEqual([])
@@ -148,6 +148,10 @@ describe('engine status', () => {
     })
     expect(notices([reset(Date.now() - 60_000)])).toEqual([])
     expect(notices([reset(Date.now() + 3_600_000)]).map(notice => notice.title)).toEqual(['Approaching the 5-hour limit'])
+
+    // A limit belongs to the run that reported it: a later run reports its own.
+    for (const end of [[event('turn.completed'), status('succeeded')], [status('cancelled')]])
+      expect(notices([warning, step(), ...end]).map(notice => notice.title)).not.toContain('Approaching the 5-hour limit')
 
     const blocked = limit('rejected', true)
     expect(notices([blocked]).map(notice => notice.title)).toEqual(['5-hour limit reached'])

@@ -1539,11 +1539,12 @@ async fn a_usage_limit_that_stops_requests_fails_the_turn_with_its_reset() {
     assert!(cairn_installation::run_output::exhausted(failure));
     assert!(!root.path().join("result.claude-receipt.json").exists());
 
-    // A limit that no longer stops requests does not explain a later failure: Claude Code
-    // answered after it (on another model), or its reset time passed.
+    // A limit does not explain a failure it did not cause: Claude Code answered after it (on
+    // another model), its reset time passed, or the agent's request failed for another reason.
     for scenario in [
         "fixture:usage-limit answered",
         "fixture:usage-limit reset-passed",
+        "fixture:usage-limit unrelated",
     ] {
         let root = TempDir::new().unwrap();
         let c = setup(&root);
@@ -1636,6 +1637,7 @@ async fn nested_and_resumed_subagents_keep_their_identity_and_the_parent_reply()
             ("agent-nested", "Tests pass."),
             ("agent-review", "Looks good."),
             ("agent-review", "Docs are fine too."),
+            ("agent-review", "Changelog too."),
         ]
     );
     let replies: Vec<_> = events
@@ -1678,12 +1680,14 @@ async fn a_subagent_resumed_by_a_later_execution_shows_as_resumed() {
     assert_eq!(last["status"], "completed");
     assert_eq!(last["result"], "Picked up again.");
 
-    // Its message is one of its steps, never the agent's reply.
-    let step = events
+    // Its messages are its steps, never the agent's reply, whether they carry its agent ID or
+    // name the call that resumed it.
+    let steps: Vec<_> = events
         .iter()
-        .find(|event| event["item"]["type"] == "subagent_message")
-        .unwrap();
-    assert_eq!(step["item"]["parent_id"], "task-old");
+        .filter(|event| event["item"]["type"] == "subagent_message")
+        .map(|event| event["item"]["parent_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(steps, vec!["task-old", "task-old"]);
     assert_eq!(
         std::fs::read_to_string(root.path().join("result.md")).unwrap(),
         "Resumed in a later turn"

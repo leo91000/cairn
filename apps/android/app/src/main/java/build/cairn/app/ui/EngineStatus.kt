@@ -196,10 +196,12 @@ internal fun hiddenEngineNotices(
                 retries.clear()
                 limits.clear()
             }
-            // The engine's retries end with the run: they did not recover.
+            // The engine's retries and usage limit belong to the run that reported them: its
+            // retries did not recover, and a later run reports its own limit.
             runEnds(event) -> {
-                hidden.addAll(retries)
+                hidden.addAll(retries + limits)
                 retries.clear()
+                limits.clear()
             }
             workContinues(event) -> {
                 hidden.addAll(retries)

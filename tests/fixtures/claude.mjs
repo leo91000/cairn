@@ -563,6 +563,24 @@ else {
         return
       }
 
+      if (prompt.includes('unrelated')) {
+        // The limit refused a subagent's request; the agent's own request fails for another reason.
+        const error = 'API Error: 500 Internal server error'
+        out({
+          type: 'assistant',
+          parent_tool_use_id: null,
+          error: 'server_error',
+          message: { id: 'server-error', content: [{ type: 'text', text: error }] },
+        })
+        out({
+          type: 'result',
+          subtype: 'success',
+          is_error: true,
+          result: error,
+        })
+        return
+      }
+
       const message = 'Your usage allowance is used up for now.'
       out({ type: 'assistant', error: 'rate_limit', message: { id: 'limit-message', content: [{ type: 'text', text: message }] } })
       out({
@@ -635,6 +653,12 @@ else {
         parent_tool_use_id: null,
         agent_id: 'task-old',
         message: { id: 'old-1', content: [{ type: 'text', text: 'Picked up again.' }] },
+      })
+      // Before 2.1.292, its messages may name the call that resumed it instead.
+      out({
+        type: 'assistant',
+        parent_tool_use_id: 'send-later',
+        message: { id: 'old-2', content: [{ type: 'text', text: 'Still on it.' }] },
       })
       out({
         type: 'system',
@@ -773,6 +797,8 @@ else {
         usage: { total_tokens: 1, tool_uses: 0, duration_ms: 1 },
       })
       said(null, 'task-review', 'review-2', 'Docs are fine too.')
+      // Without an agent ID (before 2.1.292), its messages may name the call that resumed it.
+      said('send-review', undefined, 'review-3', 'Changelog too.')
       out({
         type: 'system',
         subtype: 'task_notification',

@@ -84,12 +84,14 @@ kind of wait stays separate:
   changes. That covers a warning, a limit covered by extra usage, a limit that stops
   requests (`blocked`), and the return to normal after one of these. Window and reset
   time are included. The conversation shows it until the limit no longer applies, its
-  reset time passes or the turn fails. If a turn fails while the latest state blocks
-  requests, the adapter fails it with `code: usage_limit_reached`, the window and
-  `resetsAt`. The worker then takes Cairn's durable account wait or fails over, without
+  reset time passes, or its run ends or fails: a later run reports its own state. If a
+  turn fails because the usage limit refused the agent's request (its message carries
+  `error: "rate_limit"`) while the latest state blocks requests, the adapter fails it
+  with `code: usage_limit_reached`, the window and `resetsAt`. The worker then takes Cairn's durable account wait or fails over, without
   matching Claude's wording. A limit Claude Code answered after (for example a limit on
-  one model's weekly window, with the reply coming from another model), or whose reset
-  time has passed, does not explain the failure: the turn fails as usual.
+  one model's weekly window, with the reply coming from another model), one that only
+  refused a subagent's request, or one whose reset time has passed does not explain the
+  failure: the turn fails as usual.
 - **Cairn durable wait.** Account waits, `wait_for` and automatic retries are Cairn's
   own. They release the execution's resources. Léo does not enable Claude's unattended
   `CLAUDE_CODE_RETRY_WATCHDOG`, which would keep the process waiting for a usage window
@@ -118,7 +120,10 @@ started, resumed by a `SendMessage` call or by Claude Code itself, shows as a ne
 of the current execution marked `resumed`, keyed by its task ID: Cairn rows belong to
 one execution. Other unknown agent tasks, such as a workflow's agents or housekeeping
 agents Claude Code marks `skip_transcript` or `ambient`, are ignored. Nested subagents
-keep their parent and `parent_task_id`. The minimum supported CLI stays **2.1.280**:
+keep their parent and `parent_task_id`. Without `agent_id`, a resumed subagent's
+messages may name the call that resumed it (such as `SendMessage`) in
+`parent_tool_use_id`; once a task frame ties that call to the subagent, they stay its
+steps. The minimum supported CLI stays **2.1.280**:
 older frames without these fields keep the earlier correlation, and the fixtures cover
 both shapes. The events reach the public MCP and `cairn_installation` through
 `get_run`.

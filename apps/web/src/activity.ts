@@ -527,12 +527,14 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       usageLimits = []
     }
 
-    // A run that ends without its turn completing, stopped or failed by the runner, ends the
-    // engine's retries with it: they did not recover.
+    // The engine's retries and usage limit belong to the run that reported them. A run that ends
+    // before its turn completes, stopped or failed by the runner, ends its retries unrecovered; a
+    // later run reports its own limit.
     if (event.type === 'runner.failed' || (event.type === 'status' && terminalStatuses.has(event.text))) {
-      for (const notice of engineRetries)
+      for (const notice of [...engineRetries, ...usageLimits])
         notice.attention = false
       engineRetries = []
+      usageLimits = []
     }
 
     // A run that ends, or is stopped while it waits, ends its retry chain: a resume starts afresh.
