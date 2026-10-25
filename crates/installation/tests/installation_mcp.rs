@@ -3473,6 +3473,10 @@ async fn typed_agent_profiles_preview_and_avatars_match_on_both_tools() {
     let (_, configuration) = active_run(&s, &main).await;
     let token = common::relay_fixture::grant(&s, &["read", "manage"]).await;
     let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let connection = s.mcps.save(&s, json!({
+        "name": "Selected tools", "transport": "http", "url": "http://127.0.0.1:9/mcp", "allowPrivateNetwork": true,
+    }), None).await.unwrap();
+    let connection_id = connection["id"].as_str().unwrap();
     for installation in [false, true] {
         let invoke = |name, args| {
             let configuration = &configuration;
@@ -3575,6 +3579,41 @@ async fn typed_agent_profiles_preview_and_avatars_match_on_both_tools() {
         );
         let read = invoke("get_agent", json!({ "agentId": created.id })).await;
         assert_eq!(result(&read), &serde_json::to_value(&uploaded).unwrap());
+        // The owner grants a restricted connection. Agents may remove it, but cannot
+        // turn its selected tools into unrestricted tools while retaining the connection.
+        let granted = s
+            .agent_fixture(
+                json!({ "access": {
+            "mcps": [connection_id], "mcpTools": { connection_id: ["read"] },
+        } }),
+                Some(&created.id.to_string()),
+            )
+            .await
+            .unwrap();
+        let granted: cairn_contracts::Agent = serde_json::from_value(granted).unwrap();
+        let mut reduced = cairn_contracts::ReplaceAgentInput {
+            agent_id: granted.id,
+            revision: granted.revision.clone(),
+            settings: granted.settings,
+            review: cairn_contracts::AgentReview::default(),
+        };
+        reduced.settings.access.mcp_tools.clear();
+        let expanded = invoke("replace_agent", serde_json::to_value(&reduced).unwrap()).await;
+        assert_eq!(expanded["result"]["isError"], true, "{expanded}");
+        assert_eq!(
+            s.store
+                .agent(&created.id.to_string())
+                .await
+                .unwrap()
+                .unwrap()
+                .revision,
+            reduced.revision
+        );
+        reduced.settings.access.mcps = Some(Vec::new());
+        let removed = invoke("replace_agent", serde_json::to_value(reduced).unwrap()).await;
+        assert_eq!(result(&removed)["access"]["mcps"], json!([]));
+        assert_eq!(result(&removed)["access"]["mcpTools"], json!({}));
+
         let deleted = invoke("delete_agent", json!({ "agentId": created.id })).await;
         assert_eq!(result(&deleted), &json!({ "deleted": true }));
         assert!(

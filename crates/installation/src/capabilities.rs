@@ -378,7 +378,11 @@ impl AgentOperation {
             "inputSchema": input,
             "outputSchema": output,
             "_meta": { "securitySchemes": [{ "type": "oauth2", "scopes": [self.scope] }] },
-            "annotations": { "readOnlyHint": self.scope == "read" || self.name == "preview_agent", "destructiveHint": self.scope != "read" && self.name != "preview_agent", "openWorldHint": self.name == "generate_agent_avatar" },
+            "annotations": {
+                "readOnlyHint": self.scope == "read" || self.name == "preview_agent",
+                "destructiveHint": self.scope != "read" && self.name != "preview_agent",
+                "openWorldHint": self.name == "generate_agent_avatar",
+            },
         })
     }
 

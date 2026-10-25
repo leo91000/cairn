@@ -210,7 +210,19 @@ impl Service {
                 agent.avatar = current.avatar.clone();
             }
             if editor == AgentEditor::Installation {
-                let before = current.as_ref().map(serde_json::to_value).transpose()?.unwrap_or_else(|| json!({ "access": { "projects": [], "skills": [], "mcps": [], "nodes": [], "sandbox": "yolo" } }));
+                let mut before_access = current.as_ref().map_or_else(|| cairn_contracts::AccessPolicy {
+                    projects: Some(Vec::new()),
+                    skills: Some(Vec::new()),
+                    mcps: Some(Vec::new()),
+                    nodes: Some(Vec::new()),
+                    ..cairn_contracts::AccessPolicy::default()
+                }, |profile| profile.settings.access.clone());
+                // A tool ceiling only applies to connections retained by the proposed policy.
+                // Removing a connection also removes its tool entry, without granting all tools.
+                before_access.mcp_tools.retain(|connection, _| {
+                    agent.settings.access.mcps.as_ref().is_none_or(|connections| connections.contains(connection))
+                });
+                let before = json!({ "access": before_access });
                 let edited = serde_json::to_value(&agent)?;
                 let expands = !covers(&before, &edited) || !node_access_covers(&before, &edited);
                 let previous_plugins = current.as_ref().map(|a| a.settings.plugins.as_slice()).unwrap_or_default();
