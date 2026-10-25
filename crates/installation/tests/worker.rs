@@ -1697,7 +1697,7 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
             "sharedResources": true,
             "budget": { "slots": state.slots, "limits": { "cpu": 7, "memoryMiB": 15872, "diskMiB": 104857 } },
             "runtimeId": "development",
-            "runtimes": ["development"],
+
             "capabilities": {
                 "os": "linux",
                 "arch": "x86_64",
@@ -2932,7 +2932,7 @@ async fn queued_work_waits_for_node_capacity_without_failing() {
             "accepting": true,
             "executionReady": true,
             "runtimeId": "development",
-            "runtimes": ["development"],
+
             "lastSeen": now() + 60_000,
             "capabilities": {"kvm": true },
             "limits": {"cpu": 1, "memoryMiB": 8192, "diskMiB": 65536},

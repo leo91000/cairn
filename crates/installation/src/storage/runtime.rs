@@ -575,9 +575,6 @@ impl Volume {
         let blocked = reason.is_some();
         let pending = self.transition.lock().map_err(Error::internal)?.is_some();
         if blocked != self.paused() || pending {
-            if self.paused() || pending {
-                suspension::adopt_storage_state(state, attempt, self.paused(), pending).await?;
-            }
             let transition_started = std::time::Instant::now();
             tracing::info!(target: "cairn_performance", operation = "storage_backpressure", id = attempt, phase = "requested", paused = blocked, reason = reason.unwrap_or("ready"));
             let result = suspension::set_reason(state, attempt, &Reason::Storage, blocked).await;
@@ -885,7 +882,10 @@ pub async fn materialize(directory: &Path, stop: &CancellationToken) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{BlockSource, environment, remote::RemoteSource};
+    use crate::{
+        microvm::suspension,
+        storage::{BlockSource, environment, remote::RemoteSource},
+    };
     use serde_json::json;
 
     fn prepared_manifest() -> Value {
@@ -1325,11 +1325,15 @@ mod tests {
         let vm = uuid::Uuid::new_v4().to_string();
         let jail = root.join("jails/firecracker").join(&vm).join("root");
         std::fs::create_dir_all(&jail).unwrap();
+        suspension::prepare_attempt(root, &attempt, &vm)
+            .await
+            .unwrap();
         std::fs::write(
             root.join("attempt.vm.json"),
             json!({"vmId":vm,"runId":"run"}).to_string(),
         )
         .unwrap();
+        suspension::bind_attempt(root, &attempt, &vm).await.unwrap();
         (
             volume,
             attempt,
@@ -1480,29 +1484,7 @@ mod tests {
     #[tokio::test]
     async fn cache_admission_contention_does_not_interrupt_the_vm() {
         let root = tempfile::tempdir().unwrap();
-        let directory = root.path().join("disks/conversation");
-        let context = json!({
-            "master": "http://127.0.0.1:1/", "grant": "fixture",
-            "policy": { "reserveMiB": 64, "reservePercent": 1 }
-        });
-        drop(
-            create(
-                &directory.join("lazy"),
-                &json!({
-                    "version": 1, "size": 4096, "blockSize": 4194304,
-                    "blocks": [{"offset": 0, "size": 4096, "hash": null}]
-                }),
-                &context,
-            )
-            .await
-            .unwrap(),
-        );
-        let volume = load(&directory).await.unwrap();
-        std::fs::write(
-            root.path().join("attempt.vm.json"),
-            json!({"vmId":uuid::Uuid::new_v4().to_string()}).to_string(),
-        )
-        .unwrap();
+        let (volume, _, _api) = controller_fixture(root.path()).await;
         let (ready, acquired) = std::sync::mpsc::channel();
         let admission = std::thread::spawn(move || {
             let _guard = super::super::cache::admission().unwrap();

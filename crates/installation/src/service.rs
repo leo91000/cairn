@@ -1027,16 +1027,13 @@ pub(crate) fn forget_agent(db: &Db<'_>, id: &str) -> Result<()> {
     crate::agent_grants::forget_agent(db, id)
 }
 
-/// Older clients omit settings they do not know about; keep the saved ones.
+/// Partial updates preserve current settings that the caller did not edit.
 fn inherit_agent_settings(input: &mut Value, existing: &Value) {
     if input.get("access").is_none() {
         input["access"] = policy(existing);
     }
     if input.get("provider").is_none() {
-        input["provider"] = existing
-            .get("provider")
-            .cloned()
-            .unwrap_or_else(|| "codex".into());
+        input["provider"] = existing["provider"].clone();
     }
     if input.is_object() {
         for key in [

@@ -1086,6 +1086,9 @@ mod tests {
             .join(&vm_id)
             .join("root");
         tokio::fs::create_dir_all(&directory).await.unwrap();
+        suspension::prepare_attempt(root.path(), "attempt", &vm_id)
+            .await
+            .unwrap();
         atomic_write(
             &root.path().join("attempt.vm.json"),
             &serde_json::to_vec(&AttemptRecord {

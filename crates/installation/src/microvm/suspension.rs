@@ -38,7 +38,7 @@ pub struct Status {
 #[serde(rename_all = "camelCase")]
 struct Record {
     vm_id: Option<String>,
-    ready: Option<bool>,
+    ready: bool,
     reasons: BTreeSet<Reason>,
     confirmed_paused: Option<bool>,
     administrative_since: Option<i64>,
@@ -118,15 +118,11 @@ impl Record {
     fn effective_paused(&self) -> bool {
         self.reasons
             .iter()
-            .any(|reason| self.ready != Some(false) || !matches!(reason, Reason::Exclusive { .. }))
+            .any(|reason| self.ready || !matches!(reason, Reason::Exclusive { .. }))
     }
 
     fn account(&mut self, bound: bool, now: i64) {
-        if bound
-            && self.ready != Some(false)
-            && self.confirmed_paused == Some(true)
-            && self.administrative()
-        {
+        if bound && self.ready && self.confirmed_paused == Some(true) && self.administrative() {
             self.administrative_since.get_or_insert(now);
         } else if let Some(since) = self.administrative_since.take() {
             self.administrative_suspended_ms = self
@@ -146,9 +142,7 @@ impl Record {
         };
         Status {
             paused,
-            acknowledged: bound
-                && self.ready != Some(false)
-                && self.confirmed_paused == Some(paused),
+            acknowledged: bound && self.ready && self.confirmed_paused == Some(paused),
             administrative_suspended_ms: self.administrative_suspended_ms.saturating_add(current),
             reasons: self.reasons.iter().cloned().collect(),
         }
@@ -189,60 +183,50 @@ pub async fn set_reason(
     }
     let path = record_path(state, attempt)?;
     let _attempt = transition_lock(&path).await?;
-    let mut record: Record = read(&path).await?.unwrap_or_default();
+    let binding: Option<AttemptRecord> = read(&state.join(format!("{attempt}.vm.json"))).await?;
+    let mut record: Record = match read(&path).await? {
+        Some(record) => record,
+        None if binding.is_none() => Record::default(),
+        None => return Err(Error::conflict("Bound VM suspension state is missing.")),
+    };
     if enabled {
         record.reasons.insert(reason.clone());
     } else {
         record.reasons.remove(reason);
     }
 
-    let binding: Option<AttemptRecord> = read(&state.join(format!("{attempt}.vm.json"))).await?;
     let Some(binding) = binding else {
         record.account(false, crate::config::now());
         save(&path, &record).await?;
         return Ok(record.status(false));
     };
-    let starting = record.ready == Some(false);
-    let administrative_only = record
-        .reasons
-        .iter()
-        .all(|reason| matches!(reason, Reason::Exclusive { .. }));
-    if starting && administrative_only {
-        // Initial guest RPCs must finish before their CPUs can be parked. The
-        // exclusive caller waits for bind_attempt after the Run request.
-        let current_jail = jail(state, &binding.vm_id)?;
-        let owner_path = current_jail.join("suspension-owner.json");
-        let _vm = transition_lock(&owner_path).await?;
-        let owns_vm = read::<Owner>(&owner_path)
-            .await?
-            .is_some_and(|owner| owner.attempt == attempt);
-        if owns_vm && record.confirmed_paused != Some(false) {
-            // Storage protection can end during preparation. Resume that
-            // fence while leaving administrative acquisition unacknowledged.
-            return apply(&path, &current_jail, &mut record).await;
-        }
-        save(&path, &record).await?;
-        return Ok(record.status(false));
+    if record.vm_id.as_deref() != Some(binding.vm_id.as_str()) {
+        return Err(Error::conflict("VM suspension binding changed."));
     }
     let jail = jail(state, &binding.vm_id)?;
     let owner_path = jail.join("suspension-owner.json");
     let _vm = transition_lock(&owner_path).await?;
-    if let Some(owner) = read::<Owner>(&owner_path).await? {
-        if owner.attempt != attempt {
-            return Err(Error::conflict("Execution no longer owns this VM."));
-        }
-    } else {
-        // Compatibility with already active VMs from before arbiter startup.
-        save(
-            &owner_path,
-            &Owner {
-                attempt: attempt.to_owned(),
-            },
-        )
-        .await?;
-        record.confirmed_paused.get_or_insert(false);
+    if !read::<Owner>(&owner_path)
+        .await?
+        .is_some_and(|owner| owner.attempt == attempt)
+    {
+        return Err(Error::conflict("Execution no longer owns this VM."));
     }
-    record.vm_id = Some(binding.vm_id);
+    let administrative_only = record
+        .reasons
+        .iter()
+        .all(|reason| matches!(reason, Reason::Exclusive { .. }));
+    if !record.ready && administrative_only {
+        // Initial guest RPCs must finish before their CPUs can be parked. The
+        // exclusive caller waits for bind_attempt after the Run request.
+        if record.confirmed_paused != Some(false) {
+            // Storage protection can end during preparation. Resume that
+            // fence while leaving administrative acquisition unacknowledged.
+            return apply(&path, &jail, &mut record).await;
+        }
+        save(&path, &record).await?;
+        return Ok(record.status(false));
+    }
     apply(&path, &jail, &mut record).await
 }
 
@@ -304,50 +288,6 @@ pub async fn administrative_suspended_ms(state: &Path, attempt: &str) -> Result<
     Ok(inspect(state, attempt).await?.administrative_suspended_ms)
 }
 
-/// Adopt the old monitor's known state once, for an already active VM. Existing
-/// durable owners always take precedence over this compatibility observation.
-pub(crate) async fn adopt_storage_state(
-    state: &Path,
-    attempt: &str,
-    paused: bool,
-    pending: bool,
-) -> Result<()> {
-    let path = record_path(state, attempt)?;
-    let mutex = lock(&path)?;
-    let _attempt = mutex.lock().await;
-    if read::<Record>(&path).await?.is_some() {
-        return Ok(());
-    }
-    let binding: AttemptRecord = read(&state.join(format!("{attempt}.vm.json")))
-        .await?
-        .ok_or_else(|| Error::conflict("VM suspension is not bound."))?;
-    let owner_path = jail(state, &binding.vm_id)?.join("suspension-owner.json");
-    let mutex = lock(&owner_path)?;
-    let _vm = mutex.lock().await;
-    if let Some(owner) = read::<Owner>(&owner_path).await? {
-        if owner.attempt != attempt {
-            return Err(Error::conflict("Execution no longer owns this VM."));
-        }
-    } else {
-        save(
-            &owner_path,
-            &Owner {
-                attempt: attempt.to_owned(),
-            },
-        )
-        .await?;
-    }
-    let mut record = Record {
-        vm_id: Some(binding.vm_id),
-        confirmed_paused: (!pending).then_some(paused),
-        ..Record::default()
-    };
-    if paused || pending {
-        record.reasons.insert(Reason::Storage);
-    }
-    save(&path, &record).await
-}
-
 /// Keeps a confirmed fence stable while host-side memory reclamation operates.
 /// This does not take the broker control lock, so callers may already hold it.
 pub struct PausedGuard {
@@ -359,10 +299,7 @@ pub async fn hold_paused(state: &Path, attempt: &str, reason: &Reason) -> Result
     let path = record_path(state, attempt)?;
     let attempt_guard = lock(&path)?.lock_owned().await;
     let record: Record = read(&path).await?.unwrap_or_default();
-    if record.ready == Some(false)
-        || record.confirmed_paused != Some(true)
-        || !record.reasons.contains(reason)
-    {
+    if !record.ready || record.confirmed_paused != Some(true) || !record.reasons.contains(reason) {
         return Err(Error::conflict(
             "VM suspension has not been confirmed for this owner.",
         ));
@@ -395,29 +332,19 @@ pub(crate) async fn bind_attempt(state: &Path, attempt: &str, vm_id: &str) -> Re
     let owner_path = jail.join("suspension-owner.json");
     let mutex = lock(&owner_path)?;
     let _vm = mutex.lock().await;
-    let mut record: Record = read(&path).await?.unwrap_or_default();
-    if let Some(owner) = read::<Owner>(&owner_path).await?
-        && owner.attempt != attempt
+    let mut record: Record = read(&path)
+        .await?
+        .ok_or_else(|| Error::conflict("VM suspension has not been prepared."))?;
+    if record.vm_id.as_deref() != Some(vm_id)
+        || !read::<Owner>(&owner_path)
+            .await?
+            .is_some_and(|owner| owner.attempt == attempt)
     {
-        let old_path = record_path(state, &owner.attempt)?;
-        let old: Record = read(&old_path).await?.unwrap_or_default();
-        if !old.reasons.is_empty() || old.confirmed_paused != Some(false) {
-            return Err(Error::conflict(
-                "Previous execution still holds this VM suspended.",
-            ));
-        }
+        return Err(Error::conflict("Execution no longer owns this VM."));
     }
-    record.vm_id = Some(vm_id.to_owned());
-    record.ready = Some(true);
-    // Boot and retained resume both leave CPUs running before this binding.
+    record.ready = true;
+    // Guest setup and the Run request finish before this activation.
     record.confirmed_paused = Some(false);
-    save(
-        &owner_path,
-        &Owner {
-            attempt: attempt.to_owned(),
-        },
-    )
-    .await?;
     apply(&path, &jail, &mut record).await
 }
 
@@ -442,7 +369,7 @@ pub(crate) async fn prepare_attempt(state: &Path, attempt: &str, vm_id: &str) ->
         }
     }
     record.vm_id = Some(vm_id.to_owned());
-    record.ready = Some(false);
+    record.ready = false;
     record.confirmed_paused = Some(false);
     save(&path, &record).await?;
     // Transfer the physical owner before imports. The new lease's storage
@@ -519,7 +446,7 @@ pub(super) async fn finish_jail(jail: &Path) -> Result<()> {
     record.account(false, crate::config::now());
     record.vm_id = None;
     record.confirmed_paused = None;
-    record.ready = Some(false);
+    record.ready = false;
     save(&path, &record).await
 }
 
@@ -557,6 +484,9 @@ mod tests {
         let vm_id = crate::config::id();
         let directory = jail(root.path(), &vm_id).unwrap();
         tokio::fs::create_dir_all(&directory).await.unwrap();
+        prepare_attempt(root.path(), "attempt", &vm_id)
+            .await
+            .unwrap();
         save(
             &root.path().join("attempt.vm.json"),
             &AttemptRecord {
@@ -600,6 +530,29 @@ mod tests {
             .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn bound_vms_require_current_suspension_records() {
+        for missing_owner in [true, false] {
+            let (root, vm_id, listener) = fixture().await;
+            let missing = if missing_owner {
+                jail(root.path(), &vm_id)
+                    .unwrap()
+                    .join("suspension-owner.json")
+            } else {
+                record_path(root.path(), "attempt").unwrap()
+            };
+            tokio::fs::remove_file(&missing).await.unwrap();
+            let server = tokio::spawn(async move { acknowledge(&listener, "Paused").await });
+            let result = set_reason(root.path(), "attempt", &Reason::Storage, true).await;
+            server.abort();
+            assert!(
+                result.is_err(),
+                "A bound VM cannot reconstruct missing suspension ownership"
+            );
+            assert!(!missing.exists());
+        }
     }
 
     #[tokio::test]
@@ -844,6 +797,9 @@ mod tests {
     #[tokio::test]
     async fn late_previous_attempt_cannot_resume_reused_physical_vm() {
         let (root, vm_id, listener) = fixture().await;
+        prepare_attempt(root.path(), "replacement", &vm_id)
+            .await
+            .unwrap();
         save(
             &root.path().join("replacement.vm.json"),
             &AttemptRecord {
@@ -962,6 +918,7 @@ mod tests {
     #[test]
     fn only_confirmed_administrative_pauses_extend_execution_budget() {
         let mut record = Record {
+            ready: true,
             confirmed_paused: Some(true),
             ..Record::default()
         };

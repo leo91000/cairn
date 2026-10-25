@@ -453,8 +453,26 @@ async fn exercise_vm_control(case: ControlScenario) {
         json!({"runtimeId":"development"}).to_string(),
     )
     .unwrap();
-    let api = root.path().join("jails/firecracker").join(vm).join("root");
+    let api = root.path().join("jails/firecracker").join(&vm).join("root");
     std::fs::create_dir_all(&api).unwrap();
+    std::fs::write(
+        root.path().join(format!("{attempt}.suspension.json")),
+        json!({
+            "vmId": vm,
+            "ready": true,
+            "reasons": if case.resume_ack() { json!([{ "type": "storage" }]) } else { json!([]) },
+            "confirmedPaused": case.resume_ack(),
+            "administrativeSince": null,
+            "administrativeSuspendedMs": 0,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        api.join("suspension-owner.json"),
+        json!({ "attempt": attempt }).to_string(),
+    )
+    .unwrap();
     let paused = Arc::new(AtomicBool::new(case.resume_ack()));
     let controller_task = spawn_firecracker_api(
         UnixListener::bind(api.join("api.sock")).unwrap(),

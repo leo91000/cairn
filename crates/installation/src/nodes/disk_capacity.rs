@@ -120,7 +120,7 @@ pub(crate) fn admission_fits(
 pub(crate) fn report(db: &Db<'_>, node: &mut Value, body: &Value) -> Result<Value> {
     let Ok(mut sample) = serde_json::from_value::<Observation>(body.clone()) else {
         // Negotiation is sticky: an incomplete heartbeat must never downgrade
-        // durable reservations to the legacy physical-only admission policy.
+        // durable reservations to the conservative physical-only admission policy.
         node["diskCapacity"] = Value::Null;
         return Ok(Value::Null);
     };

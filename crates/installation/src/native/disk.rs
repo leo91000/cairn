@@ -25,7 +25,7 @@ pub(crate) async fn used(data: &Path, state: &Path) -> Result<u64> {
         .map_err(Error::internal)?
 }
 
-/// Count file-backed legacy work conservatively, but charge journal/cache blocks
+/// Count file-backed staging conservatively, but charge journal/cache blocks
 /// by allocated bytes. Mounted views refer to those same blocks and add no charge.
 pub(crate) fn usage_sync(data: &Path, state: &Path) -> Result<u64> {
     fn size(

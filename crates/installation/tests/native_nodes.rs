@@ -1191,7 +1191,7 @@ async fn native_disk_growth_is_idempotent_and_competes_atomically_with_admission
     }
     let body = json!({
         "backend": "native", "nodeProtocol": 2, "executionReady": true, "dataRoot": "/fixture",
-        "runtimeId": "development", "runtimes": ["development"],
+        "runtimeId": "development",
         "capabilities": node["capabilities"], "pool": { "capacity": 4 },
         "sharedResources": true, "budget": { "slots": 4, "limits": node["limits"] },
         "nativeMode": { "mode": "protected", "generation": null, "status": "applied" },

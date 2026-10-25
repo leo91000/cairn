@@ -502,14 +502,41 @@ async fn component_version_mismatches_are_explicitly_rejected() {
     request["runtimeId"] = "development".into();
     let (status, identity) = owner.call("POST", ENROLL, request, None).await;
     assert_eq!(status, StatusCode::OK, "{identity}");
+    let node_id = identity["nodeId"].as_str().unwrap();
+    let mut node = owner.stored("nodes", node_id).await.unwrap();
+    node["slots"] = 2.into();
+    let valid = json!({
+        "runtimeId": "development", "nodeProtocol": 2, "executionReady": true,
+        "sharedResources": true, "dataRoot": owner.service.config.data_dir,
+        "budget": { "slots": 2, "limits": node["limits"] },
+    });
+    owner.put("nodes", node).await;
     for request in [
         json!({ "runtimeId": "other-version", "nodeProtocol": 2 }),
         json!({ "runtimeId": "development", "nodeProtocol": 3 }),
+        json!({ "runtimeId": "development", "nodeProtocol": null, "executionReady": false }),
+        json!({ "runtimeId": "other-version", "nodeProtocol": 2, "capabilities": { "backend": "firecracker" } }),
     ] {
+        assert_eq!(
+            owner
+                .call("POST", HEARTBEAT, valid.clone(), identity["token"].as_str())
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            owner.stored("nodes", node_id).await.unwrap()["executionReady"],
+            true
+        );
         let (status, error) = owner
             .call("POST", HEARTBEAT, request, identity["token"].as_str())
             .await;
         assert_eq!(status, StatusCode::CONFLICT, "{error}");
+        assert_eq!(
+            owner.stored("nodes", node_id).await.unwrap()["executionReady"],
+            false,
+            "A rejected or unavailable controller must not retain its previous readiness"
+        );
     }
 }
 
@@ -2436,6 +2463,9 @@ async fn owner_placement_obeys_agent_grants_and_preserves_last_good_selection() 
     let run = id();
     let mut record = run_record(&run, RunStatus::Succeeded);
     record["snapshot"] = json!({ "agent": { "id": MAIN_AGENT_ID } });
+    record["nativeProvenanceUnknown"] = true.into();
+    record["nativePrincipals"] = json!([]);
+    record["nativeAuthorityNodes"] = json!([]);
     owner.add_run(&record).await;
     let path = format!("/api/nodes/placement/{run}");
     let pin = |node: Value| json!({ "pinnedNodeId": node, "preferredNodeId": null });

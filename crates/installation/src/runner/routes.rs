@@ -90,12 +90,6 @@ pub(super) async fn handler(State(broker): State<Broker>, request: Request) -> R
 
 async fn health(broker: &Broker) -> Result<Response> {
     let runtime_id = crate::nodes::component_runtime();
-    let image = broker.state.join("images").join(&runtime_id);
-    let runtimes = if image.join("root.ext4").exists() && image.join("vmlinux").exists() {
-        vec![runtime_id.clone()]
-    } else {
-        Vec::new()
-    };
     let active_runs = broker.active.lock().await.len();
     let mut capabilities = crate::nodes::connector::capabilities(&broker.state).ok();
     if let (Some(capabilities), Some(hardware)) = (&mut capabilities, broker.pool.hardware()) {
@@ -111,7 +105,6 @@ async fn health(broker: &Broker) -> Result<Response> {
         "nodeProtocol": NODE_PROTOCOL,
         "sharedResources": broker.pool.budget().await.is_some(),
         "exclusiveReservations": true,
-        "runtimes": runtimes,
         "dataRoot": broker.data,
         "activeRuns": active_runs,
         "capabilities": capabilities,

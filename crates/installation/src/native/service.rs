@@ -1387,12 +1387,13 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         } else {
             Value::Null
         };
+        let runtime_id = crate::nodes::component_runtime();
+        systemd::tools(&runtime_id)?;
         return Ok(Json(json!({
             "status": "ok", "backend": "native", "nodeProtocol": 2,
-            "runtimeId": std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into()),
+            "runtimeId": runtime_id,
             "dataRoot": controller.data, "capabilities": capabilities,
             "nativeMode": controller.mode.lock().await.clone(),
-            "runtimes": systemd::runtimes()?,
             "pool": { "capacity": budget["slots"] }, "activeRuns": controller.active.lock().await.len(),
             "sharedResources": true, "exclusiveReservations": false, "budget": budget,
             "usage": usage, "pressure": null, "diskGrowth": disk_growth

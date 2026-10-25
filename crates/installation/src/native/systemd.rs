@@ -589,26 +589,7 @@ pub fn spawn(launch: &Launch<'_>) -> Result<Child> {
         .map_err(Error::from)
 }
 
-pub fn runtimes() -> Result<Vec<String>> {
-    Ok(installed_tools()?
-        .into_iter()
-        .map(|(runtime, _)| runtime)
-        .collect())
-}
-
 pub fn tools(runtime: &str) -> Result<PathBuf> {
-    installed_tools()?
-        .into_iter()
-        .find(|(candidate, _)| candidate == runtime)
-        .map(|(_, path)| path)
-        .ok_or_else(|| {
-            Error::unavailable(
-                "The pinned coding-engine runtime is not installed on this native node.",
-            )
-        })
-}
-
-fn installed_tools() -> Result<Vec<(String, PathBuf)>> {
     let current = PathBuf::from(
         std::env::var("CAIRN_NATIVE_TOOLS")
             .map_err(|_| Error::bad("Missing native tool bundle."))?,
@@ -618,8 +599,8 @@ fn installed_tools() -> Result<Vec<(String, PathBuf)>> {
         .ok_or_else(|| Error::bad("Invalid native tool bundle path."))?
         .join("release.json");
     let release: Value = serde_json::from_slice(&std::fs::read(release_path)?)?;
-    let runtime = crate::nodes::component_runtime();
-    if release["runtimeId"] != runtime
+    let expected_runtime = crate::nodes::component_runtime();
+    if release["runtimeId"] != expected_runtime
         || release["os"] != "linux"
         || release["arch"] != "x86_64"
         || !current.join("manifest.json").is_file()
@@ -628,7 +609,12 @@ fn installed_tools() -> Result<Vec<(String, PathBuf)>> {
             "Native tool version mismatch; reinstall the current component bundle.",
         ));
     }
-    Ok(vec![(runtime, current)])
+    if runtime != expected_runtime {
+        return Err(Error::unavailable(
+            "The pinned coding-engine runtime is not installed on this native node.",
+        ));
+    }
+    Ok(current)
 }
 
 /// Freeze the entire workload, including descendants. An acknowledged command

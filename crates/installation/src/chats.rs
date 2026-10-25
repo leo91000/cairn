@@ -1222,10 +1222,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn continuation_consumes_durable_and_legacy_fresh_session_requests_once() {
+    async fn continuation_consumes_chat_and_checkpoint_fresh_session_requests_once() {
         use crate::store::Store;
 
-        for legacy in [false, true] {
+        for checkpoint_restart in [false, true] {
             for (isolated, native) in [(false, false), (true, false), (true, true)] {
                 let root = tempfile::tempdir().unwrap();
                 let store = Store::open(root.path()).unwrap();
@@ -1244,7 +1244,7 @@ mod tests {
                         let chat = json!({
                             "id": "chat",
                             "runId": "run",
-                            "sessionRestartRequested": !legacy,
+                            "sessionRestartRequested": !checkpoint_restart,
                         });
                         db.put("chats", &chat)?;
                         db.set(
@@ -1267,7 +1267,7 @@ mod tests {
                         db.set(
                             "run-checkpoint:run",
                             &json!({
-                                "freshSession": legacy,
+                                "freshSession": checkpoint_restart,
                                 "completed": true,
                                 "launched": true,
                                 "prepared": prepared,

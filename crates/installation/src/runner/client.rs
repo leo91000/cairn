@@ -24,8 +24,8 @@ struct Controller {
     token: String,
 }
 
-/// Older controllers report admission pressure as a plain 503 error. Normalize
-/// only their known capacity refusals into the manager's existing wait contract.
+/// Current controllers report occupied native slots as plain 503 errors.
+/// Normalize known capacity refusals into the manager's wait contract.
 fn startup_rejection(status: StatusCode, reason: Option<&str>) -> String {
     let mut message = format!("Execution controller rejected startup (HTTP {status}).");
     if let Some(reason) = reason {
