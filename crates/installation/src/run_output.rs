@@ -766,6 +766,36 @@ mod tests {
     }
 
     #[test]
+    fn native_chat_protocol_runs_keep_the_frame_of_their_interaction() {
+        for provider in ["codex", "claude", "opencode"] {
+            let mut run = json!({
+                "id": "run", "isolated": true,
+                "pluginInstructions": "Mail: never print credentials.",
+                "snapshot": { "agent": { "provider": provider, "access": { "backend": "native" } }, "task": { "prompt": "Check the deployment." } },
+            });
+            let mode = json!({ "mode": "protected" });
+            let mut chat = json!({ "execution": { "text": "Task brief:\nCheck the deployment." } });
+            native_chat_privileges(&mut chat, &run, &mode);
+            let instructions = text(&chat, "instructions");
+            assert!(instructions.contains("Mail: never print credentials."));
+            assert!(instructions.contains("This unattended task"), "{provider}");
+            assert!(!instructions.contains("This is an interactive chat"));
+            assert!(!instructions.contains("Check the deployment."));
+
+            run["chatExecution"] = json!({ "messageId": "message", "text": "Hello" });
+            let mut chat = json!({ "execution": { "text": "Hello" } });
+            native_chat_privileges(&mut chat, &run, &mode);
+            let instructions = text(&chat, "instructions");
+            assert!(instructions.contains("Mail: never print credentials."));
+            assert!(
+                instructions.contains("This is an interactive chat"),
+                "{provider}"
+            );
+            assert!(!instructions.contains("This unattended task"));
+        }
+    }
+
+    #[test]
     fn subscription_limits_of_both_coding_agents_are_exhaustion() {
         for message in [
             "You've hit your usage limit. Upgrade or try again later.",
