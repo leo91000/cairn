@@ -83,9 +83,12 @@ static AGENT_PERFORMANCE_RECORD: LazyLock<regex::Regex> = LazyLock::new(|| {
 const TOOL_FRAME_LIMIT: usize = 100_000_000;
 const MESSAGE_LIMIT: usize = 100_000;
 const ERROR_LIMIT: usize = 10_000;
+/// Claude Code's notices are status lines; a longer one is cut.
+const NOTICE_LIMIT: usize = 4_000;
 
-/// Event types that are always recorded. Clients use turn markers to scope reused message IDs.
-const CONVERSATION_EVENTS: [&str; 7] = [
+/// Event types that are always recorded. Clients use turn markers to scope reused message IDs,
+/// and show the engine's retries and usage limits in the conversation.
+const CONVERSATION_EVENTS: [&str; 9] = [
     "thread.started",
     "turn.started",
     "turn.completed",
@@ -93,7 +96,16 @@ const CONVERSATION_EVENTS: [&str; 7] = [
     "turn.waiting",
     "error",
     "runner.failed",
+    "engine.retry",
+    "provider.limit",
 ];
+
+/// An engine notice the conversation shows. Other notices only reach the run log, within its
+/// budget.
+fn shown_notice(event: &Value) -> bool {
+    event["type"] == "engine.notice"
+        && (matches!(text(event, "level"), "warning" | "suggestion") || event["stopsTurn"] == true)
+}
 
 // Separate pipe readers keep stderr draining even while stdout applies database backpressure.
 pub(super) async fn read_output(
@@ -288,15 +300,23 @@ pub(super) async fn record(
     apply_event(s, id, &event, checkpoint, secrets).await?;
     // Every activity item has its own detail limit, regardless of earlier output.
     let conversation = event["item"]["type"] == "agent_message"
-        || CONVERSATION_EVENTS.contains(&text(&event, "type"));
+        || CONVERSATION_EVENTS.contains(&text(&event, "type"))
+        || shown_notice(&event);
     let activity_item = text(&event, "type").starts_with("item.") && event["item"].is_object();
     if conversation || activity_item || *log_total < LOG_BUDGET {
         let abbreviated = !conversation && activity_item && raw.len() > ITEM_DETAIL_LIMIT;
-        let stored = if abbreviated {
+        let mut stored = if abbreviated {
             run_output::compact_activity(&event, secrets)
         } else {
             run_output::payload(&event, secrets)
         };
+        // Cut once redacted, so a cut cannot expose part of a secret.
+        if let Some(message) = stored["message"]
+            .as_str()
+            .filter(|_| stored["type"] == "engine.notice")
+        {
+            stored["message"] = truncate(message, NOTICE_LIMIT).into();
+        }
         let serialized = serde_json::to_string(&stored)?;
         if !conversation && !activity_item {
             *log_total = log_total.saturating_add(serialized.len());

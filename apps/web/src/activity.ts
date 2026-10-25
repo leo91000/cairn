@@ -9,6 +9,14 @@ import {
   planSteps,
   samePlan,
 } from './agent-plan'
+import {
+  engineAttention,
+  engineNoticeTitle,
+  engineRetryDetail,
+  engineRetryTitle,
+  usageLimitDetail,
+  usageLimitTitle,
+} from './engine-status'
 
 export const MAX_ACTIVITY_GROUP_SIZE = 30
 
@@ -30,6 +38,8 @@ export interface ActivitySubagent {
   activity: string
   model: string
   background: boolean
+  /** The agent resumed it after it reported back; it keeps its identity and steps. */
+  resumed?: boolean
   state: 'running' | 'done' | 'failed' | 'stopped'
   tokens?: number
   toolUses?: number
@@ -171,6 +181,9 @@ function connectionText(raw: string) {
   return /websocket|reconnecting\.\.\.|reconnecting\s+\d+\//i.test(raw) && /503|reconnect|falling back|connection.*(?:closed|failed)/i.test(raw)
 }
 
+// The engine's report on its own requests, distinct from a failure and from Cairn's waits.
+const engineEvents = new Set(['engine.retry', 'engine.notice', 'provider.limit'])
+
 // Adapters report a stop that Cairn requested as a failed turn.
 const stopEchoes = new Set(['Conversation stopped.', 'Claude execution stopped.', 'OpenCode execution stopped.'])
 
@@ -228,6 +241,10 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
 
   const agentKey = (event: RunEvent, id: string) => `${event.runId}:${aliases.get(`${event.runId}:${id}`) ?? id}`
   let connectionNotices: ActivityArtifact[] = []
+  // The engine's own retries share one notice, showing the latest, until work continues.
+  let engineRetries: ActivityArtifact[] = []
+  // The provider's usage limit shows its latest state, until it no longer applies.
+  let usageLimits: ActivityArtifact[] = []
   // A conversation shows one card per failure. The adapter, the worker and the final status
   // may each repeat the provider's error; only a new reason adds a card. When Cairn retries,
   // the next attempt's card with the same reason replaces the previous one.
@@ -245,6 +262,15 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     }
 
     connectionNotices = []
+  }
+
+  function retriesRecovered() {
+    for (const notice of engineRetries) {
+      notice.statusLabel = 'Recovered'
+      notice.attention = false
+    }
+
+    engineRetries = []
   }
 
   let turn = 0
@@ -480,6 +506,8 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     if (event.type === 'turn.started') {
       // Item IDs may repeat in a later turn: a new turn's calls start afresh.
       connectionNotices = []
+      engineRetries = []
+      usageLimits = []
       turn++
     }
 
@@ -492,6 +520,21 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       }
 
       connectionNotices = []
+      // The failure says why the turn ended; a limit that stopped it shows as the usage banner.
+      for (const notice of [...engineRetries, ...usageLimits])
+        notice.attention = false
+      engineRetries = []
+      usageLimits = []
+    }
+
+    // The engine's retries and usage limit belong to the execution that reported them. One that
+    // ends before its turn completes, stopped or failed by the runner, ends its retries
+    // unrecovered; a later execution, perhaps on another account, reports its own limit.
+    if (event.type === 'runner.failed' || (event.type === 'status' && (terminalStatuses.has(event.text) || data.attempt === true))) {
+      for (const notice of [...engineRetries, ...usageLimits])
+        notice.attention = false
+      engineRetries = []
+      usageLimits = []
     }
 
     // A run that ends, or is stopped while it waits, ends its retry chain: a resume starts afresh.
@@ -547,6 +590,14 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
 
     if (event.type === 'turn.completed' || (type === 'command_execution' && event.type === 'item.completed' && item.exit_code === 0 && item.status !== 'failed'))
       recovered()
+    // Work continues once the agent's own reply streams or its tools start, a subagent among them.
+    // Claude Code reports a request it gave up on as a completed message, which the turn's failure
+    // follows; a subagent's progress, or its resumption, says nothing about the agent's request.
+    const ownWork = !text(item.parent_id) && (
+      (event.type === 'item.started' && !(type === 'subagent' && item.resumed === true))
+      || (event.type === 'item.updated' && type !== 'subagent'))
+    if (event.type === 'turn.completed' || ownWork)
+      retriesRecovered()
     const itemId = text(item.id)
     // A subagent keeps its row when its updates arrive after the turn that started it.
     const parentArtifact = subagents.get(agentKey(event, text(item.parent_id)))
@@ -739,6 +790,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
         activity: text(item.activity),
         model: text(item.model) || previous?.model || '',
         background: item.background === true,
+        resumed: item.resumed === true || previous?.resumed === true,
         state,
         tokens: typeof item.tokens === 'number' ? item.tokens : undefined,
         toolUses: typeof item.tool_uses === 'number' ? item.tool_uses : undefined,
@@ -771,6 +823,9 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
         'item.completed': 'Work completed',
         'turn.failed': 'The agent ran into an error',
         'turn.waiting': 'Waiting for background tasks',
+        'engine.retry': 'Retrying the request',
+        'engine.notice': 'Claude Code notice',
+        'provider.limit': 'Usage limit',
       }
       artifact.title = event.type === 'status' ? (statusTitles[event.text] ?? (event.text.includes(' ') ? event.text : readable(event.text))) : type ? readable(type) : labels[event.type] || readable(event.type)
       const message = text(item.message) || text(data.message) || text(record(data.error).message)
@@ -793,6 +848,30 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
           artifact.title = 'Background tasks finished'
         artifact.subtitle = tasks.join(' · ')
       }
+
+      if (engineEvents.has(event.type)) {
+        artifact.status = 'info'
+        artifact.attention = engineAttention(event.type, data)
+      }
+
+      if (event.type === 'engine.retry') {
+        artifact.title = engineRetryTitle(data)
+        artifact.subtitle = engineRetryDetail(data)
+        for (const notice of engineRetries)
+          notice.attention = false
+        engineRetries = [artifact]
+      }
+
+      if (event.type === 'provider.limit') {
+        artifact.title = usageLimitTitle(data)
+        artifact.subtitle = usageLimitDetail(data)
+        for (const notice of usageLimits)
+          notice.attention = false
+        usageLimits = data.status === 'allowed' ? [] : [artifact]
+      }
+
+      if (event.type === 'engine.notice')
+        artifact.title = engineNoticeTitle(data)
     }
 
     if (artifact.kind === 'notice' && ['error', 'diagnostic', 'item.completed'].includes(event.type) && connectionText(artifact.raw)) {

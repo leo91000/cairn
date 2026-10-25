@@ -202,6 +202,43 @@ async fn assert_large_metadata_is_chunked_consistently(
 }
 
 #[tokio::test]
+async fn run_history_includes_the_engine_retries_limits_and_notices() {
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let (s, origin, server) = served(&root).await;
+    let token = common::relay_fixture::grant(&s, &["read"]).await;
+    let run = manual_run(&s, "Engine", "Engine reports").await;
+    let run_id = run["id"].as_str().unwrap();
+    let reports = [
+        json!({ "type": "engine.retry", "attempt": 1, "maxRetries": 10, "delayMs": 500, "reason": "overloaded" }),
+        json!({ "type": "provider.limit", "status": "allowed_warning", "window": "five_hour", "resetsAt": 1_893_499_200_000_i64, "blocked": false }),
+        json!({ "type": "engine.notice", "level": "warning", "message": "Context is almost full." }),
+    ];
+    for report in &reports {
+        let kind = report["type"].as_str().unwrap();
+        s.store
+            .event(run_id, kind, kind, Some(report.clone()))
+            .await
+            .unwrap();
+    }
+    let mcp = Mcp {
+        http: reqwest::Client::new(),
+        endpoint: format!("{origin}/mcp"),
+        token,
+    };
+    let response = mcp.call("get_run", json!({ "runId": run_id })).await;
+    let payloads: Vec<_> = result(&response)["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["type"] != "status")
+        .map(|event| event["payload"].clone())
+        .collect();
+    assert_eq!(payloads, reports);
+    server.abort();
+}
+
+#[tokio::test]
 async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
     let root = TempDir::new().unwrap();
     std::fs::create_dir(root.path().join("home")).unwrap();

@@ -922,8 +922,26 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         s.store.run(queued_id.as_str().unwrap()).await.unwrap()["status"],
         RunStatus::Cancelled
     );
+    // The engine's own retries and usage limits read as the app shows them.
+    let engine =
+        json!({ "type": "engine.retry", "attempt": 2, "maxRetries": 10, "reason": "overloaded" });
+    s.store
+        .event(
+            run["id"].as_str().unwrap(),
+            "engine.retry",
+            "retry",
+            Some(engine.clone()),
+        )
+        .await
+        .unwrap();
     let history = call(&s, &configuration, "get_run", json!({ "runId": run["id"] })).await;
     assert_eq!(result(&history)["run"]["id"], run["id"]);
+    let events = result(&history)["events"].as_array().unwrap().clone();
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == "engine.retry" && event["payload"] == engine)
+    );
     let chunk = call(
         &s,
         &configuration,
