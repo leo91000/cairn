@@ -31,7 +31,7 @@ use serde_json::{Value, json};
 use sign_in::SignIn;
 use std::{
     borrow::Cow,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -456,8 +456,8 @@ impl Accounts {
         Ok(self.connecting.lock().await.as_deref() == Some(id) || self.recovering(s, id).await?)
     }
 
-    /// Accounts able to take a new `model` run now, best first: those offering `speed` when any
-    /// can take the run, then the most remaining capacity, then the least recently used.
+    /// Accounts able to take a new `model` run now, best first: those offering `speed`, then the
+    /// most remaining capacity, then the least recently used.
     async fn eligible(
         &self,
         s: &Service,
@@ -481,17 +481,14 @@ impl Accounts {
             }
         }
 
-        // A speed only some accounts offer prefers them, but never holds a run back when
-        // none of them can take it now: the run then goes at Standard, with a notice.
+        // A speed only some accounts offer puts them first, but never holds a run back: when
+        // none of them can take it, the run goes at Standard on another one, with a notice.
+        let mut lacking = HashSet::new();
         if !speed.is_empty() {
-            let mut offering = Vec::new();
             for account in &candidates {
-                if driver.supports(s, &account.id, model, speed).await? {
-                    offering.push(account.clone());
+                if !driver.supports(s, &account.id, model, speed).await? {
+                    lacking.insert(account.id.clone());
                 }
-            }
-            if !offering.is_empty() {
-                candidates = offering;
             }
         }
 
@@ -499,8 +496,10 @@ impl Accounts {
         let ordered = driver.ordered();
         candidates.sort_by(|a, b| {
             let position = |a: &Account| ordered.then(|| a.priority());
-            position(a)
-                .cmp(&position(b))
+            lacking
+                .contains(&a.id)
+                .cmp(&lacking.contains(&b.id))
+                .then(position(a).cmp(&position(b)))
                 .then(rank(b).total_cmp(&rank(a)))
                 .then(
                     a.last_used_at

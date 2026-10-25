@@ -132,7 +132,7 @@ impl ExecutionAdapter for Codex {
                     .event(
                         text(plan, "runId"),
                         "status",
-                        "The selected speed isn’t offered for this model on this Codex account. This turn runs at Standard speed.",
+                        "Codex doesn’t offer the selected speed for this model here. This turn runs at Standard speed.",
                         Some(payload),
                     )
                     .await?;

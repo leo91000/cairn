@@ -64,7 +64,7 @@ data class Agent(
     val description: String = "",
     val model: String = "",
     val reasoning: String = "high",
-    /** Codex speed; empty follows Codex's default. */
+    /** Codex speed; empty runs at Standard. */
     val speed: String = "",
     val instructions: String = "",
     val timeoutMinutes: Int = 0,

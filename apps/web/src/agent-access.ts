@@ -14,7 +14,7 @@ export interface AgentDraft {
   provider: Agent['provider']
   model: string
   reasoning: string
-  /** Codex speed; empty follows Codex's default. */
+  /** Codex speed; empty runs at Standard. */
   speed: string
   timeoutMinutes: number
   access: AgentAccess

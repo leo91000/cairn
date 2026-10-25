@@ -240,6 +240,25 @@ class EngineStatusTest {
     }
 
     @Test
+    fun `a conversation says a turn runs at Standard when Codex lacks the selected speed`() {
+        val fallback =
+            event("status") {
+                    put(
+                        "speed",
+                        buildJsonObject {
+                            put("requested", "priority")
+                            put("applied", "standard")
+                        },
+                    )
+                }
+                .copy(text = "Codex doesn’t offer the selected speed for this model here.")
+        assertEquals(listOf(fallback.id), notices(listOf(fallback, step())).map { it.id })
+        val shown = presentActivity(fallback)
+        assertEquals("Ce tour passe en vitesse Standard", shown.title)
+        assertEquals("Codex ne propose pas la vitesse choisie pour ce modèle ici", shown.subtitle)
+    }
+
+    @Test
     fun `the usage banner gives the reset the engine reported`() {
         val resetsAt = 1_893_499_200_000L
         val failed =

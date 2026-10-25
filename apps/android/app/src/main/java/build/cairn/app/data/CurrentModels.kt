@@ -191,7 +191,10 @@ data class ServiceTier(
     val id: String,
     val name: String = "",
     val description: String = "",
-    /** Offered by some enabled accounts only; runs asking for it use one of those. */
+    /**
+     * Offered by some enabled accounts only; runs asking for it prefer those, otherwise run at
+     * Standard.
+     */
     val limited: Boolean = false,
 )
 
