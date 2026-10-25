@@ -67,7 +67,7 @@ se déploient à la même version ; un écart de version doit être corrigé ava
 4. Reconnecter les comptes et plugins, réimporter les projets et vérifier une nouvelle
    conversation. Les anciennes conversations et identités ne sont pas récupérées.
 
-La réinitialisation de la base Beacon relève de son runbook opérateur distinct.
+Pour la base Beacon, suivre aussi le [runbook de réinitialisation](BEACON.md#next-release-recreate-the-beacon-database).
 
 ## Installation updates and temporary offline status
 
