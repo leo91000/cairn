@@ -295,7 +295,15 @@ fn agent_run(run: &str, agent: &str) -> Value {
 
 /// A persisted run record in `status`.
 fn run_record(run: &str, status: RunStatus) -> Value {
-    json!({ "id": run, "taskId": "fixture", "createdAt": 0, "status": status })
+    json!({
+        "id": run,
+        "taskId": "fixture",
+        "createdAt": 0,
+        "status": status,
+        "nativeProvenanceUnknown": true,
+        "nativePrincipals": [],
+        "nativeAuthorityNodes": [],
+    })
 }
 
 /// A storage policy with a small reserve, so fixtures fit on any disk.
@@ -2463,9 +2471,6 @@ async fn owner_placement_obeys_agent_grants_and_preserves_last_good_selection() 
     let run = id();
     let mut record = run_record(&run, RunStatus::Succeeded);
     record["snapshot"] = json!({ "agent": { "id": MAIN_AGENT_ID } });
-    record["nativeProvenanceUnknown"] = true.into();
-    record["nativePrincipals"] = json!([]);
-    record["nativeAuthorityNodes"] = json!([]);
     owner.add_run(&record).await;
     let path = format!("/api/nodes/placement/{run}");
     let pin = |node: Value| json!({ "pinnedNodeId": node, "preferredNodeId": null });
