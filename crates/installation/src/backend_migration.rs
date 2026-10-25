@@ -94,8 +94,17 @@ fn prospective(db: &Db<'_>, run: &Value, agent: &Value, origin: &Origin) -> Resu
     check_access(run, agent)?;
     let mut proposed = run.clone();
     proposed["snapshot"]["agent"] = agent.clone();
-    for key in ["provider", "model", "reasoning", "speed"] {
+    for key in ["provider", "model", "reasoning"] {
         proposed["snapshot"]["agent"][key] = run["snapshot"]["agent"][key].clone();
+    }
+    // A run without a speed keeps none, rather than the profile's or a null one.
+    match run["snapshot"]["agent"].get("speed") {
+        Some(speed) => proposed["snapshot"]["agent"]["speed"] = speed.clone(),
+        None => {
+            if let Some(agent) = proposed["snapshot"]["agent"].as_object_mut() {
+                agent.remove("speed");
+            }
+        }
     }
     // An explicit authenticated owner adopts the existing work. Installation
     // agents keep their parent's bounded, revocable native authority.
@@ -753,6 +762,15 @@ mod tests {
             assert!(prospective(db, &historical, &agent, &origin).is_err());
             historical["nativeParentRunId"] = parent.clone().into();
             let candidate = prospective(db, &historical, &agent, &origin)?;
+            // The run's speed carries over; a run without one keeps none, whatever the profile's.
+            assert!(candidate["snapshot"]["agent"].get("speed").is_none());
+            let mut faster = agent.clone();
+            faster["speed"] = "priority".into();
+            let standard = prospective(db, &historical, &faster, &origin)?;
+            assert!(standard["snapshot"]["agent"].get("speed").is_none());
+            let mut fast = historical.clone();
+            fast["snapshot"]["agent"]["speed"] = "priority".into();
+            assert_eq!(prospective(db, &fast, &agent, &origin)?["snapshot"]["agent"]["speed"], "priority");
             assert_eq!(candidate["nativePrincipals"], json!(["editor", "owner"]));
             assert_eq!(candidate["nativeParentRunId"], parent);
             assert!(allowed(db, &candidate, &db.get("nodes", &node)?.unwrap())?);
