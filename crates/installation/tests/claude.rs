@@ -1680,21 +1680,31 @@ async fn nested_and_resumed_subagents_keep_their_identity_and_the_parent_reply()
 
 #[tokio::test]
 async fn a_subagent_resumed_before_its_call_returns_keeps_its_new_run() {
+    for prompt in [
+        "fixture:resumed-before-result",
+        "fixture:resumed-before-result after-report",
+    ] {
+        resumed_before_result(prompt).await;
+    }
+}
+
+async fn resumed_before_result(prompt: &str) {
     let root = TempDir::new().unwrap();
     let c = setup(&root);
-    let events = run_events(&c, plan(&root, "fixture:resumed-before-result")).await;
+    let events = run_events(&c, plan(&root, prompt)).await;
     let rows: Vec<_> = events
         .iter()
         .filter(|event| event["item"]["type"] == "subagent" && event["item"]["id"] == "agent-a")
         .map(|event| &event["item"])
         .collect();
-    // The call that started it returns during the new run, which reports for itself.
+    // The call that started it returns during the new run, or after it, which reports for
+    // itself.
     let last = rows.last().unwrap();
-    assert_eq!(last["status"], "completed");
+    assert_eq!(last["status"], "completed", "{prompt}");
     assert_eq!(last["run_id"], "run-2");
     assert_eq!(last["resumed"], true);
-    assert_eq!(last["result"], "A second report.");
-    assert_eq!(last["tokens"], 700);
+    assert_eq!(last["result"], "A second report.", "{prompt}");
+    assert_eq!(last["tokens"], 700, "{prompt}");
     assert!(
         rows.iter()
             .filter(|item| item["run_id"] == "run-2")
@@ -1712,8 +1722,8 @@ async fn a_subagent_resumed_by_a_later_execution_shows_as_resumed() {
         .filter(|event| event["item"]["type"] == "subagent")
         .collect();
     // Only the subagents resumed, by the agent or by Claude Code: an agent its workflow starts,
-    // one a subagent starts from work this execution does not see, or a housekeeping agent
-    // Claude Code starts itself, is not one.
+    // one a subagent starts from work this execution does not see, a new agent started without
+    // a call, or a housekeeping agent Claude Code starts itself, is not one.
     assert!(all.iter().all(|event| {
         ["task-old:run-3", "task-orphan:run-5"].contains(&event["item"]["id"].as_str().unwrap())
     }));

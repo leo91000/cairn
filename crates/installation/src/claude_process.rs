@@ -910,9 +910,13 @@ impl Turn<'_> {
             }
         }
         // The call that started the subagent can return after a later run resumed it: that run
-        // reports for itself, so the earlier run's result leaves it open.
-        if item["resumed"] == true && item["status"] == "in_progress" {
-            self.subagents.insert(id, item);
+        // reports for itself, whether it still works or already reported.
+        if item["resumed"] == true {
+            if item["status"] == "in_progress" {
+                self.subagents.insert(id, item);
+            } else {
+                self.settled.insert(id, item);
+            }
             return Ok(());
         }
         let launched = matches!(
@@ -1066,10 +1070,11 @@ impl Turn<'_> {
 
     /// A subagent an earlier execution started, resumed in this one: by a SendMessage call, or
     /// by Claude Code itself. It keeps its task ID, but this execution never saw the tool use that
-    /// started it, so it shows as a new row of this execution marked resumed. Its run names the SendMessage call,
-    /// or, when Claude Code resumed it, the earlier execution's call that started it, or none.
-    /// Another tool use of this execution, such as a workflow's, starts its own agents. A call
-    /// this execution never made only names a resumed subagent the agent itself started: a nested
+    /// started it, so it shows as a new row of this execution marked resumed. Its run names the
+    /// SendMessage call or, when Claude Code resumed it, the earlier execution's call that
+    /// started it. Another tool use of this execution, such as a workflow's, starts its own
+    /// agents; a start naming no call is a new agent, such as a forked slash command. A call this
+    /// execution never made only names a resumed subagent the agent itself started: a nested
     /// agent may start from work this execution does not see.
     async fn subagent_resumed(&mut self, value: &Value) -> Result<()> {
         let task = text(value, "task_id");
@@ -1078,7 +1083,7 @@ impl Turn<'_> {
             && value["spawn_depth"].as_u64().is_none_or(|depth| depth <= 1);
         let resumes = match self.called.get(tool_use) {
             Some(tool) => tool == "SendMessage",
-            None => tool_use.is_empty() || top_level,
+            None => !tool_use.is_empty() && top_level,
         };
         // Housekeeping agents Claude Code starts itself stay out of the transcript.
         if value["subtype"] != "task_started"

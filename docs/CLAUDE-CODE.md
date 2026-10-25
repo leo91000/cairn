@@ -121,27 +121,27 @@ Subagents are followed by the tool use that started them and by their task ID. C
 Code 2.1.292 and later add `agent_id` to a subagent's messages (equal to its task ID,
 kept when resumed), plus `parent_task_id` and `run_id` to task frames. From then on, a
 subagent's messages are never taken as the agent's reply, even without
-`parent_tool_use_id`. Older frames rely on `parent_tool_use_id` alone.
-When the agent resumes a subagent, its new run reopens the same item, marked
-`resumed`. That holds even when the run names another tool use. Claude Code promises
-that a task's run IDs sort, by plain string comparison, in the order its runs opened,
-so a frame naming an earlier run, or repeating the start of the run that reported, is
-late and ignored. The call that started a subagent can return after a later run
-resumed it; that run then reports for itself. A subagent an earlier execution started, resumed by a `SendMessage`
-call or by Claude Code itself (its run then names the earlier execution's call, or no
-call), shows as a new row of the current execution marked `resumed`, keyed by its task
-and run IDs: Cairn rows belong to one execution, and a later execution that resumes it
-again gets its own row. A call this execution never made only counts
+`parent_tool_use_id`. Older frames rely on `parent_tool_use_id` alone. When the agent
+resumes a subagent, its new run reopens the same item, marked `resumed`. That holds
+even when the run names another tool use. Claude Code promises that a task's run IDs
+sort, by plain string comparison, in the order its runs opened, so a frame naming an
+earlier run, or repeating the start of the run that reported, is late and ignored. The
+call that started a subagent can return after a later run resumed it; that run then
+reports for itself. A subagent an earlier execution started, resumed by a
+`SendMessage` call or by Claude Code itself (its run then names the earlier
+execution's call), shows as a new row of the current execution marked `resumed`, keyed
+by its task and run IDs: Cairn rows belong to one execution, and a later execution
+that resumes it again gets its own row. A call this execution never made only counts
 for a top-level subagent (no `parent_task_id`, `spawn_depth` 1). Other unknown agent
-tasks, such as a workflow's agents, nested agents started from work this execution does
-not see, or housekeeping agents Claude Code marks `skip_transcript` or `ambient`, are
-ignored. Nested subagents keep their parent and `parent_task_id`. Without `agent_id`,
-a resumed subagent's messages may name the call that resumed it (such as
-`SendMessage`) in `parent_tool_use_id`; once a task frame ties that call to the
-subagent, they stay its steps. The minimum supported CLI stays **2.1.280**: older
-frames without these fields keep the earlier correlation, and the fixtures cover both
-shapes. The events reach the public MCP and `cairn_installation` through
-`get_run`.
+tasks, such as a workflow's agents, nested agents started from work this execution
+does not see, new agents started without a call (forked slash commands or skills), or
+housekeeping agents Claude Code marks `skip_transcript` or `ambient`, are ignored.
+Nested subagents keep their parent and `parent_task_id`. Without `agent_id`, a resumed
+subagent's messages may name the call that resumed it (such as `SendMessage`) in
+`parent_tool_use_id`; once a task frame ties that call to the subagent, they stay its
+steps. The minimum supported CLI stays **2.1.280**: older frames without these fields
+keep the earlier correlation, and the fixtures cover both shapes. The events reach the
+public MCP and `cairn_installation` through `get_run`.
 
 An explicit provider choice is saved with each queued message. Steering cannot
 change the running turn's provider. Messages that omit the provider continue

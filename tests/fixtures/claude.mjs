@@ -705,6 +705,14 @@ else {
         parent_tool_use_id: 'agent-earlier',
         message: { id: 'orphan-1', content: [{ type: 'text', text: 'Migration done.' }] },
       })
+      // Nor is a new agent started without a call, such as a forked slash command.
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-forked',
+        description: 'Forked command',
+        task_type: 'local_agent',
+      })
       // Nor is an agent a subagent starts from work this execution does not see.
       out({
         type: 'system',
@@ -814,7 +822,7 @@ else {
         is_backgrounded: true,
         task_type: 'local_agent',
       })
-      out({
+      const firstResult = () => out({
         type: 'user',
         parent_tool_use_id: null,
         message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'agent-a', content: [{ type: 'text', text: 'A done.' }] }] },
@@ -825,6 +833,10 @@ else {
           content: [{ type: 'text', text: 'A done.' }],
         },
       })
+      // The call may return while the new run works, or only once it reported too.
+      const late = prompt.includes('after-report')
+      if (!late)
+        firstResult()
       out({
         type: 'system',
         subtype: 'task_notification',
@@ -836,6 +848,8 @@ else {
         output_file: '',
         usage: { total_tokens: 700, tool_uses: 2, duration_ms: 400 },
       })
+      if (late)
+        firstResult()
       out({
         type: 'user',
         parent_tool_use_id: null,
