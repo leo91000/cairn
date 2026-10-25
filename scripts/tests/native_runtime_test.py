@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.request
 import uuid
 import zipfile
 
@@ -190,6 +191,17 @@ def main():
             run = str(uuid.uuid4())
             runs.append(run)
             contexts[run] = manager('create', run=run)
+            # Warm local blocks can hide a missing current node acknowledgement.
+            # Exercise the real cold-read authorization before mounting any disk.
+            context = contexts[run]
+            request = urllib.request.Request(
+                context['master'].rstrip('/') + '/internal/node-restore/renew',
+                data=b'{}',
+                headers={'Authorization': 'Bearer ' + context['grant'], 'Content-Type': 'application/json'},
+                method='POST',
+            )
+            with host.HTTP.open(request, timeout=30) as response:
+                assert json.load(response)['renewed'] is True, 'Native fixture disk grant is not authorized.'
             seed(run)
             return run
 

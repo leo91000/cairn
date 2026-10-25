@@ -150,7 +150,7 @@ console.log('exclusive-live-ok '+mode+' pid='+process.pid);
       storage,
       resources: { cpu: 2, memoryMiB: envelopeMiB, diskMiB: 32768 },
       command: ['node', `${runRoot}/workspace/probe.mjs`],
-      chat: {},
+      chat: { provider: 'codex' },
       imports: [
         { source: `${runRoot}/workspace`, target: `${runRoot}/workspace` },
         { source: `${runRoot}/home`, target: '/home/node' },

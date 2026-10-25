@@ -273,7 +273,7 @@ console.log('probe.done');
         sandbox: 'yolo',
         cwd: `${runRoot}/workspace`,
         command: ['/usr/local/bin/node', `${runRoot}/workspace/probe.mjs`, mode, Date.now().toString()],
-        chat: { output: `${runRoot}/output/result.md` },
+        chat: { provider: 'codex', output: `${runRoot}/output/result.md` },
         imports: [
           { source: `${runRoot}/workspace`, target: `${runRoot}/workspace`, readOnly: false },
           { source: `${runRoot}/home`, target: '/home/node', readOnly: false },
