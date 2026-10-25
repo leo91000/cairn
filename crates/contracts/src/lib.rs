@@ -1,3 +1,5 @@
+pub mod beacon;
+
 use schemars::JsonSchema;
 pub use schemars::generate::Contract;
 use serde::{Deserialize, Serialize};

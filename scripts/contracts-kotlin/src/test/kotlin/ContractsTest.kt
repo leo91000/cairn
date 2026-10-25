@@ -8,6 +8,31 @@ class ContractsTest {
     private val json = Json { encodeDefaults = true }
 
     @Test
+    fun accountMethodsCorpusDecodesTypedSuccessAndRefusal() {
+        val corpus =
+            json
+                .parseToJsonElement(
+                    File(System.getProperty("cairn.accountMethodsFixtures")).readText()
+                )
+                .jsonObject
+        for (value in corpus.getValue("valid").jsonArray) {
+            val decoded = json.decodeFromJsonElement<ListAccountMethodsOutput>(value)
+            assertEquals(value, json.encodeToJsonElement(decoded))
+        }
+        for (value in corpus.getValue("invalid").jsonArray) {
+            assertFails(value.toString()) {
+                json.decodeFromJsonElement<ListAccountMethodsOutput>(value)
+            }
+        }
+        assertEquals("{}", json.encodeToString(ListAccountMethodsInput()))
+        for (value in corpus.getValue("invalidInputs").jsonArray) {
+            assertFails(value.toString()) {
+                json.decodeFromJsonElement<ListAccountMethodsInput>(value)
+            }
+        }
+    }
+
+    @Test
     fun qualificationCorpusDecodesAndRoundTrips() {
         val corpus =
             json

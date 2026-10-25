@@ -37,28 +37,15 @@ pub(super) async fn authenticated_on(
 pub(super) async fn list(
     State(service): State<Service>,
     headers: HeaderMap,
-) -> Result<Json<Value>, ApiError> {
-    let (id, _) = authenticated(&service, &headers, false).await?;
-
-    let rows: Vec<(String, String, String)> = query_as(
-        "SELECT id, kind, label FROM sign_in_methods WHERE account_id = $1 AND NOT removed ORDER BY kind, id",
-    )
-    .bind(id)
-    .fetch_all(&service.pool)
-    .await?;
-
-    let methods: Vec<Value> = rows
-        .into_iter()
-        .map(|(id, kind, label)| {
-            json!({
-                "id": id,
-                "kind": kind,
-                "label": label,
-            })
-        })
-        .collect();
-
-    Ok(Json(json!({ "methods": methods })))
+) -> Result<Json<cairn_contracts::beacon::ListAccountMethodsOutput>, ApiError> {
+    let output = capabilities::LIST_ACCOUNT_METHODS
+        .invoke(
+            &service,
+            &headers,
+            cairn_contracts::beacon::ListAccountMethodsInput {},
+        )
+        .await?;
+    Ok(Json(output))
 }
 
 #[derive(Deserialize)]

@@ -857,6 +857,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
     public_names.insert(cairn_contracts::RESUME_RUN_ID);
+    public_names.insert(cairn_contracts::beacon::LIST_ACCOUNT_METHODS_ID);
     assert_eq!(installed_names, public_names);
     assert!(tools.iter().all(|tool| tool.get("_meta").is_none()));
     let deletion = tools
@@ -3187,4 +3188,67 @@ async fn concurrent_resume_run_publishes_once_and_a_revoked_grant_cannot_resume(
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
     ));
     assert!(s.store.run(id).await.unwrap()["cancelRequestedAt"].is_number());
+}
+
+#[tokio::test]
+async fn account_methods_never_derive_account_authority_from_installation_grants() {
+    use cairn_contracts::beacon::{LIST_ACCOUNT_METHODS_ID, ListAccountMethodsOutput};
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (run, configuration) = active_run(&s, &main).await;
+    let token = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+    let public = common::relay_fixture::grant(&s, &["read", "write", "run"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    for (endpoint, bearer) in [("/mcp", public.as_str()), ("/mcp-installation", token)] {
+        let (_, discovery) = node_management_call(
+            &app,
+            endpoint,
+            bearer,
+            "search",
+            json!({ "names": [LIST_ACCOUNT_METHODS_ID], "detail": "schema" }),
+        )
+        .await;
+        let operations = result(&discovery)["operations"].as_array().unwrap();
+        assert_eq!(operations.len(), 1);
+        assert_eq!(
+            operations[0]["inputSchema"],
+            cairn_contracts::schema_for::<cairn_contracts::beacon::ListAccountMethodsInput>(
+                cairn_contracts::Contract::Deserialize
+            )
+        );
+        assert_eq!(
+            operations[0]["outputSchema"],
+            cairn_contracts::schema_for::<ListAccountMethodsOutput>(
+                cairn_contracts::Contract::Serialize
+            )
+        );
+        let (_, denied) =
+            node_management_call(&app, endpoint, bearer, LIST_ACCOUNT_METHODS_ID, json!({})).await;
+        let denied: ListAccountMethodsOutput =
+            serde_json::from_value(result(&denied).clone()).unwrap();
+        assert!(matches!(
+            denied,
+            ListAccountMethodsOutput::AccountProofRequired { .. }
+        ));
+        for args in [
+            json!({ "owner": true }),
+            json!({ "confirmed": true }),
+            json!({ "accountId": "owner" }),
+        ] {
+            let (_, invalid) =
+                node_management_call(&app, endpoint, bearer, LIST_ACCOUNT_METHODS_ID, args).await;
+            assert_eq!(invalid["result"]["isError"], true, "{invalid}");
+        }
+    }
+    s.mcps.revoke_run(&s, text(&run, "id")).await.unwrap();
+    let (status, _) = node_management_call(
+        &app,
+        "/mcp-installation",
+        token,
+        LIST_ACCOUNT_METHODS_ID,
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
