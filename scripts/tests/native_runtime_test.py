@@ -820,6 +820,20 @@ def main():
                 auth_target.chmod(0o600)
                 api('/runs/' + fresh, method='DELETE')
                 fenced(docker_run, fresh)
+                # Model a crash between directory creation and metadata save,
+                # alongside an individually corrupt container. Healthy saved
+                # binds, cache and volumes must survive both resume and restore.
+                containers = docker_data / 'docker/containers'
+                owner = containers.stat()
+                for digit in ['d', 'e']:
+                    incomplete = containers / (digit * 64)
+                    incomplete.mkdir(mode=0o700)
+                    os.chown(incomplete, owner.st_uid, owner.st_gid)
+                    if digit == 'e':
+                        host = incomplete / 'hostconfig.json'
+                        host.write_text('{')
+                        host.chmod(0o600)
+                        os.chown(host, owner.st_uid, owner.st_gid)
                 progress('docker-publish-resume')
                 point = manager('publish', run=docker_run)
                 resumed_docker = start(docker_run, lease=300000, docker_script=docker_script('resume'))
@@ -830,6 +844,7 @@ def main():
                 pinned_target.unlink()
                 metrics['pendingHomeMetadataRecovered'] = True
                 metrics['dockerResume'] = docker_result(docker_run)
+                metrics['dockerPartialMetadataRecovered'] = True
                 api('/runs/' + resumed_docker, method='DELETE')
                 fenced(docker_run, resumed_docker)
                 progress('docker-restore-remap')

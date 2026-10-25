@@ -281,25 +281,30 @@ pub(super) async fn pin(policy: &Policy, source: &str, read_only: bool) -> Resul
     Ok(target.to_string_lossy().into_owned())
 }
 
-/// Before starting a daemon, recreate only bindings still referenced by saved
-/// containers. Invalid current permissions leave the mirror absent; the policy
-/// refuses starting that container. Restart policies are never accepted.
-pub(super) async fn restore(policy: &Policy) -> Result<()> {
-    let _guard = BIND_LOCK.lock().await;
-    let containers = Path::new(DATA).join("containers");
+async fn referenced_bindings(store: &Path) -> Result<std::collections::HashSet<String>> {
+    let containers = store.join("containers");
+    let mut used = std::collections::HashSet::new();
     let mut entries = match tokio::fs::read_dir(containers).await {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(used),
         Err(error) => return Err(error.into()),
     };
-    let mut used = std::collections::HashSet::new();
     while let Some(entry) = entries.next_entry().await? {
         let id = entry.file_name();
         if id.len() != 64 || !id.as_encoded_bytes().iter().all(u8::is_ascii_hexdigit) {
             continue;
         }
-        let host: serde_json::Value =
-            serde_json::from_slice(&tokio::fs::read(entry.path().join("hostconfig.json")).await?)?;
+        // A crash can retain a directory before Docker saves its metadata.
+        // Isolate that container instead of blocking the entire daemon/store.
+        // Activation still requires a valid saved HostConfig in Policy.
+        let bytes = match tokio::fs::read(entry.path().join("hostconfig.json")).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let Ok(host) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
         for bind in host["Binds"].as_array().into_iter().flatten() {
             if let Some(source) = bind.as_str().and_then(|bind| bind.split(':').next())
                 && let Ok(id) = uuid(Path::new(source))
@@ -321,6 +326,15 @@ pub(super) async fn restore(policy: &Policy) -> Result<()> {
             "Persisted Docker containers exceed the native bind mirror limit.",
         ));
     }
+    Ok(used)
+}
+
+/// Before starting a daemon, recreate only bindings still referenced by saved
+/// containers. Invalid current permissions leave the mirror absent; the policy
+/// refuses starting that container. Restart policies are never accepted.
+pub(super) async fn restore(policy: &Policy) -> Result<()> {
+    let _guard = BIND_LOCK.lock().await;
+    let used = referenced_bindings(Path::new(DATA)).await?;
     let records = Path::new(DATA).join(".cairn-bindings");
     let mut entries = match tokio::fs::read_dir(&records).await {
         Ok(entries) => entries,
@@ -354,6 +368,44 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn incomplete_container_metadata_does_not_hide_valid_saved_bindings() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(referenced_bindings(root.path()).await.unwrap().is_empty());
+        let legacy = crate::config::id();
+        let structured = crate::config::id();
+        for id in ["a", "b", "c"] {
+            std::fs::create_dir_all(root.path().join("containers").join(id.repeat(64))).unwrap();
+        }
+        let valid = root.path().join("containers").join("a".repeat(64));
+        std::fs::write(
+            valid.join("hostconfig.json"),
+            serde_json::to_vec(&json!({
+                "Binds": [format!("{RUNTIME}/mounts/{legacy}/source:/legacy:ro")],
+                "Mounts": [{
+                    "Type": "bind",
+                    "Source": format!("{RUNTIME}/mounts/{structured}/source"),
+                    "Target": "/structured",
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let malformed = root.path().join("containers").join("c".repeat(64));
+        std::fs::write(malformed.join("hostconfig.json"), b"{").unwrap();
+        assert_eq!(
+            referenced_bindings(root.path()).await.unwrap(),
+            [legacy, structured]
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>()
+        );
+        // Genuine filesystem errors must remain visible rather than silently
+        // discarding otherwise valid durable bindings.
+        std::fs::remove_file(malformed.join("hostconfig.json")).unwrap();
+        std::fs::create_dir(malformed.join("hostconfig.json")).unwrap();
+        assert!(referenced_bindings(root.path()).await.is_err());
+    }
 
     #[test]
     fn unmounted_targets_are_not_confirmed_mirrors() {

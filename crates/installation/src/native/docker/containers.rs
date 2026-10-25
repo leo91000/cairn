@@ -188,6 +188,15 @@ mod tests {
         )
         .unwrap();
         assert!(authorize(root.path(), &uri).is_err());
+        std::fs::write(
+            root.path()
+                .join("containers")
+                .join(&id)
+                .join("hostconfig.json"),
+            b"{",
+        )
+        .unwrap();
+        assert!(authorize(root.path(), &uri).is_err());
     }
 
     #[test]

@@ -91,6 +91,10 @@ Live publication is crash consistent; completed turns fence all processes and
 flush/unmount before sealing. A crash can lose unflushed pages, including database
 transactions not yet synced by a container. S3 publication failure retains local
 work and the existing unsynchronized-work status.
+An incomplete container directory or malformed saved HostConfig does not block
+daemon startup or unrelated images, volumes and valid bind mounts. Containers
+without a valid saved HostConfig remain unavailable for activation; no empty
+configuration is substituted during authorization.
 
 Same-node resume retains Docker state without a directory-wide ownership pass.
 Cold restore, acknowledged-cache eviction and movement to another native node use
