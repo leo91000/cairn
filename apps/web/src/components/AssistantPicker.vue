@@ -559,7 +559,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
                     </p>
                     <p v-else-if="appliedTier" class="text-2xs text-muted">
                       {{ appliedTier.description || `${appliedTier.name} speed` }}<template v-if="appliedTier.limited">
-                        · Not every Codex account offers it; runs use one that does.
+                        · Not every Codex account offers it; runs prefer one that does, otherwise they run at Standard.
                       </template> · <a
                         :href="speedUsageUrl"
                         target="_blank"

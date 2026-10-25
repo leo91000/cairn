@@ -246,10 +246,20 @@ fn changes_running_agent(message: &Value, run: &Value) -> Result<bool> {
     let differs = |key: &str, current: &Value| {
         !text(message, key).is_empty() && text(message, key) != current.as_str().unwrap_or("")
     };
+    // A turn without a speed runs at Standard, so asking for Standard changes nothing.
+    let speed = |value: &str| {
+        if value.is_empty() {
+            crate::models::STANDARD_SPEED.to_owned()
+        } else {
+            value.to_owned()
+        }
+    };
+    let changes_speed = !text(message, "speed").is_empty()
+        && speed(text(message, "speed")) != speed(text(agent, "speed"));
     Ok(differs("provider", &provider)
         || differs("model", &agent["model"])
         || differs("reasoning", &agent["reasoning"])
-        || differs("speed", &agent["speed"]))
+        || changes_speed)
 }
 
 /// The coding agent a message's turn runs with: the one it names, else the one the
@@ -1555,6 +1565,10 @@ mod tests {
         );
         message["speed"] = "".into();
         validate_steer(&db, &chat, &message).unwrap();
+        // Asking for Standard does not change a turn without a speed: it runs at Standard.
+        message["speed"] = "standard".into();
+        validate_steer(&db, &chat, &message).unwrap();
+        message["speed"] = "".into();
 
         let unknown = json!({
             "id": id(),

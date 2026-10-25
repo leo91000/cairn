@@ -1093,7 +1093,7 @@ private fun SpeedControl(
             listOfNotNull(
                     tier.description.ifBlank { "Vitesse ${tier.name}" },
                     if (tier.limited)
-                        "Tous vos comptes Codex ne la proposent pas ; les exécutions en utilisent un qui la propose."
+                        "Tous vos comptes Codex ne la proposent pas ; les exécutions privilégient un compte qui la propose, sinon elles passent en Standard."
                     else null,
                 )
                 .joinToString(" · "),

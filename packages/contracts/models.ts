@@ -19,7 +19,7 @@ export interface ServiceTier {
   id: string
   name: string
   description: string
-  /** Offered by some enabled accounts only; runs asking for it use one of those. */
+  /** Offered by some enabled accounts only; runs asking for it prefer those, otherwise run at Standard. */
   limited?: boolean
 }
 export interface CodingAgentModel {
