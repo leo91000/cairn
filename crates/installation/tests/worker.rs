@@ -2577,6 +2577,91 @@ async fn controller_interruptions_resume_saved_threads_and_stop_after_three_reco
 }
 
 #[tokio::test]
+async fn vm_chat_protocol_runs_receive_one_frame_with_plugin_instructions() {
+    let mut fixture = Fixture::new().await;
+    fixture.stop(false).await;
+    let controller = Arc::new(Controller {
+        data: fixture.service.config.data_dir.clone(),
+        plans: tokio::sync::Mutex::new(Vec::new()),
+        failures: 0,
+        slots: 4,
+        hold: std::sync::atomic::AtomicBool::new(false),
+    });
+    let app = Router::new()
+        .fallback(any(serve_controller))
+        .with_state(controller.clone());
+    let (listener, address) = common::bind().await;
+    common::reconfigure(&mut fixture.service, |config| {
+        config.runner_url = format!("http://{address}");
+    })
+    .await;
+    let server = common::serve(listener, app);
+    let s = fixture.service.clone();
+    claude_account(&s, 4).await;
+    tokio::fs::write(
+        s.config.data_dir.join("storage-s3.json"),
+        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
+    )
+    .await
+    .unwrap();
+    let agent = s
+        .agent(json!({ "name": "Claude", "provider": "claude" }), None)
+        .await
+        .unwrap();
+    cairn_installation::plugins::connections::save(
+        &s,
+        "onepassword",
+        &json!({
+            "name": "Production", "enabled": true,
+            "secrets": { "token": "ops_fixture" }, "agentIds": [agent["id"]],
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    let plugin = "cairn plugin onepassword read --account ACCOUNT_ID";
+    fixture.start().await;
+
+    // Scheduled work: the frame is in the instructions, the turn is the brief.
+    let brief = "Check the deployment.";
+    let task = json!({
+        "name": "Scheduled", "prompt": brief, "worktree": false, "agentId": agent["id"],
+    });
+    let task = s.task(task, None).await.unwrap();
+    let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
+    let finished = fixture.until_finished(text(&run, "id")).await;
+    assert_eq!(finished["status"], RunStatus::Succeeded, "{finished}");
+    let plan = controller.plans.lock().await[0]["chat"].clone();
+    let instructions = text(&plan, "instructions");
+    assert!(instructions.contains(plugin), "{instructions}");
+    assert!(instructions.contains("This unattended task"));
+    assert!(!instructions.contains("This is an interactive chat"));
+    assert!(!instructions.contains(brief));
+    assert_eq!(plan["execution"]["text"], brief);
+    assert_eq!(plan["execution"]["recovery"], false);
+
+    // Chat turns stay interactive and also receive plugin instructions.
+    let chat = s
+        .chat_create(json!({ "agentId": agent["id"] }))
+        .await
+        .unwrap();
+    let chat_id = text(&chat, "id").to_owned();
+    s.chat_send(&chat_id, message("Hello")).await.unwrap();
+    let chat_run = fixture.chat_run(&chat_id).await;
+    fixture
+        .until(&chat_run, |run| run["status"] == RunStatus::Succeeded)
+        .await;
+    let plan = controller.plans.lock().await.last().unwrap()["chat"].clone();
+    let instructions = text(&plan, "instructions");
+    assert!(instructions.contains(plugin), "{instructions}");
+    assert!(instructions.contains("This is an interactive chat"));
+    assert!(!instructions.contains("This unattended task"));
+    assert_eq!(plan["execution"]["text"], "Hello");
+    fixture.stop(false).await;
+    server.abort();
+}
+
+#[tokio::test]
 async fn claude_conversations_run_together_and_lowering_limit_does_not_cancel_them() {
     let mut fixture = Fixture::new().await;
     let s = fixture.service.clone();
