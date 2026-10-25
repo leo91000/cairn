@@ -121,7 +121,11 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                 try {
                     while (isActive) {
                         val attemptGeneration = generation.get()
-                        if (denied.get() || unavailableAt.get() == attemptGeneration) {
+                        if (
+                            denied.get() ||
+                                api.transport.protocolError.value != null ||
+                                unavailableAt.get() == attemptGeneration
+                        ) {
                             changed.receive()
                             continue
                         }
@@ -176,6 +180,10 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
     }
 
     private fun rememberDenial(error: Exception) {
+        if (error is ApiException && error.status in setOf(422, 426)) {
+            denied.set(true)
+            api.transport.rejectProtocol()
+        }
         if (error is ApiException && error.status in setOf(401, 403)) denied.set(true)
     }
 
@@ -268,14 +276,15 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
             data.set(peer!!.createDataChannel("cairn.v4", DataChannel.Init()))
             traffic =
                 DirectChannel(
-                    { packet, canceled, deadline -> send(packet, canceled, deadline) },
-                    { failed.complete(Unit) },
-                    {
-                        !stopped.get() &&
-                            !failed.isCompleted &&
-                            System.currentTimeMillis() < expires.get()
-                    },
-                )
+                        { packet, canceled, deadline -> send(packet, canceled, deadline) },
+                        { failed.complete(Unit) },
+                        {
+                            !stopped.get() &&
+                                !failed.isCompleted &&
+                                System.currentTimeMillis() < expires.get()
+                        },
+                    )
+                    .also { it.onProtocolMismatch = { error -> rememberDenial(error) } }
             data
                 .get()!!
                 .registerObserver(
@@ -441,7 +450,7 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                         "/installations/${segment(api.installationId!!)}/direct/$path",
                         buildJsonObject {
                             put("fingerprint", fingerprint)
-                            put("versions", buildJsonArray { add(4) })
+                            put("version", 4)
                         },
                     )
                 )

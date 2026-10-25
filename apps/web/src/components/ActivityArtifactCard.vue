@@ -71,7 +71,7 @@ const labels = {
 }
 const running = computed(() => props.artifact.status === 'running' && props.active)
 const suspended = computed(() => running.value && props.suspended)
-const status = computed(() => suspended.value ? 'Suspended' : props.artifact.statusLabel ?? (running.value ? 'Running' : props.artifact.status === 'running' ? 'Stopped' : props.artifact.status === 'error' ? 'Failed' : props.artifact.historical ? 'Recorded' : props.artifact.status === 'info' ? 'Info' : 'Completed'))
+const status = computed(() => suspended.value ? 'Suspended' : props.artifact.statusLabel ?? (running.value ? 'Running' : props.artifact.status === 'running' ? 'Stopped' : props.artifact.status === 'error' ? 'Failed' : props.artifact.status === 'info' ? 'Info' : 'Completed'))
 const blocks = computed(() => props.artifact.blocks.filter(block => block.label !== 'Command'))
 const outputLines = computed(() => blocks.value.reduce((total, block) => total + (block.code ? block.code.trimEnd().split('\n').length : 0), 0))
 const diff = computed(() => {
@@ -200,9 +200,6 @@ const elapsed = computed(() => {
       <p v-if="!blocks.length && !artifact.files.length && !artifact.tasks.length" class="artifact-no-output text-2xs text-muted leading-[1.8]">
         {{ running ? 'Waiting for output…' : 'No output for this step.' }}
       </p>
-      <p v-if="artifact.historical" class="operation-history flex items-start gap-[7px] text-3xs text-muted leading-[1.7] mt-3 mb-0 mx-0">
-        <Icon :name="Info" :size="13" />This older step saved output only. Its command and exit code weren’t recorded.
-      </p>
       <button class="artifact-raw-toggle text-3xs text-muted border-0 bg-transparent cursor-pointer [text-decoration:underline] [text-underline-offset:3px] phone:min-h-11 px-0 py-2" :aria-expanded="raw" @click="raw = !raw">
         {{ raw ? 'Hide' : 'View' }} event details
       </button>
@@ -210,7 +207,7 @@ const elapsed = computed(() => {
         v-if="raw"
         label="Event details"
         :code="artifact.raw"
-        :language="artifact.historical ? 'plaintext' : 'json'"
+        language="json"
       />
     </div>
   </article>

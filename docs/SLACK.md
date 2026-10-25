@@ -113,7 +113,7 @@ Actual-worker fixtures exercise a timed `wait_for`, replacement, a granted packa
 manager restart while paused, and aging an accepted delivery beyond 24 hours.
 They use a fake model process and local Slack HTTP fixtures; they do not prove a
 real Slack workspace, physical VM restoration or production object storage.
-The [storage observation](performance/SLACK-CONTINUATION-DELIVERY.md) describes
+The [storage observation](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/SLACK-CONTINUATION-DELIVERY.md) describes
 reservation overhead and its limits. Full recovery qualification and all
 remaining Q1–Q20 functions remain required.
 
@@ -144,7 +144,7 @@ Questions and replies share the same per-channel post pacing. Write intent is
 stored before posting; an uncertain question POST is not automatically repeated.
 Native delivery ownership removes these nonsecret states on every terminal path,
 including revocation and conversation purge.
-The [native storage observation](performance/SLACK-QUESTION-STATE.md) compares
+The [native storage observation](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/SLACK-QUESTION-STATE.md) compares
 this ownership and cleanup with ordinary instance state near the key limit.
 
 When a provider session reopens, the old native RPC question is withdrawn. A
@@ -189,7 +189,7 @@ All writers share channel pacing and workspace/method cooldowns.
 The local actual-worker fixtures cover signed HTTP and verified WSS, step edits,
 actual provider cancellation, wrong authors/sources/actions, post-ACK authority
 changes, definite quota rejection, uncertain creation through restart, uncertain
-editing and interrupted cleanup. The [storage observation](performance/SLACK-PROGRESS-STATE.md)
+editing and interrupted cleanup. The [storage observation](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/SLACK-PROGRESS-STATE.md)
 measures this record separately. No real Slack workspace has been used.
 
 ## First Socket Mode exchange

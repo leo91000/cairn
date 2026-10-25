@@ -421,18 +421,6 @@ internal fun InstanceEditor(
             if (saving) name.isNotBlank() && steps.all { stepProblem(it) == null }
             else stepProblem(current) == null
     fun save() = vm.perform {
-        // Grants to send back (older or unknown installation), as saved right now.
-        val keptGrants =
-            if (creating) null
-            else
-                initial.agentIdsToSend(state.agents, manifest) {
-                    api.pluginInstance(
-                            pluginId,
-                            initial.id,
-                            configuration?.exactInstanceReads == true,
-                        )
-                        .agentIds
-                }
         api.pluginOperation(
             "/plugins/${segment(pluginId)}/connections" +
                 if (creating) "" else "/${segment(initial.id)}",
@@ -468,12 +456,12 @@ internal fun InstanceEditor(
                 }
                 put("enabled", enabled)
                 sharing()
-                // An older (or unknown) installation needs the granted agents back, as they are
-                // now. A new instance is granted to the agents chosen on the agents step; creation
-                // only grants, it never removes.
-                (keptGrants ?: grants.takeIf { creating && it.isNotEmpty() })?.let { ids ->
-                    put("agentIds", JsonArray(ids.map(::JsonPrimitive)))
-                }
+                // Creation grants the chosen agents; editing keeps current grants.
+                grants
+                    .takeIf { creating && it.isNotEmpty() }
+                    ?.let { ids ->
+                        put("agentIds", JsonArray(ids.map(::JsonPrimitive)))
+                    }
             },
             method = if (creating) "POST" else "PUT",
         )

@@ -271,7 +271,9 @@ struct Negotiation {
     dependencies: Option<PeerDependencies>,
 }
 
-fn udp_bindings(addresses: impl IntoIterator<Item = IpAddr>) -> Vec<(&'static str, NetworkType)> {
+pub(crate) fn udp_bindings(
+    addresses: impl IntoIterator<Item = IpAddr>,
+) -> Vec<(&'static str, NetworkType)> {
     let (mut ipv4, mut ipv6) = (false, false);
     for address in addresses {
         if !cairn_protocol::direct::usable_candidate_address(address) {
@@ -419,8 +421,8 @@ async fn serve_peer(
             }
         };
         *channel_to_close.lock().unwrap() = Some(channel.clone());
-        if channel.label().await.map_err(Error::internal)? != "cairn.v4"
-            || !channel.ordered().await.map_err(Error::internal)?
+        let channel_label = channel.label().await.map_err(Error::internal)?;
+        if !channel.ordered().await.map_err(Error::internal)?
             || channel
                 .max_retransmits()
                 .await
@@ -456,6 +458,7 @@ async fn serve_peer(
         let writer = async {
             let mut transfer = 1_u32;
             while let Some(frame) = frames.recv().await {
+                let refusal = matches!(&frame, cairn_protocol::Frame::UpdateRequired { .. });
                 let encoded = cairn_protocol::data_channel::EncodedFrame::new(transfer, &frame)
                     .map_err(Error::bad)?;
                 transfer = transfer.wrapping_add(1).max(1);
@@ -464,6 +467,33 @@ async fn serve_peer(
                         .send(bytes::BytesMut::from(packet.as_slice()))
                         .await
                         .map_err(Error::internal)?;
+                }
+                if refusal {
+                    // Let the client consume the refusal and close its side. A SCTP
+                    // acknowledgement can precede its off-thread application decoder.
+                    let deadline = tokio::time::sleep(cairn_protocol::REQUEST_TIMEOUT);
+                    tokio::pin!(deadline);
+
+                    loop {
+                        tokio::select! {
+                            biased;
+                            () = &mut deadline => break,
+                            event = channel.poll() => {
+                                let closed = matches!(
+                                    event,
+                                    None | Some(DataChannelEvent::OnClose | DataChannelEvent::OnError)
+                                );
+                                if closed {
+                                    break;
+                                }
+                                // Refused peers cannot dispatch further application frames.
+                            },
+                        }
+                    }
+
+                    return Err(Error::bad(
+                        cairn_protocol::data_channel::DecodeError::VersionMismatch.to_string(),
+                    ));
                 }
             }
             Ok::<_, Error>(())
@@ -487,6 +517,10 @@ async fn serve_peer(
                         decoder.expire();
                     }
                     event = channel.poll() => match event {
+                        Some(DataChannelEvent::OnOpen | DataChannelEvent::OnMessage(_))
+                            if channel_label != "cairn.v4" => {
+                                return refuse_protocol(&rejected).await;
+                            },
                         Some(DataChannelEvent::OnMessage(message)) if !message.is_string => {
                             // Owner waiters keep at most one packet while capacity is busy.
                             // Self-blocking transfers are rejected so this ordered
@@ -529,6 +563,9 @@ async fn serve_peer(
                                         }
                                         break None;
                                     }
+                                    Err(DecodeError::VersionMismatch) => {
+                                        return refuse_protocol(&rejected).await;
+                                    },
                                     Err(DecodeError::Invalid(message)) => return Err(Error::bad(message)),
                                 }
                             };
@@ -584,6 +621,18 @@ async fn apply_signal(
     })
     .await
     .map_err(Error::internal)
+}
+
+// The writer owns transfer IDs and sends the terminal refusal before peer cleanup.
+// Keep the reader parked so it cannot dispatch another request or cancel that write.
+async fn refuse_protocol(output: &mpsc::Sender<cairn_protocol::Frame>) -> Result<()> {
+    output
+        .send(cairn_protocol::Frame::UpdateRequired {
+            message: cairn_protocol::data_channel::DecodeError::VersionMismatch.to_string(),
+        })
+        .await
+        .map_err(|_| Error::unavailable("Direct response queue closed."))?;
+    std::future::pending().await
 }
 
 struct ClosePeer {

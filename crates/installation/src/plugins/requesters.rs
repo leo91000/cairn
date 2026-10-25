@@ -376,6 +376,7 @@ pub(crate) struct RunRequester {
 pub(crate) struct Observation {
     run: Value,
     owner: crate::waits::Owner,
+    slot: Option<usize>,
     pub(crate) principal: Option<Principal>,
     approval: Option<super::registry::Approval>,
 }
@@ -388,9 +389,20 @@ impl Observation {
             .store
             .read(move |db| {
                 let owner = crate::waits::Owner::for_run(db, &run)?;
-                if owner.record["wakeup"]["condition"] != condition {
-                    return Err(Error::conflict("The waiting condition changed."));
-                }
+                let waited = &owner.record["wakeup"]["condition"];
+                let slot = if crate::waits::is_group(waited) {
+                    Some(
+                        crate::waits::members(waited)
+                            .iter()
+                            .position(|member| **member == condition)
+                            .ok_or_else(|| Error::conflict("The waiting condition changed."))?,
+                    )
+                } else {
+                    if waited != &condition {
+                        return Err(Error::conflict("The waiting condition changed."));
+                    }
+                    None
+                };
                 let principal = captured_run(db, &run)?.map(|requester| requester.principal);
                 let approval = match &principal {
                     Some(Principal::External(actor)) => {
@@ -406,6 +418,7 @@ impl Observation {
                 let observation = Self {
                     run,
                     owner,
+                    slot,
                     principal,
                     approval,
                 };
@@ -447,7 +460,11 @@ impl Observation {
             || run["trigger"] != self.run["trigger"]
             || crate::waits::execution_id(&run) != crate::waits::execution_id(&self.run)
             || owner.run_id() != text(&run, "id")
-            || owner.record["wakeup"] != self.owner.record["wakeup"]
+            || !super::conditions::unchanged(
+                &owner.record["wakeup"],
+                &self.owner.record["wakeup"],
+                self.slot,
+            )
             || !owner.resumable(&run)
             || owner.record["wakeup"]["wakeAt"]
                 .as_i64()
@@ -464,7 +481,11 @@ impl Observation {
         if let Some(approval) = &self.approval {
             approval.recheck_in(db)?;
         }
-        crate::waits::access(db, &run, &self.owner.record["wakeup"]["condition"])
+        crate::waits::access(
+            db,
+            &run,
+            super::conditions::condition_of(&self.owner.record["wakeup"], self.slot),
+        )
     }
 }
 

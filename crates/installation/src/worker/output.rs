@@ -238,6 +238,17 @@ pub(super) async fn record(
         record_raw(s, id, "output", raw, secrets, log_total).await?;
         return Ok(false);
     };
+    if event["type"] == "runtime.disk_notice" {
+        let event = run_output::payload(&event, secrets);
+        let message = text(&event, "text").to_owned();
+        // Capacity is runtime diagnostic state, separate from the controller's
+        // authoritative storage document refreshed by the publication monitor.
+        s.store
+            .patch_run(id, serde_json::json!({ "diskCapacity": event["capacity"] }))
+            .await?;
+        s.store.event(id, "status", &message, Some(event)).await?;
+        return Ok(false);
+    }
     if event["type"] == "runner.start_rejected" {
         let run = s.store.run(id).await?;
         let first_rejected = !previously_launched

@@ -69,5 +69,5 @@ the database, retained live grants, blocked cases and transaction rollback.
 
 The resource-reference precondition reads a Boolean projection, without loading
 all route configuration and people directories. Its reproducible
-[local read/write comparison](performance/AGENT-MERGE-RESOURCE-READS.md) records
+[local read/write comparison](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/AGENT-MERGE-RESOURCE-READS.md) records
 logical bytes, first/warm reads, unchanged writes, CPU and host conditions.

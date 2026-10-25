@@ -26,24 +26,11 @@ class ActivityPresentationTest {
     }
 
     @Test
-    fun `historical diagnostics are shown verbatim without terminal styling`() {
-        val styled =
-            "\u001B[2m2026-10-22T12:08:49Z\u001B[0m \u001B[33m WARN\u001B[0m " +
-                "\u001B[2mcodex\u001B[0m\u001B[2m:\u001B[0m disk full\n"
-        val presentation = presentActivity(RunEvent(1, 1, "diagnostic", styled))
-
-        assertEquals("Diagnostic de l’agent", presentation.title)
-        assertTrue(presentation.verbatim)
-        assertEquals("2026-10-22T12:08:49Z  WARN codex: disk full\n", presentation.output)
-        assertEquals(presentation.output, presentation.raw)
-    }
-
-    @Test
     fun `shared corpus preserves activity and distinguishes immediate results`() {
         val raw =
             java.io.File(requireNotNull(System.getProperty("cairn.activityCorpus"))).readText()
         val corpus = wireJson.parseToJsonElement(raw).jsonArray
-        assertEquals(21, corpus.size)
+        assertEquals(17, corpus.size)
         val original =
             corpus.take(15).mapIndexed { index, value ->
                 val data = value.jsonObject
@@ -72,7 +59,7 @@ class ActivityPresentationTest {
             kinds,
         )
 
-        val immediate = listOf(true, true, false, false, true, false)
+        val immediate = listOf(true, false)
         val condition = buildJsonObject {
             put("type", "run_finished")
             put("runId", "dependency")
@@ -232,20 +219,5 @@ class ActivityPresentationTest {
             resultParts("{\"outer\":{\"ok\":true},\"tail\":").single() is ResultPart.Incomplete
         )
         assertTrue(resultParts("```json\n{\"outer\":").single() is ResultPart.Incomplete)
-    }
-
-    @Test
-    fun `legacy saved tools remain tools and get a structured result`() {
-        val rows =
-            timelineEntries(
-                listOf(
-                    event("item.started", "Running tool"),
-                    event("item.completed", "{\"jobs\":[]}").copy(id = 2),
-                )
-            )
-        assertFalse(rows.single().message)
-        val p = presentActivity(rows.single().events.single())
-        assertEquals(ActivityKind.OUTPUT, p.kind)
-        assertTrue(resultParts(p.output).single() is ResultPart.Data)
     }
 }

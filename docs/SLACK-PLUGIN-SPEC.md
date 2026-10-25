@@ -256,5 +256,5 @@ du package et leurs tests, avec les références relevées le 2026-10-17.
 
 Décisions : [apps privées](adr/0048-private-slack-apps-per-installation.md),
 [réception HTTP](adr/0049-plugin-public-http-ingress.md),
-[autorisations personnelles](adr/0050-personal-plugin-authorizations.md),
-[consultation éphémère](adr/0051-transient-plugin-contexts.md).
+[autorisations personnelles](adr/0071-personal-plugin-authorizations.md),
+[consultation éphémère](adr/0072-transient-plugin-contexts.md).

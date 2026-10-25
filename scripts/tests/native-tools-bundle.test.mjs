@@ -8,7 +8,7 @@ import {
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, expect, it } from 'vitest'
-import { selectPinnedBinaries } from '../../deploy/nodes/bundle-native-tools.mjs'
+import { pinnedVersion, selectPinnedBinaries } from '../../deploy/nodes/bundle-native-tools.mjs'
 
 const roots = []
 const versions = new Map(['codex', 'claude', 'opencode'].map(name => [name, '1.2.3']))
@@ -57,4 +57,11 @@ it.each([183, 0])('rejects a companion for a different ELF machine: %s', async (
   const root = await fixture()
   await executable(root, 'codex@1.2.3-linux-x64-musl/bin/codex-code-mode-host', machine)
   await expect(selectPinnedBinaries(root, versions)).rejects.toThrow('Missing pinned native executable: codex-code-mode-host')
+})
+
+it('bundles only the engine versions resolved for this image', () => {
+  expect(pinnedVersion('claude', '2.1.308 (Claude Code)\n', '2.1.308')).toBe('2.1.308')
+  expect(pinnedVersion('codex', 'codex-cli 0.164.0\n', undefined)).toBe('0.164.0')
+  expect(() => pinnedVersion('opencode', '1.19.0\n', '1.19.4')).toThrow('Installed opencode 1.19.0 is not the resolved 1.19.4')
+  expect(() => pinnedVersion('claude', 'unknown\n', '2.1.308')).toThrow('Cannot identify pinned CLI version: claude')
 })

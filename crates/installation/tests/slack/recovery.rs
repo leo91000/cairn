@@ -238,7 +238,7 @@ async fn exchange(scenario: Scenario) {
                 &service,
                 bearer,
                 &json!({
-                    "condition": { "type": "task_finished", "chatId": child["chatId"] },
+                    "conditions": [{ "type": "task_finished", "chatId": child["chatId"] }],
                     "timeoutSeconds": 120, "reason": reason,
                 }),
             )
@@ -251,7 +251,7 @@ async fn exchange(scenario: Scenario) {
                 &service,
                 bearer,
                 &json!({
-                    "condition": { "type": "delay-fixture_ready", "after": now() / 1000 + 2 },
+                    "conditions": [{ "type": "delay-fixture_ready", "after": now() / 1000 + 2 }],
                     "timeoutSeconds": 120,
                     "reason": reason,
                 }),
@@ -271,7 +271,7 @@ async fn exchange(scenario: Scenario) {
                     &service,
                     bearer,
                     &json!({
-                        "condition": { "type": "delay", "seconds": 3600 }, "reason": "Superseded wait must never execute",
+                        "conditions": [{ "type": "delay", "seconds": 3600 }], "reason": "Superseded wait must never execute",
                     }),
                 )
                 .await
@@ -280,7 +280,7 @@ async fn exchange(scenario: Scenario) {
                     &service,
                     bearer,
                     &json!({
-                        "condition": { "type": "delay", "seconds": duration }, "reason": reason,
+                        "conditions": [{ "type": "delay", "seconds": duration }], "reason": reason,
                     }),
                 )
                 .await
@@ -301,7 +301,7 @@ async fn exchange(scenario: Scenario) {
                 &service,
                 bearer,
                 &json!({
-                    "condition": { "type": "delay", "seconds": duration }, "reason": reason,
+                    "conditions": [{ "type": "delay", "seconds": duration }], "reason": reason,
                 }),
             )
             .await

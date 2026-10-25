@@ -1,3 +1,5 @@
+> Statut : Remplacée par [ADR-0045](0045-declarative-plugin-contributions.md) et [ADR-0046](0046-plugin-transports-and-forms-in-luau.md) pour les contributions et transports, [ADR-0056](0056-plugin-oauth-file-transfers-and-gmail.md) pour le report d’OAuth générique, et [ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md) pour les restrictions des agents délégués ; le socle Luau reste applicable.
+
 # Luau installation plugins and explicit external bot delegation
 
 Date: 2026-10-12.
@@ -5,7 +7,7 @@ Date: 2026-10-12.
 Arbitrary native execution and the built-in-only 1Password capability are
 superseded by [ADR-0045](0045-declarative-plugin-contributions.md). The agent
 restrictions on delegations are superseded by
-[ADR-0059](0059-owner-chosen-agents-for-bot-delegation.md): the owner chooses any
+[ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md): the owner chooses any
 agent and is warned about its access.
 
 ## Decision

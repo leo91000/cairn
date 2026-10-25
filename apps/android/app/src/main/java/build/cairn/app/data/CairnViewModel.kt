@@ -51,6 +51,7 @@ data class Workspace(
     val skills: List<Skill> = emptyList(),
     val overview: Overview = Overview(),
     val transportRoute: String = "relay",
+    val protocolError: String? = null,
 ) {
     fun modelCatalog(provider: String): ModelCatalog = modelCatalogs[provider] ?: ModelCatalog()
 
@@ -673,8 +674,15 @@ constructor(
                 }
             connection = next
             routeCollection = viewModelScope.launch {
-                next.transport.route.collect { route ->
-                    if (connection === next) mutable.update { it.copy(transportRoute = route) }
+                launch {
+                    next.transport.route.collect { route ->
+                        if (connection === next) mutable.update { it.copy(transportRoute = route) }
+                    }
+                }
+                launch {
+                    next.transport.protocolError.collect { error ->
+                        if (connection === next) mutable.update { it.copy(protocolError = error) }
+                    }
                 }
             }
             mutable.update {

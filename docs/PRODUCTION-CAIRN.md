@@ -6,8 +6,6 @@ migration, DNS setup, provider registration or installation claim.
 
 - [Production configuration](PRODUCTION-CAIRN-SETUP.md): provisioning and changes
   to the host, Coolify, proxy, DNS/TLS, providers and installation networking.
-- [Historical v0.53 migration](archive/CAIRN-V0.53-MIGRATION.md): first-launch
-  qualification, old public manager retirement and naming cutover.
 
 A documentation or implementation task alone does not authorize a release or
 production change. Creating an authorized stable release tag starts the automatic
@@ -21,7 +19,9 @@ Infrastructure changes have their own scope and are not part of a routine releas
 1. **Choose the version and exact source.** Use a stable `vMAJOR.MINOR.PATCH` tag
    and a reviewed commit. A successful `Quality and container` run must cover its
    exact Git tree. One schema-3 `validated-image-<tree>/image.json` records both
-   immutable image digests, the tested commit, run ID and CLI versions. Take the
+   immutable image digests, the tested commit, run ID, CLI versions and the served
+   engine releases its rollback checks used
+   ([tool versions](CLI-UPDATES.md)). Take the
    Beacon and installation images from that same evidence. A reused PR image
    can report its tested merge commit while matching the tag's tree.
 2. **Check data compatibility.** The workflow compares the served and candidate
@@ -37,7 +37,9 @@ Infrastructure changes have their own scope and are not part of a routine releas
    a draft release if needed. The Android workflow signs the validated APK,
    attaches it and its update manifest, then publishes the release atomically.
    Leave the draft unpublished until that workflow completes.
-4. **Follow automatic deployment.** After the compatibility check, the production
+4. **Follow automatic deployment.** The production job first checks that
+   production still serves the engine releases the rollback checks used. After
+   that and the compatibility check, the production
    job deploys the validated image pair through Coolify. It does not stop Beacon
    for a database dump or upload recovery artifacts.
 5. **Verify the served release.** Check `/health` for the expected tested commit
@@ -138,4 +140,3 @@ The setup details have moved to [production configuration](PRODUCTION-CAIRN-SETU
 [Coolify and proxy trust](PRODUCTION-CAIRN-SETUP.md#coolify-service-and-trusted-proxy),
 [installation claim](PRODUCTION-CAIRN-SETUP.md#install-and-claim-on-the-same-server),
 and [STUN](PRODUCTION-CAIRN-SETUP.md#stun-and-direct-installation-connectivity).
-The [v0.53 archive](archive/CAIRN-V0.53-MIGRATION.md) records the naming cutover.

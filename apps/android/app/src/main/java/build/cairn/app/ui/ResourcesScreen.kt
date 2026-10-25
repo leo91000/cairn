@@ -89,11 +89,7 @@ fun ResourcesScreen(
                             }
                             if (agent.description.isNotBlank()) Text(agent.description)
                             Text(
-                                agentAccessSummary(
-                                    agent,
-                                    catalog = pluginDirectory,
-                                    older = olderInstallation(state.agents),
-                                ),
+                                agentAccessSummary(agent, catalog = pluginDirectory),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )

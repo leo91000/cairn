@@ -164,7 +164,12 @@ impl ExecutionAdapter for Codex {
             result
         }
         .await;
-        result.map_err(|_| Error::conflict("The saved Codex conversation is unavailable. Working files were preserved; review them before starting a new run."))
+        result.map_err(|error| {
+            if crate::run_retry::startup_failure(&error).is_some() {
+                return error;
+            }
+            Error::conflict("The saved Codex conversation is unavailable. Working files were preserved; review them before starting a new run.")
+        })
     }
 
     async fn run(

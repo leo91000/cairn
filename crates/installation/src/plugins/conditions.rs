@@ -334,17 +334,59 @@ pub async fn observe(
     })
 }
 
-fn watchable(owner: &crate::waits::Owner, run: &Value, time: i64) -> bool {
+/// One plugin condition of a wait: the whole wait (`None`), or one condition of a group.
+type Slot = Option<usize>;
+
+// Share each wait snapshot: cloning its full member list per watcher is quadratic.
+type Watch = (Arc<crate::waits::Owner>, Arc<Value>, Slot);
+
+pub(super) fn condition_of(wakeup: &Value, slot: Option<usize>) -> &Value {
+    match slot {
+        Some(index) => &wakeup["condition"]["conditions"][index],
+        None => &wakeup["condition"],
+    }
+}
+
+/// Where a condition's progress is recorded: on the wakeup, or beside its grouped condition.
+fn progress_of(wakeup: &mut Value, slot: Slot) -> &mut Value {
+    match slot {
+        Some(index) => &mut wakeup["members"][index],
+        None => wakeup,
+    }
+}
+
+/// The plugin conditions of a wait to observe now.
+fn watched(owner: &crate::waits::Owner, run: &Value, time: i64) -> Vec<Slot> {
     let wakeup = &owner.record["wakeup"];
-    owner.resumable(run)
-        && is_condition(&wakeup["condition"])
+    let pending = owner.resumable(run)
         && !wakeup["observation"].is_object()
         && wakeup["wakeAt"]
             .as_i64()
-            .is_some_and(|deadline| deadline > time)
-        && wakeup["nextCheckAt"]
-            .as_i64()
-            .is_none_or(|next| next <= time)
+            .is_some_and(|deadline| deadline > time);
+    if !pending {
+        return Vec::new();
+    }
+    let slots = if crate::waits::is_group(&wakeup["condition"]) {
+        (0..crate::waits::members(&wakeup["condition"]).len())
+            .map(Some)
+            .collect()
+    } else {
+        vec![None]
+    };
+    slots
+        .into_iter()
+        .filter(|slot| {
+            let progress = match slot {
+                Some(index) => &wakeup["members"][index],
+                None => wakeup,
+            };
+            is_condition(condition_of(wakeup, *slot))
+                && !progress["observation"].is_object()
+                && progress["nextCheckAt"]
+                    .as_i64()
+                    .is_none_or(|next| next <= time)
+        })
+        .collect()
 }
 
 /// One batch is capped and deduplicated; slow services never hold the admission tick.
@@ -352,7 +394,7 @@ pub async fn poll_once(s: &Service) -> Result<()> {
     let groups = s
         .store
         .read(|db| {
-            let mut groups: BTreeMap<String, Vec<(crate::waits::Owner, Value)>> = BTreeMap::new();
+            let mut groups: BTreeMap<String, Vec<Watch>> = BTreeMap::new();
             let mut owners = db
                 .list("chats")?
                 .into_iter()
@@ -371,29 +413,40 @@ pub async fn poll_once(s: &Service) -> Result<()> {
                 let Some(run) = db.run(owner.run_id())? else {
                     continue;
                 };
-                if !watchable(&owner, &run, now()) {
-                    continue;
+                let owner = Arc::new(owner);
+                let run = Arc::new(run);
+                for slot in watched(&owner, &run, now()) {
+                    let condition = condition_of(&owner.record["wakeup"], slot);
+                    let project_id = &condition["projectId"];
+                    let granted_origin = crate::project_workspaces::catalog(&run)
+                        .into_iter()
+                        .find(|project| &project["id"] == project_id)
+                        .map(|project| project["origin"].clone());
+                    let key = json!({
+                        "agentId": run["snapshot"]["agent"]["id"],
+                        "access": policy(&run["snapshot"]["agent"]),
+                        "condition": condition,
+                        "projectOrigin": granted_origin,
+                        "requester": super::requesters::observation_key_in(db, &run)?,
+                    })
+                    .to_string();
+                    groups
+                        .entry(key)
+                        .or_default()
+                        .push((owner.clone(), run.clone(), slot));
                 }
-                let project_id = &owner.record["wakeup"]["condition"]["projectId"];
-                let granted_origin = crate::project_workspaces::catalog(&run)
-                    .into_iter()
-                    .find(|project| &project["id"] == project_id)
-                    .map(|project| project["origin"].clone());
-                let key = json!({
-                    "agentId": run["snapshot"]["agent"]["id"],
-                    "access": policy(&run["snapshot"]["agent"]),
-                    "condition": owner.record["wakeup"]["condition"],
-                    "projectOrigin": granted_origin,
-                    "requester": super::requesters::observation_key_in(db, &run)?,
-                })
-                .to_string();
-                groups.entry(key).or_default().push((owner, run));
             }
             let mut groups: Vec<_> = groups.into_values().collect();
             groups.sort_by_key(|group| {
                 group
                     .iter()
-                    .filter_map(|(c, _)| c.record["wakeup"]["nextCheckAt"].as_i64())
+                    .filter_map(|(owner, _, slot)| {
+                        let wakeup = &owner.record["wakeup"];
+                        match slot {
+                            Some(index) => wakeup["members"][index]["nextCheckAt"].as_i64(),
+                            None => wakeup["nextCheckAt"].as_i64(),
+                        }
+                    })
                     .min()
                     .unwrap_or(0)
             });
@@ -403,8 +456,9 @@ pub async fn poll_once(s: &Service) -> Result<()> {
         .await?;
     let results = stream::iter(groups)
         .map(|group| async move {
-            let (first, run) = &group[0];
-            let observed = observe(s, run, &first.record["wakeup"]["condition"], None).await;
+            let (first, run, slot) = &group[0];
+            let condition = condition_of(&first.record["wakeup"], *slot);
+            let observed = observe(s, run, condition, None).await;
             s.store
                 .transaction(move |db| record(db, group, &observed))
                 .await
@@ -419,11 +473,26 @@ pub async fn poll_once(s: &Service) -> Result<()> {
     Ok(())
 }
 
-/// Resolve one still-current wait from the snapshot used by a provider probe.
+/// Whether the condition observed is still the one waited for, in the same state. Other
+/// conditions of its group may have progressed meanwhile.
+pub(super) fn unchanged(current: &Value, expected: &Value, slot: Option<usize>) -> bool {
+    match slot {
+        Some(index) => {
+            current["id"] == expected["id"]
+                && current["condition"] == expected["condition"]
+                && current["observation"] == expected["observation"]
+                && current["members"][index] == expected["members"][index]
+        }
+        None => current == expected,
+    }
+}
+
+/// Resolve the current member under the exact profile used for its probe.
 fn current_wait(
     db: &Db<'_>,
     expected: &crate::waits::Owner,
     observed_run: &Value,
+    slot: Slot,
 ) -> Result<Option<(crate::waits::Owner, Value)>> {
     let Some(owner) = expected.reload(db)? else {
         return Ok(None);
@@ -433,32 +502,28 @@ fn current_wait(
     };
     if run["id"] != observed_run["id"]
         || run["snapshot"]["agent"] != observed_run["snapshot"]["agent"]
-        || owner.record["wakeup"] != expected.record["wakeup"]
-        || !watchable(&owner, &run, now())
+        || !unchanged(&owner.record["wakeup"], &expected.record["wakeup"], slot)
+        || !watched(&owner, &run, now()).contains(&slot)
     {
         return Ok(None);
     }
     Ok(Some((owner, run)))
 }
 
-fn record(
-    db: &Db<'_>,
-    group: Vec<(crate::waits::Owner, Value)>,
-    observed: &Result<Observed>,
-) -> Result<()> {
-    // A shared probe carries its representative's requester proof. If its wait
-    // changed during I/O, retry peers under a current representative instead of
-    // permanently resolving another conversation or mission with a stale denial.
-    if let Some((expected, run)) = group.first()
-        && current_wait(db, expected, run)?.is_none()
+fn record(db: &Db<'_>, group: Vec<Watch>, observed: &Result<Observed>) -> Result<()> {
+    // A shared probe carries its representative's requester proof. Retry peers
+    // under a current representative if that member changed during provider I/O.
+    if let Some((expected, run, slot)) = group.first()
+        && current_wait(db, expected, run, *slot)?.is_none()
     {
         return Ok(());
     }
-    for (expected, observed_run) in group {
-        let Some((mut owner, run)) = current_wait(db, &expected, &observed_run)? else {
+    for (expected, observed_run, slot) in group {
+        let Some((mut owner, run)) = current_wait(db, &expected, &observed_run, slot)? else {
             continue;
         };
-        let authorized = crate::waits::access(db, &run, &owner.record["wakeup"]["condition"]);
+        let condition = condition_of(&owner.record["wakeup"], slot).clone();
+        let authorized = crate::waits::access(db, &run, &condition);
         let result = match (&authorized, observed) {
             (Err(error), _) => Some(json!({ "state": "unavailable", "message": error.message })),
             (Ok(()), Ok(value)) => value.result.clone(),
@@ -467,29 +532,35 @@ fn record(
             }
             _ => None,
         };
+        let progress = progress_of(&mut owner.record["wakeup"], slot);
         let mut delay = POLL_MS;
-        if let Some(result) = result {
-            owner.record["wakeup"]["observation"] = result.clone();
+        if let Some(result) = &result {
+            progress["observation"] = result.clone();
+        } else if observed.is_err() {
+            progress["lastError"] =
+                "The service is temporarily unavailable; retrying until the wait deadline.".into();
+        } else if let Some(progress) = progress.as_object_mut() {
+            // A successful check means the service answers again.
+            progress.remove("lastError");
+        }
+        if let Ok(observed) = observed {
+            if let Some(display) = &observed.display {
+                progress["display"] = display.clone();
+            }
+            delay = observed.check_after.unwrap_or(POLL_MS);
+        }
+        progress["nextCheckAt"] = (now() + delay).into();
+        if slot.is_some() {
+            // The group resumes once this result completes it.
+            crate::waits::record_members(db, &mut owner, &run)?;
+        } else if let Some(result) = result {
             db.event(
                 text(&run, "id"),
                 owner.event("wait_ready"),
                 "Wait condition resolved",
                 Some(&result),
             )?;
-        } else if observed.is_err() {
-            owner.record["wakeup"]["lastError"] =
-                "The service is temporarily unavailable; retrying until the wait deadline.".into();
-        } else if let Some(wakeup) = owner.record["wakeup"].as_object_mut() {
-            // A successful check means the service answers again.
-            wakeup.remove("lastError");
         }
-        if let Ok(observed) = observed {
-            if let Some(display) = &observed.display {
-                owner.record["wakeup"]["display"] = display.clone();
-            }
-            delay = observed.check_after.unwrap_or(POLL_MS);
-        }
-        owner.record["wakeup"]["nextCheckAt"] = (now() + delay).into();
         owner.record["updatedAt"] = now().into();
         owner.save(db)?;
     }
@@ -561,8 +632,10 @@ mod tests {
                         crate::waits::Owner {
                             chat: true,
                             record: chat.clone(),
-                        },
-                        captured_run,
+                        }
+                        .into(),
+                        captured_run.into(),
+                        None,
                     )],
                     &Err(stale_denial),
                 )?;
@@ -580,8 +653,10 @@ mod tests {
                         crate::waits::Owner {
                             chat: true,
                             record: chat,
-                        },
-                        current_run,
+                        }
+                        .into(),
+                        current_run.into(),
+                        None,
                     )],
                     &fresh,
                 )?;

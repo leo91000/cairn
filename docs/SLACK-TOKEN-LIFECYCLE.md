@@ -2,7 +2,7 @@
 
 Research checked on **2026-10-19**. This is a focused supplement to the accepted
 [Q1–Q20 design](SLACK-PLUGIN-DESIGN.md), [specification](SLACK-PLUGIN-SPEC.md),
-[personal authorization ADR](adr/0050-personal-plugin-authorizations.md) and
+[personal authorization ADR](adr/0071-personal-plugin-authorizations.md) and
 [implementation log](SLACK-PLUGIN-IMPLEMENTATION.md), not an implementation
 checkpoint or a claim of live Slack compatibility. No credentials, workspace,
 provider API calls or app settings were used.
@@ -170,7 +170,7 @@ A matching display name, email, bot identity or channel participant is insuffici
 Owner intervention and later turns do not transfer another person's authorization.
 External people need the exact provider proof for their admitted route, without
 acquiring Cairn membership. These are already accepted requirements, not new
-product decisions. [ADR-0050](adr/0050-personal-plugin-authorizations.md),
+product decisions. [ADR-0071](adr/0071-personal-plugin-authorizations.md),
 [current host contract][host-doc]
 
 ## Existing host support and mandatory gaps

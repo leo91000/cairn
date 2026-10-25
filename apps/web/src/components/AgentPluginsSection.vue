@@ -21,8 +21,6 @@ const props = defineProps<{
   connections: AgentPluginInstance[]
   // Delegations currently stopped until their new access is reapproved.
   suspended: string[]
-  // Why grants cannot be changed here, e.g. on an older installation.
-  readOnlyGrants?: string
 }>()
 // Granted plugin instance ids.
 const plugins = defineModel<string[]>('plugins', { required: true })
@@ -57,9 +55,6 @@ function set(id: string, on: boolean) {
 
 <template>
   <div class="grid min-w-0 gap-5">
-    <p v-if="readOnlyGrants" class="rounded-xl bg-soft px-5 py-3 text-sm" role="note">
-      {{ readOnlyGrants }}
-    </p>
     <label v-if="searchable" class="search-field flex min-w-0 flex-row items-center gap-[7px] rounded-[7px] border border-line bg-raised px-2.5 py-0 text-subtle"><Icon :name="Search" :size="16" /><input
       v-model="query"
       type="search"
@@ -85,7 +80,6 @@ function set(id: string, on: boolean) {
         <li v-for="connection in rows" :key="connection.id" class="flex min-w-0 items-center gap-3 px-5 py-3 phone:flex-wrap phone:px-4">
           <UiSwitch
             :model-value="plugins.includes(connection.id)"
-            :disabled="Boolean(readOnlyGrants)"
             :label="`Access to ${packageName(connection.pluginId)} ${connection.name}`"
             @update:model-value="set(connection.id, $event)"
           />
@@ -153,7 +147,6 @@ function set(id: string, on: boolean) {
             Review<Icon :name="ArrowUpRight" :size="13" />
           </RouterLink>
           <UiButton
-            v-if="!readOnlyGrants"
             size="small"
             :aria-label="`Remove access to ${packageName(connection.pluginId)} ${connection.name}`"
             @click="set(connection.id, false)"
@@ -170,7 +163,6 @@ function set(id: string, on: boolean) {
         Not found
       </AccessChip>
       <UiButton
-        v-if="!readOnlyGrants"
         size="small"
         aria-label="Remove deleted plugin instances"
         @click="plugins = plugins.filter(id => !missing.includes(id))"

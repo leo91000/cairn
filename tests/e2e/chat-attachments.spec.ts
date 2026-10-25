@@ -14,10 +14,10 @@ import {
 test('sent SVGs remain images in the mosaic, viewer and clipboard', async ({ page, workspace }) => {
   test.setTimeout(60000)
   await useRelayForHttpMocks(page)
-  let legacyRequests = 0
+  let streamRequests = 0
   await page.route(/\/chats\/[^/]+\/attachments\/[^/?]+\/stream$/, (route) => {
-    legacyRequests++
-    return route.fulfill({ status: 404, json: { error: 'Not found' } })
+    streamRequests++
+    return route.continue()
   })
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'clipboard', {
@@ -55,7 +55,7 @@ test('sent SVGs remain images in the mosaic, viewer and clipboard', async ({ pag
   await message.getByRole('button', { name: 'More actions for logo.svg', exact: true }).click()
   await page.getByRole('menuitem', { name: 'Copy image', exact: true }).click()
   await expect(page.locator('html')).toHaveAttribute('data-copied-type', 'image/png')
-  expect(legacyRequests).toBeGreaterThan(0)
+  expect(streamRequests).toBeGreaterThan(0)
   await expect(page.locator('html')).not.toHaveAttribute('data-svg-script', 'executed')
   await message.getByRole('button', { name: 'More actions for logo.svg', exact: true }).click()
   const download = page.waitForEvent('download')

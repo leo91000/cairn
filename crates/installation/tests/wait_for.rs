@@ -1,4 +1,6 @@
 mod common;
+#[path = "wait_for/groups.rs"]
+mod groups;
 #[path = "wait_for/pr_checks.rs"]
 mod pr_checks;
 
@@ -204,7 +206,7 @@ impl Fixture {
         wait_for::schedule(
             &self.s,
             &self.token,
-            &json!({ "condition": condition, "reason": "Wait for result", "timeoutSeconds": 420 }),
+            &json!({ "conditions": [condition], "reason": "Wait for result", "timeoutSeconds": 420 }),
         )
         .await
         .unwrap()
@@ -325,7 +327,7 @@ async fn already_finished_sources_return_results_without_scheduling_or_ending_th
         wait_for::schedule(
             &f.s,
             &f.token,
-            &json!({ "condition": { "type": "delay", "seconds": 420 }, "reason": "Old delay" }),
+            &json!({ "conditions": [{ "type": "delay", "seconds": 420 }], "reason": "Old delay" }),
         )
         .await
         .unwrap();
@@ -373,7 +375,7 @@ async fn github_monitor_pins_identity_and_wakes_on_failure_without_polling_the_l
     let f = Fixture::new().await;
     let wait = f.schedule(f.github_condition()).await;
     let repeated = wait_for::schedule(&f.s, &f.token, &json!({
-        "condition": { "type": "github_workflow", "projectId": f.project, "runId": 42.0, "headSha": SHA },
+        "conditions": [{ "type": "github_workflow", "projectId": f.project, "runId": 42.0, "headSha": SHA }],
         "timeoutSeconds": 420.0, "reason": "Wait for result",
     })).await.unwrap();
     assert_eq!(wait, repeated);
@@ -574,7 +576,7 @@ async fn permissions_origins_and_workflow_commit_mismatches_are_rechecked() {
         wait_for::schedule(
             &f.s,
             &f.token,
-            &json!({ "condition": invalid, "timeoutSeconds": 420, "reason": "Wrong commit" })
+            &json!({ "conditions": [invalid], "timeoutSeconds": 420, "reason": "Wrong commit" })
         )
         .await
         .is_err()
@@ -623,7 +625,7 @@ async fn delay_replaces_condition_waits_and_private_tokens_follow_agent_identity
     let replaced = wait_for::schedule(
         &f.s,
         &f.token,
-        &json!({ "condition": { "type": "delay", "seconds": 420 }, "reason": "Wait for result" }),
+        &json!({ "conditions": [{ "type": "delay", "seconds": 420 }], "reason": "Wait for result" }),
     )
     .await
     .unwrap()["wakeup"]
@@ -645,7 +647,7 @@ async fn delay_replaces_condition_waits_and_private_tokens_follow_agent_identity
         &f.s,
         &f.token,
         &json!({
-            "condition": { "type": "run_finished", "runId": target["id"] },
+            "conditions": [{ "type": "run_finished", "runId": target["id"] }],
             "timeoutSeconds": 420,
             "reason": "Observe another agent",
         }),
@@ -684,7 +686,7 @@ async fn deferred_target_conversations_are_not_finished_and_cycles_are_rejected(
         .patch_run(text(&target, "id"), json!({ "status": "succeeded" }))
         .await
         .unwrap();
-    let input = json!({ "condition": { "type": "run_finished", "runId": target["id"] }, "timeoutSeconds": 420, "reason": "Join other work" });
+    let input = json!({ "conditions": [{ "type": "run_finished", "runId": target["id"] }], "timeoutSeconds": 420, "reason": "Join other work" });
     assert_eq!(
         wait_for::schedule(&f.s, &f.token, &input)
             .await
@@ -714,14 +716,14 @@ async fn input_validation_self_waits_and_pending_steering_cannot_register_wakeup
             wait_for::schedule(
                 &f.s,
                 &f.token,
-                &json!({ "condition": condition, "reason": "Wait", "timeoutSeconds": 420 })
+                &json!({ "conditions": [condition], "reason": "Wait", "timeoutSeconds": 420 })
             )
             .await
             .is_err()
         );
     }
     for seconds in [json!(0), json!(86401), json!(1.5), json!("420")] {
-        assert!(wait_for::schedule(&f.s, &f.token, &json!({ "condition": f.github_condition(), "reason": "Wait", "timeoutSeconds": seconds })).await.is_err());
+        assert!(wait_for::schedule(&f.s, &f.token, &json!({ "conditions": [f.github_condition()], "reason": "Wait", "timeoutSeconds": seconds })).await.is_err());
     }
     f.s.chat_send(
         &f.chat,
@@ -733,7 +735,7 @@ async fn input_validation_self_waits_and_pending_steering_cannot_register_wakeup
         wait_for::schedule(
             &f.s,
             &f.token,
-            &json!({ "condition": f.github_condition(), "reason": "Wait", "timeoutSeconds": 420 })
+            &json!({ "conditions": [f.github_condition()], "reason": "Wait", "timeoutSeconds": 420 })
         )
         .await
         .is_err()
@@ -755,7 +757,7 @@ async fn queued_follow_ups_do_not_prevent_registering_a_wait() {
     let result = wait_for::schedule(
         &f.s,
         &f.token,
-        &json!({ "condition": f.github_condition(), "reason": "Wait for CI", "timeoutSeconds": 420 }),
+        &json!({ "conditions": [f.github_condition()], "reason": "Wait for CI", "timeoutSeconds": 420 }),
     )
     .await
     .unwrap();
@@ -782,7 +784,7 @@ async fn newly_queued_input_during_the_initial_probe_cannot_be_held_by_a_wait() 
             wait_for::schedule(
                 &f.s,
                 &f.token,
-                &json!({ "condition": { "type": "delay", "seconds": 420 }, "reason": "Earlier wait" }),
+                &json!({ "conditions": [{ "type": "delay", "seconds": 420 }], "reason": "Earlier wait" }),
             )
             .await
             .unwrap();
@@ -796,7 +798,7 @@ async fn newly_queued_input_during_the_initial_probe_cannot_be_held_by_a_wait() 
                 &s,
                 &token,
                 &json!({
-                    "condition": condition,
+                    "conditions": [condition],
                     "reason": "Old plan",
                     "timeoutSeconds": 420,
                 }),
@@ -835,7 +837,7 @@ async fn delivered_steering_input_during_the_initial_probe_cannot_be_overwritten
             &s,
             &token,
             &json!({
-                "condition": condition, "reason": "Old plan", "timeoutSeconds": 420,
+                "conditions": [condition], "reason": "Old plan", "timeoutSeconds": 420,
             }),
         )
         .await
@@ -895,7 +897,7 @@ async fn watchers_share_requests_only_for_the_same_granted_project_origin() {
             &f.s,
             text(&config["env"], "CAIRN_MCP_RUN_TOKEN"),
             &json!({
-                "condition": f.github_condition(), "reason": "Also waiting", "timeoutSeconds": 600,
+                "conditions": [f.github_condition()], "reason": "Also waiting", "timeoutSeconds": 600,
             }),
         )
         .await
@@ -987,7 +989,7 @@ async fn git_suffixes_and_installation_grant_flags_cannot_change_the_target_scop
         &f.s,
         &f.token,
         &json!({
-            "condition": { "type": "run_finished", "runId": target["id"] },
+            "conditions": [{ "type": "run_finished", "runId": target["id"] }],
             "reason": "Narrower grant", "timeoutSeconds": 420,
         }),
     )
@@ -1017,7 +1019,7 @@ async fn projects_registered_with_ssh_remotes_can_wait_for_their_ci() {
     let result = wait_for::schedule(
         &f.s,
         &f.token,
-        &json!({ "condition": f.github_condition(), "reason": "Elsewhere", "timeoutSeconds": 420 }),
+        &json!({ "conditions": [f.github_condition()], "reason": "Elsewhere", "timeoutSeconds": 420 }),
     )
     .await;
     assert_eq!(result.unwrap_err().status, 409);
@@ -1065,7 +1067,7 @@ async fn scoped_agent_token_removal_never_falls_back_to_shared_credentials() {
         &f.s,
         text(&config["env"], "CAIRN_MCP_RUN_TOKEN"),
         &json!({
-            "condition": f.github_condition(), "reason": "Scoped CI", "timeoutSeconds": 420,
+            "conditions": [f.github_condition()], "reason": "Scoped CI", "timeoutSeconds": 420,
         }),
     )
     .await
@@ -1142,7 +1144,7 @@ async fn measure_wait_metadata() {
                     &f.s,
                     &f.token,
                     &json!({
-                        "condition": condition,
+                        "conditions": [condition],
                         "reason": reason,
                         "timeoutSeconds": 420,
                     }),
@@ -1158,7 +1160,7 @@ async fn measure_wait_metadata() {
                 wait_for::schedule(
                     &f.s,
                     &f.token,
-                    &json!({ "condition": condition, "reason": reason }),
+                    &json!({ "conditions": [condition], "reason": reason }),
                 )
                 .await
                 .unwrap();
@@ -1221,6 +1223,15 @@ async fn measure_wait_metadata() {
 
 #[tokio::test]
 async fn dormant_plugin_probes_keep_the_requesters_membership_generation() {
+    dormant_probe_identity(false).await;
+}
+
+#[tokio::test]
+async fn grouped_plugin_probes_keep_the_requesters_membership_generation() {
+    dormant_probe_identity(true).await;
+}
+
+async fn dormant_probe_identity(grouped: bool) {
     use cairn_installation::auth::{InstallationIdentity, InstallationRole};
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -1233,7 +1244,15 @@ async fn dormant_plugin_probes_keep_the_requesters_membership_generation() {
             )),
         )
         .await;
-        f.schedule(f.github_condition()).await;
+        if grouped {
+            let target = f.target().await;
+            wait_for::schedule(&f.s, &f.token, &json!({
+                "conditions": [f.github_condition(), { "type": "run_finished", "runId": target["id"] }],
+                "mode": "all", "reason": "Wait under the original author", "timeoutSeconds": 420,
+            })).await.unwrap();
+        } else {
+            f.schedule(f.github_condition()).await;
+        }
         f.finish().await;
         let revoked = Arc::new(AtomicBool::new(false));
         let state = revoked.clone();
@@ -1288,11 +1307,23 @@ async fn dormant_plugin_probes_keep_the_requesters_membership_generation() {
             // the revoked source before making another provider request.
             let pending = f.s.get("chats", &f.chat).await.unwrap();
             assert!(pending["wakeup"]["observation"].is_null());
-            f.next_poll().await;
+            if grouped {
+                let mut chat = f.s.get("chats", &f.chat).await.unwrap();
+                chat["wakeup"]["members"][0]["nextCheckAt"] = 0.into();
+                f.s.store.put("chats", chat).await.unwrap();
+            } else {
+                f.next_poll().await;
+            }
             conditions::poll_once(&f.s).await.unwrap();
         }
         let chat = f.s.get("chats", &f.chat).await.unwrap();
-        assert_eq!(chat["wakeup"]["observation"]["state"], "unavailable");
+        let progress = if grouped {
+            assert!(chat["wakeup"]["observation"].is_null());
+            &chat["wakeup"]["members"][0]
+        } else {
+            &chat["wakeup"]
+        };
+        assert_eq!(progress["observation"]["state"], "unavailable");
         assert_eq!(f.calls().len(), if during_request { 2 } else { 1 });
         authority.abort();
     }
@@ -1300,6 +1331,15 @@ async fn dormant_plugin_probes_keep_the_requesters_membership_generation() {
 
 #[tokio::test]
 async fn cancelling_the_shared_probe_representative_keeps_other_waits_pending() {
+    shared_probe_representative(false).await;
+}
+
+#[tokio::test]
+async fn cancelling_a_grouped_probe_representative_keeps_other_waits_pending() {
+    shared_probe_representative(true).await;
+}
+
+async fn shared_probe_representative(grouped: bool) {
     use cairn_installation::{
         auth::{InstallationIdentity, InstallationRole},
         plugins::registry,
@@ -1335,7 +1375,18 @@ async fn cancelling_the_shared_probe_representative_keeps_other_waits_pending() 
     .await
     .unwrap();
     let condition = json!({"type":"probe-fixture_ready"});
-    f.schedule(condition.clone()).await;
+    let mut request = json!({
+        "conditions": [condition], "reason": "Independent wait", "timeoutSeconds": 420,
+    });
+    if grouped {
+        let target = f.target().await;
+        request["conditions"].as_array_mut().unwrap().push(json!({
+            "type": "run_finished", "runId": target["id"],
+        }));
+        request["mode"] = "any".into();
+    }
+    let scheduled = wait_for::schedule(&f.s, &f.token, &request).await.unwrap();
+    assert_eq!(scheduled["deferred"], true);
     f.finish().await;
     let second = f.s.chat_create(json!({})).await.unwrap();
     let second_chat = text(&second, "id").to_owned();
@@ -1360,15 +1411,9 @@ async fn cancelling_the_shared_probe_representative_keeps_other_waits_pending() 
         .await
         .unwrap();
     let config = f.s.mcps.run_configuration(&f.s, &run).await.unwrap();
-    wait_for::schedule(
-        &f.s,
-        text(&config["env"], "CAIRN_MCP_RUN_TOKEN"),
-        &json!({
-            "condition":condition, "reason":"Independent wait", "timeoutSeconds":420,
-        }),
-    )
-    .await
-    .unwrap();
+    wait_for::schedule(&f.s, text(&config["env"], "CAIRN_MCP_RUN_TOKEN"), &request)
+        .await
+        .unwrap();
     f.s.store
         .patch_run(text(&run, "id"), json!({"status":"succeeded"}))
         .await
@@ -1525,7 +1570,7 @@ async fn mission_plugin_wait_survives_restart_and_resumes_on_the_pinned_result()
             &restarted,
             &f.token,
             &json!({
-                "condition": { "type": "delay", "seconds": 1 }, "reason": "Stale turn",
+                "conditions": [{ "type": "delay", "seconds": 1 }], "reason": "Stale turn",
             })
         )
         .await
@@ -1574,7 +1619,7 @@ async fn mission_wait_is_cancellable_and_schedule_pause_only_affects_future_runs
         &f.s,
         &f.token,
         &json!({
-            "condition": { "type": "delay", "seconds": 60 }, "reason": "Wait for the result",
+            "conditions": [{ "type": "delay", "seconds": 60 }], "reason": "Wait for the result",
         }),
     )
     .await
@@ -1608,7 +1653,7 @@ async fn missions_share_dependency_cycle_detection_with_conversations() {
         &f.s,
         &f.token,
         &json!({
-            "condition": { "type": "run_finished", "runId": target["id"] },
+            "conditions": [{ "type": "run_finished", "runId": target["id"] }],
             "reason": "Cyclic dependency", "timeoutSeconds": 60,
         }),
     )

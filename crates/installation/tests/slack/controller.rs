@@ -60,6 +60,32 @@ impl Controller {
     }
 }
 
+#[tokio::test]
+async fn controller_health_is_accepted_by_the_current_node_schema() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = super::common::config(root.path());
+    let controller = Controller::new(config.clone());
+    let (origin, server) = super::common::serve_locally(controller.router()).await;
+    config.runner_url = origin;
+    let service = cairn_installation::service::Service::new(config)
+        .await
+        .unwrap();
+    let result = cairn_installation::nodes::refresh_local(&service).await;
+    controller.shutdown();
+    server.abort();
+    assert!(
+        result.is_ok(),
+        "The controller health was rejected: {result:?}"
+    );
+    let node = service
+        .store
+        .get("nodes", cairn_installation::nodes::LOCAL_NODE_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(node["capabilities"]["kvm"], true);
+}
+
 async fn handle(State(state): State<Arc<Controller>>, request: Request) -> Response {
     let path = request.uri().path();
     if path == "/health" {
@@ -67,7 +93,7 @@ async fn handle(State(state): State<Arc<Controller>>, request: Request) -> Respo
             "status": "ok", "sharedResources": true,
             "budget": state.budget.lock().await.clone(),
             "runtimeId": "fixture", "runtimes": ["fixture"],
-            "capabilities": { "os": "linux", "arch": "x86_64", "kvm": true, "fuse": true,
+            "capabilities": { "os": "linux", "arch": "x86_64", "kvm": true,
                 "cpu": 4, "memoryMiB": 16384, "diskMiB": 131072 }
         }))
         .into_response();

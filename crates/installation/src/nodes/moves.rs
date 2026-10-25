@@ -857,7 +857,7 @@ mod tests {
         );
         for manifest in [
             json!({ "kind": "native-ext4-v1" }),
-            json!({ "layout": { "kind": "paired-ext4-v2" } }),
+            json!({ "version": 1 }),
             json!(null),
         ] {
             assert_eq!(restored_storage_mode(&manifest), "on-demand");

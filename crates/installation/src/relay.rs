@@ -1,5 +1,6 @@
 //! The installation owns the outbound connection and dispatches through its real HTTP router.
 pub(crate) mod application;
+pub(crate) mod nodes;
 
 use crate::{
     auth::{InstallationIdentity, InstallationRole},
@@ -13,9 +14,9 @@ use axum::{
     http::{HeaderName, HeaderValue, Request},
 };
 use cairn_protocol::{
-    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_NOTIFICATION_IN_FLIGHT,
-    MAX_PUBLIC_IN_FLIGHT, MAX_STREAM_CHUNK, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
-    REQUEST_TIMEOUT, Role, SUPPORTED_VERSIONS,
+    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_NODE_CHANNELS,
+    MAX_NOTIFICATION_IN_FLIGHT, MAX_PUBLIC_IN_FLIGHT, MAX_STREAM_CHUNK, PROTOCOL_VERSION,
+    REQUEST_TIMEOUT, Role,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -176,7 +177,7 @@ pub async fn claim(beacon: &str, directory: &Path, code: &str, name: &str) -> Re
             .json(&serde_json::json!({
                 "code": code,
                 "name": name,
-                "protocol": MIN_PROTOCOL_VERSION,
+                "protocol": PROTOCOL_VERSION,
             }))
             .send()
             .await
@@ -235,6 +236,19 @@ async fn read_private<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Opt
         Error::bad("Invalid private installation identity. Back up the file before recovery.")
     })?;
     Ok(Some(identity))
+}
+
+/// Beacon's origin and this installation's ID once claimed. Nodes added
+/// without a manager address reach the manager through Beacon with them.
+pub(crate) async fn node_channel_route(data_dir: &Path) -> Result<Option<(String, String)>> {
+    let Some(identity) = read_identity(&data_dir.join("installation-relay")).await? else {
+        return Ok(None);
+    };
+    let beacon = origin(&identity.origin)?;
+    Ok(Some((
+        beacon.as_str().trim_end_matches('/').to_owned(),
+        identity.installation_id,
+    )))
 }
 
 async fn read_identity(directory: &Path) -> Result<Option<Identity>> {
@@ -546,6 +560,13 @@ pub async fn connect_with_direct(
         .await?
         .ok_or_else(|| Error::bad("Run cairn claim before starting the relay."))?;
     let beacon = origin(&identity.origin)?;
+    // Direct node connections outlive a reconnect of this tunnel.
+    let nodes = nodes::NodePeers::new(
+        router.clone(),
+        directory.clone(),
+        direct.clone(),
+        stop.clone(),
+    );
     let mut delay = Duration::from_millis(250);
     loop {
         let started = tokio::time::Instant::now();
@@ -554,7 +575,7 @@ pub async fn connect_with_direct(
                 direct.detach();
                 return Ok(());
             },
-            result = connected(&identity, &beacon, router.clone(), &service, direct.clone()) => {
+            result = connected(&identity, &beacon, router.clone(), &service, direct.clone(), &nodes) => {
                 direct.detach();
                 if let Err(error) = result {
                     if error.status == 401 {
@@ -590,6 +611,7 @@ async fn connected(
     router: Router,
     service: &crate::service::Service,
     direct: crate::direct::DirectConnections,
+    nodes: &nodes::NodePeers,
 ) -> Result<()> {
     service.synchronize_task_authors().await?;
     let mut url = beacon
@@ -631,7 +653,7 @@ async fn connected(
     socket
         .send(Message::Text(
             serde_json::to_string(&Frame::Hello {
-                versions: SUPPORTED_VERSIONS.to_vec(),
+                version: PROTOCOL_VERSION,
             })?
             .into(),
         ))
@@ -640,18 +662,32 @@ async fn connected(
 
     let welcome = tokio::time::timeout(Duration::from_secs(5), socket.next())
         .await
-        .map_err(|_| Error::unavailable("Relay negotiation timed out."))?;
-    let Some(Ok(Message::Text(welcome))) = welcome else {
-        return Err(Error::unavailable("Relay negotiation failed."));
+        .map_err(|_| Error::unavailable("Relay handshake timed out."))?;
+    let welcome = match welcome {
+        Some(Ok(Message::Text(welcome))) => welcome,
+        Some(Ok(Message::Close(Some(close))))
+            if close.code
+                == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Protocol =>
+        {
+            return Err(Error::bad(
+                "Relay protocol mismatch. Update required: update Beacon and the installation.",
+            ));
+        }
+        _ => return Err(Error::unavailable("Relay handshake failed.")),
     };
     let Frame::Welcome { version } = serde_json::from_str::<Frame>(&welcome)? else {
-        return Err(Error::bad("Incompatible relay protocol."));
+        return Err(Error::bad(
+            "Relay protocol mismatch. Update required: update Beacon and the installation.",
+        ));
     };
-    if !SUPPORTED_VERSIONS.contains(&version) {
-        return Err(Error::bad("Incompatible relay protocol."));
+    if version != PROTOCOL_VERSION {
+        return Err(Error::bad(
+            "Relay protocol mismatch. Update required: update Beacon and the installation.",
+        ));
     }
 
-    let direct_supported = version >= cairn_protocol::direct::DIRECT_VERSION;
+    // Node channels end with this connection; Beacon closes their other side too.
+    let mut node_channels = JoinSet::new();
     let mut requests = JoinSet::new();
     let mut request_ids = HashMap::new();
     let mut active = HashMap::<String, (AbortHandle, std::sync::Arc<Semaphore>)>::new();
@@ -666,11 +702,9 @@ async fn connected(
     };
     let (direct_output, mut direct_frames) =
         mpsc::channel::<Frame>(cairn_protocol::direct::MAX_DIRECT_QUEUE);
-    if direct_supported {
-        direct.attach(direct_output);
-    }
+    direct.attach(direct_output);
     loop {
-        if version >= 3 && notification_schedule.poll {
+        if notification_schedule.poll {
             notification_schedule.poll = false;
             let available = MAX_NOTIFICATION_IN_FLIGHT - notification_schedule.in_flight.len();
             if available > 0 {
@@ -713,7 +747,7 @@ async fn connected(
         }
 
         tokio::select! {
-            _ = notifications.tick(), if version >= 3 => {
+            _ = notifications.tick() => {
                 notification_schedule.poll = true;
             }
             result = requests.join_next_with_id(), if !requests.is_empty() => {
@@ -749,7 +783,8 @@ async fn connected(
                     .await
                     .map_err(Error::internal)?;
             }
-            Some(frame) = direct_frames.recv(), if direct_supported => {
+            Some(_) = node_channels.join_next(), if !node_channels.is_empty() => {}
+            Some(frame) = direct_frames.recv() => {
                 let message = serde_json::to_string(&frame)?;
                 socket
                     .send(Message::Text(message.into()))
@@ -761,12 +796,12 @@ async fn connected(
                 match message {
                     Some(Ok(Message::Text(message))) => {
                         let request = match serde_json::from_str::<Frame>(&message)? {
-                            Frame::DirectKey { public_key, stun_url } if direct_supported => {
+                            Frame::DirectKey { public_key, stun_url } => {
                                 direct.configure_stun(stun_url)?;
                                 direct.set_key(&identity.installation_id, &public_key)?;
                                 continue;
                             }
-                            Frame::DirectAuthorize { id, authorization } if direct_supported => {
+                            Frame::DirectAuthorize { id, authorization } => {
                                 let accepted = direct.authorize(authorization, false);
                                 let acknowledgement = Frame::DirectAuthorized { id, accepted };
                                 let message = serde_json::to_string(&acknowledgement)?;
@@ -776,7 +811,7 @@ async fn connected(
                                     .map_err(Error::internal)?;
                                 continue;
                             }
-                            Frame::DirectRenew { id, authorization } if direct_supported => {
+                            Frame::DirectRenew { id, authorization } => {
                                 let accepted = direct.authorize(authorization, true);
                                 let acknowledgement = Frame::DirectAuthorized { id, accepted };
                                 let message = serde_json::to_string(&acknowledgement)?;
@@ -786,11 +821,11 @@ async fn connected(
                                     .map_err(Error::internal)?;
                                 continue;
                             }
-                            Frame::DirectRevoke { scope } if direct_supported => {
+                            Frame::DirectRevoke { scope } => {
                                 direct.revoke(scope);
                                 continue;
                             }
-                            Frame::DirectSignal { id, signal, request_id } if direct_supported => {
+                            Frame::DirectSignal { id, signal, request_id } => {
                                 let accepted = direct.receive_signal(id, signal);
                                 if let Some(id) = request_id {
                                     let acknowledgement = Frame::DirectSignalAck { id, accepted };
@@ -802,15 +837,57 @@ async fn connected(
                                 }
                                 continue;
                             }
+                            Frame::NodeChannel { id, address } => {
+                                if node_channels.len() >= MAX_NODE_CHANNELS {
+                                    continue;
+                                }
+                                let beacon = beacon.clone();
+                                let installation = identity.installation_id.clone();
+                                let token = identity.token.clone();
+                                let router = router.clone();
+                                let nodes = nodes.clone();
+                                node_channels.spawn(async move {
+                                    let accepted = match nodes.certificate().await {
+                                        Ok(certificate) => nodes::accept(
+                                            &beacon,
+                                            &installation,
+                                            &token,
+                                            &id,
+                                            address.as_deref(),
+                                            router,
+                                            certificate,
+                                        )
+                                        .await,
+                                        Err(error) => Err(error),
+                                    };
+                                    if accepted.is_err() {
+                                        tracing::debug!("Node channel was not accepted");
+                                    }
+                                });
+                                continue;
+                            }
+                            Frame::NodeOffer { id, sdp, address } => {
+                                if node_channels.len() >= MAX_NODE_CHANNELS {
+                                    continue;
+                                }
+                                let nodes = nodes.clone();
+                                let output = output.clone();
+                                node_channels.spawn(async move {
+                                    let address = address.and_then(|value| value.parse().ok());
+                                    let sdp = nodes.answer(sdp, address).await;
+                                    let _ = output.send(Frame::NodeAnswer { id, sdp }).await;
+                                });
+                                continue;
+                            }
                             Frame::Request(request) => request,
-                            Frame::StreamCredit { id } if version >= 2 => {
+                            Frame::StreamCredit { id } => {
                                 if let Some((_, credit)) = active.get(&id)
                                     && credit.available_permits() == 0 {
                                     credit.add_permits(1);
                                 }
                                 continue;
                             }
-                            Frame::Cancel { id } if version >= 2 => {
+                            Frame::Cancel { id } => {
                                 if let Some((task, _)) = active.remove(&id) {
                                     task.abort();
                                 }
@@ -819,7 +896,7 @@ async fn connected(
                             Frame::NotificationAck {
                                 id,
                                 delivered: outbox_complete,
-                            } if version >= 3 => {
+                            } => {
                                 if notification_schedule.in_flight.remove(&id) {
                                     if outbox_complete {
                                         notification_schedule.recently_sent.remove(&id);
@@ -854,13 +931,9 @@ async fn connected(
                         let request_id = request.id.clone();
                         let router = router.clone();
                         let credit = std::sync::Arc::new(Semaphore::new(0));
-                        let streaming = if version >= 2 {
-                            Some(StreamOutput {
-                                frames: output.clone(),
-                                credit: credit.clone(),
-                            })
-                        } else {
-                            None
+                        let streaming = StreamOutput {
+                            frames: output.clone(),
+                            credit: credit.clone(),
                         };
                         let task = requests.spawn(async move {
                             let _permit = permit;
@@ -897,17 +970,10 @@ struct StreamOutput {
 async fn dispatch(
     router: Router,
     input: ApiRequest,
-    streaming: Option<StreamOutput>,
+    streaming: StreamOutput,
 ) -> Result<Option<ApiResponse>> {
     if !cairn_protocol::api_path(&input.path) || input.body.len() > MAX_BODY {
         return Err(Error::bad("Invalid relayed API request."));
-    }
-    if cairn_protocol::stream_path(&input.path) && streaming.is_none() {
-        return Ok(Some(request_failure(
-            input.id,
-            501,
-            "Streaming requires relay protocol 2.",
-        )));
     }
     let role = match input.role {
         Role::Owner => InstallationRole::Owner,
@@ -957,7 +1023,8 @@ async fn dispatch(
         })
         .collect();
     let is_stream = cairn_protocol::stream_path(&input.path);
-    if is_stream && let Some(output) = streaming {
+    if is_stream {
+        let output = streaming;
         let id = input.id;
         output
             .frames

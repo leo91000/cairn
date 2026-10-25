@@ -337,7 +337,6 @@ impl Fixture {
                 "diskMiB": 100000,
                 "diskTotalMiB": 100000,
                 "kvm": false,
-                "fuse": false,
             },
             "limits": { "cpu": 2, "memoryMiB": 4096, "diskMiB": 32768 },
             "slots": 1,
@@ -995,7 +994,6 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
         let mut node = f.node.clone();
         node["capabilities"]["backend"] = backend.into();
         node["capabilities"]["kvm"] = (!native).into();
-        node["capabilities"]["fuse"] = (!native).into();
         f.service.store.put("nodes", node.clone()).await.unwrap();
         let mut agent = f.agent.clone();
         agent["access"]["backend"] = backend.into();
@@ -1048,14 +1046,11 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
         if changed_backend {
             node["capabilities"]["backend"] = "firecracker".into();
             node["capabilities"]["kvm"] = true.into();
-            node["capabilities"]["fuse"] = true.into();
-        } else if !native {
-            node["capabilities"]["fuse"] = false.into();
         }
         f.service.store.put("nodes", node).await.unwrap();
         let attempt = id();
         let claimed = placement::reserve(&f.service, &resumed, &attempt).await;
-        let succeeds = native && !changed_backend;
+        let succeeds = !changed_backend;
         if succeeds {
             let claimed = claimed.unwrap();
             assert_eq!(claimed["nodeId"], f.node["id"]);
@@ -1073,14 +1068,7 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
         } else {
             let error = claimed.unwrap_err();
             assert_eq!(error.status, 409);
-            assert_eq!(
-                error.message,
-                if changed_backend {
-                    "Destination execution backend changed."
-                } else {
-                    "Destination no longer supports on-demand disks."
-                }
-            );
+            assert_eq!(error.message, "Destination execution backend changed.");
             assert!(
                 f.service
                     .store
@@ -1126,6 +1114,154 @@ async fn retained_conversations_exhaust_the_shared_native_admission_budget() {
     let next = f.run();
     common::add_run(&f.service.store, &next).await;
     assert!(placement::reserve(&f.service, &next, &id()).await.is_err());
+}
+
+#[tokio::test]
+async fn native_same_node_resume_reuses_retained_capacity_on_a_small_pool() {
+    let f = Fixture::new().await;
+    let mut node = f.node.clone();
+    node["limits"]["diskMiB"] = 32768.into();
+    node["diskGrowthProtocol"] = 1.into();
+    node["diskCapacity"] = json!({ "protocol": 1, "capturedAt": now(), "usedBytes": 0,
+        "freeBytes": 900 * 1024 * 1024 * 1024u64, "ownedBytes": {}, "retainedBytes": {}, "requests": [] });
+    f.service.store.put("nodes", node.clone()).await.unwrap();
+    let mut run = f.run();
+    common::add_run(&f.service.store, &run).await;
+    let first = id();
+    let selected = placement::reserve(&f.service, &run, &first).await.unwrap();
+    assert_eq!(selected["resources"]["diskMiB"], 31_000);
+    common::set_checkpoint(
+        &f.service.store,
+        text(&run, "id"),
+        json!({
+            "nodeId": node["id"], "runnerId": first, "resources": selected["resources"],
+        }),
+    )
+    .await;
+    placement::materialize(&f.service, &first).await.unwrap();
+    placement::release(&f.service, &first).await.unwrap();
+    let volume_id = format!("{}:{}", text(&run, "id"), text(&node, "id"));
+    let mut volume = f
+        .service
+        .store
+        .get("node-volumes", &volume_id)
+        .await
+        .unwrap()
+        .unwrap();
+    volume["materialized"] = true.into();
+    volume["storageMode"] = "on-demand".into();
+    volume["diskMiB"] = 256.into();
+    volume["activeDiskMiB"] = 256.into();
+    f.service.store.put("node-volumes", volume).await.unwrap();
+    node["diskCapacity"]["usedBytes"] = (256 * 1024 * 1024u64).into();
+    node["diskCapacity"]["retainedBytes"] = json!({ text(&run, "id"): 256 * 1024 * 1024u64 });
+    f.service.store.put("nodes", node).await.unwrap();
+    run["status"] = "queued".into();
+    run["finishedAt"] = Value::Null;
+    run["recoveryPending"] = true.into();
+    f.service
+        .store
+        .patch_run(text(&run, "id"), run.clone())
+        .await
+        .unwrap();
+    placement::check(&f.service, &run).await.unwrap();
+    let selected = placement::reserve(&f.service, &run, &id()).await.unwrap();
+    assert_eq!(selected["resources"]["diskMiB"], 31_000);
+}
+
+#[tokio::test]
+async fn native_disk_growth_is_idempotent_and_competes_atomically_with_admission() {
+    let f = Fixture::new().await;
+    let gib = 1024 * 1024 * 1024u64;
+    let mut node = f.node.clone();
+    node["slots"] = 4.into();
+    node["limits"]["diskMiB"] = (80 * 1024).into();
+    node["capabilities"]["diskTotalMiB"] = (1024 * 1024).into();
+    node["capabilities"]["diskMiB"] = (900 * 1024).into();
+    f.service.store.put("nodes", node.clone()).await.unwrap();
+    let token = auth::token();
+    f.service
+        .store
+        .set(
+            &format!("node-token:{}", auth::digest(&token)),
+            node["id"].clone(),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut attempts = Vec::new();
+    let mut runs = Vec::new();
+    for _ in 0..2 {
+        let mut run = f.run();
+        run["status"] = "running".into();
+        run["resources"] = json!({ "cpu": 2, "memoryMiB": 4096, "diskMiB": 32768 });
+        common::add_run(&f.service.store, &run).await;
+        let attempt = id();
+        placement::reserve(&f.service, &run, &attempt)
+            .await
+            .unwrap();
+        common::set_checkpoint(
+            &f.service.store,
+            text(&run, "id"),
+            json!({ "nodeId": node["id"], "runnerId": attempt }),
+        )
+        .await;
+        attempts.push(attempt);
+        runs.push(run);
+    }
+    let body = json!({
+        "backend": "native", "nodeProtocol": 2, "executionReady": true, "dataRoot": "/fixture",
+        "runtimeId": "development", "runtimes": ["development"],
+        "capabilities": node["capabilities"], "pool": { "capacity": 4 },
+        "sharedResources": true, "budget": { "slots": 4, "limits": node["limits"] },
+        "nativeMode": { "mode": "protected", "generation": null, "status": "applied" },
+        "usage": { "diskMiB": 16384 },
+        "diskGrowth": { "protocol": 1, "capturedAt": now(), "usedBytes": 16 * gib, "freeBytes": 900 * gib,
+            "ownedBytes": { &attempts[0]: 8 * gib, &attempts[1]: 8 * gib },
+            "requests": [
+                { "attemptId": attempts[0], "currentMiB": 32768 },
+                { "attemptId": attempts[1], "currentMiB": 32768 },
+            ] },
+    });
+    for _ in 0..2 {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/internal/nodes/heartbeat")
+            .header("host", common::HOST)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = common::send(&f.router, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let reply = read_json(response).await;
+        assert_eq!(
+            reply["diskGrowth"]["grants"][0]["allowanceMiB"], 40960,
+            "{reply}"
+        );
+        assert_eq!(
+            reply["diskGrowth"]["grants"][1]["allowanceMiB"], 32768,
+            "{reply}"
+        );
+    }
+    assert_eq!(
+        f.service.store.run(text(&runs[0], "id")).await.unwrap()["resources"]["diskMiB"],
+        40960
+    );
+    let incoming = f.run();
+    common::add_run(&f.service.store, &incoming).await;
+    assert!(
+        placement::reserve(&f.service, &incoming, &id())
+            .await
+            .is_err()
+    );
+    placement::release(&f.service, &attempts[0]).await.unwrap();
+    placement::release(&f.service, &attempts[0]).await.unwrap();
+    assert!(
+        placement::reserve(&f.service, &incoming, &id())
+            .await
+            .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -1507,7 +1643,6 @@ async fn parent_node_grant_reductions_revoke_existing_native_delegation() {
         node["id"] = node_id.clone().into();
         node["capabilities"]["backend"] = "firecracker".into();
         node["capabilities"]["kvm"] = true.into();
-        node["capabilities"]["fuse"] = true.into();
         f.service.store.put("nodes", node).await.unwrap();
     }
     let agent = f

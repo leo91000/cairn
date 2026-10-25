@@ -447,7 +447,7 @@ async fn detaching_and_reclaiming_an_installation_permanently_revokes_its_mcp_gr
             "/api/relay/device-claim/start",
             json!({
                 "name": "Reclaimed machine",
-                "protocol": 1,
+                "protocol": cairn_protocol::PROTOCOL_VERSION,
                 "identity": { "installationId": id, "token": identity["token"] },
             }),
         )

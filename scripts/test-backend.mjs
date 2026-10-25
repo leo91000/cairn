@@ -11,8 +11,8 @@ const selectsPackage = args.some(arg => arg === '-p' || arg === '--package' || a
 const includesInstallation = !selectsPackage || args.includes('--workspace')
   || args.includes('cairn-installation') || args.includes('--package=cairn-installation')
 // Beacon's real MCP relay tests also execute the installation's isolated code
-// worker. Build it with the same feature/profile flags before tests start, so a
-// nested Cargo invocation cannot overwrite the binary with another feature set.
+// worker. Build it with the same profile flags before tests start, so a
+// nested Cargo invocation cannot overwrite the binary with another profile.
 const needsCodeWorker = includesInstallation
   || args.includes('cairn-beacon') || args.includes('--package=cairn-beacon')
 // Installation journeys also launch a real manager from this example. Cargo's
@@ -21,8 +21,8 @@ const needsManagerFixture = includesInstallation && !args.includes('--doc')
 if (needsCodeWorker) {
   const delimiter = args.indexOf('--')
   const cargoArgs = delimiter < 0 ? args : args.slice(0, delimiter)
-  const valued = new Set(['--features', '-F', '--target', '--target-dir', '--profile', '--config', '--jobs', '-j'])
-  const switches = new Set(['--all-features', '--no-default-features', '--release', '--offline', '--frozen'])
+  const valued = new Set(['--target', '--target-dir', '--profile', '--config', '--jobs', '-j'])
+  const switches = new Set(['--release', '--offline', '--frozen'])
   const buildArgs = []
   for (let i = 0; i < cargoArgs.length; i++) {
     const arg = cargoArgs[i]

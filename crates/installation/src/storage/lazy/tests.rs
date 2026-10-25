@@ -802,7 +802,7 @@ fn concurrent_cold_reads_share_one_verified_transfer() {
     assert_eq!(
         source.calls.load(Ordering::SeqCst),
         1,
-        "overlapping FUSE reads must share their cold block"
+        "overlapping disk reads must share their cold block"
     );
 }
 

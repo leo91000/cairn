@@ -16,7 +16,6 @@ import {
   watch,
 } from 'vue'
 import { useRoute } from 'vue-router'
-import { currentAgentIds } from '../agent-access'
 import {
   api,
   notify,
@@ -61,7 +60,7 @@ import {
   X,
   Zap,
 } from '../icons'
-import { pluginConfiguration, pluginInstance } from '../plugin-catalogue'
+import { pluginConfiguration } from '../plugin-catalogue'
 import { pluginFormLookup } from '../plugin-form-lookups'
 import {
   pluginFieldAnswer,
@@ -512,8 +511,6 @@ async function save() {
   await action(async () => {
     const plugin = id.value
     const connection = editing.value
-    const currentEntry = entry.value ?? undefined
-    const exact = Boolean(configuration.value?.exactInstanceReads)
     const agent = state.agents.find(item => item.id === form.value.agentId)
     const body = {
       name: form.value.name,
@@ -522,7 +519,7 @@ async function save() {
       settings: pluginSettings(storedFields.value, values.value),
       // Blank secret fields keep what is saved.
       secrets: pluginSecrets(secrets.value),
-      // Existing grants are reread before save; new instances use the final setup step.
+      // Editing keeps current grants; creation uses the final setup step.
       ...(delegates.value && {
         agentId: form.value.agentId,
         // An agent with one project answers in it; a broader one answers outside projects.
@@ -537,14 +534,8 @@ async function save() {
       ...sharing.value,
       ...(!connection && grants.value.length ? { agentIds: [...grants.value] } : {}),
     }
-    // Capture the target and typed fields before the asynchronous grant read.
-    // Closing the editor during that read cannot turn this update into a creation.
-    const agentIds = await currentAgentIds(state.agents, currentEntry, connection, async () => [await pluginInstance(plugin, connection!.id, exact)])
     const path = `/plugins/${plugin}/connections${connection ? `/${connection.id}` : ''}`
-    await pluginOperation(path, {
-      ...body,
-      ...(agentIds ? { agentIds } : {}),
-    }, connection ? 'PUT' : 'POST')
+    await pluginOperation(path, body, connection ? 'PUT' : 'POST')
     signIn.consumed()
     form.value.token = ''
     secrets.value = pluginFormSecrets()

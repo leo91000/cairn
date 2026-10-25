@@ -56,17 +56,17 @@ if (args[0] === 'build') {
 
 describe('backend test launcher', () => {
   it('keeps cargo test and documentation checks as the default', () => {
-    const { calls, status } = invoke(['--doc', '--features', 'ublk-prototype'])
+    const { calls, status } = invoke(['--doc'])
     expect(status).toBe(0)
-    expect(calls[0].args).toContain('ublk-prototype')
-    expect(calls[1]).toEqual({ args: ['test', '--locked', '--workspace', '--doc', '--features', 'ublk-prototype'], worker: '/fixture/cairn' })
+    expect(calls[0].args).toContain('build')
+    expect(calls[1]).toEqual({ args: ['test', '--locked', '--workspace', '--doc'], worker: '/fixture/cairn' })
   })
 
-  it('isolates credentials and builds the code worker with the nextest feature graph', () => {
-    const { calls, status } = invoke(['--nextest', '--features', 'ublk-prototype', '--test-threads', '4', '--no-fail-fast'])
+  it('isolates credentials and builds the code worker with the nextest profile', () => {
+    const { calls, status } = invoke(['--nextest', '--test-threads', '4', '--no-fail-fast'])
     expect(status).toBe(0)
-    expect(calls[0]).toEqual({ args: ['build', '--locked', '-p', 'cairn-installation', '--bin', 'cairn', '--example', 'worker_fixture', '--message-format=json', '--features', 'ublk-prototype'] })
-    expect(calls[1]).toEqual({ args: ['nextest', 'run', '--locked', '--workspace', '--features', 'ublk-prototype', '--test-threads', '4', '--no-fail-fast'], worker: '/fixture/cairn' })
+    expect(calls[0]).toEqual({ args: ['build', '--locked', '-p', 'cairn-installation', '--bin', 'cairn', '--example', 'worker_fixture', '--message-format=json'] })
+    expect(calls[1]).toEqual({ args: ['nextest', 'run', '--locked', '--workspace', '--test-threads', '4', '--no-fail-fast'], worker: '/fixture/cairn' })
   })
 
   it('preserves the nextest failure exit code and package selection', () => {
@@ -79,10 +79,10 @@ describe('backend test launcher', () => {
   })
 
   it('rebuilds a stale native manager before the real Slack worker journey', () => {
-    const { calls, status } = invoke(['-p', 'cairn-installation', '--test', 'slack', '--release', '--features', 'ublk-prototype'])
+    const { calls, status } = invoke(['-p', 'cairn-installation', '--test', 'slack', '--release', '--offline'])
     expect(status).toBe(0)
     expect(calls[0].args).toContain('--release')
-    expect(calls[0].args).toContain('ublk-prototype')
-    expect(calls.at(-1).args).toEqual(['test', '--locked', '-p', 'cairn-installation', '--test', 'slack', '--release', '--features', 'ublk-prototype'])
+    expect(calls[0].args).toContain('--offline')
+    expect(calls.at(-1).args).toEqual(['test', '--locked', '-p', 'cairn-installation', '--test', 'slack', '--release', '--offline'])
   })
 })

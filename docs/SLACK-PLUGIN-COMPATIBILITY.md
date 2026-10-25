@@ -60,7 +60,7 @@ No deployment, automatic backup, restoration or production transition is perform
 | Setup | Expiring root drafts and inert resource namespaces retain exact approval/owner provenance and TTLs. Activation atomically publishes original resource IDs and finished owner credentials; pending consent is never promoted. Discard and deletion retire corresponding secrets and references. |
 | Conversation and execution | Per-message requester proofs, shared-source bindings, generation/revision fences and new-turn bookkeeping preserve each author's authority through queue/preparation/wake. Existing un-attributed messages never gain another person's personal OAuth. An authenticated account captured while Beacon is unavailable has no personal membership-generation proof; later recovery cannot upgrade that turn. Verified proof records retain their existing serialized generation string. Exact owner-answer provenance is stored under the existing chat-control KV prefix, bound to the run, initiating turn and answer; edits retire it and conversation deletion clears that prefix. It permits only that answer's delivery and never restores suspended personal credentials. Older execution code cannot be used to resume work that depends on these checks. |
 | Issued question controls | Nonsecret plugin-storage values retain their `preparing`/`posting`/`sent` write intent, canonical fields/partial selections and exact delivery/person/provider-message binding across worker restart. Optional host-derived `deliveryId`/`chatId` fields bind their lifetime; all delivery-removal paths delete them atomically, including source revocation and conversation purge. Ordinary instance values and quotas keep their existing format. A queued interaction's existing `nextAttemptAt` also represents a definite provider cooldown without spending unexpected-error attempts. Native RPC question IDs include the provider turn as well as thread/item; reopening a session withdraws old requests and a new turn cannot inherit their answers or withdrawals. `blockingQuestion` is derived adapter inbox input, not a stored message field. Unknown POST outcomes are not silently replayed; unsupported/secret questions stay in Cairn. These additions remain inside the unqualified epoch-14 draft boundary. |
-| Ordinary progress controls | One delivery-owned `progress:<deliveryId>` plugin-storage value retains an eight-second `readyAt` wall deadline, `preparing`/`posting`/`sent` intent, exact source/person/delivery/message binding, confirmed short native step label and optional `updateStatus = sending`. Only definite quota rejection clears the relevant in-flight intent for retry. The confirmed Stop binding remains usable after an uncertain edit; an uncertain initial creation is not replayed. Final reply handling deletes the reference before optional provider cleanup; native delivery removal still retires it atomically. Values use the existing store envelope and quota; no new table, index, native capability or credential shape is introduced. Epoch 14 / SQLite 13 and the unchanged legacy tree remain the draft boundary. [Local measurements](performance/SLACK-PROGRESS-STATE.md) compare the representative full record with ordinary instance state. |
+| Ordinary progress controls | One delivery-owned `progress:<deliveryId>` plugin-storage value retains an eight-second `readyAt` wall deadline, `preparing`/`posting`/`sent` intent, exact source/person/delivery/message binding, confirmed short native step label and optional `updateStatus = sending`. Only definite quota rejection clears the relevant in-flight intent for retry. The confirmed Stop binding remains usable after an uncertain edit; an uncertain initial creation is not replayed. Final reply handling deletes the reference before optional provider cleanup; native delivery removal still retires it atomically. Values use the existing store envelope and quota; no new table, index, native capability or credential shape is introduced. Epoch 14 / SQLite 13 and the unchanged legacy tree remain the draft boundary. [Local measurements](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/SLACK-PROGRESS-STATE.md) compare the representative full record with ordinary instance state. |
 | Clients | Android's ordinary setup-input snapshots are local, backup-excluded and bounded. They contain no declared secret fields; session/scope retirement clears them. They are disposable editor state, not installation data or an offline mutation queue. Web state remains browser-local. |
 
 Saved-root OAuth renewal in resource forms reuses the encrypted credential key
@@ -74,7 +74,7 @@ to refresh a record with no refresh token, rather than replaying it. Consumption
 and completion compare the prior credential in the authorization transaction.
 No table, key count, encryption envelope, epoch, legacy tree or migration changes;
 the additive metadata stays inside this unreleased epoch-14 / SQLite-13 draft.
-The [native record observation](performance/ROOT-FORM-CREDENTIAL-RENEWAL.md)
+The [native record observation](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/ROOT-FORM-CREDENTIAL-RENEWAL.md)
 includes all three states. Inert root OAuth activation and whole-PR production
 transition/recovery qualification remain open.
 
@@ -87,7 +87,7 @@ preview and save their workspace so its bot is checked again. The existing vault
 resource IDs, routes, table layout and epoch-14 / SQLite-13 draft boundary remain.
 This is an authority restriction inside the unreleased candidate, not a qualified
 production migration or permission to run an earlier feature-branch binary.
-[Local resource measurements](performance/SLACK-WORKSPACE-APP-BINDING.md) record
+[Local resource measurements](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/SLACK-WORKSPACE-APP-BINDING.md) record
 the added field's bytes and store timings separately from the operational RPC.
 
 Resource-form events also expose the previous nonsecret settings from their
@@ -104,7 +104,7 @@ Installed-package approval reads retain the same files, manifest parser, digest
 and original approval snapshots. Synchronous loading/validation now uses the
 blocking pool so nested OAuth forms do not exhaust their default stack. No new
 record, encoded payload or write is introduced; [local read/write and CPU
-samples](performance/PACKAGE-APPROVAL-READ.md) compare the same loader before and
+samples](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/PACKAGE-APPROVAL-READ.md) compare the same loader before and
 after this scheduling boundary. Effect/commit approval checks remain mandatory.
 
 The SQLite version fence advances; the existing application tables, storage
@@ -186,7 +186,7 @@ retirement above. Preserve the original store and identity. A stored fixture
 regression exercises restart, exact answer cancellation, unchanged attributed and
 closed questions, content-free recovery instructions and idempotence. It does
 not replace qualification against actual prior production data. The
-[storage-shape observation](performance/QUESTION-TURN-MIGRATION.md) records the
+[storage-shape observation](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/QUESTION-TURN-MIGRATION.md) records the
 bounded additional records and its measurement limits.
 
 ## Socket slice and optional queued-work hint
@@ -244,7 +244,7 @@ These are additive records inside the already incompatible, unreleased epoch-14
 automatic migration or legacy-tree change is introduced. Pre-Slack downgrade and
 production deployment remain fenced. This is a checkpoint inventory, not final
 whole-contract compatibility qualification. Local overhead is recorded in
-[continuation measurements](performance/SLACK-CONTINUATION-DELIVERY.md).
+[continuation measurements](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/SLACK-CONTINUATION-DELIVERY.md).
 
 ## Root OAuth on inert setup drafts
 
@@ -265,7 +265,7 @@ the setup sign-in endpoint and have incomplete root OAuth activation/renewal;
 they are not a supported way to operate this draft feature. The already
 unreleased epoch-14 / SQLite-13 boundary and legacy tree stay unchanged, and this
 inventory does not qualify production transition, physical recovery, downgrade,
-deployment or release. [Local measurements](performance/SETUP-OAUTH-EXPIRATION.md)
+deployment or release. [Local measurements](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/SETUP-OAUTH-EXPIRATION.md)
 separate encoded-value sizes from KV expiry and production latency. Web/Android
 sign-in and equivalent public-MCP/agent-tool mutations remain required before
 complete delivery.
@@ -284,7 +284,7 @@ transition and recovery qualification before any production migration.
 After integrating Main's reviewed epoch-13 native administrator contract, the
 candidate marker advances to SQLite 13 and epoch 14. The local Store regression
 preserves native-review/plugin records and opaque KV values and refuses a future
-marker. [Marker observations](performance/PLUGIN-COMPATIBILITY-FENCE.md) compare
+marker. [Marker observations](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/PLUGIN-COMPATIBILITY-FENCE.md) compare
 encoded bytes, reads, writes and CPU against version 12 with their explicit
 scope. This is not a complete startup/vault/forward-recovery qualification; no
 automatic transition is declared.
@@ -306,7 +306,7 @@ Slack destination, while its parent retains the external reply reservation.
 Older development execution code lacks these semantics and must not resume such
 work. These additions remain inside the unreleased epoch-14 / SQLite-13 boundary;
 no new automatic transition, supported downgrade or whole-service/vault recovery
-qualification is declared. [Local Store observations](performance/DELEGATED-PLUGIN-SOURCE.md)
+qualification is declared. [Local Store observations](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/DELEGATED-PLUGIN-SOURCE.md)
 separate representative JSON/key bytes and KV timings from provider, comparison,
 startup and recovery costs.
 

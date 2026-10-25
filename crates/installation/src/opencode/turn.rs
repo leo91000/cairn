@@ -32,6 +32,8 @@ struct Receipt {
     #[serde(default)]
     previously_delivered: HashSet<String>,
     #[serde(default)]
+    operational_notices: HashSet<String>,
+    #[serde(default)]
     complete: bool,
     #[serde(default)]
     answer: String,
@@ -266,6 +268,9 @@ struct Turn<'a> {
 
 impl Turn<'_> {
     async fn deliver(&mut self, id: &str) -> Result<()> {
+        if self.receipt.operational_notices.contains(id) {
+            return Ok(());
+        }
         if self.receipt.delivered.insert(id.into()) {
             self.receipt.save(&self.receipt_path).await?;
             emit(
@@ -312,16 +317,18 @@ impl Turn<'_> {
     }
 
     async fn poll_inbox(&mut self) -> Result<()> {
-        let path = Path::new(text(self.plan, "inputDirectory")).join("messages.json");
-        let Ok(file) = tokio::fs::File::open(path).await else {
+        let directory = Path::new(text(self.plan, "inputDirectory"));
+        let Some(bytes) = crate::chat_inbox::read(directory, LIMIT).await? else {
             return Ok(());
         };
-        let bytes = crate::process::read_bounded(file, LIMIT).await?;
         let Ok(messages) = serde_json::from_slice::<Vec<Value>>(&bytes) else {
             return Ok(());
         };
         for message in messages {
             let id = text(&message, "id");
+            if message["operationalNotice"] == true {
+                self.receipt.operational_notices.insert(id.to_owned());
+            }
             if id.is_empty()
                 || self.submitted.contains(id)
                 || self.receipt.delivered.contains(id)

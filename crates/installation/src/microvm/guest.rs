@@ -1,7 +1,6 @@
 //! Guest-only bridge. All filesystem operations here run inside the microVM.
 mod codex;
 mod filesystems;
-mod restored;
 
 use super::{
     plan::{CHAT_INBOX, Plan},
@@ -117,36 +116,8 @@ async fn handle(
     match request {
         GuestRequest::Freeze => freeze(&mut write, true).await,
         GuestRequest::Thaw => freeze(&mut write, false).await,
-        GuestRequest::MountWorkspace => {
-            let _running = running
-                .try_lock()
-                .map_err(|_| Error::conflict("Guest already running."))?;
-            let _filesystem = FILESYSTEM_CONTROL.lock().await;
-            filesystems::mount().await?;
-            wire::write(&mut write, &Reply::ok(true)).await
-        }
-        GuestRequest::RestoreClone { identity } => {
-            let _running = running
-                .try_lock()
-                .map_err(|_| Error::conflict("Guest already running."))?;
-            let _filesystem = FILESYSTEM_CONTROL.lock().await;
-            if Path::new(INITIALIZED).exists() || filesystems::mounted() {
-                return Err(Error::conflict(
-                    "Only an anonymous unmounted VM can be cloned.",
-                ));
-            }
-            restored::validate(&identity)?;
-            let mut timing =
-                crate::performance::Operation::new("guest_clone", &identity.id, "unfreeze");
-            filesystems::freeze(false).await?;
-            timing.next("entropy_and_network");
-            restored::renew(&identity).await?;
-            // VMGenID cannot reset randomness cached by an arbitrary userspace
-            // library. Recreate the native process before granting an account.
-            timing.next("native_restart");
-            codex.restart(stop, timing_endpoint.as_deref()).await?;
-            timing.finish();
-            wire::write(&mut write, &Reply::ok(true)).await
+        GuestRequest::MountWorkspace | GuestRequest::RestoreClone { .. } => {
+            Err(Error::bad("Unknown guest operation."))
         }
         GuestRequest::ArtifactExport { path, root } => {
             export_artifact(&mut write, Path::new(&path), &root).await
@@ -160,8 +131,8 @@ async fn handle(
                 initialized: Path::new(INITIALIZED).exists(),
                 codex_service: true,
                 codex_ready: codex.ready(),
-                workspace_disks: true,
-                snapshot_clones: restored::kvm_is_deferred(),
+                workspace_disks: false,
+                snapshot_clones: false,
                 entrypoint_reuse: true,
             };
             wire::write(&mut write, &status).await
@@ -560,12 +531,6 @@ async fn seed_codex() -> Result<usize> {
 
 /// Warmup never reads a previous conversation or an imported configuration.
 async fn prepare_anonymous_codex() -> Result<()> {
-    if filesystems::mounted() {
-        return Err(Error::conflict(
-            "Only a fresh VM can initialize anonymous Codex.",
-        ));
-    }
-
     prepare_anonymous_codex_home(
         Path::new("/home/node/.codex"),
         Path::new("/opt/cairn-codex-state"),

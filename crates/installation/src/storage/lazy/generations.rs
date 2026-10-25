@@ -17,6 +17,7 @@ impl LazyDisk {
 
     fn seal_with_completion(&self, completed: bool) -> io::Result<i64> {
         let _write = self.write_gate.write().map_err(failure)?;
+        let _geometry = self.publication.read().map_err(failure)?;
         let mut journal = self.journal.lock().map_err(failure)?;
         journal.sync()?;
         let mut db = self.db.lock().map_err(failure)?;
@@ -116,7 +117,7 @@ impl LazyDisk {
         let mut retained_blocks = 0;
         let reconstruct = |index: u64| -> io::Result<_> {
             let offset = index * BLOCK;
-            let mut bytes = vec![0; (self.size - offset).min(BLOCK) as usize];
+            let mut bytes = vec![0; (self.size() - offset).min(BLOCK) as usize];
             self.read_generation(generation, offset, &mut bytes)?;
             let hash = (!bytes.iter().all(|byte| *byte == 0)).then(|| block_digest(&bytes));
             Ok((index, bytes, hash))

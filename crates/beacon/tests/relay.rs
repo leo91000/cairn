@@ -188,7 +188,7 @@ async fn owner_claims_an_installation_with_a_single_use_code() {
     let claim_body = json!({
         "code": claim["code"],
         "name": "My installation",
-        "protocol": 1,
+        "protocol": cairn_protocol::PROTOCOL_VERSION,
     });
     let response = app
         .client

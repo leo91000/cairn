@@ -101,7 +101,7 @@ impl Started {
         wait_for::schedule(
             &self.s,
             &self.bearer,
-            &json!({ "condition": { "type": "delay", "seconds": 3600 }, "reason": reason }),
+            &json!({ "conditions": [{ "type": "delay", "seconds": 3600 }], "reason": reason }),
         )
         .await
         .map(|result| {

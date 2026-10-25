@@ -40,17 +40,13 @@ import {
   newAgentDraft,
   nodeName,
   nodesFor,
-  olderInstallation,
   rebaseDraft,
   reviewLines,
   sandboxOptionsFor,
   savedDraft,
   selectionSummary,
-  sentDraft,
   skillKey,
   skillLabel,
-  updateForGrants,
-  withResourceGrants,
 } from '../agent-access'
 import { agentPluginDirectory } from '../agent-plugin-directory'
 import {
@@ -133,8 +129,6 @@ const catalogError = ref('')
 const nodesError = ref('')
 const nodesLoading = ref(false)
 const catalogLoading = ref(false)
-// An installation older than agent revisions keeps live grants on its resources: shown read-only.
-const legacy = ref(false)
 const suspended = ref<string[]>([])
 const busy = ref(false)
 const serverError = ref('')
@@ -368,16 +362,10 @@ const overviewShown = computed(() => isMain.value || state.workspaceLoaded
         : card),
     })))
 
-/** The agent as the page edits it; on an older installation, with grants from its resources. */
-function loadedDraft(found: Agent) {
-  const loadedAgent = draftOf(found)
-  return legacy.value ? withResourceGrants(loadedAgent, found.id, catalog.value.connections, nodes.value) : loadedAgent
-}
-
 function apply(found: Agent) {
   agent.value = found
-  saved.value = loadedDraft(found)
-  draft.value = loadedDraft(found)
+  saved.value = draftOf(found)
+  draft.value = draftOf(found)
   fieldErrors.value = {}
   attempted.value = false
 }
@@ -422,25 +410,12 @@ async function loadCatalog() {
   }
 }
 
-/**
- * On an older installation, the live grants are read from resources: once `part` loads, the saved
- * and edited agent take them from there (they are read-only, never edited here).
- */
-function regrant(part: 'plugins' | 'exclusiveNodes') {
-  if (!legacy.value || !agent.value)
-    return
-  const fromResources = withResourceGrants(saved.value, agent.value.id, catalog.value.connections, nodes.value)[part]
-  saved.value = { ...saved.value, [part]: fromResources }
-  draft.value = { ...draft.value, [part]: [...fromResources] }
-}
-
 async function retryCatalog() {
   catalogLoading.value = true
   try {
     const plugins = await loadCatalog()
     if (plugins) {
       catalog.value = plugins
-      regrant('plugins')
       void loadSuspension()
     }
   }
@@ -468,7 +443,6 @@ async function retryNodes() {
     const nodeList = await loadNodes()
     if (nodeList) {
       nodes.value = nodeList
-      regrant('exclusiveNodes')
     }
   }
   finally {
@@ -492,7 +466,6 @@ async function load() {
       nodes.value = nodeList
     if (plugins)
       catalog.value = plugins
-    legacy.value = olderInstallation(agents)
     if (isNew.value) {
       saved.value = newAgentDraft()
       draft.value = newAgentDraft()
@@ -536,11 +509,10 @@ function body(reapprove: string[] = [], nativeNodes: string[] = []) {
   // Also set once a new agent exists: a recovery update must not overwrite another client's change.
   const revision = agent.value?.revision
   // Only a loaded connection list says which ones were deleted.
-  const { exclusiveNodes: _nodes, plugins: _plugins, ...profile } = savedDraft(draft.value, state.workspaceLoaded && state.installationRole === 'owner' ? state.mcps.map(connection => connection.id) : undefined)
+  const profile = savedDraft(draft.value, state.workspaceLoaded && state.installationRole === 'owner' ? state.mcps.map(connection => connection.id) : undefined)
   return {
-    // An older installation has no live grants on agents nor revisions: they are not sent.
-    ...(legacy.value ? profile : { ...profile, exclusiveNodes: draft.value.exclusiveNodes, plugins: draft.value.plugins }),
-    ...(revision && !legacy.value ? { revision } : {}),
+    ...profile,
+    ...(revision ? { revision } : {}),
     ...(reapprove.length ? { reapproveDelegations: reapprove } : {}),
     ...(nativeNodes.length ? { nativeNodeReviews: nativeNodes } : {}),
   }
@@ -559,7 +531,7 @@ async function requestSave() {
     return
   }
 
-  let lines = reviewLines(saved.value, sentDraft(saved.value, draft.value, legacy.value), context.value)
+  let lines = reviewLines(saved.value, draft.value, context.value)
   let effects: DelegationEffect[] = []
   let current: Preview | null = null
   if (!isNew.value && changes(saved.value, draft.value).length) {
@@ -567,16 +539,13 @@ async function requestSave() {
     try {
       // The server says which queued or running work and which delegations the change affects.
       const preview = await api<Preview>(`/agents/${id.value}/preview`, { method: 'POST', body: JSON.stringify(body()) })
-      lines = reviewLines(saved.value, sentDraft(saved.value, draft.value, legacy.value), context.value, preview.runs)
+      lines = reviewLines(saved.value, draft.value, context.value, preview.runs)
       effects = preview.delegations.filter(item => item.suspended)
       current = preview
     }
     catch (e) {
-      // An older installation has no preview: the review is computed here only.
-      if (!(e instanceof ApiError && (e.status === 404 || e.status === 405))) {
-        failed(e)
-        return
-      }
+      failed(e)
+      return
     }
     finally {
       busy.value = false
@@ -662,8 +631,8 @@ async function commit(reapprove: string[]) {
   // workspace is reloaded too: retrying then updates the same agent instead of creating another one.
   agent.value = result
   if (profileChanged) {
-    saved.value = loadedDraft(result)
-    draft.value = loadedDraft(result)
+    saved.value = draftOf(result)
+    draft.value = draftOf(result)
     fieldErrors.value = {}
     attempted.value = false
   }
@@ -718,8 +687,7 @@ async function reloadAgent() {
     const mine = draft.value
     agent.value = found
     saved.value = draftOf(found)
-    legacy.value = olderInstallation(agents)
-    saved.value = loadedDraft(found)
+    saved.value = draftOf(found)
     const rebased = rebaseDraft(base, mine, saved.value)
     // Tool choices of deleted MCP connections are dropped.
     if (state.workspaceLoaded && state.installationRole === 'owner')
@@ -1112,7 +1080,6 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               :packages="catalog.packages"
               :connections="catalog.connections"
               :suspended="suspended"
-              :read-only-grants="legacy ? updateForGrants : ''"
             />
             <AgentResourceAccess
               v-if="!isNew && !catalogError && catalog.resourceGrantCounts !== undefined"
@@ -1157,7 +1124,6 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               v-model:exclusive-nodes="draft.exclusiveNodes"
               :nodes="nodes"
               :agent-id="agent?.id"
-              :read-only-grants="legacy ? updateForGrants : ''"
             />
           </template>
 

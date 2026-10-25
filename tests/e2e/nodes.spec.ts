@@ -18,6 +18,7 @@ test('registers, configures and revokes a node through the owner interface', asy
   await page.goto(workspacePath('/nodes'))
   await page.getByRole('button', { name: 'Add a machine', exact: true }).click()
   await page.getByLabel('Machine name').fill('Browser Linux')
+  await page.getByText('Connect directly instead').click()
   await page.getByLabel('Direct manager address').fill(workspace.url)
   await page.getByRole('button', { name: 'Create enrollment code' }).click()
   const code = await page.getByLabel('Single-use enrollment code').textContent()
@@ -349,6 +350,7 @@ test('finishing the first step keeps an agent allowed while it was open', async 
   await page.goto(workspacePath('/nodes'))
   await page.getByRole('button', { name: 'Add a machine', exact: true }).click()
   await page.getByLabel('Machine name').fill('Shared Linux')
+  await page.getByText('Connect directly instead').click()
   await page.getByLabel('Direct manager address').fill(workspace.url)
   await page.getByRole('button', { name: 'Create enrollment code' }).click()
   const code = await page.getByLabel('Single-use enrollment code').textContent()
@@ -407,7 +409,6 @@ test('native enrollment requires explicit people and native agent grants', async
     memoryMiB: 16384,
     diskMiB: 65536,
     kvm: false,
-    fuse: false,
   }
   // A native agent already runs on another native machine.
   const laptopInvitation = await workspace.api('/api/nodes/enrollments', 'POST', { name: 'Native laptop', backend: 'native' })
@@ -431,6 +432,7 @@ test('native enrollment requires explicit people and native agent grants', async
   await page.getByRole('option', { name: 'Native process · trusted people only', exact: true }).click()
   await expect(enrollment).toContainText('weaker isolation')
   await enrollment.getByLabel('Machine name').fill('Native desktop')
+  await enrollment.getByText('Connect directly instead').click()
   await enrollment.getByLabel('Direct manager address').fill(workspace.url)
   await enrollment.getByRole('button', { name: 'Create enrollment code' }).click()
   const code = await enrollment.getByLabel('Single-use enrollment code').textContent()
@@ -505,62 +507,6 @@ test('native enrollment requires explicit people and native agent grants', async
   expect((await workspace.api('/api/nodes')).find((value: { id: string }) => value.id === desktop).slots).toBe(6)
 })
 
-test('on an older installation, finishing the first step sends the machine\'s whole list', async ({ page, workspace }) => {
-  test.setTimeout(60000)
-  const earlier = await workspace.api('/api/agents', 'POST', { name: 'Earlier agent', access: { nodes: [] } })
-  await useRelayForHttpMocks(page)
-  // An older installation rejects `add` and replaces the list instead.
-  const bodies: unknown[] = []
-  await page.route('**/api/nodes/*/agents', async (route) => {
-    const body = route.request().postDataJSON()
-    bodies.push(body)
-    if (body.add)
-      await route.fulfill({ status: 400, json: { error: 'Invalid node request.' } })
-    else
-      await route.continue()
-  })
-  await page.goto(workspacePath('/nodes'))
-  await authenticateWorkspace(page)
-  await page.getByRole('button', { name: 'Add a machine', exact: true }).click()
-  await page.getByLabel('Machine name').fill('Older Linux')
-  await page.getByLabel('Direct manager address').fill(workspace.url)
-  await page.getByRole('button', { name: 'Create enrollment code' }).click()
-  const code = await page.getByLabel('Single-use enrollment code').textContent()
-  const response = await page.request.post(`${workspace.installationUrl}/internal/nodes/enroll`, {
-    data: {
-      code,
-      name: 'Older Linux',
-      protocol: 1,
-      runtimeId: 'fixture',
-      capabilities: {
-        os: 'linux',
-        arch: 'x86_64',
-        kvm: true,
-        cpu: 8,
-        memoryMiB: 16384,
-        diskMiB: 65536,
-      },
-    },
-  })
-  expect(response.ok()).toBe(true)
-  const { nodeId } = await response.json()
-  const grant = page.getByRole('dialog', { name: 'Who can use “Older Linux”?' })
-  await expect(grant).toBeVisible({ timeout: 20000 })
-  // Allowed meanwhile from its agent page: the replacing list must keep it.
-  const current = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === earlier.id)
-  await workspace.api(`/api/agents/${earlier.id}`, 'PUT', { ...current, access: { ...current.access, nodes: [nodeId] } })
-  await expect(grant.getByRole('checkbox', { name: /^Earlier agent/ })).toBeDisabled({ timeout: 15000 })
-  await grant.getByRole('checkbox', { name: 'Main agent', exact: true }).check()
-  await grant.getByRole('button', { name: 'Finish', exact: true }).click()
-  await expect(grant).toHaveCount(0)
-  expect(bodies).toEqual([
-    { agentIds: [MAIN_AGENT_ID], add: true },
-    { agentIds: [earlier.id, MAIN_AGENT_ID] },
-  ])
-  const saved = (await workspace.api('/api/nodes')).find((node: { id: string }) => node.id === nodeId)
-  expect(saved.agents.map((item: { id: string }) => item.id).sort()).toEqual([MAIN_AGENT_ID, earlier.id].sort())
-})
-
 test('switching a machine to native enrolls it again and retires the previous node', async ({ page, workspace }) => {
   test.setTimeout(90000)
   const chat = await workspace.api('/api/chats', 'POST', {})
@@ -603,6 +549,7 @@ test('switching a machine to native enrolls it again and retires the previous no
   // The backend is the point of the switch: it is not offered again.
   await expect(switching.getByRole('combobox', { name: 'Execution backend' })).toHaveCount(0)
   await expect(switching).toContainText('weaker isolation')
+  await switching.getByText('Connect directly instead').click()
   await switching.getByLabel('Direct manager address').fill(workspace.url)
   await switching.getByRole('button', { name: 'Create enrollment code' }).click()
   const code = await switching.getByLabel('Single-use enrollment code').textContent()
@@ -612,7 +559,6 @@ test('switching a machine to native enrolls it again and retires the previous no
     ...machine,
     backend: 'native',
     kvm: false,
-    fuse: false,
   })
   await page.waitForResponse(async response => response.request().method() === 'GET'
     && new URL(response.url()).pathname.endsWith('/api/nodes')
@@ -624,7 +570,6 @@ test('switching a machine to native enrolls it again and retires the previous no
     ...machine,
     backend: 'native',
     kvm: false,
-    fuse: false,
   })
 
   // The new runtime is configured and offered agents first, then the previous node can be retired.
@@ -656,7 +601,9 @@ test('switching a machine to native enrolls it again and retires the previous no
 test('existing conversation explicitly confirms backend migration and follows its progress', async ({ page, workspace }) => {
   test.setTimeout(60000)
   await useRelayForHttpMocks(page)
-  const chat = await workspace.api('/api/chats', 'POST', {})
+  // Earlier enrollment journeys may change Main's backend or allowed nodes.
+  const agent = await workspace.api('/api/agents', 'POST', { name: 'Migration source' })
+  const chat = await workspace.api('/api/chats', 'POST', { agentId: agent.id })
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Keep this conversation' })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
   await page.route('**/nodes/placement/*', route => route.fulfill({ json: { nodes: [{ id: 'native-fixture', name: 'Desktop GPU' }], pinnedNodeId: null, preferredNodeId: null } }))

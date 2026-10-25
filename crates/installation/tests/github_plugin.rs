@@ -337,7 +337,7 @@ async fn granted_agents_see_github_conditions_and_others_do_not() {
             .unwrap()
             .iter()
             .find(|tool| tool["name"] == "wait_for")
-            .unwrap()["inputSchema"]["properties"]["condition"]["oneOf"]
+            .unwrap()["inputSchema"]["properties"]["conditions"]["items"]["oneOf"]
             .as_array()
             .unwrap()
             .iter()

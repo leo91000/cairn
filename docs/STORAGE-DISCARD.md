@@ -3,8 +3,7 @@
 Cairn propagates guest ext4 FITRIM through native virtio-blk Async and managed ublk.
 The guest filesystem decides which extents are free. No controller mounts a
 conversation filesystem, infers free ranges from a partial cache or overwrites
-allocated files. This implements the discard recommendation from
-[the storage follow-up study](STORAGE-FOLLOWUP.md).
+allocated files.
 
 ## Storage and durability
 
@@ -54,7 +53,7 @@ No userspace worker or additional seccomp syscall is needed.
 
 Discard starts after prior completion receipts are consumed and fences subsequent
 read/write/flush requests until its own receipt is consumed, including on error.
-The VMM control thread never waits for the backing discard: paired-view remote
+The VMM control thread never waits for the backing discard: remote
 reads, queued publication and dirty-page writeback can block the kernel operation
 without preventing a storage-pressure pause. Both the native frontend and ublk
 advertise a maximum 8 MiB request to bound each maintenance ordering boundary.
@@ -91,9 +90,8 @@ runs from its original root image; maintenance runs from the immutable control
 disk. The control disk is local to the node and is not part of the conversation's
 S3 manifest. The guest kernel already enables SquashFS/XZ; the build asserts it.
 
-This covers both old flat disks and paired system/workspace disks without moving
-their device names. The system stays `/dev/vdb`, the paired workspace `/dev/vdc`;
-the control disk follows them. The root image remains read-only. An interrupted
+The conversation filesystem stays on `/dev/vdb`;
+the read-only control disk uses `/dev/vdc`. The root image remains read-only. An interrupted
 node asset copy retries its private staging file and installs only synced bytes.
 
 The root helper starts after the mounts and acknowledges readiness before the
@@ -117,42 +115,15 @@ resumed from their durable disk. Dormant remote conversations are not automatica
 started or bucket-scanned by this feature. Their bytes are reclaimed after they
 are resumed and a trimmed publication replaces the previous one.
 
-Anonymous template identity advances to version 2 and includes the control image
-in the entrypoint identity. An older template cannot restore the previous device
-topology. Fresh templates retain the helper and the same immutable control disk
-when cloned; live conversation VMs are never copied as templates.
-
 This storage change preserves the existing installation compatibility epoch.
 Disk frames, database schemas,
-manifest/envelope formats and runtime records are unchanged. Template identity
-uses the existing fields; its version prevents reuse across the topology change.
-A release compatible with the installation's data epoch can ignore the new cached
-templates and boot the retained disk. Rollback must follow the installation's
+manifest/envelope formats and runtime records are unchanged. Rollback must follow the installation's
 [compatibility policy](PRODUCTION-CAIRN.md#installation-data-compatibility).
 The updated init tolerates a missing control disk on rollback, so ordinary disk
 reads and the older bridge remain usable. Rolling back disables new maintenance;
 it does not resurrect discarded bytes, which were already free in ext4.
 
 ## Reproduction and evidence
-
-Native storage/codec comparison, isolated from live agent credentials:
-
-```sh
-pnpm test:backend -p cairn-installation --example storage-discard-benchmark \
-  --features ublk-prototype -- --ignored --nocapture --test-threads=1
-```
-
-It alternates three reference and three discard trials over the same 64 MiB
-controlled data: sixteen unique 4 MiB regions, each half seeded random and half
-repeated. The operation discards eight whole regions and the random halves of
-four more. Every surviving byte and zero manifest extent is verified. Output
-includes current unique encoded bytes, physical/logical journal bytes, write,
-trim and publication CPU/latency, and cold/warm 4 KiB read measurements. Thirty-two
-non-overlapping foreground write/read pairs start concurrently with maintenance
-to record foreground contention against the disabled reference; concurrent CPU
-measurements include all process threads and must not be added together. Cold reads
-empty decoded caches and execute the real authenticated codec; encoded objects
-are in memory. This excludes S3, HTTP, VM overhead and production workload mix.
 
 Native Firecracker regression tests require working host io_uring, rather than
 silently skipping it in a container build sandbox:
@@ -171,7 +142,7 @@ python3 tests/storage-discard-bootstrap.py \
   --output /path/to/bootstrap-reference.json
 ```
 
-This boots a deliberately old bridge in flat and paired guests, compares with
+This boots a deliberately old bridge with a flat disk, compares with
 maintenance disabled, deletes controlled files, verifies live files after FITRIM
 and checks that the retained root image never changed. It uses file-backed Async
 drives, so it does not substitute for ublk or production-network qualification.
@@ -186,27 +157,3 @@ workflow are both required for this change's review evidence. Reproducible
 measurement JSON and host conditions belong with the PR/release reference;
 controlled gains are not a forecast for the whole production bucket.
 
-Real native guest qualification, on a disposable private directory with KVM and
-ublk available (root, Debian Python 3.11, busybox-static and e2fsprogs required):
-
-```sh
-python3 tests/storage-discard-native.py \
-  --firecracker /path/to/candidate/firecracker --probe /path/to/ublk_probe \
-  --kernel /path/to/candidate/vmlinux \
-  --control-image /path/to/candidate/control.squashfs \
-  --legacy-init /path/to/pre-change/cairn-init --output /path/to/native.json
-```
-
-Use the exact musl binary/kernel/control disk from the built candidate image;
-provide the historical init explicitly when the checkout no longer has it at
-HEAD. The harness checks flat and paired retained guests, holds a real backend
-discard pending for at least two seconds, requires GET and pause/resume responses
-within one second, then releases it and verifies retained files and completed
-FITRIM on both mounts. It verifies kernel-device and private-registry removal
-before deleting fixtures. `ublk_probe` supports only private fixture markers
-`METRICS.discard-hold` and `METRICS.discard-entered`; managed-stop also releases a
-held fixture request. This opt-in fault injection is absent from production code.
-The harness also requires the ublk device to advertise host WRITE_ZEROES, the
-Linux block-device ABI used by Async hole punching. The qualification measures
-responsiveness during a controlled stall, not normal
-read/write latency or S3 performance.

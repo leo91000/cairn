@@ -844,7 +844,7 @@ establish whole-plugin compatibility.
 
 The pre-merge Android correction passes 518 JVM cases, including forty shared
 plugin journeys, four local-store contracts and nine scope transitions. Its
-[reproducible local reference](performance/ANDROID-PLUGIN-DRAFT-STATE.md) records
+[reproducible local reference](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/ANDROID-PLUGIN-DRAFT-STATE.md) records
 1,280 bytes of saved state versus the reproduced 1,543,572-byte baseline, with a
 260,251-byte private file. This is Robolectric/tmpfs evidence, not device storage
 or live Slack evidence. Current merged-source validation and new independent
@@ -967,7 +967,7 @@ original author keeps later question/steering control. Personal OAuth remains
 suspended, including in-flight results and wakeups. Ordinary turns admitted
 without membership proof retain that restriction after Beacon recovery, while the
 same authenticated account can continue the turn. Storage-shape measurements and
-their host limitations are recorded in [requester control](performance/REQUESTER-CONTROL.md).
+their host limitations are recorded in [requester control](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/REQUESTER-CONTROL.md).
 Actual failing regressions were captured before these corrections; current final
 qualification and fresh independent review remain pending. This does not finish
 the Slack package or the complete contract.
@@ -982,7 +982,7 @@ starts and finishes; receipt validation refuses superseded or disconnected old
 starts without creating another flow. Still-current replays retain their URL.
 Event completion, retry exhaustion, obsolete event removal and instance deletion
 retire the receipts; pending consent keeps its independent expiry.
-[Storage-shape measurements](performance/OAUTH-EVENT-REPLAY.md) record bytes,
+[Storage-shape measurements](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/OAUTH-EVENT-REPLAY.md) record bytes,
 read/write timings, CPU, reference and host limits. Targeted and
 whole-checkpoint qualification remain pending, as do all unfinished Slack lots.
 
@@ -1098,7 +1098,7 @@ such buffers, including after a rule was saved or cancelled. Android now keeps
 these ordinary inputs in the existing bounded device-local snapshot store,
 scoped to account, installation and resource path; saved activity state retains
 only its opaque reference (1,272 bytes in the same shared JVM regression).
-[Storage measurements](performance/ANDROID-PLUGIN-DRAFT-STATE.md) record the
+[Storage measurements](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/ANDROID-PLUGIN-DRAFT-STATE.md) record the
 144,081-byte file, read/write latency, CPU, reference workloads and host limits.
 Closing, cancelling and completing a submission retire
 the input buffer. An unavailable local snapshot cannot restore a rule with its
@@ -1275,7 +1275,7 @@ setting defaults, exact file/digest review, changed-module approval rejection,
 invalid/empty packages and owner-only access. Both client catalogue migrations,
 bounded instance and grant selectors, and the remainder of Q1–Q20 remain unfinished.
 
-The synthetic [read/write observation](performance/PLUGIN-CATALOGUE-READS.md)
+The synthetic [read/write observation](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/PLUGIN-CATALOGUE-READS.md)
 compares the complete response and first compact page in the same binary. It
 records bytes, first/warm read wall time and CPU, unchanged approval-write timing,
 workload and host conditions. The compact page is bounded in bytes and count;
@@ -1417,7 +1417,7 @@ only an older host takes the complete-catalogue adapter. Closing or changing the
 selected instance discards an obsolete schema, while refreshing only saved-rule
 counts preserves an unchanged open editor. Grant writes retain their existing
 host checks. The complete-read measurement and its limitations are recorded in
-[selector measurements](PLUGIN-SELECTOR-MEASUREMENTS.md).
+[selector measurements](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/PLUGIN-SELECTOR-MEASUREMENTS.md).
 
 The shared management catalogue adds five read operations for these selectors:
 `list_plugin_packages`, `get_plugin_package`, `list_plugin_instance_access`,
@@ -1509,7 +1509,7 @@ Native regressions use actual owner HTTP, the real Luau worker and synthetic
 provider responses. They cover consent/save/form/activation, cross-target refusal,
 late edit/delete/owner/package changes, expired renewal, uncertain response and
 secret expiration. Prepared expiry uses the real credential obtained by code
-exchange. [Storage observations](performance/SETUP-OAUTH-EXPIRATION.md) compare
+exchange. [Storage observations](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/SETUP-OAUTH-EXPIRATION.md) compare
 the same encrypted value with and without a KV deadline. Client sign-in surfaces,
 both tool mutation interfaces and the complete Slack OAuth lifecycle remain open;
 this API evidence is not a complete product or live Slack qualification.
@@ -1665,7 +1665,7 @@ Actual-worker HTTP/WSS fixtures exercise the hanging provider, step transition,
 real cancellation, Bob/forged-message/forged-answer refusal, post-ACK visibility
 and revocation, uncertain edits/cleanup, definite creation quotas and uncertain
 creation through manager restart. These use simulated Slack/model/controller
-boundaries, not a real workspace. The [storage observation](performance/SLACK-PROGRESS-STATE.md)
+boundaries, not a real workspace. The [storage observation](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/SLACK-PROGRESS-STATE.md)
 records the representative progress value and its lifetime cost. No native API,
 web/Android UI capability or new persisted envelope is added; the inventory stays
 within the unqualified epoch-12 / SQLite-11 boundary. Full final review/validation,
@@ -1713,7 +1713,7 @@ new code consent and ordinary save restore a working form. This is not a process
 restart or physical recovery experiment. Late authority changes can retain a
 consumed intent but cannot publish new tokens; deleting the root removes it.
 
-The [storage observation](performance/ROOT-FORM-CREDENTIAL-RENEWAL.md) compares
+The [storage observation](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/ROOT-FORM-CREDENTIAL-RENEWAL.md) compares
 actual pre/post-renewal encrypted records using local native reads/writes. The
 existing vault envelope and key count are reused; the optional consumed metadata
 is inventoried inside the unreleased epoch-12 / SQLite-11 boundary. This repairs
@@ -1744,7 +1744,7 @@ renewed its parent OAuth. Synchronous installed-package validation was nested
 inside the HTTP/worker/credential call chain. Approval reads now run that same
 file loader in the blocking pool, retaining the original approval and later
 checks. The uncertain-refresh regression passes with unchanged stack/deadlines;
-[local measurements](performance/PACKAGE-APPROVAL-READ.md) record its I/O/CPU
+[local measurements](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/PACKAGE-APPROVAL-READ.md) record its I/O/CPU
 limits. Complete merged-tree validation and fresh review remain separate gates.
 
 ## Inert root OAuth clients and verified workspace identity
@@ -1782,7 +1782,7 @@ signed HTTP/Luau reproduced acceptance for the wrong app. Workspaces now retain
 the app ID verified by `bots.info`; every operational resource-authenticated
 request checks app/workspace before token-bearing I/O. Active/prepared root
 replacement and owner revalidation of an unbound legacy workspace pass. The
-[record measurement](performance/SLACK-WORKSPACE-APP-BINDING.md) records bytes,
+[record measurement](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/SLACK-WORKSPACE-APP-BINDING.md) records bytes,
 local reads/writes, CPU and limits; it excludes the added operational RPC.
 
 The full R2 Slack suite passes 71 cases (six optional observations ignored).
@@ -1826,7 +1826,7 @@ remain readable, while new markers retain that boolean plus canonical status.
 The tests use the actual worker and scheduler fencing with synthetic agent events;
 they are distinct from full-provider Slack exchanges.
 
-The [three-shape storage observation](performance/SLACK-RETRY-REPLY-RANGE.md)
+The [three-shape storage observation](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/SLACK-RETRY-REPLY-RANGE.md)
 records bytes, cold/warm reads, writes, CPU and host limits. It excludes SQL
 selection and provider/network latency and makes no speedup claim. Root OAuth,
 requester grants, native waits and both client implementations remain required in
@@ -1917,7 +1917,7 @@ provider-response or live Slack proof.
 No persisted shape or compatibility boundary changes; the current draft remains
 epoch 14 / SQLite 13 with no automatic migration. Narrow native Store observations
 and their limits are recorded in
-[authority outage storage](performance/PLUGIN-AUTHORITY-OUTAGE.md). Broader
+[authority outage storage](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/PLUGIN-AUTHORITY-OUTAGE.md). Broader
 qualification, mutation parity, guided setup and the remaining Q1–Q20 gates stay
 open.
 
@@ -1931,7 +1931,7 @@ Three real-worker regressions cover restart, the exact 200 MiB quota, refusing a
 replacement and distinct files from two admissions in the same conversation.
 Owner HTTP verifies the stored bytes. The reference failure and narrow native
 storage observations are recorded in
-[attachment retry storage](performance/PLUGIN-ATTACHMENT-RETRY.md).
+[attachment retry storage](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/PLUGIN-ATTACHMENT-RETRY.md).
 This adds no persisted shape or automatic migration and does not complete Slack
 file support, live validation or whole-PR transition/recovery qualification.
 
@@ -2010,7 +2010,7 @@ Saved resource-route approvals predating `delegation` normalize the absent power
 to false on read, matching root approvals without rewriting stored rows. Actually
 enabling it still suspends a bot. Both clients name this power in root/resource
 bot warnings while preserving the owner's agent choice. The
-[KV observation](performance/DELEGATED-PLUGIN-SOURCE.md) records the incremental
+[KV observation](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/DELEGATED-PLUGIN-SOURCE.md) records the incremental
 source metadata and measurement limits. Final whole-contract qualification,
 management mutation parity, guided inert setup and all Slack Q1–Q20 remain open;
 PR #226 stays draft/unmerged.
@@ -2068,3 +2068,41 @@ No stored field, key, table, envelope or migration changes. The earlier KV
 measurements do not time these additional authority reads or remote policy
 checks. The full installation-management exception remains separate from these
 dedicated delegation tools. Whole Q1–Q20 and the delivery gates above remain open.
+
+
+## Current-format Main integration and grouped observations
+
+The integration of Main `73ac69a5` adopts its current-only client/protocol formats,
+Beacon-introduced nodes, bounded retry admission and grouped `wait_for` inputs.
+Selected-package reads, saved resource-rule counts and both native client warnings
+remain. Root instance edits omit agent grants so concurrent owner changes are
+preserved by the current host; historical resource-grant save adapters are removed.
+Retired Node backend tests follow Main's Rust fixture replacement. Their changed
+branch versions and all local measurement artifacts are preserved in the checkpoint
+history and private workspace evidence; this tree follows Main's rule to put
+measurement evidence in the PR rather than committing artifacts.
+
+A grouped plugin wait initially failed before making its next provider request:
+the dormant requester proof compared a member to the whole group. The proof now
+captures the member's slot. Rechecks preserve that member's state, group identity,
+requester generation and deadline, allow other members to progress, and stop after
+the group resolves. Authorization applies to the observed member. Shared probes
+remain keyed by requester and discard a stale representative's result without
+resolving a peer under its old denial. Native tests exercise individual results,
+large groups, participant revocation during provider I/O and cancellation of a
+shared group's representative. No new persistent key, envelope or field is added
+by this integration correction. Full qualification and independent review of the
+merged tree, all mutation parity/setup and Slack Q1–Q20 remain required.
+
+
+The merged-tree Slack controller fixture advertised the removed `fuse` capability.
+The production node schema rejected its health and left VM work queued without an
+authorized node. A public `refresh_local` fixture regression reproduces the refusal;
+removing only that retired fixture field passes it and restores a complete Socket
+exchange with the real manager/provider process. Production admission stays strict.
+The active remote-choice Android fixture also omitted installation-resolved setup:
+the editor opened on Details without its Channel field. A temporary semantics probe
+located the missing step; it is removed, the fixture supplies the current Settings
+step, and both active/inert choice journeys pass with unchanged assertions/deadlines.
+A separate enrollment JVM timeout passes isolated but remains unexplained. These
+fixture corrections and scoped passes do not establish full contract qualification.

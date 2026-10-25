@@ -204,7 +204,7 @@ private fun CairnAppContent(
     // No installation row above the workspace: each screen's own header shows it, and only the
     // workspace Scaffold (or the offline page below) applies the system bar insets.
     key(installation.id, installation.role, state.session.csrf) {
-        if (!installation.online) {
+        if (!installation.online || installation.updateRequired || state.protocolError != null) {
             var connection by rememberSaveable { mutableStateOf(false) }
             Box(Modifier.fillMaxSize().systemBarsPadding()) {
                 Page {
@@ -212,8 +212,14 @@ private fun CairnAppContent(
                     InstallationHeader(state, openConnection = { connection = true })
                     ConnectionLostNotice(state.connectionLost)
                     Heading(
-                        "Installation hors ligne",
-                        "Les exécutions continuent sur votre installation. Réessayez lorsqu’elle sera connectée.",
+                        if (installation.updateRequired || state.protocolError != null)
+                            "Mise à jour requise"
+                        else "Installation hors ligne",
+                        state.protocolError
+                            ?: if (installation.updateRequired)
+                                "Mettez à jour l’installation avant de l’utiliser avec cette app."
+                            else
+                                "Les exécutions continuent sur votre installation. Réessayez lorsqu’elle sera connectée.",
                     )
                     TextButton(onClick = { vm.perform { refreshInstallations() } }) {
                         Text("Actualiser")

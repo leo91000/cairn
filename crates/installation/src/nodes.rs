@@ -3,6 +3,7 @@ pub mod alerts;
 pub mod checkpoint;
 pub mod connector;
 pub mod coordination;
+pub(crate) mod disk_capacity;
 pub mod disk_grants;
 pub(crate) mod eviction;
 pub mod exclusive;
@@ -252,8 +253,6 @@ struct Capabilities {
     #[serde(default = "firecracker_backend")]
     backend: String,
     kvm: bool,
-    #[serde(default)]
-    fuse: bool,
     #[serde(default)]
     ublk: bool,
     #[serde(default)]
@@ -810,9 +809,30 @@ pub(crate) async fn invite(
         return Err(Error::bad("Unknown execution backend."));
     }
     let backend = request.backend;
-    let origin = match request.manager_url {
+    let direct = match request.manager_url {
         Some(value) => Some(connector::master(value.trim())?),
-        None => connector::master(&s.config.public_url).ok(),
+        None => None,
+    };
+    // Without an address, Beacon introduces the node to a claimed
+    // installation: no address, certificate or incoming port on the manager.
+    // The node pins the manager's node certificate from its command.
+    let beacon = match direct {
+        Some(_) => None,
+        None => match crate::relay::node_channel_route(&s.config.data_dir).await? {
+            Some((beacon, installation)) => {
+                let certificate = crate::relay::nodes::NodeCertificate::load(
+                    &s.config.data_dir.join("installation-relay"),
+                )
+                .await?;
+                Some((beacon, installation, certificate.pin.clone()))
+            }
+            None => None,
+        },
+    };
+    let origin = match (direct, &beacon) {
+        (Some(direct), _) => Some(direct),
+        (None, None) => connector::master(&s.config.public_url).ok(),
+        (None, Some(_)) => None,
     };
     let manager_url = origin
         .as_ref()
@@ -828,10 +848,17 @@ pub(crate) async fn invite(
             db.set(&key, &invitation, Some(expires))
         })
         .await?;
-    let install = (backend == "native" || maintenance::release().is_ok())
-        .then_some(origin)
-        .flatten()
-        .map(|origin| {
+    let installable = backend == "native" || maintenance::release().is_ok();
+    let route = if beacon.is_some() { "beacon" } else { "direct" };
+    let install = match (installable, beacon, origin) {
+        (false, _, _) => None,
+        (true, Some((beacon, installation, pin)), _) => {
+            let script = format!("{beacon}/install/node.sh").replace('\'', "'\\''");
+            Some(format!(
+                "curl --fail --silent --show-error '{script}' | sudo bash -s -- '{installation}' {backend} {pin}"
+            ))
+        }
+        (true, None, Some(origin)) => {
             let mut script = origin.clone();
             script.set_path(if backend == "native" {
                 "/internal/nodes/native-install.sh"
@@ -840,11 +867,16 @@ pub(crate) async fn invite(
             });
             let quoted = script.as_str().replace('\'', "'\\''");
             let manager = origin.as_str().trim_end_matches('/').replace('\'', "'\\''");
-            format!("curl --fail --silent --show-error '{quoted}' | sudo bash -s -- '{manager}'")
-        });
+            Some(format!(
+                "curl --fail --silent --show-error '{quoted}' | sudo bash -s -- '{manager}'"
+            ))
+        }
+        (true, None, None) => None,
+    };
     Ok(json!({
         "code": code,
         "expiresAt": expires,
+        "route": route,
         "managerUrl": manager_url,
         "installCommand": install,
         "backend": backend,
@@ -1212,6 +1244,8 @@ struct HeartbeatReply {
     limits: Value,
     leases: Vec<Lease>,
     native_mode: Value,
+    #[serde(skip_serializing_if = "Value::is_null")]
+    disk_growth: Value,
     heartbeat_interval_ms: i64,
     disconnect_timeout_ms: i64,
 }
@@ -1316,10 +1350,12 @@ fn record_heartbeat(
         .into();
     }
     node["executionReady"] = execution_ready(&node, body, expected).into();
+    let disk_growth = disk_capacity::report(db, &mut node, &body["diskGrowth"])?;
     db.put("nodes", &node)?;
     let leases = renew_leases(db, &node_id, expected.lease_ms)?;
     Ok(HeartbeatReply {
         native_mode: native_mode::requested(&node),
+        disk_growth,
         node_id,
         accepting: node["accepting"].clone(),
         slots: slots(&node),
@@ -1350,7 +1386,6 @@ fn execution_ready(node: &Value, body: &Value, expected: &Expectations) -> bool 
         && body["pool"]["quarantined"] != true
         && body["sharedResources"] == true
         && body["budget"] == json!({ "slots": slots(node), "limits": node["limits"] })
-        && node["capabilities"]["fuse"] == true
         && body["dataRoot"] == expected.data_root
         && current_image
 }
@@ -1464,7 +1499,6 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
             record["runtimeId"] = health["runtimeId"].clone();
             record["storage"] = serde_json::to_value(Policy::for_node(&record["storage"])?)?;
             record["executionReady"] = (health["status"] == "ok"
-                && detected.fuse
                 && health["sharedResources"] == true
                 && health["budget"]
                     == json!({ "slots": slots(&record), "limits": record["limits"] }))
@@ -1507,6 +1541,18 @@ pub async fn daemon(
         }
     });
     let directory = directory.to_owned();
+    // Bound before the connector starts, so its first request finds the gateway.
+    if let Some(socket) = std::env::var_os("CAIRN_NODE_GATEWAY_SOCKET")
+        && let Some(listener) = connector::bind_gateway(&directory).await?
+    {
+        let gateway_stop = stop.child_token();
+        let socket = std::path::PathBuf::from(socket);
+        tokio::spawn(async move {
+            if let Err(error) = connector::serve_gateway(listener, socket, gateway_stop).await {
+                tracing::warn!(%error, "Node gateway bridge stopped");
+            }
+        });
+    }
     let connector_stop = stop.child_token();
     let mut connector =
         tokio::spawn(async move { connector::connect(&directory, connector_stop).await });

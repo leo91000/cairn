@@ -65,65 +65,6 @@ it('releases list delivery when a conversation is terminally unavailable', async
   expect(vi.mocked(liveConnection).mock.results[0]!.value.close).toHaveBeenCalled()
 })
 
-it('releases list delivery for a finite relay read and reclaims it when streaming recovers', async () => {
-  Object.assign(state, { installationId: 'fixture' })
-  vi.mocked(api).mockResolvedValue({ id: 'a', messages: [], run: null })
-  const scope = effectScope()
-  scopes.push(scope)
-  const live = scope.run(() => useLiveRun(() => '/chats/a/stream', { list: true }))!
-  await vi.waitFor(() => expect(liveConnection).toHaveBeenCalled())
-
-  const [_, accept, status] = vi.mocked(liveConnection).mock.calls[0]!
-  status('reconnecting')
-  await vi.waitFor(() => expect(live.snapshot.value?.chat?.id).toBe('a'))
-  expect(live.carriesList.value).toBe(false)
-
-  status('reconnecting', true)
-  expect(live.carriesList.value).toBe(true)
-  status('reconnecting')
-  expect(live.carriesList.value).toBe(false)
-  status('reconnecting', true)
-  accept({
-    events: [],
-    state: {
-      run: null,
-      chat: null,
-      artifacts: [],
-      chats: [],
-    },
-    reset: false,
-    more: false,
-    history: 'v1:r:0',
-  }, 0)
-  expect(live.carriesList.value).toBe(true)
-})
-
-it('refreshes a saved list through the finite relay read when streaming fails', async () => {
-  Object.assign(state, { installationId: 'fixture' })
-  const cache = await cacheScope('fixture:test-session')
-  await writeHistory(cache, '/chats/stream', {
-    version: 1,
-    cursor: 0,
-    history: 'v1::0',
-    events: [],
-    state: {
-      run: null,
-      chat: null,
-      artifacts: [],
-      chats: [],
-    },
-    savedAt: Date.now(),
-  })
-  vi.mocked(api).mockResolvedValue([{ id: 'new' }])
-  const scope = effectScope()
-  scopes.push(scope)
-  const live = scope.run(() => useLiveRun(() => '/chats/stream'))!
-  expect(live.snapshot.value?.chats).toEqual([])
-
-  vi.mocked(liveConnection).mock.calls[0]![2]('reconnecting')
-  await vi.waitFor(() => expect(live.snapshot.value?.chats?.[0].id).toBe('new'))
-})
-
 it.each(['navigation', 'hidden', 'dispose'] as const)('retains older history when an outdated copy is saved on %s before receiving a batch', async (reason) => {
   const scope = await cacheScope('test-session')
   const stream = '/chats/a/stream'

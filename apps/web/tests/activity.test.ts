@@ -1,7 +1,6 @@
 import type { RunEvent } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
 import sample from '../../../tests/fixtures/activity-events.json'
-import { redactPayload } from '../../../tests/fixtures/legacy/server/worker.ts'
 import {
   activityEntries,
   ActivityGroups,
@@ -112,6 +111,7 @@ describe('conversation activity', () => {
         createdAt: 4,
         type: 'item.completed',
         text: 'The checks passed.',
+        payload: { item: { id: 'reply', type: 'agent_message', text: 'The checks passed.' } },
       },
       {
         id: 5,
@@ -382,103 +382,6 @@ describe('conversation activity', () => {
     expect(entries[0].artifacts.map(item => item.status)).toEqual(['error', 'done', 'running'])
     expect(entries[0].artifacts[1].raw).toContain('preserved')
   })
-  it('keeps historical plain output readable and pairs legacy command events', () => {
-    const old = (id: number, type: string, text: string): RunEvent => ({
-      id,
-      type,
-      text,
-      runId: 'old',
-      createdAt: id,
-    })
-    const entries = activityEntries([old(1, 'item.completed', 'I will check this.'), old(2, 'item.started', ''), old(3, 'item.completed', '8 tests passed'), old(4, 'item.completed', 'The checks passed.')])
-    expect(entries.map(entry => entry.kind)).toEqual(['message', 'group', 'message'])
-    if (entries[1].kind !== 'group')
-      throw new Error('Expected a group')
-    expect(entries[1].artifacts[0].blocks[0].code).toBe('8 tests passed')
-  })
-  it('redacts structured tool arguments and nested text before persistence', () => {
-    expect(redactPayload({ arguments: { access_token: 'private-value' }, result: { text: 'Bearer private-token' } })).toEqual({ arguments: { access_token: '[redacted]' }, result: { text: 'Bearer [redacted]' } })
-  })
-})
-
-describe('artifact identities', () => {
-  it('summarizes historical JSON without copying it into the card heading', () => {
-    const output = JSON.stringify([{ id: 123, jobs: [{ name: 'quality', conclusion: 'success' }] }])
-    const entries = activityEntries([
-      {
-        id: 1,
-        runId: 'old',
-        createdAt: 10,
-        type: 'item.started',
-        text: '',
-      },
-      {
-        id: 2,
-        runId: 'old',
-        createdAt: 20,
-        type: 'item.completed',
-        text: output,
-      },
-    ])
-    if (entries[0].kind !== 'group')
-      throw new Error('Expected an artifact')
-    expect(entries[0].artifacts[0]).toMatchObject({ title: 'Workflow checks', subtitle: '1 item', historical: true })
-    expect(entries[0].artifacts[0].raw).toBe(output)
-  })
-  it('keeps historical JSON output with its step instead of losing the pairing', () => {
-    const entries = activityEntries([
-      {
-        id: 1,
-        runId: 'old',
-        createdAt: 10,
-        type: 'item.started',
-        text: '',
-      },
-      {
-        id: 2,
-        runId: 'old',
-        createdAt: 20,
-        type: 'item.completed',
-        text: '{"files":["src/a.ts"]}',
-      },
-    ])
-    expect(entries).toHaveLength(1)
-    if (entries[0].kind !== 'group')
-      throw new Error('Expected an artifact')
-    expect(entries[0].artifacts).toHaveLength(1)
-    expect(entries[0].artifacts[0]).toMatchObject({
-      title: 'Structured result',
-      subtitle: '1 field',
-      status: 'info',
-      blocks: [{ label: 'Output', code: '{"files":["src/a.ts"]}', language: 'plaintext' }],
-    })
-  })
-  it('labels historical output honestly instead of leaving a completed Working card', () => {
-    const entries = activityEntries([
-      {
-        id: 1,
-        runId: 'old',
-        createdAt: 10,
-        type: 'item.started',
-        text: '',
-      },
-      {
-        id: 2,
-        runId: 'old',
-        createdAt: 20,
-        type: 'item.completed',
-        text: 'Already up to date.\ncompatibility/css-feature-target.json',
-      },
-    ])
-    if (entries[0].kind !== 'group')
-      throw new Error('Expected an artifact')
-    expect(entries[0].artifacts[0]).toMatchObject({
-      kind: 'output',
-      title: 'Recorded output',
-      historical: true,
-      status: 'info',
-    })
-  })
 })
 
 describe('operation cards', () => {
@@ -614,19 +517,6 @@ describe('expected command outcomes and connection recovery', () => {
     }
     const result = artifacts([old, event(2, 'turn.completed', {})])[0]
     expect(result).toMatchObject({ status: 'info', statusLabel: 'Recovered', raw: old.text })
-  })
-  it('shows historical diagnostics without terminal styling', () => {
-    const styled = {
-      id: 1,
-      runId: 'old',
-      createdAt: 1,
-      type: 'diagnostic',
-      text: '\x1B[2m2026-10-22T12:08:49Z\x1B[0m \x1B[33m WARN\x1B[0m \x1B[2mcodex\x1B[0m\x1B[2m:\x1B[0m disk full\n',
-    }
-    const [result] = artifacts([styled])
-    expect(result).toMatchObject({ title: 'Agent diagnostic', verbatim: true })
-    expect(result.raw).toBe('2026-10-22T12:08:49Z  WARN codex: disk full\n')
-    expect(result.blocks).toEqual([{ label: 'Output', code: '2026-10-22T12:08:49Z  WARN codex: disk full\n', language: 'plaintext' }])
   })
   it.each([
     '{"type":"diagnostic","message":"disk full","code":"ENOSPC"}\n',

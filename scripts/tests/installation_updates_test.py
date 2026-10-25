@@ -208,7 +208,6 @@ if 'exec' in args:
                         self.assertIn('SYS_RESOURCE', capabilities)
                         self.assertIn('/dev/ublk-control:/dev/ublk-control', compose['services']['runner']['devices'])
                         self.assertEqual(compose['services']['runner']['device_cgroup_rules'], ['c 238:* rwm', 'b 259:* rwm'])
-                        self.assertEqual(compose['services']['runner']['environment']['CAIRN_BLOCK_TRANSPORT'], 'ublk')
                         self.assertEqual(compose['services']['runner']['environment']['OPERATOR_SETTING'], '${KEEP_THIS_EXPRESSION}')
                         self.assertEqual(compose['services']['garage']['image'], 'retained-storage')
                         self.assertNotIn('pendingImage', updated)

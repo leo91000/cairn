@@ -3,6 +3,7 @@ package build.cairn.app.data
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -247,14 +248,16 @@ class AgentEditingTest {
     }
 
     @Test
-    fun delegationIsAReviewedPowerSentOnlyOnceSet() {
+    fun delegationIsAReviewedPower() {
         val granted = agent.copy(access = agent.access.copy(delegation = true))
         val added = agentReview(agent, granted, resources, AgentPreview())
         assertEquals(ReviewKind.Power, added.single().kind)
         assertTrue(added.single().text.startsWith("Ajout : délégation de tâches."))
         assertEquals(listOf("délégation de tâches"), agentReductions(granted, agent, resources))
-        // Unknown to an older installation, the setting is left out until it is set.
-        assertFalse("delegation" in agentSaveBody(agent)["access"]!!.jsonObject)
+        assertEquals(
+            JsonPrimitive(false),
+            agentSaveBody(agent)["access"]!!.jsonObject["delegation"],
+        )
         val revoked = granted.copy(access = granted.access.copy(delegation = false))
         assertEquals(
             "false",
@@ -409,109 +412,6 @@ class AgentEditingTest {
     }
 
     @Test
-    fun olderInstallationsAreRecognizedByTheMissingMarkerNotTheRevision() {
-        val current = agent.copy(grantsOnAgent = true)
-        assertFalse(olderInstallation(listOf(current, agent)))
-        // A rolled-back release keeps revisions but no longer marks its agents.
-        assertTrue(olderInstallation(listOf(agent, agent.copy(id = "other"))))
-        assertFalse(olderInstallation(emptyList()))
-        // Decoded, never sent.
-        val decoded =
-            wireJson.decodeFromString<Agent>(
-                """{"id":"a","name":"A","revision":"r1","grantsOnAgent":true}"""
-            )
-        assertTrue(decoded.grantsOnAgent)
-        assertFalse("grantsOnAgent" in agentSaveBody(decoded))
-    }
-
-    @Test
-    fun anEditedInstanceKeepsItsGrantsUnlessTheInstallationIsKnownCurrent() {
-        val account = catalog.connections.first { it.id == "prod" }.copy(agentIds = listOf("agent"))
-        val access = catalog.packages.first { it.id == "onepassword" }.manifest!!
-        val current = listOf(agent.copy(grantsOnAgent = true))
-        assertNull(account.agentIdsToKeep(current, access))
-        assertEquals(listOf("agent"), account.agentIdsToKeep(listOf(agent), access))
-        // Agents not loaded yet: unknown, so the grants are kept.
-        assertEquals(listOf("agent"), account.agentIdsToKeep(emptyList(), access))
-        // Nothing to keep without grants or without agent access.
-        assertNull(account.copy(agentIds = emptyList()).agentIdsToKeep(emptyList(), access))
-        assertNull(account.agentIdsToKeep(emptyList(), PluginManifest(id = "discord")))
-    }
-
-    @Test
-    fun anOlderOrUnknownInstallationNeverReceivesLiveGrantsOrARevision() {
-        val granted = agent.copy(plugins = listOf("prod"), exclusiveNodes = listOf("gpu"))
-        val current = agentSaveBody(granted)
-        assertTrue("plugins" in current && "exclusiveNodes" in current && "revision" in current)
-        val older = agentSaveBody(granted, liveGrants = false)
-        assertFalse("plugins" in older)
-        assertFalse("exclusiveNodes" in older)
-        assertFalse("revision" in older)
-        assertEquals("Release engineer", older["name"]!!.jsonPrimitive.content)
-    }
-
-    @Test
-    fun grantsSentBackAreReadAgainJustBeforeSaving() = runBlocking {
-        val account = catalog.connections.first { it.id == "prod" }.copy(agentIds = listOf("agent"))
-        val access = catalog.packages.first { it.id == "onepassword" }.manifest!!
-        // Revoked meanwhile: nothing to send back.
-        assertNull(account.agentIdsToSend(emptyList(), access) { emptyList() })
-        assertEquals(
-            listOf("other"),
-            account.agentIdsToSend(emptyList(), access) { listOf("other") },
-        )
-        assertNull(account.agentIdsToSend(emptyList(), access) { null })
-        // Always read again, whatever the editor last saw: a grant added meanwhile is kept.
-        val none = account.copy(agentIds = emptyList())
-        assertEquals(listOf("late"), none.agentIdsToSend(listOf(agent), access) { listOf("late") })
-        assertNull(none.agentIdsToSend(listOf(agent), access) { emptyList() })
-        // A current installation keeps them itself: no extra read.
-        var read = false
-        assertNull(
-            account.agentIdsToSend(listOf(agent.copy(grantsOnAgent = true)), access) {
-                read = true
-                listOf("agent")
-            }
-        )
-        assertFalse(read)
-    }
-
-    @Test
-    fun olderInstallationsCheckAndReviewTheGrantsAsShown() {
-        val shownCatalog =
-            catalog.copy(
-                connections =
-                    catalog.connections.map {
-                        if (it.id == "prod") it.copy(agentIds = listOf("agent")) else it
-                    }
-            )
-        val shownNodes = nodes.map {
-            if (it.id == "mac") it.copy(exclusiveAgents = listOf("agent")) else it
-        }
-        val shown = agent.withResourceGrants(shownCatalog.agentDirectory(), shownNodes)
-        assertEquals(listOf("prod"), shown.plugins)
-        // The exclusive reservation on a machine it cannot run on is reported from the resources.
-        assertTrue(
-            agentIssues(
-                    shown,
-                    resources.copy(nodes = shownNodes, catalog = shownCatalog.agentDirectory()),
-                )
-                .any {
-                    it.section == AgentSection.Nodes
-                }
-        )
-
-        // Live-grant differences are not reviewed: they are never saved from the agent there.
-        val edited = agent.copy(plugins = listOf("prod"), exclusiveNodes = listOf("gpu"))
-        val legacyLines =
-            agentReview(reviewBaseline(agent, edited, legacy = true), edited, resources, null)
-        assertTrue(legacyLines.isEmpty())
-        val currentLines =
-            agentReview(reviewBaseline(agent, edited, legacy = false), edited, resources, null)
-        assertEquals(2, currentLines.size)
-    }
-
-    @Test
     fun aBackendSwitchOnEitherSideKeepsThatSidesNodesWhole() {
         val base = agent.withExclusive("gpu", true)
         // I switched to native and chose desk; they added mac meanwhile.
@@ -548,8 +448,6 @@ class AgentEditingTest {
         val granted = agent.copy(plugins = listOf("prod", "staging")).withExclusive("mac", true)
         // Without the catalog or machines: counts, and no exclusivity that may not apply.
         assertEquals("2 projets · 2 nodes · 2 plugins", agentAccessSummary(granted))
-        // An older installation records them on its resources: unknown without the catalog.
-        assertEquals("2 projets · 2 nodes", agentAccessSummary(granted, older = true))
         assertEquals(
             "2 projets · 2 nodes · Exclusivité",
             agentAccessSummary(agent.withExclusive("gpu", true), nodes = nodes),
@@ -645,14 +543,6 @@ class AgentEditingTest {
         assertEquals(listOf("desk"), native.nodeChoices(all).map { it.id })
         assertEquals(native, native.withBackend(native = true))
         // An older installation keeps reservations on its nodes: they stay as shown.
-        assertEquals(
-            listOf("gpu"),
-            reserved.withBackend(native = true, readOnlyGrants = true).exclusiveNodes,
-        )
-        assertEquals(
-            listOf("gpu"),
-            reserved.withNodeRun("gpu", false, readOnlyGrants = true).exclusiveNodes,
-        )
         assertEquals(emptyList<String>(), reserved.withNodeRun("gpu", false).exclusiveNodes)
 
         val running = native.withNodeRun("desk", true)
@@ -739,18 +629,7 @@ class AgentEditingTest {
     }
 
     @Test
-    fun anOlderInstallationWithoutPreviewIsReviewedLocally() = runBlocking {
-        assertNull(optionalPreview<AgentPreview> { throw ApiException(404, "Not found") })
-        assertNull(optionalPreview<AgentPreview> { throw ApiException(405, "Not allowed") })
-        assertEquals(AgentPreview(), optionalPreview { AgentPreview() })
-        val refused = runCatching {
-            optionalPreview<AgentPreview> { throw ApiException(400, "Refusé") }
-        }
-        assertEquals(400, (refused.exceptionOrNull() as ApiException).status)
-    }
-
-    @Test
-    fun nodeGrantsOnlyAddAndFallBackToTheMergedListOnOlderInstallations() = runBlocking {
+    fun nodeGrantsOnlyAddAndPropagateFailures() = runBlocking {
         val sent = mutableListOf<JsonObject>()
         grantNodeAgents(listOf("agent", "agent"), setOf("other")) { sent += it }
         assertEquals(1, sent.size)
@@ -760,30 +639,13 @@ class AgentEditingTest {
         )
         assertEquals(true, sent.single()["add"]!!.jsonPrimitive.content.toBoolean())
 
-        // An installation that predates `add` rejects it: the full list is sent once without it.
-        sent.clear()
-        grantNodeAgents(listOf("agent"), setOf("other")) { body ->
-            sent += body
-            // What an older server answers when decoding the unknown field fails.
-            if ("add" in body) throw ApiException(400, "Invalid node request.")
-        }
-        assertEquals(2, sent.size)
-        assertFalse("add" in sent.last())
-        assertEquals(
-            setOf("other", "agent"),
-            sent.last()["agentIds"]!!.jsonArray.map { it.jsonPrimitive.content }.toSet(),
-        )
-
-        // A serde-style unknown-field message is recognized too.
-        sent.clear()
-        grantNodeAgents(listOf("agent"), setOf("other")) { body ->
-            sent += body
-            if ("add" in body) throw ApiException(400, "unknown field `add`, expected `agentIds`")
-        }
-        assertEquals(2, sent.size)
-
         // Other failures, including another 400, are reported without replacing the list.
-        for (error in listOf(ApiException(500, "Erreur"), ApiException(400, "Invalid agent id."))) {
+        for (error in
+            listOf(
+                ApiException(500, "Erreur"),
+                ApiException(400, "Invalid agent id."),
+                ApiException(400, "Invalid node request."),
+            )) {
             sent.clear()
             val failed = runCatching {
                 grantNodeAgents(listOf("agent"), setOf("other")) { body ->

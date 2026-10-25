@@ -64,6 +64,70 @@ async fn enroll_management_node(app: &axum::Router, invitation: &Value) -> Value
 }
 
 #[tokio::test]
+async fn pending_recovery_can_be_inspected_and_cancelled_through_both_tool_interfaces() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let agent_token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let owner_token = common::relay_fixture::grant(&s, &["read", "run", "manage"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    for (endpoint, token) in [
+        ("/mcp", owner_token.as_str()),
+        ("/mcp-installation", agent_token),
+    ] {
+        for chat_retry in [true, false] {
+            let chat = s.chat_create(json!({})).await.unwrap();
+            s.chat_send(
+                chat["id"].as_str().unwrap(),
+                json!({ "text": "Keep this request", "id": uuid::Uuid::new_v4().to_string() }),
+            )
+            .await
+            .unwrap();
+            s.chat_tick(&std::collections::HashSet::default())
+                .await
+                .unwrap();
+            let chat = s.chat_detail(chat["id"].as_str().unwrap()).await.unwrap();
+            let run_id = chat["runId"].as_str().unwrap();
+            let retry = json!({
+                "attempt": 2,
+                "limit": 5,
+                "nextAttemptAt": cairn_installation::config::now() + 60_000,
+                "startedAt": cairn_installation::config::now(),
+                "deadlineAt": cairn_installation::config::now() + 600_000,
+                "cause": { "kind": "timeout", "message": "Temporary timeout", "startup": true },
+            });
+            s.store
+                .patch_run(run_id, json!({ "retry": retry }))
+                .await
+                .unwrap();
+            let (_, history) =
+                node_management_call(&app, endpoint, token, "get_run", json!({ "runId": run_id }))
+                    .await;
+            assert_eq!(result(&history)["run"]["retry"], retry);
+            let (name, args) = if chat_retry {
+                ("stop_chat", json!({ "chatId": chat["id"] }))
+            } else {
+                ("cancel_run", json!({ "runId": run_id }))
+            };
+            let (status, response) = node_management_call(&app, endpoint, token, name, args).await;
+            assert_eq!(status, StatusCode::OK, "{response}");
+            result(&response);
+            let stopped = s.store.run(run_id).await.unwrap();
+            assert_eq!(stopped["status"], RunStatus::Cancelled);
+            assert!(stopped["retry"].is_null());
+            let retained = s.chat_detail(chat["id"].as_str().unwrap()).await.unwrap();
+            assert_eq!(retained["messages"].as_array().unwrap().len(), 1);
+            if chat_retry {
+                assert_eq!(retained["paused"], true);
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn node_switch_controls_match_public_mcp_and_installation_tools_and_keep_their_grants() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;

@@ -40,7 +40,6 @@ abstract class AgentPageCases {
             "Agent principal",
             revision = "m1",
             access = AccessPolicy(nodes = listOf(LOCAL_NODE_ID)),
-            grantsOnAgent = true,
         )
     private val release =
         Agent(
@@ -49,7 +48,6 @@ abstract class AgentPageCases {
             "Publie les versions web et Android",
             model = "gpt-5",
             revision = "r1",
-            grantsOnAgent = true,
             access =
                 AccessPolicy(
                     nodes = listOf(LOCAL_NODE_ID),
@@ -135,15 +133,8 @@ abstract class AgentPageCases {
         val failNodes: AtomicBoolean = AtomicBoolean(false),
         /** The plugin catalog fails to load. */
         val failPlugins: AtomicBoolean = AtomicBoolean(false),
-        /**
-         * An installation that predates agent revisions: live grants live on the resources
-         * (instance `agentIds`, node `exclusiveAgents`).
-         */
-        val older: AtomicBoolean = AtomicBoolean(false),
         /** The installation's MCP connections, as `GET /mcps` returns them. */
         val mcps: AtomicReference<String> = AtomicReference("[]"),
-        /** No agent is listed yet, so the installation's version is unknown. */
-        val noAgents: AtomicBoolean = AtomicBoolean(false),
     )
 
     private fun fixture(): Fixture {
@@ -156,9 +147,7 @@ abstract class AgentPageCases {
         val failRefresh = AtomicBoolean(false)
         val failNodes = AtomicBoolean(false)
         val failPlugins = AtomicBoolean(false)
-        val older = AtomicBoolean(false)
         val mcps = AtomicReference("[]")
-        val noAgents = AtomicBoolean(false)
         val server = MockWebServer()
         server.dispatcher =
             object : Dispatcher() {
@@ -179,7 +168,7 @@ abstract class AgentPageCases {
                             agents.get().find { it.id == "created" }
                                 ?: wireJson
                                     .decodeFromJsonElement<Agent>(body)
-                                    .copy(id = "created", revision = "c1", grantsOnAgent = true)
+                                    .copy(id = "created", revision = "c1")
                                     .also { agents.set(agents.get() + it) }
                         if (loseCreation.getAndSet(false))
                             return MockResponse()
@@ -220,7 +209,6 @@ abstract class AgentPageCases {
                                 .copy(
                                     id = path.removePrefix("/agents/"),
                                     revision = "saved-${saved.size}",
-                                    grantsOnAgent = true,
                                 )
                         agents.set(agents.get().map { if (it.id == updated.id) updated else it })
                         return response.setBody(wireJson.encodeToString(updated))
@@ -233,7 +221,6 @@ abstract class AgentPageCases {
                         return response
                             .setResponseCode(409)
                             .setBody("""{"error":"Plugins indisponibles"}""")
-                    if (path == "/agents" && noAgents.get()) return response.setBody("[]")
                     if (path == "/nodes" && failNodes.get())
                         return response
                             .setResponseCode(409)
@@ -250,26 +237,8 @@ abstract class AgentPageCases {
                             path == "/mcps" -> mcps.get()
                             path == "/skills" ->
                                 """[{"name":"review","scope":"global"},{"name":"lint","scope":"p1"}]"""
-                            path == "/nodes" ->
-                                if (older.get())
-                                    nodes.replace(
-                                        """"id":"gpu",""",
-                                        """"id":"gpu","exclusiveAgents":["agent"],""",
-                                    )
-                                else nodes
-                            path == "/plugins" ->
-                                wireJson.encodeToString(
-                                    if (older.get())
-                                        catalog.copy(
-                                            connections =
-                                                catalog.connections.map {
-                                                    if (it.id == "prod")
-                                                        it.copy(agentIds = listOf("agent"))
-                                                    else it
-                                                }
-                                        )
-                                    else catalog
-                                )
+                            path == "/nodes" -> nodes
+                            path == "/plugins" -> wireJson.encodeToString(catalog)
                             path == "/api/installations" -> beaconInstallationsFixture()
                             path == "/api/account/session" -> beaconAccountFixture("fixture")
                             path.endsWith("/models") -> """{"models":[]}"""
@@ -291,9 +260,7 @@ abstract class AgentPageCases {
             failRefresh,
             failNodes,
             failPlugins,
-            older,
             mcps,
-            noAgents,
         )
     }
 
@@ -307,7 +274,6 @@ abstract class AgentPageCases {
     private fun journey(
         agentId: String,
         prepare: (Fixture) -> Unit = {},
-        beforeAgents: Boolean = false,
         body: (Fixture) -> Unit,
     ) {
         val fixture = fixture().also(prepare)
@@ -336,7 +302,7 @@ abstract class AgentPageCases {
                 CairnTheme {
                     Surface(Modifier.fillMaxSize()) {
                         Box(Modifier.systemBarsPadding()) {
-                            if (mounted && (loaded || beforeAgents && state.installation != null))
+                            if (mounted && loaded)
                                 AgentScreen(
                                     vm,
                                     state,
@@ -839,67 +805,6 @@ abstract class AgentPageCases {
             val body = fixture.saved.last().second
             assertEquals(JsonArray(listOf(JsonPrimitive("gh-work"))), body["plugins"])
             assertFalse("github" in body["access"]!!.jsonObject)
-        }
-    }
-
-    @Test
-    fun anOlderInstallationShowsLiveGrantsReadOnly() {
-        journey(
-            "agent",
-            prepare = { fixture ->
-                fixture.older.set(true)
-                fixture.agents.set(
-                    fixture.agents.get().map {
-                        // A rollback: agents keep their revision but lose the marker.
-                        it.copy(
-                            grantsOnAgent = false,
-                            access = it.access.copy(nodes = listOf(LOCAL_NODE_ID, "gpu")),
-                        )
-                    }
-                )
-            },
-        ) { _ ->
-            val note =
-                "Mettez à jour l’installation pour accorder ces accès depuis la fiche de l’agent."
-            // The grants come from the resources and cannot be changed from the agent.
-            open(AgentSection.Plugins)
-            waitForDescription("Accès à Production")
-            compose.onNodeWithText(note).assertExists()
-            compose
-                .onNodeWithContentDescription("Accès à Production")
-                .assertIsOn()
-                .assertIsNotEnabled()
-            back()
-            open(AgentSection.Nodes)
-            waitForDescription("Réserver gpu-box en exclusivité")
-            compose.onNodeWithText(note).assertExists()
-            compose
-                .onNodeWithContentDescription("Réserver gpu-box en exclusivité")
-                .performScrollTo()
-                .assertIsOn()
-                .assertIsNotEnabled()
-            // Execution itself is part of the access policy and stays editable.
-            compose
-                .onNodeWithContentDescription("Exécuter ses conversations sur gpu-box")
-                .assertIsEnabled()
-        }
-    }
-
-    @Test
-    fun liveGrantsStayReadOnlyUntilTheInstallationIsKnown() {
-        journey("", prepare = { it.noAgents.set(true) }, beforeAgents = true) { _ ->
-            // They would not be sent before the agent list says where the installation keeps them.
-            open(AgentSection.Plugins)
-            waitForDescription("Accès à Production")
-            compose
-                .onNodeWithContentDescription("Accès à Production")
-                .assertIsOff()
-                .assertIsNotEnabled()
-            compose
-                .onNodeWithText(
-                    "Mettez à jour l’installation pour accorder ces accès depuis la fiche de l’agent."
-                )
-                .assertDoesNotExist()
         }
     }
 

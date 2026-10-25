@@ -125,7 +125,7 @@ Every plugin uses the same connection model: name, settings, optional credential
 (encrypted in the vault), and, when the package can start conversations, an owner
 delegation: the agent that answers, the people allowed (listed, approved as they ask,
 or anyone), and an hourly message limit. Any agent can answer
-([ADR-0059](adr/0059-owner-chosen-agents-for-bot-delegation.md)); the setup assistant
+([ADR-0068](adr/0068-owner-chosen-agents-for-bot-delegation.md)); the setup assistant
 warns when it can manage the installation or open several projects, and, for anyone,
 when it can also write, run commands or use MCP connections or plugins (GitHub,
 1Password…). The agent must be able to open the delegation's project. “Anyone” is
@@ -292,7 +292,7 @@ The record is removed atomically when the delivery settles, and on instance
 deletion; it consumes no general plugin storage key. A pending write intent lets
 a package stop an uncertain replay, without claiming external exactly-once writes.
 This API belongs to `conversations.submit` and is unavailable in other handlers.
-[Local record/read/write observations](performance/PLUGIN-DELIVERY-CHECKPOINTS.md)
+[Local record/read/write observations](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/PLUGIN-DELIVERY-CHECKPOINTS.md)
 compare its retention shape with permanent reply keys.
 
 Concurrent workers can preserve a numeric deadline with
@@ -767,7 +767,7 @@ Tokens remain in the host. The same renewal fences apply to inert setup roots,
 including both intent and completion retaining the original setup expiry. Native
 root consent, activation and their client/tool authority boundaries are described
 above; broader management mutation parity remains a draft-PR delivery requirement.
-The [local encrypted-record observation](performance/ROOT-FORM-CREDENTIAL-RENEWAL.md)
+The [local encrypted-record observation](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/ROOT-FORM-CREDENTIAL-RENEWAL.md)
 records the reused storage shape and its limits.
 
 Both clients discard obsolete responses when the editor or parent changes, keep
@@ -1374,8 +1374,8 @@ talk to it` and `Agents` when they apply. The effort defaults to `app` for OAuth
 `signin` for a device sign-in and `token` for another credential or a required
 secret setting. `GET /api/plugins` returns the resolved `setup` beside each
 `manifest` (and each version), and `manage_plugin`'s `setup` action returns it too.
-Clients of an older installation resolve it from the manifest the same way; the
-shared corpus `tests/fixtures/plugin-setup.json` checks Rust, web and Android.
+Clients use this resolved setup. The shared corpus
+`tests/fixtures/plugin-setup.json` checks server derivation and client presentation.
 
 The package's `form` view appears on the credential step, on steps with dynamic or
 `refresh` fields, and on the first step when there is no credential. A new instance
@@ -1520,8 +1520,7 @@ a `message/rfc822` handle and its `messageId`. `messageKey` produces a determini
 Message-ID scoped to the instance, useful for reconciling uncertain sends.
 `contentDigest` hashes the stable composition input and the actual attachment
 bytes, excluding generated MIME boundaries and dates. A changed attachment cannot
-silently replay an earlier send receipt. Local byte/I/O/CPU measurements and their
-limits are recorded in [the transfer measurements](PLUGIN-TRANSFER-MEASUREMENTS.md).
+silently replay an earlier send receipt.
 
 The run-local CLI transfers conversation files with any approved files-capable
 package: `cairn plugin PACKAGE --upload INSTANCE PATH`, `--download INSTANCE HANDLE
@@ -1638,7 +1637,9 @@ properties.sha = { type = "string", pattern = "^[0-9a-f]{40}$" }
 `wait_for` provides native `delay`, `at` and `run_finished` conditions. Plugins add
 service-specific conditions through the same `condition` handler; no host-side
 service-specific dispatch is needed. Temporal waits take no `timeoutSeconds`;
-plugin conditions require it.
+plugin conditions require it. Agents can group a plugin condition with other
+external conditions (`mode: all` or `any`); each grouped condition is observed and
+scheduled on its own, so the handler is unchanged.
 
 Granted agents see each condition in `wait_for` as type `<plugin>_<name>` (plugin
 IDs have no `_`, so types never collide), with `projectId` when `project = true`; Cairn records the plugin
@@ -1814,10 +1815,6 @@ records its output. Already delivered secrets cannot be revoked.
 The CLI expects an active conversation VM with the current Cairn binary and guest
 channel; VMs started by an earlier binary must restart to use it. Non-VM development
 commands do not acquire a new manager network route.
-
-Existing 1Password accounts migrate to plugin instances at startup. This is a data
-compatibility break (epoch 2); follow the [migration and rollback plan](PLUGIN-V2-MIGRATION.md)
-before deploying the first plugin API v2 release.
 
 ## GitHub
 

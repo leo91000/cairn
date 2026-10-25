@@ -334,7 +334,7 @@ export interface PluginEntry {
   status: 'active' | 'update' | 'needs_approval' | 'invalid'
   active: string | null
   manifest: Manifest | null
-  /** The steps the owner follows; older installations send only the manifest. */
+  /** The steps resolved by the installation; null for invalid packages. */
   setup?: PluginSetup | null
   versions: PackageVersion[]
 }

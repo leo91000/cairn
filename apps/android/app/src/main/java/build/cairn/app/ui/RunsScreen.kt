@@ -347,7 +347,9 @@ fun RunScreen(
                         title = if (error != null && ended) statusLabel(current.status) else null,
                         maxLines = 4,
                     )
-                RunWaitingReason(current)
+                RunWaitingReason(current, state.busy || current.cancelRequestedAt != null) {
+                    vm.perform { api.request("POST", "/runs/$id/cancel") }
+                }
                 if (current.status == "waiting")
                     current.wakeup?.let { wakeup ->
                         Notice(
@@ -443,6 +445,8 @@ fun RunScreen(
                                                 paused = false,
                                                 settled = current.status == "waiting",
                                                 canPause = false,
+                                                openRun = openRun,
+                                                openChat = openChat,
                                             )
                                     ) {
                                         TimelineRow(

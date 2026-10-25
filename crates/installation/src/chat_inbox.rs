@@ -6,7 +6,7 @@ pub(crate) const ADAPTER_LIMIT: usize = 2_000_000;
 // Transport reads allow headroom above the adapters’ 2 MB validation limit.
 pub(crate) const TRANSPORT_LIMIT: usize = 16_000_000;
 
-pub(crate) async fn read(directory: &Path, limit: usize) -> Result<Option<Vec<u8>>> {
+async fn messages(directory: &Path, limit: usize) -> Result<Option<Vec<u8>>> {
     let Ok(file) = tokio::fs::File::open(directory.join("messages.json")).await else {
         return Ok(None);
     };
@@ -19,9 +19,66 @@ pub(crate) async fn read(directory: &Path, limit: usize) -> Result<Option<Vec<u8
     }
 }
 
+/// The controller owns a separate notice lane. Replacing user steering cannot
+/// lose a disk warning, and a warning never creates a user message or authority.
+pub(crate) async fn read(directory: &Path, limit: usize) -> Result<Option<Vec<u8>>> {
+    let original = messages(directory, limit).await?;
+    let Ok(file) = tokio::fs::File::open(directory.join("disk-notice.json")).await else {
+        return Ok(original);
+    };
+    let Ok(bytes) = crate::process::read_bounded(file, 16384).await else {
+        return Ok(original);
+    };
+    let Ok(notice) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return Ok(original);
+    };
+    if notice["operationalNotice"] != true
+        || notice["id"].as_str().is_none()
+        || notice["text"].as_str().is_none()
+    {
+        return Ok(original);
+    }
+    let mut inbox: Vec<serde_json::Value> = match original.as_deref() {
+        Some(bytes) => match serde_json::from_slice(bytes) {
+            Ok(messages) => messages,
+            Err(_) => return Ok(original),
+        },
+        None => Vec::new(),
+    };
+    inbox.push(notice);
+    let encoded = serde_json::to_vec(&inbox)?;
+    if encoded.len() > limit {
+        return Ok(original);
+    }
+    Ok(Some(encoded))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn operational_notices_survive_steering_replacement_without_becoming_user_messages() {
+        let root = tempfile::tempdir().unwrap();
+        let notice = serde_json::json!({ "id": "notice", "operationalNotice": true, "text": "Disk pressure" });
+        tokio::fs::write(root.path().join("disk-notice.json"), notice.to_string())
+            .await
+            .unwrap();
+        for messages in ["[]", "[{\"id\":\"user\",\"text\":\"Continue\"}]"] {
+            tokio::fs::write(root.path().join("messages.json"), messages)
+                .await
+                .unwrap();
+            let bytes = read(root.path(), ADAPTER_LIMIT).await.unwrap().unwrap();
+            let inbox: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(inbox.last(), Some(&notice));
+            assert_eq!(
+                tokio::fs::read(root.path().join("messages.json"))
+                    .await
+                    .unwrap(),
+                messages.as_bytes()
+            );
+        }
+    }
 
     #[tokio::test]
     async fn missing_and_unreadable_inboxes_remain_absent() {

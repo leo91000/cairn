@@ -36,6 +36,11 @@ jobs:
       artifact: ${{ steps.resolve.outputs.artifact }}
       codex: ${{ steps.tools.outputs.codex }}
       gh: ${{ steps.tools.outputs.gh }}
+      claude: ${{ steps.tools.outputs.claude }}
+      opencode: ${{ steps.tools.outputs.opencode }}
+      served-found: ${{ steps.served.outputs.found }}
+      served-claude: ${{ steps.served.outputs.claude }}
+      served-opencode: ${{ steps.served.outputs.opencode }}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: ./.github/actions/setup-pnpm
@@ -46,11 +51,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/cli-updates.mjs build-versions
+      - name: Find the agent tools of the served release
+        id: served
+        env:
+          CAIRN_BEACON_ORIGIN: ${{ vars.CAIRN_BEACON_ORIGIN }}
+        run: node scripts/served-tools.mjs
       - id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
           CODEX_VERSION: ${{ steps.tools.outputs.codex }}
           GH_VERSION: ${{ steps.tools.outputs.gh }}
+          CLAUDE_VERSION: ${{ steps.tools.outputs.claude }}
+          OPENCODE_VERSION: ${{ steps.tools.outputs.opencode }}
+          SERVED_FOUND: ${{ steps.served.outputs.found }}
+          SERVED_CLAUDE: ${{ steps.served.outputs.claude }}
+          SERVED_OPENCODE: ${{ steps.served.outputs.opencode }}
         run: GIT_TREE="$(git rev-parse 'HEAD^{tree}')" node scripts/resolve-release.mjs
   build:
     # Browser tests need only these binaries and the frontend, not the whole quality job.
@@ -72,7 +87,7 @@ jobs:
       - uses: ./.github/actions/cache-rust
       - name: Build the browser-test backend and frontend
         run: |
-          cargo build --locked --bin cairn --example worker_fixture --example network_direct_client --example network_qualification --example native_storage_qualifier --features ublk
+          cargo build --locked --bin cairn --example worker_fixture --example browser_fixture --example network_direct_client --example network_qualification --example native_storage_qualifier
           cargo build --locked -p cairn-beacon --bin cairn-beacon --example network_stun_server
           pnpm exec vite build --config apps/web/vite.config.ts
       - uses: actions/upload-artifact@v7.0.1
@@ -83,6 +98,7 @@ jobs:
             target/debug/cairn-beacon
             target/debug/examples/native_storage_qualifier
             target/debug/examples/worker_fixture
+            target/debug/examples/browser_fixture
             target/debug/examples/network_direct_client
             target/debug/examples/network_qualification
             target/debug/examples/network_stun_server
@@ -129,7 +145,7 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
       - uses: ./.github/actions/cache-rust
       - name: Check all Rust targets, including the required ublk transport
-        run: cargo clippy --locked --workspace --all-targets --features ublk-prototype -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
   backend:
     services:
       postgres:
@@ -169,10 +185,80 @@ jobs:
       - name: Run backend tests across binaries with isolated credentials
         run: |
           set -o pipefail
-          node scripts/test-backend.mjs --nextest --features ublk-prototype --test-threads 8 --no-fail-fast --color never --status-level pass 2>&1 | tee backend-tests.log
+          node scripts/test-backend.mjs --nextest --test-threads 8 --no-fail-fast --color never --status-level pass 2>&1 | tee backend-tests.log
           node scripts/production-release.mjs qualify backend-tests.log
       - name: Check Rust documentation examples
-        run: node scripts/test-backend.mjs --doc --features ublk-prototype
+        run: node scripts/test-backend.mjs --doc
+      - name: Qualify the resolved OpenCode release against its native adapter
+        env:
+          OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
+          SERVED_OPENCODE: ${{ needs.resolve.outputs.served-opencode }}
+        run: |
+          # The resolved release lists its catalog and runs a turn, then resumes sessions an
+          # installation can hold: from the oldest supported release, and both ways with the
+          # served release, as after an update or a rollback.
+          minimum=$(node --input-type=module -e "import { engines } from './scripts/cli-updates.mjs'; console.log(engines.opencode.minimum)")
+          served=$(node scripts/served-tools.mjs rollback-target opencode "$SERVED_OPENCODE" "$OPENCODE_VERSION")
+          # Command substitutions do not inherit errexit, so installation failures return explicitly.
+          install() {
+            npm install --global --prefix "$RUNNER_TEMP/opencode-$1" --allow-scripts=opencode-ai "opencode-ai@$1" >&2 || return 1
+            test "$("$RUNNER_TEMP/opencode-$1/bin/opencode" --version)" = "$1" || return 1
+            echo "$RUNNER_TEMP/opencode-$1/bin/opencode"
+          }
+          native() {
+            node scripts/test-backend.mjs -p cairn-installation --test opencode -- --ignored --exact "$1"
+          }
+          qualify() {
+            OPENCODE_NATIVE_BIN="$1" OPENCODE_NATIVE_RESUME_BIN="$2" native pinned_native_cli_executes_and_resumes_without_global_plugins
+          }
+          resolved=$(install "$OPENCODE_VERSION")
+          OPENCODE_NATIVE_BIN="$resolved" native native_cli_lists_providers_and_models
+          qualify "$resolved" "$resolved"
+          if test "$minimum" != "$OPENCODE_VERSION" && test "$minimum" != "$served"; then
+            oldest=$(install "$minimum")
+            qualify "$oldest" "$resolved"
+          fi
+          if test -n "$served"; then
+            served=$(install "$served")
+            qualify "$served" "$resolved"
+            qualify "$resolved" "$served"
+          fi
+      - name: Qualify the resolved Claude Code release against its native adapter
+        env:
+          CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
+          SERVED_CLAUDE: ${{ needs.resolve.outputs.served-claude }}
+        run: |
+          # The resolved release answers model discovery, usage and authentication status,
+          # runs a turn against a local Messages API and resumes it. Sessions created by the
+          # legacy release resume on it, and sessions move both ways with the served release,
+          # as after an update or a rollback.
+          # The oldest release this adapter runs: its minimum, if any, else the legacy release.
+          legacy=$(node --input-type=module -e "import { engines } from './scripts/cli-updates.mjs'; console.log(engines.claude.minimum ?? engines.claude.legacy)")
+          served=$(node scripts/served-tools.mjs rollback-target claude "$SERVED_CLAUDE" "$CLAUDE_VERSION")
+          # Command substitutions do not inherit errexit, so installation failures return explicitly.
+          install() {
+            npm install --global --prefix "$RUNNER_TEMP/claude-$1" --allow-scripts=@anthropic-ai/claude-code "@anthropic-ai/claude-code@$1" >&2 || return 1
+            test "$("$RUNNER_TEMP/claude-$1/bin/claude" --version)" = "$1 (Claude Code)" || return 1
+            echo "$RUNNER_TEMP/claude-$1/bin/claude"
+          }
+          native() {
+            node scripts/test-backend.mjs -p cairn-installation --test claude -- --ignored --exact "$1"
+          }
+          qualify() {
+            CLAUDE_NATIVE_BIN="$1" CLAUDE_NATIVE_RESUME_BIN="$2" native native_cli_executes_and_resumes_a_session_against_a_local_model
+          }
+          resolved=$(install "$CLAUDE_VERSION")
+          CLAUDE_NATIVE_BIN="$resolved" native native_cli_lists_its_model_catalog_without_inference
+          qualify "$resolved" "$resolved"
+          if test "$legacy" != "$CLAUDE_VERSION" && test "$legacy" != "$served"; then
+            oldest=$(install "$legacy")
+            qualify "$oldest" "$resolved"
+          fi
+          if test -n "$served"; then
+            served=$(install "$served")
+            qualify "$served" "$resolved"
+            qualify "$resolved" "$served"
+          fi
   node-checks:
     services:
       postgres:
@@ -227,7 +313,9 @@ jobs:
           bash tests/installation-installer-container.sh
           python3 tests/installation_update_containers.py
           python3 -m venv .node-s3-test
-          .node-s3-test/bin/pip install 'moto[server]==5.2.3' awscli
+          .node-s3-test/bin/pip install 'moto[server]==5.2.3' awscli blake3==1.0.8
+          .node-s3-test/bin/python scripts/tests/storage_observer_test.py
+          .node-s3-test/bin/python scripts/tests/storage_sample_test.py
           PATH="$PWD/.node-s3-test/bin:$PATH" .node-s3-test/bin/python scripts/tests/node_s3_test.py
   native-runtime:
     name: Native Linux ublk storage and process ownership (CPU workload)
@@ -341,7 +429,7 @@ jobs:
         with:
           name: browser-backend
           path: target/debug/
-      - run: chmod +x target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/worker_fixture
+      - run: chmod +x target/debug/examples/browser_fixture target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/worker_fixture
       - name: Install Postgres client for beacon account fixtures
         run: apt-get update -qq && apt-get install -y --no-install-recommends postgresql-client
       - run: |
@@ -414,7 +502,7 @@ jobs:
         with:
           name: browser-backend
           path: target/debug/
-      - run: chmod +x target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/network_stun_server
+      - run: chmod +x target/debug/examples/browser_fixture target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/network_stun_server
       - run: chmod +x target/debug/examples/network_qualification
       - run: pnpm exec vite build --config tests/network-qualification.vite.ts
       - name: Validate real network topology and authenticated sessions
@@ -503,7 +591,7 @@ jobs:
         with:
           name: browser-backend
           path: target/debug/
-      - run: chmod +x target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/network_stun_server
+      - run: chmod +x target/debug/examples/browser_fixture target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/network_stun_server
       - uses: actions/download-artifact@v8.0.1
         with:
           name: android-direct-apks
@@ -566,8 +654,6 @@ jobs:
           fi
           test -c /dev/ublk-control
           test "$(cat /proc/sys/kernel/io_uring_disabled)" = 0
-          sudo modprobe fuse
-          test -c /dev/fuse
           # A working L0 device alone does not guarantee nested KVM for our guest.
           if grep -qw vmx /proc/cpuinfo; then
             grep -Eq '^(Y|1)$' /sys/module/kvm_intel/parameters/nested
@@ -637,6 +723,8 @@ jobs:
             VCS_REF=${{ github.sha }}
             CODEX_VERSION=${{ needs.resolve.outputs.codex }}
             GH_VERSION=${{ needs.resolve.outputs.gh }}
+            CLAUDE_VERSION=${{ needs.resolve.outputs.claude }}
+            OPENCODE_VERSION=${{ needs.resolve.outputs.opencode }}
           # GHCR deduplicates layers across main builds. PRs read the trusted
           # main cache but skip the expensive cache upload on their critical path.
           cache-from: |
@@ -715,6 +803,10 @@ jobs:
       - name: Smoke-test the exact image
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          CODEX_VERSION: ${{ needs.resolve.outputs.codex }}
+          GH_VERSION: ${{ needs.resolve.outputs.gh }}
+          CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
+          OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
           CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@127.0.0.1:5432/cairn_beacon_test
           CAIRN_SMOKE_BEACON_BINARY: beacon-smoke-bin/cairn-beacon
         run: |
@@ -723,7 +815,7 @@ jobs:
       - name: Qualify exclusive pause, private memory paging and live nested KVM
         env:
           CAIRN_EXCLUSIVE_REQUIRE_RECLAIM: 'true'
-          # Hosted AMD nested Android remains unqualified (NESTED-KVM-RESEARCH.md).
+          # Hosted AMD nested Android remains unqualified.
           # Keep the same-emulator mode available for explicit qualification.
           CAIRN_EXCLUSIVE_ANDROID: ${{ inputs.exclusive-android && 'true' || 'false' }}
         run: |
@@ -850,6 +942,8 @@ jobs:
             VCS_REF=${{ github.sha }}
             CODEX_VERSION=${{ needs.resolve.outputs.codex }}
             GH_VERSION=${{ needs.resolve.outputs.gh }}
+            CLAUDE_VERSION=${{ needs.resolve.outputs.claude }}
+            OPENCODE_VERSION=${{ needs.resolve.outputs.opencode }}
           cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn:buildcache
           cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true
           secrets: github_token=${{ github.token }}
@@ -899,11 +993,16 @@ jobs:
           GIT_TREE: ${{ needs.resolve.outputs.tree }}
           CODEX_VERSION: ${{ needs.resolve.outputs.codex }}
           GH_VERSION: ${{ needs.resolve.outputs.gh }}
+          CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
+          OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
+          SERVED_FOUND: ${{ needs.resolve.outputs.served-found }}
+          SERVED_CLAUDE: ${{ needs.resolve.outputs.served-claude }}
+          SERVED_OPENCODE: ${{ needs.resolve.outputs.served-opencode }}
         run: |
           mkdir -p release-evidence
           node --input-type=module <<'JS'
           import { writeFileSync } from 'node:fs'
-          writeFileSync('release-evidence/image.json', JSON.stringify({ schema: 3, beaconDigest: process.env.BEACON_IMAGE_DIGEST, repository: process.env.GITHUB_REPOSITORY.toLowerCase(), tree: process.env.GIT_TREE, commit: process.env.GITHUB_SHA, digest: process.env.IMAGE_DIGEST, runId: Number(process.env.GITHUB_RUN_ID), tools: { codex: process.env.CODEX_VERSION, gh: process.env.GH_VERSION } }))
+          writeFileSync('release-evidence/image.json', JSON.stringify({ schema: 3, beaconDigest: process.env.BEACON_IMAGE_DIGEST, repository: process.env.GITHUB_REPOSITORY.toLowerCase(), tree: process.env.GIT_TREE, commit: process.env.GITHUB_SHA, digest: process.env.IMAGE_DIGEST, runId: Number(process.env.GITHUB_RUN_ID), tools: { codex: process.env.CODEX_VERSION, gh: process.env.GH_VERSION, claude: process.env.CLAUDE_VERSION, opencode: process.env.OPENCODE_VERSION }, served: process.env.SERVED_FOUND === 'true' ? { claude: process.env.SERVED_CLAUDE, opencode: process.env.SERVED_OPENCODE } : null }))
           JS
       - uses: actions/upload-artifact@v7.0.1
         if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
@@ -951,6 +1050,15 @@ jobs:
       - uses: ./.github/actions/setup-pnpm
         with:
           cache: true
+      - name: Require rollback checks against the release served now
+        env:
+          CAIRN_BEACON_ORIGIN: ${{ vars.CAIRN_BEACON_ORIGIN }}
+          SERVED_FOUND: ${{ needs.resolve.outputs.served-found }}
+          SERVED_CLAUDE: ${{ needs.resolve.outputs.served-claude }}
+          SERVED_OPENCODE: ${{ needs.resolve.outputs.served-opencode }}
+          CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
+          OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
+        run: node scripts/served-tools.mjs verify-served
       - name: Verify installation data compatibility
         env:
           CAIRN_BEACON_ORIGIN: ${{ vars.CAIRN_BEACON_ORIGIN }}

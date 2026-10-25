@@ -50,6 +50,7 @@ import Modal from '../components/Modal.vue'
 import NodeExecution from '../components/NodeExecution.vue'
 import PlanBar from '../components/PlanBar.vue'
 import QueueStrip from '../components/QueueStrip.vue'
+import RecoveryNotice from '../components/RecoveryNotice.vue'
 import SkillTextarea from '../components/SkillTextarea.vue'
 import SubagentBar from '../components/SubagentBar.vue'
 import SubagentPanel from '../components/SubagentPanel.vue'
@@ -88,7 +89,7 @@ import {
 } from '../icons'
 import { connectionTone, installationKey, routeLabel } from '../installation-context'
 import { useReadWhileOpen } from '../reads'
-import { useRetryNotice } from '../run-retry'
+import { useRetryState } from '../run-retry'
 import { exclusiveSuspensionLabel, isExclusivelySuspended } from '../run-status'
 import { backgroundWait } from '../signal'
 import { chatSkills } from '../skill-mentions'
@@ -149,8 +150,8 @@ const live = useLiveRun(() => streamPath.value, {
   // Also saved under its slug when a link by identifier opened it: the Fil links to slugs.
   savedAs: state => state.chat ? `/chats/${state.chat.slug || state.chat.id}/stream` : undefined,
 })
-// Its stream carries the list while available; a failed open or a finite relay read
-// releases it to the shell, so the Fil keeps working even when the conversation cannot.
+// Its stream carries the list while available; a failed open releases it to the shell,
+// so the Fil keeps working even when the conversation cannot.
 watch(live.carriesList, value => chatListCarried.value = value, { immediate: true, flush: 'sync' })
 onBeforeUnmount(() => chatListCarried.value = false)
 const { events, connectionNotice, catchingUp } = live
@@ -360,12 +361,10 @@ const active = computed(() => !!detail.value?.run && ['queued', 'running'].inclu
 const suspended = computed(() => isExclusivelySuspended(detail.value?.run))
 // The plan of the current request stays in sight beside the composer while the agent follows it.
 const currentPlan = computed(() => runActive.value && !suspended.value ? activity.value?.plan : undefined)
-const retryNotice = useRetryNotice(() => detail.value?.run)
+const recovery = useRetryState(() => detail.value?.run)
 const scheduled = computed(() => scheduledWakeup(detail.value))
 // The scheduled wait shows as a card in the conversation; these notices explain a run that cannot start.
-const waitNotice = computed(() => retryNotice.value
-  ? { account: null, message: retryNotice.value }
-  : chatWaitNotice(detail.value?.run))
+const waitNotice = computed(() => recovery.value ? null : chatWaitNotice(detail.value?.run))
 const waitNow = ref(Date.now())
 let waitClock: ReturnType<typeof setInterval> | undefined
 watch(() => !!scheduled.value, (waiting) => {
@@ -1133,8 +1132,14 @@ function key(event: KeyboardEvent) {
                 </button>
               </template>
             </UiNotice>
+            <RecoveryNotice
+              v-if="recovery && !quota"
+              :recovery="recovery"
+              :busy="busy"
+              @cancel="action('stop')"
+            />
             <UiNotice
-              v-if="waitNotice && !quota"
+              v-else-if="waitNotice && !quota"
               role="status"
               class="mb-3"
               :tone="waitNotice.account ? 'warning' : 'info'"

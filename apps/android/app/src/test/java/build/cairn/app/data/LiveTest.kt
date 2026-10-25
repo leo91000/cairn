@@ -101,92 +101,79 @@ class LiveTest {
         }
 
     @Test
-    fun `legacy cached subagents refetch while scoped caches resume without duplicate workers`() =
-        runBlocking {
-            for (legacy in listOf(true, false)) {
-                MockWebServer().use { server ->
-                    val state = LiveState(run = Run("r1", status = "running"))
-                    fun item(id: Long, body: JsonObjectBuilder.() -> Unit) =
-                        RunEvent(
-                            id,
-                            id,
-                            "item.completed",
-                            "",
-                            mapOf("item" to buildJsonObject(body)),
-                            runId = "r1",
-                        )
-                    val spawn =
-                        item(1) {
-                            put("id", "worker")
-                            put("type", "subagent")
-                            put("name", "Reviewer")
-                            put("status", "in_progress")
-                        }
-                    val progress =
-                        item(2) {
-                            put("id", "read")
-                            put("type", "command_execution")
-                            put("parent_id", "worker")
-                            put("command", "pwd")
-                            put("exit_code", 0)
-                        }
-                    val finished =
-                        spawn.copy(
-                            id = 3,
-                            payload =
-                                mapOf(
-                                    "item" to
-                                        JsonObject(
-                                            spawn.payload!!.getValue("item").jsonObject +
-                                                ("status" to JsonPrimitive("completed"))
-                                        )
-                                ),
-                        )
-                    val value = CachedHistory(1, "v1:r1:1", state, listOf(spawn))
-                    val encoded = wireJson.encodeToJsonElement(value).jsonObject
-                    val oldEvent =
-                        JsonObject(
-                            encoded.getValue("events").jsonArray.single().jsonObject - "runId"
-                        )
-                    val saved =
-                        if (legacy)
-                            wireJson.decodeFromString<CachedHistory>(
-                                JsonObject(encoded + ("events" to JsonArray(listOf(oldEvent))))
-                                    .toString()
-                            )
-                        else value
-                    server.dispatcher =
-                        object : Dispatcher() {
-                            override fun dispatch(request: RecordedRequest): MockResponse {
-                                val reset = request.requestUrl!!.queryParameter("after") == "0"
-                                val events =
-                                    if (reset) listOf(spawn, progress, finished)
-                                    else listOf(progress, finished)
-                                val batch = LiveBatch(events, state, reset, false, value.history)
-                                return MockResponse()
-                                    .setHeader("Content-Type", "text/event-stream")
-                                    .setBody(frame(3, batch))
-                            }
-                        }
-                    server.start()
-                    val api = CairnApi(server.url("/"), MemoryVault())
-                    val route = "/runs/r1/stream"
-                    val session = LiveSession()
-                    session.restore(saved, route, api.streamGeneration.get())
-                    val final = withTimeout(10000) { api.live(route, session).first { it.synced } }
-
-                    assertEquals(
-                        if (legacy) "0" else "1",
-                        server.takeRequest().requestUrl!!.queryParameter("after"),
+    fun `cached scoped subagents resume without duplicate workers`() = runBlocking {
+        run {
+            MockWebServer().use { server ->
+                val state = LiveState(run = Run("r1", status = "running"))
+                fun item(id: Long, body: JsonObjectBuilder.() -> Unit) =
+                    RunEvent(
+                        id,
+                        id,
+                        "item.completed",
+                        "",
+                        mapOf("item" to buildJsonObject(body)),
+                        runId = "r1",
                     )
-                    val worker =
-                        build.cairn.app.ui.timelineEntries(final.events).single().agents.single()
-                    assertEquals(build.cairn.app.ui.SubagentState.DONE, worker.state)
-                    assertEquals(1, worker.steps.size)
-                    assertTrue(final.events.all { it.runId == "r1" })
-                }
+                val spawn =
+                    item(1) {
+                        put("id", "worker")
+                        put("type", "subagent")
+                        put("name", "Reviewer")
+                        put("status", "in_progress")
+                    }
+                val progress =
+                    item(2) {
+                        put("id", "read")
+                        put("type", "command_execution")
+                        put("parent_id", "worker")
+                        put("command", "pwd")
+                        put("exit_code", 0)
+                    }
+                val finished =
+                    spawn.copy(
+                        id = 3,
+                        payload =
+                            mapOf(
+                                "item" to
+                                    JsonObject(
+                                        spawn.payload!!.getValue("item").jsonObject +
+                                            ("status" to JsonPrimitive("completed"))
+                                    )
+                            ),
+                    )
+                val value = CachedHistory(1, "v1:r1:1", state, listOf(spawn))
+                server.dispatcher =
+                    object : Dispatcher() {
+                        override fun dispatch(request: RecordedRequest): MockResponse {
+                            val reset = request.requestUrl!!.queryParameter("after") == "0"
+                            val events =
+                                if (reset) listOf(spawn, progress, finished)
+                                else listOf(progress, finished)
+                            val batch = LiveBatch(events, state, reset, false, value.history)
+                            return MockResponse()
+                                .setHeader("Content-Type", "text/event-stream")
+                                .setBody(frame(3, batch))
+                        }
+                    }
+                server.start()
+                val api = CairnApi(server.url("/"), MemoryVault())
+                val route = "/runs/r1/stream"
+                val session = LiveSession()
+                session.restore(value, route, api.streamGeneration.get())
+                val final = withTimeout(10000) { api.live(route, session).first { it.synced } }
+
+                assertEquals(
+                    "1",
+                    server.takeRequest().requestUrl!!.queryParameter("after"),
+                )
+                val worker =
+                    build.cairn.app.ui.timelineEntries(final.events).single().agents.single()
+                assertEquals(build.cairn.app.ui.SubagentState.DONE, worker.state)
+                assertEquals(1, worker.steps.size)
+                assertTrue(final.events.all { it.runId == "r1" })
             }
         }
+    }
 
     @Test
     fun `revalidation retains the cached paging boundary and a reset replaces it`() = runBlocking {

@@ -80,6 +80,21 @@ abstract class PluginsCases {
             id = "discord",
             builtin = true,
             active = "1.0.0",
+            setup =
+                PluginSetup(
+                    effort = "token",
+                    steps =
+                        listOf(
+                            SetupStep("credential", "credential", "Bot token"),
+                            SetupStep(
+                                "settings",
+                                "settings",
+                                "Settings",
+                                settings = listOf("guildId", "channelId", "messageContent"),
+                            ),
+                            SetupStep("people", "people", "Who can talk to it"),
+                        ),
+                ),
             manifest =
                 PluginManifest(
                     id = "discord",
@@ -136,6 +151,19 @@ abstract class PluginsCases {
         PluginEntry(
             id = "notes",
             active = "1.0.0",
+            setup =
+                PluginSetup(
+                    steps =
+                        listOf(
+                            SetupStep(
+                                "settings",
+                                "settings",
+                                "Settings",
+                                settings = listOf("team", "limit", "loud"),
+                            ),
+                            SetupStep("people", "people", "Who can talk to it"),
+                        )
+                ),
             manifest =
                 PluginManifest(
                     id = "notes",
@@ -882,57 +910,62 @@ abstract class PluginsCases {
     @Test
     fun ordinaryFieldsClearStaleErrorsAndPresetsRefreshDependentChoices() {
         val entry =
-            notes.copy(
-                manifest =
-                    notes.manifest!!.copy(
-                        capabilities = emptyList(),
-                        instanceForm = true,
-                        settings =
-                            listOf(
-                                PluginSetting(key = "team", title = "Team", required = true),
-                                PluginSetting(
-                                    key = "more",
-                                    title = "More destinations",
-                                    type = "boolean",
-                                    refresh = true,
+            notes
+                .copy(
+                    manifest =
+                        notes.manifest!!.copy(
+                            capabilities = emptyList(),
+                            instanceForm = true,
+                            settings =
+                                listOf(
+                                    PluginSetting(key = "team", title = "Team", required = true),
+                                    PluginSetting(
+                                        key = "more",
+                                        title = "More destinations",
+                                        type = "boolean",
+                                        refresh = true,
+                                    ),
+                                    PluginSetting(
+                                        key = "extra",
+                                        title = "Extra destinations",
+                                        type = "boolean",
+                                        refresh = true,
+                                    ),
+                                    PluginSetting(
+                                        key = "destination",
+                                        title = "Destination",
+                                        type = "select",
+                                        dynamic = true,
+                                    ),
                                 ),
-                                PluginSetting(
-                                    key = "extra",
-                                    title = "Extra destinations",
-                                    type = "boolean",
-                                    refresh = true,
-                                ),
-                                PluginSetting(
-                                    key = "destination",
-                                    title = "Destination",
-                                    type = "select",
-                                    dynamic = true,
-                                ),
-                            ),
-                        setup =
-                            PluginSetup(
-                                steps =
-                                    listOf(
-                                        SetupStep(
-                                            id = "settings",
-                                            title = "Settings",
-                                            settings =
-                                                listOf("team", "more", "extra", "destination"),
-                                            presets =
-                                                listOf(
-                                                    SetupPreset("basic", "Basic"),
-                                                    SetupPreset(
-                                                        "more",
-                                                        "More places",
-                                                        values =
-                                                            mapOf("more" to true, "extra" to true),
+                            setup =
+                                PluginSetup(
+                                    steps =
+                                        listOf(
+                                            SetupStep(
+                                                id = "settings",
+                                                title = "Settings",
+                                                settings =
+                                                    listOf("team", "more", "extra", "destination"),
+                                                presets =
+                                                    listOf(
+                                                        SetupPreset("basic", "Basic"),
+                                                        SetupPreset(
+                                                            "more",
+                                                            "More places",
+                                                            values =
+                                                                mapOf(
+                                                                    "more" to true,
+                                                                    "extra" to true,
+                                                                ),
+                                                        ),
                                                     ),
-                                                ),
+                                            )
                                         )
-                                    )
-                            ),
-                    )
-            )
+                                ),
+                        )
+                )
+                .let { it.copy(setup = it.manifest!!.setup) }
         MockWebServer().use { server ->
             val forms = CopyOnWriteArrayList<JsonObject>()
             val saved = CopyOnWriteArrayList<String>()
@@ -1018,6 +1051,19 @@ abstract class PluginsCases {
     fun requiredWhitespaceChoiceCanBeSavedWithNonblankUnicodeText() {
         val entry =
             notes.copy(
+                setup =
+                    PluginSetup(
+                        effort = "token",
+                        steps =
+                            listOf(
+                                SetupStep(
+                                    "settings",
+                                    "settings",
+                                    "Settings",
+                                    settings = listOf("region", "team", "password"),
+                                )
+                            ),
+                    ),
                 manifest =
                     notes.manifest!!.copy(
                         capabilities = emptyList(),
@@ -1043,7 +1089,7 @@ abstract class PluginsCases {
                                     required = true,
                                 ),
                             ),
-                    )
+                    ),
             )
         MockWebServer().use { server ->
             val saved = CopyOnWriteArrayList<String>()
@@ -1196,6 +1242,11 @@ abstract class PluginsCases {
             id = "forge",
             builtin = true,
             active = "1.0.0",
+            setup =
+                PluginSetup(
+                    effort = "signin",
+                    steps = listOf(SetupStep("credential", "credential", "Sign in with Forge")),
+                ),
             manifest =
                 PluginManifest(
                     id = "forge",
@@ -1275,6 +1326,20 @@ abstract class PluginsCases {
     fun oauthAccountsUseTheSameEditorWithoutATokenOrDeviceCode() {
         val oauth =
             forge.copy(
+                setup =
+                    PluginSetup(
+                        effort = "app",
+                        steps =
+                            listOf(
+                                SetupStep(
+                                    "settings",
+                                    "settings",
+                                    "Settings",
+                                    settings = listOf("clientId", "clientSecret"),
+                                ),
+                                SetupStep("credential", "credential", "Sign in with Forge"),
+                            ),
+                    ),
                 manifest =
                     requireNotNull(forge.manifest)
                         .copy(
@@ -1295,7 +1360,7 @@ abstract class PluginsCases {
                                         required = true,
                                     ),
                                 ),
-                        )
+                        ),
             )
         MockWebServer().use { server ->
             val starts = CopyOnWriteArrayList<JsonObject>()
@@ -5639,6 +5704,19 @@ abstract class PluginsCases {
                                                     id = manifest.id,
                                                     active = "1",
                                                     manifest = manifest,
+                                                    setup =
+                                                        PluginSetup(
+                                                            steps =
+                                                                listOf(
+                                                                    SetupStep(
+                                                                        id = "settings",
+                                                                        kind = "settings",
+                                                                        title = "Settings",
+                                                                        settings =
+                                                                            listOf("channel"),
+                                                                    )
+                                                                )
+                                                        ),
                                                 )
                                             ),
                                         connections =
@@ -6895,12 +6973,16 @@ abstract class PluginsCases {
         // Runs receive the account's git credentials: one account per agent.
         val github =
             forge.copy(
+                setup =
+                    forge.setup!!.copy(
+                        steps = forge.setup.steps + SetupStep("agents", "agents", "Agents")
+                    ),
                 manifest =
                     requireNotNull(forge.manifest)
                         .copy(
                             agentAccess = PluginAgentAccess(),
                             runCredentials = buildJsonObject { putJsonArray("git") {} },
-                        )
+                        ),
             )
         val work =
             PluginConnection(
@@ -7238,30 +7320,20 @@ abstract class PluginsCases {
     /** The sign-in button, not the step's title above it. */
     private fun signInButton(label: String) = compose.onNode(hasText(label) and hasClickAction())
 
-    @Test fun editingAnInstanceLeavesItsGrantsToTheAgentPages() = editExistingAccount(older = false)
+    @Test fun editingAnInstanceLeavesItsGrantsToTheAgentPages() = editExistingAccount()
 
     @Test
-    fun anOlderInstallationKeepsTheGrantsOfAnEditedInstance() = editExistingAccount(older = true)
+    fun aGrantRevokedWhileEditingIsNotRestored() = editExistingAccount(revokedMeanwhile = true)
 
-    @Test
-    fun aGrantRevokedWhileEditingIsNotRestored() =
-        editExistingAccount(older = true, revokedMeanwhile = true)
-
-    /**
-     * An older installation (agents without `grantsOnAgent`) reads a missing `agentIds` as "no
-     * agents": the editor then sends the instance's current grants unchanged. A current one keeps
-     * them.
-     */
     @Test
     fun selectedPackageReadsKeepCurrentGrantsWithoutReadingTheGlobalCatalogue() =
-        editExistingAccount(older = true, bounded = true)
+        editExistingAccount(bounded = true)
 
     @Test
     fun selectedPackageExactReadDoesNotRestoreARevokedGrant() =
-        editExistingAccount(older = true, revokedMeanwhile = true, bounded = true)
+        editExistingAccount(revokedMeanwhile = true, bounded = true)
 
     private fun editExistingAccount(
-        older: Boolean,
         revokedMeanwhile: Boolean = false,
         bounded: Boolean = false,
     ) {
@@ -7271,7 +7343,6 @@ abstract class PluginsCases {
             server.dispatcher =
                 dispatcher(
                     includeGet = true,
-                    current = !older,
                     read = { path ->
                         if (!bounded) null
                         else
@@ -7335,7 +7406,7 @@ abstract class PluginsCases {
                             editing.get() ->
                             wireJson.encodeToString(
                                 PluginCatalog(
-                                    setupDrafts = !older,
+                                    setupDrafts = true,
                                     packages = listOf(onePassword, discord, notes),
                                     connections = listOf(bot, account.copy(agentIds = emptyList())),
                                 )
@@ -7354,7 +7425,7 @@ abstract class PluginsCases {
             }
             editing.set(true)
             compose.onNodeWithText("Enregistrer").performClick()
-            // The save reads the instance again first; keep the clock moving for its reply.
+            // Keep the clock moving while the save completes.
             repeat(100) {
                 if (saved.isEmpty()) {
                     compose.mainClock.advanceTimeBy(100)
@@ -7364,22 +7435,14 @@ abstract class PluginsCases {
                 }
             }
             compose.waitUntil(10000) { saved.isNotEmpty() }
-            if (older) {
-                val paths = List(server.requestCount) { server.takeRequest().path.orEmpty() }
-                assertFalse(paths.any { "/setup-drafts" in it })
-            }
             val payload = wireJson.parseToJsonElement(saved.single()).jsonObject
-            if (revokedMeanwhile) assertFalse("agentIds" in payload)
-            else if (older)
-                assertEquals(JsonArray(listOf(JsonPrimitive(MAIN_AGENT_ID))), payload["agentIds"])
-            else assertFalse("agentIds" in payload)
+            assertFalse("agentIds" in payload)
         }
     }
 
     private fun dispatcher(
         includeGet: Boolean = false,
         read: (String) -> String? = { null },
-        current: Boolean = true,
         packages: List<PluginEntry> = listOf(onePassword, discord, notes),
         connections: List<PluginConnection> = listOf(bot, account),
         /** Every request as "METHOD path", when a journey checks methods. */
@@ -7402,8 +7465,7 @@ abstract class PluginsCases {
                 )
                     return MockResponse().setResponseCode(404)
                 if (request.method == "GET" && path.endsWith("/setup-drafts"))
-                    return if (current) MockResponse().setBody("""{"items":[]}""")
-                    else MockResponse().setResponseCode(404)
+                    return MockResponse().setBody("""{"items":[]}""")
                 if (request.method != "GET") {
                     if (request.getHeader("X-CSRF-Token") != "fixture-csrf")
                         return MockResponse().setResponseCode(403)
@@ -7432,21 +7494,19 @@ abstract class PluginsCases {
                                         id = MAIN_AGENT_ID,
                                         name = "Cairn",
                                         revision = "r1",
-                                        grantsOnAgent = current,
                                     ),
                                     Agent(
                                         id = "helper",
                                         name = "Helper",
                                         access = AccessPolicy(projects = listOf("project")),
                                         revision = "r1",
-                                        grantsOnAgent = current,
                                     ),
                                 )
                             )
                         "/api/installations/fixture/api/plugins" ->
                             wireJson.encodeToString(
                                 PluginCatalog(
-                                    setupDrafts = current,
+                                    setupDrafts = true,
                                     packages = packages,
                                     connections = connections,
                                 )

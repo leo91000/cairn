@@ -170,25 +170,7 @@ export function firecrackerRunnerCompose(compose) {
   if (poolSize !== undefined)
     migratedEnvironment.CAIRN_READY_VM_POOL_SIZE = poolSize
 
-  const blockTransport = runnerSetting('CAIRN_BLOCK_TRANSPORT')
-  if (blockTransport !== undefined && !['vhost-user', 'ublk'].includes(blockTransport))
-    throw new Error('Unsupported runner block transport.')
-  migratedEnvironment.CAIRN_BLOCK_TRANSPORT = 'ublk'
-
-  const diskLayout = runnerSetting('CAIRN_DISK_LAYOUT')
-  const snapshots = runnerSetting('CAIRN_VM_SNAPSHOTS')
-  if (diskLayout !== undefined && !['flat-ext4-v1', 'paired-ext4-v1'].includes(diskLayout))
-    throw new Error('Unsupported runner disk layout.')
-  if (snapshots !== undefined && !['true', 'false'].includes(snapshots))
-    throw new Error('Runner snapshots must be true or false.')
-  if (snapshots === 'true' && diskLayout !== 'paired-ext4-v1')
-    throw new Error('Snapshots require paired disks.')
-  if (diskLayout !== undefined)
-    migratedEnvironment.CAIRN_DISK_LAYOUT = diskLayout
-  if (snapshots !== undefined)
-    migratedEnvironment.CAIRN_VM_SNAPSHOTS = snapshots
-
-  const devices = ['/dev/kvm:/dev/kvm', '/dev/fuse:/dev/fuse', '/dev/net/tun:/dev/net/tun']
+  const devices = ['/dev/kvm:/dev/kvm', '/dev/net/tun:/dev/net/tun']
   const configuredDevices = runner.get('devices')?.toJSON()
   const rules = runner.get('device_cgroup_rules')?.toJSON()
   const control = '/dev/ublk-control:/dev/ublk-control'
