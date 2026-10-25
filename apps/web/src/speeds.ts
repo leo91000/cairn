@@ -15,7 +15,7 @@ export function effectiveSpeed(speed: string, inherited: string) {
 
 /**
  * Whether the model offers `speed`. A catalog without speeds, cached before they were
- * listed or from an older Codex, cannot tell: the run then leaves the check to Codex.
+ * listed, cannot tell: the turn then checks with Codex.
  */
 export function offersSpeed(model: CodingAgentModel | undefined, speed: string) {
   if (!speed || speed === STANDARD_SPEED || !model?.serviceTiers)

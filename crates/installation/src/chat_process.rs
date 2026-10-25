@@ -981,7 +981,10 @@ impl Chat<'_> {
             "" => self.thread_model.clone(),
             model => model.to_owned(),
         };
-        let check = crate::models::check_tier(self.session, &model, &tier).await;
+        let check = tokio::select! {
+            () = self.cancel.cancelled() => return Err(Error::conflict(STOPPED)),
+            check = crate::models::check_tier(self.session, &model, &tier) => check,
+        };
         let speed = match check {
             crate::models::TierCheck::Offered => return Ok(tier),
             crate::models::TierCheck::Lacking => json!({

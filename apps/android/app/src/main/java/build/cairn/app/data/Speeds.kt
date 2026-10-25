@@ -17,8 +17,8 @@ fun effectiveSpeed(speed: String, inherited: String): String =
     speed.ifBlank { inherited }.ifBlank { STANDARD_SPEED }
 
 /**
- * Whether the model offers [speed]. A catalog without speeds, cached before they were listed or
- * from an older Codex, cannot tell: the run then leaves the check to Codex.
+ * Whether the model offers [speed]. A catalog without speeds, cached before they were listed,
+ * cannot tell: the turn then checks with Codex.
  */
 fun offersSpeed(model: CodingAgentModel?, speed: String): Boolean {
     val tiers = model?.serviceTiers

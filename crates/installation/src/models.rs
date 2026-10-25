@@ -400,9 +400,10 @@ fn catalog_row<'a>(cached: &'a Value, model: &str) -> Option<&'a Value> {
     })
 }
 
-/// Whether a fresh catalog offers `tier` for `model`, or `None` when it cannot tell.
+/// Whether a fresh catalog offers `tier` for `model`, or `None` when it cannot tell. Without a
+/// model, Codex runs the one its configuration sets, which only the turn itself learns.
 fn offers_tier(cached: &Value, model: &str, tier: &str) -> Option<bool> {
-    if !speeds_known(cached) {
+    if !speeds_known(cached) || model.is_empty() {
         return None;
     }
     tier_listed(cached, model, tier)
@@ -420,9 +421,10 @@ fn tier_listed(catalog: &Value, model: &str, tier: &str) -> Option<bool> {
 pub enum TierCheck {
     /// Its catalog lists the tier for the model.
     Offered,
-    /// Its catalog lists the model without the tier: Codex would silently run Standard.
+    /// Its catalog lists the model without the tier, or does not list the model: Codex would
+    /// silently run Standard.
     Lacking,
-    /// Its catalog could not be read, or does not list the model or its speeds.
+    /// Its catalog could not be read, or no model is known for the turn.
     Unconfirmed,
 }
 
@@ -432,7 +434,16 @@ pub async fn check_tier(session: &mut Session, model: &str, tier: &str) -> TierC
     let Ok(models) = discover(session).await else {
         return TierCheck::Unconfirmed;
     };
-    match tier_listed(&json!({ "models": models }), model, tier) {
+    let catalog = json!({ "models": models });
+    if catalog_row(&catalog, model).is_none() {
+        // Codex drops a tier for a model its own list does not name, such as a custom alias.
+        return if model.is_empty() {
+            TierCheck::Unconfirmed
+        } else {
+            TierCheck::Lacking
+        };
+    }
+    match tier_listed(&catalog, model, tier) {
         Some(true) => TierCheck::Offered,
         Some(false) => TierCheck::Lacking,
         None => TierCheck::Unconfirmed,
@@ -723,6 +734,8 @@ mod tests {
         assert_eq!(resolve("gpt-6-luna", "standard"), send("default"));
         assert_eq!(resolve("gpt-6-astra", "priority"), send("priority"));
         assert_eq!(resolve("", "priority"), send("priority"));
+        // Without a model, Codex may run another one than the catalog default: the turn checks.
+        assert_eq!(resolve("", "ultrafast"), send("ultrafast"));
         assert_eq!(
             resolve("gpt-6-astra", "ultrafast"),
             ServiceTierChoice::Unavailable

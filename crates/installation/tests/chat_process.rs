@@ -500,8 +500,8 @@ async fn a_faster_tier_is_checked_against_codex_own_model_list_before_the_turn()
             "custom-alias",
             "priority",
             false,
-            "priority",
-            Some("unconfirmed"),
+            "default",
+            Some("applied"),
         ),
         (
             "fixture-fast",
