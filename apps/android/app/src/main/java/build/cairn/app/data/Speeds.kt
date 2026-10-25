@@ -37,13 +37,14 @@ fun showsSpeed(provider: String, model: CodingAgentModel?, speed: String) =
  */
 fun speedNote(speed: String, model: String, models: List<CodingAgentModel>): String? {
     if (speed.isBlank()) return null
-    val label = speedLabel(speed, models.flatMap { it.serviceTiers.orEmpty() }).lowercase()
+    // Codex's own tier names, such as Fast, keep their capital.
+    val label = speedLabel(speed, models.flatMap { it.serviceTiers.orEmpty() })
     if (speed == STANDARD_SPEED) return "vitesse $label"
     val row = models.find { if (model.isEmpty()) it.isDefault else it.model == model }
     return when {
         row?.serviceTiers == null -> "vitesse $label demandée"
         offersSpeed(row, speed) -> "vitesse $label"
-        else -> "vitesse standard ($label non proposée)"
+        else -> "vitesse Standard ($label non proposée)"
     }
 }
 

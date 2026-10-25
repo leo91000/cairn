@@ -337,8 +337,8 @@ impl Models {
     }
 }
 
-/// Whether `account` can run `model` at `speed`. Unknown capabilities never block a run:
-/// only what another enabled account's fresh catalog actually offers restricts routing.
+/// Whether `account` can run `model` at `speed`. Unknown capabilities never block a model; a
+/// speed only orders accounts, behind those whose catalog confirms it.
 pub async fn account_supports(
     s: &Service,
     account: &str,
@@ -385,8 +385,10 @@ async fn account_offers_speed(
     if speed.is_empty() || speed == STANDARD_SPEED {
         return Ok(true);
     }
+    // An account whose catalog confirms the speed comes first. One that lacks it, or cannot
+    // tell, comes after any enabled account whose catalog confirms it.
     let own = s.store.kv(&format!("codex-models:{account}")).await?;
-    if own.is_none_or(|cached| offers_tier(&cached, model, speed) != Some(false)) {
+    if own.is_some_and(|cached| offers_tier(&cached, model, speed) == Some(true)) {
         return Ok(true);
     }
     for source in s.accounts.records(s, Provider::Codex).await? {

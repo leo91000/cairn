@@ -178,8 +178,6 @@ function chooseModel(option: { value: string, chosen: boolean }) {
   reasoning.value = ''
 }
 
-// The speed is independent of the model: changing model keeps it, as `chooseRoute` does.
-
 // Switching between routes of one model keeps a reasoning level they share.
 function chooseRoute(value: string) {
   const effort = effectiveEffort.value

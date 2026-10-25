@@ -946,6 +946,34 @@ async fn speeds_come_from_each_account_and_route_runs_to_an_account_offering_the
     service.accounts.release(&busy).await.unwrap();
     service.accounts.release(&fallback).await.unwrap();
 
+    // An account whose catalog confirms the speed comes before one that cannot tell, which
+    // Codex could run at Standard without notice.
+    for (unknown, confirmed) in [(0, 1), (1, 0)] {
+        let key = format!("codex-models:{}", ids[unknown]);
+        let catalog = service.store.kv(&key).await.unwrap().unwrap();
+        let mut outdated = catalog.clone();
+        outdated["checkedAt"] = (now() - 3_600_000).into();
+        service.store.set(&key, outdated, None).await.unwrap();
+        // Twice, so the least recently used account is the unknown one at least once.
+        for _ in 0..2 {
+            let lease = service
+                .accounts
+                .acquire_for(
+                    &service,
+                    FIRST_RUN,
+                    Provider::Codex,
+                    "fixture-fast",
+                    "priority",
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(lease.account_id, ids[confirmed]);
+            service.accounts.release(&lease).await.unwrap();
+        }
+        service.store.set(&key, catalog, None).await.unwrap();
+    }
+
     let tier = async |account: &str, model: &str, speed: &str| {
         service_tier(&service, account, model, speed).await.unwrap()
     };
