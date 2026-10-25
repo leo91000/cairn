@@ -217,7 +217,7 @@ pub async fn refresh_from_session(s: &Service, source: &str, session: &mut Sessi
 /// Combines one model listed by several accounts: only effort levels supported by
 /// every account, hidden only when hidden everywhere, default when default anywhere.
 /// Speeds are offered when any account offers them, since runs prefer an account that
-/// does; `limited` marks a speed that some of these accounts lack.
+/// does; `limited` marks a speed that some of these accounts lack or do not confirm.
 fn intersect(existing: &mut Value, model: &Value) {
     let supported = model["supportedReasoningEfforts"]
         .as_array()
@@ -265,6 +265,34 @@ fn merge_tiers(existing: &mut Value, model: &Value) {
     }
 }
 
+/// Marks `limited` a speed that some account able to run the model does not confirm: one whose
+/// catalog is unknown, outdated or silent about the model's speeds. A run there asks for it
+/// without knowing whether Codex applies it.
+fn mark_unconfirmed(model: &mut Value, catalogs: &[Value]) {
+    let name = text(model, "model").to_owned();
+    let runs_elsewhere = |catalog: &Value| fresh(catalog) && catalog_row(catalog, &name).is_none();
+    let Some(tiers) = model["serviceTiers"].as_array_mut() else {
+        return;
+    };
+    for tier in tiers {
+        let id = text(tier, "id").to_owned();
+        let unconfirmed = catalogs.iter().any(|catalog| {
+            !runs_elsewhere(catalog) && offers_tier(catalog, &name, &id) != Some(true)
+        });
+        if unconfirmed {
+            tier["limited"] = true.into();
+        }
+    }
+}
+
+/// Whether a catalog is recent enough to route models, as the picker's own freshness.
+fn fresh(catalog: &Value) -> bool {
+    catalog["checkedAt"]
+        .as_i64()
+        .and_then(|at| now().checked_sub(at))
+        .is_some_and(|age| (0..=TTL).contains(&age))
+}
+
 async fn discover_local(s: &Service) -> Result<Value> {
     let mut session = Session::codex(&s.config, &s.config.home.join(".codex"), &[], None).await?;
     let result = discover(&mut session).await;
@@ -290,6 +318,7 @@ impl Models {
             accounts.iter().map(|a| text(a, "id").to_owned()).collect()
         };
         let mut models = BTreeMap::<String, Value>::new();
+        let mut catalogs = Vec::new();
         let mut stale = false;
         let mut checked_at: Option<i64> = None;
         for source in &sources {
@@ -317,8 +346,12 @@ impl Models {
                     }
                 }
             }
+            catalogs.push(cached);
         }
-        let models = models.into_values().collect::<Vec<_>>();
+        let mut models = models.into_values().collect::<Vec<_>>();
+        for model in &mut models {
+            mark_unconfirmed(model, &catalogs);
+        }
         let error = if sources.is_empty() {
             "Connect a Codex account to load available models."
         } else if models.is_empty() {
@@ -372,8 +405,38 @@ fn offers_tier(cached: &Value, model: &str, tier: &str) -> Option<bool> {
     if !speeds_known(cached) {
         return None;
     }
-    let tiers = catalog_row(cached, model)?["serviceTiers"].as_array()?;
+    tier_listed(cached, model, tier)
+}
+
+/// Whether a catalog lists `tier` for `model`, or `None` when it does not list the model or its
+/// speeds.
+fn tier_listed(catalog: &Value, model: &str, tier: &str) -> Option<bool> {
+    let tiers = catalog_row(catalog, model)?["serviceTiers"].as_array()?;
     Some(tiers.iter().any(|offered| offered["id"] == tier))
+}
+
+/// What the Codex process running a turn says about the `tier` it is asked for.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TierCheck {
+    /// Its catalog lists the tier for the model.
+    Offered,
+    /// Its catalog lists the model without the tier: Codex would silently run Standard.
+    Lacking,
+    /// Its catalog could not be read, or does not list the model or its speeds.
+    Unconfirmed,
+}
+
+/// Checks `tier` against the model list of the Codex process about to run the turn, the
+/// catalog Codex itself applies, rather than Cairn's cached copy of an account's.
+pub async fn check_tier(session: &mut Session, model: &str, tier: &str) -> TierCheck {
+    let Ok(models) = discover(session).await else {
+        return TierCheck::Unconfirmed;
+    };
+    match tier_listed(&json!({ "models": models }), model, tier) {
+        Some(true) => TierCheck::Offered,
+        Some(false) => TierCheck::Lacking,
+        None => TierCheck::Unconfirmed,
+    }
 }
 
 async fn account_offers_speed(

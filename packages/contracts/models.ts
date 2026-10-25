@@ -19,7 +19,7 @@ export interface ServiceTier {
   id: string
   name: string
   description: string
-  /** Offered by some enabled accounts only; runs asking for it prefer those, otherwise run at Standard. */
+  /** Not confirmed by every enabled account able to run the model: runs prefer accounts that confirm it, and each turn says when it runs at Standard or Codex cannot confirm it. */
   limited?: boolean
 }
 export interface CodingAgentModel {

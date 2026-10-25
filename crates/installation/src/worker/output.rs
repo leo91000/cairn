@@ -261,6 +261,17 @@ pub(super) async fn record(
         s.store.event(id, "status", &message, Some(event)).await?;
         return Ok(false);
     }
+    if event["type"] == "turn.speed" {
+        // The conversation shows it as a notice, as the account check's own.
+        let event = run_output::payload(&event, secrets);
+        let message = if event["speed"]["unconfirmed"] == true {
+            "Codex couldn’t confirm it offers the selected speed for this model here. This turn asks for it but may run at Standard speed."
+        } else {
+            "Codex doesn’t offer the selected speed for this model here. This turn runs at Standard speed."
+        };
+        s.store.event(id, "status", message, Some(event)).await?;
+        return Ok(false);
+    }
     if event["type"] == "runner.start_rejected" {
         let run = s.store.run(id).await?;
         let first_rejected = !previously_launched

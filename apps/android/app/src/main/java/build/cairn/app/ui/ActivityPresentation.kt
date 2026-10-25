@@ -369,6 +369,7 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
                         when {
                             account != null -> "Compte ${account.first} sélectionné"
                             speedFallback(data) -> "Ce tour passe en vitesse Standard"
+                            speedUnconfirmed(data) -> "Vitesse non confirmée pour ce tour"
                             event.text.lowercase() in
                                 listOf(
                                     "succeeded",
@@ -399,6 +400,8 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
                 if (account != null) account.second
                 else if (event.type == "status" && speedFallback(data))
                     "Codex ne propose pas la vitesse choisie pour ce modèle ici"
+                else if (event.type == "status" && speedUnconfirmed(data))
+                    "Codex ne peut pas confirmer qu’il propose la vitesse choisie pour ce modèle ici ; ce tour peut passer en Standard"
                 else if (event.type == "engine.retry") engineRetryDetail(data)
                 else if (event.type == "provider.limit") usageLimitDetail(data)
                 else if (backgroundTasks.isNotEmpty()) backgroundTasks.joinToString(" · ")
@@ -550,3 +553,7 @@ private fun accountUsed(text: String): Pair<String, String>? =
 /** A turn whose selected speed Codex does not offer for its model runs at Standard. */
 internal fun speedFallback(data: JsonObject?): Boolean =
     data?.get("speed").asObject().string("applied").isNotEmpty()
+
+/** A turn asking for a speed Codex could not confirm for its model may run at Standard. */
+internal fun speedUnconfirmed(data: JsonObject?): Boolean =
+    data?.get("speed").asObject()?.get("unconfirmed") == JsonPrimitive(true)

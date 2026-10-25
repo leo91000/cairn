@@ -45,6 +45,17 @@ describe('codex speeds', () => {
     expect(speedNote('priority', 'fast', [])).toBe('Priority speed requested')
     expect(speedNote('standard', 'deep', [fast, deep])).toBe('Standard speed')
     expect(speedNote('', 'deep', [fast, deep])).toBe('')
+    // A speed some account cannot confirm is only requested.
+    const limited = model({
+      model: 'fast',
+      serviceTiers: [{
+        id: 'priority',
+        name: 'Fast',
+        description: '',
+        limited: true,
+      }],
+    })
+    expect(speedNote('priority', 'fast', [limited])).toBe('Fast speed requested')
   })
 
   it('treats catalogs without speeds as unknown rather than unsupported', () => {

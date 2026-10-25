@@ -946,13 +946,14 @@ impl Chat<'_> {
         };
         let input =
             crate::attachments::input(&message, &plan["execution"]["attachments"], inbox(plan));
+        let service_tier = self.service_tier(plan).await?;
         let params = TurnParams {
             thread_id: &self.thread,
             input,
             effort: (!effort.is_empty()).then_some(effort),
             client_user_message_id: (!continuing).then(|| &plan["execution"]["messageId"]),
             model: model(plan),
-            service_tier: Some(text(plan, "serviceTier")).filter(|tier| !tier.is_empty()),
+            service_tier: Some(service_tier.as_str()).filter(|tier| !tier.is_empty()),
         };
         let params = serde_json::to_value(params)?;
         self.turn_submitted = true;
@@ -960,6 +961,36 @@ impl Chat<'_> {
         self.turn = text(&started["turn"], "id").to_owned();
         self.acknowledge(text(&plan["execution"], "messageId"))
             .await
+    }
+
+    /// The tier sent with the turn. Codex silently runs Standard for a tier its own catalog lacks,
+    /// so a faster tier is checked against this process's model list first, and the conversation
+    /// is told when the turn runs at Standard or when Codex cannot confirm the tier.
+    async fn service_tier(&mut self, plan: &Value) -> Result<String> {
+        let tier = text(plan, "serviceTier").to_owned();
+        if tier.is_empty() || tier == crate::models::CODEX_STANDARD_TIER {
+            return Ok(tier);
+        }
+
+        let check = crate::models::check_tier(self.session, text(plan, "model"), &tier).await;
+        let speed = match check {
+            crate::models::TierCheck::Offered => return Ok(tier),
+            crate::models::TierCheck::Lacking => json!({
+                "requested": tier,
+                "applied": crate::models::STANDARD_SPEED,
+            }),
+            crate::models::TierCheck::Unconfirmed => json!({
+                "requested": tier,
+                "unconfirmed": true,
+            }),
+        };
+        self.emit(json!({ "type": "turn.speed", "speed": speed }))
+            .await?;
+        Ok(if check == crate::models::TierCheck::Lacking {
+            crate::models::CODEX_STANDARD_TIER.to_owned()
+        } else {
+            tier
+        })
     }
 
     /// Steers the turn with the user's new messages until it completes.

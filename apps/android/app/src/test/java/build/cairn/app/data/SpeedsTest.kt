@@ -37,6 +37,9 @@ class SpeedsTest {
         assertEquals("vitesse Priority demandée", speedNote("priority", "fast", emptyList()))
         assertEquals("vitesse Standard", speedNote(STANDARD_SPEED, "deep", listOf(fast, deep)))
         assertNull(speedNote("", "deep", listOf(fast, deep)))
+        // A speed some account cannot confirm is only requested.
+        val limited = fast.copy(serviceTiers = listOf(this.fast.copy(limited = true)))
+        assertEquals("vitesse Fast demandée", speedNote("priority", "fast", listOf(limited)))
     }
 
     @Test

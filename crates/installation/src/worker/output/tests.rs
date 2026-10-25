@@ -156,6 +156,45 @@ async fn runtime_disk_notice_preserves_publication_metadata_and_redacts_all_payl
 }
 
 #[tokio::test]
+async fn speed_checks_before_a_turn_become_conversation_notices() {
+    let mut fixture = Fixture::new().await;
+    for speed in [
+        json!({ "requested": "priority", "applied": "standard" }),
+        json!({ "requested": "priority", "unconfirmed": true }),
+    ] {
+        fixture
+            .event(json!({ "type": "turn.speed", "speed": speed }))
+            .await;
+    }
+    let id = fixture.id.clone();
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.events(&id, 0, 100))
+        .await
+        .unwrap();
+    let notices = events
+        .iter()
+        .filter(|event| event["type"] == "status" && event["payload"]["speed"].is_object())
+        .collect::<Vec<_>>();
+    assert_eq!(notices.len(), 2, "{events:#?}");
+    assert_eq!(notices[0]["payload"]["speed"]["applied"], "standard");
+    assert!(
+        notices[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("runs at Standard speed")
+    );
+    assert_eq!(notices[1]["payload"]["speed"]["unconfirmed"], true);
+    assert!(
+        notices[1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("may run at Standard speed")
+    );
+}
+
+#[tokio::test]
 async fn partial_guest_stdout_cannot_hide_controller_failure_after_exhausted_logs() {
     let mut fixture = Fixture::new().await;
     fixture.log_total = LOG_BUDGET;

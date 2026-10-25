@@ -882,6 +882,14 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       artifact.attention = true
     }
 
+    // Codex could not confirm the speed: the turn asks for it, but may run at Standard.
+    if (event.type === 'status' && record(data.speed).unconfirmed === true) {
+      artifact.title = 'Speed not confirmed for this turn'
+      artifact.subtitle = 'Codex couldn’t confirm it offers the selected speed for this model here; this turn may run at Standard'
+      artifact.status = 'info'
+      artifact.attention = true
+    }
+
     if (artifact.kind === 'notice' && ['error', 'diagnostic', 'item.completed'].includes(event.type) && connectionText(artifact.raw)) {
       artifact.title = 'Connection interrupted'
       artifact.attention = true

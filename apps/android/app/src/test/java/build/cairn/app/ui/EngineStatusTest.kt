@@ -256,6 +256,20 @@ class EngineStatusTest {
         val shown = presentActivity(fallback)
         assertEquals("Ce tour passe en vitesse Standard", shown.title)
         assertEquals("Codex ne propose pas la vitesse choisie pour ce modèle ici", shown.subtitle)
+
+        val unconfirmed =
+            event("status") {
+                    put(
+                        "speed",
+                        buildJsonObject {
+                            put("requested", "priority")
+                            put("unconfirmed", true)
+                        },
+                    )
+                }
+                .copy(text = "Codex couldn’t confirm it offers the selected speed.")
+        assertEquals(listOf(unconfirmed.id), notices(listOf(unconfirmed, step())).map { it.id })
+        assertEquals("Vitesse non confirmée pour ce tour", presentActivity(unconfirmed).title)
     }
 
     @Test

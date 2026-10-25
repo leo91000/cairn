@@ -192,8 +192,8 @@ data class ServiceTier(
     val name: String = "",
     val description: String = "",
     /**
-     * Offered by some enabled accounts only; runs asking for it prefer those, otherwise run at
-     * Standard.
+     * Not confirmed by every enabled account able to run the model: runs prefer accounts that
+     * confirm it, and each turn says when it runs at Standard or Codex cannot confirm it.
      */
     val limited: Boolean = false,
 )

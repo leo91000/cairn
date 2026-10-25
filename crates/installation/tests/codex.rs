@@ -768,7 +768,15 @@ async fn models_are_paginated_cached_and_keep_last_known_options_when_codex_is_d
         .await
         .unwrap();
     let stale = service.models.list(&service).await.unwrap();
-    assert_eq!(stale["models"], catalog["models"]);
+    // The last known options stay, but an outdated catalog no longer confirms their speeds.
+    let mut unconfirmed = stale["models"].clone();
+    for model in unconfirmed.as_array_mut().unwrap() {
+        for tier in model["serviceTiers"].as_array_mut().unwrap() {
+            assert_eq!(tier["limited"], true, "{tier}");
+            tier.as_object_mut().unwrap().remove("limited");
+        }
+    }
+    assert_eq!(unconfirmed, catalog["models"]);
     assert_eq!(stale["stale"], true);
     assert!(!stale["error"].as_str().unwrap().is_empty());
 }
@@ -973,6 +981,67 @@ async fn speeds_come_from_each_account_and_route_runs_to_an_account_offering_the
         }
         service.store.set(&key, catalog, None).await.unwrap();
     }
+
+    // The combined catalog offers Fast, but the account a run lands on cannot confirm it: the
+    // picker marks it limited, and the turn itself checks Codex's own list before starting.
+    let key = format!("codex-models:{}", ids[0]);
+    let catalog = service.store.kv(&key).await.unwrap().unwrap();
+    let mut unknown = catalog.clone();
+    unknown["checkedAt"] = (now() - 3_600_000).into();
+    unknown["attemptedAt"] = now().into();
+    service.store.set(&key, unknown, None).await.unwrap();
+    let listed = service.models.list(&service).await.unwrap();
+    let fast = listed["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["model"] == "fixture-fast")
+        .unwrap();
+    assert_eq!(fast["serviceTiers"][0]["id"], "priority");
+    assert_eq!(fast["serviceTiers"][0]["limited"], true, "{fast}");
+    let confirming = service
+        .accounts
+        .acquire_for(
+            &service,
+            FIRST_RUN,
+            Provider::Codex,
+            "fixture-fast",
+            "ultrafast",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(confirming.account_id, ids[1]);
+    let landed = service
+        .accounts
+        .acquire_for(
+            &service,
+            SECOND_RUN,
+            Provider::Codex,
+            "fixture-fast",
+            "priority",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(landed.account_id, ids[0]);
+    assert_eq!(
+        service_tier(&service, &ids[0], "fixture-fast", "priority")
+            .await
+            .unwrap(),
+        ServiceTierChoice::Send("priority".into())
+    );
+    service.accounts.release(&confirming).await.unwrap();
+    service.accounts.release(&landed).await.unwrap();
+    service.store.set(&key, catalog, None).await.unwrap();
+    let listed = service.models.list(&service).await.unwrap();
+    let fast = listed["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["model"] == "fixture-fast")
+        .unwrap();
+    assert!(fast["serviceTiers"][0].get("limited").is_none(), "{fast}");
 
     let tier = async |account: &str, model: &str, speed: &str| {
         service_tier(&service, account, model, speed).await.unwrap()

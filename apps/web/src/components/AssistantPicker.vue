@@ -557,7 +557,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
                     </p>
                     <p v-else-if="appliedTier" class="text-2xs text-muted">
                       {{ appliedTier.description || `${appliedTier.name} speed` }}<template v-if="appliedTier.limited">
-                        · Not every Codex account offers it; runs prefer one that does, otherwise they run at Standard.
+                        · Not every Codex account confirms it; runs prefer one that does. Each turn says when it runs at Standard or Codex can’t confirm the speed.
                       </template> · <a
                         :href="speedUsageUrl"
                         target="_blank"

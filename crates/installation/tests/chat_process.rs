@@ -474,6 +474,90 @@ async fn model_and_reasoning_reach_codex_and_model_changes_resolve_the_new_defau
 }
 
 #[tokio::test]
+async fn a_faster_tier_is_checked_against_codex_own_model_list_before_the_turn() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    // Codex's own catalog lists Fast (`priority`) for fixture-fast only; Ultrafast for none here.
+    let cases = [
+        ("fixture-fast", "priority", false, "priority", None),
+        ("", "priority", false, "priority", None),
+        (
+            "fixture-deep",
+            "priority",
+            false,
+            "default",
+            Some("applied"),
+        ),
+        (
+            "fixture-fast",
+            "ultrafast",
+            false,
+            "default",
+            Some("applied"),
+        ),
+        (
+            "custom-alias",
+            "priority",
+            false,
+            "priority",
+            Some("unconfirmed"),
+        ),
+        (
+            "fixture-fast",
+            "priority",
+            true,
+            "priority",
+            Some("unconfirmed"),
+        ),
+        ("fixture-deep", "default", false, "default", None),
+    ];
+    for (index, (model, tier, list_fails, sent, notice)) in cases.into_iter().enumerate() {
+        let failure = home.join("fixture-model-list-error");
+        if list_fails {
+            std::fs::write(&failure, "").unwrap();
+        } else {
+            let _ = std::fs::remove_file(&failure);
+        }
+        let mut plan = plan(&root, "Check the speed");
+        plan["model"] = model.into();
+        plan["serviceTier"] = tier.into();
+        plan["execution"]["messageId"] = format!("speed-{index}").into();
+        if index > 0 {
+            plan["sessionId"] = "fixture-chat".into();
+        }
+        let (tx, mut rx) = mpsc::channel::<Value>(64);
+        let events = tokio::spawn(async move {
+            let mut speed = Vec::new();
+            while let Some(event) = rx.recv().await {
+                if event["type"] == "turn.speed" {
+                    speed.push(event);
+                }
+            }
+            speed
+        });
+        chat_process::run(&config, &home, plan, tx, CancellationToken::new())
+            .await
+            .unwrap();
+        let speed = events.await.unwrap();
+        let thread = conversation(&home);
+        assert_eq!(thread["turns"][index]["serviceTier"], sent, "case {index}");
+        match notice {
+            None => assert!(speed.is_empty(), "case {index}: {speed:?}"),
+            Some(kind) => {
+                assert_eq!(speed.len(), 1, "case {index}: {speed:?}");
+                assert_eq!(speed[0]["speed"]["requested"], tier);
+                if kind == "applied" {
+                    assert_eq!(speed[0]["speed"]["applied"], "standard");
+                } else {
+                    assert_eq!(speed[0]["speed"]["unconfirmed"], true);
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn resolved_speed_reaches_codex_and_a_plan_without_a_tier_sends_none() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);

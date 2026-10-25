@@ -32,8 +32,8 @@ fun showsSpeed(provider: String, model: CodingAgentModel?, speed: String) =
 
 /**
  * A queued or saved speed as it runs: one its model lacks runs at Standard. An empty model is the
- * catalog's default. Without the model's speeds, such as before the catalog loads, the speed is
- * only requested: Codex decides.
+ * catalog's default. Without the model's speeds, such as before the catalog loads, or for a speed
+ * some account does not confirm, the speed is only requested: the turn says how it runs.
  */
 fun speedNote(speed: String, model: String, models: List<CodingAgentModel>): String? {
     if (speed.isBlank()) return null
@@ -43,8 +43,9 @@ fun speedNote(speed: String, model: String, models: List<CodingAgentModel>): Str
     val row = models.find { if (model.isEmpty()) it.isDefault else it.model == model }
     return when {
         row?.serviceTiers == null -> "vitesse $label demandée"
-        offersSpeed(row, speed) -> "vitesse $label"
-        else -> "vitesse Standard ($label non proposée)"
+        !offersSpeed(row, speed) -> "vitesse Standard ($label non proposée)"
+        row.serviceTiers.orEmpty().any { it.id == speed && it.limited } -> "vitesse $label demandée"
+        else -> "vitesse $label"
     }
 }
 
