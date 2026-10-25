@@ -63,7 +63,9 @@ production, the CLIs may still contact their vendors' public endpoints:
   local model server, without loading global config, and its session resumes with
   the history it stored. Sessions created by the oldest supported release resume
   on the resolved one.
-- Claude Code answers the `initialize` and `get_usage` control requests that model
+- Claude Code ships the OAuth client and token endpoint that account token
+  rotation uses (`accounts/claude.rs`). It answers the `initialize` and
+  `get_usage` control requests that model
   discovery and account usage use, with synthetic credentials, and lists a catalog
   with its `default` alias, offering exactly the effort levels agents may save
   (`EFFORTS` in `claude.rs`). An account refresh reads its `auth status` JSON. It
@@ -114,7 +116,7 @@ version until it does. npm serves an exact version at the same URL as a dist-tag
 so the same validation applies. Claude Code
 behavior those checks cannot reach without a subscription relies on Anthropic's
 stable channel between qualifications: the `auth login --claudeai` flow, quota
-values from `get_usage`, the OAuth client and token endpoint, and subscription
+values from `get_usage`, token rotation against the endpoint, and subscription
 inference. A change in an adapter
 that depends on engine behavior, or a reported engine regression, needs the
 following checks before merge:
@@ -126,8 +128,7 @@ following checks before merge:
 - Claude Code: run the ignored native tests in `tests/claude.rs` the same way,
   with `CLAUDE_NATIVE_BIN` and `CLAUDE_NATIVE_RESUME_BIN`. Compare the credential-free
   `initialize` response with the current release's: the model catalog fields and
-  aliases, and whether stored agent models remain valid `--model` values. Check
-  the OAuth client and token endpoint in `accounts/claude.rs`. With a test
+  aliases, and whether stored agent models remain valid `--model` values. With a test
   account, check `claude auth login --claudeai`, `get_usage` quota values and
   resuming a subscription session.
 - All engines: keep their autoupdaters disabled at runtime. Engine session state

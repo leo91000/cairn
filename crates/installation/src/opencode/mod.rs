@@ -111,7 +111,7 @@ fn environment(config: &Config, home: &Path) -> Environment {
             && key != "ANTHROPIC_AUTH_TOKEN"
             && key != "GOOGLE_APPLICATION_CREDENTIALS"
     });
-    // The pinned native release reads global plugins from Global.Path.home.
+    // OpenCode reads global plugins from Global.Path.home.
     // Override that lookup without changing HOME for shell tools and GitHub auth.
     env.insert(
         "OPENCODE_TEST_HOME".into(),

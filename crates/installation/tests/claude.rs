@@ -263,6 +263,15 @@ async fn native_cli_lists_its_model_catalog_without_inference() {
     })
     .await
     .unwrap();
+    // Token rotation sends the release's own OAuth client to its token endpoint.
+    let executable = std::fs::read(&s.config.claude_bin).unwrap();
+    for shipped in [accounts::claude::CLIENT_ID, accounts::claude::TOKEN_URL] {
+        let literal = regex::bytes::Regex::new(&regex::escape(shipped)).unwrap();
+        assert!(
+            literal.is_match(&executable),
+            "{shipped} is not in the release"
+        );
+    }
     let id = connected(&s).await;
     let catalog = claude::model_catalog(&s).await.unwrap();
     assert_eq!(catalog["stale"], false, "{catalog}");

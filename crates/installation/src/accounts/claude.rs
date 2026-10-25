@@ -25,10 +25,11 @@ use std::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
-// Official Claude Code client, checked on each engine change (docs/CLI-UPDATES.md);
-// a per-login clientId takes precedence.
-const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+/// Token rotation uses the endpoint and official client the installed Claude Code
+/// ships; CI checks both in every resolved release. A per-login clientId takes
+/// precedence.
+pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const LIMIT: usize = 128_000;
 const USAGE_TTL: i64 = 300_000;
 /// The CLI files that follow an account into a run's home. Credentials never do.
