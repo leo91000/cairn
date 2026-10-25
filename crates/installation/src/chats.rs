@@ -287,6 +287,7 @@ fn validate_speed(db: &Db<'_>, chat: &Value, message: &Value) -> Result<()> {
     if text(message, "speed").is_empty() {
         return Ok(());
     }
+    crate::models::validate_speed(text(message, "speed"))?;
     if message_provider(db, chat, message)? != Provider::Codex.as_str() {
         return Err(Error::bad(
             "Speed applies only to Codex. Remove it or choose Codex for this message.",
@@ -605,6 +606,7 @@ pub(crate) fn select_agent(
     let inherited_model = text(previous, "model").to_owned();
     let inherited_reasoning = text(previous, "reasoning").to_owned();
     let inherited_speed = text(previous, "speed").to_owned();
+    let continues = provider == Provider::of_agent(previous)?.as_str();
 
     let switched = provider != Provider::of_run(snapshot)?.as_str();
     let agent = &mut snapshot["snapshot"]["agent"];
@@ -632,6 +634,11 @@ pub(crate) fn select_agent(
             },
         );
     }
+    // Naming the coding agent of the latest turn keeps that turn's speed, as both clients
+    // show it, rather than a default the agent's profile gained since.
+    if !implicit_provider && continues {
+        set_speed(agent, &inherited_speed);
+    }
     if !text(message, "model").is_empty() {
         agent["model"] = message["model"].clone();
         agent["reasoning"] = text(message, "reasoning").into();
@@ -650,7 +657,7 @@ pub(crate) fn select_agent(
     Ok(())
 }
 
-/// Snapshots without a speed, including every earlier one, inherit Codex's own.
+/// Snapshots without a speed, including every earlier one, run at Standard.
 fn set_speed(agent: &mut Value, speed: &str) {
     if !speed.is_empty() {
         agent["speed"] = speed.into();
@@ -1591,6 +1598,16 @@ mod tests {
         let agent = select(&codex(None), json!({ "text": "Continue" }));
         assert!(agent.get("speed").is_none());
 
+        // Naming the conversation's coding agent keeps its latest turn's speed, even after the
+        // agent's profile gained another default.
+        let mut faster_profile = codex(Some("priority"));
+        let continued = json!({ "provider": "codex", "model": "gpt-6-sol", "reasoning": "high" });
+        select_agent(&mut faster_profile, Some(&codex(None)), &continued).unwrap();
+        assert!(faster_profile["snapshot"]["agent"].get("speed").is_none());
+        let mut standard_profile = codex(None);
+        select_agent(&mut standard_profile, Some(&previous), &continued).unwrap();
+        assert_eq!(standard_profile["snapshot"]["agent"]["speed"], "priority");
+
         // Another coding agent has no speed, and returning to Codex starts from its default.
         let agent = select(&previous, json!({ "provider": "claude" }));
         assert!(agent.get("speed").is_none());
@@ -1634,6 +1651,8 @@ mod tests {
                 validate_speed(db, &switched, &fast("codex"))?;
                 assert!(refused(&new_codex, &fast("opencode")));
                 validate_speed(db, &new_claude, &json!({ "id": id(), "speed": "" }))?;
+                // Codex's name for Standard is not a speed choice.
+                assert!(refused(&new_codex, &json!({ "id": id(), "speed": "default" })));
 
                 // A queued message switching coding agent decides for the ones after it.
                 let mut ahead = json!({

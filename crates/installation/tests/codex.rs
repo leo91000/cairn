@@ -910,6 +910,42 @@ async fn speeds_come_from_each_account_and_route_runs_to_an_account_offering_the
         service.accounts.release(&lease).await.unwrap();
     }
 
+    // The speed is only preferred: while the account offering it cannot take another run,
+    // the run goes to an available account at Standard instead of waiting.
+    service
+        .accounts
+        .update(&service, &ids[1], &json!({ "maxConcurrentRuns": 1 }))
+        .await
+        .unwrap();
+    let busy = service
+        .accounts
+        .acquire_for(
+            &service,
+            FIRST_RUN,
+            Provider::Codex,
+            "fixture-fast",
+            "ultrafast",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(busy.account_id, ids[1]);
+    let fallback = service
+        .accounts
+        .acquire_for(
+            &service,
+            SECOND_RUN,
+            Provider::Codex,
+            "fixture-fast",
+            "ultrafast",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fallback.account_id, ids[0]);
+    service.accounts.release(&busy).await.unwrap();
+    service.accounts.release(&fallback).await.unwrap();
+
     let tier = async |account: &str, model: &str, speed: &str| {
         service_tier(&service, account, model, speed).await.unwrap()
     };

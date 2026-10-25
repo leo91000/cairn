@@ -474,7 +474,7 @@ async fn model_and_reasoning_reach_codex_and_model_changes_resolve_the_new_defau
 }
 
 #[tokio::test]
-async fn resolved_speed_reaches_codex_and_plans_without_one_leave_the_thread_tier() {
+async fn resolved_speed_reaches_codex_and_a_plan_without_a_tier_sends_none() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);
     let config = config(&root);

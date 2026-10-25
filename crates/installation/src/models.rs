@@ -393,6 +393,16 @@ async fn account_offers_speed(
     Ok(true)
 }
 
+/// Codex's own name for Standard is not a speed choice: `standard` asks for it.
+pub fn validate_speed(speed: &str) -> Result<()> {
+    if speed == CODEX_STANDARD_TIER {
+        return Err(Error::bad(
+            "Choose the standard speed as `standard`, or leave the speed empty to inherit it.",
+        ));
+    }
+    Ok(())
+}
+
 /// The `serviceTier` sent to Codex for a run's speed.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ServiceTierChoice {

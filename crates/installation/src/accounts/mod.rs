@@ -109,7 +109,8 @@ pub trait Driver: Send + Sync {
         Cow::Borrowed(model)
     }
 
-    /// Whether the account can run `model` at `speed`, a Codex service tier or empty.
+    /// Whether the account can run `model` at `speed`, a Codex service tier or empty. A model
+    /// is required; a speed is only preferred, since a run without it falls back to Standard.
     async fn supports(&self, s: &Service, id: &str, model: &str, speed: &str) -> Result<bool>;
 
     /// Loads what [`Driver::supports`] needs for `model` before selection takes its locks.
@@ -455,8 +456,8 @@ impl Accounts {
         Ok(self.connecting.lock().await.as_deref() == Some(id) || self.recovering(s, id).await?)
     }
 
-    /// Accounts able to take a new `model` run at `speed` now, best first: the most remaining
-    /// capacity, then the least recently used.
+    /// Accounts able to take a new `model` run now, best first: those offering `speed` when any
+    /// can take the run, then the most remaining capacity, then the least recently used.
     async fn eligible(
         &self,
         s: &Service,
@@ -474,11 +475,26 @@ impl Accounts {
                 && running(leases, id) < account.parallel_runs()
                 && connecting.as_deref() != Some(id)
                 && !self.recovering(s, id).await?
-                && driver.supports(s, id, model, speed).await?
+                && driver.supports(s, id, model, "").await?
             {
                 candidates.push(account);
             }
         }
+
+        // A speed only some accounts offer prefers them, but never holds a run back when
+        // none of them can take it now: the run then goes at Standard, with a notice.
+        if !speed.is_empty() {
+            let mut offering = Vec::new();
+            for account in &candidates {
+                if driver.supports(s, &account.id, model, speed).await? {
+                    offering.push(account.clone());
+                }
+            }
+            if !offering.is_empty() {
+                candidates = offering;
+            }
+        }
+
         let rank = |a: &Account| capacity(a, driver, model).unwrap_or(-1.);
         let ordered = driver.ordered();
         candidates.sort_by(|a, b| {
@@ -506,7 +522,8 @@ impl Accounts {
         self.acquire_for(s, run_id, provider, model, "").await
     }
 
-    /// Leases an account able to run `model` at `speed`, the run's chosen Codex speed.
+    /// Leases an account able to run `model`, preferring one offering `speed`, the run's chosen
+    /// Codex speed.
     pub async fn acquire_for(
         &self,
         s: &Service,
@@ -563,7 +580,7 @@ impl Accounts {
             drop(leases);
             if !available
                 || self.busy(s, &account.id).await?
-                || !driver.supports(s, &account.id, model, speed).await?
+                || !driver.supports(s, &account.id, model, "").await?
             {
                 continue;
             }

@@ -304,6 +304,7 @@ impl Service {
         let mut agent = parse("agent", input)?;
         crate::agent_grants::normalize(&mut agent);
         let provider = crate::provider::Provider::of_agent(&agent)?;
+        crate::models::validate_speed(text(&agent, "speed"))?;
         if provider != crate::provider::Provider::Codex && !text(&agent, "speed").is_empty() {
             return Err(Error::bad(
                 "Speed applies only to Codex agents. Remove it or choose Codex.",

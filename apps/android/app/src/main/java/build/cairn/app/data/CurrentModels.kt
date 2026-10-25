@@ -220,7 +220,10 @@ data class CodingAgentModel(
     val routes: List<ModelRoute> = emptyList(),
     /** Codex speeds besides standard; null in catalogs cached before speeds were listed. */
     val serviceTiers: List<ServiceTier>? = null,
-    /** The tier Codex uses when no speed is chosen, when its catalog names one. */
+    /**
+     * Codex's catalog default tier, applied only by Codex's own terminal client: Cairn runs
+     * Standard when no speed is chosen.
+     */
     val defaultServiceTier: String? = null,
 )
 
