@@ -256,6 +256,14 @@ Binary messages contain a 13-byte envelope followed by JSON-frame bytes:
 `version:u8=1`, `transfer:u32`, `total:u32`, `offset:u32`; integers are network
 byte order. Transfer IDs are nonzero. `total` is the UTF-8 JSON byte count for
 one existing relay `Frame`; body bytes retain the protocol's base64 encoding.
+A different envelope version or channel label receives an `update_required`
+control frame with an update message in the current envelope. Application dispatch
+stops immediately; the client closes after consuming the refusal, or the installation
+ends the peer after the 30-second request deadline. No application request from that
+incompatible channel is dispatched.
+Web and Android stop ordinary requests and live streams on this refusal; they do
+not reopen them through the relay. Ordinary network loss retains its relay fallback.
+
 Each message is at most 16,384 bytes, leaving 16,371 bytes per fragment. Offsets
 must be contiguous within a transfer, although separate transfers (including
 credits/cancellation) can interleave. `total=offset=0` with no payload abandons

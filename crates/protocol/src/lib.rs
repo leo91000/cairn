@@ -167,6 +167,10 @@ pub enum Frame {
     DirectRevoke {
         scope: direct::DirectRevocation,
     },
+    // Terminal refusal on an authenticated DataChannel; no application request was admitted.
+    UpdateRequired {
+        message: String,
+    },
     Request(ApiRequest),
     Response(ApiResponse),
     // Credit permits one bounded chunk, independently per stream.

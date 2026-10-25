@@ -68,6 +68,7 @@ struct Reservation {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum DecodeError {
+    VersionMismatch,
     Busy,
     Rejected(Option<String>),
     Invalid(&'static str),
@@ -76,6 +77,9 @@ pub enum DecodeError {
 impl std::fmt::Display for DecodeError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::VersionMismatch => formatter.write_str(
+                "DataChannel protocol mismatch. Update required: update the app and installation.",
+            ),
             Self::Busy => formatter.write_str("Reassembly capacity busy"),
             Self::Rejected(_) => formatter.write_str("Reassembly transfer rejected"),
             Self::Invalid(message) => formatter.write_str(message),
@@ -194,10 +198,7 @@ impl FrameDecoder {
             return Err("Invalid DataChannel fragment".into());
         }
         if packet[0] != 1 {
-            return Err(
-                "DataChannel protocol mismatch. Update required: update the app and installation."
-                    .into(),
-            );
+            return Err(DecodeError::VersionMismatch);
         }
         let id = u32::from_be_bytes(packet[1..5].try_into().unwrap());
         let total = u32::from_be_bytes(packet[5..9].try_into().unwrap()) as usize;

@@ -185,7 +185,10 @@ event text, historical wait markers, resource-based agent grants or old API save
 forms. Agent previews and current grant APIs are required. Removed Android polling
 workers and old web cache cleanup have no replacement migration. The relay accepts
 only version 5; direct authorization accepts only version 4 and DataChannel
-envelopes only version 1. Mismatches stop direct attempts and display an update-required message in the workspace.
+envelopes only version 1. The installation sends an `update_required` control frame
+before closing a peer with an incompatible envelope or channel label. Both clients
+stop ordinary requests and live streams on a protocol mismatch and display an
+update-required message in the workspace.
 Android also presents Beacon’s `updateRequired` installation status, as the web does.
 Update the app, Beacon and installation together.
 Network fallback from direct transport to the relay remains available. Current

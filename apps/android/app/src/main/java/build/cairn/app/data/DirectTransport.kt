@@ -325,8 +325,9 @@ class DirectChannel(
                     .jsonObject
             }
         val type = frame["type"]!!.jsonPrimitive.content
-        require(type in setOf("response", "stream_start", "stream_chunk", "stream_end"))
         require(frame["type"]!!.jsonPrimitive.isString)
+        if (type == "update_required") throw ProtocolMismatch()
+        require(type in setOf("response", "stream_start", "stream_chunk", "stream_end"))
         val id = frame["id"]!!.jsonPrimitive
         require(id.isString)
 

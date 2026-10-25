@@ -11,6 +11,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.*
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.mockwebserver.MockResponse
@@ -21,21 +22,40 @@ import org.junit.Test
 class DirectTransportTest {
     @Test
     fun `a protocol mismatch is actionable and never falls back to relay`() = runBlocking {
-        MockWebServer().use { server ->
-            server.start()
-            val api = CairnApi(server.url("/"), MemoryVault(), installationId = "test")
-            val channel = DirectChannel({ _, _, _ -> }, {})
-            api.transport.attach(channel)
-            val packet = ByteArray(13)
-            packet[0] = 2
-            channel.receive(packet)
-            withTimeout(5000) { api.transport.protocolError.first { it != null } }
-            val failure = runCatching { api.request("GET", "/chats") }.exceptionOrNull()
-            assertTrue(failure is ProtocolMismatch)
-            assertFalse(isConnectionFailure(checkNotNull(failure)))
-            assertTrue(failure.message.orEmpty().contains("Mise à jour requise"))
-            assertEquals(0, server.requestCount)
-            api.closeStreams()
+        val packets =
+            listOf(
+                ByteArray(13).apply { this[0] = 2 },
+                singleFramePacket(
+                    """{"type":"update_required","message":"Update required."}""".toByteArray()
+                ),
+            )
+        for (packet in packets) {
+            MockWebServer().use { server ->
+                server.start()
+                server.enqueue(MockResponse().setResponseCode(200))
+                val api = CairnApi(server.url("/"), MemoryVault(), installationId = "test")
+                val channel = DirectChannel({ _, _, _ -> }, {})
+                api.transport.attach(channel)
+                channel.receive(packet)
+                withTimeout(5000) { api.transport.protocolError.first { it != null } }
+                val failure = runCatching { api.request("GET", "/chats") }.exceptionOrNull()
+                assertTrue(failure is ProtocolMismatch)
+                assertFalse(isConnectionFailure(checkNotNull(failure)))
+                assertTrue(failure.message.orEmpty().contains("Mise à jour requise"))
+                val client = OkHttpClient.Builder().addInterceptor(api.transport).build()
+                val request =
+                    Request.Builder()
+                        .url(server.url("/api/installations/test/api/chats/stream"))
+                        .header("Accept", "text/event-stream")
+                        .build()
+                val streamFailure = runCatching {
+                    api.transport.newCall(client, request).execute().use {}
+                }
+                    .exceptionOrNull()
+                assertTrue(streamFailure is ProtocolMismatch)
+                assertEquals(0, server.requestCount)
+                api.closeStreams()
+            }
         }
     }
 

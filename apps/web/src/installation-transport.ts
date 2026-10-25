@@ -218,6 +218,7 @@ export class InstallationTransport {
       this.context.protocolError = error.message
       this.blocked = true
       this.traffic?.close(error)
+      window.dispatchEvent(new Event('cairn-transport-change'))
     }
 
     if (error instanceof SignalingError && [401, 403].includes(error.status))
@@ -456,6 +457,8 @@ export class InstallationTransport {
   }
 
   source(path: string, url: string): EventSource {
+    if (this.context.protocolError)
+      throw new ProtocolMismatch(this.context.protocolError)
     const traffic = this.context.transportRoute === 'direct' ? this.traffic : undefined
     if (!traffic)
       return Object.assign(new EventSource(url), { transportRoute: 'relay' as const })
