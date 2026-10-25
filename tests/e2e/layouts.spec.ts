@@ -291,7 +291,6 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     name: index === 4999 ? 'Équipe sécurité' : `Agent ${index.toString().padStart(5, '0')}`,
     description: `Maintains project ${index}`,
     // A current installation marks its agents as holding their live grants.
-    grantsOnAgent: true,
     model: '',
     reasoning: 'high',
     access: {

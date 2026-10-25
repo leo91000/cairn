@@ -330,10 +330,10 @@ pub(super) async fn detach_on(
 }
 
 fn claim_name(name: &str, protocol: u16) -> Result<&str, ApiError> {
-    if !cairn_protocol::SUPPORTED_VERSIONS.contains(&protocol) {
+    if protocol != cairn_protocol::PROTOCOL_VERSION {
         return Err(ApiError::Http(
             StatusCode::CONFLICT,
-            "Unsupported relay protocol",
+            "Relay protocol mismatch. Update required: update Beacon and the installation.",
         ));
     }
 

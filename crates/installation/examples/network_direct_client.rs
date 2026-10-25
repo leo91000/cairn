@@ -181,7 +181,7 @@ async fn direct_read(
             .header("x-csrf-token", csrf)
             .json(&json!({
                 "fingerprint": fingerprint,
-                "versions": [4],
+                "version": 4,
             }))
             .send()
             .await?

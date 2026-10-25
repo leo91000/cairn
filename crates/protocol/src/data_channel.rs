@@ -190,8 +190,14 @@ impl FrameDecoder {
 
     pub fn push(&mut self, packet: &[u8]) -> Result<Option<Frame>, DecodeError> {
         self.expire();
-        if packet.len() < HEADER || packet.len() > MAX_PACKET || packet[0] != 1 {
+        if packet.len() < HEADER || packet.len() > MAX_PACKET {
             return Err("Invalid DataChannel fragment".into());
+        }
+        if packet[0] != 1 {
+            return Err(
+                "DataChannel protocol mismatch. Update required: update the app and installation."
+                    .into(),
+            );
         }
         let id = u32::from_be_bytes(packet[1..5].try_into().unwrap());
         let total = u32::from_be_bytes(packet[5..9].try_into().unwrap()) as usize;

@@ -898,25 +898,3 @@ async fn native_agents_cannot_newly_get_the_current_runner_and_drop_reservations
     let (status, _) = owner.send("PUT", &path(&fresh), local).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
-
-#[tokio::test]
-async fn the_agent_list_says_grants_live_on_agents() {
-    let owner = Owner::new().await;
-    let (status, agents) = owner.send("GET", "/api/agents", Value::Null).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(
-        agents
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|agent| agent["grantsOnAgent"] == true)
-    );
-    // The marker is never stored.
-    assert!(
-        owner
-            .stored("agents", MAIN_AGENT_ID)
-            .await
-            .get("grantsOnAgent")
-            .is_none()
-    );
-}

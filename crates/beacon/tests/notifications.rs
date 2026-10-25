@@ -1746,7 +1746,7 @@ async fn one_android_device_receives_both_installations_without_installation_sub
             .json(&json!({
                 "code": code["code"],
                 "name": name,
-                "protocol": 3,
+                "protocol": cairn_protocol::PROTOCOL_VERSION,
             }))
             .send()
             .await
@@ -1768,16 +1768,25 @@ async fn one_android_device_receives_both_installations_without_installation_sub
         let (mut socket, _) = tokio_tungstenite::connect_async(connect).await.unwrap();
         socket
             .send(Message::Text(
-                serde_json::to_string(&Frame::Hello { versions: vec![3] })
-                    .unwrap()
-                    .into(),
+                serde_json::to_string(&Frame::Hello {
+                    version: cairn_protocol::PROTOCOL_VERSION,
+                })
+                .unwrap()
+                .into(),
             ))
             .await
             .unwrap();
         let welcome = socket.next().await.unwrap().unwrap();
         assert!(matches!(
             serde_json::from_str::<Frame>(welcome.to_text().unwrap()).unwrap(),
-            Frame::Welcome { version: 3 }
+            Frame::Welcome {
+                version: cairn_protocol::PROTOCOL_VERSION
+            }
+        ));
+        let key = socket.next().await.unwrap().unwrap();
+        assert!(matches!(
+            serde_json::from_str::<Frame>(key.to_text().unwrap()).unwrap(),
+            Frame::DirectKey { .. }
         ));
         let event = Frame::Notification(NotificationEvent {
             id: "e".repeat(64),

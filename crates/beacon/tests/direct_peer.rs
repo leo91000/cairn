@@ -181,7 +181,7 @@ async fn client_with_offer_candidates(
         .authenticated(cookie, session, Method::POST, &path)
         .json(&json!({
             "fingerprint": fingerprint,
-            "versions": [4],
+            "version": 4,
         }))
         .send()
         .await
@@ -655,7 +655,7 @@ async fn disabling_direct_refuses_authorization_and_preserves_the_relay() {
         )
         .json(&json!({
             "fingerprint": fingerprint,
-            "versions": [4],
+            "version": 4,
         }))
         .send()
         .await
@@ -955,7 +955,7 @@ async fn signal_lag_keeps_the_peer_running_and_new_connections_work() {
         )
         .json(&json!({
             "fingerprint": fingerprint,
-            "versions": [4],
+            "version": 4,
         }))
         .send()
         .await
@@ -1733,7 +1733,7 @@ async fn observed_certificate_is_compared_with_the_grant_without_an_sdp_check() 
         )
         .json(&json!({
             "fingerprint": fingerprint,
-            "versions": [4],
+            "version": 4,
         }))
         .send()
         .await
@@ -1810,7 +1810,7 @@ async fn a_panicking_peer_task_releases_its_authorization_and_preserves_other_pe
         )
         .json(&json!({
             "fingerprint": fingerprint,
-            "versions": [4],
+            "version": 4,
         }))
         .send()
         .await
@@ -1908,7 +1908,7 @@ async fn public_alias_is_withheld_without_remote_candidates_and_does_not_escape_
         )
         .json(&json!({
             "fingerprint": fingerprint,
-            "versions": [4],
+            "version": 4,
         }))
         .send()
         .await

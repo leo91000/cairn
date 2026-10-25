@@ -20,6 +20,26 @@ import org.junit.Test
 
 class DirectTransportTest {
     @Test
+    fun `a protocol mismatch is actionable and never falls back to relay`() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            val api = CairnApi(server.url("/"), MemoryVault(), installationId = "test")
+            val channel = DirectChannel({ _, _, _ -> }, {})
+            api.transport.attach(channel)
+            val packet = ByteArray(13)
+            packet[0] = 2
+            channel.receive(packet)
+            withTimeout(5000) { api.transport.protocolError.first { it != null } }
+            val failure = runCatching { api.request("GET", "/chats") }.exceptionOrNull()
+            assertTrue(failure is ProtocolMismatch)
+            assertFalse(isConnectionFailure(checkNotNull(failure)))
+            assertTrue(failure.message.orEmpty().contains("Mise à jour requise"))
+            assertEquals(0, server.requestCount)
+            api.closeStreams()
+        }
+    }
+
+    @Test
     fun `response parsing and base64 validation leave the callback thread`() {
         for (bytes in
             listOf(

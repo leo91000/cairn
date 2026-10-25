@@ -854,3 +854,33 @@ it('keeps a session-capped renewal until expiry without issuing one-second renew
   await vi.advanceTimersByTimeAsync(1)
   expect(state.transportRoute).toBe('relay')
 })
+
+it('requires an update after a DataChannel version mismatch without relaying the interrupted read', async () => {
+  const { api, channel, state } = await direct()
+  const pending = api('/chats')
+  const rejected = expect(pending).rejects.toMatchObject({ status: 426, message: expect.stringContaining('Update required') })
+  await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+  const packet = new Uint8Array(13)
+  packet[0] = 2
+  channel.dispatchEvent(new MessageEvent('message', { data: packet.buffer }))
+  await rejected
+  expect(state.protocolError).toContain('Update required')
+  const requests = vi.mocked(fetch).mock.calls.length
+  await expect(api('/chats')).rejects.toMatchObject({ status: 426 })
+  await vi.advanceTimersByTimeAsync(300000)
+  expect(fetch).toHaveBeenCalledTimes(requests)
+})
+
+it('requires an update after direct authorization refuses the protocol instead of retrying', async () => {
+  vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(Response.json({ error: 'Update required: update the app and Beacon.' }, { status: 426 }))))
+  const { api, state } = await import('../src/api')
+  state.csrf = 'test-csrf'
+  state.authenticated = true
+  state.ready = true
+  await nextTick()
+  await vi.waitFor(() => expect(state.protocolError).toContain('Update required'))
+  const requests = vi.mocked(fetch).mock.calls.length
+  await expect(api('/chats')).rejects.toMatchObject({ status: 426 })
+  await vi.advanceTimersByTimeAsync(300000)
+  expect(fetch).toHaveBeenCalledTimes(requests)
+})

@@ -90,11 +90,28 @@ needs migration permissions. All filenames use `YYYYMMDDHHmm` versions. The
 upstream SQLx migration macro is imported directly from `sqlx-macros`: the full
 `sqlx` facade resolves a conflicting SQLite dependency even in Postgres-only
 builds. A build script tracks the directory so adding a migration recompiles it.
-This pre-public-deployment renumbering changes versions 1–3 to 202610030001–3.
-An old development database must be backed up and its three ledger versions
-updated to those timestamps before startup (SQL contents/checksums are unchanged),
-or replaced with an empty disposable development database. Do not run the old
-binary against the updated ledger. Rate limits are shared through Postgres.
+Rate limits are shared through Postgres.
+
+### Next release: recreate the Beacon database
+
+The refactor campaign replaces all 28 historical migrations with one initial
+schema. The owner has accepted losing the Beacon database at the next release;
+there is no ledger rewrite or automatic upgrade path. During that release's
+maintenance window:
+
+1. Stop Beacon and keep its public ingress closed.
+2. Recreate its database as an empty database, retaining the configured database
+   role and connection settings. Do not copy the old SQLx ledger or account rows.
+3. Start the new Beacon binary with its matching web bundle. Startup applies the
+   initial migration. Verify account sign-in on the empty database before reopening
+   ingress, then reconnect Android with the matching app version.
+4. Recreate accounts and claim the newly reinstalled installations. Sessions,
+   passkeys, sharing, MCP grants and notification registrations must be set up again.
+
+This runbook is for the next authorized release, not an instruction to alter a
+running production service during the refactor. Existing databases intentionally
+fail SQLx validation. Beacon, installations and apps must use the current protocol;
+a different version is rejected with an update-required message.
 
 Only **one beacon relay process** is supported for deployment. Route all browser
 account/access mutations, installation API requests and relay WebSockets to that
@@ -427,8 +444,7 @@ Account deletion, installation detachment, definitive installation revocation,
 sign-in method removal, invitations, member removal, personal token creation,
 MCP consent approval and revocation of other devices (individually or together)
 require an email-code or user-verified passkey proof from the last **five minutes**, in the **calling session**. A fresh email
-or passkey sign-in qualifies; OAuth sign-in alone does not. Sessions issued before
-the additive migration remain usable but have no qualifying proof. The web asks
+or passkey sign-in qualifies; OAuth sign-in alone does not. The web asks
 for an explicit confirmation before enabling deletion, including after a reload
 or cancelling and reopening the form. Reconfirm if the five-minute window expires.
 
@@ -436,11 +452,7 @@ The proof grants a **reusable five-minute window**, not a one-use authorization:
 several sensitive actions can use it in that session until it expires. The email
 code or WebAuthn challenge itself is still consumed once. `web_sessions.last_proof_at`
 records the last independent email/passkey proof, not an OAuth login or session
-activity. A new rename migration preserves existing proof timestamps,
-CSRF, cookie digests and deadlines, leaving historical SQLx checksums intact.
-The rename is a forward-only schema change, not an additive compatibility change.
-Update the beacon binary with this migration; older binaries still using the
-previous column name cannot serve that database. Upgrade its web bundle too.
+activity. The web bundle and Android app use the same proof policy.
 
 The installation actions expose **Confirm identity** in their confirmation form;
 after verification the app returns to that form without performing the action.

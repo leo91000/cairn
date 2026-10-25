@@ -137,16 +137,6 @@ private val failures = setOf("failure", "failed", "error", "startup_failure", "t
 private val workspaceWaitTool = Regex("^(?:mcp__)?cairn_workspace(?:__|_|\\.)(?:sleep|wait_for)$")
 
 /** A tool call's arguments, which some providers record as JSON text. */
-internal fun toolArguments(item: JsonObject?): JsonObject? =
-    when (val value = item?.get("arguments")) {
-        is JsonObject -> value
-        is JsonPrimitive ->
-            value.contentOrNull?.let {
-                runCatching { wireJson.parseToJsonElement(it).jsonObject }.getOrNull()
-            }
-        else -> null
-    }
-
 internal fun isWaitTool(item: JsonObject?): Boolean {
     val tool = item.string("tool")
     return workspaceWaitTool.matches(tool) ||
@@ -386,7 +376,6 @@ internal fun waitStatus(wakeup: ChatWakeup, now: Long = System.currentTimeMillis
     }
 
 /** Historical marker for events that predate the explicit immediate boolean. */
-internal const val IMMEDIATE_WAIT_RESULT = "Wait condition already completed"
 
 /** A plugin's words for a result, when it gave a title. */
 private fun resultDisplay(observation: JsonObject): WaitOutcome? {

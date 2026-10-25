@@ -77,14 +77,11 @@ impl Default for DirectConnections {
 }
 
 impl DirectConnections {
-    pub(crate) fn configure_stun(&self, url: Option<String>) -> Result<()> {
-        if url
-            .as_ref()
-            .is_some_and(|value| !value.starts_with("stun:") || value.len() > 256)
-        {
+    pub(crate) fn configure_stun(&self, url: String) -> Result<()> {
+        if !url.starts_with("stun:") || url.len() > 256 {
             return Err(Error::bad("Invalid beacon STUN configuration."));
         }
-        self.state.lock().unwrap().stun_url = url;
+        self.state.lock().unwrap().stun_url = Some(url);
         Ok(())
     }
 

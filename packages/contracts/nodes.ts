@@ -108,7 +108,7 @@ export interface NodeAgent {
 export interface NativeCaller { id: string, email: string }
 
 export interface NodeEnrollment {
-  nodeId?: string
+  nodeId: string
   backend?: 'firecracker' | 'native'
   installCommand?: string | null
   // `beacon` when Beacon introduces the machine to the manager, without an address.

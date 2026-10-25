@@ -47,13 +47,12 @@ opens immediately; otherwise the reader waits for the stream’s first snapshot.
   the start.
 - The Fil follows the list on the conversation's stream on the conversation page and on the
   list stream elsewhere, instead of polling every 30 seconds; the Fil page has no stream of
-  its own. A conversation that fails terminally or uses the finite relay fallback releases
-  list delivery to the shell, so the Fil remains available. A retry takes back its stream
+  its own. A conversation that fails terminally releases list delivery to the shell,
+  so the Fil remains available. A retry takes back its stream
   slot before connecting, preserving the per-account capacity. A link by identifier to a
   conversation the Fil knows opens under its slug, so both
   forms share one saved copy.
-- The finite HTTP read for installations on the first relay protocol runs only when the
-  stream fails before its first batch, instead of beside every uncached opening.
+- The conversation opens from its stream alone; there is no finite compatibility read.
 - The history cache keeps serialized entries in memory (no re-serialization of every entry
   on each save) and evicts through an IndexedDB index of ages and sizes instead of reading
   every saved conversation. Saving while output streams happens at most every 2 seconds, and
@@ -68,18 +67,13 @@ same rule as the web; pager previews keep showing their saved copies and recheck
 freshness whenever selected, including pages retained after a previous visit. « Actualisation… »
 appears only after a second. See [web parity](../apps/android/docs/WEB-PARITY.md).
 
-## Compatibility
+## Current client contract
 
-- Streams accept the new `list=1` parameter; requests without it get conversation streams
-  without the list. A browser tab still running an earlier bundle refreshes its Fil every
-  30 seconds until reloaded.
-- Attachment records gain optional `width` and `height`. Earlier releases ignore them and
-  this release reads records without them. The installation data epoch is unchanged.
-- The browser history cache moves to the `cairn-history-v2` IndexedDB database and removes
-  `cairn-history-v1`. Saved copies are downloaded again once; an earlier build that opens
-  the old database starts from an empty one.
-- Relay protocol and stream capacity are unchanged: a tab keeps one stream on the
-  conversation page, as before, and one elsewhere instead of polling.
+Streams accept `list=1` to include the conversation list. The web and Android apps
+use the current stream protocol and installation API; old bundle polling and finite
+relay reads are no longer supported. The browser stores saved conversations in
+`cairn-history-v2`, with no migration or cleanup of earlier cache databases. Images
+may carry dimensions; an image without dimensions sizes itself when loaded.
 
 ## History cache
 

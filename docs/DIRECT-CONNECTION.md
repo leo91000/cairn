@@ -159,10 +159,11 @@ unknown, detached or removed-member installations return 404). POST also require
 the configured origin and CSRF token:
 
 - `POST /api/installations/{id}/direct/authorize` with
-  `{ "fingerprint": "sha-256 AA:…", "versions": [4] }` returns
+  `{ "fingerprint": "sha-256 AA:…", "version": 4 }` returns
   `{ "available": true, "grant": { "claims": { … }, "signature": "…" } }`
-  after installation verification, or `{ "available": false }` for an older
-  client/tunnel or an offline installation. The relay stays usable in all cases.
+  after installation verification, or `{ "available": false }` for an offline
+  installation. A different direct version returns 426 with an update-required
+  message; there is no version negotiation.
 - `POST /api/installations/{id}/direct/{connection}/renew` uses the same input,
   rechecks session and role, and returns a fresh signed grant for that connection.
   Another session cannot renew it, even for the same account.
@@ -374,15 +375,14 @@ If renewal does not extend a session-capped deadline, no further renewal is
 attempted for that lease. A 30-second negotiation deadline,
 10-second application heartbeat (a protocol HEAD request, with a
 5-second response deadline starting after transmission), channel closure, ICE failure and signaling-reader loss all
-return traffic to the relay. Unsupported clients/installations and refused local
-network permission cause no visible connection error. Temporary failures retry
+return traffic to the relay. Refused local network permission returns traffic to the relay. Temporary failures retry
 with exponential backoff from 30 seconds to five minutes, reset when an
 authorized channel opens. `available: false`,
 403 and permission denial stop direct attempts until the session or network
 changes; a capacity 503 backs off while the relay remains usable. A recovery
 observed by the existing installation availability check also resumes
 negotiation, covering beacon restart/tunnel reconnection without polling
-incompatible installations through the direct endpoints. Offline and
+offline installations through the direct endpoints. Offline and
 hidden documents do not negotiate. An established peer in a hidden document
 closes after a 30-second grace period, stopping signaling, renewal and heartbeat;
 visibility restores negotiation after any pending backoff deadline. A retry whose

@@ -238,7 +238,7 @@ test('installation subdomains preserve browser drafts and canonical account acce
       const claimed: string[] = []
       for (const name of ['Detached installation', 'Shared installation']) {
         const code = await (await fetch('/api/installations/claim-code', { method: 'POST', headers, body: '{}' })).json()
-        const identity = await (await fetch('/api/relay/claim', { method: 'POST', headers, body: JSON.stringify({ code: code.code, name, protocol: 4 }) })).json()
+        const identity = await (await fetch('/api/relay/claim', { method: 'POST', headers, body: JSON.stringify({ code: code.code, name, protocol: 5 }) })).json()
         claimed.push(identity.installationId)
       }
 

@@ -421,8 +421,8 @@ talk to it` and `Agents` when they apply. The effort defaults to `app` for OAuth
 `signin` for a device sign-in and `token` for another credential or a required
 secret setting. `GET /api/plugins` returns the resolved `setup` beside each
 `manifest` (and each version), and `manage_plugin`'s `setup` action returns it too.
-Clients of an older installation resolve it from the manifest the same way; the
-shared corpus `tests/fixtures/plugin-setup.json` checks Rust, web and Android.
+Clients use this resolved setup. The shared corpus
+`tests/fixtures/plugin-setup.json` checks server derivation and client presentation.
 
 The package's `form` view appears on the credential step, on steps with dynamic or
 `refresh` fields, and on the first step when there is no credential. A new instance

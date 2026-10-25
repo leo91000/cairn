@@ -31,6 +31,13 @@ import okio.ForwardingSink
 import okio.buffer
 import okio.source
 
+/** A protocol mismatch requires an update, rather than a network retry. */
+class ProtocolMismatch :
+    ApiException(
+        426,
+        "Protocole incompatible. Mise à jour requise de l’app, de Beacon et de l’installation.",
+    )
+
 /** Owns the current installation route; account operations and binaries stay on HTTPS. */
 class DirectTransport(private val installationId: String?, private val switched: () -> Unit = {}) :
     Interceptor {
@@ -40,8 +47,18 @@ class DirectTransport(private val installationId: String?, private val switched:
     private val current = AtomicReference<DirectChannel?>()
     private val observed = MutableStateFlow("relay")
     val route = observed.asStateFlow()
+    private val mismatch = MutableStateFlow<String?>(null)
+    val protocolError = mismatch.asStateFlow()
+
+    fun rejectProtocol(error: ProtocolMismatch = ProtocolMismatch()) {
+        mismatch.value = error.message
+        current.getAndSet(null)?.close(error)
+        observed.value = "relay"
+        switched()
+    }
 
     fun attach(channel: DirectChannel) {
+        channel.onProtocolMismatch = ::rejectProtocol
         channel.onClosed = {
             if (current.compareAndSet(channel, null)) {
                 observed.value = "relay"
@@ -82,6 +99,7 @@ class DirectTransport(private val installationId: String?, private val switched:
         response.request.tag(DirectChannel::class.java) != null
 
     override fun intercept(chain: Interceptor.Chain): Response {
+        if (mismatch.value != null) throw ProtocolMismatch()
         val request = chain.request()
         val acceptsApplication =
             request.header("Accept") in setOf("application/json", "text/event-stream")
@@ -191,6 +209,7 @@ class DirectChannel(
 
     private val pending = ConcurrentHashMap<String, Exchange>()
     internal var onClosed: () -> Unit = {}
+    internal var onProtocolMismatch: (ProtocolMismatch) -> Unit = {}
     private val closed = AtomicBoolean()
     private val transfers = AtomicInteger()
 
@@ -215,6 +234,9 @@ class DirectChannel(
                 }
             } catch (error: CancellationException) {
                 throw error
+            } catch (error: ProtocolMismatch) {
+                onProtocolMismatch(error)
+                close(error)
             } catch (_: Exception) {
                 // Malformed wire data keeps the existing connection-loss recovery rules.
                 close()
@@ -222,10 +244,10 @@ class DirectChannel(
         }
     }
 
-    fun close() {
+    fun close(reason: IOException = DirectLost("Connexion directe interrompue")) {
         if (!closed.compareAndSet(false, true)) return
         pending.values.forEach {
-            it.failure = DirectLost("Connexion directe interrompue")
+            it.failure = reason
         }
         pending.clear()
         incoming.cancel()
@@ -270,7 +292,8 @@ class DirectChannel(
         val frame =
             synchronized(assemblies) {
                 val envelope = ByteBuffer.wrap(packet)
-                require(packet.size in HEADER..MAX_PACKET && envelope.get() == 1.toByte())
+                require(packet.size in HEADER..MAX_PACKET)
+                if (envelope.get() != 1.toByte()) throw ProtocolMismatch()
                 require(
                     assemblies.values.none {
                         System.nanoTime() - it.started >= TimeUnit.SECONDS.toNanos(30)
