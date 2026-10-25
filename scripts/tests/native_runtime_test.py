@@ -291,11 +291,20 @@ def main():
                 # including concurrent steering updates after a disk warning.
                 script += "/usr/bin/python3 - <<'INBOX' &\nimport json,time\nfrom pathlib import Path\nwhile True:\n    for name in ('messages.json','disk-notice.json'):\n        try: value=json.loads((Path('/run/cairn-chat')/name).read_text())\n        except FileNotFoundError: continue\n        except PermissionError:\n            Path('inbox-read-error').write_text(name); raise\n        if name=='disk-notice.json': Path('disk-notice-seen').write_text(value['id'])\n        elif value: Path('steering-seen').write_text(value[0]['text'])\n    time.sleep(0.02)\nINBOX\n"
                 script += ("sudo -n " if administrator else "") + "setsid sh -c 'while :; do printf x >> descendant; sleep 0.1; done' &\nwait\n"
-            (tools / 'bin/codex').write_text(script)
+            workload = 'native-workload-' + attempt
+            (tools / 'bin' / workload).write_text(script)
+            (tools / 'bin' / workload).chmod(0o555)
+            (tools / 'bin/codex').write_text(Path(__file__).with_name('native_chat_fixture.py').read_text())
             (tools / 'bin/codex').chmod(0o555)
             plan = dict(id=attempt, runId=run, backend='native', runtimeId='synthetic', nodeLeaseRequired=True, nativeMode=current_mode.copy(),
                 expires=None, cwd=str(workspace / base_projects[run] if run in base_projects else workspace), projectRoot=str(workspace), sandbox='workspace-write',
-                resources=dict(cpu=1, memoryMiB=512, diskMiB=256), args=[], prompt='synthetic input', storage=contexts[run],
+                resources=dict(cpu=1, memoryMiB=512, diskMiB=256), storage=contexts[run],
+                chat=dict(provider='codex', runId=run, attemptId=attempt,
+                    execution=dict(messageId=attempt, text='synthetic input', recovery=False),
+                    cwd=str(workspace / base_projects[run] if run in base_projects else workspace),
+                    inputDirectory='/run/cairn-chat', output=str(data / 'runs' / run / 'output/result.md'),
+                    model='fixture', reasoning='low', sandbox='workspace-write', writableRoots=[str(workspace)],
+                    args=['--fixture-workload', workload]),
                 imports=[dict(source=str(workspace), target=str(workspace)), dict(source=str(data / 'runs' / run / 'home'), target='/home/node')])
             if run in base_archives:
                 plan.update(nativeProjectArchives=base_archives[run], nativeProjectBase=base_keys[run])

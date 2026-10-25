@@ -431,6 +431,7 @@ console.log('probe.done');
       root,
       api,
       storage,
+      origin: storageFixture.origin,
       docker,
       image,
       networkName,

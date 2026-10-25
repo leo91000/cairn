@@ -7,11 +7,13 @@ import { copyFile, mkdir, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import path from 'node:path'
 import process from 'node:process'
+import { blockDigest } from './block-digest.mjs'
 
 export async function entrypointSmoke({
   root,
   api,
   storage,
+  origin,
   docker,
   image,
   networkName,
@@ -130,6 +132,27 @@ export async function entrypointSmoke({
 
       await api(`/runs/${id}`, 'DELETE')
     }
+
+    // A chat can retain its paused VM until its journal is acknowledged. Finish
+    // the fixture's publication before the independent slot-admission test.
+    const snapshot = await (await api(`/disks/${runId}/snapshot`, 'POST', { consistency: 'filesystem' })).json()
+    if (!snapshot.alreadyPublished) {
+      for (const block of snapshot.manifest.blocks) {
+        if (!block.hash)
+          continue
+        const bytes = Buffer.from(await (await api(`/snapshots/${snapshot.id}/${block.hash}`)).arrayBuffer())
+        assert.equal(blockDigest(bytes, block.hash), block.hash)
+        await writeFile(path.join(origin, block.hash), bytes)
+      }
+
+      await api(`/disks/${runId}/published`, 'POST', { generation: snapshot.manifest.generation, grantId: snapshot.grantId, backupId: randomUUID() })
+    }
+
+    if (snapshot.id)
+      await api(`/snapshots/${snapshot.id}/discard`, 'DELETE')
+    const status = await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json()
+    assert.equal(status.dirtyBytes, 0, 'The fixture must publish its retained journal before deletion')
+    await api(`/disks/${runId}/delete`, 'POST', {})
 
     process.stdout.write(`${JSON.stringify({ mode: 'retained-current-chat-entrypoint', status: 'passed' })}\n`)
   }
