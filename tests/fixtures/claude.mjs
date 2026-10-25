@@ -814,6 +814,16 @@ else {
         summary: 'Looks good.',
         output_file: '',
       })
+      // A repeated start of the run that reported, before its tool result, does not resume it.
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-review',
+        run_id: 'run-1',
+        tool_use_id: 'agent-review',
+        description: 'Review the change',
+        task_type: 'local_agent',
+      })
       result(null, null, 'agent-review', 'Looks good.', { status: 'completed', agentId: 'task-review', content: [{ type: 'text', text: 'Looks good.' }] })
       // Frames of the first run may still arrive after it reported back.
       out({

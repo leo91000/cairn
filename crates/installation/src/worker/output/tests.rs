@@ -362,8 +362,9 @@ async fn engine_reports_survive_log_budget_redacted_and_only_a_reported_limit_ex
     assert!(!events[2].to_string().contains("sensitive-tool-credential"));
     assert_eq!(events[2]["payload"]["message"], "Hook printed [redacted]");
     let long = text(&events[3]["payload"], "message");
-    assert_eq!(long.chars().count(), 4_000);
-    assert!(long.ends_with("x[reda"), "{}", &long[3_980..]);
+    // It is cut before the marker it would split, and says it was cut.
+    assert!(long.chars().count() <= 4_000);
+    assert!(long.ends_with("x…"), "{}", &long[3_980..]);
     assert!(!events[3].to_string().contains("sensitive"));
 
     let limit = json!({

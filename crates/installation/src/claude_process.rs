@@ -991,8 +991,14 @@ impl Turn<'_> {
         let usage = &value["usage"];
         match text(value, "subtype") {
             "task_started" => {
-                let resumed = before["status"] != "in_progress"
-                    || (!current.is_empty() && !run.is_empty() && run != current);
+                // A start naming another run is a resumption, even before the earlier run's tool
+                // result; another start of the current run is not. Frames without run IDs
+                // (before 2.1.292) only start again once the subagent finished.
+                let resumed = if !current.is_empty() && !run.is_empty() {
+                    run != current
+                } else {
+                    before["status"] != "in_progress"
+                };
                 if resumed {
                     item["status"] = "in_progress".into();
                     item["resumed"] = true.into();
