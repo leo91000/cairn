@@ -117,7 +117,7 @@ fun profileChanged(base: Agent, edited: Agent): Boolean =
 
 /** The section of every unsaved change, once per changed setting. */
 fun agentChanges(original: Agent, draft: AgentDraft): List<AgentSection> {
-    val edited = draft.resolved()
+    val edited = draft.agent
     val before = original.access
     val after = edited.access
     return buildList {

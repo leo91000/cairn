@@ -1103,6 +1103,31 @@ abstract class AgentPageCases {
     }
 
     @Test
+    fun anInvalidTimeLimitStaysEditableUntilCorrected() {
+        journey(release.id) { fixture ->
+            open(AgentSection.Advanced)
+            compose.onNodeWithText("Sans limite de temps").performClick()
+            compose.onNodeWithText("Limite en minutes (1–720)").performTextReplacement("900")
+            waitForText("Saisissez une limite entre 1 et 720 minutes.")
+            compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+            compose.onNodeWithText("Limite en minutes (1–720)").performTextReplacement("720")
+            back()
+            compose.onNodeWithText("Enregistrer").performClick()
+            confirmReview()
+            compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
+            assertEquals(
+                720,
+                fixture.saved
+                    .last()
+                    .second["settings"]!!
+                    .jsonObject["timeoutMinutes"]!!
+                    .jsonPrimitive
+                    .int,
+            )
+        }
+    }
+
+    @Test
     fun creationRetriesKeepOneAgentAfterALostResponseAndAConflict() {
         journey("") { fixture ->
             fixture.loseCreation.set(true)

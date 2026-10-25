@@ -209,8 +209,13 @@ class AgentEditingTest {
 
     @Test
     fun invalidDraftsPointToTheirSection() {
-        val errors = agentErrors(AgentDraft(agent.copy(name = " "), timeout = "900"))
+        val invalid = AgentDraft(agent.copy(name = " "), timeout = "900")
+        val errors = agentErrors(invalid)
         assertEquals(setOf(AgentSection.Identity, AgentSection.Advanced), errors.keys)
+        assertEquals(
+            listOf(AgentSection.Identity, AgentSection.Advanced),
+            agentChanges(agent, invalid),
+        )
         assertEquals(AgentSection.Nodes, sectionOfError("Exclusive agent missing."))
         assertEquals(
             AgentSection.Plugins,
