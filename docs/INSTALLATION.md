@@ -112,29 +112,23 @@ If the Beacon or registry is unavailable, the current image keeps running.
 The update channel is independent of the relay, so an incompatible installation
 can still update.
 
-The supervisor reuses the node supervisor's pull/prepare/launch/rollback cycle.
-It takes the existing persisted deployment lease to pause new work, stops the
-manager gracefully to checkpoint active conversations, then stops the local runner.
-It replaces both images together, preserving Compose settings, Garage, identity,
-agent credentials, workspaces and runner state. Compose checks both containers;
-the manager's health must report the downloaded image's runtime identity.
-Failed health restores and verifies the previous approved image before releasing
-the lease. Each replacement has a 550-second maximum, including Docker inspection,
-graceful stops, runner readiness and HTTP runtime verification; candidate and
-rollback, including checks for a failed candidate container, together remain within
-the twenty-minute lease. A journal written before replacement lets the next timer
-restore the last committed image after interruption. A refused lease or interrupted
-supervisor leaves the same approved digest eligible for the next check. Only a
-candidate confirmed unhealthy by its runtime probe or by Docker container health
-is retained in
-`installation.json` and is not retried automatically until the approved digest
-changes. After diagnosing and fixing a host problem, the operator may remove
-`failedImage` from that private file to retry the same approved digest.
+The supervisor pulls and verifies the approved image, then takes the persisted
+deployment lease to pause new work. It stops the manager gracefully to checkpoint
+active conversations, then stops the local runner. It replaces both images
+together, preserving Compose settings, Garage, identity, agent credentials,
+workspaces and runner state. Compose checks both containers; the manager's health
+must report the downloaded image's runtime identity before the image is committed
+and the lease released.
 
-Routine automatic updates require compatible persisted data. An image rollback
-cannot undo an incompatible migration, and no automatic installation backups are
-created. Preserve active data and review forward recovery separately before
-deploying a release with a new data format.
+A durable pending candidate lets the next timer retry an interrupted replacement,
+including an exited or unresponsive candidate container. Failed health leaves the
+candidate pending for repair and retry. The supervisor does not start a previous
+binary against the data. The replacement's stop, readiness and verification
+bounds remain within the twenty-minute lease.
+
+The next release requires the
+[complete reinstallation](PRODUCTION-CAIRN.md#réinstallation-complète). Automatic
+updates create no backups.
 
 ```sh
 sudo systemctl status cairn-installation-update.timer
@@ -170,7 +164,7 @@ is independently parsed by real `docker compose config`, including healthchecks,
 claim substitution, dependencies and uid 1000. Loopback HTTP download transport
 is adapted only in the fixture; the production script requires HTTPS. Inert
 devices and command adapters exercise prerequisite and checksum failures.
-Claim, relay, deployment leases, runtime health and S3 write/read/delete checks are real. The fixture also verifies an approved update and rollback from a wrong-runtime candidate, preserving relay identity and S3 configuration. A disk published to Garage
+Claim, relay, deployment leases, runtime health and S3 write/read/delete checks are real. The fixture also verifies an approved update and repair/retry of a wrong-runtime candidate, preserving relay identity and S3 configuration. A disk published to Garage
 continues publishing, reading remotely and purging there after relayed settings
 select external HTTPS S3. No VM boots; this is not runtime/KVM coverage. Containers, network and data are cleaned up on exit.
 `CAIRN_BEACON_TEST_DATABASE_URL=… python3 tests/installation_update_containers.py`
@@ -179,7 +173,7 @@ fixture images, including interrupted recovery with `restart: unless-stopped`.
 Only the registry is adapted; Compose, persistent mounts, runtime
 metadata, deployment leases, recovery from a running candidate with a dead HTTP
 endpoint, relay reconnection and conversation reads are real.
-It checks successful replacement and an exited-candidate rollback, including
+It checks successful replacement and retry of exited and HTTP-dead candidates, including
 identity, synthetic credentials, workspaces and runner state. The readiness runner
 boots no VM; active VM checkpointing remains covered by the existing node tests.
 `python3 scripts/tests/installation_installer_test.py` checks failure cleanup and

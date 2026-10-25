@@ -381,13 +381,9 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
         if not manager_health(runtime):
             raise RuntimeError('Installation runtime health check failed.')
 
-    def finish(updated):
-        pending = config.pop('pendingImage')
+    def finish():
+        config['image'] = config.pop('pendingImage')
         config.pop('leaseAcquired', None)
-        if updated:
-            config.update(previousImage=config['image'], image=pending, failedImage=None)
-        elif updated is False:
-            config['failedImage'] = pending
         # Keep the lease acknowledgement durable, including a lost DELETE reply.
         atomic(config_file, json.dumps(config))
 
@@ -405,7 +401,7 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
             if not config.get('leaseAcquired') or not (stopped or unavailable_candidate):
                 raise
         launch(config['pendingImage'])
-        finish(True)
+        finish()
 
     if config.get('leaseOwner'):
         lease(config['leaseOwner'], release=True)
@@ -414,7 +410,7 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
         return
 
     image = release(origin)
-    if image in (config['image'], config.get('failedImage')):
+    if image == config['image']:
         return
 
     def pull(image):
@@ -436,7 +432,7 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
     pull(image)
     prepare()
     launch(image)
-    finish(True)
+    finish()
 
     lease(config['leaseOwner'], release=True)
     config.pop('leaseOwner')

@@ -1,4 +1,4 @@
-"""Real manager/runner container replacement and rollback through the supervisor CLI.
+"""Real manager/runner container replacement and candidate retry through the supervisor CLI.
 
 The registry seam maps approved references to locally built fixture images. Docker
 Compose, mounts, image runtime metadata, health, leases and the beacon relay are
@@ -7,13 +7,11 @@ real. The runner serves readiness only: this test requires no KVM or agent login
 import http.server
 import json
 import os
-from contextlib import closing
 from pathlib import Path
 import re
 import shlex
 import shutil
 import socket
-import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -119,7 +117,7 @@ class Ready(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(json.dumps({'status': 'ok', 'backend': 'firecracker', 'runtimeId': runtime}).encode())
+        self.wfile.write(json.dumps({'status': 'ok', 'backend': 'firecracker', 'runtimeId': runtime, 'nodeProtocol': 2}).encode())
     def log_message(self, *_):
         pass
 http.server.HTTPServer(('127.0.0.1', int(os.environ['PORT'])), Ready).serve_forever()
@@ -131,6 +129,7 @@ ARG RUNTIME
 ENV APP_RUNTIME_ID=$RUNTIME
 ''')
             registry = {}
+            runtime_ids = {}
             for runtime in ('previous', 'approved', 'failed', 'failed-http'):
                 tag = f'{name}:{runtime}'
                 command([DOCKER, 'build', '-t', tag, '--build-arg', f'RUNTIME={runtime}', str(build)])
@@ -140,6 +139,7 @@ ENV APP_RUNTIME_ID=$RUNTIME
                 # still requires the production repository and an immutable digest.
                 reference = 'ghcr.io/leo91000/cairn@' + metadata['Id']
                 registry[reference] = metadata['Id']
+                runtime_ids[reference] = runtime
             previous, approved, failed, failed_http = registry
             (root / 'registry.json').write_text(json.dumps(registry))
             (root / 'bin/docker').write_text('''#!/usr/bin/env python3
@@ -187,9 +187,9 @@ if 'up' in args or not target.exists():
     for service in ('manager', 'runner'):
         ref = config['services'][service]['image']
         config['services'][service]['image'] = registry[ref]
-        if service == 'manager' and ref == list(registry)[2]:
+        if service == 'manager' and ref == list(registry)[2] and not (root / 'candidate-repaired').exists():
             config['services'][service]['entrypoint'] = ['/bin/sh', '-c', 'exit 1']
-        if service == 'manager' and ref == list(registry)[3]:
+        if service == 'manager' and ref == list(registry)[3] and not (root / 'candidate-repaired').exists():
             config['services'][service]['entrypoint'] = ['python3', '-c', 'import signal, sys, time; signal.signal(signal.SIGTERM, lambda *_: sys.exit(0)); time.sleep(600)']
     target.write_text(json.dumps(config))
 args[args.index('-f') + 1] = str(target)
@@ -268,13 +268,16 @@ sys.exit(docker(*args).returncode)
             del config['services']['manager']['environment']['CAIRN_INSTALLATION_CLAIM_CODE']
             (root / 'compose.json').write_text(json.dumps(config))
 
-            for image, interrupted in ((approved, False), (failed, False), (failed, True), (failed_http, True)):
+            for image, interrupted in ((approved, False), (failed, False), (failed_http, True)):
                 if image in (failed, failed_http):
                     beacon.terminate()
                     beacon.wait(timeout=15)
                     beacon = service(image)
                     wait(lambda: request('/api/account/options'))
                 before = command(docker + ['ps', '-q', 'manager', 'runner'])
+                committed = json.loads((root / 'installation.json').read_text())['image']
+                repaired = root / 'candidate-repaired'
+                repaired.unlink(missing_ok=True)
                 if interrupted:
                     owner = str(uuid.uuid4())
                     lease_script = """
@@ -287,13 +290,8 @@ fetch('http://127.0.0.1:%d/internal/deployment-lease', {
 """ % (manager_port, json.dumps(owner))
                     command(docker + ['exec', '-T', 'manager', 'node', '-e', lease_script])
                     journal = json.loads((root / 'installation.json').read_text())
-                    # Simulate the new supervisor's durable pre-update checkpoint.
-                    # This fixture changes only runtime identity, not storage format.
-                    manager_database_uri = (root / 'data/manager.db').resolve().as_uri() + '?mode=ro'
-                    with closing(sqlite3.connect(manager_database_uri, uri=True)) as db:
-                        version = db.execute('PRAGMA user_version').fetchone()[0]
-                    journal.update(pendingImage=image, leaseOwner=owner, leaseAcquired=True,
-                                   pendingDatabaseVersion=version)
+                    # Simulate an interrupted replacement with a durable lease acknowledgement.
+                    journal.update(pendingImage=image, leaseOwner=owner, leaseAcquired=True)
                     (root / 'installation.json').write_text(json.dumps(journal))
                     deployment = json.loads((root / 'compose.json').read_text())
                     deployment['services']['manager'].update(image=image, restart='unless-stopped')
@@ -302,23 +300,35 @@ fetch('http://127.0.0.1:%d/internal/deployment-lease', {
                     command([str(root / 'bin/docker'), 'compose', '-f', str(root / 'compose.json'), 'up', '-d'], env=env)
                     expected_state = 'running' if image == failed_http else 'restarting'
                     wait(lambda: json.loads(command(docker + ['ps', '--all', '--format', 'json', 'manager']))['State'] == expected_state)
-                command(['python3', str(REPO / 'deploy/installations/host.py'), origin, '--update'], env=env, timeout=300)
-                after = command(docker + ['ps', '-q', 'manager', 'runner'])
-                assert before != after, 'Both updates must replace actual containers'
-                current = json.loads((root / 'installation.json').read_text())
-                assert current['image'] == approved and not current.get('leaseOwner')
+                update = ['python3', str(REPO / 'deploy/installations/host.py'), origin, '--update']
                 if image in (failed, failed_http):
-                    assert current['failedImage'] == failed
-                if image == failed_http:
-                    assert current.get('failedImage') != failed_http, 'Interrupted recovery must leave the approved digest eligible for retry'
+                    try:
+                        command(update, env=env, timeout=300)
+                    except RuntimeError:
+                        pass
+                    else:
+                        raise AssertionError('An unhealthy candidate must fail without committing or rolling back')
+                    pending = json.loads((root / 'installation.json').read_text())
+                    assert pending['image'] == committed and pending['pendingImage'] == image
+                    assert pending['leaseAcquired'] and pending.get('leaseOwner')
+                    deployment = json.loads((root / 'compose.json').read_text())
+                    assert all(deployment['services'][name]['image'] == image for name in ('manager', 'runner'))
+                    # Repair the fixture's launch fault, then retry the same approved candidate.
+                    repaired.write_text('ready')
+                command(update, env=env, timeout=300)
+                after = command(docker + ['ps', '-q', 'manager', 'runner'])
+                assert before != after, 'Updates must replace actual containers'
+                current = json.loads((root / 'installation.json').read_text())
+                assert current['image'] == image and not current.get('leaseOwner')
+                assert not current.get('pendingImage')
                 wait(lambda: request(base + '/chats/' + chat['id']))
                 assert identity == (root / 'data/installation-relay/identity.json').read_bytes()
                 assert (root / 'workspaces/kept').read_text() == 'retained workspace'
                 assert (root / 'home/kept').read_text() == 'synthetic coding-agent credential'
                 assert (root / 'runner-state/kept').read_text() == 'retained runner state'
                 health = json.load(urllib.request.urlopen(f'http://127.0.0.1:{manager_port}/health'))
-                assert health['runtimeId'] == 'approved' and not health['maintenance']
-            print('Real containers: approved replacement and exited/restarting/HTTP-dead-candidate rollback preserve conversations, identity, workspace, credentials and runner state')
+                assert health['runtimeId'] == runtime_ids[image] and not health['maintenance']
+            print('Real containers: approved replacement and exited/HTTP-dead-candidate retry preserve conversations, identity, workspace, credentials and runner state')
         finally:
             if compose_file.exists():
                 subprocess.run(docker + ['down', '--timeout', '10'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)

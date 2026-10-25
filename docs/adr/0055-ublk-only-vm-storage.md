@@ -39,8 +39,8 @@ The next release requires the [complete reinstallation](../PRODUCTION-CAIRN.md#r
 
 ## Qualification
 
-The deployment regressions cover default ublk, migration of the previous
-selection, exact host device permissions, preserved operator settings and refusal
+The deployment regressions cover default ublk, exact host device permissions,
+preserved operator settings and refusal
 to stop services when prerequisites fail. VM smoke tests cover actual native
 block drives, checkpoint/reopen, retention, memory reclamation and teardown.
 

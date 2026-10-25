@@ -7,8 +7,9 @@ Les nouvelles URLs de l’interface utilisent un slug enregistré, par exemple
 un adjectif, un nom et huit caractères hexadécimaux aléatoires. Une contrainte
 unique et une nouvelle génération en cas de collision garantissent son unicité :
 globale pour les installations, locale à chaque installation pour les conversations.
-Renommer un élément ne change pas son slug. Les éléments existants en reçoivent
-un à la migration, sans modifier leur identité ni leurs dates d’activité.
+Renommer un élément ne change pas son slug. Les nouvelles conversations reçoivent
+leur slug à la création ; aucun rattrapage des anciens enregistrements de
+conversations n’est effectué.
 
 Les UUID restent les identifiants des données et des autorisations. Beacon résout
 le slug d’une installation dans les seules installations accessibles au compte,

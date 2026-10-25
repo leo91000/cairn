@@ -278,9 +278,11 @@ so. Do not enable the proxy's access logs without first updating `/privacy`
 Start the new service only after Léo's approval. Verify `/health` reports the
 expected tested commit, `/install/release` reports the paired digest, `/` and
 `/claim` serve the SPA with framing protection, and an email-code sign-in works.
-Use the compatibility checks and failure procedure in the
+Use the release checks and failure procedure in the
 [release runbook](PRODUCTION-CAIRN.md#failed-releases) for subsequent updates.
-Releases create no backups. Automatic checksum-checked migrations run on startup; do not reuse a historical development database.
+Releases create no backups. The next installation release requires the
+[complete reinstallation](PRODUCTION-CAIRN.md#réinstallation-complète); do not reuse
+a historical manager database.
 
 Configure GitHub's **production** environment:
 

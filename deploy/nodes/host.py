@@ -237,7 +237,7 @@ def complete(master, image, error=None):
 
 
 def update_image(previous, image, pull, prepare, launch_image):
-    """Both host supervisors pull before draining and verify rollback before committing."""
+    """Pull before draining and verify node rollback before committing."""
     pull(image)
     if not prepare():
         return None

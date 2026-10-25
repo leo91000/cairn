@@ -52,8 +52,7 @@ stays paused after a failed attempt until the user resumes it. Retry rechecks
 authorization and reuses a converted point on the same destination, including after a manager restart or a lost restore reply.
 The reservation ID is durable; retry releases an interrupted destination admission
 without discarding its materialized disk allocation, then rechecks capacity.
-Do not downgrade the manager while a migration is pending. Legacy native file
-archives must first resume once on the original node to obtain block storage.
+Manager and execution nodes run the same release throughout the conversion.
 Conversion reads and rewrites the durable environment, so it needs temporary
 manager capacity and is not an on-demand or constant-time operation. Sparse user
 files retain holes while copying. Extraction rechecks free space, and admission
