@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Synthetic Codex app-server for the disposable native workload qualification."""
 import json
+from collections import deque
 from pathlib import Path
 import subprocess
 import sys
@@ -11,6 +12,7 @@ def main():
     workload = Path(__file__).with_name(sys.argv[sys.argv.index('--fixture-workload') + 1])
     lock = threading.Lock()
     process = None
+    error_tail = deque(maxlen=16)
     thread_id = 'native-fixture-thread'
     turn_id = 'native-fixture-turn'
 
@@ -22,8 +24,19 @@ def main():
         status = process.wait()
         turn = dict(id=turn_id, status='completed' if status == 0 else 'failed', items=[])
         if status != 0:
-            turn['error'] = dict(message='Synthetic native workload failed: ' + str(status))
+            # Adapter stderr is diagnostic logging, not a command-output RPC.
+            # Surface a bounded synthetic workload tail in the failed turn too,
+            # before controller teardown can bury it under daemon shutdown logs.
+            reader.join(timeout=0.2)
+            tail = b''.join(error_tail)[-16384:].decode(errors='replace')
+            turn['error'] = dict(message='Synthetic native workload failed: ' + str(status) + '\n' + tail)
         emit(dict(method='turn/completed', params=dict(threadId=thread_id, turn=turn)))
+
+    def drain():
+        while chunk := process.stdout.read1(4096):
+            error_tail.append(chunk)
+            sys.stderr.buffer.write(chunk)
+            sys.stderr.buffer.flush()
 
     try:
         for line in sys.stdin:
@@ -47,7 +60,9 @@ def main():
                 # Keep app-server stdout reserved for RPC frames. The shell and
                 # all its descendants remain in the real workload's cgroup.
                 process = subprocess.Popen([str(workload)], stdin=subprocess.DEVNULL,
-                                           stdout=sys.stderr, stderr=sys.stderr)
+                                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                reader = threading.Thread(target=drain, daemon=True)
+                reader.start()
                 threading.Thread(target=execute, daemon=True).start()
     finally:
         if process is not None and process.poll() is None:

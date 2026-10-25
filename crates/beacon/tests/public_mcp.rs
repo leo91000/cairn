@@ -64,7 +64,7 @@ async fn personal_mcp_token_enforces_scopes_and_revocation() {
         "{result}"
     );
 
-    // A real owner-issued public grant still has no global account authority.
+    // Account actions are outside the public installation catalogue.
     let account_denied: Value = call("list_account_methods", json!({}))
         .send()
         .await
@@ -72,13 +72,14 @@ async fn personal_mcp_token_enforces_scopes_and_revocation() {
         .json()
         .await
         .unwrap();
-    let refusal: cairn_contracts::beacon::ListAccountMethodsOutput =
-        serde_json::from_value(account_denied["result"]["structuredContent"]["result"].clone())
-            .unwrap();
-    assert!(matches!(
-        refusal,
-        cairn_contracts::beacon::ListAccountMethodsOutput::AccountProofRequired { .. }
-    ));
+    assert_eq!(
+        account_denied["result"]["isError"], true,
+        "{account_denied}"
+    );
+    assert!(
+        account_denied.to_string().contains("Unknown operation"),
+        "{account_denied}"
+    );
 
     let denied: Value = call(
         "save_project",

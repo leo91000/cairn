@@ -501,7 +501,6 @@ pub(crate) fn operations() -> Vec<Value> {
         })
         .collect();
     operations.push(crate::capabilities::RESUME_RUN.descriptor());
-    operations.push(cairn_contracts::beacon::list_account_methods_descriptor());
     operations.extend(
         crate::capabilities::PROJECT_OPERATIONS
             .iter()
@@ -537,12 +536,6 @@ pub(crate) async fn operation(
     name: &str,
     args: Value,
 ) -> Result<Value> {
-    if name == cairn_contracts::beacon::LIST_ACCOUNT_METHODS_ID {
-        let input = serde_json::from_value(args).map_err(|error| Error::bad(error.to_string()))?;
-        return Ok(serde_json::to_value(
-            cairn_contracts::beacon::account_methods_proof_required(input),
-        )?);
-    }
     if let Some(op) = crate::capabilities::project_operation(name) {
         return op
             .invoke(

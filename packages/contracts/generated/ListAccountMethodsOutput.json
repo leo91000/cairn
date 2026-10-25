@@ -1,5 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
   "definitions": {
     "AccountSignInMethod": {
       "additionalProperties": false,
@@ -22,44 +23,17 @@
       "type": "object"
     }
   },
-  "oneOf": [
-    {
-      "additionalProperties": false,
-      "properties": {
-        "kind": {
-          "const": "listed",
-          "type": "string"
-        },
-        "methods": {
-          "items": {
-            "$ref": "#/definitions/AccountSignInMethod"
-          },
-          "type": "array"
-        }
+  "properties": {
+    "methods": {
+      "items": {
+        "$ref": "#/definitions/AccountSignInMethod"
       },
-      "required": [
-        "kind",
-        "methods"
-      ],
-      "type": "object"
-    },
-    {
-      "additionalProperties": false,
-      "properties": {
-        "kind": {
-          "const": "accountProofRequired",
-          "type": "string"
-        },
-        "message": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "kind",
-        "message"
-      ],
-      "type": "object"
+      "type": "array"
     }
+  },
+  "required": [
+    "methods"
   ],
-  "title": "ListAccountMethodsOutput"
+  "title": "ListAccountMethodsOutput",
+  "type": "object"
 }

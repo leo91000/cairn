@@ -312,6 +312,9 @@ class NativeHostTests(unittest.TestCase):
                     child.poll.return_value = None
                 with patch.object(host, 'ROOT', root), patch.object(host, 'INSTALL', install), \
                         patch.object(host, 'STOP', False), patch.object(host, 'require_storage'), \
+                        patch.object(host, 'require_docker_host'), \
+                        patch.object(host, 'prepare_docker_tools', return_value=install / 'docker-tools'), \
+                        patch.object(host, 'configure_docker_apparmor') as apparmor, \
                         patch.object(host, 'start_node', side_effect=children), \
                         patch.object(host, 'terminate', side_effect=terminate), \
                         patch.object(host, 'prepare', return_value=candidate), \
@@ -334,6 +337,7 @@ class NativeHostTests(unittest.TestCase):
                     self.assertIsNone(maintenance)
                     self.assertFalse((root / 'update-pending.json').exists())
                     self.assertEqual(len(completions), 2 if lost_reply else 1)
+                    apparmor.assert_called_with(install / 'docker-tools')
 
 
 if __name__ == '__main__':

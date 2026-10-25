@@ -84,11 +84,12 @@ fn main() {
         serde_json::to_string_pretty(&clients).unwrap() + "\n",
     )
     .unwrap();
-    export::<ListAccountMethodsInput>(root, &mut generator, Contract::Deserialize);
     export::<ListAccountMethodsOutput>(root, &mut generator, Contract::Serialize);
     fs::write(
         root.join("list-account-methods.json"),
-        serde_json::to_string_pretty(&list_account_methods_descriptor()).unwrap() + "\n",
+        serde_json::to_string_pretty(&serde_json::json!({ "path": LIST_ACCOUNT_METHODS_PATH }))
+            .unwrap()
+            + "\n",
     )
     .unwrap();
     // Canonical wire values come from the Rust serializer, including omission/null semantics.
