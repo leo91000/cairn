@@ -45,8 +45,8 @@ const TITLE_CHARS: usize = 90;
 const PRIVATE_ANSWER_TEXT: &str = "Answered a private question.";
 
 const CONTINUED_MISSION: &str = concat!(
-    "This mission now continues as a chat; the unattended rule in your ",
-    "instructions no longer applies."
+    "This mission now continues as a chat; the unattended rule given earlier ",
+    "no longer applies."
 );
 
 #[derive(Deserialize)]
@@ -69,7 +69,8 @@ struct NewChat {
     updated_at: i64,
 }
 
-/// `chatExecution` on a run: the user message the next agent turn delivers.
+/// `chatExecution` on a run: the user message the next agent turn delivers,
+/// preceded by the interactive rule on a Codex mission thread.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ChatExecution {
