@@ -489,6 +489,11 @@ pub(crate) fn reserve_continuation(
 ) -> Result<()> {
     let source = text(&run["chatExecution"], "messageId");
     let Some(mut delivery) = db.get(DELIVERIES, source)? else {
+        if super::requesters::delegated_input(db, chat, source)? {
+            // The parent keeps its own external delivery. The child's native
+            // wait retains its requester without publishing a separate reply.
+            return Ok(());
+        }
         if matches!(
             super::requesters::recorded(db, text(chat, "id"), source)?,
             Some(super::requesters::Principal::External(_))

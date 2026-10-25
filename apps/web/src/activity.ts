@@ -35,6 +35,8 @@ export interface ActivitySubagent {
   tokens?: number
   toolUses?: number
   steps: ActivityArtifact[]
+  /** A task Cairn delegated to another conversation, followed through that conversation. */
+  delegation?: { chatId: string, agentName: string, provider: string }
 }
 export interface ActivityArtifact {
   kind: 'command' | 'read' | 'browse' | 'output' | 'files' | 'search' | 'tool' | 'plan' | 'thinking' | 'notice' | 'subagent'
@@ -133,6 +135,14 @@ function toolArguments(value: unknown) {
   catch {
     return {}
   }
+}
+
+const workspaceDelegateTool = /^(?:mcp__)?cairn_workspace(?:__|_|\.)delegate_task$/
+
+/** Its result shows as the delegated task Cairn records, rather than as a tool call. */
+function isDelegateTool(item: Record<string, unknown>) {
+  const tool = text(item.tool)
+  return workspaceDelegateTool.test(tool) || (text(item.server) === 'cairn_workspace' && tool === 'delegate_task')
 }
 
 function isWaitTool(item: Record<string, unknown>) {
@@ -298,6 +308,48 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     const event = stored.type === 'diagnostic' ? { ...stored, text: withoutTerminalStyling(stored.text) } : stored
     if (event.type === 'artifact' || event.type === 'chat.wakeup.delivered')
       continue
+    // A delegated task works like a subagent, in a conversation of its own.
+    if (event.type === 'chat.delegated') {
+      const data = record(event.payload)
+      const chatId = text(data.chatId)
+      const id = `delegated:${chatId}`
+      if (!chatId || artifacts.has(id))
+        continue
+      const agentName = text(data.agentName)
+      const artifact: ActivityArtifact = {
+        id,
+        sourceIds: [`${event.runId}:${event.id}`],
+        time: event.createdAt,
+        kind: 'subagent',
+        title: text(data.title) || event.text || 'Delegated task',
+        subtitle: agentName,
+        status: 'running',
+        blocks: [],
+        files: [],
+        tasks: [],
+        raw: pretty(data),
+        subagent: {
+          type: agentName,
+          prompt: text(data.task),
+          result: '',
+          message: '',
+          activity: '',
+          model: text(data.model),
+          background: true,
+          state: 'running',
+          steps: [],
+          delegation: { chatId, agentName, provider: text(data.provider) },
+        },
+      }
+      artifacts.set(id, artifact)
+      const last = entries.at(-1)
+      if (last?.kind === 'group')
+        last.artifacts.push(artifact)
+      else
+        entries.push({ kind: 'group', id: `group:${id}`, artifacts: [artifact] })
+      continue
+    }
+
     if (waitBoundaries.has(event.type) || (event.type === 'status' && terminalStatuses.has(event.text)))
       placeScheduled()
     if (['chat.sleep', 'chat.wait', 'run.wait'].includes(event.type)) {
@@ -836,6 +888,9 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
         artifact.title = `The agent ran into an error after ${previous.retries} automatic ${previous.retries === 1 ? 'retry' : 'retries'}`
       }
     }
+
+    if (type === 'mcp_tool_call' && isDelegateTool(item) && artifact.status !== 'error')
+      continue
 
     // A scheduled wait shows as its own card; only a call that failed stays among the tools.
     if (type === 'mcp_tool_call' && isWaitTool(item) && artifact.status !== 'error') {

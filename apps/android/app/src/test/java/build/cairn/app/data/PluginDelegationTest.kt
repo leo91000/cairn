@@ -74,6 +74,16 @@ class PluginDelegationTest {
     }
 
     @Test
+    fun `listed and public people get a warning about delegated work`() {
+        for (everyone in listOf(false, true)) {
+            assertEquals(
+                listOf("déléguer du travail à d'autres agents de code et modèles"),
+                agent(limited.copy(delegation = true)).delegationRisks(emptyList(), everyone),
+            )
+        }
+    }
+
+    @Test
     fun `resource permission metadata warns without an instance grant`() {
         val helper = agent(limited)
         assertEquals(

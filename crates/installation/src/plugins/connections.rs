@@ -56,6 +56,18 @@ pub struct Label {
     pub name: String,
 }
 
+pub(super) fn read_approved_access<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Value, D::Error> {
+    let mut access = Value::deserialize(deserializer)?;
+    // Older approvals omitted this default-off power. Keep explicit values and
+    // every other field unchanged so real permission changes still suspend bots.
+    if let Some(access) = access.as_object_mut() {
+        access.entry("delegation").or_insert(false.into());
+    }
+    Ok(access)
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Connection {
@@ -73,6 +85,7 @@ pub struct Connection {
     /// Empty when the plugin cannot start conversations.
     pub agent_id: String,
     pub project_id: Option<String>,
+    #[serde(deserialize_with = "read_approved_access")]
     pub granted_access: Value,
     pub owner_access_id: Option<String>,
     pub access_mode: AccessMode,
@@ -178,9 +191,15 @@ pub(crate) fn delegation_eligibility(
         .map(|agent| {
             let id = text(agent, "id");
             match project_access(db, project, &policy(agent)) {
-                Ok(()) => json!({
-                    "agentId": id, "eligible": true, "pluginAccess": plugin_agents.contains(id),
-                }),
+                Ok(()) => {
+                    let mut item = json!({
+                        "agentId": id, "eligible": true, "pluginAccess": plugin_agents.contains(id),
+                    });
+                    if crate::native::policy::native(agent) {
+                        item["reason"] = json!("External bot messages cannot start work with a native agent because they do not carry a verified Cairn host identity. Choose an isolated agent for this bot.");
+                    }
+                    item
+                },
                 Err(error) => json!({
                     "agentId": id, "eligible": false, "reason": error.message,
                     "pluginAccess": plugin_agents.contains(id),

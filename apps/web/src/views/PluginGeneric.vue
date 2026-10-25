@@ -38,6 +38,7 @@ import PluginSetup from '../components/PluginSetup.vue'
 import PluginView from '../components/PluginView.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
+import UiNotice from '../components/UiNotice.vue'
 import {
   credentialInput,
   signInProblem,
@@ -87,6 +88,7 @@ import {
   contributions,
   delegates as delegating,
   delegationRisks,
+  externalBotExecutionWarning,
   formResult,
   hasSetup,
   instanceNoun,
@@ -177,6 +179,7 @@ function risks(agent: Agent) {
 const agents = computed(() => [...state.agents].sort((a, b) => Number(risks(a).length > 0) - Number(risks(b).length > 0)))
 const chosenAgent = computed(() => state.agents.find(agent => agent.id === form.value.agentId))
 const chosenRisks = computed(() => chosenAgent.value ? risks(chosenAgent.value) : [])
+const chosenExecutionWarning = computed(() => chosenAgent.value ? externalBotExecutionWarning(chosenAgent.value) : '')
 const delegationReady = computed(() => !delegates.value || Boolean(chosenAgent.value))
 const singular = computed(() => instanceNoun(manifest.value, 1))
 const plural = computed(() => instanceNoun(manifest.value, 2))
@@ -1370,6 +1373,14 @@ onBeforeUnmount(() => {
             </section>
           </template>
 
+          <UiNotice
+            v-if="delegates && ['people', 'agents'].includes(current.kind) && chosenExecutionWarning"
+            tone="warning"
+            role="status"
+            title="Native execution unavailable for this bot"
+          >
+            {{ chosenExecutionWarning }}
+          </UiNotice>
           <div v-if="delegates && ['people', 'agents'].includes(current.kind) && chosenAgent && chosenRisks.length" class="flex gap-2.5 rounded-xl bg-warning-surface px-3.5 py-2.5 text-xs leading-relaxed text-warning" role="status">
             <Icon :name="TriangleAlert" :size="15" class="mt-0.5 shrink-0" />
             <p>

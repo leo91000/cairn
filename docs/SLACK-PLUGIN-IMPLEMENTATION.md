@@ -1969,3 +1969,102 @@ authority/finite-handler/uncertain-write controls pass with real workers and a
 synthetic HTTP provider. These tests use queued native submissions rather than
 launching their VM/provider executions. There is no new stored shape, key family
 or migration; the existing bounded queue/error-record observations still apply.
+
+## Delegated tasks retain plugin requester authority
+
+Main's `delegate_task` creates a separate ordinary conversation. A plugin-originated
+task now carries its authenticated principal onto that child's first input, rather
+than borrowing the installation owner or losing its source restriction. The host
+rechecks the original turn in the creation transaction; the child subsequently
+binds that principal to its own run and message. Another agent/model stays subject
+to the original route, resource, participant, owner and package checks.
+
+Owner intervention's personal-credential suspension crosses that delegation and
+its native wakeups. A host-only per-input boolean under the existing chat-control
+prefix identifies the internal return path and preserves suspension. Only this
+marked input and its wakeups can wait without a direct plugin reply delivery;
+the parent retains that delivery. A settled ordinary external turn still cannot
+schedule an orphaned reply. A fresh authenticated human input uses its own
+principal, and conversation purge removes both principal and control prefixes.
+
+Cross-agent creation also compares granular resource rules, separately from
+whole-instance plugin grants. Loaded approved operations determine profile and
+explicit-operation coverage; current rules and approval records are checked in
+the creation transaction. Unions of caller rules must cover every combination of
+the target's scopes. Existing 64-rule resource limits and a 16,384-state comparison
+budget bound work; unusually complex comparisons require narrower target grants.
+After creation, ordinary target grants remain live as specified by Main's
+[delegated-task decision](adr/0059-delegated-tasks.md); native parent host authority
+retains its own existing revocation checks.
+
+The targeted regressions use signed admission, actual Luau workers, genuine
+execution grants and native lifecycle fixtures. They cover another agent/Claude
+model selection, channel/person revocation, profile/operation coverage, combined
+scope rules without permission holes, personal OAuth after wakeup, owner-answer
+suspension, fresh human authority and purge. A separate real-manager/real-provider
+fixture completes the child, resumes its waiting parent and delivers the parent's
+answer to the original Slack thread. No completion is seeded in that scenario;
+no real Slack workspace or production provider is used.
+
+Saved resource-route approvals predating `delegation` normalize the absent power
+to false on read, matching root approvals without rewriting stored rows. Actually
+enabling it still suspends a bot. Both clients name this power in root/resource
+bot warnings while preserving the owner's agent choice. The
+[KV observation](performance/DELEGATED-PLUGIN-SOURCE.md) records the incremental
+source metadata and measurement limits. Final whole-contract qualification,
+management mutation parity, guided inert setup and all Slack Q1–Q20 remain open;
+PR #226 stays draft/unmerged.
+
+### Every installation operation keeps the direct caller's revocation boundary
+
+The same routed run could retain general installation reads and mutations after
+its source participant was removed, even though plugin metadata/resource calls
+already refused it. Execution-grant authorization now checks the current turn's
+source in the same database snapshot as every guarded management read/effect.
+The installation invocation also verifies the captured requester's current owner
+or membership proof before executing; read-only results recheck that same source
+and the live execution grant before returning.
+
+The signed-admission/real-worker witnesses exercise six general operations before
+and after person removal, public-owner calls, and refusal to revive the old turn
+after reapproval. A second witness holds the post-read owner lookup and revokes
+the person before releasing it. Existing plugin-metadata post-read cases retain
+the same final-source guarantees with the common invocation check in place.
+These are native lifecycle fixtures, not running provider/VM demonstrations.
+
+This preserves ADR-0036: the owner may still delegate the whole installation
+catalogue, and management-created missions/conversations use their own configured
+grants and credentials. The direct caller must remain authorized. It introduces
+no stored field/key/envelope or migration; KV measurements above do not time these
+additional authority reads or remote policy checks.
+
+### Native agent configuration explains its execution restriction
+
+Resource eligibility retains the owner's ability to select a native agent and
+adds an informational `reason` using its existing response field. Root, inert
+setup and resource-route editors in both clients explain that external bot inputs
+lack a verified Cairn host identity and cannot start native work. They recommend
+an isolated agent for receiving bot requests. Saving configuration still grants
+no host authority; the existing unknown-provenance refusal remains mandatory.
+This is configuration guidance, not delivery of native Slack sessions/streaming.
+
+### Delegated-task controls retain the calling source
+
+Workspace delegation tools also retain the original caller's source boundary.
+Removing a participant now prevents its still-running parent from listing tasks,
+reading a delegated report or cancelling a child. Status rechecks the same
+captured source after reading and before returning; cancellation verifies it in
+the worker's authorization/effect transaction. Tool discovery uses the same local
+check, without granting a new source through a live workspace token.
+
+Signed-admission, actual Luau and public workspace-MCP regressions cover valid
+reads and cancellation, immediate participant removal, removal during the
+post-read owner lookup and removal during cancellation authorization. They also
+retain the owner's ordinary conversation purge. These use native lifecycle
+fixtures without launching a child provider process; the separate delegated
+Slack wait/reply scenario supplies that process proof.
+
+No stored field, key, table, envelope or migration changes. The earlier KV
+measurements do not time these additional authority reads or remote policy
+checks. The full installation-management exception remains separate from these
+dedicated delegation tools. Whole Q1–Q20 and the delivery gates above remain open.

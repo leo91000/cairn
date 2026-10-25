@@ -487,6 +487,8 @@ export function delegationRisks(agent: Agent, connections: (Pick<PluginConnectio
   const risks: string[] = []
   if (agent.access.installation === true)
     risks.push('manage your whole installation')
+  if (agent.access.delegation === true)
+    risks.push('delegate work to other coding agents and models')
   if (!Array.isArray(agent.access.projects))
     risks.push('open every project')
   else if (agent.access.projects.length > 1)
@@ -500,6 +502,13 @@ export function delegationRisks(agent: Agent, connections: (Pick<PluginConnectio
   if (draftGrants.includes(agent.id) || connections.some(connection => (connection.agentIds?.includes(agent.id) || connection.resourceAgentIds?.includes(agent.id))))
     risks.push('use its plugins, such as GitHub or 1Password')
   return risks
+}
+
+/** Configuration never grants the bot's external sender native host authority. */
+export function externalBotExecutionWarning(agent: Agent) {
+  return agent.access.backend === 'native'
+    ? 'External bot messages cannot start work with a native agent because they do not carry a verified Cairn host identity. Choose an isolated agent for this bot.'
+    : ''
 }
 
 /** `a, b and c`. */

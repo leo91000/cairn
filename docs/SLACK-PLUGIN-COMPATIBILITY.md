@@ -288,3 +288,29 @@ marker. [Marker observations](performance/PLUGIN-COMPATIBILITY-FENCE.md) compare
 encoded bytes, reads, writes and CPU against version 12 with their explicit
 scope. This is not a complete startup/vault/forward-recovery qualification; no
 automatic transition is declared.
+
+## Delegated plugin inputs
+
+The delegated task's first message copies the existing per-message principal
+representation. A new `delegated:<messageId>` suffix under the existing
+`plugin-requester-suspended:<chatId>:` prefix stores a boolean: false identifies
+an internal delegated return path, true also retains personal suspension. Native
+wakeups copy it along with the principal and any owner-control suspension. These
+are input-specific records; a later human turn does not inherit the marker. The
+existing purge of both chat prefixes removes them after conversation deletion.
+No new table, index, credential envelope or principal field is introduced.
+
+This boolean also distinguishes a child's internal `task_finished` return path
+from a direct external delivery: a child can wait without manufacturing its own
+Slack destination, while its parent retains the external reply reservation.
+Older development execution code lacks these semantics and must not resume such
+work. These additions remain inside the unreleased epoch-14 / SQLite-13 boundary;
+no new automatic transition, supported downgrade or whole-service/vault recovery
+qualification is declared. [Local Store observations](performance/DELEGATED-PLUGIN-SOURCE.md)
+separate representative JSON/key bytes and KV timings from provider, comparison,
+startup and recovery costs.
+
+Old resource-route approvals now read absent `delegation` as false, using the same
+normalizer as root approvals. Admission leaves the saved row unchanged; actually
+enabling the power still requires review. This is a reader default, not a rewrite
+of existing approval records or a change to their native authority generation.

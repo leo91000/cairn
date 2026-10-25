@@ -22,7 +22,8 @@ Any agent may answer a delegation, whoever it is delegated to. The installation 
 longer refuses an agent's projects, installation access, sandbox, MCP connections or
 plugin grants when a delegation is saved, reapproved or used. The web and Android
 setup assistants instead warn the owner about what the chosen agent lets these
-people do: manage the installation and open several or every project, and for
+people do: manage the installation, delegate work to other coding agents and models, and
+open several or every project, and for
 anyone in the channel, also write files, run commands and use MCP connections or
 plugins.
 

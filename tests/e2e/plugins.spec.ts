@@ -1,5 +1,6 @@
 import type { Locator, Route } from '@playwright/test'
 import type { PluginConnection, PluginRoute } from '../../apps/web/src/plugins'
+import type { Agent } from '../../packages/contracts/contracts'
 import { Buffer } from 'node:buffer'
 import { createHmac } from 'node:crypto'
 import {
@@ -2288,6 +2289,26 @@ test('resource routes preserve exact conditions, require explicit grants and edi
 
 test('resource route warnings include scoped grants without refusing the selected agent', async ({ page, workspace }) => {
   const fixture = await conversationRoutesFixture(workspace, 'route-warning')
+  await useRelayForHttpMocks(page)
+  let nativePreview = false
+  await page.route('**/agents', async (route) => {
+    if (route.request().method() !== 'GET')
+      return route.continue()
+    const response = await route.fetch()
+    const agents = await response.json()
+    // Client metadata fixture; native admission remains tested by the backend.
+    return route.fulfill({
+      response,
+      json: agents.map((agent: Agent) => nativePreview && agent.id === fixture.agent.id
+        ? { ...agent, access: { ...agent.access, backend: 'native' } }
+        : agent),
+    })
+  })
+  await workspace.api(`/api/agents/${fixture.agent.id}`, 'PUT', {
+    name: fixture.agent.name,
+    revision: fixture.agent.revision,
+    access: { ...fixture.agent.access, delegation: true },
+  })
   const permissions = await resourceAccessFixture(workspace, 'route-warning-permissions')
   await workspace.api(permissions.path, 'POST', { agentId: fixture.agent.id, profile: 'read', scopes: { channel: ['C1'] } })
   await page.goto(workspacePath(`/plugins/${fixture.id}`))
@@ -2299,8 +2320,10 @@ test('resource route warnings include scoped grants without refusing the selecte
   await selectField(routes, 'Who may participate', 'Anyone')
   await selectField(routes, 'Agent', fixture.agent.name)
   await expect(routes.getByRole('status').filter({ hasText: 'use its plugins' })).toBeVisible()
+  await expect(routes.getByRole('status').filter({ hasText: 'delegate work to other coding agents and models' })).toBeVisible()
   await selectField(routes, 'Who may participate', 'Approve people as they ask')
   await expect(routes.getByRole('status').filter({ hasText: 'use its plugins' })).toHaveCount(0)
+  await expect(routes.getByRole('status').filter({ hasText: 'delegate work to other coding agents and models' })).toBeVisible()
   await selectField(routes, 'Who may participate', 'Anyone')
   await expect(routes.getByRole('status').filter({ hasText: 'use its plugins' })).toBeVisible()
   await routes.getByRole('button', { name: 'Add condition', exact: true }).click()
@@ -2312,6 +2335,15 @@ test('resource route warnings include scoped grants without refusing the selecte
   expect((await workspace.api(fixture.path)).items[0]).toMatchObject({ agentId: fixture.agent.id, accessMode: 'everyone' })
   const agent = (await workspace.api('/api/agents')).find((agent: { id: string }) => agent.id === fixture.agent.id)
   expect(agent.plugins).toEqual([])
+  nativePreview = true
+  await page.reload()
+  await page.getByRole('article', { name: 'Engineering', exact: true }).getByRole('button', { name: 'Conversation routes', exact: true }).click()
+  await routes.getByRole('article', { name: 'Public support', exact: true }).getByRole('button', { name: 'Edit route', exact: true }).click()
+  const nativeWarning = routes.getByRole('status').filter({ hasText: 'External bot messages cannot start work with a native agent' })
+  await expect(nativeWarning).toBeVisible()
+  await expect(routes.getByRole('button', { name: 'Save route', exact: true })).toBeEnabled()
+  await selectField(routes, 'Who may participate', 'Approve people as they ask')
+  await expect(nativeWarning).toBeVisible()
 })
 
 test('resource routes refresh an uncertain creation without repeating the write', async ({ page, workspace }) => {

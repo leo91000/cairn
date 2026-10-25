@@ -120,7 +120,7 @@ fn canonical(condition: &mut Value, schema: &Value) {
 /// `None` for Cairn's own conditions.
 pub async fn normalize(s: &Service, agent_id: &str, condition: &Value) -> Result<Option<Value>> {
     let kind = text(condition, "type");
-    if kind == "run_finished" {
+    if matches!(kind, "run_finished" | "task_finished") {
         return Ok(None);
     }
     for (package, _) in granted(s, agent_id).await? {

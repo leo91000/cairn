@@ -9,7 +9,7 @@ import {
 } from 'vue'
 import { api, date, state } from '../api'
 import { pluginManagementItems } from '../plugin-management'
-import { delegationRisks, listed } from '../plugins'
+import { delegationRisks, externalBotExecutionWarning, listed } from '../plugins'
 import Modal from './Modal.vue'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
@@ -42,6 +42,7 @@ const eligibility = ref<RouteEligibility[]>([])
 const eligibilityReady = ref(false)
 const eligibilityError = ref('')
 const chosenAgent = computed(() => state.agents.find(item => item.id === agent.value))
+const chosenExecutionWarning = computed(() => chosenAgent.value ? externalBotExecutionWarning(chosenAgent.value) : '')
 const chosenRisks = computed(() => chosenAgent.value && eligibilityReady.value
   ? delegationRisks(chosenAgent.value, [], mode.value === 'everyone', eligibility.value.find(item => item.agentId === agent.value)?.pluginAccess ? [agent.value] : [])
   : [])
@@ -447,6 +448,14 @@ onBeforeUnmount(() => {
         <p class="text-xs text-muted">
           The agent must be able to open the selected project.
         </p>
+        <UiNotice
+          v-if="chosenExecutionWarning"
+          tone="warning"
+          role="status"
+          title="Native execution unavailable for this bot"
+        >
+          {{ chosenExecutionWarning }}
+        </UiNotice>
         <UiNotice
           v-if="chosenAgent && chosenRisks.length"
           tone="warning"

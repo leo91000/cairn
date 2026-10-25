@@ -223,7 +223,7 @@ const pluginSummary = computed(() => {
 
   return [[...counts].map(([name, count]) => name === '1Password' ? `1Password: ${count} ${count === 1 ? 'account' : 'accounts'}` : count > 1 ? `${name} (${count})` : name).join(' · '), resourceCountsKnown.value ? (resourceCount.value ? `${resourceCount.value} saved resource rule${resourceCount.value === 1 ? '' : 's'}` : '') : 'Resource access not loaded'].filter(Boolean).join(' · ')
 })
-const powers = computed(() => exclusiveNodes.value.length + Number(access.value.installation))
+const powers = computed(() => exclusiveNodes.value.length + Number(access.value.installation) + Number(access.value.delegation))
 const mcpCount = computed(() => access.value.mcps === null ? state.mcps.length : access.value.mcps.length)
 // Connections whose tools are limited to a chosen few, also under "All, including future".
 const limitedMcps = computed(() => state.mcps.filter(connection => connection.id in access.value.mcpTools && (access.value.mcps === null || access.value.mcps.includes(connection.id))))
@@ -243,7 +243,7 @@ const summaries = computed<Record<SectionId, { short: string, long: string }>>((
     ? { short: 'Unavailable', long: 'Not loaded' }
     : { short: `${backend.value === 'native' ? 'Native · ' : ''}${short(access.value.nodes, availableNodes.value.length)}`, long: `${backend.value === 'native' ? 'Native process · ' : ''}${selectionSummary(access.value.nodes, availableNodes.value.length)}${exclusiveNodes.value.length ? ` · exclusive on ${exclusiveNodes.value.length}` : ''}` },
   sandbox: { short: sandbox.value.label, long: sandbox.value.label },
-  powers: { short: powers.value ? String(powers.value) : nodesError.value ? 'Unavailable' : 'None', long: [nodesError.value ? 'Exclusive reservation not loaded' : exclusiveNodes.value.length ? 'Exclusive reservation' : '', access.value.installation ? 'Installation management' : ''].filter(Boolean).join(' · ') || 'None' },
+  powers: { short: powers.value ? String(powers.value) : nodesError.value ? 'Unavailable' : 'None', long: [nodesError.value ? 'Exclusive reservation not loaded' : exclusiveNodes.value.length ? 'Exclusive reservation' : '', access.value.installation ? 'Installation management' : '', access.value.delegation ? 'Task delegation' : ''].filter(Boolean).join(' · ') || 'None' },
   advanced: { short: draft.value.timeoutMinutes ? `${draft.value.timeoutMinutes} min` : '', long: draft.value.timeoutMinutes ? `Time limit: ${draft.value.timeoutMinutes} minutes` : 'No time limit' },
 }))
 
@@ -316,6 +316,15 @@ const overview = computed(() => [
         summary: access.value.installation ? 'On' : 'Off',
         detail: access.value.installation ? 'Manages agents, projects, skills, MCP connections, missions and runs' : 'Cannot manage agents, projects or missions',
         chip: access.value.installation ? { tone: 'power' as const, label: 'Power' } : undefined,
+        power: true,
+      },
+      {
+        id: 'delegation',
+        section: 'powers' as const,
+        title: 'Task delegation',
+        summary: access.value.delegation ? 'On' : 'Off',
+        detail: access.value.delegation ? 'Starts conversations on other coding agents and models that report back to it' : 'Cannot hand tasks to other conversations',
+        chip: access.value.delegation ? { tone: 'power' as const, label: 'Power' } : undefined,
         power: true,
       },
       {
@@ -1190,6 +1199,19 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
                 </p>
               </div>
               <UiSwitch v-model="draft.access.installation" power label="Installation management" />
+            </div>
+            <div class="flex items-center justify-between gap-4 rounded-xl border border-power/30 bg-surface px-5 py-4 phone:px-4">
+              <div class="min-w-0">
+                <p class="flex flex-wrap items-center gap-2 text-sm font-semibold">
+                  Task delegation<AccessChip v-if="access.delegation" tone="power">
+                    Power
+                  </AccessChip>
+                </p>
+                <p class="mt-1 text-xs leading-relaxed text-muted">
+                  Hand tasks from a conversation to new conversations that report back to it, on any coding agent and model. Each runs as this agent, or as another agent whose access this one covers, in its own workspace. Delegated conversations cannot delegate further, and at most 5 work at a time.
+                </p>
+              </div>
+              <UiSwitch v-model="draft.access.delegation" power label="Task delegation" />
             </div>
             <div class="flex items-center justify-between gap-4 rounded-xl border border-power/30 bg-surface px-5 py-4 phone:px-4">
               <div class="min-w-0">

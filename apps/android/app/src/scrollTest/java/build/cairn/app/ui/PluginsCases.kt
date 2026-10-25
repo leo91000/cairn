@@ -710,6 +710,8 @@ abstract class PluginsCases {
                                                     projects = emptyList(),
                                                     mcps = emptyList(),
                                                     sandbox = "read-only",
+                                                    delegation = true,
+                                                    backend = "native",
                                                 )
                                         )
                                     else it
@@ -741,6 +743,14 @@ abstract class PluginsCases {
                     .performScrollTo()
                     .assertIsDisplayed()
                 compose.onNodeWithText("Enregistrer").assertIsEnabled()
+                compose.onNodeWithText("déléguer du travail", substring = true).assertExists()
+                compose
+                    .onNodeWithText(
+                        "Les messages externes ne peuvent pas démarrer",
+                        substring = true,
+                    )
+                    .performScrollTo()
+                    .assertIsDisplayed()
                 capture("plugin-selected-package-public-resource-access")
                 compose.onNodeWithText("Tout le monde").performScrollTo().performClick()
                 compose.onNodeWithText("Valider les personnes à leur demande").performClick()
@@ -750,6 +760,7 @@ abstract class PluginsCases {
                         .fetchSemanticsNodes()
                         .isEmpty()
                 }
+                compose.onNodeWithText("déléguer du travail", substring = true).assertExists()
                 compose.onNodeWithText("Enregistrer").assertIsEnabled()
                 assertFalse(paths.any { it.endsWith("/api/plugins") })
                 assertTrue(paths.any { it.endsWith("/instance-access?cursor=next") })
@@ -4064,6 +4075,8 @@ abstract class PluginsCases {
                             projects = emptyList(),
                             mcps = emptyList(),
                             sandbox = "read-only",
+                            delegation = true,
+                            backend = "native",
                         ),
                 )
             val vm =
@@ -4104,6 +4117,14 @@ abstract class PluginsCases {
                     .onNodeWithText("utiliser ses plugins", substring = true)
                     .performScrollTo()
                     .assertIsDisplayed()
+                compose.onNodeWithText("déléguer du travail", substring = true).assertExists()
+                compose
+                    .onNodeWithText(
+                        "Les messages externes ne peuvent pas démarrer",
+                        substring = true,
+                    )
+                    .performScrollTo()
+                    .assertIsDisplayed()
                 capture("resource-route-plugin-warning")
                 compose.onNodeWithText("Tout le monde").performScrollTo().performClick()
                 compose.onNodeWithText("Approuver sur demande").performClick()
@@ -4120,6 +4141,7 @@ abstract class PluginsCases {
                         .fetchSemanticsNodes()
                         .isNotEmpty()
                 }
+                compose.onNodeWithText("déléguer du travail", substring = true).assertExists()
                 compose.onNodeWithText("Enregistrer").assertIsEnabled()
             } finally {
                 models.clear()

@@ -27,6 +27,7 @@ import { pluginOperation } from '../plugin-operations'
 import {
   delegates,
   delegationRisks,
+  externalBotExecutionWarning,
   formResult,
   listed,
   unshownFormErrors,
@@ -86,6 +87,7 @@ const dirty = computed(() => edited.value || signIn.completed.value)
 const available = computed(() => draft.value.status === 'setup' && !expired.value)
 const chosenAgent = computed(() => state.agents.find(agent => agent.id === agentId.value))
 const chosenRisks = computed(() => chosenAgent.value ? delegationRisks(chosenAgent.value, [], false) : [])
+const chosenExecutionWarning = computed(() => chosenAgent.value ? externalBotExecutionWarning(chosenAgent.value) : '')
 const consentBasis = computed(() => {
   if (!oauth.value)
     return ''
@@ -348,6 +350,14 @@ onBeforeUnmount(() => {
           required
         />
         <small>People must be approved before their messages are accepted. You can configure people and limits after activation.</small>
+        <UiNotice
+          v-if="chosenExecutionWarning"
+          tone="warning"
+          role="status"
+          title="Native execution unavailable for this bot"
+        >
+          {{ chosenExecutionWarning }}
+        </UiNotice>
         <UiNotice
           v-if="chosenAgent && chosenRisks.length"
           tone="warning"

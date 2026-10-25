@@ -614,6 +614,7 @@ fun Agent.delegationRisks(
     pluginAccess: Boolean = false,
 ): List<String> = buildList {
     if (access.installation) add("gérer toute votre installation")
+    if (access.delegation == true) add("déléguer du travail à d'autres agents de code et modèles")
     when {
         access.projects == null -> add("ouvrir tous les projets")
         access.projects.size > 1 -> add("ouvrir ${access.projects.size} projets")
@@ -624,6 +625,12 @@ fun Agent.delegationRisks(
     if (pluginAccess || id in draftGrants || connections.any { id in it.agentIds })
         add("utiliser ses plugins, comme GitHub ou 1Password")
 }
+
+/** Configurer un bot ne prouve jamais l'identité de son auteur sur la machine. */
+fun Agent.externalBotExecutionWarning(): String? =
+    if (access.backend == "native")
+        "Les messages externes ne peuvent pas démarrer de travail avec un agent natif car ils ne portent pas d'identité Cairn vérifiée pour la machine. Choisissez un agent isolé pour ce bot."
+    else null
 
 /** `a, b et c`. */
 fun listed(items: List<String>): String =

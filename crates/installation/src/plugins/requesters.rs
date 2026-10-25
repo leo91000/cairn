@@ -134,7 +134,58 @@ fn owner_answer_key(chat: &str, message: &str) -> String {
 }
 
 fn suspended(db: &Db<'_>, chat: &str, run: &Value) -> Result<bool> {
-    Ok(db.kv(&control_key(chat, run))?.is_some())
+    Ok(db.kv(&control_key(chat, run))?.is_some()
+        || db.kv(&delegated_control_key(
+            chat,
+            text(&run["chatExecution"], "messageId"),
+        ))? == Some(json!(true)))
+}
+
+fn delegated_control_key(chat: &str, message: &str) -> String {
+    format!("{}delegated:{message}", control_prefix(chat))
+}
+
+/// Only the host's delegated input (and its native wakeups) returns to a parent
+/// conversation instead of owning a direct external reply delivery.
+pub(crate) fn delegated_input(db: &Db<'_>, chat: &Value, message: &str) -> Result<bool> {
+    Ok(chat["requestedBy"].is_object()
+        && matches!(
+            db.kv(&delegated_control_key(text(chat, "id"), message))?,
+            Some(Value::Bool(_))
+        ))
+}
+
+/// A delegated first message keeps the issuing turn's authenticated principal.
+/// Its own run will bind that principal to the child's execution. Suspension is
+/// retained per message, before the scheduler has allocated the child's run.
+pub(crate) fn capture_delegation(
+    db: &Db<'_>,
+    run: &Value,
+    chat: &str,
+    message: &Value,
+    requester: Option<&RunRequester>,
+) -> Result<()> {
+    if captured_run(db, run)?.as_ref() != requester {
+        return Err(Error::conflict("The delegation's requesting turn changed."));
+    }
+    if let Some(requester) = requester {
+        recheck_in(db, requester)?;
+    }
+    capture_principal(
+        db,
+        chat,
+        message,
+        requester.map(|requester| &requester.principal),
+        Capture::New,
+    )?;
+    if let Some(requester) = requester {
+        db.set(
+            &delegated_control_key(chat, text(message, "id")),
+            &json!(requester.suspended),
+            None,
+        )?;
+    }
+    Ok(())
 }
 
 /// A native wakeup continues the task which scheduled it. Its synthetic input ID
@@ -146,6 +197,13 @@ pub(crate) fn capture_wakeup(db: &Db<'_>, chat: &str, run: &Value, message: &Val
     }
     let principal = recorded(db, chat, previous)?;
     capture_principal(db, chat, message, principal.as_ref(), Capture::New)?;
+    if let Some(control) = db.kv(&delegated_control_key(chat, previous))? {
+        db.set(
+            &delegated_control_key(chat, text(message, "id")),
+            &control,
+            None,
+        )?;
+    }
     if suspended(db, chat, run)? {
         let key = control_key_for(chat, text(run, "id"), text(message, "id"));
         db.set(&key, &json!(true), None)?;
@@ -303,7 +361,7 @@ pub(crate) async fn external(
     Ok(connection)
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(crate) struct RunRequester {
     pub principal: Principal,
     run: String,
@@ -555,6 +613,15 @@ pub(crate) async fn for_run(s: &Service, run: &Value) -> Result<Option<RunReques
         recheck(s, requester).await?;
     }
     Ok(requester)
+}
+
+/// Execution grants do not outlive the source person/route that admitted a turn.
+/// Keep this local check in the same transaction as management reads and effects.
+pub(crate) fn recheck_run_in(db: &Db<'_>, run: &Value) -> Result<()> {
+    if let Some(requester) = captured_run(db, run)? {
+        recheck_in(db, &requester)?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn recheck(s: &Service, requester: &RunRequester) -> Result<()> {

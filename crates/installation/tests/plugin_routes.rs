@@ -5,6 +5,10 @@ mod authority_outages;
 mod common;
 #[path = "plugin_routes/continuations.rs"]
 mod continuations;
+#[path = "plugin_routes/delegation.rs"]
+mod delegation;
+#[path = "plugin_routes/delegation_storage.rs"]
+mod delegation_storage;
 #[path = "plugin_routes/metadata.rs"]
 mod metadata;
 
@@ -1565,6 +1569,20 @@ async fn queued_control_after_source_change(change: &str) {
 
 #[tokio::test]
 async fn routed_runs_use_only_the_oauth_subject_proved_by_their_external_requester() {
+    Box::pin(routed_personal_oauth(false, false)).await;
+}
+
+#[tokio::test]
+async fn delegated_runs_keep_their_external_oauth_subject_after_a_wakeup() {
+    Box::pin(routed_personal_oauth(true, false)).await;
+}
+
+#[tokio::test]
+async fn delegated_runs_cannot_release_owner_suspended_personal_authority() {
+    Box::pin(routed_personal_oauth(true, true)).await;
+}
+
+async fn routed_personal_oauth(delegated: bool, owner_answer: bool) {
     let (_root, s, instance, resource, app) = fixture().await;
     let hold = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let entered = Arc::new(tokio::sync::Notify::new());
@@ -1635,7 +1653,7 @@ async fn routed_runs_use_only_the_oauth_subject_proved_by_their_external_request
         .agent(
             json!({
                 "name": "Scoped",
-                "access": { "projects": [], "installation": false, "github": false },
+                "access": { "projects": [], "installation": false, "github": false, "delegation": delegated },
             }),
             None,
         )
@@ -1704,12 +1722,13 @@ async fn routed_runs_use_only_the_oauth_subject_proved_by_their_external_request
             .await
             .unwrap();
         let chats = s.chat_list().await.unwrap();
-        let chat = chats
+        let mut chat = chats
             .iter()
             .find(|chat| chat["status"] == "queued")
-            .unwrap();
-        let detail = s.chat_detail(text(chat, "id")).await.unwrap();
-        let run = s
+            .unwrap()
+            .clone();
+        let detail = s.chat_detail(text(&chat, "id")).await.unwrap();
+        let mut run = s
             .store
             .patch_run(
                 text(&detail["run"], "id"),
@@ -1718,6 +1737,37 @@ async fn routed_runs_use_only_the_oauth_subject_proved_by_their_external_request
             .await
             .unwrap();
         let config = s.mcps.run_configuration(&s, &run).await.unwrap();
+        if delegated {
+            if owner_answer {
+                let question = "c".repeat(64);
+                s.question_receive(
+                    text(&run, "id"),
+                    json!({
+                        "id": question, "blocking": false,
+                        "fields": [{ "id": "choice", "title": "Continue?", "options": [] }],
+                    }),
+                )
+                .await
+                .unwrap();
+                let path = format!(
+                    "/api/chats/{}/questions/{question}/answer",
+                    text(&chat, "id")
+                );
+                assert_eq!(common::send(&app, owner_request("POST", &path, json!({
+                    "id": cairn_installation::config::id(), "answers": { "choice": ["Yes"] },
+                }))).await.status(), StatusCode::OK);
+            }
+            let child = cairn_installation::delegation::delegate(
+                &s,
+                text(&config["env"], "CAIRN_MCP_RUN_TOKEN"),
+                &json!({ "task": "Read with the original person's authorization" }),
+            )
+            .await
+            .unwrap();
+            (run, _) = delegation::running_turn(&s, text(&child, "chatId")).await;
+            chat = s.chat_detail(text(&child, "chatId")).await.unwrap();
+        }
+        let config = s.mcps.run_configuration(&s, &run).await.unwrap();
         let result = agents::call_tool(
             &s,
             text(&config["env"], "CAIRN_MCP_RUN_TOKEN"),
@@ -1725,6 +1775,7 @@ async fn routed_runs_use_only_the_oauth_subject_proved_by_their_external_request
             &json!({ "resource": resource }),
         )
         .await;
+        let expected = if owner_answer { None } else { expected };
         match expected {
             Some(subject) => assert_eq!(result.unwrap().unwrap()["subject"], subject),
             None => assert!(
@@ -1732,10 +1783,88 @@ async fn routed_runs_use_only_the_oauth_subject_proved_by_their_external_request
                 "an unlinked external person inherited the installation owner's personal token"
             ),
         }
+        if owner_answer && author == "U111" {
+            let continued = wake_after_sleep(
+                &s,
+                text(&chat, "id"),
+                &run,
+                text(&config["env"], "CAIRN_MCP_RUN_TOKEN"),
+            )
+            .await;
+            let config = s.mcps.run_configuration(&s, &continued).await.unwrap();
+            let bearer = text(&config["env"], "CAIRN_MCP_RUN_TOKEN");
+            assert!(
+                agents::call_tool(&s, bearer, "router_read", &json!({ "resource": resource }))
+                    .await
+                    .is_err(),
+                "A delegated wake released personal suspension"
+            );
+            assert_eq!(
+                agents::call_tool(
+                    &s,
+                    bearer,
+                    "router_scope",
+                    &json!({
+                        "resource": resource, "channel": "C1",
+                    })
+                )
+                .await
+                .unwrap()
+                .unwrap()["channel"],
+                "C1"
+            );
+            assert!(
+                agents::call_tool(
+                    &s,
+                    bearer,
+                    "router_scope",
+                    &json!({
+                        "resource": resource, "channel": "C2",
+                    })
+                )
+                .await
+                .is_err(),
+                "Suspension released the original channel scope"
+            );
+            s.store
+                .patch_run(text(&continued, "id"), json!({ "status": "succeeded" }))
+                .await
+                .unwrap();
+            s.store
+                .set(
+                    &format!("run-checkpoint:{}", text(&continued, "id")),
+                    json!({ "launched": true, "completed": true }),
+                    None,
+                )
+                .await
+                .unwrap();
+            let message = cairn_installation::config::id();
+            let sent = common::send(
+                &app,
+                owner_request(
+                    "POST",
+                    &format!("/api/chats/{}/messages", text(&chat, "id")),
+                    json!({
+                        "id": message, "text": "A fresh human-authored turn uses my own account",
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(sent.status(), StatusCode::OK);
+            let (fresh, bearer) = delegation::running_turn(&s, text(&chat, "id")).await;
+            assert_eq!(fresh["chatExecution"]["messageId"], message);
+            assert_eq!(
+                agents::call_tool(&s, &bearer, "router_read", &json!({ "resource": resource }))
+                    .await
+                    .unwrap()
+                    .unwrap()["subject"],
+                "U111"
+            );
+        }
         if expected.is_some() {
             let continued = wake_after_sleep(
                 &s,
-                text(chat, "id"),
+                text(&chat, "id"),
                 &run,
                 text(&config["env"], "CAIRN_MCP_RUN_TOKEN"),
             )
@@ -5090,6 +5219,10 @@ async fn external_route_configuration_does_not_grant_native_host_provenance() {
     assert_eq!(
         item["eligible"], true,
         "the owner may configure any chosen agent"
+    );
+    assert!(
+        text(item, "reason").contains("native"),
+        "An eligible native agent must explain why external bot requests cannot execute: {item}"
     );
     let response = common::send(
         &app,

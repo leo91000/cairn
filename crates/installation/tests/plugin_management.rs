@@ -534,12 +534,14 @@ async fn resource_form_case(case: FormCase) {
         })).await;
         let public = result(&public);
         assert_eq!(public["secretKeys"], json!([]));
-        connections::save(
+        // Like the initial grant, keep this owner-update future on the heap: it
+        // enlarges the shared fixture's poll frame even before this branch runs.
+        Box::pin(connections::save(
             &s,
             "managed-forms",
             &json!({"name": "App", "enabled": true, "agentIds": []}),
             Some(text(&instance, "id")),
-        )
+        ))
         .await
         .unwrap();
         let mut args = json!({

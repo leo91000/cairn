@@ -21,6 +21,181 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub const KIND: &str = "plugin-resource-grants";
 
+/// Operation definitions for comparing two agents' resource permissions. Package
+/// files load outside the write transaction; current rules and exact approvals
+/// are checked together when the delegated conversation is created.
+pub(crate) struct DelegationAccess {
+    packages: HashMap<String, registry::ApprovedPackage>,
+}
+
+impl DelegationAccess {
+    pub(crate) async fn capture(s: &Service, requesting: &str, target: &str) -> Result<Self> {
+        let mut packages = HashMap::new();
+        if requesting != target {
+            for grant in s.store.list(KIND).await? {
+                if grant["agentId"] != target {
+                    continue;
+                }
+                let connection = s
+                    .store
+                    .get(connections::KIND, text(&grant, "connectionId"))
+                    .await?
+                    .ok_or_else(|| Error::forbidden("A target resource grant is unavailable."))?;
+                let plugin = text(&connection, "pluginId");
+                if !packages.contains_key(plugin) {
+                    packages.insert(plugin.to_owned(), registry::approved(s, plugin).await?);
+                }
+            }
+        }
+        Ok(Self { packages })
+    }
+
+    pub(crate) fn covers_in(&self, db: &Db<'_>, requesting: &str, target: &str) -> Result<bool> {
+        if requesting == target {
+            return Ok(true);
+        }
+        for package in self.packages.values() {
+            package.recheck_in(db)?;
+        }
+        let grants = db
+            .list(KIND)?
+            .into_iter()
+            .filter(|grant| grant["agentId"] == requesting || grant["agentId"] == target)
+            .map(serde_json::from_value::<Grant>)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut comparisons = 16_384;
+        for grant in grants.iter().filter(|grant| grant.agent_id == target) {
+            let Some(connection) = db.get(connections::KIND, &grant.connection_id)? else {
+                return Ok(false);
+            };
+            let Some(resource) = db.get(resources::KIND, &grant.resource_id)? else {
+                return Ok(false);
+            };
+            let Some(package) = self.packages.get(text(&connection, "pluginId")) else {
+                // A concurrent new grant needs a fresh comparison, never an
+                // assumption about a package that was not loaded.
+                return Ok(false);
+            };
+            for operation in package
+                .package
+                .manifest
+                .operations
+                .iter()
+                .filter(|operation| {
+                    resource["collection"] == operation.collection
+                        && permits(grant, operation, None)
+                })
+            {
+                let callers = grants
+                    .iter()
+                    .filter(|caller| {
+                        caller.agent_id == requesting
+                            && caller.connection_id == grant.connection_id
+                            && caller.resource_id == grant.resource_id
+                            && caller.owner_access_id == grant.owner_access_id
+                            && permits(caller, operation, None)
+                    })
+                    .collect::<Vec<_>>();
+                if !scopes_covered(&grant.scopes, &callers, &mut comparisons)? {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// Check the union of up to 64 resource rules without expanding the Cartesian
+/// product of scope values. Each bit identifies a caller rule; intersections
+/// retain exactly the rules permitting the chosen values in every dimension.
+fn scopes_covered(
+    requested: &BTreeMap<String, Vec<String>>,
+    callers: &[&Grant],
+    comparisons: &mut usize,
+) -> Result<bool> {
+    // A finite union of restricted values cannot cover an unbounded dimension.
+    let callers = callers
+        .iter()
+        .filter(|grant| grant.scopes.keys().all(|name| requested.contains_key(name)))
+        .collect::<Vec<_>>();
+    if callers.is_empty() {
+        return Ok(false);
+    }
+    if callers.len() > 64 {
+        return Err(Error::too_large(
+            "A resource can have at most 64 grant rules.",
+        ));
+    }
+    let dimensions = requested
+        .iter()
+        .map(|(name, values)| {
+            values
+                .iter()
+                .map(|value| {
+                    callers
+                        .iter()
+                        .enumerate()
+                        .fold(0_u64, |mask, (index, grant)| {
+                            if grant
+                                .scopes
+                                .get(name)
+                                .is_none_or(|allowed| allowed.contains(value))
+                            {
+                                mask | (1_u64 << index)
+                            } else {
+                                mask
+                            }
+                        })
+                })
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let all = u64::MAX >> (64 - callers.len());
+    scope_combinations(&dimensions, 0, all, &mut HashMap::new(), comparisons)
+}
+
+fn scope_combinations(
+    dimensions: &[Vec<u64>],
+    index: usize,
+    candidates: u64,
+    memo: &mut HashMap<(usize, u64), bool>,
+    comparisons: &mut usize,
+) -> Result<bool> {
+    if candidates == 0 {
+        return Ok(false);
+    }
+    if index == dimensions.len() {
+        return Ok(true);
+    }
+    if let Some(covered) = memo.get(&(index, candidates)) {
+        return Ok(*covered);
+    }
+    // A rule present in every remaining partition already covers this range.
+    let common = dimensions[index..]
+        .iter()
+        .flatten()
+        .fold(candidates, |mask, value| mask & value);
+    if common != 0 {
+        return Ok(true);
+    }
+    if *comparisons == 0 {
+        return Err(Error::too_large(
+            "These resource rules are too complex to compare. Choose narrower target grants.",
+        ));
+    }
+    *comparisons -= 1;
+    for mask in &dimensions[index] {
+        if !scope_combinations(dimensions, index + 1, candidates & mask, memo, comparisons)? {
+            memo.insert((index, candidates), false);
+            return Ok(false);
+        }
+    }
+    memo.insert((index, candidates), true);
+    Ok(true)
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Grant {

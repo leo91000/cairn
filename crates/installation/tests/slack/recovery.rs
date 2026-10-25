@@ -31,6 +31,11 @@ async fn another_participants_queued_request_cannot_cancel_the_authors_native_wa
     exchange(Scenario::OtherParticipant).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_delegated_task_returns_through_the_original_slack_authors_wait() {
+    exchange(Scenario::Delegated).await;
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Scenario {
     Sleep,
@@ -38,6 +43,7 @@ enum Scenario {
     Condition,
     Restart,
     OtherParticipant,
+    Delegated,
     Aged,
 }
 
@@ -70,7 +76,10 @@ async fn exchange(scenario: Scenario) {
         .agent(
             json!({
                 "name": "Recovering Slack helper",
-                "access": { "projects": [], "skills": [], "mcps": [], "installation": false },
+                "access": {
+                    "projects": [], "skills": [], "mcps": [], "installation": false,
+                    "delegation": scenario == Scenario::Delegated,
+                },
             }),
             None,
         )
@@ -207,6 +216,7 @@ async fn exchange(scenario: Scenario) {
     )
     .await;
     let mut continuation_id = None;
+    let mut delegated_id = None;
     if wait {
         let configuration = service
             .mcps
@@ -215,7 +225,28 @@ async fn exchange(scenario: Scenario) {
             .unwrap();
         let bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
         let reason = format!("Return {marker} to the source Slack thread");
-        let wakeup = if scenario == Scenario::Condition {
+        let wakeup = if scenario == Scenario::Delegated {
+            let child = cairn_installation::delegation::delegate(
+                &service,
+                bearer,
+                &json!({ "task": "fixture:stream Complete SLACK_DELEGATED_REPORT" }),
+            )
+            .await
+            .unwrap();
+            delegated_id = Some(text(&child, "chatId").to_owned());
+            let scheduled = cairn_installation::chats::wait_for::schedule(
+                &service,
+                bearer,
+                &json!({
+                    "condition": { "type": "task_finished", "chatId": child["chatId"] },
+                    "timeoutSeconds": 120, "reason": reason,
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(scheduled["deferred"], true);
+            scheduled["wakeup"].clone()
+        } else if scenario == Scenario::Condition {
             let scheduled = cairn_installation::chats::wait_for::schedule(
                 &service,
                 bearer,
@@ -373,7 +404,7 @@ async fn exchange(scenario: Scenario) {
             .await
             .unwrap();
     }
-    let expected_plans = if scenario == Scenario::OtherParticipant {
+    let expected_plans = if matches!(scenario, Scenario::OtherParticipant | Scenario::Delegated) {
         3
     } else if wait {
         2
@@ -469,6 +500,28 @@ async fn exchange(scenario: Scenario) {
             && principal["binding"]["id"] == route["id"]
             && principal["binding"]["resource"] == resource["id"]
     }));
+    if let Some(child) = delegated_id {
+        let detail = service.chat_detail(&child).await.unwrap();
+        assert_eq!(detail["run"]["status"], "succeeded");
+        assert!(text(&detail["run"], "summary").contains("SLACK_DELEGATED_REPORT"));
+        let source = service
+            .store
+            .read(move |db| db.keys(&format!("plugin-message-requester:{child}:")))
+            .await
+            .unwrap();
+        assert_eq!(source.len(), 1);
+        assert_eq!(source[0].1["subject"], "UALICE");
+        assert_eq!(source[0].1["binding"]["id"], route["id"]);
+        assert!(
+            service
+                .store
+                .list(work::DELIVERIES)
+                .await
+                .unwrap()
+                .iter()
+                .all(|delivery| delivery["chatId"] != detail["id"])
+        );
+    }
     if scenario == Scenario::OtherParticipant {
         assert_eq!(
             principals

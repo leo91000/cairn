@@ -111,6 +111,8 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
       at: chat.updatedAt,
       to: chatPath(chat),
       chatId: chat.id,
+      // A delegated conversation names the conversation that delegated it.
+      requester: chat.requester ? { title: chat.requester.title || 'New conversation', to: chatPath({ id: chat.requester.chatId }) } : undefined,
     }
     if (chat.pendingQuestions > 0) {
       forYou.push({ ...base, kind: 'question', subtitle: chat.pendingQuestions > 1 ? `${chat.pendingQuestions} questions need your answer` : 'Needs your answer' })

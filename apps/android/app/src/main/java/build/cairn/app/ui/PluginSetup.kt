@@ -490,6 +490,13 @@ internal fun PluginSetup(
                     )
                 if (manifest.delegates) {
                     val selected = state.agents.find { it.id == agentId }
+                    selected?.externalBotExecutionWarning()?.let { warning ->
+                        Notice(
+                            title = "Exécution native indisponible pour ce bot",
+                            text = warning,
+                            tone = NoticeTone.WARNING,
+                        )
+                    }
                     val risks = selected?.delegationRisks(emptyList(), everyone = false).orEmpty()
                     if (selected != null && risks.isNotEmpty())
                         Notice(

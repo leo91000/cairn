@@ -910,6 +910,12 @@ internal fun InstanceEditor(
                     }
 
                 if (manifest.delegates && current.kind in listOf("people", "agents")) {
+                    agent?.externalBotExecutionWarning()?.let { warning ->
+                        SetupWarning(
+                            title = "Exécution native indisponible pour ce bot",
+                            text = warning,
+                        )
+                    }
                     val chosenRisks = agent?.let(::risks).orEmpty()
                     if (agent != null && chosenRisks.isNotEmpty()) {
                         val everyone = accessMode == "everyone"

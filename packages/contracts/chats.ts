@@ -76,6 +76,8 @@ export interface Chat {
   canRequestNewSession?: boolean
   lifecycleError?: string | null
   pendingMessages?: number
+  /** The conversation whose agent delegated this one, and its retry key. */
+  requestedBy?: { runId: string, chatId: string, requestId?: string | null } | null
   id: string
   title: string
   agentId: string
@@ -113,6 +115,8 @@ export interface ChatView extends Chat {
   unread?: boolean
   /** The opening of the agent's final message, while unread. */
   preview?: string | null
+  /** The conversation that delegated this one, while it still exists. */
+  requester?: { chatId: string, title: string } | null
 }
 export interface ChatDetail extends ChatView {
   questions: ChatQuestion[]

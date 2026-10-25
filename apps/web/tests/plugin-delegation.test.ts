@@ -39,6 +39,13 @@ it('lists risks as a sentence', () => {
   expect(listed(['a', 'b', 'c'])).toBe('a, b and c')
 })
 
+it('warns listed and public audiences about delegation to other coding agents', () => {
+  for (const everyone of [false, true]) {
+    expect(delegationRisks(agent({ delegation: true }), [], everyone))
+      .toEqual(['delegate work to other coding agents and models'])
+  }
+})
+
 it('warns about grants to the edited instance and unsaved instance', () => {
   const helper = agent({ projects: ['project'] })
   expect(delegationRisks(helper, [{ agentIds: ['helper'] }], true))

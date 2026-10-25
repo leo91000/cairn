@@ -954,6 +954,9 @@ internal fun timelineEntries(
                 }
             val waitTool =
                 event.item().let { it.string("type") == "mcp_tool_call" && isWaitTool(it) }
+            val delegateTool =
+                event.item().let { it.string("type") == "mcp_tool_call" && isDelegateTool(it) }
+            if (delegateTool && !presentActivity(event).failed) continue
             // The wait shows as its own card; only a call that failed stays among the tools.
             if (waitTool && !presentActivity(event).failed) {
                 // A provider may announce the call before its arguments: keep what the same call

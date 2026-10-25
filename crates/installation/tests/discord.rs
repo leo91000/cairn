@@ -864,6 +864,8 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
             } }),
         )
         .await;
+        // Queue an earlier heartbeat, as the random first heartbeat can do.
+        send(&mut socket, json!({ "op": 1 })).await;
         // A large server's GUILD_CREATE, well over what a script receives whole.
         let channels = (0..12_000)
             .map(|index| json!({ "id": format!("{}", 10_000 + index), "type": 0, "name": "x".repeat(80) }))
