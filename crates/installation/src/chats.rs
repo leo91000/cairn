@@ -43,6 +43,10 @@ string_enum! {
 const MAX_UNDELIVERED: usize = 20;
 const TITLE_CHARS: usize = 90;
 const PRIVATE_ANSWER_TEXT: &str = "Answered a private question.";
+const CONTINUED_MISSION: &str = concat!(
+    "This mission now continues as a chat; the unattended rule in your ",
+    "instructions no longer applies."
+);
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -619,10 +623,15 @@ fn continue_run(
             provider.label()
         );
         db.event(run_id, "status", &status, None)?;
-    } else if provider == Provider::Codex && continues_mission(db, run)? {
-        // Codex keeps the developer instructions a thread started with, so a
-        // resumed mission thread would stay unattended.
-        execution.text = format!("{}\n\n{}", crate::run_output::INTERACTIVE, execution.text);
+    } else if provider == Provider::Codex && resumes_mission_thread(run) {
+        // Codex keeps the developer instructions a thread started with, so the
+        // mission's thread would stay unattended. Every turn repeats the rule
+        // because compaction can drop earlier user messages.
+        execution.text = format!(
+            "{CONTINUED_MISSION} {}\n\n{}",
+            crate::run_output::INTERACTIVE,
+            execution.text
+        );
     }
     checkpoint["completed"] = false.into();
     checkpoint["remainingMs"] = crate::run_limits::budget_ms(agent).into();
@@ -645,17 +654,9 @@ fn continue_run(
     Ok(())
 }
 
-/// A mission continued in chat whose first chat message has not reached the agent.
-fn continues_mission(db: &Db<'_>, run: &Value) -> Result<bool> {
-    if !run["sourceTaskPrompt"].is_string() {
-        return Ok(false);
-    }
-    let delivered: bool = db.0.query_row(
-        "SELECT EXISTS(SELECT 1 FROM events WHERE run_id=? AND type='chat.user')",
-        [text(run, "id")],
-        |row| row.get(0),
-    )?;
-    Ok(!delivered)
+/// A mission continued in chat that still resumes the thread its mission started.
+fn resumes_mission_thread(run: &Value) -> bool {
+    run["sessionId"].is_string() && run["sessionId"] == run["sourceSessionId"]
 }
 
 fn remove_keys(value: &mut Value, keys: &[&str]) {
@@ -799,6 +800,7 @@ fn from_run(db: &Db<'_>, run_id: &str, origin: &crate::native::policy::Origin) -
         &json!({
             "sourceTaskId": run["taskId"],
             "sourceTaskPrompt": run["snapshot"]["task"]["prompt"],
+            "sourceSessionId": run["sessionId"],
             "taskId": chat["id"],
             "trigger": "chat",
         }),
@@ -1323,11 +1325,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn codex_missions_continued_in_chat_receive_the_interactive_rule_once() {
-        for (provider, converted, expected) in [
-            ("codex", true, true),
-            ("codex", false, false),
-            ("claude", true, false),
+    async fn codex_threads_of_missions_continued_in_chat_receive_the_interactive_rule() {
+        // Provider, thread the mission started, and whether each turn carries the rule.
+        for (provider, source, expected) in [
+            ("codex", Some("thread"), true),
+            ("codex", Some("earlier-thread"), false),
+            ("codex", None, false),
+            ("claude", Some("thread"), false),
         ] {
             let root = tempfile::tempdir().unwrap();
             let store = crate::store::Store::open(root.path()).unwrap();
@@ -1339,35 +1343,38 @@ mod tests {
                         "createdAt": 0,
                         "status": "succeeded",
                         "trigger": "chat",
-                        "sessionId": "mission-thread",
+                        "sessionId": "thread",
                         "snapshot": { "agent": { "provider": provider } },
                     });
-                    if converted {
+                    if let Some(source) = source {
                         run["sourceTaskPrompt"] = "Check the deployment.".into();
+                        run["sourceSessionId"] = source.into();
                     }
                     db.add_run(&run, None)?;
                     db.set("run-checkpoint:run", &json!({ "completed": true }), None)?;
                     let chat = json!({ "id": "chat", "runId": "run" });
                     db.put("chats", &chat)?;
-                    let execution = |text: &str| ChatExecution {
-                        message_id: "message".into(),
-                        text: text.into(),
-                        attachments: json!([]),
-                        recovery: false,
-                        context: None,
-                    };
-
-                    continue_run(db, &chat, &run, &run, execution("Now fix it"))?;
-                    let turn = db.run("run")?.unwrap()["chatExecution"]["text"].clone();
-                    let turn = turn.as_str().unwrap();
-                    assert_eq!(turn.starts_with(crate::run_output::INTERACTIVE), expected);
-                    assert!(turn.ends_with("Now fix it"));
-                    assert_eq!(db.run("run")?.unwrap()["sessionId"], "mission-thread");
-
-                    // The thread keeps the rule once a chat message reached it.
-                    db.event("run", "chat.user", "Now fix it", None)?;
-                    continue_run(db, &chat, &run, &run, execution("Thanks"))?;
-                    assert_eq!(db.run("run")?.unwrap()["chatExecution"]["text"], "Thanks");
+                    // Compaction can drop earlier messages, so every turn repeats it.
+                    for message in ["Now fix it", "Thanks"] {
+                        let execution = ChatExecution {
+                            message_id: message.into(),
+                            text: message.into(),
+                            attachments: json!([]),
+                            recovery: false,
+                            context: None,
+                        };
+                        continue_run(db, &chat, &run, &run, execution)?;
+                        let continued = db.run("run")?.unwrap();
+                        let turn = text(&continued["chatExecution"], "text");
+                        assert_eq!(
+                            turn.contains(crate::run_output::INTERACTIVE),
+                            expected,
+                            "{provider} {source:?}"
+                        );
+                        assert_eq!(turn.starts_with(CONTINUED_MISSION), expected);
+                        assert!(turn.ends_with(message));
+                        assert_eq!(continued["sessionId"], "thread");
+                    }
                     Ok(())
                 })
                 .await
