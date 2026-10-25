@@ -60,7 +60,13 @@ impl App {
     /// Inserts a finished run, with its events, directly in the database.
     async fn add_finished_run(&self, run: &str, status: RunStatus, extra: Value, context: &str) {
         let (run, context) = (run.to_owned(), context.to_owned());
-        let mut record = json!({ "id": run, "status": status });
+        let mut record = json!({
+            "id": run,
+            "status": status,
+            "nativeProvenanceUnknown": true,
+            "nativePrincipals": [],
+            "nativeAuthorityNodes": [],
+        });
         for (key, value) in extra.as_object().unwrap() {
             record[key] = value.clone();
         }

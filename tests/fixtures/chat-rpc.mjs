@@ -29,7 +29,7 @@ export function chatFixture() {
   const finish = () => {
     if (!active)
       return
-    const text = completionText || (active.items.some(item => item.type === 'userMessage' && item.content[0].text.includes('Authorized projects (open only those needed for the task;'))
+    const text = completionText || (thread.fixtureInstructions.includes('This unattended task cannot answer clarification questions')
       ? '# Complete\nThe fixture task passed.'
       : `I reviewed the workspace. **The approach looks good.**\n\n${active.items.filter(item => item.type === 'userMessage').map(item => item.content[0].text).join('\n\n')}\n\nReady for the next step.`)
     const item = { id: `reply-${thread.fixtureGeneration || 'legacy'}-${active.id}`, type: 'agentMessage', text }
@@ -78,6 +78,7 @@ export function chatFixture() {
         turns: [],
         parentThreadId: null,
         fixtureConfig: params.config,
+        fixtureInstructions: params.developerInstructions || '',
       }
       save()
       emit({ id: request.id, result: { thread } })
@@ -89,6 +90,7 @@ export function chatFixture() {
         throw new Error('No conversation')
       thread = JSON.parse(readFileSync(file, 'utf8'))
       thread.fixtureConfig = params.config
+      thread.fixtureInstructions = params.developerInstructions || ''
       counter = thread.turns.length
       emit({ id: request.id, result: { thread: { ...thread, turns: [] } } })
     }
