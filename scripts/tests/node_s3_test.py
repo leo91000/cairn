@@ -11,6 +11,16 @@ import subprocess
 import boto3
 from moto.server import ThreadedMotoServer
 
+NATIVE_S3_KEY_BUFFER_BYTES = 64 * 1024
+
+
+def configure_native_s3():
+    # Moto 5.2.3 deep-copies every bucket payload for each version listing before
+    # prefix filtering. Concurrent real GC requests otherwise multiply a Docker
+    # store into several GiB of emulator RAM. Use Moto's supported file-spooling
+    # setting; preserve the real version-list/delete APIs and every purge check.
+    os.environ['MOTO_S3_DEFAULT_KEY_BUFFER_SIZE'] = str(NATIVE_S3_KEY_BUFFER_BYTES)
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -22,6 +32,8 @@ def main():
     parser.add_argument('--repeat', type=int, default=3)
     parser.add_argument('--case', help='Run one node recovery test against the isolated S3 fixture')
     args = parser.parse_args()
+    if args.native_runtime:
+        configure_native_s3()
     server = ThreadedMotoServer(ip_address='127.0.0.1', port=0, verbose=False)
     server.start()
     try:

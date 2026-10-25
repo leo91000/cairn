@@ -166,8 +166,15 @@ Primary references: [Docker rootless requirements](https://docs.docker.com/engin
 ## Qualification and measurements
 
 The `native-runtime` CI job uses a disposable Linux host, synthetic credentials
-and loopback Moto S3. It executes the shipped native controller and entrypoint,
-the real systemd/ublk/ext4 stack and the managed Docker tools. Reference binaries
+and loopback Moto S3. Moto 5.2.3 payload buffers are fixed at 64 KiB for both
+reference and candidate.
+Larger emulator payloads and version-list copies spill to local temporary files:
+Moto otherwise copies the entire bucket into RAM before filtering each concurrent
+version-list request during purge. The real list/version/delete API path and final
+empty-bucket checks remain mandatory. This emulator setting is recorded in the
+measurement JSON and adds local disk/cache effects; it is not production S3 latency.
+The job executes the shipped native controller and entrypoint, the real
+systemd/ublk/ext4 stack and the managed Docker tools. Reference binaries
 use the PR base or main push's previous commit; manual runs and tags use the
 checked-out candidate's first parent, fetching shallow history when needed. They
 may be reused only for the same exact base, pinned Rust/profile (with the required ublk transport) and runner

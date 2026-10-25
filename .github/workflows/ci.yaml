@@ -361,6 +361,7 @@ jobs:
           test -c /dev/ublk-control
           python3 -m venv .native-s3-test
           .native-s3-test/bin/pip install 'moto[server]==5.2.3' awscli
+          .native-s3-test/bin/python -m unittest discover -s scripts/tests -p test_native_s3_memory.py -v
       - run: rustup toolchain install 1.97.1 --profile minimal
       - name: Identify the exact reference build
         id: native-reference-key

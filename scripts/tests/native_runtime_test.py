@@ -9,6 +9,7 @@ import boto3
 import http.client
 import http.server
 import importlib.util
+import importlib.metadata
 import hashlib
 import json
 import os
@@ -91,7 +92,10 @@ def main():
                             cpu=Path('/proc/cpuinfo').read_text().split('model name')[1].splitlines()[0],
                             memory=Path('/proc/meminfo').read_text().splitlines()[0],
                             loadAverageStart=os.getloadavg(), cpuTicksStart=Path('/proc/stat').read_text().splitlines()[0]),
-                   conditions='Disposable hosted Linux VM; loopback Moto S3, synthetic credentials; no WAN latency. '
+                   s3Emulator=dict(name='Moto', version=importlib.metadata.version('moto'),
+                                   keyBufferBytes=int(os.environ['MOTO_S3_DEFAULT_KEY_BUFFER_SIZE']),
+                                   backing='SpooledTemporaryFile; larger payloads and version-list copies spill to local disk.'),
+                   conditions='Disposable hosted Linux VM; loopback Moto S3 with 64KiB per-key memory buffers, synthetic credentials; no WAN latency. '
                               'Cold file reads use advisory POSIX_FADV_DONTNEED; post-eviction controller restart clears userspace cache.',
                    workload='Seeded random42 8MiB asset +128 fsynced 4KiB text writes, per-process wall/CPU milliseconds.',
                    resources=dict(nativeCpu=1, nativeMemoryMiB=512, nativeDiskMiB=256,
