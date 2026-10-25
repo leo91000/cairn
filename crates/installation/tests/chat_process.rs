@@ -500,8 +500,8 @@ async fn a_faster_tier_is_checked_against_codex_own_model_list_before_the_turn()
             "custom-alias",
             "priority",
             false,
-            "default",
-            Some("applied"),
+            "priority",
+            Some("unconfirmed"),
         ),
         (
             "fixture-fast",
@@ -511,13 +511,21 @@ async fn a_faster_tier_is_checked_against_codex_own_model_list_before_the_turn()
             Some("unconfirmed"),
         ),
         ("fixture-deep", "default", false, "default", None),
+        // A dated version of a listed model: Codex may apply the listed model's tiers to it.
+        (
+            "fixture-fast-2026-10-01",
+            "priority",
+            false,
+            "priority",
+            Some("unconfirmed"),
+        ),
         // Without a chosen model, Codex runs the one its configuration sets, not the catalog's
         // default: fixture-deep lists no Fast.
         ("", "priority", false, "default", Some("applied")),
     ];
     for (index, (model, tier, list_fails, sent, notice)) in cases.into_iter().enumerate() {
         let configured = home.join("fixture-config-model");
-        if index == 7 {
+        if index == 8 {
             std::fs::write(&configured, "fixture-deep").unwrap();
         }
         let failure = home.join("fixture-model-list-error");

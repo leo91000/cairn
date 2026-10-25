@@ -1033,6 +1033,25 @@ async fn speeds_come_from_each_account_and_route_runs_to_an_account_offering_the
     );
     service.accounts.release(&confirming).await.unwrap();
     service.accounts.release(&landed).await.unwrap();
+    // An account that needs reconnecting takes no run, so its unknown catalog confirms nothing.
+    let record = service
+        .store
+        .get("agentAccounts", &ids[0])
+        .await
+        .unwrap()
+        .unwrap();
+    let mut reconnect = record.clone();
+    reconnect["state"] = "error".into();
+    service.store.put("agentAccounts", reconnect).await.unwrap();
+    let listed = service.models.list(&service).await.unwrap();
+    let fast = listed["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["model"] == "fixture-fast")
+        .unwrap();
+    assert!(fast["serviceTiers"][0].get("limited").is_none(), "{fast}");
+    service.store.put("agentAccounts", record).await.unwrap();
     service.store.set(&key, catalog, None).await.unwrap();
     let listed = service.models.list(&service).await.unwrap();
     let fast = listed["models"]

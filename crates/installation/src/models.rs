@@ -346,7 +346,14 @@ impl Models {
                     }
                 }
             }
-            catalogs.push(cached);
+            // Only accounts a run can land on decide whether a speed is confirmed.
+            let signed_in = source.is_empty()
+                || accounts
+                    .iter()
+                    .any(|a| text(a, "id") == source && a["state"] == "ready");
+            if signed_in {
+                catalogs.push(cached);
+            }
         }
         let mut models = models.into_values().collect::<Vec<_>>();
         for model in &mut models {
@@ -421,10 +428,10 @@ fn tier_listed(catalog: &Value, model: &str, tier: &str) -> Option<bool> {
 pub enum TierCheck {
     /// Its catalog lists the tier for the model.
     Offered,
-    /// Its catalog lists the model without the tier, or does not list the model: Codex would
-    /// silently run Standard.
+    /// Its catalog lists the model without the tier: Codex would silently run Standard.
     Lacking,
-    /// Its catalog could not be read, or no model is known for the turn.
+    /// Its catalog could not be read, or does not list the model exactly. Codex applies a listed
+    /// model's tiers to some other names, such as dated versions, and drops them for the rest.
     Unconfirmed,
 }
 
@@ -434,16 +441,7 @@ pub async fn check_tier(session: &mut Session, model: &str, tier: &str) -> TierC
     let Ok(models) = discover(session).await else {
         return TierCheck::Unconfirmed;
     };
-    let catalog = json!({ "models": models });
-    if catalog_row(&catalog, model).is_none() {
-        // Codex drops a tier for a model its own list does not name, such as a custom alias.
-        return if model.is_empty() {
-            TierCheck::Unconfirmed
-        } else {
-            TierCheck::Lacking
-        };
-    }
-    match tier_listed(&catalog, model, tier) {
+    match tier_listed(&json!({ "models": models }), model, tier) {
         Some(true) => TierCheck::Offered,
         Some(false) => TierCheck::Lacking,
         None => TierCheck::Unconfirmed,
