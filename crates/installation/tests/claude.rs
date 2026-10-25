@@ -1673,22 +1673,23 @@ async fn a_subagent_resumed_by_a_later_execution_shows_as_resumed() {
     // Only the subagents resumed, by the agent or by Claude Code: an agent its workflow starts,
     // one a subagent starts from work this execution does not see, or a housekeeping agent
     // Claude Code starts itself, is not one.
-    assert!(
-        all.iter()
-            .all(|event| ["task-old", "task-orphan"]
-                .contains(&event["item"]["id"].as_str().unwrap()))
-    );
-    // Claude Code resumed this one itself: its run names the earlier execution's call.
+    assert!(all.iter().all(|event| {
+        ["task-old:run-3", "task-orphan:run-5"].contains(&event["item"]["id"].as_str().unwrap())
+    }));
+    // Claude Code resumed this one itself: its run names the earlier execution's call. Each row
+    // is this execution's, named after the subagent's run: a later execution that resumes it
+    // again gets its own.
     let orphan = all
         .iter()
-        .find(|event| event["item"]["id"] == "task-orphan")
+        .find(|event| event["item"]["id"] == "task-orphan:run-5")
         .unwrap();
+    assert_eq!(orphan["item"]["task_id"], "task-orphan");
     assert_eq!(orphan["item"]["resumed"], true);
     assert_eq!(orphan["item"]["run_id"], "run-5");
     assert_eq!(orphan["item"]["name"], "Finish the migration");
     let subagents: Vec<_> = all
         .into_iter()
-        .filter(|event| event["item"]["id"] == "task-old")
+        .filter(|event| event["item"]["id"] == "task-old:run-3")
         .collect();
     let started = subagents.first().unwrap();
     assert_eq!(started["type"], "item.started");
@@ -1707,19 +1708,26 @@ async fn a_subagent_resumed_by_a_later_execution_shows_as_resumed() {
         .filter(|event| event["item"]["type"] == "subagent_message")
         .map(|event| event["item"]["parent_id"].as_str().unwrap())
         .collect();
-    assert_eq!(steps, vec!["task-orphan", "task-old", "task-old"]);
+    assert_eq!(
+        steps,
+        vec!["task-orphan:run-5", "task-old:run-3", "task-old:run-3"]
+    );
     assert_eq!(
         std::fs::read_to_string(root.path().join("result.md")).unwrap(),
         "Resumed in a later turn"
     );
 
-    // Claude Code repeats a running tool's progress notice; it is reported once.
+    // Claude Code repeats a running tool's progress notice; it is reported once. A warning about
+    // the same tool use is not progress.
     let notices: Vec<_> = events
         .iter()
         .filter(|event| event["type"] == "engine.notice")
+        .map(|event| event["message"].as_str().unwrap())
         .collect();
-    assert_eq!(notices.len(), 1);
-    assert_eq!(notices[0]["message"], "Tool SendMessage running for 5s…");
+    assert_eq!(
+        notices,
+        vec!["Tool SendMessage running for 5s…", "SendMessage is slow."]
+    );
 }
 
 #[tokio::test]

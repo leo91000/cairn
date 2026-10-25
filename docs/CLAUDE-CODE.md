@@ -105,7 +105,8 @@ kind of wait stays separate:
   redacted before storage. Warnings, suggestions and notices that stop the turn show in
   the conversation and are always recorded. Notices and info lines stay in the run log,
   within its diagnostic budget. Claude Code repeats a running tool's progress line
-  (same `tool_use_id`); it is reported once.
+  (same `tool_use_id`); it is reported once. Warnings, suggestions and notices that stop
+  the turn are always reported.
 
 `session_state_changed` is opt-in (`CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS`) and
 not enabled. Completion stays correlated with result messages and consumed message
@@ -124,7 +125,8 @@ so a frame naming an earlier run, or repeating the start of the run that reporte
 late and ignored. A subagent an earlier execution started, resumed by a `SendMessage`
 call or by Claude Code itself (its run then names the earlier execution's call, or no
 call), shows as a new row of the current execution marked `resumed`, keyed by its task
-ID: Cairn rows belong to one execution. A call this execution never made only counts
+and run IDs: Cairn rows belong to one execution, and a later execution that resumes it
+again gets its own row. A call this execution never made only counts
 for a top-level subagent (no `parent_task_id`, `spawn_depth` 1). Other unknown agent
 tasks, such as a workflow's agents, nested agents started from work this execution does
 not see, or housekeeping agents Claude Code marks `skip_transcript` or `ambient`, are

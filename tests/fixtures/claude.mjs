@@ -639,6 +639,14 @@ else {
 
       out({
         type: 'system',
+        subtype: 'informational',
+        level: 'warning',
+        tool_use_id: 'send-later',
+        content: 'SendMessage is slow.',
+      })
+
+      out({
+        type: 'system',
         subtype: 'task_started',
         task_id: 'task-old',
         run_id: 'run-3',

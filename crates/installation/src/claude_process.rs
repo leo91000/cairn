@@ -682,15 +682,17 @@ impl Turn<'_> {
         if message.trim().is_empty() {
             return Ok(());
         }
-        // Notices naming a tool use report its progress: the first one says it is running.
-        let tool_use = text(value, "tool_use_id");
-        if !tool_use.is_empty() && !self.tool_notices.insert(tool_use.to_owned()) {
-            return Ok(());
-        }
         let level = match text(value, "level") {
             level @ ("info" | "notice" | "suggestion" | "warning") => level,
             _ => "notice",
         };
+        // Informational lines naming a tool use report its progress: the first one says it is
+        // running. A warning, a suggestion or a notice that stops the turn is always reported.
+        let tool_use = text(value, "tool_use_id");
+        let progress = matches!(level, "info" | "notice") && value["prevent_continuation"] != true;
+        if progress && !tool_use.is_empty() && !self.tool_notices.insert(tool_use.to_owned()) {
+            return Ok(());
+        }
         // The worker cuts a long notice once it is redacted.
         let mut notice = json!({ "type": "engine.notice", "level": level, "message": message });
         if value["prevent_continuation"] == true {
@@ -1062,7 +1064,7 @@ impl Turn<'_> {
 
     /// A subagent an earlier execution started, resumed in this one: by a SendMessage call, or
     /// by Claude Code itself. It keeps its task ID, but this execution never saw the tool use that
-    /// started it, so it shows as a new row marked resumed. Its run names the SendMessage call,
+    /// started it, so it shows as a new row of this execution marked resumed. Its run names the SendMessage call,
     /// or, when Claude Code resumed it, the earlier execution's call that started it, or none.
     /// Another tool use of this execution, such as a workflow's, starts its own agents. A call
     /// this execution never made only names a resumed subagent the agent itself started: a nested
@@ -1091,7 +1093,13 @@ impl Turn<'_> {
             "subagent_type": value["subagent_type"],
             "prompt": value["prompt"],
         });
-        let mut item = subagent(task, &input);
+        // Clients key rows by run and item ID, and a run's later executions may resume the same
+        // subagent again: each row gets its own ID, named after the subagent's run when known.
+        let row = match text(value, "run_id") {
+            "" => format!("{task}:{}", crate::config::id()),
+            run => format!("{task}:{run}"),
+        };
+        let mut item = subagent(&row, &input);
         item["resumed"] = true.into();
         item["task_id"] = task.into();
         item["background"] = (value["is_backgrounded"] == true).into();
@@ -1103,11 +1111,11 @@ impl Turn<'_> {
         if let Some(parent) = self.tasks.get(text(value, "parent_task_id")) {
             item["parent_id"] = parent.as_str().into();
         }
-        self.tasks.insert(task.to_owned(), task.to_owned());
+        self.tasks.insert(task.to_owned(), row.clone());
         if !tool_use.is_empty() {
-            self.resumed_by.insert(tool_use.to_owned(), task.to_owned());
+            self.resumed_by.insert(tool_use.to_owned(), row.clone());
         }
-        self.subagents.insert(task.to_owned(), item.clone());
+        self.subagents.insert(row, item.clone());
         self.emit(json!({ "type": "item.started", "item": item }))
             .await
     }
