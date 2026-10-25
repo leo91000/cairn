@@ -970,10 +970,18 @@ impl Turn<'_> {
         }
         let started = value["subtype"] == "task_started";
         if !self.subagents.contains_key(&id) {
-            // Only a new run reopens a subagent that reported back; other frames are late.
-            let Some(item) = self.settled.remove(&id).filter(|_| started) else {
+            // Only a new run reopens a subagent that reported back: other frames, and another
+            // start of the run that reported, are late and leave it settled.
+            let run = text(value, "run_id");
+            let reopens = started
+                && self.settled.get(&id).is_some_and(|item| {
+                    let reported = text(item, "run_id");
+                    run.is_empty() || reported.is_empty() || run > reported
+                });
+            if !reopens {
                 return Ok(());
-            };
+            }
+            let item = self.settled.remove(&id).unwrap();
             self.subagents.insert(id.clone(), item);
         }
         let item = self.subagents.get_mut(&id).unwrap();

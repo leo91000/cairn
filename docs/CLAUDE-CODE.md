@@ -79,7 +79,9 @@ kind of wait stays separate:
   then marks it recovered. A subagent's progress or resumption does not count. When
   Claude Code gives up, it reports the last API error as a message and the turn fails;
   that retry is not marked recovered. Neither is a retry whose run is stopped,
-  interrupted or failed by the runner: the conversation stops showing it.
+  interrupted or failed by the runner: the conversation stops showing it. These are the
+  agent's own requests: Claude Code reports a subagent's retries in its tool progress
+  (`subagent_retry`), which Cairn does not show.
 - **Provider usage limit.** `rate_limit_event` becomes `provider.limit` when its state
   changes. That covers a warning, a limit covered by extra usage, a limit that stops
   requests (`blocked`), and the return to normal after one of these. Window and reset
@@ -110,15 +112,16 @@ Frames Léo does not know, including future ones, are ignored.
 
 Subagents are followed by the tool use that started them and by their task ID. Claude
 Code 2.1.292 and later add `agent_id` to a subagent's messages (equal to its task ID,
-kept when resumed), plus `parent_task_id` and `run_id` to task frames. A subagent's
-messages are never taken as the agent's reply, even without `parent_tool_use_id`.
+kept when resumed), plus `parent_task_id` and `run_id` to task frames. From then on, a
+subagent's messages are never taken as the agent's reply, even without
+`parent_tool_use_id`. Older frames rely on `parent_tool_use_id` alone.
 When the agent resumes a subagent, its new run reopens the same item, marked
 `resumed`. That holds even when the run names another tool use. Claude Code promises
 that a task's run IDs sort, by plain string comparison, in the order its runs opened,
-so a frame naming an earlier run is late and ignored. A subagent an earlier execution
-started, resumed by a `SendMessage` call or by Claude Code itself, shows as a new row
-of the current execution marked `resumed`, keyed by its task ID: Cairn rows belong to
-one execution. Other unknown agent tasks, such as a workflow's agents or housekeeping
+so a frame naming an earlier run, or repeating the start of the run that reported, is
+late and ignored. A subagent an earlier execution started, resumed by a `SendMessage`
+call or by Claude Code itself, shows as a new row of the current execution marked
+`resumed`, keyed by its task ID: Cairn rows belong to one execution. Other unknown agent tasks, such as a workflow's agents or housekeeping
 agents Claude Code marks `skip_transcript` or `ambient`, are ignored. Nested subagents
 keep their parent and `parent_task_id`. Without `agent_id`, a resumed subagent's
 messages may name the call that resumed it (such as `SendMessage`) in

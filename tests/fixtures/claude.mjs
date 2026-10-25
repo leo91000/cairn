@@ -761,6 +761,25 @@ else {
         output_file: '',
       })
       result(null, null, 'agent-review', 'Looks good.', { status: 'completed', agentId: 'task-review', content: [{ type: 'text', text: 'Looks good.' }] })
+      // Frames of the first run may still arrive after it reported back.
+      out({
+        type: 'system',
+        subtype: 'task_progress',
+        task_id: 'task-review',
+        run_id: 'run-1',
+        tool_use_id: 'agent-review',
+        description: 'Late progress of the first run',
+        usage: { total_tokens: 1, tool_uses: 0, duration_ms: 1 },
+      })
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-review',
+        run_id: 'run-1',
+        tool_use_id: 'agent-review',
+        description: 'Review the change',
+        task_type: 'local_agent',
+      })
 
       // The agent resumes the reviewer through another call. Its new run names that call, and
       // its messages only its agent ID.

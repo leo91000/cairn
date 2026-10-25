@@ -1607,6 +1607,13 @@ async fn nested_and_resumed_subagents_keep_their_identity_and_the_parent_reply()
     let reopened = review.iter().find(|item| item["resumed"] == true).unwrap();
     assert_eq!(reopened["status"], "in_progress");
     assert_eq!(reopened["run_id"], "run-2");
+    // Late frames of the first run, a repeated start among them, neither reopen nor lose it.
+    assert!(
+        review
+            .iter()
+            .filter(|item| item["resumed"] == true)
+            .all(|item| item["run_id"] == "run-2")
+    );
     let last = review.last().unwrap();
     assert_eq!(last["status"], "completed");
     assert_eq!(last["task_id"], "task-review");
