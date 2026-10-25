@@ -48,7 +48,7 @@ Sign-in runs `claude auth login --claudeai` in a private temporary home. Open An
 
 The manager rotates each account's OAuth login with the refresh endpoint and client ID of the official CLI (or the one saved with the login), under the account lock, and persists rotated state before replying. Runs keep an access-only credential snapshot next to their session and refresh it every 30 seconds. A temporary broker outage keeps a conversation alive while its token is valid; an expired login produces an explicit recoverable error and the account is marked **Reconnect**.
 
-Usage is read every five minutes per account with the CLI's `get_usage` control response (`skip_behaviors: true`), without sending a prompt, including while the account runs. Claude Code 2.1.280, against which this protocol was qualified, reports utilization as a percentage and reset dates as ISO 8601 timestamps. Five-hour and weekly windows limit every model. Opus, Sonnet and model-scoped weekly windows only limit the models of their family, including catalog aliases that run it, such as `default` when it resolves to Opus. A saved model the current catalog no longer lists stays limited by its family when its name gives it exactly: an alias with a context variant, such as `opus[1m]`, or a model ID, such as `claude-opus-4-6[1m]`. Other names are matched as saved; Codex and OpenCode windows match the exact model. This protocol is experimental: when usage is unavailable, the last known windows stay visible, and runs can still use the account. Only allowlisted quota fields are exposed, and a quota error never changes the account's connection.
+Usage is read every five minutes per account with the CLI's `get_usage` control response (`skip_behaviors: true`), without sending a prompt, including while the account runs. Claude Code reports utilization as a percentage and reset dates as ISO 8601 timestamps. CI checks that every resolved release answers `get_usage`; quota values are checked with a real account (see [tool versions](CLI-UPDATES.md)). Five-hour and weekly windows limit every model. Opus, Sonnet and model-scoped weekly windows only limit the models of their family, including catalog aliases that run it, such as `default` when it resolves to Opus. A saved model the current catalog no longer lists stays limited by its family when its name gives it exactly: an alias with a context variant, such as `opus[1m]`, or a model ID, such as `claude-opus-4-6[1m]`. Other names are matched as saved; Codex and OpenCode windows match the exact model. This protocol is experimental: when usage is unavailable, the last known windows stay visible, and runs can still use the account. Only allowlisted quota fields are exposed, and a quota error never changes the account's connection.
 
 ## OpenCode
 
@@ -82,8 +82,9 @@ limit enters the shared exhaustion flow and retries the account after five minut
 when no readable quota is available.
 
 Install **OpenCode 1.19.0 or later** on the manager and runners, or set `OPENCODE_BIN`
-to its executable. Each image build installs OpenCode's latest release after CI
-qualifies it (see [tool versions](CLI-UPDATES.md)), and startup rejects older releases. Initial OpenCode agents require **YOLO** access because the native
+to its executable. Each image build installs the OpenCode release CI resolved,
+and CI qualifies it before the image is validated (see
+[tool versions](CLI-UPDATES.md)). Startup rejects older releases. Initial OpenCode agents require **YOLO** access because the native
 engine does not implement Cairn's read-only/workspace-write sandbox. Production
 runner isolation still applies. OAuth, custom endpoints and quota reporting are
 outside this first integration. See [ADR 0042](adr/0042-opencode-api-key-integration.md).

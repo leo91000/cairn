@@ -21,8 +21,8 @@ Claude Code follows Anthropic's
 [stable release channel](https://code.claude.com/docs/en/setup#configure-release-channel):
 a version "typically about one week old, skipping releases with major
 regressions", published as the npm `stable` dist-tag. Its `latest` channel is
-never used. On 24 October 2026 they differed: `stable` was 2.1.308 and `latest`
-2.1.310; builds chose 2.1.308. Anthropic notes that a newly launched model can
+never used, even when it names a newer release: when `stable` named 2.1.308 and
+`latest` 2.1.310, builds installed 2.1.308. Anthropic notes that a newly launched model can
 require a version newer than the stable channel serves. Such a model becomes
 available to Cairn when the stable channel reaches that version. Builds only
 install a release the stable channel serves.
@@ -52,6 +52,8 @@ checks that they equal the versions CI resolved. Native node bundles
 (`deploy/nodes/bundle-native-tools.mjs`) refuse an executable whose version
 differs from the image's resolved version. MicroVM guests are built from the same
 runtime stage.
+Direct Docker builds must pass these build arguments too; see
+[deployment setup](DEPLOYMENT.md) and the [agent toolkit](TOOLKIT.md).
 
 The `backend` job also runs the real engine releases it resolved through their
 adapters, without credentials and without inference against a vendor. As in
@@ -94,8 +96,6 @@ names only Codex and GitHub CLI. It is never reused: such a tree validates a new
 image. Tools never change after image validation:
 Claude Code runs with `DISABLE_AUTOUPDATER=1` and OpenCode with automatic updates
 disabled.
-Direct Docker builds must pass these build arguments too; see
-[deployment setup](DEPLOYMENT.md) and the [agent toolkit](TOOLKIT.md).
 
 Installations follow approved, paired immutable images through
 `cairn-installation-update.timer`. This host updater retains the persisted

@@ -26,8 +26,8 @@ use std::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
-// Official Claude Code client, unchanged from 2.1.280 through 2.1.308; a per-login
-// clientId takes precedence.
+// Official Claude Code client, checked on each engine change (docs/CLI-UPDATES.md);
+// a per-login clientId takes precedence.
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const LIMIT: usize = 128_000;
 const USAGE_TTL: i64 = 300_000;
