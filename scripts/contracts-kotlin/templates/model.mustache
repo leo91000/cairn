@@ -10,7 +10,7 @@ value class {{&className}}(val value: Map<String, {{#additionalProperties}}{{>ty
     init {
 {{#properties}}{{^constValue}}{{#minimum}}        require({{&kotlinName}} >= {{&.}}{{#isLong}}L{{/isLong}})
 {{/minimum}}{{#maximum}}        require({{&kotlinName}} <= {{&.}}{{#isLong}}L{{/isLong}})
-{{/maximum}}{{#isSystemClass}}{{#systemClass}}{{#UUID}}        java.util.UUID.fromString({{&kotlinName}})
+{{/maximum}}{{#isSystemClass}}{{#systemClass}}{{#UUID}}        {{#nullable}}{{&kotlinName}}?.let { java.util.UUID.fromString(it) }{{/nullable}}{{^nullable}}java.util.UUID.fromString({{&kotlinName}}){{/nullable}}
 {{/UUID}}{{/systemClass}}{{/isSystemClass}}{{/constValue}}{{/properties}}    }
 }
 {{/additionalPropertiesSchema}}

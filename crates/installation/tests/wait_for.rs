@@ -577,9 +577,12 @@ async fn permissions_origins_and_workflow_commit_mismatches_are_rechecked() {
     f.schedule(f.github_condition()).await;
     f.finish().await;
     let calls = f.calls().len();
-    let mut project = f.s.get("projects", &f.project).await.unwrap();
-    project["origin"] = "https://github.com/another/repository.git".into();
-    f.s.store.put("projects", project).await.unwrap();
+    let mut project = f.s.get_project(&f.project).await.unwrap();
+    project.origin = "https://github.com/another/repository.git".into();
+    f.s.store
+        .transaction(move |db| db.save_project(&project, Some(&project.revision)))
+        .await
+        .unwrap();
     conditions::poll_once(&f.s).await.unwrap();
     assert_eq!(f.calls().len(), calls);
     assert_eq!(
@@ -859,9 +862,12 @@ async fn watchers_share_requests_only_for_the_same_granted_project_origin() {
         f.schedule(f.github_condition()).await;
         f.finish().await;
         if origin_changed {
-            let mut project = f.s.get("projects", &f.project).await.unwrap();
-            project["origin"] = "git@github.com:fixture/repo.git".into();
-            f.s.store.put("projects", project).await.unwrap();
+            let mut project = f.s.get_project(&f.project).await.unwrap();
+            project.origin = "git@github.com:fixture/repo.git".into();
+            f.s.store
+                .transaction(move |db| db.save_project(&project, Some(&project.revision)))
+                .await
+                .unwrap();
         }
         let second = f.s.chat_create(json!({})).await.unwrap();
         let chat = text(&second, "id");

@@ -95,7 +95,13 @@ abstract class UnifiedHeaderCases {
                                     listOf(Agent(MAIN_AGENT_ID, "Agent principal"))
                                 )
                             "/api/installations/fixture/api/projects" ->
-                                wireJson.encodeToString(listOf(Project("project", "Cairn")))
+                                wireJson.encodeToString(
+                                    build.cairn.contracts.ListProjectsOutput(
+                                        listOf(
+                                            Project("46d045dd-9bce-51e3-8a99-65aa9384efc9", "Cairn")
+                                        )
+                                    )
+                                )
                             "/api/installations/fixture/api/tasks",
                             "/api/installations/fixture/api/tasks/activity",
                             "/api/installations/fixture/api/skills",

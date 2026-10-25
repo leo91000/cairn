@@ -33,6 +33,22 @@ class ContractsTest {
     }
 
     @Test
+    fun projectsMatchRustWireAndDefaults() {
+        val root = File(System.getProperty("cairn.contractWire")).parentFile
+        val corpus = json.parseToJsonElement(File(root.parentFile.parentFile.parentFile, "tests/fixtures/project-contracts.json").readText()).jsonObject
+        val wire = json.parseToJsonElement(File(root, "project-wire.json").readText()).jsonObject
+        for ((index, input) in corpus.getValue("creates").jsonArray.withIndex()) {
+            val model = json.decodeFromJsonElement<CreateProjectInput>(input)
+            assertEquals(wire.getValue("creates").jsonArray[index], json.encodeToJsonElement(model))
+        }
+        for (value in wire.getValue("views").jsonArray) {
+            val project = json.decodeFromJsonElement<Project>(value)
+            assertEquals(value, json.encodeToJsonElement(project))
+            assertEquals(project, json.decodeFromString<Project>(json.encodeToString(project)))
+        }
+    }
+
+    @Test
     fun qualificationCorpusDecodesAndRoundTrips() {
         val corpus =
             json

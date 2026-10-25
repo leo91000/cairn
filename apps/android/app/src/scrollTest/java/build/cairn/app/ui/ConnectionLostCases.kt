@@ -71,7 +71,14 @@ abstract class ConnectionLostCases {
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path.endsWith("/overview") || path.endsWith("/models") -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")
@@ -180,7 +187,14 @@ abstract class ConnectionLostCases {
                                     """{"authenticated":true,"csrf":"fixture","account":{"id":"fixture-account","email":"owner@example.test"},"installations":$installations}"""
                                 path == "/api/installations" -> installations
                                 path.endsWith("/overview") || path.endsWith("/models") -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")
@@ -231,7 +245,14 @@ abstract class ConnectionLostCases {
                                 path == "/api/account/session" -> beaconAccountFixture()
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path.endsWith("/overview") || path.endsWith("/models") -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")
@@ -277,7 +298,14 @@ abstract class ConnectionLostCases {
                                 path == "/api/account/session" -> beaconAccountFixture()
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path.endsWith("/overview") || path.endsWith("/models") -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")
@@ -340,7 +368,14 @@ abstract class ConnectionLostCases {
                                     beaconInstallationsFixture()
                                         .replace("\"online\":true", "\"online\":false")
                                 path.endsWith("/overview") || path.endsWith("/models") -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")
@@ -389,7 +424,14 @@ abstract class ConnectionLostCases {
                                 path == "/api/account/session" -> beaconAccountFixture()
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path.endsWith("/overview") || path.endsWith("/models") -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")

@@ -1385,7 +1385,21 @@ async fn native_project_archive_handshake_skips_the_tree_and_rechecks_cache_gran
     std::fs::write(project_path.join("file"), "project seed").unwrap();
     std::fs::write(root.join("home/config"), "fresh configuration").unwrap();
     let project_record = json!({ "id": project, "path": project_path, "sourceMode": "remote", "baseBranch": "main" });
-    owner.put("projects", project_record.clone()).await;
+    let fixture_project = cairn_contracts::Project {
+        id: cairn_contracts::ProjectId(uuid::Uuid::parse_str(&project).unwrap()),
+        settings: serde_json::from_value(json!({ "name": "Fixture", "path": project_path }))
+            .unwrap(),
+        origin: "".into(),
+        source: None,
+        revision: id(),
+        created_at: now(),
+    };
+    owner
+        .service
+        .store
+        .transaction(move |db| db.save_project(&fixture_project, None))
+        .await
+        .unwrap();
     let mut record = run_record(&run, RunStatus::Running);
     record["snapshot"] = json!({ "agent": { "id": MAIN_AGENT_ID, "provider": "codex", "access": { "backend": "native" } }, "projects": [project_record] });
     record["workspaces"] =

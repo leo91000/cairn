@@ -74,6 +74,7 @@ abstract class ResourceSaveCases {
         restore: Boolean = false,
         malformedResponse: Boolean = false,
     ) {
+        val savedId = if (kind == "tasks") "saved" else "00000000-0000-4000-8000-000000000005"
         val uncertainResponse = loseResponse || malformedResponse
         val resourceKind = if (kind == "import") "projects" else kind
         val mutations = CopyOnWriteArrayList<Pair<String, JsonObject>>()
@@ -101,7 +102,7 @@ abstract class ResourceSaveCases {
                         if (
                             request.method in listOf("POST", "PUT") &&
                                 (path == resourcePath ||
-                                    path == "$resourcePath/saved" ||
+                                    path == "$resourcePath/$savedId" ||
                                     path == "$resourcePath/import")
                         ) {
                             val value =
@@ -124,10 +125,31 @@ abstract class ResourceSaveCases {
                                 if (kind == "import")
                                     mapOf("path" to JsonPrimitive("/fixtures/imported"))
                                 else emptyMap()
-                            return json(
-                                JsonObject(stored + projectPath + ("id" to JsonPrimitive("saved")))
-                                    .toString()
-                            )
+                            val settings =
+                                if (
+                                    kind == "projects" ||
+                                        request.method == "PUT" && resourceKind == "projects"
+                                )
+                                    stored["settings"]!!.jsonObject
+                                else stored
+                            val output =
+                                if (resourceKind == "projects")
+                                    JsonObject(
+                                        settings +
+                                            projectPath +
+                                            mapOf(
+                                                "id" to JsonPrimitive(savedId),
+                                                "origin" to JsonPrimitive(""),
+                                                "revision" to
+                                                    JsonPrimitive("revision-${mutations.size}"),
+                                                "createdAt" to JsonPrimitive(0L),
+                                                "sourceMode" to
+                                                    (settings["sourceMode"]
+                                                        ?: JsonPrimitive("remote")),
+                                            )
+                                    )
+                                else JsonObject(stored + ("id" to JsonPrimitive(savedId)))
+                            return json(output.toString())
                         }
                         if (loseResponse && created.get() && request.method == "GET") {
                             if (path.endsWith("/overview")) {
@@ -157,7 +179,14 @@ abstract class ResourceSaveCases {
                                     """{"items":[{"id":"owner/repository","name":"owner/repository","description":"","defaultBranch":"main","badges":["Private"],"imported":false}],"nextPage":null}"""
                                 path.endsWith("/overview") || path.endsWith("/models") -> "{}"
                                 path.endsWith("/agents") -> """[{"id":"agent","name":"Agent"}]"""
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
                             }
                         )
                     }
@@ -313,7 +342,14 @@ abstract class ResourceSaveCases {
                         else -> listOf("POST", "PUT")
                     }
                 assertEquals(expected, mutations.map { it.first })
-                assertEquals("Modifié", mutations.last().second["name"]!!.jsonPrimitive.content)
+                assertEquals(
+                    "Modifié",
+                    (if (resourceKind == "projects")
+                            mutations.last().second["settings"]!!.jsonObject
+                        else mutations.last().second)["name"]!!
+                        .jsonPrimitive
+                        .content,
+                )
                 if (kind == "import") {
                     val import = mutations.first().second
                     assertEquals("github", import["pluginId"]!!.jsonPrimitive.content)
@@ -323,11 +359,21 @@ abstract class ResourceSaveCases {
                     assertEquals("main", import["baseBranch"]!!.jsonPrimitive.content)
                     assertEquals(
                         "/fixtures/imported",
-                        mutations.last().second["path"]!!.jsonPrimitive.content,
+                        mutations
+                            .last()
+                            .second["settings"]!!
+                            .jsonObject["path"]!!
+                            .jsonPrimitive
+                            .content,
                     )
                     assertEquals(
                         "remote",
-                        mutations.last().second["sourceMode"]!!.jsonPrimitive.content,
+                        mutations
+                            .last()
+                            .second["settings"]!!
+                            .jsonObject["sourceMode"]!!
+                            .jsonPrimitive
+                            .content,
                     )
                 }
                 assertTrue(

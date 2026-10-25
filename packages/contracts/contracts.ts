@@ -1,3 +1,4 @@
+import type { Project } from './generated/typescript/Project'
 import { z } from 'zod'
 import { LOCAL_NODE_ID } from './nodes'
 
@@ -56,16 +57,6 @@ export const agentUpdate = z.object({
   plugins: agentInput.shape.plugins.removeDefault().optional(),
   nativeNodeReviews: agentInput.shape.nativeNodeReviews,
 })
-export const projectInput = z.object({
-  name,
-  path: z.string().min(1).max(2000),
-  description: z.string().max(500).default(''),
-  sourceMode: z.enum(['remote', 'local']).default('remote'),
-  baseBranch: z
-    .string()
-    .regex(/^[a-z0-9][\w/.-]*$/i)
-    .default('main'),
-})
 export const taskInput = z.object({
   name,
   prompt: z.string().trim().min(1).max(50000),
@@ -92,11 +83,7 @@ export type Agent = z.infer<typeof agentInput> & {
   // Changes on every save; sent back so a stale editor cannot overwrite newer access.
   revision?: string
 }
-export type Project = z.infer<typeof projectInput> & {
-  origin?: string
-  id: string
-  createdAt: number
-}
+export type { Project } from './generated/typescript/Project'
 export type Task = z.infer<typeof taskInput> & {
   id: string
   createdAt: number
