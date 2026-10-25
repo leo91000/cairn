@@ -601,7 +601,9 @@ test('switching a machine to native enrolls it again and retires the previous no
 test('existing conversation explicitly confirms backend migration and follows its progress', async ({ page, workspace }) => {
   test.setTimeout(60000)
   await useRelayForHttpMocks(page)
-  const chat = await workspace.api('/api/chats', 'POST', {})
+  // Earlier enrollment journeys may change Main's backend or allowed nodes.
+  const agent = await workspace.api('/api/agents', 'POST', { name: 'Migration source' })
+  const chat = await workspace.api('/api/chats', 'POST', { agentId: agent.id })
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Keep this conversation' })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
   await page.route('**/nodes/placement/*', route => route.fulfill({ json: { nodes: [{ id: 'native-fixture', name: 'Desktop GPU' }], pinnedNodeId: null, preferredNodeId: null } }))
