@@ -48,7 +48,7 @@ test('OpenCode connects a Zen key, selects native models and runs a conversation
   await page.getByLabel('Name', { exact: true }).fill('OpenCode workspace helper')
   await grantFullAccess(page)
   await openAgentSection(page, 'Coding agent & model')
-  const picker = page.getByRole('button', { name: /^Agent, model and reasoning/ })
+  const picker = page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })
   await picker.click()
   const menu = page.getByRole('dialog', { name: 'Agent & model' })
   await menu.getByRole('radio', { name: 'OpenCode', exact: true }).click()
@@ -216,7 +216,7 @@ test('OpenCode Auto runs a model on the first connection, then the next one at i
   await page.goto(workspacePath(`/chats/${chat.id}`))
   // The reply names the connection that wrote it.
   await expect(page.getByRole('article').filter({ hasText: 'compact status panel' }).getByText('via OpenCode Zen')).toBeVisible()
-  const picker = page.getByRole('button', { name: /^Agent, model and reasoning/ })
+  const picker = page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })
   await picker.click()
   const menu = page.getByRole('dialog', { name: 'Agent & model' })
   const connection = menu.getByRole('radiogroup', { name: 'Connection' })
@@ -251,7 +251,7 @@ test('OpenCode keeps an explicitly selected model and reasoning after opening an
 
   await page.goto(workspacePath('/chats'))
   await signIn(page)
-  const picker = page.getByRole('button', { name: /^Agent, model and reasoning/ })
+  const picker = page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })
   const menu = page.getByRole('dialog', { name: 'Agent & model' })
   await picker.click()
   await menu.getByRole('radio', { name: 'OpenCode', exact: true }).click()

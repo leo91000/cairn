@@ -89,6 +89,7 @@ import {
   Zap,
 } from '../icons'
 import { connectionTone, installationKey, routeLabel } from '../installation-context'
+import { modelCatalogs } from '../models'
 import { useReadWhileOpen } from '../reads'
 import { useRetryState } from '../run-retry'
 import { exclusiveSuspensionLabel, isExclusivelySuspended } from '../run-status'
@@ -160,6 +161,9 @@ const deliverables = computed(() => live.snapshot.value?.artifacts ?? [])
 const draft = ref('')
 const model = ref('')
 const reasoning = ref('')
+const speed = ref('')
+// Names queued messages' speeds; the composer's picker keeps this catalog current.
+const codexModels = computed(() => modelCatalogs.codex.catalog.models)
 const provider = ref<'' | Provider>('')
 const history = ref(false)
 const deletingConversation = ref<ChatDetail>()
@@ -439,6 +443,7 @@ const chosenProvider = computed({
     provider.value = value
     model.value = ''
     reasoning.value = ''
+    speed.value = ''
   },
 })
 const switchingProvider = computed(() => !!detail.value?.run && chosenProvider.value !== currentProvider.value)
@@ -507,6 +512,7 @@ let submission: {
     provider: Provider
     model: string
     reasoning: string
+    speed: string
     attachmentIds: string[]
   }
 } | undefined
@@ -521,6 +527,7 @@ function newConversation() {
   provider.value = ''
   model.value = ''
   reasoning.value = ''
+  speed.value = ''
   agentId.value = MAIN_AGENT_ID
   projectId.value = ''
   createdChat = undefined
@@ -577,12 +584,15 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
     // conversation selection explicit on the wire, including after a reload.
     const selectedModel = model.value || inheritedAssistant.value?.model || ''
     const selectedReasoning = reasoning.value || (!model.value ? inheritedAssistant.value?.reasoning : '') || ''
+    // The speed survives a model change, so it is inherited even with a new model.
+    const selectedSpeed = speed.value || inheritedAssistant.value?.speed || ''
     const content = {
       text,
       mode,
       provider: chosenProvider.value,
       model: selectedModel,
       reasoning: selectedReasoning,
+      speed: selectedSpeed,
       attachmentIds,
     }
     const submissionKey = JSON.stringify({ chatId: chat.id, editing: editing.value, ...content })
@@ -689,6 +699,7 @@ function edit(message: ChatMessage) {
   provider.value = message.provider || currentProvider.value
   model.value = message.model
   reasoning.value = message.reasoning || ''
+  speed.value = message.speed || ''
   textarea.value?.focus()
 }
 
@@ -705,6 +716,7 @@ watch(chatId, (id) => {
   provider.value = ''
   model.value = ''
   reasoning.value = ''
+  speed.value = ''
   submission = undefined
   const destinationId = createdChat && createdChat.slug === id ? createdChat.id : selectedChatId.value
   createdChat = undefined
@@ -1198,6 +1210,7 @@ function key(event: KeyboardEvent) {
               <template v-if="pending.length || detail?.paused">
                 <QueueStrip
                   :pending="pending"
+                  :models="codexModels"
                   :paused="!!detail?.paused"
                   :working="active"
                   :busy="busy"
@@ -1271,9 +1284,11 @@ function key(event: KeyboardEvent) {
                       v-model:provider="chosenProvider"
                       v-model:model="model"
                       v-model:reasoning="reasoning"
+                      v-model:speed="speed"
                       :inherit="!!inheritedAssistant"
                       :default-model="inheritedAssistant?.model || ''"
                       :default-reasoning="inheritedAssistant?.reasoning || ''"
+                      :default-speed="inheritedAssistant?.speed || ''"
                       :default-source="inheritConversation ? 'conversation' : 'agent'"
                       :switching="switchingProvider"
                       :disabled="busy"

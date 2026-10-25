@@ -8,6 +8,7 @@ use crate::{
     config::Config,
     error::{Error, Result},
     execution,
+    models::ServiceTierChoice,
     process::Environment,
     rpc::Session,
     service::Service,
@@ -105,13 +106,36 @@ impl ExecutionAdapter for Codex {
         plan: &mut Value,
         account: Option<&Lease>,
     ) -> Result<()> {
-        if text(plan, "reasoning").is_empty() {
-            let source = account.map_or("", |account| account.account_id.as_str());
-            if let Some((model, effort)) =
+        let source = account.map_or("", |account| account.account_id.as_str());
+        if text(plan, "reasoning").is_empty()
+            && let Some((model, effort)) =
                 crate::models::cached_defaults(s, source, text(plan, "model")).await?
-            {
-                plan["model"] = model.into();
-                plan["reasoning"] = effort.into();
+        {
+            plan["model"] = model.into();
+            plan["reasoning"] = effort.into();
+        }
+
+        let speed = text(plan, "speed").to_owned();
+        let tier = crate::models::service_tier(s, source, text(plan, "model"), &speed).await?;
+        match tier {
+            ServiceTierChoice::Send(tier) => plan["serviceTier"] = tier.into(),
+            ServiceTierChoice::Unavailable => {
+                // Codex would silently omit the tier; say so instead of implying a faster run.
+                plan["serviceTier"] = crate::models::CODEX_STANDARD_TIER.into();
+                let payload = json!({
+                    "speed": {
+                        "requested": speed,
+                        "applied": crate::models::STANDARD_SPEED,
+                    },
+                });
+                s.store
+                    .event(
+                        text(plan, "runId"),
+                        "status",
+                        "Codex doesn’t offer the selected speed for this model here. This turn runs at Standard speed.",
+                        Some(payload),
+                    )
+                    .await?;
             }
         }
         Ok(())

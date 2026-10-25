@@ -33,6 +33,12 @@
         "maxLength": 40,
         "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
       },
+      "speed": {
+        "default": "",
+        "type": "string",
+        "maxLength": 40,
+        "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
+      },
       "instructions": {
         "default": "",
         "type": "string",
@@ -223,6 +229,7 @@
       "description",
       "model",
       "reasoning",
+      "speed",
       "instructions",
       "timeoutMinutes",
       "access",
@@ -416,6 +423,12 @@
         "type": "string",
         "maxLength": 40,
         "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
+      },
+      "speed": {
+        "default": "",
+        "type": "string",
+        "maxLength": 40,
+        "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
       }
     },
     "required": [
@@ -425,7 +438,8 @@
       "mode",
       "provider",
       "model",
-      "reasoning"
+      "reasoning",
+      "speed"
     ],
     "additionalProperties": false
   },

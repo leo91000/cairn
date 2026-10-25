@@ -874,6 +874,14 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
         artifact.title = engineNoticeTitle(data)
     }
 
+    // A speed Codex does not offer for the run's model runs at Standard: the conversation says so.
+    if (event.type === 'status' && text(record(data.speed).applied)) {
+      artifact.title = 'This turn runs at Standard speed'
+      artifact.subtitle = 'Codex doesn’t offer the selected speed for this model here'
+      artifact.status = 'info'
+      artifact.attention = true
+    }
+
     if (artifact.kind === 'notice' && ['error', 'diagnostic', 'item.completed'].includes(event.type) && connectionText(artifact.raw)) {
       artifact.title = 'Connection interrupted'
       artifact.attention = true

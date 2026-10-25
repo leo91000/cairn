@@ -196,7 +196,12 @@ impl Worker {
         let provider = Provider::of_run(&run)?;
         timing.next("account_acquire");
         let model = text(&run["snapshot"]["agent"], "model");
-        let account = match s.accounts.acquire(s, &run_id, provider, model).await {
+        let speed = text(&run["snapshot"]["agent"], "speed");
+        let account = match s
+            .accounts
+            .acquire_for(s, &run_id, provider, model, speed)
+            .await
+        {
             Ok(account) => account,
             Err(error) => return report_account_wait(s, &run, provider, &error).await,
         };

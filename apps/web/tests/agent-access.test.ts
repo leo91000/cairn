@@ -657,3 +657,21 @@ it('reviews administrator node admission as a power even after converting a wild
   administrator.nativeReviewedAgents = ['future']
   expect(nativeReviewNodes(draft, ownContext)).toEqual([])
 })
+
+it('edits the Codex speed with the model and keeps it for agents saved before speeds', () => {
+  const saved = draftOf({
+    id: 'a',
+    name: 'Reviewer',
+    provider: 'codex',
+    reasoning: 'high',
+  } as unknown as Agent)
+  expect(saved.speed).toBe('')
+  const mine = structuredClone(saved)
+  mine.speed = 'priority'
+  expect(changes(saved, mine)).toEqual(['model'])
+  const theirs = structuredClone(saved)
+  theirs.reasoning = 'low'
+  const rebased = rebaseDraft(saved, mine, theirs)
+  expect(rebased).toMatchObject({ speed: 'priority', reasoning: 'low' })
+  expect(errorSection('Speed applies only to Codex agents. Remove it or choose Codex.')).toBe('model')
+})

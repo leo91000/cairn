@@ -377,6 +377,7 @@ internal fun ChatPage(
     var provider by rememberSaveable(id) { mutableStateOf(savedDraft.provider) }
     var model by rememberSaveable(id) { mutableStateOf(savedDraft.model) }
     var reasoning by rememberSaveable(id) { mutableStateOf(savedDraft.reasoning) }
+    var speed by rememberSaveable(id) { mutableStateOf(savedDraft.speed) }
     var attachments by rememberForm(savedDraft.attachments)
     // Per-file states of the composer: refused before upload, uploading, or failed to upload.
     var rejected by rememberForm(savedDraft.rejected)
@@ -411,6 +412,7 @@ internal fun ChatPage(
                     submissionKey,
                     provider,
                     rejected,
+                    speed,
                 )
     }
     SideEffect { persistDraft() }
@@ -535,10 +537,12 @@ internal fun ChatPage(
         else selectedAgent?.takeIf { it.provider == chosenProvider }
     val defaultModel = inheritedAssistant?.model.orEmpty()
     val defaultReasoning = inheritedAssistant?.reasoning.orEmpty()
+    val defaultSpeed = inheritedAssistant?.speed.orEmpty()
     fun chooseProvider(value: String) {
         provider = value
         model = ""
         reasoning = ""
+        speed = ""
     }
     val skillOptions =
         remember(state.skills, selectedAgent, chat?.projectId, project, chat == null) {
@@ -673,12 +677,15 @@ internal fun ChatPage(
             val selectedReasoning = reasoning.ifBlank {
                 if (model.isBlank()) defaultReasoning else ""
             }
+            // The speed survives a model change, so it is inherited even with a new model.
+            val selectedSpeed = speed.ifBlank { defaultSpeed }
             val content = buildJsonObject {
                 put("text", draft.trim())
                 put("mode", mode)
                 put("provider", chosenProvider)
                 put("model", selectedModel)
                 put("reasoning", selectedReasoning)
+                put("speed", selectedSpeed)
                 put(
                     "attachmentIds",
                     wireJson.encodeToJsonElement(attachments.map { it.attachment.id }),
@@ -703,6 +710,7 @@ internal fun ChatPage(
                         System.currentTimeMillis(),
                         attachments.map { it.attachment },
                         provider = chosenProvider,
+                        speed = selectedSpeed,
                     )
             try {
                 api.request(
@@ -733,6 +741,7 @@ internal fun ChatPage(
         provider = message.provider.ifBlank { currentProvider }
         model = message.model
         reasoning = message.reasoning
+        speed = message.speed
         attachments = message.attachments.map { DraftAttachment(it) }
     }
     fun steerQueued(message: ChatMessage) {
@@ -747,6 +756,7 @@ internal fun ChatPage(
                     put("provider", message.provider)
                     put("model", message.model)
                     put("reasoning", message.reasoning)
+                    put("speed", message.speed)
                     put(
                         "attachmentIds",
                         wireJson.encodeToJsonElement(message.attachments.map { it.id }),
@@ -1438,6 +1448,7 @@ internal fun ChatPage(
                                             steer = ::steerQueued,
                                             remove = { removing = it },
                                             togglePause = { chat?.let(::togglePause) },
+                                            models = state.modelCatalog("codex").models,
                                             attachments = {
                                                 MessageAttachments(
                                                     vm,
@@ -1587,6 +1598,9 @@ internal fun ChatPage(
                                                 provider = chosenProvider,
                                                 changeProvider = ::chooseProvider,
                                                 switching = switchingProvider,
+                                                speed = speed,
+                                                defaultSpeed = defaultSpeed,
+                                                changeSpeed = { speed = it },
                                             ) { m, r ->
                                                 model = m
                                                 reasoning = r

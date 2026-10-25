@@ -648,7 +648,7 @@ impl Driver for Claude {
         }
     }
 
-    async fn supports(&self, _s: &Service, _id: &str, _model: &str) -> Result<bool> {
+    async fn supports(&self, _s: &Service, _id: &str, _model: &str, _speed: &str) -> Result<bool> {
         Ok(true)
     }
 
