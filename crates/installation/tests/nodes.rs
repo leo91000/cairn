@@ -277,7 +277,7 @@ fn schedulable_node(id: &str, limits: &Value) -> Value {
         "executionReady": true,
         "sharedResources": true,
         "lastSeen": now(),
-        "capabilities": { "kvm": true, "fuse": true },
+        "capabilities": { "kvm": true },
         "limits": limits,
     })
 }
@@ -370,7 +370,6 @@ async fn shared_budget_must_be_applied_before_admission_and_reconfiguration_paus
     record["name"] = "Shared worker".into();
     record["slots"] = 4.into();
     record["capabilities"] = capabilities(true, 8, 8192, 65536);
-    record["capabilities"]["fuse"] = true.into();
     owner.put("nodes", record).await;
     owner.authorize_node(&node, token).await;
     let mut heartbeat = json!({
@@ -2256,48 +2255,6 @@ async fn explicit_resource_requests_are_rejected_before_moving() {
         error
             .message
             .contains("resource requests are no longer supported")
-    );
-}
-
-#[tokio::test]
-async fn a_moved_disk_requires_a_node_with_fuse() {
-    let owner = Owner::new().await;
-    let (agent, local_only, unknown, s3_ready) = (id(), id(), id(), id());
-    for (node, fuse) in [(&local_only, false), (&s3_ready, true)] {
-        let mut record = schedulable_node(node, &limits(4, 8192, 32768));
-        record["storage"] = json!({ "enabled": false, "reserveMiB": 64, "reservePercent": 1 });
-        record["capabilities"] = json!({
-            "kvm": true,
-            "fuse": fuse,
-            "diskMiB": 32768,
-            "diskTotalMiB": 32768,
-        });
-        owner.put("nodes", record).await;
-    }
-    let mut record = schedulable_node(&unknown, &limits(4, 8192, 32768));
-    record["capabilities"] = json!({ "kvm": true });
-    owner.put("nodes", record).await;
-    owner
-        .grant_nodes(&agent, json!([local_only, unknown, s3_ready]))
-        .await;
-    let mut run = agent_run(&id(), &agent);
-    run["placementTransition"] = true.into();
-    for target in [&local_only, &unknown] {
-        run["targetNodeId"] = target.clone().into();
-        assert_eq!(
-            placement::reserve(&owner.service, &run, &id())
-                .await
-                .unwrap_err()
-                .status,
-            503
-        );
-    }
-    run["targetNodeId"] = s3_ready.clone().into();
-    assert_eq!(
-        placement::reserve(&owner.service, &run, &id())
-            .await
-            .unwrap()["nodeId"],
-        s3_ready
     );
 }
 
@@ -4268,7 +4225,7 @@ async fn node_agent_grants_are_edited_from_the_node_without_narrowing_all_node_a
                 "accepting": true,
                 "tags": [],
                 "lastSeen": now(),
-                "capabilities": { "kvm": true, "fuse": true },
+                "capabilities": { "kvm": true },
                 "limits": limits(4, 8192, 65536),
             }),
         )
@@ -4332,7 +4289,7 @@ async fn mission_wait_and_node_move_exclude_each_other_without_leaking_destinati
             .await
             .unwrap();
         let input = json!({
-            "condition": { "type": "delay", "seconds": 3600 }, "reason": "Wait for CI",
+            "conditions": [{ "type": "delay", "seconds": 3600 }], "reason": "Wait for CI",
         });
         let args = json!({ "nodeId": node });
         let register_wait = || cairn_installation::waits::schedule(&owner.service, token, &input);
@@ -4473,7 +4430,7 @@ async fn stale_node_disks_are_reported_and_freed_on_request() {
                 "revoked": false,
                 "accepting": true,
                 "tags": [],
-                "capabilities": { "kvm": true, "fuse": true },
+                "capabilities": { "kvm": true },
                 "limits": limits(4, 8192, 65536),
             }),
         )

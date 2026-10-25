@@ -261,9 +261,17 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_workspace(false).await
+    }
+
+    async fn with_workspace(workspace: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("home")).unwrap();
-        let service = Service::new(common::config(root.path())).await.unwrap();
+        let mut config = common::config(root.path());
+        if workspace {
+            config.runner_url = "http://unused-runner:4311".into();
+        }
+        let service = Service::new(config).await.unwrap();
         let router = common::relay_fixture::router(service.clone())
             .await
             .unwrap();
@@ -305,7 +313,6 @@ impl Fixture {
                 "diskMiB": 100000,
                 "diskTotalMiB": 100000,
                 "kvm": false,
-                "fuse": false,
             },
             "limits": { "cpu": 2, "memoryMiB": 4096, "diskMiB": 32768 },
             "slots": 1,
@@ -413,6 +420,197 @@ impl Fixture {
             "snapshot": { "agent": self.agent },
         })
     }
+}
+
+#[tokio::test]
+async fn delegated_native_administration_requires_the_requesters_current_review() {
+    let mut f = Fixture::with_workspace(true).await;
+    f.agent["access"]["delegation"] = true.into();
+    f.agent["access"]["nodes"] = Value::Null;
+    f.service
+        .store
+        .put("agents", f.agent.clone())
+        .await
+        .unwrap();
+
+    let mut administrator = f.node.clone();
+    administrator["id"] = id().into();
+    administrator["name"] = "Administrative host".into();
+    f.service
+        .store
+        .put("nodes", administrator.clone())
+        .await
+        .unwrap();
+    let target = f
+        .service
+        .agent(
+            json!({
+                "name": "Reviewed target",
+                "access": { "backend": "native", "nodes": [administrator["id"]] },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let (_, parent) = f.conversation().await;
+    let parent = f
+        .service
+        .store
+        .patch_run(
+            text(&parent, "id"),
+            json!({
+                "status": "running", "nodeId": f.node["id"],
+            }),
+        )
+        .await
+        .unwrap();
+    let configuration = f
+        .service
+        .mcps
+        .run_configuration(&f.service, &parent)
+        .await
+        .unwrap();
+    let token = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+
+    let generation = id();
+    administrator["capabilities"]["nativeModeProtocol"] = 1.into();
+    administrator["nativeModeRequest"] =
+        json!({ "mode": "administrator", "generation": generation });
+    administrator["nativeModeObserved"] = json!({
+        "mode": "administrator", "generation": generation, "status": "applied",
+    });
+    administrator["nativeReviewedAgents"] = json!([target["id"]]);
+    f.service
+        .store
+        .put("nodes", administrator.clone())
+        .await
+        .unwrap();
+    let input = json!({ "task": "Review on the administrative host", "agentId": target["id"] });
+    let error = cairn_installation::delegation::delegate(&f.service, token, &input)
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+
+    administrator["nativeReviewedAgents"] = json!([target["id"], f.agent["id"]]);
+    f.service
+        .store
+        .put("nodes", administrator.clone())
+        .await
+        .unwrap();
+    let task = cairn_installation::delegation::delegate(&f.service, token, &input)
+        .await
+        .unwrap();
+    f.service.chat_tick(&HashSet::new()).await.unwrap();
+    let child = f.service.chat_detail(text(&task, "chatId")).await.unwrap()["run"].clone();
+    let check = |node: Value| {
+        let child = child.clone();
+        f.service
+            .store
+            .read(move |db| policy::allows(db, &child, &node))
+    };
+    assert!(check(administrator.clone()).await.unwrap());
+
+    administrator["nativeReviewedAgents"] = json!([target["id"]]);
+    f.service
+        .store
+        .put("nodes", administrator.clone())
+        .await
+        .unwrap();
+    assert!(
+        !check(administrator).await.unwrap(),
+        "Removing the requester's review revokes its child's administrator admission"
+    );
+}
+
+#[tokio::test]
+async fn task_delegation_has_its_own_revocable_native_authority() {
+    let mut f = Fixture::with_workspace(true).await;
+    f.agent["access"]["delegation"] = true.into();
+    f.service
+        .store
+        .put("agents", f.agent.clone())
+        .await
+        .unwrap();
+    let (_, parent) = f.conversation().await;
+    let parent = f
+        .service
+        .store
+        .patch_run(text(&parent, "id"), json!({ "status": "running" }))
+        .await
+        .unwrap();
+    let configuration = f
+        .service
+        .mcps
+        .run_configuration(&f.service, &parent)
+        .await
+        .unwrap();
+    let task = cairn_installation::delegation::delegate(
+        &f.service,
+        text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN"),
+        &json!({ "task": "Review on the authorized native node" }),
+    )
+    .await
+    .unwrap();
+    let child_id = text(&task, "chatId");
+    let child = f.service.get("chats", child_id).await.unwrap();
+    assert_eq!(child["nativeParentRunId"], parent["id"]);
+    assert_eq!(child["nativeParentAccess"], "delegation");
+    assert_eq!(child["nativeAuthorityNodes"], json!([f.node["id"]]));
+    f.service.chat_tick(&HashSet::new()).await.unwrap();
+    let child = f.service.chat_detail(child_id).await.unwrap()["run"].clone();
+    assert_eq!(child["nativeParentAccess"], "delegation");
+
+    let check = |run: Value| {
+        let node = f.node.clone();
+        f.service
+            .store
+            .read(move |db| policy::allows(db, &run, &node))
+    };
+    assert!(check(child.clone()).await.unwrap());
+    let mut management_child = child.clone();
+    management_child["nativeParentAccess"] = Value::Null;
+    assert!(
+        !check(management_child).await.unwrap(),
+        "Management-created and historical edges still require installation access"
+    );
+
+    // A human follow-up preserves the capability that authorized the parent edge.
+    policy::CALLER
+        .scope(
+            Some(TRUSTED.into()),
+            f.service.chat_send(
+                child_id,
+                json!({ "id": id(), "text": "Also inspect the tests" }),
+            ),
+        )
+        .await
+        .unwrap();
+    let continued = f.service.get("chats", child_id).await.unwrap();
+    assert_eq!(continued["nativeParentAccess"], "delegation");
+
+    let mut revoked = f.agent.clone();
+    revoked["access"]["delegation"] = false.into();
+    revoked["access"]["installation"] = true.into();
+    f.service.store.put("agents", revoked).await.unwrap();
+    assert!(
+        !check(child.clone()).await.unwrap(),
+        "Installation access cannot replace revoked task delegation"
+    );
+    f.service
+        .store
+        .put("agents", f.agent.clone())
+        .await
+        .unwrap();
+    assert!(check(child.clone()).await.unwrap());
+    f.service
+        .store
+        .patch_run(text(&parent, "id"), json!({ "nativeAuthorityNodes": [] }))
+        .await
+        .unwrap();
+    assert!(
+        !check(child).await.unwrap(),
+        "The parent's node ceiling remains live"
+    );
 }
 
 #[tokio::test]
@@ -772,7 +970,6 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
         let mut node = f.node.clone();
         node["capabilities"]["backend"] = backend.into();
         node["capabilities"]["kvm"] = (!native).into();
-        node["capabilities"]["fuse"] = (!native).into();
         f.service.store.put("nodes", node.clone()).await.unwrap();
         let mut agent = f.agent.clone();
         agent["access"]["backend"] = backend.into();
@@ -825,14 +1022,11 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
         if changed_backend {
             node["capabilities"]["backend"] = "firecracker".into();
             node["capabilities"]["kvm"] = true.into();
-            node["capabilities"]["fuse"] = true.into();
-        } else if !native {
-            node["capabilities"]["fuse"] = false.into();
         }
         f.service.store.put("nodes", node).await.unwrap();
         let attempt = id();
         let claimed = placement::reserve(&f.service, &resumed, &attempt).await;
-        let succeeds = native && !changed_backend;
+        let succeeds = !changed_backend;
         if succeeds {
             let claimed = claimed.unwrap();
             assert_eq!(claimed["nodeId"], f.node["id"]);
@@ -850,14 +1044,7 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
         } else {
             let error = claimed.unwrap_err();
             assert_eq!(error.status, 409);
-            assert_eq!(
-                error.message,
-                if changed_backend {
-                    "Destination execution backend changed."
-                } else {
-                    "Destination no longer supports on-demand disks."
-                }
-            );
+            assert_eq!(error.message, "Destination execution backend changed.");
             assert!(
                 f.service
                     .store
@@ -903,6 +1090,154 @@ async fn retained_conversations_exhaust_the_shared_native_admission_budget() {
     let next = f.run();
     common::add_run(&f.service.store, &next).await;
     assert!(placement::reserve(&f.service, &next, &id()).await.is_err());
+}
+
+#[tokio::test]
+async fn native_same_node_resume_reuses_retained_capacity_on_a_small_pool() {
+    let f = Fixture::new().await;
+    let mut node = f.node.clone();
+    node["limits"]["diskMiB"] = 32768.into();
+    node["diskGrowthProtocol"] = 1.into();
+    node["diskCapacity"] = json!({ "protocol": 1, "capturedAt": now(), "usedBytes": 0,
+        "freeBytes": 900 * 1024 * 1024 * 1024u64, "ownedBytes": {}, "retainedBytes": {}, "requests": [] });
+    f.service.store.put("nodes", node.clone()).await.unwrap();
+    let mut run = f.run();
+    common::add_run(&f.service.store, &run).await;
+    let first = id();
+    let selected = placement::reserve(&f.service, &run, &first).await.unwrap();
+    assert_eq!(selected["resources"]["diskMiB"], 31_000);
+    common::set_checkpoint(
+        &f.service.store,
+        text(&run, "id"),
+        json!({
+            "nodeId": node["id"], "runnerId": first, "resources": selected["resources"],
+        }),
+    )
+    .await;
+    placement::materialize(&f.service, &first).await.unwrap();
+    placement::release(&f.service, &first).await.unwrap();
+    let volume_id = format!("{}:{}", text(&run, "id"), text(&node, "id"));
+    let mut volume = f
+        .service
+        .store
+        .get("node-volumes", &volume_id)
+        .await
+        .unwrap()
+        .unwrap();
+    volume["materialized"] = true.into();
+    volume["storageMode"] = "on-demand".into();
+    volume["diskMiB"] = 256.into();
+    volume["activeDiskMiB"] = 256.into();
+    f.service.store.put("node-volumes", volume).await.unwrap();
+    node["diskCapacity"]["usedBytes"] = (256 * 1024 * 1024u64).into();
+    node["diskCapacity"]["retainedBytes"] = json!({ text(&run, "id"): 256 * 1024 * 1024u64 });
+    f.service.store.put("nodes", node).await.unwrap();
+    run["status"] = "queued".into();
+    run["finishedAt"] = Value::Null;
+    run["recoveryPending"] = true.into();
+    f.service
+        .store
+        .patch_run(text(&run, "id"), run.clone())
+        .await
+        .unwrap();
+    placement::check(&f.service, &run).await.unwrap();
+    let selected = placement::reserve(&f.service, &run, &id()).await.unwrap();
+    assert_eq!(selected["resources"]["diskMiB"], 31_000);
+}
+
+#[tokio::test]
+async fn native_disk_growth_is_idempotent_and_competes_atomically_with_admission() {
+    let f = Fixture::new().await;
+    let gib = 1024 * 1024 * 1024u64;
+    let mut node = f.node.clone();
+    node["slots"] = 4.into();
+    node["limits"]["diskMiB"] = (80 * 1024).into();
+    node["capabilities"]["diskTotalMiB"] = (1024 * 1024).into();
+    node["capabilities"]["diskMiB"] = (900 * 1024).into();
+    f.service.store.put("nodes", node.clone()).await.unwrap();
+    let token = auth::token();
+    f.service
+        .store
+        .set(
+            &format!("node-token:{}", auth::digest(&token)),
+            node["id"].clone(),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut attempts = Vec::new();
+    let mut runs = Vec::new();
+    for _ in 0..2 {
+        let mut run = f.run();
+        run["status"] = "running".into();
+        run["resources"] = json!({ "cpu": 2, "memoryMiB": 4096, "diskMiB": 32768 });
+        common::add_run(&f.service.store, &run).await;
+        let attempt = id();
+        placement::reserve(&f.service, &run, &attempt)
+            .await
+            .unwrap();
+        common::set_checkpoint(
+            &f.service.store,
+            text(&run, "id"),
+            json!({ "nodeId": node["id"], "runnerId": attempt }),
+        )
+        .await;
+        attempts.push(attempt);
+        runs.push(run);
+    }
+    let body = json!({
+        "backend": "native", "nodeProtocol": 2, "executionReady": true, "dataRoot": "/fixture",
+        "runtimeId": "development", "runtimes": ["development"],
+        "capabilities": node["capabilities"], "pool": { "capacity": 4 },
+        "sharedResources": true, "budget": { "slots": 4, "limits": node["limits"] },
+        "nativeMode": { "mode": "protected", "generation": null, "status": "applied" },
+        "usage": { "diskMiB": 16384 },
+        "diskGrowth": { "protocol": 1, "capturedAt": now(), "usedBytes": 16 * gib, "freeBytes": 900 * gib,
+            "ownedBytes": { &attempts[0]: 8 * gib, &attempts[1]: 8 * gib },
+            "requests": [
+                { "attemptId": attempts[0], "currentMiB": 32768 },
+                { "attemptId": attempts[1], "currentMiB": 32768 },
+            ] },
+    });
+    for _ in 0..2 {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/internal/nodes/heartbeat")
+            .header("host", common::HOST)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = common::send(&f.router, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let reply = read_json(response).await;
+        assert_eq!(
+            reply["diskGrowth"]["grants"][0]["allowanceMiB"], 40960,
+            "{reply}"
+        );
+        assert_eq!(
+            reply["diskGrowth"]["grants"][1]["allowanceMiB"], 32768,
+            "{reply}"
+        );
+    }
+    assert_eq!(
+        f.service.store.run(text(&runs[0], "id")).await.unwrap()["resources"]["diskMiB"],
+        40960
+    );
+    let incoming = f.run();
+    common::add_run(&f.service.store, &incoming).await;
+    assert!(
+        placement::reserve(&f.service, &incoming, &id())
+            .await
+            .is_err()
+    );
+    placement::release(&f.service, &attempts[0]).await.unwrap();
+    placement::release(&f.service, &attempts[0]).await.unwrap();
+    assert!(
+        placement::reserve(&f.service, &incoming, &id())
+            .await
+            .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -1284,7 +1619,6 @@ async fn parent_node_grant_reductions_revoke_existing_native_delegation() {
         node["id"] = node_id.clone().into();
         node["capabilities"]["backend"] = "firecracker".into();
         node["capabilities"]["kvm"] = true.into();
-        node["capabilities"]["fuse"] = true.into();
         f.service.store.put("nodes", node).await.unwrap();
     }
     let agent = f

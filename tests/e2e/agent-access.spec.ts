@@ -791,7 +791,6 @@ test('the execution backend chooses which nodes an agent can be granted', async 
         memoryMiB: 16384,
         diskMiB: 65536,
         kvm: false,
-        fuse: false,
       },
     },
   })

@@ -1,3 +1,5 @@
+> Statut : Le transport ublk reste l’unique transport. Les anciens sélecteurs Cargo/environnement, l’adaptateur FUSE, les snapshots mémoire et le layout paired sont supprimés ; le pool prêt et la publication des disques restent applicables.
+
 # ublk as the sole VM block transport
 
 Date: 2026-10-21
@@ -52,8 +54,7 @@ block drives, checkpoint/reopen, retention, memory reclamation and teardown.
 
 Fresh common-storage measurements compare this change against main
 `1e7355877adf763326b69fbaddc0edbb22c04734`. Reproduce on each checkout with
-`cargo build --locked --example storage-discard-benchmark`, then run
-`target/debug/examples/storage-discard-benchmark` separately. Both use Rust
+the standalone benchmark (since retired). Both used Rust
 1.97.1, the development profile, Linux 7.2.9 on the same 32-thread workstation,
 local tmpfs journals and in-memory encoded objects. Background compilation was
 active; these timings do not establish a transport performance improvement.

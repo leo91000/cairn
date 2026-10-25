@@ -119,6 +119,13 @@ impl Usage {
         self.extra.get("useBalance").and_then(Value::as_bool) == Some(true)
     }
 
+    /// Whether a window is scoped to `model` by name.
+    pub fn names(&self, model: &str) -> bool {
+        self.windows
+            .iter()
+            .any(|w| w.models.iter().any(|m| m == model))
+    }
+
     fn windows<'a>(&'a self, model: &'a str) -> impl Iterator<Item = &'a Window> {
         self.windows.iter().filter(move |w| w.applies(model))
     }

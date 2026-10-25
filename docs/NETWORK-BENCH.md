@@ -107,30 +107,19 @@ Rust first verifies the same conversation marker through HTTPS, then requests a
 signed grant and negotiates with the real installation DataChannel. It records
 `direct` only after the API response arrives on that channel and a selected UDP
 ICE pair is observed (`candidatePair.local` / `.remote`). Both clients expect
-**direct** for LAN, ordinary NAT, network change, same-server and packet loss;
+**direct** for LAN, ordinary NAT, network change and same-server. Packet loss
+uses the qualification contract below;
 UDP blocked, symmetric NAT and symmetric client expect **relay**. In the
 additional mDNS-only client case, the browser expects relay and Rust expects direct. Neither uses
 a fixed route label. `--expect-route` and `--expect-rust-route` override the
 scenario defaults; a mismatch fails the bench.
 
-With Rust direct expected, packet-loss qualification samples three independent
-Rust negotiations. At least
-one must deliver its read directly; all three on relay fail qualification.
-Individual relay reads are accepted only with the fixed diagnostic
-`directFailure: { phase: "ice", timedOut: true }`, since the deterministic router
-also drops handshake packets and ICE retains its strict 30-second limit.
-Other failures and all other scenario route expectations remain strict. Every
-sample's actual route stays in the report, including successful fallback reads.
-
-Packet-loss reports also include `directNegotiations`: `attempts`, `direct`,
-`relay`, and `ratio` (direct responses divided by attempts, from 0 to 1). These
-counts describe only the three independent Rust negotiations, using their actual
-application-response routes; browser bootstrap and stream observations are
-excluded. The summary is written before qualification assertions, so an all-relay
-failure still records its zero direct ratio. Compare this field in
-`direct-relay-network-evidence/packet-loss.json` across CI runs. The requirement
-for at least one direct read and the exact ICE-timeout diagnostic for relay reads
-are unchanged. Explicit relay expectations also remain strict.
+Packet-loss reports include `directNegotiations`: `attempts`, `direct`, `relay`
+and `ratio`, based on the actual application-response routes of three independent
+Rust negotiations. Browser bootstrap and stream observations are excluded. These
+are measurements, not a minimum-direct-ratio gate. The
+[current qualification contract](#current-qualification-contract-308) determines
+which direct deliveries and diagnosed fallbacks must succeed.
 
 The numeric qualification browser is launched with Chromium's
 `--disable-features=WebRtcHideLocalIpsWithMdns` option so that host-candidate ICE
@@ -183,42 +172,6 @@ sequentially without retries. JSON reports and Playwright failure diagnostics ar
 `direct-relay-network-evidence`.
 Evidence contains no
 cookies, claim codes, machine credentials or conversation exports.
-
-## Residual packet-loss measurements (#126)
-
-Seven local runs on 2026-10-08 compared the merged #119 implementation with
-the #126 candidate using the unchanged `packet-loss` scenario and assertions. The
-base tree is `4427d79b47499c322862c99df07161140d90ca90`, shared by #119 head
-`43106bd` and merge `7c842df`. Base binaries/frontend came from #119's CI artifacts;
-the candidate binaries were built locally with the pinned toolchain. Each run
-used a fresh authenticated owner, installation, browser and Linux namespaces.
-
-| Build | Run | Result | Largest outbound application frame (JSON bytes) | Fragmented frames / pending transfers |
-| --- | --- | --- | --- | --- |
-| #119 | 1 | Pass; browser send + title: 9,582 ms | Not instrumented | Not instrumented |
-| #119 | 2 | Pass; browser send + title: 15,984 ms | 855 | 0 / 0 |
-| #119 | 3 | Message POST not observed within 10 s (line 165) | 685 | 0 / 0 |
-| #119 | 4 | Route stayed relay at 35 s (line 161) | 0 | 0 / 0 |
-| #126 | 1 | Message POST succeeded; title absent at 10 s (line 166) | 855 | 0 / 0 |
-| #126 | 2 | Message POST not observed within 10 s (line 165) | 855 | 0 / 0 |
-| #126 | 3 | Route stayed relay at 35 s (line 161) | 0 | 0 / 0 |
-
-A passive browser probe counted binary DataChannel sends from their 13-byte
-headers: declared total, offset and completion. It did not change packets,
-deadlines, network effects or retries. Only aggregate sizes/counts and the public
-transport observations' method, route and elapsed time were retained; no payloads
-or credentials were recorded. Run #126/1 reproduces the exact #119 title failure
-after the successful messages POST (9,515 ms after document initialization),
-with 11 packets, no fragmentation and no outstanding transfer.
-
-These results exclude reassembly waiting/rejection as the cause of that title
-failure: every request fits one packet, reservations are released synchronously
-on decoding, and this single-owner session has no competing member reservation.
-The #126 member-only admission paths are not used. Runs that never establish
-direct have not sent any application packet at all. The measurements establish
-this narrower conclusion; they do not establish general reliability under loss
-or diagnose the remaining ICE/POST/view latency. The 10-second POST/title and
-35-second route assertions are unchanged. Qualification remains #105.
 
 ## Published beacon STUN port
 
@@ -283,197 +236,36 @@ SDP, cookies, authorization IDs or logcat are uploaded. The **Android direct-rel
 device bench** CI job runs all three cases on API 36, fails on any failed case
 and retains only these sanitized reports.
 
-## Packet-loss investigation (#141)
+## Diagnosing loss and fallback
 
-The reported CI baseline is 8 failed jobs out of 29 (27.6%). Runs
-[37830006941](https://github.com/leo91000/cairn/actions/runs/37830006941) and
-[37907266093](https://github.com/leo91000/cairn/actions/runs/37907266093) fail the
-initial `direct` assertion under 35 s; other historical failures concern title
-arrival or three Rust negotiations remaining on relay. These are distinct
-failure modes, not eight interchangeable ICE failures.
+The deterministic router drops one outgoing IPv4 packet per five-packet block on
+each side, including TCP. It varies the dropped position using the fixed seed;
+aggregate 20% loss does not guarantee delivery of a particular SCTP exchange.
+Use [bounded qualification](NETWORK-QUALIFICATION.md) to separate recoverable DATA
+loss from starvation that must end in safe relay recovery.
 
-### DTLS retransmission
+Packet-loss setup creates its conversation on the authenticated relay because
+chat creation is not safely replayable. The idempotent message is then sent under
+loss. Heartbeats keep their 10-second interval and five-second response deadline.
+Fallback must have an observed heartbeat timeout, opening deadline or failed peer;
+unknown early failures remain errors. Product timers are not extended by the bench.
 
-Eight fresh, local promotion-only runs reproduced the exact initial failure
-once (12.5%). ICE connected at 1,936 ms, DTLS stayed connecting, no DataChannel
-message was sent, and the unchanged negotiation deadline closed the peer at
-30,661 ms. The route remained relay throughout the 35-second assertion.
-
-Pinned `rtc-dtls` 0.21.0 cleared its retransmission deadline before parsing a
-complete next flight. Partial or repeated previous flights could leave a lost
-certificate flight without any retransmission. A temporary, targeted probe of
-the real authenticated bench dropped a 659-byte client certificate datagram:
-it was never resent before the fix; afterwards retransmissions occurred at
-+1,000 and +2,001 ms and the channel opened at 4,210 ms. The probe was removed.
-
-A second defect affects the final server flight. The server marks itself complete
-when sending it, but an established endpoint no longer processed the client's
-repeated preceding flight, nor resent its cached final flight. A public endpoint
-regression loses that final flight: the server considers DTLS connected while
-the client remains waiting. It failed in 0.41 s before correction. This explains
-how local DTLS can look connected while the remote peer cannot open SCTP, matching
-the separate CI diagnostics `DTLS Connected / SCTP Connecting`.
-
-A temporary header-only loss router confirmed this in the authenticated bench:
-discard the first encrypted Finished on each client-side flow. Before final-flight
-recovery, all three Rust reads used relay after 30 s, with DTLS Connected and SCTP
-Connecting; their final record was emitted only once. After recovery, the same
-probe passed with Rust direct 3/3 and the cached final record retransmitted.
-Chromium already retransmitted its final flight in the control. No ciphertext,
-credentials or payload was logged, only record sizes/epochs/sequences and timings.
-The targeted loss was removed before ordinary qualification.
-
-Three public DTLS endpoint tests use virtual time: lost server flight/repeated
-ClientHello, lost Certificate/repeated server flight, and lost final server
-flight/repeated client Finished. The first two failed before the timer fix;
-the third failed before final-flight recovery. All three pass after the fixes
-in 0.07 s, including application delivery and application replay rejection:
+A bounded sibling `packet-loss.transport.json` records ICE/DTLS/DataChannel
+states, counters, monotonic timings and heartbeat-timeout labels, even on failure.
+It excludes candidates, SDP, addresses, certificates, credentials and content.
+Rust `directDiagnostics` separates ICE, DTLS and SCTP; the historical phase label
+`ice` covers the whole DataChannel-opening wait and does not identify the cause.
+The patched DTLS retransmission and final-flight rules are documented in
+[the vendored patch provenance](../vendor/rtc-dtls/CAIRN-PATCH.md). Run their public
+endpoint regressions through the isolated backend launcher:
 
 ```sh
 CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=4 pnpm test:backend --test direct_dtls_loss
 ```
 
-The fixes retain the timer until a complete next flight advances the handshake,
-and answer a recognized repeat with the cached final flight after local
-completion. They preserve crypto configuration, replay protection, grants,
-fingerprints, revocation and every product deadline.
-
-After completion, only the sender of the final flight answers, and only an
-authenticated Finished identical to the one already received triggers one copy
-of its cached flight. Other handshake records never reach the concluded
-transcript. A review found that an unexpected epoch-0 record, such as a 25-byte
-ServerHelloDone with the next message number, made the client re-verify a
-rebuilt transcript, fail with `ErrVerifyDataMismatch` and close the session. Two
-further public endpoint tests inject unexpected and repeated handshake records
-on both sides after completion: application data still flows, and the server
-resends its final flight exactly once per repeated Finished, never for other
-records or replays. Both failed before this correction.
-
-The 0.21.0 sources are the verified crates.io archive with four upstream source
-files patched; provenance and verification are in
-[`vendor/rtc-dtls/CAIRN-PATCH.md`](../vendor/rtc-dtls/CAIRN-PATCH.md).
-No WebRTC or other dependency version is upgraded.
-
-### Response observation and valid heartbeat fallback
-
-The first qualification matrix, [37947373445](https://github.com/leo91000/cairn/actions/runs/37947373445),
-passed three benches and failed one on observing a POST after 10 s, after
-promotion had succeeded. Six jobs were cancelled for diagnosis. A reduced
-prefix reproduced the same assertion failure in 1/20 natural-loss runs:
-POST observed **direct at 18,142 ms**, title at 19,056 ms, same open channel.
-No forced loss or phase shift was used. Same-lan/NAT sends took 149–386 ms.
-The existing client contract already permits 35 s per response and 30 s for
-fragment reassembly; the shorter observer could expire before valid recovery.
-
-The next main CI, [37952457396](https://github.com/leo91000/cairn/actions/runs/37952457396),
-promoted at 1,661 ms, but sent a message on relay at 13.865 s and closed the
-channel at 16,666 ms. Rust used direct 3/3. Its qualification matrix was
-interrupted after three successes. Reproduction CI
-[37956987153](https://github.com/leo91000/cairn/actions/runs/37956987153)
-recorded 41 independent packet-loss cases and five failures: two title observers,
-one relayed browser send, one interrupted chat creation, and one 0/3 Rust result.
-These measurements are not full eleven-scenario qualification runs.
-
-Thirty reduced local sends passed. A temporary loss-phase sweep then reproduced
-the relayed send and identified its cause: heartbeat sent at 13,342 ms, cancelled
-at 18,343 ms for its five-second response deadline, followed by relay. This is
-the documented health policy, not the initial negotiation defect. Another phase
-received the title after the original 10 s window, with a direct send at
-13,656 ms. Phase-controlled probes do not count as rates of the original profile
-and are removed after diagnosis.
-
-The packet-loss scenario therefore prepares its empty conversation on the
-**authenticated relay**, as it already does bootstrap reads. Chat creation is
-not safely replayable after transport loss. It then requires the browser's
-initial direct promotion under the unchanged 35 s assertion, releasing direct
-authorization only once that conversation is open, and sends the
-idempotent message under loss. POST and title observers allow 35 s only for this
-profile. A relayed message is accepted only when the browser diagnostic confirms
-**heartbeat timeout** and earlier successful authenticated direct traffic.
-Unknown fallbacks still fail. Three independent Rust negotiations still require
-at least one direct response; opening-timeout fallback remains the only accepted
-Rust relay reason. Other scenarios retain their original authorization release
-right after bootstrap, observer windows and route expectations. All
-anonymous-access, identity, revocation and security checks remain in place.
-
-No heartbeat delay changes: it is still sent every 10 s with 5 s for its response
-after transmission. A metadata-only `cairn-direct-heartbeat-timeout` event records
-that existing decision, and a public web regression verifies the timeout, relay
-selection and preservation of the idempotent message body.
-
-### Periodic loss aliasing after DTLS recovery
-
-Exact-head CI [37969386136](https://github.com/leo91000/cairn/actions/runs/37969386136)
-still reproduced the initial 35 s failure: ICE connected at 2,253 ms and DTLS
-connected by 3,376 ms, but its DataChannel stayed connecting until 31,377 ms.
-Only three incoming transport packets were observed throughout that interval.
-This is a different failure mode from DTLS remaining connecting.
-
-A temporary phase sweep reproduced the same trace locally (one failure in eleven
-phase-controlled cases; four follow-up controls passed, so phase alone does not
-pin timing). Header-only traces show a delivered first native SCTP INIT, followed
-by retries at approximately +1, +3, +7 and +15 seconds. Every retry was dropped:
-packet ordinals 83, 88, 93 and 103 all landed on the installation router's shifted
-five-packet boundary. Chromium's first INIT-ACK was also dropped. Native INIT
-retransmission is running, not missing. Moving a packet in the background changes
-the result. An extra targeted INIT loss was separately recovered at the existing
-backoff times. These controlled cases are not rates of the original profile.
-
-The fixed every-fifth pattern can therefore turn 20% aggregate loss into 100%
-loss of a periodic control exchange. A finite opening timeout correctly leaves
-that connection on relay; the bench's unconditional initial direct expectation
-is unrealistic for this synchronized pattern. Increasing deadlines would not
-repair the model and is deliberately avoided.
-
-The bench retains 20% loss, both directions and TCP/UDP, but varies the dropped
-position in each five-packet block. BLAKE2s of the fixed domain
-`cairn-network-loss-v1`, participant role and block ordinal makes the profile
-reproducible and separates the two sides. It is a stratified deterministic loss
-profile, not a claim to model independent random loss. It does not inspect DTLS,
-SCTP or application content and has no special control-packet exemption. Initial
-direct promotion is still required under 35 s, and all existing product timers
-and fallback policies remain unchanged.
-
-A regression through the real namespace/router interface sends 125 UDP packets
-on each side, checks exactly four survivors in every five-packet block, and
-replays the observed periodic retry positions after two background packets.
-Before the change every retry was lost on both sides (red in 9.18 s); after the
-change at least one retry survives, while the aggregate loss remains exactly
-25/125 per side. The ordinary public CLI also retains its reproducible 8/10 probe.
-The temporary phase control, header logger and promotion-only return were removed
-before qualification. This regression is about the network fixture's loss model;
-it does not promise that every SCTP handshake can recover arbitrary correlated
-loss.
-
-### Reproduction and qualification
-
-The router discards exactly one outgoing IPv4 packet in each five-packet block
-on both sides, including TCP. There are no retries inside a scenario. Run the complete authenticated
-seam with the original network topology:
-
-```sh
-CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=4 python3 tests/network-bench.py packet-loss --output test-results/network/packet-loss.json
-```
-
-Each run writes a bounded sibling `packet-loss.transport.json`, even on failure.
-It contains ICE/DTLS/DataChannel states, counters, monotonic timings and the
-heartbeat-timeout label; never candidates, SDP, addresses, certificates,
-credentials or application content. Rust `directDiagnostics` separates ICE,
-DTLS and SCTP states: the historical phase name `ice` covers the entire wait for
-DataChannel opening, rather than identifying ICE as the cause.
-
-After the first timer fix alone, ten full local packet-loss benches passed
-consecutively, with Rust direct 15/30; valid fallback does not mean every
-negotiation opens direct. Those intermediate-source results do not qualify the
-final head. Exact-head full CI, every qualification run/rerun and measured final
-rates are recorded with the separate Standards/Spec reviews in
-[PR #142](https://github.com/leo91000/cairn/pull/142).
-Qualification remains #105; this change performs no merge, release or deployment.
-
 ## Current qualification contract (#308)
 
-The historical universal packet-loss prerequisites described above are superseded
-by [bounded qualification](NETWORK-QUALIFICATION.md). The original 20% router,
+Use [bounded qualification](NETWORK-QUALIFICATION.md). The original 20% router,
 seed, topologies, security checks and product deadlines remain unchanged.
 `packet-loss` retains authenticated recovery, accepted batches, exactly one stored
 message and diagnosed failure/deadline checks. Promotion and three Rust routing

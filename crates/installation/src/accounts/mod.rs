@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sign_in::SignIn;
 use std::{
+    borrow::Cow,
     collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
@@ -102,6 +103,11 @@ pub trait Driver: Send + Sync {
 
     /// Codex never schedules on unknown usage; Claude Code's usage may be unavailable.
     fn requires_usage(&self) -> bool;
+
+    /// The name `usage` windows know a saved `model` by.
+    fn usage_model<'a>(&self, _usage: &Usage, model: &'a str) -> Cow<'a, str> {
+        Cow::Borrowed(model)
+    }
 
     async fn supports(&self, s: &Service, id: &str, model: &str) -> Result<bool>;
 
@@ -259,13 +265,14 @@ pub(crate) fn replenish(account: &mut Account, driver: &dyn Driver) {
     let Some(exhausted) = &account.exhausted else {
         return;
     };
-    let (at, model) = (exhausted.at, exhausted.model.as_str());
+    let at = exhausted.at;
     let read_since = account
         .usage
         .as_ref()
         .and_then(|u| u.checked_at)
         .is_some_and(|checked| checked > at);
     let current = account.usage();
+    let model = &*driver.usage_model(&current, &exhausted.model);
     let retry_unknown_capacity = !driver.requires_usage()
         && (!read_since || current.uses_balance())
         && now() - at >= driver.fresh_for();
@@ -303,13 +310,14 @@ fn capacity(account: &Account, driver: &dyn Driver, model: &str) -> Option<f64> 
     if usage.uses_balance() {
         return None;
     }
-    usage.remaining(model)
+    usage.remaining(&driver.usage_model(usage, model))
 }
 
 /// Whether usage and state let the account take a new `model` run, ignoring its slots.
 fn schedulable(account: &Account, driver: &dyn Driver, model: &str) -> bool {
     let current = fresh(account, driver);
-    let blocked = current && account.usage().blocked(model);
+    let usage = account.usage();
+    let blocked = current && usage.blocked(&driver.usage_model(&usage, model));
     let has_capacity =
         capacity(account, driver, model).map_or(!driver.requires_usage(), |n| n > 0.);
     account.is_active()

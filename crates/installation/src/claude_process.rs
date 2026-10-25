@@ -386,6 +386,7 @@ struct Turn<'a> {
     /// The ID Claude Code knows the request by.
     wire_id: String,
     submitted: HashSet<String>,
+    operational_notices: HashSet<String>,
     delivered: HashSet<String>,
     /// Submitted messages whose turn has not produced a result yet.
     pending: HashSet<String>,
@@ -426,6 +427,9 @@ impl Turn<'_> {
     }
 
     async fn deliver(&mut self, id: &str) -> Result<()> {
+        if self.operational_notices.contains(id) {
+            return Ok(());
+        }
         if self.delivered.insert(id.to_owned()) {
             self.emit(delivered(id)).await?;
         }
@@ -460,6 +464,9 @@ impl Turn<'_> {
         };
         for message in messages {
             let id = text(&message, "id");
+            if message["operationalNotice"] == true {
+                self.operational_notices.insert(id.to_owned());
+            }
             if self.submitted.contains(id) {
                 continue;
             }
@@ -1105,6 +1112,7 @@ pub async fn run(
         initial_id,
         wire_id,
         submitted: HashSet::from([initial_id.to_owned()]),
+        operational_notices: HashSet::new(),
         delivered: HashSet::new(),
         pending: HashSet::from([initial_id.to_owned()]),
         consumed: HashSet::new(),

@@ -44,9 +44,6 @@ pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Resu
             "Conversation moves cannot change execution backend.",
         ));
     }
-    if !native && record["capabilities"]["fuse"] != true {
-        return Err(Error::conflict("Destination has no FUSE device."));
-    }
     let policy = crate::storage::policy::Policy::for_node(&record["storage"])?;
     let grant = super::disk_grants::issue(s, run, node, backup).await?;
     let request = RestoreRequest {
@@ -144,17 +141,12 @@ pub async fn controller(state: &Path, run: &str, value: Value) -> Result<Value> 
             "Required VM runtime is not installed on this node.",
         ));
     }
-    restore_journal(state, run, value, true).await
+    restore_journal(state, run, value).await
 }
 
 /// Shared journal restore; native hosts validate their pinned tools instead of
-/// VM images and attach ublk directly rather than requiring the FUSE adapter.
-pub(crate) async fn restore_journal(
-    state: &Path,
-    run: &str,
-    value: Value,
-    require_fuse: bool,
-) -> Result<Value> {
+/// VM images. Both backends attach the restored journal through ublk.
+pub(crate) async fn restore_journal(state: &Path, run: &str, value: Value) -> Result<Value> {
     let manifest = &value["manifest"];
     let lease =
         crate::storage::environment::lock(state, run, "Conversation disk is active.").await?;
@@ -183,9 +175,6 @@ pub(crate) async fn restore_journal(
             directory.join(format!("stale-{}-lazy", crate::config::id())),
         )
         .await?;
-    }
-    if require_fuse && !Path::new("/dev/fuse").exists() {
-        return Err(Error::conflict("Node has no FUSE device."));
     }
     let context = json!({
         "master": origin.as_str(),

@@ -3,13 +3,18 @@ package build.cairn.app.ui
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
 import kotlinx.serialization.json.*
 import org.junit.Assert.*
@@ -27,7 +32,7 @@ abstract class RetryNoticeCases {
             "retry",
             status = "queued",
             accountWaitReason = "Temporary agent error. Retrying in 30 seconds (attempt 1/3).",
-            retry = RunRetry(1, 3, deadline, RunRetryCause("timeout", "Temporary timeout")),
+            retry = RunRetry(1, 5, deadline, RunRetryCause("timeout", "Temporary timeout")),
         )
 
     /** Like CairnApp, the background surface gives the run text its theme colours. */
@@ -49,22 +54,11 @@ abstract class RetryNoticeCases {
             val run = remember { run(System.currentTimeMillis() + 4000) }
             Notices(run)
         }
-        val notices = compose.onAllNodesWithText("Temporary agent error.", substring = true)
-        notices.assertCountEquals(2)
-        val initial =
-            notices.fetchSemanticsNodes().map { it.config[SemanticsProperties.Text].toString() }
-        assertTrue(initial.all { it.contains(Regex("Retrying in [1-4] seconds")) })
+        compose.onAllNodesWithTag("recovery-notice").assertCountEquals(2)
+        compose.onAllNodesWithText("Reprise 1/5").assertCountEquals(2)
         capture("countdown")
-
-        compose.waitUntil(5000) {
-            notices.fetchSemanticsNodes().map { it.config[SemanticsProperties.Text].toString() } !=
-                initial
-        }
-        compose.waitUntil(5000) {
-            compose
-                .onAllNodesWithText("Retrying now", substring = true)
-                .fetchSemanticsNodes()
-                .size == 2
+        compose.waitUntil(6000) {
+            compose.onAllNodesWithText("Bientôt").fetchSemanticsNodes().size == 2
         }
         capture("now")
     }
@@ -73,7 +67,7 @@ abstract class RetryNoticeCases {
     fun noticesFollowRunUpdatesAndKeepOtherWaitReasons() {
         val current = mutableStateOf(run(System.currentTimeMillis() + 60_000))
         compose.setContent { Notices(current.value) }
-        compose.onAllNodesWithText("attempt 1/3", substring = true).assertCountEquals(2)
+        compose.onAllNodesWithText("Reprise 1/5", substring = true).assertCountEquals(2)
         compose.runOnIdle {
             current.value =
                 current.value.copy(
@@ -84,20 +78,60 @@ abstract class RetryNoticeCases {
                         )
                 )
         }
-        compose.onAllNodesWithText("attempt 2/3", substring = true).assertCountEquals(2)
+        compose.onAllNodesWithText("Reprise 2/5", substring = true).assertCountEquals(2)
         capture("attempt")
         compose.runOnIdle {
             current.value = current.value.copy(accountWaitReason = "Waiting for capacity.")
         }
         compose.onAllNodesWithText("Waiting for capacity.", substring = true).assertCountEquals(2)
-        compose.onAllNodesWithText("Temporary agent error.", substring = true).assertCountEquals(0)
+        compose.onAllNodesWithTag("recovery-notice").assertCountEquals(0)
         capture("priority")
 
         compose.runOnIdle {
             current.value = current.value.copy(accountWaitReason = null, status = "running")
         }
-        compose.onAllNodesWithText("Temporary agent error.", substring = true).assertCountEquals(0)
+        compose.onAllNodesWithTag("recovery-notice").assertCountEquals(0)
         compose.onAllNodesWithText("Conversation en attente").assertCountEquals(0)
+    }
+
+    @Test
+    fun retryCanBeCancelledAndBusyDisablesTheActionOnANarrowScreen() {
+        var cancelled = 0
+        val busy = mutableStateOf(false)
+        compose.setContent {
+            val current = remember { run(System.currentTimeMillis() + 80_000) }
+            CairnTheme {
+                CompositionLocalProvider(
+                    LocalDensity provides Density(LocalDensity.current.density, 1.5f)
+                ) {
+                    Surface(Modifier.width(320.dp).safeDrawingPadding()) {
+                        ChatRunWaitingNotice(
+                            current,
+                            {},
+                            busy = busy.value,
+                            cancelRetry = { cancelled++ },
+                        )
+                    }
+                }
+            }
+        }
+        val titleLayouts = mutableListOf<TextLayoutResult>()
+        compose.onNodeWithText("Nouvelle tentative automatique").performSemanticsAction(
+            SemanticsActions.GetTextLayoutResult
+        ) {
+            it(titleLayouts)
+        }
+        assertTrue(
+            "Large text must remain readable on a narrow screen",
+            titleLayouts.single().lineCount <= 3,
+        )
+        compose.onNodeWithText("Annuler la reprise").assertIsDisplayed().performClick()
+        assertEquals(1, cancelled)
+        compose.onNodeWithText("Voir le détail").performClick()
+        compose.onNodeWithText("Temporary timeout").assertIsDisplayed()
+        capture("narrow-details")
+        compose.runOnIdle { busy.value = true }
+        compose.onNodeWithText("Annuler la reprise").assertIsNotEnabled()
     }
 
     @Test

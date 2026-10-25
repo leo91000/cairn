@@ -397,9 +397,44 @@ impl Execution<'_> {
         if !self.checkpoint.read(RunCheckpoint::launched).await {
             return Ok(None);
         }
-        let Some(session) =
-            saved_session(s, self.run, &workspace.state_home, workspace.cwd()).await?
-        else {
+        let pending_startup = self
+            .checkpoint
+            .read(|saved| {
+                saved
+                    .retry_cause
+                    .as_ref()
+                    .and_then(Option::as_ref)
+                    .is_some_and(|cause| cause.startup)
+            })
+            .await;
+        if !self.run["sessionId"].is_string() && pending_startup {
+            // The adapter confirmed no new turn was submitted; preserve the same
+            // prepared workspace and retry its initial authentication safely.
+            return Ok(None);
+        }
+        let session = match saved_session(s, self.run, &workspace.state_home, workspace.cwd()).await
+        {
+            Ok(session) => session,
+            Err(error) => {
+                // Local session discovery happens before any new turn is submitted.
+                // Preserve its specific transient failure instead of the previous cause.
+                if let Some(failure) = crate::run_retry::startup_failure(&error) {
+                    let cause = crate::run_retry::Cause::classify(&failure["error"]);
+                    self.checkpoint
+                        .update(|saved| {
+                            saved.completed = Some(false);
+                            saved.last_error = Some(Some(error.message.clone()));
+                            saved.retry_cause = Some(cause);
+                        })
+                        .await?;
+                    s.store
+                        .event(&self.id, "turn.failed", &error.message, Some(failure))
+                        .await?;
+                }
+                return Err(error);
+            }
+        };
+        let Some(session) = session else {
             s.store.event(
                 &self.id,
                 "status",
@@ -515,10 +550,15 @@ impl Execution<'_> {
                 )));
             }
 
+            let controller = controller_name(self.run);
             let message = if session.is_some() {
-                "VM controller interrupted execution. The saved conversation and workspace have been preserved."
+                format!(
+                    "{controller} interrupted execution. The saved conversation and workspace have been preserved."
+                )
             } else {
-                "VM controller interrupted execution. Working files were preserved, but no resumable agent session was confirmed."
+                format!(
+                    "{controller} interrupted execution. Working files were preserved, but no resumable agent session was confirmed."
+                )
             };
             return Err(Error::unavailable(message));
         }
@@ -528,9 +568,10 @@ impl Execution<'_> {
         let controller_failed = exit.code == Some(crate::runner::CONTROLLER_FAILED);
         let may_retry = saved.controller_recoveries() < super::execution::MAX_CONTROLLER_RECOVERIES;
         if managed && stopped_by_controller && controller_failed && may_retry {
-            return Err(Error::unavailable(
-                "VM controller failed while running this attempt. The saved conversation and workspace have been preserved.",
-            ));
+            return Err(Error::unavailable(format!(
+                "{} failed while running this attempt. The saved conversation and workspace have been preserved.",
+                controller_name(self.run),
+            )));
         }
 
         // Preserve the controller's outcome before cleanup can fail. Failed
@@ -1051,8 +1092,8 @@ impl Execution<'_> {
         if status == RunStatus::Failed
             && !exit.timed_out
             && !self.stopping()
-            && has_session
             && let Some(cause) = saved.retry_cause.as_ref().and_then(Option::as_ref)
+            && (has_session || cause.startup)
         {
             // The provider confirmed this turn failed. Recovery is scheduled by
             // the worker after the previous execution is fenced, not replayed here.
@@ -1131,13 +1172,24 @@ impl Execution<'_> {
         }
         match exit.code {
             Some(crate::runner::CONTROLLER_FAILED) => {
-                "VM controller failed while running this attempt. Resume the conversation to continue.".into()
+                format!(
+                    "{} failed while running this attempt. Resume the conversation to continue.",
+                    controller_name(self.run)
+                )
             }
             Some(code) => {
                 format!("Process exited with status {code}. Resume the conversation to continue.")
             }
             None => "Process stopped before finishing. Resume the conversation to continue.".into(),
         }
+    }
+}
+
+fn controller_name(run: &Value) -> &'static str {
+    if crate::native::policy::native(&run["snapshot"]["agent"]) {
+        "Native controller"
+    } else {
+        "VM controller"
     }
 }
 
@@ -1148,6 +1200,23 @@ fn current_exe() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn controller_messages_follow_the_execution_backend() {
+        assert_eq!(
+            controller_name(
+                &json!({ "snapshot": { "agent": { "access": { "backend": "native" } } } })
+            ),
+            "Native controller"
+        );
+        assert_eq!(
+            controller_name(
+                &json!({ "snapshot": { "agent": { "access": { "backend": "firecracker" } } } })
+            ),
+            "VM controller"
+        );
+        assert_eq!(controller_name(&json!({})), "VM controller");
+    }
 
     #[tokio::test]
     async fn mode_restart_before_first_session_preserves_available_sessions_and_other_recovery_rules()
@@ -1160,7 +1229,10 @@ mod tests {
             public_url: "http://localhost:4310".into(),
             host: "127.0.0.1".into(),
             port: 0,
-            codex_bin: "/bin/false".into(),
+            codex_bin: Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/codex.mjs")
+                .to_string_lossy()
+                .into_owned(),
             claude_bin: "/bin/false".into(),
             opencode_bin: "/bin/false".into(),
             opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),

@@ -129,7 +129,6 @@ def configure_ublk(runner):
     if control not in devices:
         devices.append(control)
     runner['device_cgroup_rules'] = rules
-    environment['CAIRN_BLOCK_TRANSPORT'] = 'ublk'
 
 
 def compose(image, origin):
@@ -178,7 +177,7 @@ def compose(image, origin):
                 'cap_drop': ['ALL'],
                 'cap_add': ['SYS_ADMIN', 'SYS_PTRACE', 'SYS_NICE', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'],
                 'security_opt': ['apparmor:unconfined', 'seccomp:unconfined'],
-                'devices': ['/dev/kvm:/dev/kvm', '/dev/net/tun:/dev/net/tun', '/dev/fuse:/dev/fuse'],
+                'devices': ['/dev/kvm:/dev/kvm', '/dev/net/tun:/dev/net/tun'],
                 'sysctls': {'net.ipv4.ip_forward': '1', 'net.ipv6.conf.all.disable_ipv6': '1'},
                 'tmpfs': ['/run', '/tmp'],
                 'volumes': ['./data:/data', './runner-state:/runner-state'],

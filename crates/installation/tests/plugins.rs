@@ -137,6 +137,85 @@ async fn fixture() -> (TempDir, Arc<Service>, Connection) {
     (root, s, serde_json::from_value(connection).unwrap())
 }
 
+#[tokio::test]
+async fn legacy_bot_approvals_keep_default_off_delegation_without_approving_new_powers() {
+    let (_root, s, connection) = fixture().await;
+    let agent_id = &connection.agent_id;
+    let mut legacy = s
+        .store
+        .get(connections::KIND, &connection.id)
+        .await
+        .unwrap()
+        .unwrap();
+    legacy["grantedAccess"]
+        .as_object_mut()
+        .unwrap()
+        .remove("delegation");
+    s.store.put(connections::KIND, legacy).await.unwrap();
+    let mut agent = s.get("agents", agent_id).await.unwrap();
+    agent["access"]
+        .as_object_mut()
+        .unwrap()
+        .remove("delegation");
+    s.store.put("agents", agent.clone()).await.unwrap();
+
+    let preview = s.agent_preview(agent.clone(), agent_id).await.unwrap();
+    assert_eq!(preview["delegations"][0]["suspended"], false);
+    assert_eq!(preview["delegations"][0]["alreadySuspended"], false);
+    assert!(
+        accept(
+            &s,
+            &connection,
+            message("600", "300", "Hello before upgrading permissions")
+        )
+        .await
+        .unwrap()
+    );
+
+    agent["access"]["delegation"] = true.into();
+    let preview = s.agent_preview(agent.clone(), agent_id).await.unwrap();
+    assert_eq!(preview["delegations"][0]["suspended"], true);
+    assert_eq!(preview["delegations"][0]["alreadySuspended"], false);
+    agent = s.agent(agent.clone(), Some(agent_id)).await.unwrap();
+    assert_eq!(
+        accept(
+            &s,
+            &connection,
+            message("601", "300", "New permission needs approval")
+        )
+        .await
+        .unwrap_err()
+        .status,
+        403
+    );
+
+    agent["reapproveDelegations"] = json!([connection.id]);
+    agent = s.agent(agent.clone(), Some(agent_id)).await.unwrap();
+    let current: Connection = serde_json::from_value(
+        s.store
+            .get(connections::KIND, &connection.id)
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(current.granted_access["delegation"], true);
+    assert!(
+        accept(&s, &current, message("602", "300", "Hello after approval"))
+            .await
+            .unwrap()
+    );
+
+    agent
+        .as_object_mut()
+        .unwrap()
+        .remove("reapproveDelegations");
+    agent["access"]["delegation"] = false.into();
+    let preview = s.agent_preview(agent, agent_id).await.unwrap();
+    assert_eq!(preview["delegations"][0]["suspended"], true);
+    assert_eq!(preview["delegations"][0]["alreadySuspended"], false);
+}
+
 fn message(id: &str, author: &str, content: &str) -> Value {
     json!({
         "id": id,
@@ -944,7 +1023,7 @@ async fn finish_turn(s: &Service, delivery: &Value, answer: &str) {
 }
 
 #[tokio::test]
-async fn public_support_channels_need_a_limited_agent_and_stay_quiet_when_nothing_is_needed() {
+async fn public_support_channels_accept_any_agent_and_stay_quiet_when_nothing_is_needed() {
     let (_root, s, connection) = fixture().await;
     let (mock, server) = mock(&s).await;
     let support = s
@@ -971,18 +1050,16 @@ async fn public_support_channels_need_a_limited_agent_and_stay_quiet_when_nothin
         })
     };
     let channel = json!({ "guildId": "100", "channelId": "200", "messageContent": true, "everyMessage": true });
-    // The fixture's agent can run commands: not acceptable for anyone in a channel.
+    // The owner chooses the agent, even one that can run commands for anyone in a channel.
     let broad = s.get("agents", &connection.agent_id).await.unwrap();
-    assert!(
-        connections::save(
-            &s,
-            "discord",
-            &input(&broad, channel.clone()),
-            Some(&connection.id)
-        )
-        .await
-        .is_err()
-    );
+    connections::save(
+        &s,
+        "discord",
+        &input(&broad, channel.clone()),
+        Some(&connection.id),
+    )
+    .await
+    .unwrap();
     // Answering every message needs Message Content: the package turns it on.
     let missing = json!({ "guildId": "100", "channelId": "200", "everyMessage": true });
     let saved = connections::save(
@@ -1118,7 +1195,7 @@ async fn public_support_channels_need_a_limited_agent_and_stay_quiet_when_nothin
         1
     );
 
-    // Granting the agent a plugin such as 1Password later suspends the public connection.
+    // Granting the agent a plugin such as 1Password later keeps the public connection.
     connections::save(
         &s,
         "onepassword",
@@ -1130,13 +1207,9 @@ async fn public_support_channels_need_a_limited_agent_and_stay_quiet_when_nothin
     )
     .await
     .unwrap();
-    assert_eq!(
-        accept(&s, &connection, chatter("605", "303", "hello?"))
-            .await
-            .unwrap_err()
-            .status,
-        403
-    );
+    accept(&s, &connection, chatter("605", "303", "hello?"))
+        .await
+        .unwrap();
     session.stop().await;
     server.abort();
 }
@@ -1271,7 +1344,7 @@ async fn access_requests_wait_for_approval_without_storing_content() {
 
 #[tokio::test]
 async fn rate_limits_and_changed_agent_access_stop_admission() {
-    let (_root, s, connection) = fixture().await;
+    let (root, s, connection) = fixture().await;
     let event = |id: &str| {
         json!({
             "name": "message",
@@ -1334,7 +1407,8 @@ async fn rate_limits_and_changed_agent_access_stop_admission() {
             .status,
         403
     );
-    let broad = connections::save(
+    // Listed people may reach the main agent, with every project and installation access.
+    connections::save(
         &s,
         "discord",
         &json!({
@@ -1347,8 +1421,40 @@ async fn rate_limits_and_changed_agent_access_stop_admission() {
         }),
         None,
     )
-    .await;
-    assert!(broad.is_err());
+    .await
+    .unwrap();
+    // The agent still has to reach the delegation's project.
+    let project = s
+        .project(json!({ "name": "Elsewhere", "path": root.path() }), None)
+        .await
+        .unwrap();
+    let elsewhere = s
+        .agent(
+            json!({ "name": "Elsewhere", "access": { "projects": [], "installation": false } }),
+            None,
+        )
+        .await
+        .unwrap();
+    let unreachable = connections::save(
+        &s,
+        "discord",
+        &json!({
+            "name": "Elsewhere",
+            "settings": { "guildId": "100", "channelId": "200" },
+            "userIds": ["300"],
+            "agentId": elsewhere["id"],
+            "projectId": project["id"],
+            "enabled": true,
+            "token": "synthetic_discord_token",
+        }),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        unreachable.message,
+        "This agent can’t open the selected project."
+    );
     for settings in [
         json!({ "guildId": "100" }),
         json!({ "guildId": "100", "channelId": "x" }),
