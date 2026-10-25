@@ -2623,7 +2623,8 @@ async fn vm_chat_protocol_runs_receive_one_frame_with_plugin_instructions() {
     fixture.start().await;
 
     // Scheduled work: the frame is in the instructions, the turn is the brief.
-    let brief = "Check the deployment.";
+    // A leading command stays text: Claude Code would run `/clear` itself.
+    let brief = "/clear stale branches, then check the deployment.";
     let task = json!({
         "name": "Scheduled", "prompt": brief, "worktree": false, "agentId": agent["id"],
     });
@@ -2637,7 +2638,7 @@ async fn vm_chat_protocol_runs_receive_one_frame_with_plugin_instructions() {
     assert!(instructions.contains("This unattended task"));
     assert!(!instructions.contains("This is an interactive chat"));
     assert!(!instructions.contains(brief));
-    assert_eq!(plan["execution"]["text"], brief);
+    assert_eq!(plan["execution"]["text"], format!("Task brief:\n{brief}"));
     assert_eq!(plan["execution"]["recovery"], false);
 
     // Chat turns stay interactive and also receive plugin instructions.

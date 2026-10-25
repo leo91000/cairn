@@ -557,12 +557,17 @@ fn interactive(run: &Value) -> bool {
 
 /// The first turn of scheduled work sent through the chat protocol. The
 /// instructions already carry the Cairn frame, so a fresh turn sends only the
-/// task brief; a resumed turn sends its resume prompt.
+/// task brief; a resumed turn sends its resume prompt. The brief follows a
+/// fixed lead-in: Claude Code runs a turn that starts with a command such as
+/// `/clear` as that command, and unattended work has nobody to notice.
 pub fn scheduled_turn(run: &Value, resume_prompt: Option<&str>) -> Value {
-    let brief = resume_prompt.unwrap_or_else(|| text(&run["snapshot"]["task"], "prompt"));
+    let turn = resume_prompt.map_or_else(
+        || format!("Task brief:\n{}", text(&run["snapshot"]["task"], "prompt")),
+        str::to_owned,
+    );
     json!({
         "messageId": run["missionTurnId"].as_str().unwrap_or_else(|| text(run, "id")),
-        "text": brief,
+        "text": turn,
         "recovery": resume_prompt.is_some(),
         "attachments": [],
     })
@@ -744,7 +749,7 @@ mod tests {
 
             let turn = scheduled_turn(&run, None);
             assert_eq!(turn["messageId"], "turn");
-            assert_eq!(turn["text"], "Check the deployment.");
+            assert_eq!(turn["text"], "Task brief:\nCheck the deployment.");
             assert_eq!(turn["recovery"], false);
             let resumed = scheduled_turn(&run, Some("Continue."));
             assert_eq!(resumed["text"], "Continue.");
