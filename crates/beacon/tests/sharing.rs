@@ -328,12 +328,18 @@ async fn removal_and_departure_close_member_streams_and_preserve_owner_access() 
 
         let avatar = format!("{api}/agents/{MAIN_AGENT_ID}/avatar");
         let image = include_bytes!("../../../tests/fixtures/artifacts/thumbnail.png");
-        let uploaded = request(&relay, &relay.cookie, &relay.session, Method::PUT, &avatar)
-            .header("content-type", "image/png")
-            .body(image.as_slice())
-            .send()
-            .await
-            .unwrap();
+        let data = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, image);
+        let uploaded = request(
+            &relay,
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            &format!("{avatar}/upload"),
+        )
+        .json(&json!({ "agentId": MAIN_AGENT_ID, "data": data }))
+        .send()
+        .await
+        .unwrap();
         assert_eq!(uploaded.status(), StatusCode::OK);
         let response = request(&relay, &cookie, &session, Method::GET, &avatar)
             .send()
@@ -1159,7 +1165,7 @@ async fn members_cannot_rewrite_or_resume_another_authors_task() {
         Method::POST,
         &format!("/api/installations/{id}/api/agents"),
     )
-    .json(&json!({ "name": "Alternative agent" }))
+    .json(&json!({ "settings": { "name": "Alternative agent", "access": cairn_contracts::AccessPolicy::default(), "exclusiveNodes": [], "plugins": [] }, "review": {} }))
     .send()
     .await
     .unwrap()

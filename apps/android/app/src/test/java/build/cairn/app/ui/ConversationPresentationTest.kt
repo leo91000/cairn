@@ -31,7 +31,26 @@ class ConversationPresentationTest {
                 "run",
                 status = "queued",
                 accountWaitReason = "Waiting for a Codex account with available usage.",
-                snapshot = Snapshot(agent = Agent(provider = "codex")),
+                snapshot =
+                    Snapshot(
+                        agent =
+                            Agent(
+                                exclusiveNodes = emptyList(),
+                                plugins = emptyList(),
+                                id = "00000000-0000-4000-8000-000000000000",
+                                name = "",
+                                revision = "",
+                                createdAt = 0,
+                                access =
+                                    AccessPolicy(
+                                        mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                                        projects = null,
+                                        skills = null,
+                                        mcps = null,
+                                    ),
+                                provider = "codex",
+                            )
+                    ),
             )
         val quota = chatQuota(admission, recovered)!!
         assertEquals("Codex", quota.provider)

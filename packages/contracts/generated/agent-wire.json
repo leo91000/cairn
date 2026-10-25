@@ -1,0 +1,189 @@
+{
+  "creates": [
+    {
+      "review": {
+        "nativeNodeReviews": [],
+        "reapproveDelegations": []
+      },
+      "settings": {
+        "access": {
+          "backend": "firecracker",
+          "delegation": false,
+          "installation": false,
+          "mcpTools": {},
+          "mcps": null,
+          "nodes": [
+            "00000000-0000-4000-8000-000000000002"
+          ],
+          "projects": null,
+          "sandbox": "yolo",
+          "skills": null
+        },
+        "description": "",
+        "exclusiveNodes": [],
+        "instructions": "",
+        "model": "",
+        "name": "Default agent",
+        "plugins": [],
+        "provider": "codex",
+        "reasoning": "high",
+        "timeoutMinutes": 0
+      }
+    },
+    {
+      "creationId": "00000000-0000-4000-8000-000000000077",
+      "review": {
+        "nativeNodeReviews": [],
+        "reapproveDelegations": []
+      },
+      "settings": {
+        "access": {
+          "backend": "firecracker",
+          "delegation": false,
+          "installation": false,
+          "mcpTools": {},
+          "mcps": [],
+          "nodes": null,
+          "projects": [],
+          "sandbox": "yolo",
+          "skills": []
+        },
+        "description": "",
+        "exclusiveNodes": [],
+        "instructions": "",
+        "model": "opus[1m]",
+        "name": "Claude",
+        "plugins": [],
+        "provider": "claude",
+        "reasoning": "max",
+        "timeoutMinutes": 0
+      }
+    },
+    {
+      "review": {
+        "nativeNodeReviews": [],
+        "reapproveDelegations": []
+      },
+      "settings": {
+        "access": {
+          "backend": "firecracker",
+          "delegation": false,
+          "installation": false,
+          "mcpTools": {
+            "00000000-0000-4000-8000-000000000003": [
+              "inspect"
+            ]
+          },
+          "mcps": null,
+          "nodes": [],
+          "projects": null,
+          "sandbox": "yolo",
+          "skills": null
+        },
+        "description": "",
+        "exclusiveNodes": [],
+        "instructions": "",
+        "model": "opencode/test-model",
+        "name": "OpenCode",
+        "plugins": [],
+        "provider": "opencode",
+        "reasoning": "future_effort-2",
+        "timeoutMinutes": 720
+      }
+    }
+  ],
+  "views": [
+    {
+      "access": {
+        "backend": "firecracker",
+        "delegation": false,
+        "installation": false,
+        "mcpTools": {},
+        "mcps": null,
+        "nodes": [
+          "00000000-0000-4000-8000-000000000002"
+        ],
+        "projects": null,
+        "sandbox": "yolo",
+        "skills": null
+      },
+      "createdAt": 9007199254740991,
+      "description": "",
+      "exclusiveNodes": [],
+      "id": "00000000-0000-4000-8000-000000000001",
+      "instructions": "",
+      "model": "",
+      "name": "Default agent",
+      "plugins": [],
+      "provider": "codex",
+      "reasoning": "high",
+      "revision": "profile-revision",
+      "timeoutMinutes": 0
+    },
+    {
+      "access": {
+        "backend": "firecracker",
+        "delegation": false,
+        "installation": false,
+        "mcpTools": {},
+        "mcps": [],
+        "nodes": null,
+        "projects": [],
+        "sandbox": "yolo",
+        "skills": []
+      },
+      "avatar": {
+        "revision": "avatar-revision",
+        "status": "generating",
+        "url": null
+      },
+      "createdAt": 9007199254740991,
+      "description": "",
+      "exclusiveNodes": [],
+      "id": "00000000-0000-4000-8000-000000000001",
+      "instructions": "",
+      "model": "opus[1m]",
+      "name": "Claude",
+      "plugins": [],
+      "provider": "claude",
+      "reasoning": "max",
+      "revision": "profile-revision",
+      "timeoutMinutes": 0
+    },
+    {
+      "access": {
+        "backend": "firecracker",
+        "delegation": false,
+        "installation": false,
+        "mcpTools": {
+          "00000000-0000-4000-8000-000000000003": [
+            "inspect"
+          ]
+        },
+        "mcps": null,
+        "nodes": [],
+        "projects": null,
+        "sandbox": "yolo",
+        "skills": null
+      },
+      "avatar": {
+        "error": "Portrait generation was interrupted. You can try again.",
+        "revision": "avatar-revision",
+        "status": "failed",
+        "url": null
+      },
+      "createdAt": 9007199254740991,
+      "description": "",
+      "exclusiveNodes": [],
+      "id": "00000000-0000-4000-8000-000000000001",
+      "instructions": "",
+      "model": "opencode/test-model",
+      "name": "OpenCode",
+      "plugins": [],
+      "provider": "opencode",
+      "reasoning": "future_effort-2",
+      "revision": "profile-revision",
+      "timeoutMinutes": 720
+    }
+  ]
+}

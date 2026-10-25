@@ -345,6 +345,10 @@ abstract class SkillWorkbenchCases {
                         json(
                             if (request.requestUrl?.encodedPath?.endsWith("/api/projects") == true)
                                 """{"projects":[]}"""
+                            else if (
+                                request.requestUrl?.encodedPath?.endsWith("/api/agents") == true
+                            )
+                                """{"agents":[]}"""
                             else "[]"
                         )
                 }

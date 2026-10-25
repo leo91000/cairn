@@ -21,7 +21,23 @@ abstract class ChatProviderCases {
     @Test
     fun queuedConversationShowsReconnectActionInsteadOfWorking() {
         MockWebServer().use { server ->
-            val agent = Agent(MAIN_AGENT_ID, "Agent principal", provider = "claude")
+            val agent =
+                Agent(
+                    exclusiveNodes = emptyList(),
+                    plugins = emptyList(),
+                    revision = "",
+                    createdAt = 0,
+                    access =
+                        AccessPolicy(
+                            mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                            projects = null,
+                            skills = null,
+                            mcps = null,
+                        ),
+                    id = MAIN_AGENT_ID,
+                    name = "Agent principal",
+                    provider = "claude",
+                )
             val run =
                 Run(
                     "run",
@@ -68,7 +84,9 @@ abstract class ChatProviderCases {
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/agents" ->
-                                    wireJson.encodeToString(listOf(agent))
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListAgentsOutput(listOf(agent))
+                                    )
                                 "/api/installations/fixture/api/claude/models" ->
                                     """{"models":[]}"""
                                 "/api/installations/fixture/api/overview" -> "{}"
@@ -79,6 +97,11 @@ abstract class ChatProviderCases {
                                             ?.endsWith("/api/projects") == true
                                     )
                                         """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
                                     else "[]"
                             }
                         return MockResponse().setBody(body)
@@ -134,7 +157,23 @@ abstract class ChatProviderCases {
         MockWebServer().use { server ->
             val sent = CopyOnWriteArrayList<JsonObject>()
             val agent =
-                Agent(MAIN_AGENT_ID, "Agent principal", model = "fixture-deep", reasoning = "ultra")
+                Agent(
+                    exclusiveNodes = emptyList(),
+                    plugins = emptyList(),
+                    revision = "",
+                    createdAt = 0,
+                    access =
+                        AccessPolicy(
+                            mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                            projects = null,
+                            skills = null,
+                            mcps = null,
+                        ),
+                    id = MAIN_AGENT_ID,
+                    name = "Agent principal",
+                    model = "fixture-deep",
+                    reasoning = "ultra",
+                )
             val run = Run("run", status = "succeeded", snapshot = Snapshot(agent = agent))
             val chat =
                 Chat(
@@ -165,7 +204,9 @@ abstract class ChatProviderCases {
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/agents" ->
-                                    wireJson.encodeToString(listOf(agent))
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListAgentsOutput(listOf(agent))
+                                    )
                                 "/api/installations/fixture/api/chats/chat/messages" -> {
                                     sent +=
                                         wireJson
@@ -185,6 +226,11 @@ abstract class ChatProviderCases {
                                             ?.endsWith("/api/projects") == true
                                     )
                                         """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
                                     else "[]"
                             }
                         return MockResponse().setBody(body)
@@ -370,7 +416,23 @@ abstract class ChatProviderCases {
             val sent = CopyOnWriteArrayList<JsonObject>()
             val retries = CopyOnWriteArrayList<JsonObject>()
             val agent =
-                Agent(MAIN_AGENT_ID, "Agent principal", model = "fixture-deep", reasoning = "ultra")
+                Agent(
+                    exclusiveNodes = emptyList(),
+                    plugins = emptyList(),
+                    revision = "",
+                    createdAt = 0,
+                    access =
+                        AccessPolicy(
+                            mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                            projects = null,
+                            skills = null,
+                            mcps = null,
+                        ),
+                    id = MAIN_AGENT_ID,
+                    name = "Agent principal",
+                    model = "fixture-deep",
+                    reasoning = "ultra",
+                )
             val run =
                 Run(
                     "run",
@@ -415,7 +477,9 @@ abstract class ChatProviderCases {
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/agents" ->
-                                    wireJson.encodeToString(listOf(agent))
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListAgentsOutput(listOf(agent))
+                                    )
                                 "/api/installations/fixture/api/opencode/models" ->
                                     """{"models":[{"model":"auto/gpt-5-6-luna","displayName":"GPT 5.6 Luna","isDefault":true},{"model":"auto/deepseek-v4-1-flash","displayName":"DeepSeek","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}"""
                                 "/api/installations/fixture/api/chats/chat/messages" -> {
@@ -440,6 +504,11 @@ abstract class ChatProviderCases {
                                             ?.endsWith("/api/projects") == true
                                     )
                                         """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
                                     else "[]"
                             }
                         return MockResponse().setBody(body)

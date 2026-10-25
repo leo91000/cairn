@@ -37,13 +37,38 @@ class SignalJourneyTest {
 
     private val calls = CopyOnWriteArrayList<Triple<String, String, String>>()
     private val now = System.currentTimeMillis()
-    private val main = Agent(MAIN_AGENT_ID, "Agent principal")
+    private val main =
+        Agent(
+            exclusiveNodes = emptyList(),
+            plugins = emptyList(),
+            revision = "",
+            createdAt = 0,
+            access =
+                AccessPolicy(
+                    mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                    projects = null,
+                    skills = null,
+                    mcps = null,
+                ),
+            id = MAIN_AGENT_ID,
+            name = "Agent principal",
+        )
     private val designer =
         Agent(
-            "designer",
-            "Designer",
+            exclusiveNodes = emptyList(),
+            plugins = emptyList(),
+            revision = "",
+            createdAt = 0,
+            id = "23fd6447-79ef-5b16-9e92-4e5efcc9a72d",
+            name = "Designer",
             provider = "claude",
-            access = AccessPolicy(projects = listOf("e11e98cf-45bf-5364-83b7-7606435a2154")),
+            access =
+                AccessPolicy(
+                    mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                    skills = null,
+                    mcps = null,
+                    projects = listOf("e11e98cf-45bf-5364-83b7-7606435a2154"),
+                ),
         )
     private val manager = Project("bac8fd52-058a-52cd-8904-a2d40746b051", "Cairn")
     private val site = Project("e11e98cf-45bf-5364-83b7-7606435a2154", "Site vitrine")
@@ -77,7 +102,7 @@ class SignalJourneyTest {
             Chat(
                 "question",
                 "Choisir la pagination",
-                agentId = "designer",
+                agentId = "23fd6447-79ef-5b16-9e92-4e5efcc9a72d",
                 agentName = "Designer",
                 pendingQuestions = 1,
                 updatedAt = now - 60_000,
@@ -142,7 +167,13 @@ class SignalJourneyTest {
                             path == "/api/installations" -> json(beaconInstallationsFixture())
                             path == "/api/account/session" -> json(beaconAccountFixture("fixture"))
                             path == "/api/installations/fixture/api/agents" ->
-                                json(wireJson.encodeToString(listOf(main, designer)))
+                                json(
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListAgentsOutput(
+                                            listOf(main, designer)
+                                        )
+                                    )
+                                )
                             path == "/api/installations/fixture/api/projects" ->
                                 json(
                                     wireJson.encodeToString(
@@ -192,7 +223,14 @@ class SignalJourneyTest {
                                 stream(LiveState(chats = chats))
                             path == "/api/installations/fixture/api/chats" &&
                                 request.method == "POST" ->
-                                json(wireJson.encodeToString(Chat("created", agentId = "designer")))
+                                json(
+                                    wireJson.encodeToString(
+                                        Chat(
+                                            "created",
+                                            agentId = "23fd6447-79ef-5b16-9e92-4e5efcc9a72d",
+                                        )
+                                    )
+                                )
                             path.startsWith("/api/installations/fixture/api/chats/") &&
                                 path.endsWith("/stream") -> {
                                 val id =
@@ -203,7 +241,11 @@ class SignalJourneyTest {
                                     LiveState(
                                         chat =
                                             chats.find { it.id == id }
-                                                ?: Chat(id, agentId = "designer")
+                                                ?: Chat(
+                                                    id,
+                                                    agentId =
+                                                        "23fd6447-79ef-5b16-9e92-4e5efcc9a72d",
+                                                )
                                     ),
                                     if (id == "live") liveEvents else emptyList(),
                                 )
@@ -488,7 +530,10 @@ class SignalJourneyTest {
                         .third
                 )
                 .jsonObject
-        assertEquals("designer", created["agentId"]?.jsonPrimitive?.content)
+        assertEquals(
+            "23fd6447-79ef-5b16-9e92-4e5efcc9a72d",
+            created["agentId"]?.jsonPrimitive?.content,
+        )
         assertEquals(
             "e11e98cf-45bf-5364-83b7-7606435a2154",
             created["projectId"]?.jsonPrimitive?.content,

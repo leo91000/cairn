@@ -1,3 +1,5 @@
+use common::AgentFixture;
+
 mod common;
 #[path = "wait_for/groups.rs"]
 mod groups;
@@ -45,7 +47,7 @@ impl Fixture {
         .await
         .unwrap();
         github.attach(&s);
-        s.agent(
+        s.agent_fixture(
             json!({ "name": "Main agent", "access": { "installation": true } }),
             Some(MAIN_AGENT_ID),
         )
@@ -276,7 +278,7 @@ async fn run_wait_survives_restart_and_only_resumes_after_target_completion() {
 async fn installation_access_can_wait_for_another_agents_run() {
     let f = Fixture::new().await;
     let agent =
-        f.s.agent(json!({ "name": "Delegated worker" }), None)
+        f.s.agent_fixture(json!({ "name": "Delegated worker" }), None)
             .await
             .unwrap();
     let task =
@@ -1027,7 +1029,7 @@ async fn projects_registered_with_ssh_remotes_can_wait_for_their_ci() {
 async fn scoped_agent_token_removal_never_falls_back_to_shared_credentials() {
     let f = Fixture::new().await;
     let agent =
-        f.s.agent(
+        f.s.agent_fixture(
             json!({
                 "name": "Scoped watcher",
                 "access": { "projects": [f.project], "installation": true },

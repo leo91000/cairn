@@ -136,7 +136,7 @@ JSON Schema's UUID format; clients never grant authority through validation.
 
 ### Development reset
 
-The fresh installation schema is now version 2. Version 1 databases from #394
+The fresh installation schema is now version 3. Earlier development databases
 are rejected, without being rewritten. Stop the development processes, remove the
 **disposable development data directory** (SQLite, vault and related local state)
 and start with a newly empty data directory. Recreate projects/agents and rerun
@@ -163,3 +163,48 @@ local SQLite layout comparison, not an HTTP/actor/clone benchmark or production
 network latency. Store pool initialization and corpus construction are untimed.
 Raw results belong outside Git; PR descriptions record the command, SHAs, host
 conditions, result summaries and limitations.
+
+## Agent profiles, preview and avatars (#403)
+
+`crates/contracts/src/agents.rs` owns `AgentSettings`, the public profile and the
+complete creation/replacement, preview, merge and avatar commands. The same ten
+operations extend the existing registry for HTTP, public MCP and
+`cairn_installation`. Listings return `{agents: [...]}`. Replacements and previews
+require `{agentId, revision, settings, review}`; there is no partial update route.
+Creation retries return the current profile without overwriting later changes.
+`review` holds explicit owner confirmations, separately from settings. Public and
+installation agents cannot add plugins, exclusivity, native execution or broaden
+rights; this slice does not construct an owner-confirmation workflow for agents.
+Preview reads a consistent transaction without writing or notifying subscribers.
+
+The `agents` table stores identity, provider, text, timeout, revision, timestamps
+and avatar metadata in named columns with SQL checks and an ordering index.
+Permissions (`access`, `exclusive_nodes`, `plugins`) keep their current JSON
+representation until A3. Only that boundary and unconverted run/plugin/node
+consumers serialize typed profiles; writes decode them back into the authoritative
+profile. Avatar image bytes keep their existing private key/value storage. Merge
+preserves its existing run/task/chat effects and permission rules. No historical
+reader or migration is shipped. Generic records cannot store profiles.
+
+Both apps use generated profile, permission, preview and avatar models and clients.
+Manual Zod schemas and Kotlin data classes for this domain are removed. Defaults
+come from Rust; scalar/list defaults and string-pattern checks extend the pinned
+Kotlin templates. Commands use the generated canonical JSON encoder with defaults
+and explicit nulls, preserving null (all resources) versus an empty selection.
+The permission object, tool map, plugin/exclusivity lists and review object are
+required so omitted settings cannot silently clear grants on replacement.
+Unknown providers are rejected, including in saved snapshots.
+
+`tests/fixtures/agent-contracts.json` qualifies the same values in Rust, JSON
+Schema/TypeScript and Kotlin. Agent editor journeys exercise both apps; the two
+MCP interfaces exercise the same profile, preview and avatar commands. Uploads
+use the generated JSON/base64 command and retain the existing 5 MiB image limit;
+private authenticated image delivery is unchanged.
+
+The A1 storage harness above also measures profiles (`agent_storage_layouts`),
+against the records mapping on the A2 base. It reuses the same repetitions and
+read/write phases with 1,000 complete mixed-provider profiles, long instructions,
+nullable permissions and avatar metadata on half the rows. Pixels and transport
+are outside the measured layout. Reference and candidate serialize identical wire
+values. The candidate replacement includes the expected-revision read. PR reports
+record results and host conditions; raw measurements are never committed.

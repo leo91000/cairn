@@ -266,7 +266,7 @@ fn selected_tools(server: &McpServer, selection: &Value) -> Option<Vec<String>> 
 /// Removes a deleted connection from every agent's access policy. Other settings,
 /// including live grants such as 1Password, are kept as saved.
 fn revoke_agent_access(db: &Db<'_>, id: &str) -> Result<()> {
-    for mut agent in db.list("agents")? {
+    for mut agent in db.agent_snapshots()? {
         let mut access = policy(&agent);
         let mut changed = false;
         if let Some(mcps) = access["mcps"].as_array_mut() {
@@ -282,7 +282,7 @@ fn revoke_agent_access(db: &Db<'_>, id: &str) -> Result<()> {
         }
         agent["access"] = access;
         crate::service::touch(&mut agent);
-        db.put("agents", &agent)?;
+        db.save_agent_permissions(&agent)?;
     }
     Ok(())
 }
@@ -662,7 +662,7 @@ impl Mcps {
                 }
                 let agent = &run["snapshot"]["agent"];
                 let current = db
-                    .get("agents", text(agent, "id"))?
+                    .agent_snapshot(text(agent, "id"))?
                     .ok_or_else(|| Error::forbidden("Agent permissions changed."))?;
                 if !covers(&current, agent) {
                     return Err(Error::forbidden("Agent permissions were reduced."));

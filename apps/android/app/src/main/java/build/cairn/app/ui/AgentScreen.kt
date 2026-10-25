@@ -30,9 +30,20 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import build.cairn.contracts.AgentInput
+import build.cairn.contracts.CreateAgentInput
+import build.cairn.contracts.ListAgentsInput
+import build.cairn.contracts.ReplaceAgentInput
+import build.cairn.contracts.createAgent
+import build.cairn.contracts.deleteAgent
+import build.cairn.contracts.listAgents
+import build.cairn.contracts.previewAgent
+import build.cairn.contracts.replaceAgent
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.encodeToJsonElement
 
 /** Purple marks rights that can affect other agents or the whole installation. */
 @Composable
@@ -206,7 +217,7 @@ private fun AgentPage(
         nativeNodes: List<String> = emptyList(),
     ) {
         // A profile already saved (only its reload failed) is not sent again.
-        val profilePending = baseline.id.isBlank() || profileChanged(baseline, edited)
+        val profilePending = (creating && creation.id.isBlank()) || profileChanged(baseline, edited)
         val saved: Agent =
             when {
                 !profilePending -> baseline
@@ -220,7 +231,7 @@ private fun AgentPage(
                                 "/agents",
                                 value = {
                                     agentSaveBody(
-                                        edited.copy(revision = baseline.revision),
+                                        edited.copy(id = baseline.id, revision = baseline.revision),
                                         approved,
                                         mcpIds,
                                         nativeNodeReviews = nativeNodes,
@@ -228,14 +239,31 @@ private fun AgentPage(
                                 },
                                 createValue = {
                                     agentSaveBody(
-                                        edited.copy(revision = ""),
-                                        approved,
-                                        mcpIds,
-                                        nativeNodeReviews = nativeNodes,
-                                    )
+                                            edited.copy(revision = ""),
+                                            approved,
+                                            mcpIds,
+                                            nativeNodeReviews = nativeNodes,
+                                        )
+                                        .let { JsonObject(it - "agentId" - "revision") }
                                 },
                                 onCreated = {
                                     baseline = wireJson.decodeFromJsonElement<Agent>(it)
+                                },
+                                request = { method, _, payload ->
+                                    val saved =
+                                        if (method == "POST")
+                                            vm.api.createAgent(
+                                                wireJson.decodeFromJsonElement<CreateAgentInput>(
+                                                    payload
+                                                )
+                                            )
+                                        else
+                                            vm.api.replaceAgent(
+                                                wireJson.decodeFromJsonElement<ReplaceAgentInput>(
+                                                    payload
+                                                )
+                                            )
+                                    wireJson.encodeToJsonElement(saved)
                                 },
                             )
                         } catch (e: Exception) {
@@ -251,15 +279,15 @@ private fun AgentPage(
                     wireJson.decodeFromJsonElement<Agent>(response)
                 }
                 else ->
-                    vm.api.send(
-                        "PUT",
-                        "/agents/${segment(agentId)}",
-                        agentSaveBody(
-                            edited,
-                            approved,
-                            mcpIds,
-                            nativeNodeReviews = nativeNodes,
-                        ),
+                    vm.api.replaceAgent(
+                        wireJson.decodeFromJsonElement<ReplaceAgentInput>(
+                            agentSaveBody(
+                                edited,
+                                approved,
+                                mcpIds,
+                                nativeNodeReviews = nativeNodes,
+                            )
+                        )
                     )
             }
 
@@ -306,10 +334,10 @@ private fun AgentPage(
                 val preview =
                     if (creating) null
                     else
-                        vm.api.send<AgentPreview>(
-                            "POST",
-                            "/agents/${segment(agentId)}/preview",
-                            agentSaveBody(edited, mcpIds = mcpIds),
+                        vm.api.previewAgent(
+                            wireJson.decodeFromJsonElement<ReplaceAgentInput>(
+                                agentSaveBody(edited, mcpIds = mcpIds)
+                            )
                         )
                 val lines =
                     agentReview(
@@ -336,8 +364,9 @@ private fun AgentPage(
         scope.launch {
             try {
                 val theirs =
-                    vm.api.get<List<Agent>>("/agents").find { it.id == agentId }
-                        ?: error("Cet agent n’existe plus.")
+                    vm.api.listAgents(build.cairn.contracts.ListAgentsInput()).agents.find {
+                        it.id == agentId
+                    } ?: error("Cet agent n’existe plus.")
                 // Tool choices of connections deleted meanwhile cannot be saved: read the
                 // connections again first.
                 val refreshed = runCatching { vm.refresh() }.isSuccess
@@ -549,7 +578,9 @@ private fun AgentPage(
             { deleting = false },
         ) {
             vm.perform {
-                delete("/agents/${segment(agentId)}")
+                api.deleteAgent(AgentInput(agentId))
+                refresh()
+                notify("Suppression effectuée")
                 deleting = false
                 back()
             }
@@ -1331,9 +1362,11 @@ private fun McpTools(
                 change {
                     it.copy(
                         mcpTools =
-                            if (all) it.mcpTools - mcp.id
-                            // Choosing starts with no tool selected, as on the web.
-                            else it.mcpTools + (mcp.id to emptyList())
+                            build.cairn.contracts.McpTools(
+                                if (all) it.mcpTools - mcp.id
+                                // Choosing starts with no tool selected, as on the web.
+                                else it.mcpTools + (mcp.id to emptyList())
+                            )
                     )
                 }
             }
@@ -1344,8 +1377,10 @@ private fun McpTools(
                             val old = it.mcpTools[mcp.id].orEmpty()
                             it.copy(
                                 mcpTools =
-                                    it.mcpTools +
-                                        (mcp.id to if (on) old + tool.name else old - tool.name)
+                                    build.cairn.contracts.McpTools(
+                                        it.mcpTools +
+                                            (mcp.id to if (on) old + tool.name else old - tool.name)
+                                    )
                             )
                         }
                     }

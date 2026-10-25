@@ -529,7 +529,7 @@ for (const version of ['2026-07-28', '2025-11-25', '2025-06-18']) {
     const catalog = await client.listTools();
     if (catalog.tools.map(t => t.name).join(',') !== 'search,execute') throw Error('invalid compact tools');
     const agents = await client.callTool({ name: 'execute', arguments: {code: 'return await cairn.list_agents({});'} });
-    if (agents.isError || agents.structuredContent.result.length !== 1) throw Error('invalid result ' + JSON.stringify(agents));
+    if (agents.isError || agents.structuredContent.result.agents.length !== 1) throw Error('invalid result ' + JSON.stringify(agents));
     const denied = await client.callTool({ name: 'execute', arguments: {code: 'return await cairn.create_task(input);', input: { name: 'Denied', prompt: 'No' }} });
     if (!denied.isError || !denied._meta['mcp/www_authenticate']) throw Error('scope bypass');
     await client.close();

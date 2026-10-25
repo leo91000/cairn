@@ -187,7 +187,8 @@ abstract class ResourceSaveCases {
                                 path.endsWith("/plugins/github/projects") ->
                                     """{"items":[{"id":"owner/repository","name":"owner/repository","description":"","defaultBranch":"main","badges":["Private"],"imported":false}],"nextPage":null}"""
                                 path.endsWith("/overview") || path.endsWith("/models") -> "{}"
-                                path.endsWith("/agents") -> """[{"id":"agent","name":"Agent"}]"""
+                                path.endsWith("/agents") ->
+                                    """{"agents":[{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"d3153f9f-724b-59c3-9614-ab78f231c4d3","instructions":"","model":"","name":"Agent","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0}]}"""
                                 else ->
                                     if (
                                         request.requestUrl
@@ -195,6 +196,11 @@ abstract class ResourceSaveCases {
                                             ?.endsWith("/api/projects") == true
                                     )
                                         """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
                                     else "[]"
                             }
                         )

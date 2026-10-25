@@ -14,8 +14,9 @@ personnel ou OAuth. Ce détour ne représentait pas les permissions de l’agent
 
 Le propriétaire peut cocher l’accès à l’installation courante dans l’éditeur
 d’un agent, sur le web et Android. `access.installation` vaut `false` par défaut,
-y compris pour Main et les agents existants. Les anciens clients qui omettent
-ce champ lors d’une modification conservent sa valeur enregistrée.
+y compris pour Main. Depuis #403, les profils utilisent un remplacement complet
+avec révision attendue ; aucun chemin de mise à jour partielle ou ancien format
+n’est conservé.
 
 L’option ajoute `cairn_installation` aux configurations Codex et Claude Code.
 `/mcp-installation` réutilise le canal privé et le jeton de l’exécution. Le droit
@@ -31,9 +32,12 @@ propriétaire de lui demander de créer une skill globale dans Cairn.
 
 Cocher cette option délègue désormais la gestion de toute l’installation, même
 si les accès directs de l’agent aux projets, skills, connexions, GitHub ou nodes
-sont restreints. L’agent peut modifier les permissions d’autres agents et leur
-confier des missions ; ces missions utilisent leurs propres identifiants et
-grants. Cette autorité est celle déjà accordée au MCP externe de gestion, plutôt
+sont restreints. Il peut éditer les profils et leur confier des missions ; ces
+missions utilisent leurs propres identifiants et grants. L’arbitrage du propriétaire
+pour #395/#403 interdit néanmoins à un agent d’élargir les droits d’un profil ou de
+lui attribuer un plugin, une node exclusive ou l’exécution native. Ces actions
+restent réservées au propriétaire ; aucun flux de confirmation ponctuelle côté
+agent n’est construit dans cette tranche. Cette autorité est celle déjà accordée au MCP externe de gestion, plutôt
 qu’un nouveau sous-ensemble divergent de ses outils. Elle n’ajoute pas de fonctions
 d’administration absentes du catalogue MCP public, notamment pour les comptes.
 

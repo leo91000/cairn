@@ -1,0 +1,232 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AccessPolicy": {
+      "additionalProperties": false,
+      "description": "Permission relations remain owned by A3. Their typed wire view preserves null (all)\nseparately from an empty selection. No authority is supplied by this DTO.",
+      "properties": {
+        "backend": {
+          "default": "firecracker",
+          "pattern": "^(firecracker|native)$",
+          "type": "string"
+        },
+        "delegation": {
+          "default": false,
+          "type": "boolean"
+        },
+        "installation": {
+          "default": false,
+          "type": "boolean"
+        },
+        "mcpTools": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "type": "object"
+        },
+        "mcps": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "nodes": {
+          "default": [
+            "00000000-0000-4000-8000-000000000002"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "projects": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "sandbox": {
+          "default": "yolo",
+          "pattern": "^(yolo|workspace-write|read-only)$",
+          "type": "string"
+        },
+        "skills": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "backend",
+        "nodes",
+        "projects",
+        "skills",
+        "mcps",
+        "mcpTools",
+        "installation",
+        "delegation",
+        "sandbox"
+      ],
+      "type": "object"
+    },
+    "Agent": {
+      "properties": {
+        "access": {
+          "$ref": "#/definitions/AccessPolicy"
+        },
+        "avatar": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AgentAvatar"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "createdAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "description": {
+          "default": "",
+          "maxLength": 500,
+          "type": "string"
+        },
+        "exclusiveNodes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "instructions": {
+          "default": "",
+          "maxLength": 20000,
+          "type": "string"
+        },
+        "model": {
+          "default": "",
+          "maxLength": 100,
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "plugins": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "provider": {
+          "default": "codex",
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        },
+        "reasoning": {
+          "default": "high",
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "timeoutMinutes": {
+          "default": 0,
+          "format": "uint16",
+          "maximum": 720,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "provider",
+        "description",
+        "model",
+        "reasoning",
+        "instructions",
+        "timeoutMinutes",
+        "access",
+        "exclusiveNodes",
+        "plugins",
+        "revision",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "AgentAvatar": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "type": "string"
+        },
+        "status": {
+          "pattern": "^(generating|ready|failed)$",
+          "type": "string"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "revision",
+        "url"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "agents": {
+      "items": {
+        "$ref": "#/definitions/Agent"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "agents"
+  ],
+  "title": "ListAgentsOutput",
+  "type": "object"
+}

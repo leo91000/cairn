@@ -2,6 +2,7 @@ package build.cairn.app.data
 
 import build.cairn.app.diagnostics.PerfOperation
 import build.cairn.app.diagnostics.Performance
+import build.cairn.contracts.setAgentAvatar
 import java.io.FileNotFoundException
 import java.io.IOException
 import kotlin.coroutines.resume
@@ -329,14 +330,12 @@ class CairnApi(
 
     suspend fun uploadAgentPortrait(id: String, bytes: ByteArray): Agent {
         require(bytes.size <= 5 * 1024 * 1024) { "Choisissez une image de moins de 5 Mo." }
-        return exchange(
-            builder("/agents/${segment(id)}/avatar")
-                .put(bytes.toRequestBody("application/octet-stream".toMediaType()))
-                .build()
-        ) { response ->
-            checkResponse(response)
-            wireJson.decodeFromString<Agent>(response.body.string())
-        }
+        return setAgentAvatar(
+            build.cairn.contracts.SetAgentAvatarInput(
+                id,
+                java.util.Base64.getEncoder().encodeToString(bytes),
+            )
+        )
     }
 
     suspend fun download(

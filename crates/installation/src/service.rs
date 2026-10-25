@@ -102,234 +102,154 @@ impl Service {
             shutdown: CancellationToken::new(),
         });
         service.bootstrap_main_agent().await?;
-        service
-            .store
-            .transaction(|db| crate::agent_grants::reconcile(db))
-            .await?;
         service.avatars.recover(&service).await?;
         tokio::spawn(crate::artifacts::preview::recover(service.clone()));
         Ok(service)
     }
 
     async fn bootstrap_main_agent(&self) -> Result<()> {
-        if self.store.get("agents", MAIN_AGENT_ID).await?.is_none() {
-            let mut agent = parse(
-                "agent",
-                json!({
-                    "name": "Main agent",
-                    "description": "Your default agent, with access to every registered project, skill, and shared connection.",
-                }),
-            )?;
-            agent["id"] = MAIN_AGENT_ID.into();
-            agent["createdAt"] = now().into();
-            self.store.put("agents", agent).await?;
+        if self.store.agent(MAIN_AGENT_ID).await?.is_none() {
+            let settings: cairn_contracts::AgentSettings = serde_json::from_value(json!({
+                "name": "Main agent",
+                "exclusiveNodes": [], "plugins": [], "access": cairn_contracts::AccessPolicy::default(),
+                "description": "Your default agent, with access to every registered project, skill, and shared connection."
+            }))?;
+            let agent = crate::agents::new_agent(
+                settings,
+                Some(cairn_contracts::AgentId(
+                    uuid::Uuid::parse_str(MAIN_AGENT_ID).unwrap(),
+                )),
+            );
+            self.store
+                .transaction(move |db| {
+                    db.save_agent(&agent)?;
+                    Ok(())
+                })
+                .await?;
         }
         Ok(())
+    }
+
+    pub async fn agent_snapshot(&self, id: &str) -> Result<Value> {
+        required(self.store.agent_snapshot(id).await?, "Agent not found")
     }
 
     pub async fn get(&self, kind: &str, id: &str) -> Result<Value> {
         required(self.store.get(kind, id).await?, "Record not found")
     }
 
-    pub async fn agent(self: &Arc<Self>, input: Value, existing_id: Option<&str>) -> Result<Value> {
-        self.agent_authorized(input, existing_id, AgentEditor::Owner, |_| Ok(()))
-            .await
-    }
-
-    pub(crate) async fn agent_authorized<F>(
+    pub(crate) async fn save_profile<F>(
         self: &Arc<Self>,
-        input: Value,
-        existing_id: Option<&str>,
+        command: crate::agents::SaveProfile,
         editor: AgentEditor,
         authorize: F,
-    ) -> Result<Value>
+    ) -> Result<cairn_contracts::Agent>
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
-        let creation_id = creation_id(&input, existing_id)?;
-        let draft = self
-            .agent_draft(input, existing_id, editor, creation_id.clone())
-            .await?;
-        let reapprove = draft.reapprove.clone();
-        let reapproved = !reapprove.is_empty();
-        for connection in &reapprove {
+        let (mut agent, expected, creation_id, review) = match command {
+            crate::agents::SaveProfile::Create(input) => (
+                crate::agents::new_agent(input.settings, input.creation_id),
+                None,
+                input.creation_id,
+                input.review,
+            ),
+            crate::agents::SaveProfile::Replace(input) => (
+                crate::agents::new_agent(input.settings, Some(input.agent_id)),
+                Some(input.revision),
+                None,
+                input.review,
+            ),
+        };
+        agent.settings.validate().map_err(Error::bad)?;
+        review.validate().map_err(Error::bad)?;
+        if creation_id.is_some_and(|id| id.0.get_version() != Some(uuid::Version::Random)) {
+            return Err(Error::bad("creationId must be a random UUID"));
+        }
+        let snapshot = serde_json::to_value(&agent)?;
+        crate::provider::Provider::of_agent(&snapshot)?
+            .adapter()
+            .validate_agent(&snapshot)?;
+        validate_profile(&agent)?;
+        // A3 still owns permission target lookup; pass only its typed wire view.
+        let access = serde_json::to_value(&agent.settings.access)?;
+        self.require_access_targets(&access).await?;
+        if editor == AgentEditor::Installation
+            && (!review.reapprove_delegations.is_empty() || !review.native_node_reviews.is_empty())
+        {
+            return Err(Error::forbidden(
+                "Only the installation owner can approve native nodes or plugin delegations.",
+            ));
+        }
+        for connection in &review.reapprove_delegations {
             let connection = crate::plugins::connections::load(self, connection).await?;
             crate::plugins::connections::ensure_owner(self, &connection).await?;
         }
-        let accepts_agents = self.instances_accepting_agents(&draft.agent).await?;
-        let creating = existing_id.is_none();
-        let AgentDraft {
-            mut agent,
-            access,
-            expected_revision,
-            inherited_grants,
-            native_reviews,
-            ..
-        } = draft;
-        let owner_review = crate::nodes::native_mode::owner().is_some();
-        let (agent, created) = self
-            .store
-            .transaction(move |db| {
-                authorize(db)?;
-                if let Some(previous) = replayed_creation(db, "agents", creation_id.as_deref())? {
-                    return Ok((previous, false));
+        let accepts_agents = self.instances_accepting_agents(&snapshot).await?;
+        let creating = expected.is_none();
+        let owner_review =
+            editor == AgentEditor::Owner && crate::nodes::native_mode::owner().is_some();
+        let reapproved = !review.reapprove_delegations.is_empty();
+        let (agent, created) = self.store.transaction(move |db| {
+            authorize(db)?;
+            let current = db.agent(&agent.id.to_string())?;
+            if creating {
+                if let Some(current) = &current {
+                    if creation_id.is_some() { return Ok((current.clone(), false)); }
+                    return Err(Error::conflict("Agent already exists."));
                 }
-                if !creating {
-                    required(
-                        db.get("agents", text(&agent, "id"))?,
-                        "Agent no longer exists",
-                    )?;
+                if db.0.query_row("SELECT EXISTS(SELECT 1 FROM records WHERE id=? UNION ALL SELECT 1 FROM projects WHERE id=?)", rusqlite::params![agent.id.to_string(), agent.id.to_string()], |row| row.get::<_, bool>(0))? {
+                    return Err(Error::conflict("This creation identity belongs to a different resource."));
                 }
-                if let Some(expected) = &expected_revision
-                    && let Some(current) = db.get("agents", text(&agent, "id"))?
-                    && current["revision"] != *expected
-                {
-                    return Err(Error::conflict(
-                        "This agent was changed elsewhere. Reload it before saving.",
-                    ));
+            } else {
+                let current = required(current.as_ref(), "Agent no longer exists")?;
+                if expected.as_deref() != Some(current.revision.as_str()) {
+                    return Err(Error::conflict("This agent was changed elsewhere. Reload it before saving."));
                 }
-                if let Some(current) = db.get("agents", text(&agent, "id"))? {
-                    for key in &inherited_grants {
-                        agent[*key] = current[*key].clone();
-                    }
-                    crate::agent_grants::normalize(&mut agent);
+                agent.created_at = current.created_at;
+                agent.avatar = current.avatar.clone();
+            }
+            if editor == AgentEditor::Installation {
+                let before = current.as_ref().map(serde_json::to_value).transpose()?.unwrap_or_else(|| json!({ "access": { "projects": [], "skills": [], "mcps": [], "nodes": [], "sandbox": "yolo" } }));
+                let edited = serde_json::to_value(&agent)?;
+                let expands = !covers(&before, &edited) || !node_access_covers(&before, &edited);
+                let previous_plugins = current.as_ref().map(|a| a.settings.plugins.as_slice()).unwrap_or_default();
+                let previous_exclusive = current.as_ref().map(|a| a.settings.exclusive_nodes.as_slice()).unwrap_or_default();
+                if expands || agent.settings.access.backend == "native" && current.as_ref().is_none_or(|a| a.settings.access.backend != "native")
+                    || agent.settings.plugins.iter().any(|id| !previous_plugins.contains(id))
+                    || agent.settings.exclusive_nodes.iter().any(|id| !previous_exclusive.contains(id)) {
+                    return Err(Error::forbidden("Only the installation owner can expand agent permissions."));
                 }
-                for project in access["projects"].as_array().into_iter().flatten() {
-                    required(
-                        db.project(project.as_str().unwrap_or(""))?,
-                        "Project no longer exists",
-                    )?;
-                }
-                crate::agent_grants::validate(db, &agent, &accepts_agents)?;
-                let agent = save_agent(db, agent, &access, owner_review, &native_reviews)?;
-                for connection in &reapprove {
-                    crate::plugins::connections::reapprove(db, connection, &agent)?;
-                }
-                Ok((agent, creating))
-            })
-            .await?;
+                // Owner-managed live grants remain authoritative until A3; profile replacement
+                // never revokes them through an installation agent.
+                agent.settings.plugins = previous_plugins.to_vec();
+                agent.settings.exclusive_nodes = previous_exclusive.to_vec();
+                agent.settings.validate().map_err(Error::bad)?;
+            }
+            let snapshot = serde_json::to_value(&agent)?;
+            for project in agent.settings.access.projects.as_ref().into_iter().flatten() {
+                required(db.project(project)?, "Project no longer exists")?;
+            }
+            crate::agent_grants::validate(db, &snapshot, &accepts_agents)?;
+            let access = serde_json::to_value(&agent.settings.access)?;
+            let agent = crate::agent_grants::save_profile(db, agent, &access, owner_review, &review.native_node_reviews)?;
+            let snapshot = serde_json::to_value(&agent)?;
+            for connection in &review.reapprove_delegations {
+                crate::plugins::connections::reapprove(db, connection, &snapshot)?;
+            }
+            Ok((agent, creating))
+        }).await?;
         if reapproved {
             self.plugins.changed.notify_one();
         }
         if created && self.avatars.configured(self).await? {
-            // Creation remains successful even when portrait scheduling fails.
             return Ok(self
                 .avatars
-                .generate(self, text(&agent, "id"))
+                .generate(self, &agent.id.to_string())
                 .await
                 .unwrap_or(agent));
         }
         Ok(agent)
-    }
-
-    /// Validates an edited agent without saving it. Owners may change live grants and
-    /// reapprove plugin delegations; the installation MCP keeps the saved ones.
-    async fn agent_draft(
-        &self,
-        mut input: Value,
-        existing_id: Option<&str>,
-        editor: AgentEditor,
-        creation_id: Option<String>,
-    ) -> Result<AgentDraft> {
-        let existing = match existing_id {
-            Some(id) => Some(self.get("agents", id).await?),
-            None => None,
-        };
-        let expected_revision = input
-            .as_object_mut()
-            .and_then(|fields| fields.remove("revision"))
-            // Agents saved before revisions existed have none; clients may send it empty.
-            .filter(|revision| {
-                revision
-                    .as_str()
-                    .is_some_and(|revision| !revision.is_empty())
-            });
-        let native_reviews = input
-            .as_object_mut()
-            .and_then(|fields| fields.remove("nativeNodeReviews"))
-            .unwrap_or_else(|| json!([]));
-        let native_reviews: Vec<String> = serde_json::from_value(native_reviews)
-            .map_err(|_| Error::bad("Native node reviews must be an explicit node list."))?;
-        if native_reviews.len() > 100 {
-            return Err(Error::bad("Review at most 100 administrative nodes."));
-        }
-        for node in &native_reviews {
-            crate::validation::uuid(node)?;
-        }
-        let reapprove = input
-            .as_object_mut()
-            .and_then(|fields| fields.remove("reapproveDelegations"))
-            .unwrap_or_else(|| json!([]));
-        let Some(reapprove) = reapprove.as_array() else {
-            return Err(Error::bad("Delegations to reapprove must be a list."));
-        };
-        let reapprove = reapprove
-            .iter()
-            .map(|connection| {
-                let connection = connection.as_str().unwrap_or("");
-                crate::validation::uuid(connection)?;
-                Ok(connection.to_owned())
-            })
-            .collect::<Result<Vec<_>>>()?;
-        if editor == AgentEditor::Installation && !reapprove.is_empty() {
-            return Err(Error::forbidden(
-                "Only the installation owner can reapprove plugin delegations.",
-            ));
-        }
-        // Grants the editor did not send are taken from the saved agent inside the save
-        // transaction, so a concurrent revocation is never restored.
-        let inherited_grants = [
-            crate::agent_grants::EXCLUSIVE_NODES,
-            crate::agent_grants::PLUGINS,
-        ]
-        .into_iter()
-        .filter(|key| {
-            existing.is_some() && (editor == AgentEditor::Installation || input.get(*key).is_none())
-        })
-        .collect::<Vec<_>>();
-        if let Some(existing) = &existing {
-            inherit_agent_settings(&mut input, existing);
-        }
-        if editor == AgentEditor::Installation && input.is_object() {
-            // Exclusive reservations and plugin grants such as 1Password stay with the owner.
-            for key in [
-                crate::agent_grants::EXCLUSIVE_NODES,
-                crate::agent_grants::PLUGINS,
-            ] {
-                input[key] = existing
-                    .as_ref()
-                    .map_or_else(|| json!([]), |agent| json!(live_grant(agent, key)));
-            }
-        }
-        let mut agent = parse("agent", input)?;
-        crate::agent_grants::normalize(&mut agent);
-        let provider = crate::provider::Provider::of_agent(&agent)?;
-        crate::models::validate_speed(text(&agent, "speed"))?;
-        if provider != crate::provider::Provider::Codex && !text(&agent, "speed").is_empty() {
-            return Err(Error::bad(
-                "Speed applies only to Codex agents. Remove it or choose Codex.",
-            ));
-        }
-        provider.adapter().validate_agent(&agent)?;
-        agent["id"] = existing_id
-            .map(str::to_owned)
-            .or(creation_id.clone())
-            .unwrap_or_else(id)
-            .into();
-        agent["createdAt"] = existing
-            .as_ref()
-            .map_or_else(|| now().into(), |v| v["createdAt"].clone());
-        let access = policy(&agent);
-        validate_access(&agent, &access)?;
-        self.require_access_targets(&access).await?;
-        Ok(AgentDraft {
-            agent,
-            access,
-            expected_revision,
-            reapprove,
-            inherited_grants,
-            native_reviews,
-        })
     }
 
     /// Plugin instances whose package gives agents access. A package that renders
@@ -366,17 +286,52 @@ impl Service {
 
     /// What saving an edited agent would interrupt: its queued or running work that
     /// the new access no longer covers, and plugin delegations it would suspend.
-    pub async fn agent_preview(&self, input: Value, existing_id: &str) -> Result<Value> {
-        let draft = self
-            .agent_draft(input, Some(existing_id), AgentEditor::Owner, None)
-            .await?;
-        let agent = draft.agent;
-        let id = existing_id.to_owned();
+    pub(crate) async fn agent_preview<F>(
+        &self,
+        mut input: cairn_contracts::ReplaceAgentInput,
+        authorize: F,
+    ) -> Result<cairn_contracts::AgentPreview>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
+        input.settings.validate().map_err(Error::bad)?;
+        input.review.validate().map_err(Error::bad)?;
+        let current = required(
+            self.store.agent(&input.agent_id.to_string()).await?,
+            "Agent not found",
+        )?;
+        if current.revision != input.revision {
+            return Err(Error::conflict(
+                "This agent was changed elsewhere. Reload it before saving.",
+            ));
+        }
+        let mut agent = current;
+        agent.settings = input.settings;
+        validate_profile(&agent)?;
+        let access = serde_json::to_value(&agent.settings.access)?;
+        self.require_access_targets(&access).await?;
+        let agent = serde_json::to_value(&agent)?;
+        crate::provider::Provider::of_agent(&agent)?
+            .adapter()
+            .validate_agent(&agent)?;
+        let id = input.agent_id.to_string();
         let owner = crate::relay::task_author_policy(self)
             .await?
             .map(|policy| policy.owner.access_id);
         self.store
             .read(move |db| {
+                let tx = rusqlite::Transaction::new_unchecked(
+                    db.0,
+                    rusqlite::TransactionBehavior::Deferred,
+                )?;
+                let db = &Db(&tx);
+                authorize(db)?;
+                let current = required(db.agent(&id)?, "Agent not found")?;
+                if current.revision != input.revision {
+                    return Err(Error::conflict(
+                        "This agent was changed elsewhere. Reload it before saving.",
+                    ));
+                }
                 let mut queued = 0;
                 let mut running = 0;
                 for run in db.active()? {
@@ -396,10 +351,10 @@ impl Service {
                     &agent,
                     owner.as_deref(),
                 )?;
-                Ok(json!({
-                    "runs": { "queued": queued, "running": running },
-                    "delegations": delegations,
-                }))
+                Ok(cairn_contracts::AgentPreview {
+                    runs: cairn_contracts::AgentPreviewRuns { queued, running },
+                    delegations: serde_json::from_value(serde_json::to_value(delegations)?)?,
+                })
             })
             .await
     }
@@ -442,7 +397,7 @@ impl Service {
     ) -> Result<Value> {
         let creation_id = creation_id(&input, existing)?;
         let mut task = parse("task", input)?;
-        let agent = self.get("agents", text(&task, "agentId")).await?;
+        let agent = self.agent_snapshot(text(&task, "agentId")).await?;
         let origin = crate::native::policy::origin();
         if crate::native::policy::native(&agent) && !reduces_execution {
             crate::native::policy::refresh(self).await?;
@@ -485,7 +440,7 @@ impl Service {
         self.store
             .transaction(move |db| {
                 required(
-                    db.get("agents", text(&task, "agentId"))?,
+                    db.agent_snapshot(text(&task, "agentId"))?,
                     "Agent no longer exists",
                 )?;
                 let previous = existing
@@ -511,7 +466,7 @@ impl Service {
                     return Ok(previous);
                 }
                 let agent = required(
-                    db.get("agents", text(&task, "agentId"))?,
+                    db.agent_snapshot(text(&task, "agentId"))?,
                     "Agent no longer exists",
                 )?;
                 task_projects(&agent, &task, &db.projects()?)?;
@@ -541,9 +496,6 @@ impl Service {
                 authorize(db)?;
                 required(db.get(&kind, &id)?, "Record not found")?;
                 ensure_removable(db, &kind, &id)?;
-                if kind == "agents" {
-                    forget_agent(db, &id)?;
-                }
                 db.remove(&kind, &id)?;
                 db.audit(&format!("{kind}.deleted"), &json!({ "id": id }))
             })
@@ -575,7 +527,7 @@ impl Service {
                 "Restore this archived task before running it.",
             ));
         }
-        let agent = self.get("agents", text(&task, "agentId")).await?;
+        let agent = self.agent_snapshot(text(&task, "agentId")).await?;
         let all_projects = self.store.projects().await?;
         let projects = task_projects(&agent, &task, &all_projects)?;
         let available_projects =
@@ -714,7 +666,7 @@ impl Service {
             .store
             .transaction(move |db| {
                 required(
-                    db.get("agents", text(&run["snapshot"]["agent"], "id"))?,
+                    db.agent_snapshot(text(&run["snapshot"]["agent"], "id"))?,
                     "Agent no longer exists",
                 )?;
                 let grant = crate::native::policy::authorize_origin(
@@ -940,7 +892,7 @@ pub(crate) fn ensure_removable(db: &Db<'_>, kind: &str, id: &str) -> Result<()> 
         let projects = &policy(agent)["projects"];
         !projects.is_null() && allowed(projects, id)
     };
-    if kind == "projects" && db.list("agents")?.iter().any(assigned) {
+    if kind == "projects" && db.agent_snapshots()?.iter().any(assigned) {
         return Err(Error::conflict(
             "This project is assigned to an agent. Update the agent first.",
         ));
@@ -975,47 +927,6 @@ pub(crate) fn forget_agent(db: &Db<'_>, id: &str) -> Result<()> {
     crate::agent_grants::forget_agent(db, id)
 }
 
-/// Partial updates preserve current settings that the caller did not edit.
-fn inherit_agent_settings(input: &mut Value, existing: &Value) {
-    if input.get("access").is_none() {
-        input["access"] = policy(existing);
-    }
-    if input.get("provider").is_none() {
-        input["provider"] = existing["provider"].clone();
-    }
-    // Editors predating speeds keep the saved one while the coding agent stays the same.
-    let same_provider = input["provider"] == *existing.get("provider").unwrap_or(&json!("codex"));
-    if input.get("speed").is_none() && same_provider && existing.get("speed").is_some() {
-        input["speed"] = existing["speed"].clone();
-    }
-    if input.is_object() {
-        for key in [
-            crate::agent_grants::EXCLUSIVE_NODES,
-            crate::agent_grants::PLUGINS,
-        ] {
-            if input.get(key).is_none() {
-                input[key] = json!(live_grant(existing, key));
-            }
-        }
-    }
-    if !input["access"].is_object() {
-        return;
-    }
-    for key in ["nodes", "installation", "delegation", "backend"] {
-        if input["access"].get(key).is_none() {
-            input["access"][key] = policy(existing)[key].clone();
-        }
-    }
-}
-
-fn live_grant(agent: &Value, key: &str) -> Vec<String> {
-    if key == crate::agent_grants::EXCLUSIVE_NODES {
-        crate::agent_grants::exclusive_nodes(agent)
-    } else {
-        crate::agent_grants::plugins(agent)
-    }
-}
-
 /// Who edits an agent: the owner from the app, or an agent through the installation MCP.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentEditor {
@@ -1023,102 +934,23 @@ pub(crate) enum AgentEditor {
     Installation,
 }
 
-struct AgentDraft {
-    agent: Value,
-    access: Value,
-    expected_revision: Option<Value>,
-    reapprove: Vec<String>,
-    inherited_grants: Vec<&'static str>,
-    native_reviews: Vec<String>,
-}
-
 /// Marks a changed agent record so concurrent editors can detect the change.
 pub(crate) fn touch(agent: &mut Value) {
     agent["revision"] = id().into();
 }
 
-fn restricted(access: &Value) -> bool {
-    !access["projects"].is_null()
-        || !access["skills"].is_null()
-        || !access["mcps"].is_null()
-        || access["mcpTools"]
-            .as_object()
-            .is_some_and(|tools| !tools.is_empty())
-}
-
-fn validate_access(agent: &Value, access: &Value) -> Result<()> {
-    if agent["id"] == MAIN_AGENT_ID && restricted(access) {
+fn validate_profile(agent: &cairn_contracts::Agent) -> Result<()> {
+    let access = &agent.settings.access;
+    let restricted = access.projects.is_some()
+        || access.skills.is_some()
+        || access.mcps.is_some()
+        || !access.mcp_tools.is_empty();
+    if agent.id.to_string() == MAIN_AGENT_ID && restricted {
         return Err(Error::bad(
             "The main agent always has access to all resources. Create another agent for restricted access.",
         ));
     }
     Ok(())
-}
-
-fn save_agent(
-    db: &Db<'_>,
-    mut agent: Value,
-    access: &Value,
-    owner_review: bool,
-    native_reviews: &[String],
-) -> Result<Value> {
-    // Nodes held before stay accepted only while the execution backend is unchanged.
-    let previous_nodes = db
-        .get("agents", text(&agent, "id"))?
-        .filter(|saved| policy(saved)["backend"] == access["backend"])
-        .and_then(|saved| policy(&saved)["nodes"].as_array().cloned());
-    // Serialize grants with revocation; a concurrent editor must never
-    // restore a grant that the revocation transaction just removed.
-    // Nodes the agent already held stay accepted, so unrelated edits still save.
-    let held = |node: &Value| {
-        previous_nodes
-            .as_ref()
-            .is_some_and(|nodes| nodes.iter().any(|held| held == node))
-    };
-    for node in access["nodes"].as_array().into_iter().flatten() {
-        if node == crate::nodes::LOCAL_NODE_ID {
-            // The current runner only runs Firecracker VMs.
-            if access["backend"] == "native" && !held(node) {
-                return Err(Error::bad(
-                    "Native agents need explicit native nodes: the current runner only runs Firecracker VMs.",
-                ));
-            }
-            continue;
-        }
-        let record = required(
-            db.get("nodes", node.as_str().unwrap_or(""))?,
-            "Node not found",
-        )?;
-        if record["revoked"] == true {
-            return Err(Error::bad("A revoked node cannot be authorized."));
-        }
-        if !held(node)
-            && crate::native::policy::node_native(&record) != (access["backend"] == "native")
-        {
-            return Err(Error::bad(
-                "Choose nodes that use this agent's execution backend.",
-            ));
-        }
-    }
-    // Read the latest portrait inside the save transaction: editing an agent
-    // must not overwrite an upload or background generation that just finished.
-    if let Some(existing) = db.get("agents", text(&agent, "id"))?
-        && let Some(avatar) = existing.get("avatar")
-    {
-        agent["avatar"] = avatar.clone();
-    }
-    crate::nodes::native_mode::review_agent(
-        db,
-        &agent,
-        db.get("agents", text(&agent, "id"))?.as_ref(),
-        owner_review,
-        native_reviews,
-    )?;
-    touch(&mut agent);
-    db.put("agents", &agent)?;
-    crate::agent_grants::mirror(db, &agent)?;
-    db.audit("agent.saved", &json!({ "id": agent["id"] }))?;
-    Ok(agent)
 }
 
 pub fn policy(agent: &Value) -> Value {
@@ -1322,7 +1154,7 @@ pub(crate) fn replayed_creation(
     let Some(id) = creation_id else {
         return Ok(None);
     };
-    if db.project(id)?.is_some() {
+    if db.project(id)?.is_some() || db.agent(id)?.is_some() {
         return Err(Error::conflict(
             "This creation identity belongs to a different resource.",
         ));
@@ -1340,4 +1172,15 @@ pub(crate) fn replayed_creation(
         ));
     }
     Ok(Some(row["record"].clone()))
+}
+
+fn node_access_covers(current: &Value, edited: &Value) -> bool {
+    let current = policy(current);
+    let edited = policy(edited);
+    current["nodes"].is_null()
+        || edited["nodes"].as_array().is_some_and(|nodes| {
+            nodes
+                .iter()
+                .all(|node| allowed(&current["nodes"], node.as_str().unwrap_or("")))
+        })
 }

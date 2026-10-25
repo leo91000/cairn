@@ -65,7 +65,22 @@ abstract class AttachmentCases {
         MockWebServer().use { server ->
             val app = ApplicationProvider.getApplicationContext<Application>()
             val requested = CopyOnWriteArrayList<String>()
-            val agent = Agent(MAIN_AGENT_ID, "Agent principal")
+            val agent =
+                Agent(
+                    exclusiveNodes = emptyList(),
+                    plugins = emptyList(),
+                    revision = "",
+                    createdAt = 0,
+                    access =
+                        AccessPolicy(
+                            mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                            projects = null,
+                            skills = null,
+                            mcps = null,
+                        ),
+                    id = MAIN_AGENT_ID,
+                    name = "Agent principal",
+                )
             val run = Run("run", status = "succeeded", snapshot = Snapshot(agent = agent))
             val chat =
                 Chat(
@@ -183,7 +198,9 @@ abstract class AttachmentCases {
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/agents" ->
-                                    wireJson.encodeToString(listOf(agent))
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListAgentsOutput(listOf(agent))
+                                    )
                                 "/api/installations/fixture/api/codex/models" -> """{"models":[]}"""
                                 "/api/installations/fixture/api/overview" -> "{}"
                                 else ->
@@ -193,6 +210,11 @@ abstract class AttachmentCases {
                                             ?.endsWith("/api/projects") == true
                                     )
                                         """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
                                     else "[]"
                             }
                         return MockResponse().setBody(body)

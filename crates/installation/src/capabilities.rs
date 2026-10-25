@@ -267,3 +267,236 @@ impl ProjectOperation {
         }
     }
 }
+
+pub(crate) struct AgentOperation {
+    pub name: &'static str,
+    scope: &'static str,
+    description: &'static str,
+}
+
+pub(crate) const AGENT_OPERATIONS: &[AgentOperation] = &[
+    AgentOperation {
+        name: "set_agent_avatar",
+        scope: "manage",
+        description: "Upload a PNG, JPEG or WebP portrait as base64 (at most 5 MiB); normalization and status match the apps.",
+    },
+    AgentOperation {
+        name: "list_agents",
+        scope: "read",
+        description: "List typed agent profiles.",
+    },
+    AgentOperation {
+        name: "get_agent",
+        scope: "read",
+        description: "Read an agent profile and its portrait status.",
+    },
+    AgentOperation {
+        name: "save_agent",
+        scope: "manage",
+        description: "Create an agent with a stable optional creationId. Expanding permissions requires the owner.",
+    },
+    AgentOperation {
+        name: "replace_agent",
+        scope: "manage",
+        description: "Replace all settings at the expected revision. Agents cannot expand permissions or approve sensitive rights.",
+    },
+    AgentOperation {
+        name: "delete_agent",
+        scope: "manage",
+        description: "Delete an unused agent.",
+    },
+    AgentOperation {
+        name: "preview_agent",
+        scope: "manage",
+        description: "Preview work and delegations affected by a replacement, without writing.",
+    },
+    AgentOperation {
+        name: "merge_agents",
+        scope: "manage",
+        description: "Merge an idle agent into a destination already covering all its grants, preserving resumable work.",
+    },
+    AgentOperation {
+        name: "get_agent_avatar_configuration",
+        scope: "read",
+        description: "Whether avatar generation is configured; no account details are returned.",
+    },
+    AgentOperation {
+        name: "generate_agent_avatar",
+        scope: "manage",
+        description: "Schedule an agent portrait. Read get_agent for generation status.",
+    },
+];
+
+pub(crate) fn agent_operation(name: &str) -> Option<&'static AgentOperation> {
+    AGENT_OPERATIONS.iter().find(|op| op.name == name)
+}
+
+impl AgentOperation {
+    pub(crate) fn descriptor(&self) -> Value {
+        use cairn_contracts::*;
+        let (input, output) = match self.name {
+            "set_agent_avatar" => (
+                schema_for::<SetAgentAvatarInput>(Contract::Deserialize),
+                schema_for::<Agent>(Contract::Serialize),
+            ),
+            "list_agents" => (
+                schema_for::<ListAgentsInput>(Contract::Deserialize),
+                schema_for::<ListAgentsOutput>(Contract::Serialize),
+            ),
+            "save_agent" => (
+                schema_for::<CreateAgentInput>(Contract::Deserialize),
+                schema_for::<Agent>(Contract::Serialize),
+            ),
+            "replace_agent" => (
+                schema_for::<ReplaceAgentInput>(Contract::Deserialize),
+                schema_for::<Agent>(Contract::Serialize),
+            ),
+            "preview_agent" => (
+                schema_for::<ReplaceAgentInput>(Contract::Deserialize),
+                schema_for::<AgentPreview>(Contract::Serialize),
+            ),
+            "delete_agent" => (
+                schema_for::<AgentInput>(Contract::Deserialize),
+                schema_for::<DeleteAgentOutput>(Contract::Serialize),
+            ),
+            "merge_agents" => (
+                schema_for::<MergeAgentsInput>(Contract::Deserialize),
+                schema_for::<MergeAgentsOutput>(Contract::Serialize),
+            ),
+            "get_agent_avatar_configuration" => (
+                schema_for::<ListAgentsInput>(Contract::Deserialize),
+                schema_for::<AvatarConfiguration>(Contract::Serialize),
+            ),
+            _ => (
+                schema_for::<AgentInput>(Contract::Deserialize),
+                schema_for::<Agent>(Contract::Serialize),
+            ),
+        };
+        serde_json::json!({
+            "name": self.name,
+            "description": self.description,
+            "inputSchema": input,
+            "outputSchema": output,
+            "_meta": { "securitySchemes": [{ "type": "oauth2", "scopes": [self.scope] }] },
+            "annotations": { "readOnlyHint": self.scope == "read" || self.name == "preview_agent", "destructiveHint": self.scope != "read" && self.name != "preview_agent", "openWorldHint": self.name == "generate_agent_avatar" },
+        })
+    }
+
+    pub(crate) async fn invoke(
+        &self,
+        s: &Arc<Service>,
+        input: Value,
+        context: ResumeContext,
+    ) -> Result<Value> {
+        use cairn_contracts::*;
+        let (editor, bearer) = match context {
+            ResumeContext::Human(_) => (crate::service::AgentEditor::Owner, None),
+            ResumeContext::Public(scopes) => {
+                if !scopes.iter().any(|scope| scope == self.scope) {
+                    return Err(Error::forbidden(format!(
+                        "The {} scope is required.",
+                        self.scope
+                    )));
+                }
+                (crate::service::AgentEditor::Installation, None)
+            }
+            ResumeContext::Installation(bearer) => {
+                crate::installation_mcp::authorize(s, &bearer).await?;
+                (crate::service::AgentEditor::Installation, Some(bearer))
+            }
+        };
+        let authorize = crate::installation_mcp::management_authorization(bearer.as_deref());
+        match self.name {
+            "set_agent_avatar" => {
+                let input: SetAgentAvatarInput = decode(input)?;
+                Ok(serde_json::to_value(
+                    s.avatars
+                        .upload(s, &input.agent_id.to_string(), &input.data, authorize)
+                        .await?,
+                )?)
+            }
+            "save_agent" => Ok(serde_json::to_value(
+                s.save_profile(
+                    crate::agents::SaveProfile::Create(decode(input)?),
+                    editor,
+                    authorize,
+                )
+                .await?,
+            )?),
+            "replace_agent" => Ok(serde_json::to_value(
+                s.save_profile(
+                    crate::agents::SaveProfile::Replace(decode(input)?),
+                    editor,
+                    authorize,
+                )
+                .await?,
+            )?),
+            "preview_agent" => Ok(serde_json::to_value(
+                s.agent_preview(decode(input)?, authorize).await?,
+            )?),
+            "merge_agents" => Ok(serde_json::to_value(
+                s.merge_agents_authorized(decode(input)?, authorize).await?,
+            )?),
+            "generate_agent_avatar" => {
+                let input: AgentInput = decode(input)?;
+                Ok(serde_json::to_value(
+                    s.avatars
+                        .generate_authorized(s, &input.agent_id.to_string(), authorize)
+                        .await?,
+                )?)
+            }
+            "delete_agent" => {
+                let input: AgentInput = decode(input)?;
+                let id = input.agent_id.to_string();
+                s.store
+                    .transaction(move |db| {
+                        authorize(db)?;
+                        crate::error::required(db.agent(&id)?, "Agent not found")?;
+                        crate::service::ensure_removable(db, "agents", &id)?;
+                        crate::service::forget_agent(db, &id)?;
+                        db.remove_agent(&id)
+                    })
+                    .await?;
+                Ok(serde_json::to_value(DeleteAgentOutput { deleted: true })?)
+            }
+            name => {
+                let agent_id = if name == "get_agent" {
+                    Some(decode::<AgentInput>(input)?.agent_id)
+                } else {
+                    let _: ListAgentsInput = decode(input)?;
+                    None
+                };
+                let configured = if name == "get_agent_avatar_configuration" {
+                    s.avatars.configured(s).await?
+                } else {
+                    false
+                };
+                let list = name == "list_agents";
+                s.store
+                    .read(move |db| {
+                        let tx = rusqlite::Transaction::new_unchecked(
+                            db.0,
+                            rusqlite::TransactionBehavior::Deferred,
+                        )?;
+                        let db = Db(&tx);
+                        authorize(&db)?;
+                        let result = if let Some(id) = agent_id {
+                            serde_json::to_value(crate::error::required(
+                                db.agent(&id.to_string())?,
+                                "Agent not found",
+                            )?)?
+                        } else if list {
+                            serde_json::to_value(ListAgentsOutput {
+                                agents: db.agents()?,
+                            })?
+                        } else {
+                            serde_json::to_value(AvatarConfiguration { configured })?
+                        };
+                        tx.commit()?;
+                        Ok(result)
+                    })
+                    .await
+            }
+        }
+    }
+}

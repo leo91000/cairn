@@ -137,7 +137,7 @@ fn record_name(db: &Db<'_>, chat: &Value, kind: &str, key: &str, deleted: &str) 
     } else {
         "projectId"
     };
-    Ok(match db.get(kind, text(chat, id_key))? {
+    Ok(match db.agent_snapshot(text(chat, id_key))? {
         Some(record) => record["name"].clone(),
         // Keep the name remembered on the chat after its agent or project is removed.
         None => chat.get(key).cloned().unwrap_or_else(|| deleted.into()),
@@ -368,7 +368,7 @@ fn require_sendable(db: &Db<'_>, chat: &Value, messages: &[Value], id: &str) -> 
         ));
     }
     let agent = required(
-        db.get("agents", text(chat, "agentId"))?,
+        db.agent_snapshot(text(chat, "agentId"))?,
         "This agent is no longer available.",
     )?;
     crate::nodes::require_node(&agent)?;
@@ -897,7 +897,7 @@ fn from_run(db: &Db<'_>, run_id: &str, origin: &crate::native::policy::Origin) -
     crate::native::policy::authorize_run_in(db, run_id, origin)?;
     let run = required(db.run(run_id)?, "Run not found")?;
     let agent = required(
-        db.get("agents", text(&run["snapshot"]["agent"], "id"))?,
+        db.agent_snapshot(text(&run["snapshot"]["agent"], "id"))?,
         "Agent not found",
     )?;
     if !crate::service::covers(&agent, &run["snapshot"]["agent"]) {
@@ -957,7 +957,7 @@ pub(crate) fn create_as(
     origin: &crate::native::policy::Origin,
 ) -> Result<Value> {
     let input = parse_as::<ChatInput>("chat", input)?;
-    let agent = required(db.get("agents", &input.agent_id)?, "Agent not found")?;
+    let agent = required(db.agent_snapshot(&input.agent_id)?, "Agent not found")?;
     crate::native::policy::authorize_origin(db, &agent, origin)?;
     let created_at = now();
     let mut chat = serde_json::to_value(NewChat {

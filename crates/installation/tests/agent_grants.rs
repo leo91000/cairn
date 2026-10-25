@@ -1,6 +1,8 @@
 //! Exclusive node reservations and plugin grants (such as 1Password) are edited on
 //! the agent. Nodes and plugin instances keep a synchronized copy that enforcement
 //! and older releases read.
+use common::StoreAgentFixture;
+
 mod common;
 
 use axum::{
@@ -57,6 +59,33 @@ impl Owner {
     }
 
     async fn send(&self, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
+        let body = if path == "/api/agents" && method == "POST" {
+            json!({ "settings": body, "review": {} })
+        } else if path.starts_with("/api/agents/")
+            && (method == "PUT" || path.ends_with("/preview"))
+        {
+            let id = path
+                .trim_start_matches("/api/agents/")
+                .split('/')
+                .next()
+                .unwrap();
+            let mut settings = body.clone();
+            let revision = settings
+                .as_object_mut()
+                .unwrap()
+                .remove("revision")
+                .unwrap_or_else(|| json!(""));
+            let review = json!({
+                "nativeNodeReviews": settings.as_object_mut().unwrap().remove("nativeNodeReviews").unwrap_or_else(|| json!([])),
+                "reapproveDelegations": settings.as_object_mut().unwrap().remove("reapproveDelegations").unwrap_or_else(|| json!([])),
+            });
+            for key in ["id", "createdAt", "avatar"] {
+                settings.as_object_mut().unwrap().remove(key);
+            }
+            json!({ "agentId": id, "revision": revision, "settings": settings, "review": review })
+        } else {
+            body
+        };
         let request = self
             .session
             .authorize(
@@ -74,7 +103,16 @@ impl Owner {
     }
 
     async fn stored(&self, kind: &str, id: &str) -> Value {
-        self.service.store.get(kind, id).await.unwrap().unwrap()
+        if kind == "agents" {
+            self.service
+                .store
+                .agent_snapshot(id)
+                .await
+                .unwrap()
+                .unwrap()
+        } else {
+            self.service.store.get(kind, id).await.unwrap().unwrap()
+        }
     }
 
     async fn add_node(&self) {
@@ -115,7 +153,11 @@ impl Owner {
 
     async fn create_agent(&self, name: &str) -> Value {
         let (status, agent) = self
-            .send("POST", "/api/agents", json!({ "name": name }))
+            .send(
+                "POST",
+                "/api/agents",
+                json!({ "name": name, "exclusiveNodes": [], "plugins": [], "access": cairn_contracts::AccessPolicy::default() }),
+            )
             .await;
         assert_eq!(status, StatusCode::OK, "{agent}");
         agent
@@ -155,14 +197,15 @@ async fn the_agent_page_grants_exclusive_nodes_and_service_accounts() {
     let instance: connections::Connection = serde_json::from_value(instance).unwrap();
     assert!(instance.grants(&id));
 
-    // An older client that omits the new fields keeps them.
-    let mut older = saved.clone();
-    for key in ["exclusiveNodes", "plugins"] {
-        older.as_object_mut().unwrap().remove(key);
-    }
-    older["description"] = "Edited by an older app".into();
-    let (status, kept) = owner.send("PUT", &path(&saved), older).await;
-    assert_eq!(status, StatusCode::OK, "{kept}");
+    // A replacement cannot silently reset owner grants by omitting them.
+    let mut incomplete = saved.clone();
+    incomplete.as_object_mut().unwrap().remove("exclusiveNodes");
+    incomplete.as_object_mut().unwrap().remove("plugins");
+    assert_eq!(
+        owner.send("PUT", &path(&saved), incomplete).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let kept = owner.stored("agents", &id).await;
     assert_eq!(kept["exclusiveNodes"], json!([NODE]));
     assert_eq!(kept["plugins"], json!([account]));
 
@@ -244,20 +287,20 @@ async fn a_stale_editor_cannot_overwrite_newer_access() {
     let (status, error) = owner.send("PUT", &path(&agent), stale).await;
     assert_eq!(status, StatusCode::CONFLICT, "{error}");
 
-    // An empty revision, as for agents saved before revisions existed, is not checked.
+    // An empty revision never bypasses concurrency control.
     let mut empty = agent.clone();
     empty["revision"] = "".into();
     assert_eq!(
         owner.send("PUT", &path(&agent), empty).await.0,
-        StatusCode::OK
+        StatusCode::CONFLICT
     );
 
-    // Clients that never send a revision keep working.
+    // Omitted revisions cannot bypass concurrency control either.
     let mut unversioned = agent.clone();
     unversioned.as_object_mut().unwrap().remove("revision");
     assert_eq!(
         owner.send("PUT", &path(&agent), unversioned).await.0,
-        StatusCode::OK
+        StatusCode::CONFLICT
     );
 }
 
@@ -391,57 +434,6 @@ async fn deleting_an_agent_or_revoking_a_node_removes_its_live_grants() {
 }
 
 #[tokio::test]
-async fn startup_rebuilds_agent_grants_from_resources_an_older_release_edited() {
-    let root = TempDir::new().unwrap();
-    std::fs::create_dir(root.path().join("home")).unwrap();
-    let service = start(root.path()).await;
-    let owner = Owner::serve(service, TempDir::new().unwrap()).await;
-    owner.add_node().await;
-    let account = owner.add_service_account(json!([])).await;
-    let mut agent = owner.create_agent("Legacy").await;
-    agent["access"]["nodes"] = json!([LOCAL_NODE_ID, NODE]);
-    let (_, agent) = owner.send("PUT", &path(&agent), agent).await;
-    let id = text(&agent, "id").to_owned();
-
-    // An older release only writes the resource side, possibly naming deleted agents.
-    let store = &owner.service.store;
-    let mut node = owner.stored("nodes", NODE).await;
-    node["exclusiveAgents"] = json!([id, GHOST]);
-    store.put("nodes", node).await.unwrap();
-    let mut instance = owner.stored(connections::KIND, &account).await;
-    instance["agentIds"] = json!([GHOST, id]);
-    store.put(connections::KIND, instance).await.unwrap();
-    let mut legacy = owner.stored("agents", &id).await;
-    for key in ["exclusiveNodes", "plugins"] {
-        legacy.as_object_mut().unwrap().remove(key);
-    }
-    store.put("agents", legacy).await.unwrap();
-    owner.service.shutdown.cancel();
-    drop(owner);
-
-    let restarted = start(root.path()).await;
-    let agent = restarted.store.get("agents", &id).await.unwrap().unwrap();
-    assert_eq!(agent["exclusiveNodes"], json!([NODE]));
-    assert_eq!(agent["plugins"], json!([account]));
-    let node = restarted.store.get("nodes", NODE).await.unwrap().unwrap();
-    assert_eq!(node["exclusiveAgents"], json!([id]));
-    let instance = restarted
-        .store
-        .get(connections::KIND, &account)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(instance["agentIds"], json!([id]));
-
-    // A second startup changes nothing.
-    let revision = agent["revision"].clone();
-    restarted.shutdown.cancel();
-    let again = start(root.path()).await;
-    let agent = again.store.get("agents", &id).await.unwrap().unwrap();
-    assert_eq!(agent["revision"], revision);
-}
-
-#[tokio::test]
 async fn preview_counts_work_that_reduced_access_would_stop() {
     let owner = Owner::new().await;
     let agent = owner.create_agent("Busy").await;
@@ -536,52 +528,7 @@ async fn deleting_an_mcp_connection_keeps_live_grants_and_marks_changed_agents()
 }
 
 #[tokio::test]
-async fn startup_gives_existing_agents_a_revision_and_keeps_grants_out_of_access() {
-    let root = TempDir::new().unwrap();
-    std::fs::create_dir(root.path().join("home")).unwrap();
-    let service = start(root.path()).await;
-    let mut legacy = service
-        .store
-        .get("agents", MAIN_AGENT_ID)
-        .await
-        .unwrap()
-        .unwrap();
-    legacy.as_object_mut().unwrap().remove("revision");
-    // A draft of this change stored the grants inside `access`.
-    legacy["access"]["exclusiveNodes"] = json!([]);
-    legacy["access"]["plugins"] = json!([]);
-    service.store.put("agents", legacy).await.unwrap();
-    service.shutdown.cancel();
-    drop(service);
-
-    let restarted = start(root.path()).await;
-    let main = restarted
-        .store
-        .get("agents", MAIN_AGENT_ID)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(main["revision"].as_str().is_some_and(|r| !r.is_empty()));
-    // The previous release merges every access key into its policy: grants stay outside.
-    assert_eq!(main["exclusiveNodes"], json!([]));
-    assert!(main["access"].get("exclusiveNodes").is_none());
-    assert!(main["access"].get("plugins").is_none());
-}
-
-/// The previous release's `policy()`: defaults merged with every saved `access` key.
-/// Since data epoch 8, GitHub is a plugin grant and no longer an `access` key.
-fn previous_policy(agent: &Value) -> Value {
-    let mut previous = json!({
-        "projects": null, "skills": null, "mcps": null, "mcpTools": {},
-        "installation": false, "sandbox": "yolo",
-        "nodes": [LOCAL_NODE_ID],
-    });
-    cairn_installation::store::merge(&mut previous, &agent["access"]);
-    previous
-}
-
-#[tokio::test]
-async fn delegations_stay_approved_for_the_previous_release_whatever_the_live_grants() {
+async fn live_grants_do_not_expand_a_delegation_policy() {
     let owner = Owner::new().await;
     owner.add_node().await;
     let account = owner.add_service_account(json!([])).await;
@@ -617,12 +564,12 @@ async fn delegations_stay_approved_for_the_previous_release_whatever_the_live_gr
     let approved = owner.stored(connections::KIND, &id).await["grantedAccess"].clone();
     // Both releases compare the same policy, before and after a save by the previous
     // release, which drops the fields it does not know.
-    assert_eq!(previous_policy(&granted), approved);
+    assert_eq!(policy(&granted), approved);
     let mut saved_by_previous = granted.clone();
     for key in ["exclusiveNodes", "plugins", "revision"] {
         saved_by_previous.as_object_mut().unwrap().remove(key);
     }
-    assert_eq!(previous_policy(&saved_by_previous), approved);
+    assert_eq!(policy(&saved_by_previous), approved);
     assert_eq!(policy(&granted), approved);
 }
 
@@ -646,7 +593,7 @@ async fn a_held_grant_on_an_instance_awaiting_review_does_not_block_other_edits(
     owner
         .service
         .store
-        .put("agents", held.clone())
+        .put_agent_fixture(held.clone())
         .await
         .unwrap();
 
@@ -735,28 +682,6 @@ async fn adding_agents_to_a_new_node_never_revokes_existing_access() {
 }
 
 #[tokio::test]
-async fn startup_drops_reservations_an_older_release_left_without_node_access() {
-    let root = TempDir::new().unwrap();
-    std::fs::create_dir(root.path().join("home")).unwrap();
-    let owner = Owner::serve(start(root.path()).await, TempDir::new().unwrap()).await;
-    owner.add_node().await;
-    let agent = owner.create_agent("Rolled back").await;
-    let id = text(&agent, "id").to_owned();
-    // The previous release removed node access but kept the node's copy.
-    let mut node = owner.stored("nodes", NODE).await;
-    node["exclusiveAgents"] = json!([id]);
-    owner.service.store.put("nodes", node).await.unwrap();
-    owner.service.shutdown.cancel();
-    drop(owner);
-
-    let restarted = start(root.path()).await;
-    let agent = restarted.store.get("agents", &id).await.unwrap().unwrap();
-    assert_eq!(agent["exclusiveNodes"], json!([]));
-    let node = restarted.store.get("nodes", NODE).await.unwrap().unwrap();
-    assert_eq!(node["exclusiveAgents"], json!([]));
-}
-
-#[tokio::test]
 async fn grants_follow_the_agent_execution_backend() {
     let owner = Owner::new().await;
     owner.add_node().await;
@@ -797,7 +722,7 @@ async fn grants_follow_the_agent_execution_backend() {
     owner
         .service
         .store
-        .put("agents", held.clone())
+        .put_agent_fixture(held.clone())
         .await
         .unwrap();
     let mut renamed = owner.stored("agents", text(&agent, "id")).await;
@@ -815,14 +740,14 @@ async fn grants_follow_the_agent_execution_backend() {
 }
 
 #[tokio::test]
-async fn a_save_without_grants_never_restores_a_concurrent_revocation() {
+async fn an_incomplete_replacement_cannot_restore_a_concurrent_revocation() {
     let owner = Owner::new().await;
     let account = owner.add_service_account(json!([])).await;
     let mut agent = owner.create_agent("Older client").await;
     agent["plugins"] = json!([account]);
     let (_, agent) = owner.send("PUT", &path(&agent), agent).await;
 
-    // The owner revokes the account while an older client edits the agent.
+    // The owner revokes the account while another editor holds the previous revision.
     let mut revoked = agent.clone();
     revoked["plugins"] = json!([]);
     let (status, _) = owner.send("PUT", &path(&agent), revoked).await;
@@ -834,8 +759,11 @@ async fn a_save_without_grants_never_restores_a_concurrent_revocation() {
     }
     older["description"] = "Edited by an older client".into();
     let (status, saved) = owner.send("PUT", &path(&agent), older).await;
-    assert_eq!(status, StatusCode::OK, "{saved}");
-    assert_eq!(saved["plugins"], json!([]));
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{saved}");
+    assert_eq!(
+        owner.stored("agents", text(&agent, "id")).await["plugins"],
+        json!([])
+    );
     assert_eq!(
         owner.stored(connections::KIND, &account).await["agentIds"],
         json!([])
@@ -870,7 +798,7 @@ async fn native_agents_cannot_newly_get_the_current_runner_and_drop_reservations
     let mut native = agent.clone();
     native["access"]["backend"] = "native".into();
     native["access"]["nodes"] = json!([desk]);
-    native.as_object_mut().unwrap().remove("exclusiveNodes");
+    native["exclusiveNodes"] = json!([]);
     let (status, saved) = owner.send("PUT", &path(&agent), native).await;
     assert_eq!(status, StatusCode::OK, "{saved}");
     assert_eq!(saved["exclusiveNodes"], json!([]));

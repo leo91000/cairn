@@ -157,7 +157,7 @@ pub(crate) fn report(db: &Db<'_>, node: &mut Value, body: &Value) -> Result<Valu
         let Some(run) = db.run(run_id)? else { continue };
         let checkpoint = super::db_checkpoint(db, run_id)?;
         let agent = db
-            .get("agents", super::run_agent(&run))?
+            .agent_snapshot(super::run_agent(&run))?
             .unwrap_or_default();
         if attempt["nodeId"] != node["id"]
             || !super::is_active_attempt(attempt)

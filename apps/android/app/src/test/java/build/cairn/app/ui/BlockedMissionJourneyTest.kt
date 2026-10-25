@@ -36,16 +36,36 @@ class BlockedMissionJourneyTest {
     private val calls = CopyOnWriteArrayList<Triple<String, String, String>>()
     private val activityReads = CopyOnWriteArrayList<List<Run>>()
     private val now = System.currentTimeMillis()
-    private val claude = Agent("claude", "Claude", provider = "claude")
-    private val proof = Task("proof", "Preuve appareil F8", agentId = "claude")
-    private val notes = Task("notes", "Notes de version 0.53", agentId = "claude")
-    private val checks = Task("checks", "Checks de la PR315", agentId = "claude")
-    private val deploy = Task("deploy", "Déploiement staging", agentId = "claude")
+    private val claude =
+        Agent(
+            exclusiveNodes = emptyList(),
+            plugins = emptyList(),
+            revision = "",
+            createdAt = 0,
+            access =
+                AccessPolicy(
+                    mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                    projects = null,
+                    skills = null,
+                    mcps = null,
+                ),
+            id = "8630fb2d-e8d4-5aac-9c89-6874bb9a60b1",
+            name = "Claude",
+            provider = "claude",
+        )
+    private val proof =
+        Task("proof", "Preuve appareil F8", agentId = "8630fb2d-e8d4-5aac-9c89-6874bb9a60b1")
+    private val notes =
+        Task("notes", "Notes de version 0.53", agentId = "8630fb2d-e8d4-5aac-9c89-6874bb9a60b1")
+    private val checks =
+        Task("checks", "Checks de la PR315", agentId = "8630fb2d-e8d4-5aac-9c89-6874bb9a60b1")
+    private val deploy =
+        Task("deploy", "Déploiement staging", agentId = "8630fb2d-e8d4-5aac-9c89-6874bb9a60b1")
     private val parent =
         Chat(
             "parent",
             "Orchestrer les chantiers F8",
-            agentId = "claude",
+            agentId = "8630fb2d-e8d4-5aac-9c89-6874bb9a60b1",
             agentName = "Claude",
             updatedAt = now - 3_600_000,
         )
@@ -158,7 +178,12 @@ class BlockedMissionJourneyTest {
                         return when {
                             path == "/api/installations" -> json(beaconInstallationsFixture())
                             path == "/api/account/session" -> json(beaconAccountFixture("fixture"))
-                            path == "$api/agents" -> json(wireJson.encodeToString(listOf(claude)))
+                            path == "$api/agents" ->
+                                json(
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListAgentsOutput(listOf(claude))
+                                    )
+                                )
                             path == "$api/tasks" && request.method == "GET" ->
                                 json(wireJson.encodeToString(listOf(proof, notes, checks, deploy)))
                             path == "$api/tasks/activity" -> {

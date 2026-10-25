@@ -532,6 +532,7 @@ async fn requeue_after_error(store: &Store, run_id: &str, lease: Option<Lease>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_fixture::AgentFixture;
     use std::{future::Future, task::Poll};
 
     async fn fixture() -> (
@@ -1008,7 +1009,7 @@ mod tests {
     async fn an_admission_prepared_before_merge_cannot_register_after_resume() {
         let (_root, service, chat_id, run_id, _workspace) = fixture().await;
         let source = service
-            .agent(json!({ "name": "Source" }), None)
+            .agent_fixture(json!({ "name": "Source" }), None)
             .await
             .unwrap();
         let prepared = service
@@ -1042,9 +1043,9 @@ mod tests {
             .await
             .unwrap();
         service
-            .merge_agents(json!({
+            .merge_agents(serde_json::from_value(json!({
                 "sourceId": source["id"], "targetId": crate::config::MAIN_AGENT_ID, "confirm": true,
-            }))
+            })).unwrap())
             .await
             .unwrap();
         let resumed = service.worker.resume(&service, &run_id).await.unwrap();

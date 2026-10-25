@@ -60,7 +60,7 @@ async fn personal_mcp_token_enforces_scopes_and_revocation() {
 
     let result: Value = response.json().await.unwrap();
     assert!(
-        result["result"]["structuredContent"]["result"].is_array(),
+        result["result"]["structuredContent"]["result"]["agents"].is_array(),
         "{result}"
     );
 

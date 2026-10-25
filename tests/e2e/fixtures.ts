@@ -13,6 +13,7 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { test as base, expect } from '@playwright/test'
+import agentWire from '../../packages/contracts/generated/agent-wire.json' with { type: 'json' }
 import { beaconRelayFixture, executeBeaconSql } from './beacon-relay-fixture'
 import { NativeFixture } from './native-fixture'
 
@@ -197,10 +198,39 @@ export const test = base.extend<object, { workspace: Workspace }>({
       : route
     const api = async (route: string, method = 'GET', body?: unknown) => {
       await ensureSession()
+      // Journey setup uses concise settings; every actual request still uses the current
+      // complete command. Browser-generated calls are exercised independently of this helper.
+      const profile = route.match(/^\/api\/agents(?:\/([0-9a-f-]+))?(\/preview)?$/)
+      if (profile && body && typeof body === 'object' && !('settings' in body) && ['POST', 'PUT'].includes(method)) {
+        const patch = body as Record<string, any>
+        const current = profile[1] ? await api(`/api/agents/${profile[1]}`) : null
+        const defaults = current ?? agentWire.creates[0].settings
+        const {
+          id: _id,
+          revision: _revision,
+          createdAt: _createdAt,
+          avatar: _avatar,
+          ...settings
+        } = { ...defaults, ...patch }
+        settings.access = { ...defaults.access, ...patch.access }
+        delete settings.creationId
+        delete settings.nativeNodeReviews
+        delete settings.reapproveDelegations
+        const review = { nativeNodeReviews: patch.nativeNodeReviews ?? [], reapproveDelegations: patch.reapproveDelegations ?? [] }
+        body = profile[1]
+          ? {
+              agentId: profile[1],
+              revision: patch.revision ?? current.revision,
+              settings,
+              review,
+            }
+          : { ...(Object.hasOwn(patch, 'creationId') ? { creationId: patch.creationId } : {}), settings, review }
+      }
+
       const response = await fetch(`${url}${apiPath(route)}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
       const result = await response.json()
       expect(response.ok, JSON.stringify(result)).toBe(true)
-      return result
+      return route === '/api/agents' && method === 'GET' ? result.agents : result
     }
 
     const signIn = async (page: Page) => {

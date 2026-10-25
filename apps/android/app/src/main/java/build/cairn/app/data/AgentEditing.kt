@@ -1,11 +1,7 @@
 package build.cairn.app.data
 
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonObject
 
@@ -14,32 +10,11 @@ import kotlinx.serialization.json.jsonObject
  * checking and what saving it changes. Pure functions so they can be tested without Compose.
  */
 
-/** What saving an edited agent would interrupt (`POST /agents/{id}/preview`). */
-@Serializable data class AgentPreviewRuns(val queued: Int = 0, val running: Int = 0)
+typealias AgentPreviewRuns = build.cairn.contracts.AgentPreviewRuns
 
-/** A plugin delegation that answers as the agent, and how the new access affects it. */
-@Serializable
-data class AgentDelegationEffect(
-    val id: String = "",
-    val pluginId: String = "",
-    val name: String = "",
-    val enabled: Boolean = true,
-    /** Saving without reapproval stops the delegation until it is reapproved. */
-    val suspended: Boolean = false,
-    /** Why the new access cannot be reapproved, or null. */
-    val blocked: String? = null,
-    /**
-     * Already suspended by an earlier change: reapproving now would also approve that change, so it
-     * is never preselected.
-     */
-    val alreadySuspended: Boolean = false,
-)
+typealias AgentDelegationEffect = build.cairn.contracts.AgentDelegationEffect
 
-@Serializable
-data class AgentPreview(
-    val runs: AgentPreviewRuns = AgentPreviewRuns(),
-    val delegations: List<AgentDelegationEffect> = emptyList(),
-)
+typealias AgentPreview = build.cairn.contracts.AgentPreview
 
 /** The sections of the agent page, in the order of its overview. */
 enum class AgentSection(val title: String) {
@@ -75,13 +50,17 @@ fun AgentDraft.withAllProjects(all: Boolean): AgentDraft =
  */
 fun newAgent() =
     Agent(
+        id = "00000000-0000-4000-8000-000000000000",
+        name = "",
+        revision = "",
+        createdAt = 0,
         access =
             AccessPolicy(
                 nodes = listOf(LOCAL_NODE_ID),
                 projects = emptyList(),
                 skills = emptyList(),
                 mcps = emptyList(),
-                mcpTools = emptyMap(),
+                mcpTools = build.cairn.contracts.McpTools(emptyMap()),
                 installation = false,
                 sandbox = "yolo",
                 backend = VM_BACKEND,
@@ -113,9 +92,11 @@ const val NOT_LOADED = "Non chargé"
 fun AccessPolicy.withGrantedTools(existing: Set<String>? = null): AccessPolicy =
     copy(
         mcpTools =
-            mcpTools.filterKeys {
-                (mcps == null || it in mcps) && (existing == null || it in existing)
-            }
+            build.cairn.contracts.McpTools(
+                mcpTools.filterKeys {
+                    (mcps == null || it in mcps) && (existing == null || it in existing)
+                }
+            )
     )
 
 /** The agent as it will be sent: the parsed time limit applied. */
@@ -127,7 +108,12 @@ fun AgentDraft.resolved(): Agent =
  * revision and portrait come from the server.
  */
 fun profileChanged(base: Agent, edited: Agent): Boolean =
-    edited.copy(id = base.id, revision = base.revision, avatar = base.avatar) != base
+    edited.copy(
+        id = base.id,
+        revision = base.revision,
+        createdAt = base.createdAt,
+        avatar = base.avatar,
+    ) != base
 
 /** The section of every unsaved change, once per changed setting. */
 fun agentChanges(original: Agent, draft: AgentDraft): List<AgentSection> {
@@ -707,13 +693,14 @@ private fun pluginGrantLabel(id: String, catalog: PluginCatalog?): String {
 
 private fun runsSentence(runs: AgentPreviewRuns): String {
     val parts = buildList {
-        if (runs.queued > 0) add(plural(runs.queued, "exécution en file", "exécutions en file"))
+        if (runs.queued > 0)
+            add(plural(runs.queued.toInt(), "exécution en file", "exécutions en file"))
         if (runs.running > 0)
-            add(plural(runs.running, "conversation en cours", "conversations en cours"))
+            add(plural(runs.running.toInt(), "conversation en cours", "conversations en cours"))
     }
     val subject = parts.joinToString(" et ")
     val total = runs.queued + runs.running
-    return "$subject ne ${if (total == 1) "pourra" else "pourront"} pas continuer avec les anciens accès."
+    return "$subject ne ${if (total == 1L) "pourra" else "pourront"} pas continuer avec les anciens accès."
 }
 
 /** The review shown before saving: powers and secrets added, and work a reduction stops. */
@@ -789,7 +776,7 @@ fun agentReview(
             )
         }
     val reductions = agentReductions(original, edited, resources)
-    val runs = preview?.runs ?: AgentPreviewRuns()
+    val runs = preview?.runs ?: AgentPreviewRuns(queued = 0, running = 0)
     val affected = runs.queued + runs.running > 0
     if (reductions.isNotEmpty()) {
         val text = "Retrait : ${reductions.joinToString(", ")}."
@@ -870,7 +857,7 @@ fun rebaseAgent(
                 projects = mergeList(a.projects, m.projects, t.projects),
                 skills = mergeList(a.skills, m.skills, t.skills),
                 mcps = mergeList(a.mcps, m.mcps, t.mcps),
-                mcpTools = tools,
+                mcpTools = build.cairn.contracts.McpTools(tools),
                 installation = pick(a.installation, m.installation, t.installation),
                 delegation = pick(a.delegation, m.delegation, t.delegation),
                 sandbox = pick(a.sandbox, m.sandbox, t.sandbox),
@@ -927,23 +914,33 @@ fun agentSaveBody(
     mcpIds: Set<String>? = null,
     nativeNodeReviews: List<String> = emptyList(),
 ): JsonObject {
-    val fields =
-        wireJson
-            .encodeToJsonElement(agent.copy(access = agent.access.withGrantedTools(mcpIds)))
-            .jsonObject
-            .toMutableMap()
-    fields.remove("avatar")
-    fields.remove("revision")
-    if (agent.revision.isNotBlank()) fields["revision"] = JsonPrimitive(agent.revision)
-    fun list(value: List<String>?): JsonElement =
-        value?.let { JsonArray(it.map(::JsonPrimitive)) } ?: JsonNull
-    val access = fields["access"]!!.jsonObject.toMutableMap()
-    access["nodes"] = list(agent.access.nodes)
-    access["projects"] = list(agent.access.projects)
-    access["skills"] = list(agent.access.skills)
-    access["mcps"] = list(agent.access.mcps)
-    fields["access"] = JsonObject(access)
-    if (reapprove.isNotEmpty()) fields["reapproveDelegations"] = list(reapprove)
-    if (nativeNodeReviews.isNotEmpty()) fields["nativeNodeReviews"] = list(nativeNodeReviews)
-    return JsonObject(fields)
+    val settings = agentSettings(agent, mcpIds)
+    return build.cairn.contracts.contractJson
+        .encodeToJsonElement(
+            build.cairn.contracts.ReplaceAgentInput(
+                agentId = agent.id,
+                revision = agent.revision,
+                settings = settings,
+                review =
+                    build.cairn.contracts.AgentReview(
+                        nativeNodeReviews = nativeNodeReviews,
+                        reapproveDelegations = reapprove,
+                    ),
+            )
+        )
+        .jsonObject
 }
+
+fun agentSettings(agent: Agent, mcpIds: Set<String>? = null): build.cairn.contracts.AgentSettings =
+    build.cairn.contracts.AgentSettings(
+        name = agent.name,
+        provider = agent.provider,
+        description = agent.description,
+        model = agent.model,
+        reasoning = agent.reasoning,
+        instructions = agent.instructions,
+        timeoutMinutes = agent.timeoutMinutes,
+        access = agent.access.withGrantedTools(mcpIds),
+        exclusiveNodes = agent.exclusiveNodes,
+        plugins = agent.plugins,
+    )

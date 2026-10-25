@@ -1,0 +1,139 @@
+{
+  "creates": [
+    {
+      "settings": {
+        "name": "Default agent",
+        "access": {
+          "mcpTools": {}
+        },
+        "plugins": [],
+        "exclusiveNodes": []
+      },
+      "review": {}
+    },
+    {
+      "creationId": "00000000-0000-4000-8000-000000000077",
+      "settings": {
+        "name": "Claude",
+        "provider": "claude",
+        "reasoning": "max",
+        "model": "opus[1m]",
+        "access": {
+          "nodes": null,
+          "projects": [],
+          "skills": [],
+          "mcps": [],
+          "mcpTools": {},
+          "sandbox": "yolo"
+        },
+        "plugins": [],
+        "exclusiveNodes": []
+      },
+      "review": {}
+    },
+    {
+      "settings": {
+        "name": "OpenCode",
+        "provider": "opencode",
+        "model": "opencode/test-model",
+        "reasoning": "future_effort-2",
+        "timeoutMinutes": 720,
+        "access": {
+          "nodes": [],
+          "projects": null,
+          "mcpTools": {
+            "00000000-0000-4000-8000-000000000003": [
+              "inspect"
+            ]
+          }
+        },
+        "plugins": [],
+        "exclusiveNodes": []
+      },
+      "review": {
+        "nativeNodeReviews": [],
+        "reapproveDelegations": []
+      }
+    }
+  ],
+  "invalidCreates": [
+    {
+      "settings": {
+        "name": "Default agent",
+        "access": {
+          "mcpTools": {}
+        },
+        "plugins": [],
+        "exclusiveNodes": [],
+        "provider": "unknown"
+      },
+      "review": {}
+    },
+    {
+      "settings": {
+        "name": "Default agent",
+        "access": {
+          "mcpTools": {}
+        },
+        "plugins": [],
+        "exclusiveNodes": [],
+        "provider": null
+      },
+      "review": {}
+    },
+    {
+      "settings": {
+        "name": "Default agent",
+        "access": {
+          "mcpTools": {}
+        },
+        "plugins": [],
+        "exclusiveNodes": [],
+        "reasoning": "INVALID"
+      },
+      "review": {}
+    },
+    {
+      "settings": {
+        "name": "Default agent",
+        "access": {
+          "mcpTools": {}
+        },
+        "plugins": [],
+        "exclusiveNodes": [],
+        "timeoutMinutes": 721
+      },
+      "review": {}
+    },
+    {
+      "settings": {
+        "name": "Incomplete"
+      },
+      "review": {}
+    },
+    {
+      "settings": {
+        "name": "Default agent",
+        "access": {
+          "mcpTools": {}
+        },
+        "plugins": [],
+        "exclusiveNodes": []
+      },
+      "review": {},
+      "creationId": null
+    },
+    {
+      "settings": {
+        "name": "Default agent",
+        "access": {
+          "mcpTools": {}
+        },
+        "plugins": [],
+        "exclusiveNodes": []
+      },
+      "review": {},
+      "creationId": "00000000-0000-5000-8000-000000000001"
+    }
+  ]
+}

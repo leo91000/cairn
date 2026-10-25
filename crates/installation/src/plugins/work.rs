@@ -413,7 +413,7 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
                 let usable = match usable {
                     Some(chat) => {
                         let previous = db.run(text(&chat, "runId"))?;
-                        let agent = db.get("agents", &connection.agent_id)?
+                        let agent = db.agent_snapshot(&connection.agent_id)?
                             .ok_or_else(|| Error::forbidden("Agent no longer exists."))?;
                         let compatible = previous.as_ref().is_none_or(|run| {
                             crate::service::covers(&agent, &run["snapshot"]["agent"])

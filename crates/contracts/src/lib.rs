@@ -134,3 +134,7 @@ mod tests {
 mod projects;
 
 pub use projects::*;
+
+mod agents;
+
+pub use agents::*;
