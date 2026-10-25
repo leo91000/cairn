@@ -8,10 +8,10 @@ The default is **7 days**. Choose a whole number from 0 to 36500; **0 disables
 future automatic deletion**. Both apps ask for confirmation before saving and
 explain that existing conversations are included.
 
-Inactivity starts at the last conversation activity (`lastActivityAt`, falling
-back to `updatedAt`, then `createdAt` for older records), or the last run's
-`finishedAt`, whichever is later. Merely reading a conversation does not extend
-its life. A queued/running agent, pending message, open question (including a
+Inactivity starts at the last conversation activity (`lastActivityAt`), or the
+last run's `finishedAt`, whichever is later. New empty chats and conversations
+converted from completed missions initialize `lastActivityAt` at creation. Merely
+reading a conversation does not extend its life. A queued/running agent, pending message, open question (including a
 nonblocking question), scheduled wakeup, run preparation or worker finalization
 protects the conversation. Pausing a conversation does not exempt it once its
 pending work is resolved.
@@ -32,16 +32,14 @@ keeps its promised recovery deadline.
 
 `GET /api/settings/conversations` returns `{ "inactivityDays": 7 }` by default.
 `PUT` at the same owner-only endpoint accepts the same shape and records an audit
-entry. The additive `conversation-expiration` KV record deliberately differs
-from the retired archive policy (`conversation-retention`), which stays ignored.
-No database schema, disk encoding or object format changes are required; the
-existing installation data compatibility version is unchanged. Rolling the code
-back stops future expiration but cannot restore deleted conversations.
+entry. The `conversation-expiration` KV record stores the current policy.
+Deleted conversations cannot be restored by changing the policy.
 
 ## Validation
 
 Backend lifecycle tests cover default/configured/disabled retention, invalid
-values, owner permissions, policy persistence, the legacy activity fallback,
+values, owner permissions, policy persistence, activity initialization for empty
+and converted chats,
 recent run completion, pending work, finalization, concurrency and physical
 cleanup including public links. The settings browser journey covers confirmation,
 cancellation, persistence and disabling; shared Android Compose cases cover the

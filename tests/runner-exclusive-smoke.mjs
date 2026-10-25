@@ -150,7 +150,7 @@ console.log('exclusive-live-ok '+mode+' pid='+process.pid);
       storage,
       resources: { cpu: 2, memoryMiB: envelopeMiB, diskMiB: 32768 },
       command: ['node', `${runRoot}/workspace/probe.mjs`],
-      chat: {},
+      chat: { provider: 'codex' },
       imports: [
         { source: `${runRoot}/workspace`, target: `${runRoot}/workspace` },
         { source: `${runRoot}/home`, target: '/home/node' },
@@ -221,7 +221,7 @@ console.log('exclusive-live-ok '+mode+' pid='+process.pid);
     assert.ok((logs(owner).match(/tick owner/g) || []).length > ownerTicks, 'Exclusive owner continues running')
     const denied = await request(`/runs/${waiting.id}`, 'POST')
     assert.equal(denied.status, 409, 'New admissions wait behind the exclusive reservation')
-    const checkpoint = await (await api(`/runs/${victim.id}/snapshot`, 'POST')).json()
+    const checkpoint = await (await api(`/runs/${victim.id}/snapshot`, 'POST', { consistency: 'filesystem' })).json()
     await api(`/snapshots/${checkpoint.id}/discard`, 'DELETE')
     await setTimeout(300)
     assert.equal(logs(victim), paused, 'Checkpoint completion does not release exclusivity')

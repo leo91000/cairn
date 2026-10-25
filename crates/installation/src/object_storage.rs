@@ -175,7 +175,6 @@ fn server_side_encryption(
 
 fn setting(config: &Value, suffix: &str, key: &str) -> String {
     non_empty_env(&format!("STORAGE_S3_{suffix}"))
-        .or_else(|| non_empty_env(&format!("ARCHIVE_S3_{suffix}")))
         .unwrap_or_else(|| config[key].as_str().unwrap_or("").into())
 }
 
@@ -184,12 +183,7 @@ fn non_empty_env(name: &str) -> Option<String> {
 }
 
 fn read_config(s: &Service) -> Result<Value> {
-    let primary = s.config.data_dir.join("storage-s3.json");
-    let file = if primary.exists() {
-        primary
-    } else {
-        s.config.data_dir.join("archive-s3.json")
-    };
+    let file = s.config.data_dir.join("storage-s3.json");
     if file.exists() {
         Ok(serde_json::from_slice(&std::fs::read(file)?)?)
     } else {
@@ -199,10 +193,9 @@ fn read_config(s: &Service) -> Result<Value> {
 
 pub fn settings(s: &Service) -> Result<Value> {
     let config = read_config(s)?;
-    let environment_managed = ["BUCKET", "ENDPOINT", "REGION"].iter().any(|suffix| {
-        non_empty_env(&format!("STORAGE_S3_{suffix}")).is_some()
-            || non_empty_env(&format!("ARCHIVE_S3_{suffix}")).is_some()
-    });
+    let environment_managed = ["BUCKET", "ENDPOINT", "REGION"]
+        .iter()
+        .any(|suffix| non_empty_env(&format!("STORAGE_S3_{suffix}")).is_some());
     Ok(json!({
         "configured": Storage::configured(s).is_ok(),
         "bucket": setting(&config, "BUCKET", "bucket"),
@@ -331,7 +324,7 @@ impl Storage {
                 return Self::from_config(s, saved);
             }
         }
-        // Preserve the existing contract for older recovery points in a different bucket on the same endpoint.
+        // Current credentials can also serve retained points in another bucket on the same endpoint.
         if current.endpoint.as_deref() == location["endpoint"].as_str() {
             return Ok(current);
         }

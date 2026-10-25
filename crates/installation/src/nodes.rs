@@ -466,7 +466,7 @@ impl Usage<'_> {
     }
 }
 
-/// Legacy nodes inherit the runner's slot count, or the historical four slots.
+/// Fresh nodes inherit controller capacity until the owner configures a slot budget.
 pub(crate) fn slots(node: &Value) -> u64 {
     node["slots"]
         .as_u64()
@@ -1163,6 +1163,11 @@ async fn enroll(s: &Service, body: Value) -> Result<Value> {
     if request.protocol != 1 {
         return Err(Error::conflict("Unsupported node protocol."));
     }
+    if request.runtime_id != component_runtime() {
+        return Err(Error::conflict(
+            "Node version mismatch; deploy manager and nodes at the same version.",
+        ));
+    }
     request.capabilities.validate()?;
     name(&request.name)?;
     let runtime = name(&request.runtime_id)?;
@@ -1177,14 +1182,18 @@ async fn enroll(s: &Service, body: Value) -> Result<Value> {
             let invitation = db
                 .kv(&key)?
                 .ok_or_else(|| Error::unauthorized("Invalid or expired enrollment code."))?;
-            let expected = invitation["backend"].as_str().unwrap_or("firecracker");
+            let expected = invitation["backend"]
+                .as_str()
+                .ok_or_else(|| Error::bad("Missing enrollment backend."))?;
             if request.capabilities.backend != expected {
                 return Err(Error::forbidden(
                     "Enrollment backend differs from the owner's invitation.",
                 ));
             }
-            // Invitations issued before identity tracking remain consumable.
-            let node_id = invitation["nodeId"].as_str().map_or_else(id, str::to_owned);
+            let node_id = invitation["nodeId"]
+                .as_str()
+                .ok_or_else(|| Error::bad("Missing enrollment node identity."))?
+                .to_owned();
             db.delete(&key)?;
             let capabilities = request.capabilities;
             let node = EnrolledNode {
@@ -1221,6 +1230,14 @@ async fn enroll(s: &Service, body: Value) -> Result<Value> {
         .await
 }
 
+pub(crate) fn component_runtime() -> String {
+    std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into())
+}
+
+fn matches_component_version(observation: &Value) -> bool {
+    observation["runtimeId"] == component_runtime() && observation["nodeProtocol"] == 2
+}
+
 /// What the master expects from a node before it may execute conversations.
 struct Expectations {
     data_root: String,
@@ -1255,14 +1272,17 @@ async fn heartbeat(s: &Service, input: &Input) -> Result<Value> {
         .filter(|token| token.len() == 43)
         .ok_or_else(|| Error::unauthorized("Invalid node identity."))?;
     let key = format!("node-token:{}", digest(credential));
-    let capabilities = if input.body["capabilities"].is_object() {
+    // Rejected versions must reach the authenticated readiness fence even when
+    // their capabilities are malformed or native authority is unavailable.
+    let matching_version = matches_component_version(&input.body);
+    let capabilities = if matching_version && input.body["capabilities"].is_object() {
         let value: Capabilities = decode(input.body["capabilities"].clone())?;
         value.validate()?;
         Some(serde_json::to_value(value)?)
     } else {
         None
     };
-    if input.body["capabilities"]["backend"] == "native" {
+    if matching_version && input.body["capabilities"]["backend"] == "native" {
         crate::native::policy::refresh(s).await?;
     }
     let expected = Expectations {
@@ -1274,12 +1294,12 @@ async fn heartbeat(s: &Service, input: &Input) -> Result<Value> {
     let reply = s
         .store
         .transaction(move |db| record_heartbeat(db, &key, &body, capabilities, &expected))
-        .await?;
+        .await??;
     for lease in &reply.leases {
         record_lease(s, &lease.id, lease.remaining_ms).await;
     }
     let mut value = serde_json::to_value(&reply)?;
-    // Older connectors ignore this optional, credential-free cache catalogue.
+    // Catalogue failures must not interrupt current execution leases.
     match crate::project_archives::catalog(s, &reply.node_id).await {
         Ok(archives) => value["projectArchives"] = serde_json::to_value(archives)?,
         Err(error) => tracing::warn!(
@@ -1296,7 +1316,7 @@ fn record_heartbeat(
     body: &Value,
     capabilities: Option<Value>,
     expected: &Expectations,
-) -> Result<HeartbeatReply> {
+) -> Result<Result<HeartbeatReply>> {
     let node_id = db
         .kv(key)?
         .and_then(|v| v.as_str().map(str::to_owned))
@@ -1305,10 +1325,15 @@ fn record_heartbeat(
         .get("nodes", &node_id)?
         .filter(|v| v["revoked"] != true)
         .ok_or_else(|| Error::unauthorized("Invalid node identity."))?;
-    if let Some(runtime) = body.get("runtimeId") {
-        node["runtimeId"] = name(runtime.as_str().unwrap_or(""))?.into();
+    if !matches_component_version(body) {
+        node["executionReady"] = false.into();
+        db.put("nodes", &node)?;
+        // Commit the readiness fence before reporting the rejected observation.
+        return Ok(Err(Error::conflict(
+            "Node/controller version mismatch; deploy all components at the same version.",
+        )));
     }
-    node["runtimes"] = body["runtimes"].clone();
+    node["runtimeId"] = name(text(body, "runtimeId"))?.into();
     node["lastSeen"] = now().into();
     node["runtimeSlots"] = body["pool"]["capacity"].clone();
     node["retainedRuns"] = body["pool"]["retained_runs"].clone();
@@ -1353,7 +1378,7 @@ fn record_heartbeat(
     let disk_growth = disk_capacity::report(db, &mut node, &body["diskGrowth"])?;
     db.put("nodes", &node)?;
     let leases = renew_leases(db, &node_id, expected.lease_ms)?;
-    Ok(HeartbeatReply {
+    Ok(Ok(HeartbeatReply {
         native_mode: native_mode::requested(&node),
         disk_growth,
         node_id,
@@ -1363,15 +1388,15 @@ fn record_heartbeat(
         leases,
         heartbeat_interval_ms: HEARTBEAT_INTERVAL_MS,
         disconnect_timeout_ms: HEARTBEAT_TIMEOUT_MS,
-    })
+    }))
 }
 
 fn execution_ready(node: &Value, body: &Value, expected: &Expectations) -> bool {
-    // A node whose update failed keeps running its previous image.
+    // Only the image approved by this manager may execute.
     let current_image = expected
         .image
         .as_ref()
-        .is_none_or(|image| node["imageDigest"] == *image || node["updateError"].is_string());
+        .is_none_or(|image| node["imageDigest"] == *image);
     if crate::native::policy::node_native(node) {
         return native_mode::applied(node)
             && body["executionReady"] == true
@@ -1444,6 +1469,15 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
         .json::<Value>()
         .await
         .map_err(Error::internal)?;
+    if health["runtimeId"] != component_runtime() || health["nodeProtocol"] != 2 {
+        if let Some(mut node) = s.store.get("nodes", LOCAL_NODE_ID).await? {
+            node["executionReady"] = false.into();
+            s.store.put("nodes", node).await?;
+        }
+        return Err(Error::conflict(
+            "Local controller version mismatch; deploy all components at the same version.",
+        ));
+    }
     let capabilities = health["capabilities"].clone();
     if !capabilities.is_object() {
         return Ok(());
@@ -1494,7 +1528,6 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
                 }),
             };
             record["systemTags"] = detected.tags().into();
-            record["runtimes"] = health["runtimes"].clone();
             record["capabilities"] = capabilities;
             record["runtimeId"] = health["runtimeId"].clone();
             record["storage"] = serde_json::to_value(Policy::for_node(&record["storage"])?)?;

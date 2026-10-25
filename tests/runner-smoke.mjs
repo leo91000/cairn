@@ -273,7 +273,7 @@ console.log('probe.done');
         sandbox: 'yolo',
         cwd: `${runRoot}/workspace`,
         command: ['/usr/local/bin/node', `${runRoot}/workspace/probe.mjs`, mode, Date.now().toString()],
-        chat: { output: `${runRoot}/output/result.md` },
+        chat: { provider: 'codex', output: `${runRoot}/output/result.md` },
         imports: [
           { source: `${runRoot}/workspace`, target: `${runRoot}/workspace`, readOnly: false },
           { source: `${runRoot}/home`, target: '/home/node', readOnly: false },
@@ -336,7 +336,7 @@ console.log('probe.done');
 
               if (data.includes('probe.pause') && mode === 'cancel') {
                 const captureStarted = Date.now()
-                const point = await (await api(`/runs/${id}/snapshot`, 'POST')).json()
+                const point = await (await api(`/runs/${id}/snapshot`, 'POST', { consistency: 'filesystem' })).json()
                 const firstCaptureMs = Date.now() - captureStarted
                 assert.ok(point.manifest.size > 0)
                 assert.equal(point.manifest.onDemand, true)
@@ -351,7 +351,7 @@ console.log('probe.done');
                 assert.deepEqual(original, bytes, 'The sealed capture stays immutable while the guest writes')
                 // Starting the next capture retires the previous capture handle.
                 const nextStarted = Date.now()
-                const next = await (await api(`/runs/${id}/snapshot`, 'POST')).json()
+                const next = await (await api(`/runs/${id}/snapshot`, 'POST', { consistency: 'filesystem' })).json()
                 const nextCaptureMs = Date.now() - nextStarted
                 assert.equal(next.manifest.onDemand, true)
                 assert.ok(next.manifest.generation > point.manifest.generation, 'New writes advance the journal generation')
@@ -427,7 +427,16 @@ console.log('probe.done');
       process.stdout.write(`${JSON.stringify({ mode, durationMs: Date.now() - start, status: 'passed' })}\n`)
     }
 
-    await entrypointSmoke({ root, api, storage })
+    await entrypointSmoke({
+      root,
+      api,
+      storage,
+      origin: storageFixture.origin,
+      docker,
+      image,
+      networkName,
+      until,
+    })
 
     // Independent disks must run concurrently and enforce each guest policy.
     const probes = []

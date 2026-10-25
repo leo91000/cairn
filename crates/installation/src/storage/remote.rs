@@ -216,7 +216,7 @@ mod tests {
         );
         let read = {
             let source = source.clone();
-            tokio::task::spawn_blocking(move || source.fetch(&"a".repeat(64)))
+            tokio::task::spawn_blocking(move || source.fetch(&format!("b3-{}", "a".repeat(64))))
         };
         tokio::time::timeout(Duration::from_secs(5), async {
             while !source.waiting() {
@@ -239,7 +239,7 @@ mod tests {
         offline.store(true, Ordering::SeqCst);
         let read = {
             let source = source.clone();
-            tokio::task::spawn_blocking(move || source.fetch(&"a".repeat(64)))
+            tokio::task::spawn_blocking(move || source.fetch(&format!("b3-{}", "a".repeat(64))))
         };
         tokio::time::timeout(Duration::from_secs(5), async {
             while !source.waiting() {

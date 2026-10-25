@@ -28,7 +28,7 @@ test('registers, configures and revokes a node through the owner interface', asy
       code,
       name: 'Browser Linux',
       protocol: 1,
-      runtimeId: 'fixture',
+      runtimeId: 'development',
       capabilities: {
         os: 'linux',
         arch: 'x86_64',
@@ -122,7 +122,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
       code: invitation.code,
       name: 'Recovery server',
       protocol: 1,
-      runtimeId: 'fixture',
+      runtimeId: 'development',
       capabilities: {
         os: 'linux',
         arch: 'x86_64',
@@ -140,7 +140,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
     // real commit notification instead of relying on an empty scheduler pass.
     const reply = await page.request.post(`${workspace.installationUrl}/internal/nodes/heartbeat`, {
       headers: { authorization: `Bearer ${node.token}` },
-      data: {},
+      data: { runtimeId: 'development', nodeProtocol: 2 },
     })
     expect(reply.ok()).toBe(true)
   }
@@ -151,7 +151,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
       code: destinationInvitation.code,
       name: 'Destination server',
       protocol: 1,
-      runtimeId: 'fixture',
+      runtimeId: 'development',
       capabilities: {
         os: 'linux',
         arch: 'x86_64',
@@ -359,7 +359,7 @@ test('finishing the first step keeps an agent allowed while it was open', async 
       code,
       name: 'Shared Linux',
       protocol: 1,
-      runtimeId: 'fixture',
+      runtimeId: 'development',
       capabilities: {
         os: 'linux',
         arch: 'x86_64',
@@ -417,7 +417,7 @@ test('native enrollment requires explicit people and native agent grants', async
       code: laptopInvitation.code,
       name: 'Native laptop',
       protocol: 1,
-      runtimeId: 'fixture',
+      runtimeId: 'development',
       capabilities: nativeCapabilities,
     },
   })
@@ -441,7 +441,7 @@ test('native enrollment requires explicit people and native agent grants', async
       code,
       name: 'Native desktop',
       protocol: 1,
-      runtimeId: 'fixture',
+      runtimeId: 'development',
       capabilities: nativeCapabilities,
     },
   })
@@ -520,7 +520,7 @@ test('switching a machine to native enrolls it again and retires the previous no
         code,
         name: 'Workstation',
         protocol: 1,
-        runtimeId: 'fixture',
+        runtimeId: 'development',
         capabilities,
       },
     })
@@ -602,7 +602,7 @@ test('existing conversation explicitly confirms backend migration and follows it
   test.setTimeout(60000)
   await useRelayForHttpMocks(page)
   // Earlier enrollment journeys may change Main's backend or allowed nodes.
-  const agent = await workspace.api('/api/agents', 'POST', { name: 'Migration source' })
+  const agent = workspace.service.agent({ name: 'Migration source', provider: 'codex' })
   const chat = await workspace.api('/api/chats', 'POST', { agentId: agent.id })
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Keep this conversation' })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')

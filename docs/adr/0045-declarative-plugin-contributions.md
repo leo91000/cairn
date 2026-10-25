@@ -42,7 +42,7 @@ Cairn renders it on the web and Android, authorizes it and calls the script:
 The built-in 1Password plugin becomes an ordinary v2 package: service accounts are
 instances with a secret token and agent grants, `cairn plugin onepassword …` and the
 `onepassword` tool are declared commands and tools, and `op` is a declared program.
-Existing accounts, IDs, grants and tokens migrate in place. `onepassword.read` and
+`onepassword.read` and
 the built-in-only rule are removed; no Cairn code is specific to 1Password.
 
 Long-lived workers start only for packages that need them (a transport,

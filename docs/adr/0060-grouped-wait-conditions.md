@@ -49,10 +49,7 @@ larger groups aggregate meter segments by outcome and keep the global result cou
 Pagination is presentation only: public MCP, the installation tool and resumed
 agents retain access to every condition and its result, without a new API shape.
 
-## Compatibility
+## Storage
 
-A single condition keeps its stored record exactly. A group is stored as
-`condition: { type: "group", mode, conditions }` beside an additive `members`
-array. The previous release reads it as an unsupported condition: it resumes the
-agent with an `unavailable` observation instead of losing or misreading the wait.
-The data compatibility epoch is unchanged.
+A single condition keeps its own stored record. A group is stored as
+`condition: { type: "group", mode, conditions }` beside a `members` array.

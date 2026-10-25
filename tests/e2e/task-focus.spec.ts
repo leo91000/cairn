@@ -60,7 +60,7 @@ test('reconnects after a temporary restart and resumes a cancelled conversation 
     worktree: false,
   })
   const run = await workspace.service.enqueue(task.id)
-  await expect.poll(() => workspace.service.store.run(run.id)?.sessionId).toBe('fixture-session')
+  await expect.poll(() => workspace.service.store.run(run.id)?.sessionId).toBe('fixture-chat')
   await page.goto(workspacePath('/tasks'))
   await authenticateWorkspace(page)
   await expect(page.locator('.task-focus-detail')).toBeVisible()

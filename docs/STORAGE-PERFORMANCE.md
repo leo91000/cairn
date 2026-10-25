@@ -59,11 +59,9 @@ a time on the runner. Existing transport buffers and manager upload concurrency
 remain unchanged. Disconnecting cancels stopped reads; a mounted VM's shared
 journal remains usable. Generation checks and end-to-end block hashes still apply.
 
-Older runners return 404/405 for the new route; older relays translate unsupported
-operations to 503. These responses trigger one fallback to individual reads for
-that publication. Truncated, oversized or corrupt successful responses fail the
-publication. No writes are acknowledged until the normal durable S3 publication
-and verification complete.
+All controllers provide the publication stream. Truncated, oversized or corrupt
+successful responses fail the publication. No writes are acknowledged until the
+normal durable S3 publication and verification complete.
 
 ## Independent synchronization and shared cold reads
 

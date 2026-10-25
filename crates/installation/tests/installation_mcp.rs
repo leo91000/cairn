@@ -115,7 +115,7 @@ async fn enroll_management_node(app: &axum::Router, invitation: &Value) -> Value
         "code": invitation["code"],
         "name": "Desk",
         "protocol": 1,
-        "runtimeId": "fixture",
+        "runtimeId": "development",
         "capabilities": {
             "os": "linux",
             "arch": "x86_64",
@@ -2448,7 +2448,10 @@ async fn chat_recovery_tools_preserve_confirmation_and_retention_rules() {
     let (target, _) = active_run(&s, &main).await;
     let run_id = target["id"].as_str().unwrap();
     s.store
-        .patch_run(run_id, json!({ "status": RunStatus::Failed }))
+        .patch_run(
+            run_id,
+            json!({ "status": RunStatus::Failed, "restoredAt": 1 }),
+        )
         .await
         .unwrap();
     s.store
@@ -2461,7 +2464,6 @@ async fn chat_recovery_tools_preserve_confirmation_and_retention_rules() {
         .unwrap();
     let mut chat = s.chat_create(json!({})).await.unwrap();
     chat["runId"] = target["id"].clone();
-    chat["restoredAt"] = 1.into();
     let chat_id = chat["id"].as_str().unwrap().to_owned();
     s.store.put("chats", chat).await.unwrap();
     let denied = call(
@@ -2771,7 +2773,7 @@ async fn backend_migration_tools_match_and_recheck_management_grants() {
     let chat = cairn_installation::config::id();
     let run = cairn_installation::config::id();
     let node = cairn_installation::config::id();
-    s.store.put("nodes", json!({ "id": node, "runtimeId": "fixture", "capabilities": { "backend": "native" }, "nativeEnabled": true, "nativeAccounts": [] })).await.unwrap();
+    s.store.put("nodes", json!({ "id": node, "runtimeId": "development", "capabilities": { "backend": "native" }, "nativeEnabled": true, "nativeAccounts": [] })).await.unwrap();
     s.store
         .set(
             "native-authority",

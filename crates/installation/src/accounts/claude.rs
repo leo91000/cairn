@@ -2,8 +2,7 @@
 //! account, usage from the CLI's `get_usage` control request, and OAuth rotation by the
 //! manager only. Runs receive access-only credential snapshots.
 use super::{
-    Account, AccountState, Driver, Lease, Login, Phase, broker, lenient, remove_directory,
-    remove_file, save,
+    Account, Driver, Lease, Login, Phase, broker, lenient, remove_directory, remove_file, save,
     usage::{self, Usage},
 };
 use crate::{
@@ -12,7 +11,6 @@ use crate::{
     config::{Config, now},
     error::{Error, Result},
     process::{bounded_output, command, read_bounded},
-    provider::Provider,
     service::Service,
     skills::{atomic_write, private_dir},
 };
@@ -494,100 +492,6 @@ async fn copy_private(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Earlier versions connected one Claude account in `DATA_DIR/claude`, shared as the CLI home
-/// of local runs. It becomes an ordinary account, and local runs keep their sessions.
-async fn migrate(s: &Service) -> Result<()> {
-    let legacy = s.config.data_dir.join("claude");
-    if !legacy.exists() {
-        return Ok(());
-    }
-    migrate_sessions(s, &legacy).await?;
-    if legacy.join(CREDENTIALS).exists() && s.accounts.of(s, Provider::Claude).await?.is_empty() {
-        import_legacy(s, &legacy).await?;
-    } else {
-        remove_directory(&legacy).await?;
-    }
-    for key in ["claude-status", "claude-usage", "claude-concurrency"] {
-        s.store.delete(key).await?;
-    }
-    Ok(())
-}
-
-async fn import_legacy(s: &Service, legacy: &Path) -> Result<()> {
-    // A guest may have rotated the refresh token during the old serialized transfer.
-    let interrupted = legacy.join("sync-required").exists();
-    let saved = s.store.kv("claude-status").await?.unwrap_or(Value::Null);
-    let limit = s
-        .store
-        .kv("claude-concurrency")
-        .await?
-        .and_then(|v| v.as_u64())
-        .unwrap_or(4);
-    let state = if interrupted {
-        AccountState::Error
-    } else {
-        AccountState::Ready
-    };
-    let mut account = Account::new(Provider::Claude, "Claude", state);
-    let email = saved["email"].as_str();
-    account.email = email.map(str::to_owned);
-    account.plan = saved["subscriptionType"].as_str().map(str::to_owned);
-    account.identity = email.map(identity);
-    account.max_concurrent_runs = Some(limit);
-    if interrupted {
-        account.error = "Reconnect this account after an interrupted credential transfer.".into();
-    }
-    let home = account_home(&s.config, &account.id);
-    private_dir(&s.config.data_dir.join("claude-accounts")).await?;
-    tokio::fs::rename(legacy, &home).await?;
-    remove_file(&home.join("sync-required")).await?;
-    save(s, &account).await?;
-    s.store
-        .audit(
-            "account.imported",
-            json!({ "id": account.id, "provider": "claude" }),
-        )
-        .await
-}
-
-/// Local runs used the shared home, so their session transcripts move into each run.
-async fn migrate_sessions(s: &Service, legacy: &Path) -> Result<()> {
-    let runs = s
-        .store
-        .read(|db| {
-            db.json_rows(
-                "SELECT data FROM runs WHERE json_extract(data,'$.snapshot.agent.provider')='claude' AND json_extract(data,'$.sessionId') IS NOT NULL AND COALESCE(json_extract(data,'$.isolated'),0)!=1",
-                [],
-            )
-        })
-        .await?;
-    let Ok(mut projects) = tokio::fs::read_dir(legacy.join("projects")).await else {
-        return Ok(());
-    };
-    let mut directories = Vec::new();
-    while let Some(entry) = projects.next_entry().await? {
-        directories.push(entry.file_name());
-    }
-    for run in runs {
-        let session = format!("{}.jsonl", crate::validation::text(&run, "sessionId"));
-        let target = s
-            .config
-            .data_dir
-            .join("runs")
-            .join(crate::validation::text(&run, "id"))
-            .join("home/.claude/projects");
-        for directory in &directories {
-            let source = legacy.join("projects").join(directory).join(&session);
-            let destination = target.join(directory).join(&session);
-            if source.exists() && !destination.exists() {
-                private_dir(&target.join(directory)).await?;
-                copy_private(&source, &destination).await?;
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Drives `claude auth login` until it exits, publishing its link and passing pasted codes.
 /// Answers whether the CLI reported success.
 async fn follow_login(
@@ -648,8 +552,8 @@ pub struct Claude;
 
 #[async_trait::async_trait]
 impl Driver for Claude {
-    async fn initialize(&self, s: &Service) -> Result<()> {
-        migrate(s).await
+    async fn initialize(&self, _s: &Service) -> Result<()> {
+        Ok(())
     }
 
     async fn managed(&self, _s: &Service) -> Result<bool> {
@@ -861,6 +765,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::Provider;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},

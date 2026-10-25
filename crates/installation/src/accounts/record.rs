@@ -22,11 +22,8 @@ pub enum AccountState {
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     pub id: String,
-    #[serde(default = "codex", deserialize_with = "lenient::provider")]
     pub provider: Provider,
-    #[serde(default)]
     pub name: String,
-    #[serde(default)]
     pub enabled: bool,
     pub email: Option<String>,
     pub plan: Option<String>,
@@ -35,9 +32,8 @@ pub struct Account {
     pub created_at: Option<i64>,
     pub checked_at: Option<i64>,
     pub state: AccountState,
-    #[serde(default)]
     pub error: String,
-    #[serde(default, deserialize_with = "lenient::usage")]
+    #[serde(deserialize_with = "lenient::usage")]
     pub usage: Option<Usage>,
     pub last_used_at: Option<i64>,
     pub exhausted: Option<Exhaustion>,
@@ -52,17 +48,10 @@ pub struct Account {
 /// A run stopped on the account's usage limit for `model`, with the usage read at that time.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Exhaustion {
-    #[serde(default)]
     pub at: i64,
-    #[serde(default)]
     pub model: String,
-    #[serde(default, deserialize_with = "lenient::usage")]
+    #[serde(deserialize_with = "lenient::usage")]
     pub usage: Option<Usage>,
-}
-
-/// Records saved before Claude Code support have no provider and belong to Codex.
-fn codex() -> Provider {
-    Provider::Codex
 }
 
 impl Account {
@@ -182,7 +171,11 @@ mod tests {
 
     #[test]
     fn unknown_fields_round_trip() {
-        let value = json!({ "id": "a", "state": "ready", "future": { "x": 1 } });
+        let value = {
+            let mut account = Account::new(Provider::Codex, "A", AccountState::Ready).to_value();
+            account["future"] = json!({ "x": 1 });
+            account
+        };
         let account = Account::from_value(value).unwrap();
         assert_eq!(account.provider, Provider::Codex);
         assert_eq!(account.to_value()["future"], json!({ "x": 1 }));

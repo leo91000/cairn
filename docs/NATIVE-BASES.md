@@ -7,10 +7,9 @@ creating project inodes, formatting another filesystem and changing each file's
 owner. The private volume still validates its journal before mounting and checks
 payload integrity on reads.
 
-See [ADR-0058](adr/0058-prepared-native-project-bases.md) for ownership, compatibility,
-cache admission, cancellation and recovery. These are disposable caches; the
-installation data epoch and authoritative disk formats are unchanged. Existing
-conversations preserve their saved files and continue using their pinned tools.
+See [ADR-0058](adr/0058-prepared-native-project-bases.md) for ownership,
+cache admission, cancellation and recovery. These are disposable caches.
+Existing conversations preserve their saved files and resume with current tools.
 
 ## Reproducible measurements
 

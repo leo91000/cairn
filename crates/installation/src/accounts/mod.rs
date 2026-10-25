@@ -74,7 +74,7 @@ pub trait Driver: Send + Sync {
         Err(Error::bad("This coding agent does not accept API keys."))
     }
 
-    /// Cleans up interrupted work and migrates state from earlier versions, once per start.
+    /// Cleans up interrupted work once per start.
     async fn initialize(&self, s: &Service) -> Result<()>;
 
     /// Codex runs on the host's own login until a managed account is added.
@@ -199,24 +199,6 @@ struct Overview {
     accounts: Vec<Value>,
     sign_in: Value,
     required: Vec<Provider>,
-}
-
-/// Codex accounts and runs saved before accounts were shared across coding agents. Runs once.
-pub fn migrate(db: &mut Db<'_>) -> Result<()> {
-    let key = "migration:agent-accounts";
-    if db.kv(key)?.is_some() {
-        return Ok(());
-    }
-    db.0.execute(
-        "UPDATE records SET kind=?1, data=json_set(data,'$.provider','codex') WHERE kind='codexAccounts'",
-        [KIND],
-    )?;
-    db.0.execute(
-        "UPDATE runs SET data=json_remove(json_set(data,'$.accountId',json_extract(data,'$.codexAccountId'),'$.accountName',json_extract(data,'$.codexAccountName')),'$.codexAccountId','$.codexAccountName','$.codexAuthMode')
-         WHERE json_type(data,'$.codexAccountId') IS NOT NULL OR json_type(data,'$.codexAccountName') IS NOT NULL OR json_type(data,'$.codexAuthMode') IS NOT NULL",
-        [],
-    )?;
-    db.set(key, &Value::Bool(true), None)
 }
 
 fn stored(db: &Db<'_>) -> Result<Vec<Account>> {

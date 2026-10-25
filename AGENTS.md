@@ -7,8 +7,6 @@
   write latency, CPU, workload and host conditions. Commit no measurement artifacts.
   See [storage measurement guidance](docs/STORAGE-COMPRESSION.md#qualification).
   Distinguish local measurements from production network latency.
-- For persisted-format changes or releases, follow the reviewed compatibility
-  contract in [production releases](docs/PRODUCTION-CAIRN.md#installation-data-compatibility).
 - Keep the web and Android apps at feature parity: a user-facing feature added or changed in
   `apps/web` ships in `apps/android` in the same change, and vice versa. Use native
   presentation, and record the feature and any platform difference in

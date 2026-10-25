@@ -561,7 +561,7 @@ mod tests {
         service.store.transaction({
             let run_id = run_id.clone();
             move |db| {
-                let run = json!({ "id": run_id, "status": RunStatus::Queued });
+                let run = json!({ "id": run_id, "status": RunStatus::Queued, "snapshot": { "agent": { "id": crate::config::MAIN_AGENT_ID, "provider": "codex" } } });
                 db.0.execute(
                     "INSERT INTO runs(id,task_id,project_id,status,created_at,data) VALUES(?1,?1,'','queued',0,?2)",
                     rusqlite::params![run_id, run.to_string()],

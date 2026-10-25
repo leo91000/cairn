@@ -363,12 +363,16 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
         ));
     }
     let incoming = authorize_origin(db, &agent, source)?;
-    let legacy = chat["id"].is_string()
+    if chat["id"].is_string()
         && run["id"].is_string()
-        && !chat["nativeProvenanceUnknown"].is_boolean();
-    let mut unknown = legacy
-        || chat["nativeProvenanceUnknown"] == true
-        || incoming["nativeProvenanceUnknown"] == true;
+        && !chat["nativeProvenanceUnknown"].is_boolean()
+    {
+        return Err(Error::conflict(
+            "Saved conversation authority is incomplete.",
+        ));
+    }
+    let mut unknown =
+        chat["nativeProvenanceUnknown"] == true || incoming["nativeProvenanceUnknown"] == true;
     let mut people = chat["nativePrincipals"]
         .as_array()
         .cloned()

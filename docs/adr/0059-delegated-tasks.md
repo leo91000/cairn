@@ -74,9 +74,3 @@ task is a normal conversation: a person can open it, answer its questions,
 continue it or delete it. Requesters must state self-contained tasks and push the
 work a task reads. Agents that need a person's answer still route it through the
 person: requesters cannot answer their tasks' questions yet.
-
-The persisted lineage fields are additive and the data compatibility epoch stays
-unchanged: older releases can read the records, and new releases treat an absent
-`nativeParentAccess` as installation-management provenance. Older releases cannot
-run a native child authorized only by the new delegation permission; they deny it
-under their existing installation-access requirement.

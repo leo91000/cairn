@@ -10,11 +10,7 @@ pub(super) fn encode_context(value: &Value) -> io::Result<String> {
 }
 
 fn stored_manifest(directory: &Path, timeout: std::time::Duration) -> io::Result<Value> {
-    let path = if directory.join("journal-v2.sqlite").exists() {
-        directory.join("journal-v2.sqlite")
-    } else {
-        directory.join("journal.sqlite")
-    };
+    let path = directory.join("journal-v2.sqlite");
     let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(failure)?;
     db.busy_timeout(timeout).map_err(failure)?;
@@ -108,11 +104,7 @@ impl LazyDisk {
 
     pub fn context(directory: &Path) -> io::Result<Value> {
         let db = Connection::open_with_flags(
-            if directory.join("journal-v2.sqlite").exists() {
-                directory.join("journal-v2.sqlite")
-            } else {
-                directory.join("journal.sqlite")
-            },
+            directory.join("journal-v2.sqlite"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .map_err(failure)?;

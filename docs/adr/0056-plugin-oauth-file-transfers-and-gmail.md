@@ -73,6 +73,5 @@ the complete pending state, owner binding, PKCE verifier, token exchange and
 encrypted credentials. The central page does not restore a remembered workspace.
 The old installation callback stays available for already-started flows. Saved
 credentials and refresh requests are unchanged.
-No persisted format changes or compatibility epoch increase are required.
 
 See [plugin APIs](../PLUGINS.md) and [Gmail setup and limits](../../plugins/gmail/README.md).

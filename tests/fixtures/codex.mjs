@@ -10,7 +10,6 @@ import {
 import path from 'node:path'
 import process from 'node:process'
 import { createInterface } from 'node:readline'
-import activityEvents from './activity-events.json' with { type: 'json' }
 import { chatFixture } from './chat-rpc.mjs'
 
 async function main() {
@@ -232,103 +231,7 @@ async function main() {
     }, 120)
   }
   else {
-    let prompt = ''
-    for await (const chunk of process.stdin)
-      prompt += chunk
-    const emit = value => process.stdout.write(`${JSON.stringify(value)}\n`)
-    mkdirSync(process.env.CODEX_HOME, { recursive: true })
-    const conversation = path.join(process.env.CODEX_HOME, 'fixture-conversation.json')
-    if (!args.includes('resume')) {
-      writeFileSync(conversation, JSON.stringify({
-        id: 'fixture-session',
-        cwd: process.cwd(),
-        parentThreadId: null,
-        turns: [],
-        historyMode: 'paginated',
-      }))
-    }
-
-    emit({ type: 'thread.started', thread_id: 'fixture-session' })
-    const restartMarker = path.join(process.env.CODEX_HOME, 'fixture-restart.json')
-    if (prompt.includes('fixture:restart') && !args.includes('resume')) {
-      writeFileSync(restartMarker, JSON.stringify({ cwd: process.cwd() }))
-      writeFileSync(path.join(process.cwd(), 'restart-work.txt'), 'preserved before restart')
-      setInterval(emit, 100, { type: 'progress', item: { text: 'Waiting for restart' } })
-      return
-    }
-
-    if (args.includes('resume') && existsSync(restartMarker)) {
-      const previous = JSON.parse(readFileSync(restartMarker, 'utf8'))
-      if (previous.cwd !== process.cwd() || readFileSync(path.join(process.cwd(), 'restart-work.txt'), 'utf8') !== 'preserved before restart')
-        throw new Error('Restart lost workspace')
-      writeFileSync(args[args.indexOf('--output-last-message') + 1], '# Resumed\nThe saved conversation and work survived the restart.')
-      emit({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } })
-      return
-    }
-
-    const marker = path.join(process.env.CODEX_HOME, 'fixture-resume.json')
-    if (prompt.includes('fixture:exhaust')) {
-      mkdirSync(process.env.CODEX_HOME, { recursive: true })
-      const auth = JSON.parse(readFileSync(path.join(process.env.CODEX_HOME, 'auth.json'), 'utf8'))
-      writeFileSync(marker, JSON.stringify({ account: auth.tokens.account_id, cwd: process.cwd(), allowSameAccount: prompt.includes('fixture:banked-reset') }))
-      writeFileSync(path.join(process.cwd(), 'preserved-work.txt'), 'work before exhaustion')
-      emit({ type: 'turn.failed', error: { message: 'You\'ve hit your usage limit. Try again later.' } })
-      process.exitCode = 1
-      return
-    }
-
-    if (args.includes('resume')) {
-      const previous = JSON.parse(readFileSync(marker, 'utf8'))
-      const auth = JSON.parse(readFileSync(path.join(process.env.CODEX_HOME, 'auth.json'), 'utf8'))
-      if ((previous.account === auth.tokens.account_id && !previous.allowSameAccount) || previous.cwd !== process.cwd() || args[args.indexOf('resume') + 1] !== 'fixture-session' || readFileSync(path.join(process.cwd(), 'preserved-work.txt'), 'utf8') !== 'work before exhaustion')
-        throw new Error('Resume did not preserve context or switch accounts')
-      emit({ type: 'item.completed', item: { text: 'Resumed original session on another account with workspace intact' } })
-    }
-
-    process.stdout.write('non-JSON diagnostic\n')
-    emit({ type: 'item.completed', item: { text: 'Checking the project' } })
-    if (prompt.includes('fixture:mcp')) {
-      const { Client, StreamableHTTPClientTransport } = await import('@modelcontextprotocol/client')
-      const configuration = args.find(arg => arg.startsWith('mcp_servers.') && arg.includes('"url"='))
-      const url = JSON.parse(configuration.match(/"url"=("[^"]+")/)[1])
-      const client = new Client({ name: 'fixture-worker', version: '1' })
-      try {
-        await client.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { Authorization: `Bearer ${process.env.CAIRN_MCP_RUN_TOKEN}` } } }))
-        const result = await client.callTool({ name: 'echo', arguments: { message: `MCP subprocess passed: ${process.env.CAIRN_MCP_RUN_TOKEN}` } })
-        emit({ type: 'item.completed', item: { text: result.content[0].text } })
-        writeFileSync(args[args.indexOf('--output-last-message') + 1], result.content[0].text)
-      }
-      finally {
-        await client.close()
-      }
-
-      return
-    }
-
-    if (prompt.includes('fixture:activity')) {
-      // Stored wait cases belong to timeline tests, not the provider's original item stream.
-      for (const event of activityEvents.filter(event => event.type.startsWith('item.')))
-        emit(event)
-    }
-
-    if (prompt.includes('fixture:hang')) {
-      setInterval(emit, 100, {
-        type: 'progress',
-        item: { text: 'Still working' },
-      })
-    }
-    else {
-      await new Promise(resolve => setTimeout(resolve, 100))
-      process.stderr.write('Bearer test-token-value\n')
-      if (prompt.includes('fixture:fail'))
-        process.exit(2)
-      emit({
-        type: 'turn.completed',
-        usage: { input_tokens: 12, output_tokens: 8 },
-      })
-      const output = args[args.indexOf('--output-last-message') + 1]
-      writeFileSync(output, '# Complete\nThe fixture task passed.')
-    }
+    throw new Error(`Unsupported Codex fixture command: ${args[0]}`)
   }
 }
 

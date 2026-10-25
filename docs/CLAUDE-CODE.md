@@ -53,21 +53,21 @@ long builds need an appropriate foreground timeout. Use Cairn's durable
 release its resources while waiting. See the official
 [background command behavior](https://code.claude.com/docs/en/tools-reference#foreground-commands-that-move-to-the-background).
 
-The adapter retains background notification handling for existing session history.
+The adapter correlates SDK background notifications with the current session.
 Claude's turn results can cover several user messages, or background notifications
 unrelated to the current prompt. Léo correlates completion with consumed message
 IDs and keeps the process alive while non-ambient background tasks and their
-follow-up responses are pending. Such legacy background work remains part of the
+follow-up responses are pending. This SDK work remains part of the
 running conversation. Ambient watchers do not keep a run open.
 When Claude finishes responding and only those tasks keep the run open, Léo emits
 `turn.waiting` with each task's description, and an empty list once they finish.
 The conversation then shows « Veille » instead of the working indicator, and the
 activity heartbeat reports `waiting_for_background` with the number of tasks.
-Resume ignores legacy completion receipts that never acknowledged the request,
-preventing an empty result from repeatedly restarting the same pending message.
+Completion receipts record acknowledged requests and prevent completed messages
+from being repeated after a restart.
 
 An explicit provider choice is saved with each queued message. Steering cannot
-change the running turn's provider. Older clients that omit the provider continue
+change the running turn's provider. Messages that omit the provider continue
 with the chat's current provider. Completion receipts prevent finished requests
 from being repeated after a worker restart. Interrupted requests preserve completed
 work and verify external effects before continuing.

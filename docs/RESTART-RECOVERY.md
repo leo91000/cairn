@@ -4,7 +4,7 @@ Active runs pause during graceful shutdown and automatically resume when the wor
 
 Recovery uses the account with the most available usage at the time of resumption. If no account is available, the run waits. Downtime does not consume the remaining execution budget. The worker checkpoints this budget every five seconds and during transitions; a hard crash can restore up to five seconds of budget since the last checkpoint. Explicitly choosing **Resume** gives the conversation a new timeout budget.
 
-Explicit cancellations stay stopped. Failed and cancelled runs with retained history offer **Resume** in the run view. **Run again** starts a separate run with current task instructions. Runs that completed before shutdown are finalized from their checkpoint without starting another model turn. Older runs created before this feature may have no checkpoint or retained session; they require manual review and a new run.
+Explicit cancellations stay stopped. Failed and cancelled runs with retained history offer **Resume** in the run view. **Run again** starts a separate run with current task instructions. Runs that completed before shutdown are finalized from their checkpoint without starting another model turn. A missing checkpoint or lost retained session requires manual review.
 
 ## Process and container ownership
 
