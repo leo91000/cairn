@@ -100,8 +100,9 @@ both before claiming an improvement. PR caches cannot populate another PR’s ca
 only the backend job saves the shared compiled Rust cache.
 
 Image reuse requires successful validation of the exact Git tree, paired Beacon
-and installation digests, matching freshly resolved CLI versions and schema-3
-provenance from this repository. Fork and manual runs cannot provide release
+and installation digests, matching freshly resolved CLI versions, served engine
+releases matching what production serves, and schema-3 provenance from this
+repository. Fork and manual runs cannot provide release
 proof. Missing or stale evidence requires full validation. See the
 [release runbook](PRODUCTION-CAIRN.md) and
 [Android publication guards](../apps/android/docs/UPDATES.md#fast-tag-publication).

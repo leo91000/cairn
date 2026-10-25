@@ -121,14 +121,14 @@ Chromium and WebKit, including mobile layouts and resumed conversations.
 `AccountsJourneyTest` covers Android’s code-entry flow and provider serialization.
 These fixtures never contact Anthropic or spend subscription allowance.
 The real installed 2.1.280 CLI was also checked with a non-inference initialization
-request, verifying its current model names and effort capabilities. Stable 2.1.308,
-the first automatically resolved release, answered the same credential-free
-request with the same model fields plus `supportsThinkingOff`. Its default catalog
-lists `opus` and `fable` instead of `opus[1m]` and `claude-fable-5-1`. Both remain
-documented `--model` values, so saved agents keep working. It ships the same OAuth
-client and token endpoint. CI now runs every resolved release through the adapter's
-native tests against a local Messages API, including session resumption with the
-release production serves (see [tool versions](CLI-UPDATES.md)). Model-scoped
+request, verifying its current model names and effort capabilities.
+CI runs every resolved release through the adapter's native tests: credential-free
+model discovery, usage and authentication status, a turn against a local Messages
+API, and session resumption with its oldest qualified release and the release
+production serves (see [tool versions](CLI-UPDATES.md)). Catalogs change between
+releases: 2.1.308 lists `opus` and `fable` where 2.1.280 lists `opus[1m]` and
+`claude-fable-5-1`. Both remain documented `--model` values, so saved agents keep
+working. Model-scoped
 quota windows, such as "Weekly · Opus", cover the models of the current catalog
 and saved models of their family that it no longer lists, such as `opus[1m]` or
 `claude-opus-4-6[1m]` ([#390](https://github.com/leo91000/cairn/issues/390)).

@@ -258,8 +258,9 @@ carry SBOM/provenance and share schema-3 evidence for one validated Git tree.
 Older single-image evidence cannot be reused. Fork images remain local.
 
 A `v*` tag promotes both immutable digests without rebuilding if a trusted run
-validated that exact tree and current installation CLI versions. Otherwise the
-full pipeline runs. A tag waits for concurrent main validation for up to 40
+validated that exact tree and current installation CLI versions, and production
+still serves the engine releases its rollback checks used. Otherwise the full
+pipeline runs. A tag waits for concurrent main validation for up to 40
 minutes; if validation is still pending, retry after it completes. No second
 build starts at that deadline. Production deployment jobs remain serialized.
 Main, PR and manual workflows never deploy.

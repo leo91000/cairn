@@ -90,12 +90,18 @@ Validation evidence (`image.json`, schema 3) records all four versions under
 `tools`, and the served versions the rollback checks used under `served`. An image
 can be reused for the same source tree only when every resolved version matches
 its evidence. Evidence recorded before Claude Code and OpenCode were resolved
-names only Codex and GitHub CLI. It is never reused, so the first build after
-this change validates a new image. Tools never change after image validation:
+names only Codex and GitHub CLI. It is never reused: such a tree validates a new
+image. Tools never change after image validation:
 Claude Code runs with `DISABLE_AUTOUPDATER=1` and OpenCode with automatic updates
 disabled.
 Direct Docker builds must pass these build arguments too; see
 [deployment setup](DEPLOYMENT.md) and the [agent toolkit](TOOLKIT.md).
+
+Installations follow approved, paired immutable images through
+`cairn-installation-update.timer`. This host updater retains the persisted
+deployment lease, runtime verification and rollback.
+See [installation updates](INSTALLATION.md#automatic-approved-updates) and the
+[production runbook](PRODUCTION-CAIRN.md#installation-updates-and-temporary-offline-status).
 
 ## Qualifying an engine change
 
@@ -127,9 +133,3 @@ following checks before merge:
   in account homes is persisted installation data. The
   [installation data compatibility contract](PRODUCTION-CAIRN.md#installation-data-compatibility)
   applies to it: the served release must still read what the new release writes.
-
-Installations follow approved, paired immutable images through
-`cairn-installation-update.timer`. This host updater retains the persisted
-deployment lease, runtime verification and rollback.
-See [installation updates](INSTALLATION.md#automatic-approved-updates) and the
-[production runbook](PRODUCTION-CAIRN.md#installation-updates-and-temporary-offline-status).
