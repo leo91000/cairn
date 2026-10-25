@@ -1,11 +1,11 @@
 name: Android
 on:
   pull_request:
-    paths: [tests/fixtures/activity-events.json, 'packages/contracts/**', 'apps/android/**', '.github/actions/setup-pnpm/**', '.github/actions/setup-android-emulator/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'scripts/tests/android-*.test.mjs', tests/android-runner-smoke.mjs, tests/runner-storage-smoke.mjs]
+    paths: ['scripts/contracts-kotlin/**', scripts/generate-contracts.mjs, 'crates/contracts/**', tests/fixtures/resume-contracts.json, tests/fixtures/activity-events.json, 'packages/contracts/**', 'apps/android/**', '.github/actions/setup-pnpm/**', '.github/actions/setup-android-emulator/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'scripts/tests/android-*.test.mjs', tests/android-runner-smoke.mjs, tests/runner-storage-smoke.mjs]
   push:
     branches: [main]
     tags: ['v*']
-    paths: [tests/fixtures/activity-events.json, 'packages/contracts/**', 'apps/android/**', '.github/actions/setup-pnpm/**', '.github/actions/setup-android-emulator/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'scripts/tests/android-*.test.mjs', tests/android-runner-smoke.mjs, tests/runner-storage-smoke.mjs]
+    paths: ['scripts/contracts-kotlin/**', scripts/generate-contracts.mjs, 'crates/contracts/**', tests/fixtures/resume-contracts.json, tests/fixtures/activity-events.json, 'packages/contracts/**', 'apps/android/**', '.github/actions/setup-pnpm/**', '.github/actions/setup-android-emulator/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'scripts/tests/android-*.test.mjs', tests/android-runner-smoke.mjs, tests/runner-storage-smoke.mjs]
   workflow_dispatch:
     inputs:
       stability-repetitions:

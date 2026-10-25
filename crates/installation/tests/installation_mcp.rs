@@ -2,8 +2,12 @@ mod common;
 
 use axum::{body::Body, http::StatusCode};
 use cairn_installation::{
-    auth::hex_digest, config::MAIN_AGENT_ID, mcps::channel, run_status::RunStatus,
-    service::Service, validation::parse,
+    auth::hex_digest,
+    config::MAIN_AGENT_ID,
+    mcps::channel,
+    run_status::RunStatus,
+    service::Service,
+    validation::{parse, text},
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -842,7 +846,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
     }
     let public: Value =
         serde_json::from_str(include_str!("../schemas/mcp-operations.json")).unwrap();
-    let public_names: std::collections::BTreeSet<_> = public
+    let mut public_names: std::collections::BTreeSet<_> = public
         .as_array()
         .unwrap()
         .iter()
@@ -852,6 +856,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
+    public_names.insert(cairn_contracts::RESUME_RUN_ID);
     assert_eq!(installed_names, public_names);
     assert!(tools.iter().all(|tool| tool.get("_meta").is_none()));
     let deletion = tools
@@ -2973,4 +2978,193 @@ async fn owner_mcp_can_review_one_wildcard_administrator_node_without_broadening
             .unwrap()
             .is_empty()
     );
+}
+
+async fn saved_mission(s: &Service, agent: &Value) -> Value {
+    let (run, _) = active_run(s, agent).await;
+    let id = text(&run, "id");
+    common::set_checkpoint(
+        &s.store,
+        id,
+        json!({
+            "launched": true,
+            "prepared": { "cwd": "/saved/workspace", "marker": "retained" },
+            "generation": "retained-generation",
+            "remainingMs": 0,
+        }),
+    )
+    .await;
+    s.store
+        .patch_run(
+            id,
+            json!({
+                "status": "failed",
+                "sessionId": "saved-provider-session",
+                "workspace": "/saved/workspace",
+                "resumeAvailable": true,
+                "retry": { "attempt": 5 },
+            }),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn resume_run_is_one_capability_on_http_public_and_installation() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let public = common::relay_fixture::grant(&s, &["run"]).await;
+    let read = common::relay_fixture::grant(&s, &["read"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let owner = common::RelayContext::new(&common::relay_fixture::context(&s).await);
+    let member =
+        common::RelayContext::new(&common::relay_fixture::member_context(&s, "other-member").await);
+    let agent_token = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+    for surface in ["owner", "member", "public", "installation"] {
+        let before = saved_mission(&s, &main).await;
+        let id = text(&before, "id");
+        let (_, denied) =
+            node_management_call(&app, "/mcp", &read, "resume_run", json!({ "runId": id })).await;
+        assert_eq!(denied["result"]["isError"], true);
+        assert!(denied["result"]["_meta"]["mcp/www_authenticate"].is_string());
+        assert_eq!(s.store.run(id).await.unwrap(), before);
+        let output = if matches!(surface, "owner" | "member") {
+            let context = if surface == "owner" { &owner } else { &member };
+            let request = context
+                .authorize(common::request("POST", &format!("/api/runs/{id}/resume")))
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap();
+            let response = common::send(&app, request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            common::read_json(response).await
+        } else {
+            let (endpoint, token) = if surface == "public" {
+                ("/mcp", public.as_str())
+            } else {
+                ("/mcp-installation", agent_token)
+            };
+            let (_, response) =
+                node_management_call(&app, endpoint, token, "resume_run", json!({ "runId": id }))
+                    .await;
+            result(&response).clone()
+        };
+        assert_eq!(output, json!({ "runId": id }));
+        let after = s.store.run(id).await.unwrap();
+        for field in ["id", "taskId", "workspace", "sessionId", "snapshot"] {
+            assert_eq!(after[field], before[field], "{surface}: {field}");
+        }
+        assert_eq!(after["status"], "queued");
+        assert!(after["retry"].is_null());
+        let checkpoint = s
+            .store
+            .kv(&format!("run-checkpoint:{id}"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            checkpoint["prepared"],
+            json!({ "cwd": "/saved/workspace", "marker": "retained" })
+        );
+        assert_eq!(checkpoint["generation"], "retained-generation");
+        assert_ne!(checkpoint["remainingMs"], 0);
+        let repeated = call(&s, &configuration, "resume_run", json!({ "runId": id })).await;
+        assert_eq!(repeated["result"]["isError"], true);
+        s.worker.cancel(&s, id).await.unwrap();
+        assert!(s.store.run(id).await.unwrap()["cancelRequestedAt"].is_number());
+    }
+    let missing = cairn_installation::config::id();
+    let request = owner
+        .authorize(common::request(
+            "POST",
+            &format!("/api/runs/{missing}/resume"),
+        ))
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let response = common::send(&app, request).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let error: cairn_contracts::ResumeRunError =
+        serde_json::from_value(common::read_json(response).await).unwrap();
+    assert_eq!(error.error, "Run not found");
+    for run_id in ["not-a-uuid".to_owned(), cairn_installation::config::id()] {
+        let response = call(&s, &configuration, "resume_run", json!({ "runId": run_id })).await;
+        assert_eq!(response["result"]["isError"], true);
+    }
+    let page = call(
+        &s,
+        &configuration,
+        "search",
+        json!({ "query": "resume_run", "detail": "schema" }),
+    )
+    .await;
+    let operation = result(&page)["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "resume_run")
+        .unwrap();
+    assert_eq!(
+        operation["inputSchema"]["properties"]["runId"]["format"],
+        "uuid"
+    );
+    assert_eq!(
+        operation["outputSchema"]["properties"]["runId"]["format"],
+        "uuid"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_resume_run_publishes_once_and_a_revoked_grant_cannot_resume() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let target = saved_mission(&s, &main).await;
+    let id = text(&target, "id");
+    let args = json!({ "runId": id });
+    let (one, two) = tokio::join!(
+        call(&s, &configuration, "resume_run", args.clone()),
+        call(&s, &configuration, "resume_run", args),
+    );
+    let successes = [&one, &two]
+        .iter()
+        .filter(|response| response["result"]["isError"] != true)
+        .count();
+    assert_eq!(successes, 1, "{one} {two}");
+    let run_id = id.to_owned();
+    let events = s
+        .store
+        .read(move |db| db.events(&run_id, 0, 100))
+        .await
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["text"] == "Resume requested")
+            .count(),
+        1
+    );
+    s.worker.cancel(&s, id).await.unwrap();
+    s.agent(
+        json!({ "name": "Main agent", "access": { "installation": false } }),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
+    let token = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+    let (status, _) = request(
+        &s,
+        token,
+        "tools/call",
+        common::mcp_arguments("resume_run", &json!({ "runId": id })),
+    )
+    .await;
+    assert!(matches!(
+        status,
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    ));
+    assert!(s.store.run(id).await.unwrap()["cancelRequestedAt"].is_number());
 }

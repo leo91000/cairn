@@ -1,0 +1,188 @@
+{
+  "valid": [
+    {
+      "id": "123e4567-e89b-42d3-a456-426614174000",
+      "result": {
+        "kind": "resumed",
+        "runId": "123e4567-e89b-42d3-a456-426614174000"
+      },
+      "nullable": null,
+      "count": 9007199254740991,
+      "labels": [
+        "mission",
+        "resume"
+      ],
+      "names": {
+        "run": "mission"
+      }
+    },
+    {
+      "id": "123e4567-e89b-42d3-a456-426614174000",
+      "result": {
+        "kind": "rejected",
+        "response": {
+          "error": "Run already active"
+        }
+      },
+      "nullable": null,
+      "count": -9007199254740991,
+      "labels": [
+        "mission",
+        "resume"
+      ],
+      "names": {
+        "run": "mission"
+      },
+      "enabled": true,
+      "omitted": null
+    },
+    {
+      "id": "123e4567-e89b-42d3-a456-426614174000",
+      "result": {
+        "kind": "resumed",
+        "runId": "123e4567-e89b-42d3-a456-426614174000"
+      },
+      "nullable": "present",
+      "count": 0,
+      "labels": [
+        "mission",
+        "resume"
+      ],
+      "names": {
+        "run": "mission"
+      },
+      "omitted": "present"
+    }
+  ],
+  "invalid": [
+    {
+      "id": "wrong",
+      "result": {
+        "kind": "resumed",
+        "runId": "123e4567-e89b-42d3-a456-426614174000"
+      },
+      "nullable": null,
+      "count": 9007199254740991,
+      "labels": [
+        "mission",
+        "resume"
+      ],
+      "names": {
+        "run": "mission"
+      }
+    },
+    {
+      "id": "123e4567-e89b-42d3-a456-426614174000",
+      "result": {
+        "kind": "unknown"
+      },
+      "nullable": null,
+      "count": 9007199254740991,
+      "labels": [
+        "mission",
+        "resume"
+      ],
+      "names": {
+        "run": "mission"
+      }
+    },
+    {
+      "id": "123e4567-e89b-42d3-a456-426614174000",
+      "result": {
+        "kind": "resumed",
+        "runId": "123e4567-e89b-42d3-a456-426614174000"
+      },
+      "nullable": null,
+      "count": 9007199254740992,
+      "labels": [
+        "mission",
+        "resume"
+      ],
+      "names": {
+        "run": "mission"
+      }
+    },
+    {
+      "id": "123e4567-e89b-42d3-a456-426614174000",
+      "result": {
+        "kind": "resumed",
+        "runId": "123e4567-e89b-42d3-a456-426614174000"
+      },
+      "nullable": null,
+      "count": -9007199254740992,
+      "labels": [
+        "mission",
+        "resume"
+      ],
+      "names": {
+        "run": "mission"
+      }
+    },
+    {
+      "id": "123e4567-e89b-42d3-a456-426614174000",
+      "result": {
+        "kind": "resumed",
+        "runId": "123e4567-e89b-42d3-a456-426614174000"
+      },
+      "nullable": null,
+      "count": 9007199254740991,
+      "labels": [
+        "mission",
+        "resume"
+      ],
+      "names": {
+        "run": "mission"
+      },
+      "enabled": null
+    },
+    {
+      "id": "123e4567-e89b-42d3-a456-426614174000",
+      "result": {
+        "kind": "rejected",
+        "response": {}
+      },
+      "nullable": null,
+      "count": 9007199254740991,
+      "labels": [
+        "mission",
+        "resume"
+      ],
+      "names": {
+        "run": "mission"
+      }
+    },
+    {
+      "result": {
+        "kind": "resumed",
+        "runId": "123e4567-e89b-42d3-a456-426614174000"
+      },
+      "nullable": null,
+      "count": 9007199254740991,
+      "labels": [
+        "mission",
+        "resume"
+      ],
+      "names": {
+        "run": "mission"
+      }
+    }
+  ],
+  "serverInvalid": [
+    {
+      "id": "123e4567-e89b-42d3-a456-426614174000",
+      "result": {
+        "kind": "resumed",
+        "runId": "123e4567-e89b-42d3-a456-426614174000"
+      },
+      "nullable": null,
+      "count": "1",
+      "labels": [
+        "mission",
+        "resume"
+      ],
+      "names": {
+        "run": "mission"
+      }
+    }
+  ]
+}

@@ -22,6 +22,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { providers } from '../../../../packages/contracts/accounts'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
+import { resumeRun } from '../../../../packages/contracts/generated/resume-run'
 import { failureReason, sameReason, stopEcho } from '../activity'
 import { api, apiUpload, state } from '../api'
 import { reuseAttachmentKey } from '../attachment-media'
@@ -658,7 +659,7 @@ async function resumeQuota() {
   error.value = ''
   try {
     if (chat.run?.status === 'failed')
-      await api(`/runs/${chat.run.id}/resume`, { method: 'POST' })
+      await resumeRun(api, { runId: chat.run.id })
     await api(`/chats/${chat.id}/pause`, { method: 'POST', body: JSON.stringify({ paused: false }) })
   }
   catch (e) {
