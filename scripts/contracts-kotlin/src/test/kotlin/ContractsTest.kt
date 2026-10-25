@@ -8,7 +8,7 @@ class ContractsTest {
     private val json = Json { encodeDefaults = true }
 
     @Test
-    fun accountMethodsCorpusDecodesTypedSuccessAndRefusal() {
+    fun accountMethodsCorpusDecodesAppResponses() {
         val corpus =
             json
                 .parseToJsonElement(
@@ -22,12 +22,6 @@ class ContractsTest {
         for (value in corpus.getValue("invalid").jsonArray) {
             assertFails(value.toString()) {
                 json.decodeFromJsonElement<ListAccountMethodsOutput>(value)
-            }
-        }
-        assertEquals("{}", json.encodeToString(ListAccountMethodsInput()))
-        for (value in corpus.getValue("invalidInputs").jsonArray) {
-            assertFails(value.toString()) {
-                json.decodeFromJsonElement<ListAccountMethodsInput>(value)
             }
         }
     }

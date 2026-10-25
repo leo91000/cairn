@@ -63,8 +63,6 @@ onMounted(async () => {
 
 async function loadMethods(): Promise<AccountSignInMethod[]> {
   const result = await listAccountMethods(accountRequest)
-  if (result.kind === 'accountProofRequired')
-    throw new Error(result.message)
   return result.methods
 }
 

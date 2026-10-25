@@ -5,7 +5,6 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import build.cairn.app.BuildConfig
 import build.cairn.contracts.AccountSignInMethod
-import build.cairn.contracts.ListAccountMethodsOutput
 import build.cairn.contracts.ListProjectsInput
 import build.cairn.contracts.listAccountMethods
 import build.cairn.contracts.listProjects
@@ -526,10 +525,7 @@ constructor(
         checkNotNull(accountConnection).get("/account/options")
 
     suspend fun accountMethods(): List<AccountSignInMethod> =
-        when (val output = checkNotNull(accountConnection).listAccountMethods()) {
-            is ListAccountMethodsOutput.A -> output.methods
-            is ListAccountMethodsOutput.B -> throw ApiException(403, output.message)
-        }
+        checkNotNull(accountConnection).listAccountMethods().methods
 
     suspend fun signIn(provider: AccountProvider, credentials: CairnCredentials) {
         val job = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]

@@ -157,12 +157,7 @@ pub(crate) async fn operation(
     if !known {
         return Err(Error::not_found("Unknown operation"));
     }
-    if name == cairn_contracts::beacon::LIST_ACCOUNT_METHODS_ID {
-        let input = serde_json::from_value(args).map_err(|error| Error::bad(error.to_string()))?;
-        return Ok(serde_json::to_value(
-            cairn_contracts::beacon::account_methods_proof_required(input),
-        )?);
-    }
+
     if let Some(op) = crate::capabilities::project_operation(name) {
         return op
             .invoke(
