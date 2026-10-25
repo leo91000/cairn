@@ -43,6 +43,7 @@ string_enum! {
 const MAX_UNDELIVERED: usize = 20;
 const TITLE_CHARS: usize = 90;
 const PRIVATE_ANSWER_TEXT: &str = "Answered a private question.";
+
 const CONTINUED_MISSION: &str = concat!(
     "This mission now continues as a chat; the unattended rule in your ",
     "instructions no longer applies."

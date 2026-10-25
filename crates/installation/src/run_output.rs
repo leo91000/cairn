@@ -772,12 +772,18 @@ mod tests {
     fn native_chat_protocol_runs_keep_the_frame_of_their_interaction() {
         for provider in ["codex", "claude", "opencode"] {
             let mut run = json!({
-                "id": "run", "isolated": true,
+                "id": "run",
+                "isolated": true,
                 "pluginInstructions": "Mail: never print credentials.",
-                "snapshot": { "agent": { "provider": provider, "access": { "backend": "native" } }, "task": { "prompt": "Check the deployment." } },
+                "snapshot": {
+                    "agent": { "provider": provider, "access": { "backend": "native" } },
+                    "task": { "prompt": "Check the deployment." },
+                },
             });
             let mode = json!({ "mode": "protected" });
-            let mut chat = json!({ "execution": { "text": "Task brief:\nCheck the deployment." } });
+            let mut chat = json!({
+                "execution": { "text": "Task brief:\nCheck the deployment." },
+            });
             native_chat_privileges(&mut chat, &run, &mode);
             let instructions = text(&chat, "instructions");
             assert!(instructions.contains("Mail: never print credentials."));
