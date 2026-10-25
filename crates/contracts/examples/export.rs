@@ -1,4 +1,4 @@
-use cairn_contracts::*;
+use cairn_contracts::{beacon::*, *};
 use schemars::{JsonSchema, generate::SchemaSettings};
 use std::{fs, path::Path};
 use ts_rs::TS;
@@ -27,6 +27,13 @@ fn main() {
     export::<ResumeRunInput>(root, &mut generator, Contract::Deserialize);
     export::<ResumeRunOutput>(root, &mut generator, Contract::Serialize);
     export::<QualificationFixture>(root, &mut generator, Contract::Serialize);
+    export::<ListAccountMethodsInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListAccountMethodsOutput>(root, &mut generator, Contract::Serialize);
+    fs::write(
+        root.join("list-account-methods.json"),
+        serde_json::to_string_pretty(&list_account_methods_descriptor()).unwrap() + "\n",
+    )
+    .unwrap();
     // Canonical wire values come from the Rust serializer, including omission/null semantics.
     let corpus: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/resume-contracts.json"

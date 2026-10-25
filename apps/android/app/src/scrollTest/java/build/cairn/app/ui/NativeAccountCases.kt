@@ -53,7 +53,7 @@ abstract class NativeAccountCases {
                             path == "/api/account/methods" ->
                                 return MockResponse()
                                     .setBody(
-                                        """{"methods":[{"id":"email","kind":"email","label":"alice@example.test"}]}"""
+                                        """{"kind":"listed","methods":[{"id":"email","kind":"email","label":"alice@example.test"}]}"""
                                     )
                             path == "/api/installations" -> return MockResponse().setBody("[]")
                             path == "/api/account/options" ->
@@ -134,6 +134,17 @@ abstract class NativeAccountCases {
                 compose.onAllNodesWithText("Aucune installation").fetchSemanticsNodes().isNotEmpty()
             }
             compose.onAllNodesWithText("alice@example.test").onFirst().assertIsDisplayed()
+            // The native account screen reads its generated contract without an installation.
+            compose.waitUntil(10_000) {
+                compose
+                    .onAllNodesWithText("E-mail · alice@example.test")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose
+                .onNodeWithText("E-mail · alice@example.test")
+                .performScrollTo()
+                .assertIsDisplayed()
             assertTrue(authenticated.get())
             assertEquals(1, exchanges.size)
             assertTrue(

@@ -1165,6 +1165,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bytes",
+ "cairn-contracts",
  "cairn-installation",
  "cairn-node-gateway",
  "cairn-protocol",
