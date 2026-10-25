@@ -59,7 +59,7 @@ local function connect()
     local limit = if ok and response.status == 200 and type(response.json) == "table"
         then response.json.session_start_limit else nil
     if type(limit) ~= "table" or type(limit.remaining) ~= "number" or limit.remaining < 0
-        or type(limit.reset_after) ~= "number" or limit.reset_after < 1 then
+        or type(limit.reset_after) ~= "number" or limit.reset_after < 0 then
         cairn.instance.status("connecting", "Waiting for Discord’s session budget. Retrying shortly.")
         cairn.socket.after("connect", 5000)
         return
@@ -76,7 +76,10 @@ local function connect()
         cairn.socket.after("connect", wait * 1000)
         return
     end
-    gateway.budget = { remaining = limit.remaining, expires = observed + math.min(limit.reset_after / 1000, 86400) }
+    -- An unused bot has reset_after = 0: its daily window starts with Identify.
+    -- Keep a bounded shared reservation until the next lookup reports that window.
+    local resetAfter = if limit.reset_after == 0 then 86400 else math.min(limit.reset_after / 1000, 86400)
+    gateway.budget = { remaining = limit.remaining, expires = observed + resetAfter }
     cairn.socket.connect({ url = url .. QUERY, after = wait, oversized = OVERSIZED })
 end
 
