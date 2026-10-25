@@ -35,6 +35,7 @@ pub(crate) fn authorize_in(db: &Db<'_>, bearer: &str) -> Result<Value> {
     if policy(agent)["installation"] != true || !agent_allowed(&current, agent) {
         return Err(Error::forbidden("Agent permissions were reduced."));
     }
+    crate::plugins::requesters::recheck_run_in(db, &run)?;
     Ok(run)
 }
 
@@ -173,12 +174,32 @@ pub(crate) async fn operation(
 
 async fn invoke(s: &Arc<Service>, bearer: &str, name: &str, args: Value) -> Result<Value> {
     let run = authorize(s, bearer).await?;
-    crate::native::policy::PARENT
+    let requester = crate::plugins::requesters::for_run(s, &run).await?;
+    let read_only = crate::mcp_server::operations().iter().any(|operation| {
+        operation["name"] == name && operation["annotations"]["readOnlyHint"] == true
+    });
+    let result = crate::native::policy::PARENT
         .scope(
             text(&run, "id").to_owned(),
             invoke_inner(s, bearer, name, args),
         )
-        .await
+        .await?;
+    if read_only {
+        if let Some(requester) = &requester {
+            crate::plugins::requesters::recheck(s, requester).await?;
+        }
+        let bearer = bearer.to_owned();
+        s.store
+            .read(move |db| {
+                authorize_in(db, &bearer)?;
+                if let Some(requester) = &requester {
+                    crate::plugins::requesters::recheck_in(db, requester)?;
+                }
+                Ok(())
+            })
+            .await?;
+    }
+    Ok(result)
 }
 
 async fn invoke_inner(s: &Arc<Service>, bearer: &str, name: &str, args: Value) -> Result<Value> {

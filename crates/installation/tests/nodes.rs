@@ -1840,6 +1840,32 @@ async fn node_responses_keep_their_length_when_a_proxy_asks_for_compression() {
 
 #[tokio::test]
 async fn workspace_transfer_preserves_files_and_links_without_following_them() {
+    const CHILD: &str = "CAIRN_TEST_WORKSPACE_TRANSFER_UMASK";
+    if std::env::var_os(CHILD).is_none() {
+        // A process-wide umask must not affect the other parallel tests.
+        let output = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("umask 0077\nexec \"$@\"")
+            .arg("workspace-transfer-fixture")
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "workspace_transfer_preserves_files_and_links_without_following_them",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .kill_on_drop(true)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     let root = TempDir::new().unwrap();
     let source = root.path().join("source");
     let target = root.path().join("target");

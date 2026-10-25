@@ -20,21 +20,21 @@ test('Gmail connects two explicit mailboxes with OAuth and saves no browser toke
   const starts: Record<string, any>[] = []
   const saves: Record<string, any>[] = []
   const callbackUrl = 'https://cairn.example/plugins/oauth/callback'
-  await page.route('**/api/plugins', route => route.fulfill({
+  await page.route('**/api/plugins/packages/gmail', route => route.fulfill({
     json: {
-      packages: [{
-        id: 'gmail',
-        builtin: true,
-        status: 'active',
-        active: '1.0.0',
-        manifest: { ...gmail, instanceView: false },
-        setup: gmailEntry.setup,
-        versions: [],
-      }],
+      id: 'gmail',
+      builtin: true,
+      status: 'active',
+      active: '1.0.0',
+      manifest: { ...gmail, instanceView: false },
+      setup: gmailEntry.setup,
       capabilities: [],
-      connections,
+      instanceReads: true,
+      accessReads: true,
     },
   }))
+  await page.route('**/api/plugins/packages/gmail/connections', route => route.fulfill({ json: { items: connections } }))
+  await page.route('**/api/plugins/instance-access', route => route.fulfill({ json: { items: [] } }))
   await page.route('**/api/plugins/gmail/oauth', async (route) => {
     if (route.request().method() === 'GET')
       return route.fulfill({ json: { callbackUrl } })

@@ -92,11 +92,14 @@ async fn serve(
 }
 
 fn archive(name: &str, version: &str) -> Vec<u8> {
+    executable_archive(name, &format!("#!/bin/sh\nprintf '{version}'\n"))
+}
+
+fn executable_archive(name: &str, script: &str) -> Vec<u8> {
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     zip.start_file(name, zip::write::SimpleFileOptions::default())
         .unwrap();
-    zip.write_all(format!("#!/bin/sh\nprintf '{version}'\n").as_bytes())
-        .unwrap();
+    zip.write_all(script.as_bytes()).unwrap();
     zip.finish().unwrap().into_inner()
 }
 
@@ -143,7 +146,9 @@ impl Fixture {
     async fn new() -> Self {
         let root = TempDir::new().unwrap();
         std::fs::create_dir_all(root.path().join("home")).unwrap();
-        let service = Service::new(common::config(root.path())).await.unwrap();
+        let mut config = common::config(root.path());
+        config.runner_url = "http://runner:4311".into();
+        let service = Service::new(config).await.unwrap();
         common::relay_fixture::claimed(&service).await.unwrap();
         service
             .plugins
@@ -208,6 +213,104 @@ impl Fixture {
         let output = tokio::process::Command::new(path).output().await.unwrap();
         assert!(output.status.success());
         String::from_utf8(output.stdout).unwrap()
+    }
+
+    async fn onepassword(&self, script: &str) -> Value {
+        *self.publisher.release.lock().await = json!({ "version": "2.41.0" });
+        let arch = if std::env::consts::ARCH == "aarch64" {
+            "arm64"
+        } else {
+            "amd64"
+        };
+        self.publisher.files.lock().await.insert(
+            format!("/dist/1P/op2/pkg/v2.41.0/op_linux_{arch}_v2.41.0.zip"),
+            executable_archive("op", script),
+        );
+        cairn_installation::plugins::connections::save(
+            &self.service,
+            "onepassword",
+            &json!({
+                "name": "Fixture", "enabled": true,
+                "agentIds": [cairn_installation::config::MAIN_AGENT_ID],
+                "secrets": {"token": "ops_fixture"},
+            }),
+            None,
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn replace_owner(&self, account: &'static str) -> tokio::task::JoinHandle<()> {
+        let authority = Router::new().route("/api/relay/{id}/task-authors", axum::routing::get(move || async move {
+            Json(json!({"owner": {"account_id": account, "access_id": "replacement-access"}, "members": []}))
+        }));
+        let (origin, server) = common::serve_locally(authority).await;
+        let file = self
+            .service
+            .config
+            .data_dir
+            .join("installation-relay/identity.json");
+        let mut identity: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        identity["origin"] = json!(origin);
+        std::fs::write(file, serde_json::to_vec(&identity).unwrap()).unwrap();
+        server
+    }
+
+    async fn operation(&self, id: &str) -> Value {
+        common::eventually(
+            std::time::Duration::from_secs(15),
+            std::time::Duration::from_millis(10),
+            async || {
+                let state = self.service.plugins.operations.get(id).unwrap();
+                (state["state"] != "running").then_some(state)
+            },
+        )
+        .await
+    }
+}
+
+#[tokio::test]
+async fn completed_preparations_keep_the_most_recent_results() {
+    let f = Fixture::new().await;
+    let operations = &f.service.plugins.operations;
+    let (finish, pending) = tokio::sync::oneshot::channel();
+    let delayed = operations
+        .start(f.service.clone(), async move {
+            pending.await.unwrap();
+            Ok(json!("delayed"))
+        })
+        .unwrap()["operation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut completed = std::collections::VecDeque::new();
+    for i in 0..63 {
+        let id = operations
+            .start(f.service.clone(), async move { Ok(json!(i)) })
+            .unwrap()["operation"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(f.operation(&id).await["result"], i);
+        completed.push_back(id);
+    }
+    finish.send(()).unwrap();
+    assert_eq!(f.operation(&delayed).await["result"], "delayed");
+    completed.push_back(delayed);
+    for i in 63..130 {
+        let id = operations
+            .start(f.service.clone(), async move { Ok(json!(i)) })
+            .unwrap()["operation"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(f.operation(&id).await["result"], i);
+        let oldest = completed.pop_front().unwrap();
+        assert_eq!(operations.get(&oldest).unwrap_err().status, 404);
+        completed.push_back(id);
+        for retained in &completed {
+            assert_eq!(operations.get(retained).unwrap()["state"], "completed");
+        }
     }
 }
 
@@ -539,7 +642,7 @@ async fn first_use_can_finish_a_download_longer_than_the_normal_handler_deadline
     .unwrap();
     let gate = Arc::new(tokio::sync::Notify::new());
     *f.publisher.download_gate.lock().await = Some(gate.clone());
-    let request = axum::http::Request::builder()
+    let mut request = axum::http::Request::builder()
         .method("POST")
         .uri(format!(
             "/api/plugins/onepassword/connections/{}/test",
@@ -547,6 +650,12 @@ async fn first_use_can_finish_a_download_longer_than_the_normal_handler_deadline
         ))
         .body(Body::empty())
         .unwrap();
+    request
+        .extensions_mut()
+        .insert(cairn_installation::auth::InstallationIdentity::trusted(
+            cairn_installation::auth::InstallationRole::Owner,
+            "fixture-owner",
+        ));
     let input = cairn_installation::http::Input::read(request)
         .await
         .unwrap();
@@ -747,6 +856,7 @@ async fn owner_preparation_is_tracked_without_holding_a_relay_request_open() {
         "program-probe",
         "1.0.0",
         package["digest"].as_str(),
+        "fixture-owner",
     )
     .await
     .unwrap();
@@ -827,4 +937,477 @@ async fn unarchived_binaries_can_be_installed_and_reused() {
     assert_eq!(f.output().await, "2.0.0");
     assert_eq!(f.output().await, "2.0.0");
     assert_eq!(f.publisher.requests.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn cold_execution_rechecks_grants_before_starting_the_program() {
+    use cairn_installation::{config::MAIN_AGENT_ID, plugins::connections, validation::text};
+
+    for revoked in ["instance", "run"] {
+        let f = Fixture::new().await;
+        let marker = f.root.path().join("program-started");
+        let account = f
+            .onepassword(&format!(
+                "#!/bin/sh\nprintf started > '{}'\nprintf value\n",
+                marker.display(),
+            ))
+            .await;
+        let task = f
+            .service
+            .task(
+                json!({"name": "Read", "agentId": MAIN_AGENT_ID, "prompt": "Read"}),
+                None,
+            )
+            .await
+            .unwrap();
+        let run = f
+            .service
+            .enqueue(text(&task, "id"), "manual", None)
+            .await
+            .unwrap();
+        let run = f
+            .service
+            .store
+            .patch_run(
+                text(&run, "id"),
+                json!({"status": "running", "isolated": true}),
+            )
+            .await
+            .unwrap();
+        let config = f
+            .service
+            .mcps
+            .run_configuration(&f.service, &run)
+            .await
+            .unwrap();
+        let bearer = text(&config["env"], "CAIRN_MCP_RUN_TOKEN").to_owned();
+        let gate = Arc::new(tokio::sync::Notify::new());
+        *f.publisher.download_gate.lock().await = Some(gate.clone());
+        let service = f.service.clone();
+        let account_id = text(&account, "id").to_owned();
+        let pending = tokio::spawn(async move {
+            service
+                .plugins
+                .command(
+                    &service,
+                    &bearer,
+                    &json!({
+                        "plugin": "onepassword", "command": "read",
+                        "args": ["--account", account_id, "op://vault/item/password"],
+                    }),
+                )
+                .await
+        });
+        common::eventually(
+            std::time::Duration::from_secs(15),
+            std::time::Duration::from_millis(10),
+            async || (f.publisher.requests.load(Ordering::SeqCst) >= 2).then_some(()),
+        )
+        .await;
+        if revoked == "instance" {
+            connections::save(
+                &f.service,
+                "onepassword",
+                &json!({
+                    "name": "Fixture", "enabled": true, "agentIds": [],
+                    "secrets": {"token": "ops_replacement_fixture"},
+                }),
+                Some(text(&account, "id")),
+            )
+            .await
+            .unwrap();
+        } else {
+            f.service
+                .mcps
+                .revoke_run(&f.service, text(&run, "id"))
+                .await
+                .unwrap();
+        }
+        gate.notify_one();
+        let result = pending.await.unwrap();
+        assert!(
+            !marker.exists(),
+            "a revoked {revoked} request started the program after its download"
+        );
+        assert_eq!(
+            result.unwrap_err().status,
+            if revoked == "instance" { 403 } else { 401 }
+        );
+    }
+}
+
+#[tokio::test]
+async fn cold_package_approval_rechecks_the_initiating_owner() {
+    use cairn_installation::auth::{InstallationIdentity, InstallationRole};
+
+    for account in ["fixture-owner", "replacement-owner"] {
+        let f = Fixture::new().await;
+        let package = f.upload(MANIFEST, INSTALLER).await.unwrap();
+        let gate = Arc::new(tokio::sync::Notify::new());
+        *f.publisher.download_gate.lock().await = Some(gate.clone());
+        let mut request = common::request("POST", "/api/plugins/packages/program-probe/approve")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"version": "1.0.0", "digest": package["digest"]}).to_string(),
+            ))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(InstallationIdentity::trusted(
+                InstallationRole::Owner,
+                "fixture-owner",
+            ));
+        let input = cairn_installation::http::Input::read(request)
+            .await
+            .unwrap();
+        let accepted = cairn_installation::plugins::routes(&f.service, &input)
+            .await
+            .unwrap();
+        let operation = accepted["operation"].as_str().unwrap();
+        common::eventually(
+            std::time::Duration::from_secs(15),
+            std::time::Duration::from_millis(10),
+            async || (f.publisher.requests.load(Ordering::SeqCst) >= 2).then_some(()),
+        )
+        .await;
+        let authority = Router::new().route("/api/relay/{id}/task-authors", axum::routing::get(move || async move {
+        Json(json!({"owner": {"account_id": account, "access_id": "replacement-access"}, "members": []}))
+    }));
+        let (origin, server) = common::serve_locally(authority).await;
+        let file = f
+            .service
+            .config
+            .data_dir
+            .join("installation-relay/identity.json");
+        let mut identity: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        identity["origin"] = json!(origin);
+        std::fs::write(file, serde_json::to_vec(&identity).unwrap()).unwrap();
+        gate.notify_one();
+        let result = common::eventually(
+            std::time::Duration::from_secs(15),
+            std::time::Duration::from_millis(10),
+            async || {
+                let state = f.service.plugins.operations.get(operation).unwrap();
+                (state["state"] != "running").then_some(state)
+            },
+        )
+        .await;
+        server.abort();
+        assert_eq!(
+            result["state"], "failed",
+            "a former owner's approval completed: {result}"
+        );
+        assert!(registry::active(&f.service, "program-probe").await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn cold_package_approval_requires_the_authenticated_current_owner_before_downloading() {
+    use cairn_installation::auth::{InstallationIdentity, InstallationRole};
+
+    let f = Fixture::new().await;
+    let package = f.upload(MANIFEST, INSTALLER).await.unwrap();
+    let mut request = common::request("POST", "/api/plugins/packages/program-probe/approve")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"version": "1.0.0", "digest": package["digest"]}).to_string(),
+        ))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(InstallationIdentity::trusted(
+            InstallationRole::Owner,
+            "former-owner",
+        ));
+    let input = cairn_installation::http::Input::read(request)
+        .await
+        .unwrap();
+    let result = cairn_installation::plugins::routes(&f.service, &input).await;
+    assert_eq!(result.unwrap_err().status, 403);
+    assert_eq!(f.publisher.requests.load(Ordering::SeqCst), 0);
+    assert!(registry::active(&f.service, "program-probe").await.is_err());
+}
+
+#[tokio::test]
+async fn cold_owner_execution_rechecks_the_initiating_owner() {
+    use cairn_installation::{
+        auth::{InstallationIdentity, InstallationRole},
+        validation::text,
+    };
+
+    let f = Fixture::new().await;
+    let marker = f.root.path().join("owner-program-started");
+    let account = f
+        .onepassword(&format!(
+            "#!/bin/sh\nprintf started > '{}'\nprintf '[]'\n",
+            marker.display(),
+        ))
+        .await;
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *f.publisher.download_gate.lock().await = Some(gate.clone());
+    let path = format!(
+        "/api/plugins/onepassword/connections/{}/test",
+        text(&account, "id")
+    );
+    let mut request = common::request("POST", &path).body(Body::empty()).unwrap();
+    request
+        .extensions_mut()
+        .insert(InstallationIdentity::trusted(
+            InstallationRole::Owner,
+            "fixture-owner",
+        ));
+    let input = cairn_installation::http::Input::read(request)
+        .await
+        .unwrap();
+    let accepted = cairn_installation::plugins::routes(&f.service, &input)
+        .await
+        .unwrap();
+    let operation = text(&accepted, "operation");
+    common::eventually(
+        std::time::Duration::from_secs(15),
+        std::time::Duration::from_millis(10),
+        async || (f.publisher.requests.load(Ordering::SeqCst) >= 2).then_some(()),
+    )
+    .await;
+    let authority = Router::new().route("/api/relay/{id}/task-authors", axum::routing::get(|| async {
+        Json(json!({"owner": {"account_id": "fixture-owner", "access_id": "replacement-access"}, "members": []}))
+    }));
+    let (origin, server) = common::serve_locally(authority).await;
+    let file = f
+        .service
+        .config
+        .data_dir
+        .join("installation-relay/identity.json");
+    let mut identity: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    identity["origin"] = json!(origin);
+    std::fs::write(file, serde_json::to_vec(&identity).unwrap()).unwrap();
+    gate.notify_one();
+    let result = common::eventually(
+        std::time::Duration::from_secs(15),
+        std::time::Duration::from_millis(10),
+        async || {
+            let state = f.service.plugins.operations.get(operation).unwrap();
+            (state["state"] != "running").then_some(state)
+        },
+    )
+    .await;
+    server.abort();
+    assert!(
+        !marker.exists(),
+        "a former owner's test started the program after its download: {result}"
+    );
+    assert_eq!(result["state"], "failed", "{result}");
+}
+
+#[tokio::test]
+async fn cold_program_update_rechecks_the_initiating_owner() {
+    use cairn_installation::{
+        auth::{InstallationIdentity, InstallationRole},
+        validation::text,
+    };
+
+    let f = Fixture::new().await;
+    f.approve().await;
+    f.publisher.release("1.1.0").await;
+    let candidate = f.action("check", &json!({})).await.unwrap();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *f.publisher.download_gate.lock().await = Some(gate.clone());
+    let before = f.publisher.requests.load(Ordering::SeqCst);
+    let mut request = common::request("POST", "/api/plugins/program-probe/programs/probe/install")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"digest": candidate["digest"]}).to_string(),
+        ))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(InstallationIdentity::trusted(
+            InstallationRole::Owner,
+            "fixture-owner",
+        ));
+    let input = cairn_installation::http::Input::read(request)
+        .await
+        .unwrap();
+    let accepted = cairn_installation::plugins::routes(&f.service, &input)
+        .await
+        .unwrap();
+    common::eventually(
+        std::time::Duration::from_secs(15),
+        std::time::Duration::from_millis(10),
+        async || (f.publisher.requests.load(Ordering::SeqCst) > before).then_some(()),
+    )
+    .await;
+    let server = f.replace_owner("fixture-owner").await;
+    gate.notify_one();
+    let result = f.operation(text(&accepted, "operation")).await;
+    server.abort();
+    assert_eq!(
+        f.output().await,
+        "1.0.0",
+        "a former owner's update changed the installed program: {result}"
+    );
+    assert_eq!(result["state"], "failed", "{result}");
+}
+
+#[tokio::test]
+async fn cold_setup_forms_and_activation_acknowledge_before_program_download_finishes() {
+    for action in ["form", "activate"] {
+        setup_preparation(action, false).await;
+    }
+}
+
+#[tokio::test]
+async fn cold_setup_preparation_keeps_its_original_owner() {
+    for action in ["form", "activate"] {
+        setup_preparation(action, true).await;
+    }
+}
+
+async fn setup_preparation(action: &str, revoke: bool) {
+    use cairn_installation::{
+        auth::{InstallationIdentity, InstallationRole},
+        plugins::{connections, setup},
+    };
+
+    let f = Fixture::new().await;
+    let manifest = MANIFEST.replace(
+        "capabilities = [\"http\", \"exec\"]",
+        "instanceForm = true\ncapabilities = [\"http\", \"exec\", \"resources\"]",
+    ) + "\n[[resources]]\nname = \"workspace\"\ntitle = \"Workspaces\"\nsingular = \"Workspace\"\n";
+    let source = "return {form = function() local result = cairn.exec.run({program = 'probe'}) assert(result.stdout == '1.0.0') return {} end}";
+    let package = registry::install(
+        &f.service,
+        &json!({
+            "manifest": manifest,
+            "manifestFormat": "toml",
+            "source": source,
+            "modules": {"programs/probe.luau": INSTALLER},
+        }),
+    )
+    .await
+    .unwrap();
+    registry::approve(
+        &f.service,
+        "program-probe",
+        "1.0.0",
+        package["digest"].as_str().unwrap(),
+    )
+    .await
+    .unwrap();
+    let draft = setup::save(
+        &f.service,
+        "program-probe",
+        "fixture-owner",
+        &json!({"name":"Prepared program"}),
+        None,
+    )
+    .await
+    .unwrap();
+    std::fs::remove_dir_all(
+        f.service
+            .config
+            .data_dir
+            .join("plugin-programs/program-probe"),
+    )
+    .unwrap();
+    let before = f.publisher.requests.load(Ordering::SeqCst);
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *f.publisher.download_gate.lock().await = Some(gate.clone());
+    let path = format!(
+        "/api/plugins/program-probe/setup-drafts/{}/{action}",
+        draft["id"].as_str().unwrap()
+    );
+    let body = json!({"revision":draft["revision"],"enabled":false});
+    let mut request = common::request("POST", &path)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(InstallationIdentity::trusted(
+            InstallationRole::Owner,
+            "fixture-owner",
+        ));
+    let input = cairn_installation::http::Input::read(request)
+        .await
+        .unwrap();
+    let acknowledged = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        cairn_installation::plugins::routes(&f.service, &input),
+    )
+    .await;
+    assert!(
+        acknowledged.is_ok(),
+        "{action} held its request open for the gated download"
+    );
+    let accepted = acknowledged.unwrap().unwrap();
+    let id = accepted["operation"]
+        .as_str()
+        .expect("Cold setup must return an operation");
+    common::eventually(
+        std::time::Duration::from_secs(15),
+        std::time::Duration::from_millis(10),
+        async || (f.publisher.requests.load(Ordering::SeqCst) >= before + 2).then_some(()),
+    )
+    .await;
+    assert_eq!(
+        f.service.plugins.operations.get(id).unwrap()["state"],
+        "running"
+    );
+    assert!(
+        connections::get(&f.service, "program-probe", draft["id"].as_str().unwrap())
+            .await
+            .is_err()
+    );
+    let replacement = if revoke {
+        Some(f.replace_owner("replacement-owner").await)
+    } else {
+        None
+    };
+    gate.notify_one();
+    *f.publisher.download_gate.lock().await = None;
+    let completed = f.operation(id).await;
+    if let Some(server) = replacement {
+        server.abort();
+        assert_eq!(completed["state"], "failed", "{action}: {completed}");
+        assert!(
+            connections::get(&f.service, "program-probe", draft["id"].as_str().unwrap())
+                .await
+                .is_err()
+        );
+        assert!(
+            f.service
+                .store
+                .kv(&format!("plugin-setup:{}", draft["id"].as_str().unwrap()))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        return;
+    }
+    assert_eq!(completed["state"], "completed", "{action}: {completed}");
+    if action == "activate" {
+        assert_eq!(completed["result"]["id"], draft["id"]);
+        assert!(
+            setup::get(
+                &f.service,
+                "program-probe",
+                draft["id"].as_str().unwrap(),
+                "fixture-owner"
+            )
+            .await
+            .is_err()
+        );
+    } else {
+        assert!(
+            setup::get(
+                &f.service,
+                "program-probe",
+                draft["id"].as_str().unwrap(),
+                "fixture-owner"
+            )
+            .await
+            .is_ok()
+        );
+    }
 }

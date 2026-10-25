@@ -266,7 +266,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
 
   for (const [eventIndex, stored] of events.entries()) {
     const event = stored
-    if (event.type === 'artifact')
+    if (event.type === 'artifact' || event.type === 'chat.wakeup.delivered')
       continue
     // A delegated task works like a subagent, in a conversation of its own.
     if (event.type === 'chat.delegated') {

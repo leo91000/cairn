@@ -544,7 +544,7 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
     let checks = stream::iter(initial_sources).map(|(index, condition)| {
         let run = &run;
         async move {
-            let observed = conditions::observe(s, run, &condition).await?;
+            let observed = conditions::observe(s, run, &condition, Some(bearer)).await?;
             // Keep the single-condition refusal contract. In a group, unavailable is
             // a result too: all awaits the others, and any may return it immediately.
             if !grouped
@@ -659,6 +659,9 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
                 for (key, value) in slot {
                     wakeup[key] = value;
                 }
+            }
+            if owner.chat {
+                crate::plugins::work::reserve_continuation(db, &owner.record, &run, &wakeup)?;
             }
             owner.record["wakeup"] = wakeup.clone();
             crate::nodes::exclusive::release_before_wait(db, text(&run, "id"))?;

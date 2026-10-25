@@ -41,7 +41,9 @@ async fn dispatch_inner(s: &Arc<Service>, input: &Input) -> Result<Value> {
         return crate::accounts::routes(s, input).await;
     }
     if under(&input.path, "/api/plugins") {
-        return crate::plugins::routes(s, input).await;
+        // Plugin handlers compose form workers, credential refreshes and HTTP I/O.
+        // Keep their future off this dispatcher's stack without changing task-local authority.
+        return Box::pin(crate::plugins::routes(s, input)).await;
     }
     if under(&input.path, "/api/mcps") {
         return crate::mcp_server::routes(s, input).await;
@@ -106,6 +108,21 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
         ("GET", ["agent-avatars"]) => json!({ "configured": s.avatars.configured(s).await? }),
         ("POST", ["agents", id, "avatar", "generate"]) => s.avatars.generate(s, id).await?,
         ("POST", ["agents", id, "preview"]) => s.agent_preview(input.body.clone(), id).await?,
+        ("GET", ["agents", agent, "plugin-resource-grants"]) => {
+            crate::plugins::grants::for_agent(
+                s,
+                agent,
+                input.query.get("cursor").map(String::as_str),
+            )
+            .await?
+        }
+        ("DELETE", ["agents", agent, "plugin-resource-grants", grant]) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.account_id.as_str());
+            crate::plugins::grants::revoke_for_agent(s, agent, grant, account).await?
+        }
         ("POST", ["agents", id, "merge"]) => {
             let mut args = input.body.clone();
             if !args.is_object() {
@@ -270,9 +287,18 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
         }
         ("POST", ["chats"]) => s.chat_create(input.body.clone()).await?,
         ("GET", ["chats", id]) => chat_detail(s, id).await?,
-        ("POST", ["chats", id, "messages"]) => s.chat_send(id, input.body.clone()).await?,
+        ("POST", ["chats", id, "messages"]) => {
+            s.chat_send_as(id, input.body.clone(), input.identity.as_ref())
+                .await?
+        }
         ("PUT", ["chats", id, "messages", message]) => {
-            s.chat_edit(id, message, Some(input.body.clone())).await?
+            s.chat_edit_as(
+                id,
+                message,
+                Some(input.body.clone()),
+                input.identity.as_ref(),
+            )
+            .await?
         }
         ("DELETE", ["chats", id, "messages", message]) => s.chat_edit(id, message, None).await?,
         ("POST", ["chats", id, "questions", question, "cancel"]) => {
@@ -284,7 +310,8 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
             .await?
         }
         ("POST", ["chats", id, "questions", question, "answer"]) => {
-            s.question_answer(id, question, input.body.clone()).await?
+            s.question_answer_as(id, question, input.body.clone(), input.identity.as_ref())
+                .await?
         }
         _ => return Ok(None),
     };

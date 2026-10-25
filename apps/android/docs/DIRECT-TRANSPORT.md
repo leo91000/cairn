@@ -51,6 +51,15 @@ other candidates continue negotiating. Authorization failures still stop the
 peer and retain the relay. The same-LAN device case refuses one host candidate
 per real connection and requires a successful direct response afterwards.
 
+Android applies its local offer before publishing it, like the web client. The
+answer may arrive over the event stream before the offer's HTTP acknowledgement;
+applying that answer while the native peer is still stable fails negotiation.
+Outgoing candidates stay queued until the offer is acknowledged. The same-LAN
+case delivers a real answer while holding that acknowledgement and requires an
+actual direct response, alongside the existing foreground capacity-backoff test.
+See the [WebRTC signaling state transitions](https://www.w3.org/TR/webrtc/#rtcjsepstate-enum).
+
+
 On a default-network change, Android immediately closes the current traffic
 adapter, resumes reads/subscriptions over the relay, then creates a new ICE peer
 and authorization. The delivered installation accepts an offer for a fresh peer,

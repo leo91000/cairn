@@ -36,6 +36,15 @@ is also available in Settings → Installation.
 Required fields participate in native form validation and focus the visible
 combobox when missing a selection.
 
+Plugin configuration fields can use `remote`, emitting `search(query)` and `next`
+instead of locally filtering a complete options list. The caller owns the bounded
+page and provides `pageStatus`, `nextPage` and an optional retained `selectedOption`.
+Remote counts describe the current page, never a workspace total; their ARIA set
+size stays unknown. The caller validates the host's lookup echo and retires stale
+scope/query responses. The combobox never fetches or retains credentials itself.
+Tab reaches Next page, including after an empty page; Shift+Tab returns to the
+combobox. Loading the next page restores input focus without closing the menu.
+
 Options are rendered in a virtual window with overscan. Described options are
 62 pixels tall, simple options 44, and group headings 30. Keep these dimensions
 aligned with `apps/web/src/styles/select.css`; descriptions are single-line and truncated

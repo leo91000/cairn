@@ -242,6 +242,10 @@ async fn receive_file(
         file.write_all(&bytes).await?;
         left -= bytes.len() as u64;
     }
+    // Creation applies the receiver's umask. Restore the sender's sanitized mode
+    // on the open file, as for directory modes, before confirming the transfer.
+    file.set_permissions(std::fs::Permissions::from_mode(mode))
+        .await?;
     file.sync_all().await?;
     Ok(())
 }

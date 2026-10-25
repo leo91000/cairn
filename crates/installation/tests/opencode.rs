@@ -394,6 +394,11 @@ async fn cancelling_during_native_startup_kills_the_waiting_process() {
     let mut input = plan(&root, "Never reaches the model");
     input["opencodeConfig"] = json!({ "fixtureStartupHang": true });
     let pid_file = lease.home.join("data/opencode/startup.pid");
+    // File creation can be observed before the fixture's PID write completes.
+    tokio::fs::create_dir_all(pid_file.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&pid_file, "").await.unwrap();
     let stop = CancellationToken::new();
     let cancellation = stop.clone();
     let (tx, _rx) = mpsc::channel(128);

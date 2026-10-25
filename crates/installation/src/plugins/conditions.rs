@@ -234,7 +234,12 @@ pub struct Observed {
     pub check_after: Option<i64>,
 }
 
-pub async fn observe(s: &Service, run: &Value, condition: &Value) -> Result<Observed> {
+pub async fn observe(
+    s: &Service,
+    run: &Value,
+    condition: &Value,
+    bearer: Option<&str>,
+) -> Result<Observed> {
     let caller = run.clone();
     let source = condition.clone();
     let project = s
@@ -269,9 +274,9 @@ pub async fn observe(s: &Service, run: &Value, condition: &Value) -> Result<Obse
             object.remove(key);
         }
     }
-    let scope = Scope::Agent {
-        agent_id: agent_id.clone(),
-        instances,
+    let scope = match bearer {
+        Some(bearer) => Scope::for_agent(s, run, instances, bearer).await?,
+        None => Scope::for_condition(s, run, condition, instances).await?,
     };
     let payload = json!({
         "condition": declared.name,
@@ -335,7 +340,7 @@ type Slot = Option<usize>;
 // Share each wait snapshot: cloning its full member list per watcher is quadratic.
 type Watch = (Arc<crate::waits::Owner>, Arc<Value>, Slot);
 
-fn condition_of(wakeup: &Value, slot: Slot) -> &Value {
+pub(super) fn condition_of(wakeup: &Value, slot: Option<usize>) -> &Value {
     match slot {
         Some(index) => &wakeup["condition"]["conditions"][index],
         None => &wakeup["condition"],
@@ -422,6 +427,7 @@ pub async fn poll_once(s: &Service) -> Result<()> {
                         "access": policy(&run["snapshot"]["agent"]),
                         "condition": condition,
                         "projectOrigin": granted_origin,
+                        "requester": super::requesters::observation_key_in(db, &run)?,
                     })
                     .to_string();
                     groups
@@ -452,7 +458,7 @@ pub async fn poll_once(s: &Service) -> Result<()> {
         .map(|group| async move {
             let (first, run, slot) = &group[0];
             let condition = condition_of(&first.record["wakeup"], *slot);
-            let observed = observe(s, run, condition).await;
+            let observed = observe(s, run, condition, None).await;
             s.store
                 .transaction(move |db| record(db, group, &observed))
                 .await
@@ -469,34 +475,53 @@ pub async fn poll_once(s: &Service) -> Result<()> {
 
 /// Whether the condition observed is still the one waited for, in the same state. Other
 /// conditions of its group may have progressed meanwhile.
-fn unchanged(current: &Value, expected: &Value, slot: Slot) -> bool {
+pub(super) fn unchanged(current: &Value, expected: &Value, slot: Option<usize>) -> bool {
     match slot {
         Some(index) => {
             current["id"] == expected["id"]
                 && current["condition"] == expected["condition"]
+                && current["observation"] == expected["observation"]
                 && current["members"][index] == expected["members"][index]
         }
         None => current == expected,
     }
 }
 
+/// Resolve the current member under the exact profile used for its probe.
+fn current_wait(
+    db: &Db<'_>,
+    expected: &crate::waits::Owner,
+    observed_run: &Value,
+    slot: Slot,
+) -> Result<Option<(crate::waits::Owner, Value)>> {
+    let Some(owner) = expected.reload(db)? else {
+        return Ok(None);
+    };
+    let Some(run) = db.run(owner.run_id())? else {
+        return Ok(None);
+    };
+    if run["id"] != observed_run["id"]
+        || run["snapshot"]["agent"] != observed_run["snapshot"]["agent"]
+        || !unchanged(&owner.record["wakeup"], &expected.record["wakeup"], slot)
+        || !watched(&owner, &run, now()).contains(&slot)
+    {
+        return Ok(None);
+    }
+    Ok(Some((owner, run)))
+}
+
 fn record(db: &Db<'_>, group: Vec<Watch>, observed: &Result<Observed>) -> Result<()> {
+    // A shared probe carries its representative's requester proof. Retry peers
+    // under a current representative if that member changed during provider I/O.
+    if let Some((expected, run, slot)) = group.first()
+        && current_wait(db, expected, run, *slot)?.is_none()
+    {
+        return Ok(());
+    }
     for (expected, observed_run, slot) in group {
-        let Some(mut owner) = expected.reload(db)? else {
+        let Some((mut owner, run)) = current_wait(db, &expected, &observed_run, slot)? else {
             continue;
         };
-        let Some(run) = db.run(owner.run_id())? else {
-            continue;
-        };
-        // A merge can transfer a sleeping run while its plugin check is in flight.
-        // Retry under the current profile rather than recording a stale denial.
-        if run["id"] != observed_run["id"]
-            || run["snapshot"]["agent"] != observed_run["snapshot"]["agent"]
-            || !unchanged(&owner.record["wakeup"], &expected.record["wakeup"], slot)
-            || !watched(&owner, &run, now()).contains(&slot)
-        {
-            continue;
-        }
         let condition = condition_of(&owner.record["wakeup"], slot).clone();
         let authorized = crate::waits::access(db, &run, &condition);
         let result = match (&authorized, observed) {

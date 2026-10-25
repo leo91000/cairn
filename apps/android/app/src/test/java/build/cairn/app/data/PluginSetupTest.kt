@@ -31,6 +31,13 @@ class PluginSetupTest {
         assertEquals(listOf("Sign in with Google"), resolved.steps.map { it.title })
         assertEquals(PluginSetup(), PluginEntry().resolvedSetup())
 
+        val entryWithResolvedSteps =
+            PluginEntry(
+                manifest = manifest(mail.getValue("manifest")),
+                setup = PluginSetup("app", "Create an app once.", steps = listOf(signIn)),
+            )
+        assertEquals(resolved, entryWithResolvedSteps.configuration().resolvedSetup())
+        assertEquals(PluginSetup(), PluginEntry().configuration().resolvedSetup())
         // The catalogue announces what connecting takes until the first instance exists.
         val entry =
             PluginEntry(

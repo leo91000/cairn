@@ -7,6 +7,14 @@ import org.junit.Test
 
 class TimelineTest {
     @Test
+    fun `native continuation receipts stay out of chat and run presentation`() {
+        val receipt = RunEvent(1, 1, "chat.wakeup.delivered", "")
+        for (chat in listOf(true, false)) {
+            assertTrue(timelineEntries(listOf(receipt), chat = chat).isEmpty())
+        }
+    }
+
+    @Test
     fun `reconnection scan does not serialize message payloads while preparing chat history`() {
         var payloadScans = 0
         fun observed(values: Map<String, JsonElement>): Map<String, JsonElement> =

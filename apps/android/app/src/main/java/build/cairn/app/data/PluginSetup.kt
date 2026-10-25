@@ -64,6 +64,8 @@ data class PluginSetup(
 /** The setup resolved by the installation; invalid packages have no setup. */
 fun PluginEntry.resolvedSetup(): PluginSetup = setup ?: PluginSetup()
 
+internal fun PluginConfigurationEntry.resolvedSetup(): PluginSetup = setup ?: PluginSetup()
+
 /** The catalogue's words for what connecting takes. */
 fun effortLabel(effort: String?): String? =
     when (effort) {

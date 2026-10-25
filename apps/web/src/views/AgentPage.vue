@@ -11,7 +11,7 @@ import type {
   SectionId,
   SelectionItem,
 } from '../agent-access'
-import type { Catalog } from '../plugins'
+import type { AgentPluginDirectory } from '../agent-plugin-directory'
 import {
   computed,
   nextTick,
@@ -48,6 +48,7 @@ import {
   skillKey,
   skillLabel,
 } from '../agent-access'
+import { agentPluginDirectory } from '../agent-plugin-directory'
 import {
   api,
   ApiError,
@@ -62,6 +63,7 @@ import AgentNodesSection from '../components/AgentNodesSection.vue'
 import AgentOverview from '../components/AgentOverview.vue'
 import AgentPluginsSection from '../components/AgentPluginsSection.vue'
 import AgentPortraitEditor from '../components/AgentPortraitEditor.vue'
+import AgentResourceAccess from '../components/AgentResourceAccess.vue'
 import AgentReview from '../components/AgentReview.vue'
 import AgentSelection from '../components/AgentSelection.vue'
 import AssistantPicker from '../components/AssistantPicker.vue'
@@ -120,7 +122,7 @@ const agent = ref<Agent | null>(null)
 const saved = ref<AgentDraft>(newAgentDraft())
 const draft = ref<AgentDraft>(newAgentDraft())
 const nodes = ref<ExecutionNode[]>([])
-const catalog = ref<Catalog>({ packages: [], capabilities: [], connections: [] })
+const catalog = ref<AgentPluginDirectory>({ packages: [], connections: [] })
 // Only a loaded catalogue says which grants exist: on failure, plugin access is shown read-only.
 const catalogError = ref('')
 // Never restrict from an empty list: when nodes cannot be loaded, node access is read-only.
@@ -203,15 +205,17 @@ const sandbox = computed(() => modes.value.find(option => option.value === acces
 // Only grants that take effect: the agent may run there and the runtime supports exclusive reservations.
 const exclusiveNodes = computed(() => effectiveExclusive(draft.value, nodes.value))
 const delegations = computed(() => isNew.value ? [] : catalog.value.connections.filter(connection => connection.agentId === id.value))
+const resourceCount = computed(() => isNew.value ? 0 : catalog.value.resourceGrantCounts?.[id.value] ?? 0)
+const resourceCountsKnown = computed(() => catalog.value.resourceGrantCounts !== undefined || !catalog.value.packages.some(entry => entry.operations))
 const pluginSummary = computed(() => {
   const counts = new Map<string, number>()
   for (const granted of draft.value.plugins) {
     const connection = catalog.value.connections.find(item => item.id === granted)
-    const name = catalog.value.packages.find(entry => entry.id === connection?.pluginId)?.manifest?.name ?? 'Plugin'
+    const name = catalog.value.packages.find(entry => entry.id === connection?.pluginId)?.name ?? 'Plugin'
     counts.set(name, (counts.get(name) ?? 0) + 1)
   }
 
-  return [...counts].map(([name, count]) => name === '1Password' ? `1Password: ${count} ${count === 1 ? 'account' : 'accounts'}` : count > 1 ? `${name} (${count})` : name).join(' · ')
+  return [[...counts].map(([name, count]) => name === '1Password' ? `1Password: ${count} ${count === 1 ? 'account' : 'accounts'}` : count > 1 ? `${name} (${count})` : name).join(' · '), resourceCountsKnown.value ? (resourceCount.value ? `${resourceCount.value} saved resource rule${resourceCount.value === 1 ? '' : 's'}` : '') : 'Resource access not loaded'].filter(Boolean).join(' · ')
 })
 const powers = computed(() => exclusiveNodes.value.length + Number(access.value.installation) + Number(access.value.delegation))
 const mcpCount = computed(() => access.value.mcps === null ? state.mcps.length : access.value.mcps.length)
@@ -228,7 +232,7 @@ const summaries = computed<Record<SectionId, { short: string, long: string }>>((
   mcps: !isMain.value && !state.workspaceLoaded ? { short: 'Unavailable', long: 'Not loaded' } : { short: isMain.value ? 'Fixed' : short(access.value.mcps, state.mcps.length), long: isMain.value ? 'All, including future' : `${selectionSummary(access.value.mcps, state.mcps.length)}${limitedMcps.value.length ? ` · tools limited on ${limitedMcps.value.length}` : ''}${disabledMcps.value.length ? ` · ${disabledMcps.value.length} disabled` : ''}` },
   plugins: catalogError.value
     ? { short: 'Unavailable', long: 'Not loaded' }
-    : { short: draft.value.plugins.length ? String(draft.value.plugins.length) : 'None', long: pluginSummary.value || 'None' },
+    : { short: draft.value.plugins.length || resourceCount.value ? String(draft.value.plugins.length + resourceCount.value) : resourceCountsKnown.value ? 'None' : 'Unknown', long: pluginSummary.value || 'None' },
   nodes: nodesError.value
     ? { short: 'Unavailable', long: 'Not loaded' }
     : { short: `${backend.value === 'native' ? 'Native · ' : ''}${short(access.value.nodes, availableNodes.value.length)}`, long: `${backend.value === 'native' ? 'Native process · ' : ''}${selectionSummary(access.value.nodes, availableNodes.value.length)}${exclusiveNodes.value.length ? ` · exclusive on ${exclusiveNodes.value.length}` : ''}` },
@@ -271,7 +275,7 @@ const overview = computed(() => [
         title: 'Secrets & plugins',
         summary: catalogError.value ? 'Not loaded' : pluginSummary.value || 'No access',
         detail: catalogError.value ? 'Plugins could not be loaded' : [names(draft.value.plugins, connectionName), ...delegations.value.map(item => `Answers on ${item.name} (delegation)`)].filter(Boolean).join(' · ') || 'No plugin access by default, including Main',
-        chip: catalogError.value ? { tone: 'unavailable' as const, label: 'Unavailable' } : draft.value.plugins.length ? { tone: 'granted' as const, label: 'Granted' } : { tone: 'none' as const, label: 'None' },
+        chip: catalogError.value ? { tone: 'unavailable' as const, label: 'Unavailable' } : draft.value.plugins.length || resourceCount.value ? { tone: 'granted' as const, label: 'Saved access' } : resourceCountsKnown.value ? { tone: 'none' as const, label: 'None' } : { tone: 'unavailable' as const, label: 'Unknown' },
       },
     ],
   },
@@ -396,7 +400,7 @@ async function retryWorkspace() {
 // An installation without plugins still edits every other permission.
 async function loadCatalog() {
   try {
-    const loadedCatalog = await api<Catalog>('/plugins')
+    const loadedCatalog = await agentPluginDirectory(new AbortController().signal)
     catalogError.value = ''
     return loadedCatalog
   }
@@ -1076,6 +1080,13 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               :packages="catalog.packages"
               :connections="catalog.connections"
               :suspended="suspended"
+            />
+            <AgentResourceAccess
+              v-if="!isNew && !catalogError && catalog.resourceGrantCounts !== undefined"
+              :key="id"
+              :agent-id="id"
+              :catalog="catalog"
+              @changed="retryCatalog"
             />
             <p v-if="!catalogError && !grantablePackages(catalog.packages).length && !catalog.packages.length" class="text-xs text-muted">
               Plugins add secrets and tools that you grant per agent.

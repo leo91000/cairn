@@ -441,38 +441,6 @@
     }
   },
   {
-    "name": "merge_agents",
-    "description": "Merge an idle Firecracker agent into an existing profile, transferring all tasks (including archived), chats (including trash) and run identities atomically. Existing runs retain their engine, model and settings; future task runs use destination defaults. Destination access and live grants must already cover the source. Main can only be the destination. Rejects active/recovering work, native agents and plugin delegations. Does not change destination permissions or credentials. Requires explicit confirmation.",
-    "scope": "manage",
-    "destructive": true,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "sourceId": {
-          "type": "string",
-          "format": "uuid",
-          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-        },
-        "targetId": {
-          "type": "string",
-          "format": "uuid",
-          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-        },
-        "confirm": {
-          "type": "boolean",
-          "const": true
-        }
-      },
-      "required": [
-        "sourceId",
-        "targetId",
-        "confirm"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
     "name": "list_mcps",
     "description": "List MCP connections, discovered tools, authentication state and saved credential indicators. Secret values are never returned.",
     "scope": "read",
@@ -2220,6 +2188,151 @@
     }
   },
   {
+    "name": "list_plugin_packages",
+    "description": "List bounded plugin package cards and saved access summaries. Follow nextCursor for every page. These summaries confer no execution access.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[A-Za-z0-9+-][A-Za-z0-9.+-]*$"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_plugin_package",
+    "description": "Read one chosen plugin manifest for its resource collections, operations and permission profiles. Does not return instance settings, secrets or source files.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "pluginId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[A-Za-z0-9+-][A-Za-z0-9.+-]*$"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pluginId"
+      ]
+    }
+  },
+  {
+    "name": "list_plugin_instance_access",
+    "description": "List bounded saved instance metadata, delegated agents, root and resource memberships and diagnostic state. Includes unavailable packages; saved rules are not current execution authority.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_plugin_agent_grant_counts",
+    "description": "List complete saved resource-rule totals per agent, including held rules whose resource or instance was removed. Follow nextCursor; a count is not effective permission.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_plugin_resource_choices",
+    "description": "List resource IDs, names and parent metadata of one chosen collection without settings or secret field names. Disabled resources remain visible as saved choices. Follow nextCursor.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "pluginId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[A-Za-z0-9+-][A-Za-z0-9.+-]*$"
+        },
+        "instanceId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "collection": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "^[a-z0-9][a-z0-9_-]*$"
+        },
+        "cursor": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pluginId",
+        "instanceId",
+        "collection"
+      ]
+    }
+  },
+  {
+    "name": "merge_agents",
+    "description": "Merge an idle Firecracker agent into an existing profile, transferring all tasks (including archived), chats (including trash) and run identities atomically. Existing runs retain their engine, model and settings; future task runs use destination defaults. Destination access and live grants must already cover the source. Main can only be the destination. Rejects active/recovering work, native agents and plugin delegations. Does not change destination permissions or credentials. Requires explicit confirmation.",
+    "scope": "manage",
+    "destructive": true,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "sourceId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "targetId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "confirm": {
+          "type": "boolean",
+          "const": true
+        }
+      },
+      "required": [
+        "sourceId",
+        "targetId",
+        "confirm"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "list_nodes",
     "description": "List execution nodes, their immutable backends, budgets, trusted people, agent grants and storage status. Read this before configuring or replacing a node.",
     "scope": "read",
@@ -2622,6 +2735,126 @@
         "action"
       ],
       "additionalProperties": false
+    }
+  },
+  {
+    "name": "manage_plugin_setup",
+    "description": "Prepare an inert plugin setup before activation. list/get return bounded redacted drafts; save creates or replaces complete name/settings/secrets with a saved revision when editing; form evaluates saved draft settings; delete and activate require data.revision. signin starts root OAuth using the saved revision, signin_status/signin_cancel use flowId; consent takes place in the owner browser and save consumes data.credentialFlow. Agent grants cannot be edited here. Installation access never grants a draft's saved private credentials: those configuration actions require the owner through public MCP or the owner plugin page.",
+    "scope": "manage",
+    "destructive": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "pluginId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "list",
+            "get",
+            "save",
+            "delete",
+            "form",
+            "activate",
+            "signin",
+            "signin_status",
+            "signin_cancel"
+          ]
+        },
+        "draftId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "flowId": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "cursor": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "pluginId",
+        "action"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "manage_plugin_resource",
+    "description": "List, read, create, replace or delete plugin resources using the owner UI validation. resourceId selects a saved resource; save takes complete name/settings/secrets?/enabled?/parentId? and revision when editing. list is bounded with cursor. Deletion removes child resources and dependent grants, routes and OAuth. Installation management supplies no private credentials or agent grants; reusing saved credentials requires the separate instance grant. Choose exactly one live instanceId or inert draftId. Draft writes also require data.setupRevision, and draft deletion requires the resource revision. Draft resources never acquire live authority; saved private draft credentials remain owner-only. form evaluates settings/parentId and optional changed or remote lookup, with resourceId selecting an existing resource; it returns bounded redacted options, derived values, errors and guidance. Use resourceId rather than data.resource.",
+    "scope": "manage",
+    "destructive": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "pluginId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "instanceId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "collection": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "list",
+            "get",
+            "save",
+            "delete",
+            "form"
+          ]
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "resourceId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "cursor": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "draftId": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "pluginId",
+        "collection",
+        "action"
+      ],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "instanceId"
+          ]
+        },
+        {
+          "required": [
+            "draftId"
+          ]
+        }
+      ]
     }
   }
 ]

@@ -45,6 +45,7 @@ export function signInProblem(flow: Pick<DeviceFlow, 'state' | 'message'> | null
 export function useDeviceSignIn(plugin: () => string, onCompleted: (flow: DeviceFlow) => void, interval = 2000, options?: {
   kind: () => 'oauth' | 'device-flow'
   input: () => Record<string, unknown>
+  startPath?: () => string
 }) {
   const flow = ref<DeviceFlow | null>(null)
   const starting = ref(false)
@@ -101,15 +102,18 @@ export function useDeviceSignIn(plugin: () => string, onCompleted: (flow: Device
   }
 
   async function start() {
-    await cancel()
-    starting.value = true
-    error.value = ''
+    const cancellation = cancel()
     const attempt = generation
+    starting.value = true
+    await cancellation
+    if (generation !== attempt)
+      return
+    error.value = ''
     const kind = options?.kind() || 'device-flow'
     const requestedPlugin = plugin()
     flowKind = kind
     try {
-      const next = await api<DeviceFlow>(`/plugins/${requestedPlugin}/${kind}`, {
+      const next = await api<DeviceFlow>(options?.startPath?.() ?? `/plugins/${requestedPlugin}/${kind}`, {
         method: 'POST',
         ...(options ? { body: JSON.stringify(options.input()) } : {}),
       })

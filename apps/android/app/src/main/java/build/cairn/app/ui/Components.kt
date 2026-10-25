@@ -67,13 +67,14 @@ fun duration(run: Run): String =
     } ?: "—"
 
 @Composable
-inline fun <reified T : Any> rememberForm(initial: T): MutableState<T> =
+inline fun <reified T> rememberForm(initial: T, vararg inputs: Any?): MutableState<T> =
     rememberSaveable(
+        *inputs,
         stateSaver =
             Saver(
                 save = { wireJson.encodeToString(it) },
                 restore = { wireJson.decodeFromString<T>(it) },
-            )
+            ),
     ) {
         mutableStateOf(initial)
     }
@@ -328,6 +329,7 @@ fun Editor(
     close: () -> Unit,
     save: () -> Unit,
     valid: Boolean = true,
+    dismissible: Boolean = !busy,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val scroll = rememberScrollState()
@@ -339,7 +341,7 @@ fun Editor(
         if (error != null) scroll.animateScrollTo(0)
     }
     Dialog(
-        onDismissRequest = { if (!busy) close() },
+        onDismissRequest = { if (dismissible) close() },
         properties =
             DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
@@ -350,7 +352,7 @@ fun Editor(
                     TopAppBar(
                         title = { Text(title) },
                         navigationIcon = {
-                            IconButton(onClick = close, enabled = !busy) {
+                            IconButton(onClick = close, enabled = dismissible) {
                                 Icon(Icons.AutoMirrored.Filled.ArrowBack, "Fermer")
                             }
                         },

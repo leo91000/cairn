@@ -12,6 +12,9 @@ use crate::{
 };
 use cairn_plugin_api::{validate_action_result, validate_view};
 use serde_json::{Value, json};
+use std::sync::Arc;
+
+use super::operations::Owner;
 
 fn action_name(name: &str) -> bool {
     !name.is_empty()
@@ -28,7 +31,8 @@ fn fits(value: &Value, max: usize) -> bool {
 
 /// `{ view }`: the instance's panel, or `null` when the package declares none.
 pub async fn view(s: &Service, plugin_id: &str, connection_id: &str) -> Result<Value> {
-    view_managed(s, plugin_id, connection_id, None).await
+    let owner = Arc::new(Owner::current(s).await?);
+    view_owned(s, plugin_id, connection_id, owner).await
 }
 
 pub(crate) async fn view_managed(
@@ -37,12 +41,32 @@ pub(crate) async fn view_managed(
     connection_id: &str,
     management: Option<super::management::Authority>,
 ) -> Result<Value> {
+    let owner = Arc::new(Owner::current(s).await?);
+    view_authorized(s, plugin_id, connection_id, owner, management).await
+}
+
+pub(crate) async fn view_owned(
+    s: &Service,
+    plugin_id: &str,
+    connection_id: &str,
+    owner: Arc<Owner>,
+) -> Result<Value> {
+    view_authorized(s, plugin_id, connection_id, owner, None).await
+}
+
+async fn view_authorized(
+    s: &Service,
+    plugin_id: &str,
+    connection_id: &str,
+    owner: Arc<Owner>,
+    management: Option<super::management::Authority>,
+) -> Result<Value> {
     let connection = connections::get(s, plugin_id, connection_id).await?;
     let package = registry::active(s, plugin_id).await?;
     if !package.manifest.instance_view {
         return Ok(json!({ "view": null }));
     }
-    let scope = Scope::Instance(Box::new(connection));
+    let scope = Scope::Instance(Box::new(connection), owner);
     let scope = match management {
         Some(authority) => Scope::Managed(Box::new(scope), authority),
         None => scope,
@@ -61,7 +85,8 @@ pub async fn action(
     connection_id: &str,
     input: &Value,
 ) -> Result<Value> {
-    action_managed(s, plugin_id, connection_id, input, None).await
+    let owner = Arc::new(Owner::current(s).await?);
+    action_owned(s, plugin_id, connection_id, input, owner).await
 }
 
 pub(crate) async fn action_managed(
@@ -69,6 +94,28 @@ pub(crate) async fn action_managed(
     plugin_id: &str,
     connection_id: &str,
     input: &Value,
+    management: Option<super::management::Authority>,
+) -> Result<Value> {
+    let owner = Arc::new(Owner::current(s).await?);
+    action_authorized(s, plugin_id, connection_id, input, owner, management).await
+}
+
+pub(crate) async fn action_owned(
+    s: &Service,
+    plugin_id: &str,
+    connection_id: &str,
+    input: &Value,
+    owner: Arc<Owner>,
+) -> Result<Value> {
+    action_authorized(s, plugin_id, connection_id, input, owner, None).await
+}
+
+async fn action_authorized(
+    s: &Service,
+    plugin_id: &str,
+    connection_id: &str,
+    input: &Value,
+    owner: Arc<Owner>,
     management: Option<super::management::Authority>,
 ) -> Result<Value> {
     let connection = connections::get(s, plugin_id, connection_id).await?;
@@ -82,7 +129,7 @@ pub(crate) async fn action_managed(
     if !fits(&payload, 4096) || !values.is_object() || !fits(&values, 16_384) {
         return Err(Error::bad("The action input is too large or invalid."));
     }
-    let scope = Scope::Instance(Box::new(connection));
+    let scope = Scope::Instance(Box::new(connection), owner);
     let scope = match management {
         Some(authority) => Scope::Managed(Box::new(scope), authority),
         None => scope,
@@ -100,7 +147,8 @@ pub(crate) async fn action_managed(
 
 /// `{ ok, message }` from the package's `test` handler.
 pub async fn test(s: &Service, plugin_id: &str, connection_id: &str) -> Result<Value> {
-    test_managed(s, plugin_id, connection_id, None).await
+    let owner = Arc::new(Owner::current(s).await?);
+    test_owned(s, plugin_id, connection_id, owner).await
 }
 
 pub(crate) async fn test_managed(
@@ -109,12 +157,32 @@ pub(crate) async fn test_managed(
     connection_id: &str,
     management: Option<super::management::Authority>,
 ) -> Result<Value> {
+    let owner = Arc::new(Owner::current(s).await?);
+    test_authorized(s, plugin_id, connection_id, owner, management).await
+}
+
+pub(crate) async fn test_owned(
+    s: &Service,
+    plugin_id: &str,
+    connection_id: &str,
+    owner: Arc<Owner>,
+) -> Result<Value> {
+    test_authorized(s, plugin_id, connection_id, owner, None).await
+}
+
+async fn test_authorized(
+    s: &Service,
+    plugin_id: &str,
+    connection_id: &str,
+    owner: Arc<Owner>,
+    management: Option<super::management::Authority>,
+) -> Result<Value> {
     let connection = connections::get(s, plugin_id, connection_id).await?;
     let package = registry::active(s, plugin_id).await?;
     if !package.manifest.instance_test {
         return Err(Error::not_found("This plugin has no connection test."));
     }
-    let scope = Scope::Instance(Box::new(connection));
+    let scope = Scope::Instance(Box::new(connection), owner);
     let scope = match management {
         Some(authority) => Scope::Managed(Box::new(scope), authority),
         None => scope,

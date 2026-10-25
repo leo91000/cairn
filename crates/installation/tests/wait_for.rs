@@ -35,6 +35,13 @@ impl Fixture {
     }
 
     async fn with_origin(origin: &str) -> Self {
+        Self::with_identity(origin, None).await
+    }
+
+    async fn with_identity(
+        origin: &str,
+        identity: Option<cairn_installation::auth::InstallationIdentity>,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         common::managed_codex_home(&root.path().join("home"));
         let github = Github::start(root.path()).await;
@@ -73,9 +80,10 @@ impl Fixture {
         let chat = s.chat_create(json!({})).await.unwrap();
         let chat = text(&chat, "id").to_owned();
         let message = id();
-        s.chat_send(
+        s.chat_send_as(
             &chat,
             json!({ "id": message, "text": "Finish after the result" }),
+            identity.as_ref(),
         )
         .await
         .unwrap();
@@ -1214,8 +1222,303 @@ async fn measure_wait_metadata() {
 }
 
 #[tokio::test]
+async fn dormant_plugin_probes_keep_the_requesters_membership_generation() {
+    dormant_probe_identity(false).await;
+}
+
+#[tokio::test]
+async fn grouped_plugin_probes_keep_the_requesters_membership_generation() {
+    dormant_probe_identity(true).await;
+}
+
+async fn dormant_probe_identity(grouped: bool) {
+    use cairn_installation::auth::{InstallationIdentity, InstallationRole};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    for during_request in [false, true] {
+        let f = Fixture::with_identity(
+            "https://github.com/fixture/repo.git",
+            Some(InstallationIdentity::trusted(
+                InstallationRole::Owner,
+                "fixture-owner",
+            )),
+        )
+        .await;
+        if grouped {
+            let target = f.target().await;
+            wait_for::schedule(&f.s, &f.token, &json!({
+                "conditions": [f.github_condition(), { "type": "run_finished", "runId": target["id"] }],
+                "mode": "all", "reason": "Wait under the original author", "timeoutSeconds": 420,
+            })).await.unwrap();
+        } else {
+            f.schedule(f.github_condition()).await;
+        }
+        f.finish().await;
+        let revoked = Arc::new(AtomicBool::new(false));
+        let state = revoked.clone();
+        let authority = axum::Router::new().route(
+            "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+            axum::routing::get(move || {
+                let state = state.clone();
+                async move {
+                    axum::Json(cairn_protocol::TaskAuthorPolicy {
+                        owner: cairn_protocol::TaskAuthorGrant {
+                            account_id: "fixture-owner".into(),
+                            access_id: if state.load(Ordering::SeqCst) {
+                                "replacement-grant"
+                            } else {
+                                "fixture-owner"
+                            }
+                            .into(),
+                        },
+                        members: Vec::new(),
+                    })
+                }
+            }),
+        );
+        let (origin, authority) = common::serve_locally(authority).await;
+        let path = f.s.config.data_dir.join("installation-relay/identity.json");
+        let mut identity: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        identity["origin"] = origin.into();
+        std::fs::write(path, serde_json::to_vec(&identity).unwrap()).unwrap();
+        f.github.state(&json!({
+            "waitForRelease": during_request,
+            "response": { "id": 42, "head_sha": SHA, "status": "completed", "conclusion": "success", "run_attempt": 1 },
+        }));
+        if during_request {
+            let service = f.s.clone();
+            let observer = tokio::spawn(async move { conditions::poll_once(&service).await });
+            common::eventually(
+                Duration::from_secs(3),
+                Duration::from_millis(10),
+                || async { (f.calls().len() == 2).then_some(()) },
+            )
+            .await;
+            revoked.store(true, Ordering::SeqCst);
+            std::fs::write(f.root.path().join("github-release"), "").unwrap();
+            observer.await.unwrap().unwrap();
+        } else {
+            revoked.store(true, Ordering::SeqCst);
+            conditions::poll_once(&f.s).await.unwrap();
+        }
+        if during_request {
+            // An unhandled capability refusal is a failed worker invocation.
+            // It must deliver no provider result; the next poll then observes
+            // the revoked source before making another provider request.
+            let pending = f.s.get("chats", &f.chat).await.unwrap();
+            assert!(pending["wakeup"]["observation"].is_null());
+            if grouped {
+                let mut chat = f.s.get("chats", &f.chat).await.unwrap();
+                chat["wakeup"]["members"][0]["nextCheckAt"] = 0.into();
+                f.s.store.put("chats", chat).await.unwrap();
+            } else {
+                f.next_poll().await;
+            }
+            conditions::poll_once(&f.s).await.unwrap();
+        }
+        let chat = f.s.get("chats", &f.chat).await.unwrap();
+        let progress = if grouped {
+            assert!(chat["wakeup"]["observation"].is_null());
+            &chat["wakeup"]["members"][0]
+        } else {
+            &chat["wakeup"]
+        };
+        assert_eq!(progress["observation"]["state"], "unavailable");
+        assert_eq!(f.calls().len(), if during_request { 2 } else { 1 });
+        authority.abort();
+    }
+}
+
+#[tokio::test]
+async fn cancelling_the_shared_probe_representative_keeps_other_waits_pending() {
+    shared_probe_representative(false).await;
+}
+
+#[tokio::test]
+async fn cancelling_a_grouped_probe_representative_keeps_other_waits_pending() {
+    shared_probe_representative(true).await;
+}
+
+async fn shared_probe_representative(grouped: bool) {
+    use cairn_installation::{
+        auth::{InstallationIdentity, InstallationRole},
+        plugins::registry,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let identity = InstallationIdentity::trusted(InstallationRole::Owner, "fixture-owner");
+    let f = Fixture::with_identity(
+        "https://github.com/fixture/repo.git",
+        Some(identity.clone()),
+    )
+    .await;
+    let package = registry::install(&f.s, &json!({
+        "manifest": {
+            "id": "probe-fixture", "name": "Probe fixture", "version": "1", "apiVersion": 2,
+            "capabilities": ["storage"],
+            "settings": [{"key":"ready", "title":"Ready", "type":"boolean", "default":false}],
+            "agentAccess": {"description":"Read a synthetic condition."},
+            "conditions": [{"name":"ready", "description":"Wait for a synthetic result.", "inputSchema":{"type":"object","properties":{},"additionalProperties":false}}],
+        },
+        "source": "return {condition = function(event) if not event.instances[1].settings.ready then return {state = 'waiting'} end; cairn.storage.set('result-ready', true); return {state = 'completed'} end}",
+    })).await.unwrap();
+    registry::approve(&f.s, "probe-fixture", "1", text(&package, "digest"))
+        .await
+        .unwrap();
+    let instance = connections::save(
+        &f.s,
+        "probe-fixture",
+        &json!({
+            "name":"Probe", "enabled":true, "agentIds":[MAIN_AGENT_ID], "settings":{"ready":false},
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    let condition = json!({"type":"probe-fixture_ready"});
+    let mut request = json!({
+        "conditions": [condition], "reason": "Independent wait", "timeoutSeconds": 420,
+    });
+    if grouped {
+        let target = f.target().await;
+        request["conditions"].as_array_mut().unwrap().push(json!({
+            "type": "run_finished", "runId": target["id"],
+        }));
+        request["mode"] = "any".into();
+    }
+    let scheduled = wait_for::schedule(&f.s, &f.token, &request).await.unwrap();
+    assert_eq!(scheduled["deferred"], true);
+    f.finish().await;
+    let second = f.s.chat_create(json!({})).await.unwrap();
+    let second_chat = text(&second, "id").to_owned();
+    let message = id();
+    f.s.chat_send_as(
+        &second_chat,
+        json!({"id":message,"text":"Independently wait for the same result"}),
+        Some(&identity),
+    )
+    .await
+    .unwrap();
+    f.s.chat_tick(&HashSet::from([f.run.clone()]))
+        .await
+        .unwrap();
+    let run = f.s.chat_detail(&second_chat).await.unwrap()["run"].clone();
+    let run =
+        f.s.store
+            .patch_run(text(&run, "id"), json!({"status":"running"}))
+            .await
+            .unwrap();
+    f.s.chat_acknowledge(text(&run, "id"), &message)
+        .await
+        .unwrap();
+    let config = f.s.mcps.run_configuration(&f.s, &run).await.unwrap();
+    wait_for::schedule(&f.s, text(&config["env"], "CAIRN_MCP_RUN_TOKEN"), &request)
+        .await
+        .unwrap();
+    f.s.store
+        .patch_run(text(&run, "id"), json!({"status":"succeeded"}))
+        .await
+        .unwrap();
+    connections::save(
+        &f.s,
+        "probe-fixture",
+        &json!({
+            "name":"Probe", "enabled":true, "settings":{"ready":true},
+        }),
+        Some(text(&instance, "id")),
+    )
+    .await
+    .unwrap();
+    // The stable durable catalog order determines the representative of the
+    // identical conditions. Cancelling it must not cancel its independent peer.
+    let representative =
+        f.s.store
+            .list("chats")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|chat| chat["id"] == f.chat || chat["id"] == second_chat)
+            .unwrap();
+    let representative_id = text(&representative, "id").to_owned();
+    let other = if representative_id == f.chat {
+        second_chat
+    } else {
+        f.chat.clone()
+    };
+    let held = Arc::new(AtomicBool::new(false));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let released = Arc::new(tokio::sync::Notify::new());
+    let (service, holding, entering, releasing) =
+        (f.s.clone(), held.clone(), entered.clone(), released.clone());
+    let authority = axum::Router::new().route(
+        "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+        axum::routing::get(move || {
+            let (service, held, entered, released) = (
+                service.clone(),
+                holding.clone(),
+                entering.clone(),
+                releasing.clone(),
+            );
+            async move {
+                let marker = service
+                    .store
+                    .list("plugin-storage")
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|record| record["key"] == "result-ready");
+                if marker && !held.swap(true, Ordering::SeqCst) {
+                    // storage.set has completed. The next lookup belongs to the
+                    // invocation's final recheck, outside worker-error mapping.
+                    entered.notify_one();
+                    released.notified().await;
+                }
+                axum::Json(cairn_protocol::TaskAuthorPolicy {
+                    owner: cairn_protocol::TaskAuthorGrant {
+                        account_id: "fixture-owner".into(),
+                        access_id: "fixture-owner".into(),
+                    },
+                    members: Vec::new(),
+                })
+            }
+        }),
+    );
+    let (origin, authority) = common::serve_locally(authority).await;
+    let path = f.s.config.data_dir.join("installation-relay/identity.json");
+    let mut identity: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    identity["origin"] = origin.into();
+    std::fs::write(path, serde_json::to_vec(&identity).unwrap()).unwrap();
+    let service = f.s.clone();
+    let observer = tokio::spawn(async move { conditions::poll_once(&service).await });
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    f.s.chat_pause(&representative_id, true).await.unwrap();
+    released.notify_one();
+    observer.await.unwrap().unwrap();
+    let pending = f.s.get("chats", &other).await.unwrap();
+    assert!(
+        pending["wakeup"]["observation"].is_null(),
+        "Another wait was permanently resolved: {}",
+        pending["wakeup"]
+    );
+    conditions::poll_once(&f.s).await.unwrap();
+    let resolved = f.s.get("chats", &other).await.unwrap();
+    assert_eq!(
+        resolved["wakeup"]["observation"]["state"], "completed",
+        "Remaining wait: {}",
+        resolved["wakeup"]
+    );
+    assert_eq!(
+        f.s.get("chats", &representative_id).await.unwrap()["paused"],
+        true
+    );
+    authority.abort();
+}
+
+#[tokio::test]
 async fn mission_plugin_wait_survives_restart_and_resumes_on_the_pinned_result() {
     let f = Fixture::mission().await;
+    let chats_before = f.s.store.list("chats").await.unwrap().len();
     let wait = f.schedule(f.github_condition()).await;
     assert_eq!(wait, f.schedule(f.github_condition()).await);
     f.park_mission().await;
@@ -1230,6 +1533,15 @@ async fn mission_plugin_wait_survives_restart_and_resumes_on_the_pinned_result()
     cairn_installation::plugins::conditions::poll_once(&restarted)
         .await
         .unwrap();
+    assert_eq!(
+        f.calls().len(),
+        2,
+        "The dormant mission must query its provider"
+    );
+    assert_eq!(
+        restarted.store.list("chats").await.unwrap().len(),
+        chats_before
+    );
     restarted.worker.tick(&restarted).await.unwrap();
     let resumed = restarted.store.run(&f.run).await.unwrap();
     assert_eq!(resumed["status"], "queued");
@@ -1264,6 +1576,40 @@ async fn mission_plugin_wait_survives_restart_and_resumes_on_the_pinned_result()
         .await
         .is_err()
     );
+}
+
+#[tokio::test]
+async fn mission_condition_observation_cannot_cross_a_replaced_turn() {
+    let f = Fixture::mission().await;
+    let wait = f.schedule(f.github_condition()).await;
+    f.park_mission().await;
+    f.github_state("completed", Some("success"), 0);
+    let path = f.root.path().join("github-state.json");
+    let mut state: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    state["waitForRelease"] = true.into();
+    std::fs::write(path, state.to_string()).unwrap();
+    let s = f.s.clone();
+    let observer = tokio::spawn(async move { conditions::poll_once(&s).await });
+    common::eventually(
+        Duration::from_secs(3),
+        Duration::from_millis(10),
+        || async { (f.calls().len() == 2).then_some(()) },
+    )
+    .await;
+
+    // Keep the wakeup to isolate the issuing-turn fence from normal cancellation.
+    let next_turn = id();
+    f.s.store
+        .patch_run(&f.run, json!({ "missionTurnId": next_turn }))
+        .await
+        .unwrap();
+    std::fs::write(f.root.path().join("github-release"), "").unwrap();
+    observer.await.unwrap().unwrap();
+    let pending = f.s.store.run(&f.run).await.unwrap();
+    assert_eq!(pending["status"], "waiting");
+    assert_eq!(pending["missionTurnId"], next_turn);
+    assert_eq!(pending["wakeup"], wait["wakeup"]);
+    assert!(pending["wakeup"]["observation"].is_null());
 }
 
 #[tokio::test]

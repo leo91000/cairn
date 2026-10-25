@@ -4,6 +4,7 @@ import android.os.SystemClock
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -15,7 +16,8 @@ suspend fun CairnApi.pluginOperation(
     method: String = "POST",
 ): JsonElement {
     val result = wireJson.parseToJsonElement(request(method, path, body))
-    val id = result.jsonObject["operation"]?.jsonPrimitive?.contentOrNull ?: return result
+    val id =
+        (result as? JsonObject)?.get("operation")?.jsonPrimitive?.contentOrNull ?: return result
     val deadline = SystemClock.elapsedRealtime() + 10 * 60 * 1000
     while (SystemClock.elapsedRealtime() < deadline) {
         val operation =

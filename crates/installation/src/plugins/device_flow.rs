@@ -10,7 +10,11 @@ use crate::{
     validation::text,
 };
 use serde_json::{Value, json};
-use std::{collections::HashMap, sync::Mutex, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 /// At most this many sign-ins wait at once, across packages.
 const MAX_FLOWS: usize = 8;
@@ -20,6 +24,8 @@ const RETAIN_MS: i64 = 10 * 60 * 1000;
 #[derive(Clone)]
 struct Flow {
     plugin: String,
+    owner: Arc<super::operations::Owner>,
+    approved: Arc<registry::ApprovedPackage>,
     state: &'static str,
     user_code: String,
     verification_uri: String,
@@ -31,6 +37,11 @@ struct Flow {
 }
 
 impl Flow {
+    async fn recheck(&self, s: &Service) -> Result<()> {
+        self.owner.recheck(s).await?;
+        self.approved.recheck(s).await
+    }
+
     fn public(&self, id: &str) -> Value {
         json!({
             "id": id,
@@ -71,16 +82,23 @@ impl Flows {
         }
     }
 
-    /// The token of a completed sign-in for `plugin`. `take` forgets it.
-    pub fn token(&self, plugin: &str, id: &str, take: bool) -> Result<String> {
-        let mut flows = self.flows.lock().unwrap();
-        Self::prune(&mut flows);
+    /// The token of a completed sign-in for the same owner and approved package.
+    /// Clone outside the mutex so remote authority checks never hold it.
+    pub async fn token(&self, s: &Service, plugin: &str, id: &str, take: bool) -> Result<String> {
         let expired = || Error::bad("The sign-in expired. Sign in again.");
-        let flow = flows.get(id).ok_or_else(expired)?;
-        if flow.plugin != plugin || flow.state != "completed" {
-            return Err(expired());
-        }
-        let token = flow.token.clone().ok_or_else(expired)?;
+        let flow = {
+            let mut flows = self.flows.lock().unwrap();
+            Self::prune(&mut flows);
+            flows
+                .get(id)
+                .filter(|flow| flow.plugin == plugin && flow.state == "completed")
+                .cloned()
+                .ok_or_else(expired)?
+        };
+        flow.recheck(s).await?;
+        let mut flows = self.flows.lock().unwrap();
+        let current = flows.get(id).ok_or_else(expired)?;
+        let token = current.token.clone().ok_or_else(expired)?;
         if take {
             flows.remove(id);
         }
@@ -141,7 +159,9 @@ fn web_address(value: Option<String>) -> Option<String> {
 
 /// `POST /api/plugins/{id}/device-flow`: a user code to enter on the service's page.
 pub async fn start(s: &std::sync::Arc<Service>, plugin_id: &str) -> Result<Value> {
-    let package = registry::active(s, plugin_id).await?;
+    let owner = Arc::new(super::operations::Owner::current(s).await?);
+    let approved = Arc::new(registry::approved(s, plugin_id).await?);
+    let package = &approved.package;
     let flow = package
         .manifest
         .credential
@@ -187,8 +207,12 @@ pub async fn start(s: &std::sync::Arc<Service>, plugin_id: &str) -> Result<Value
         .clamp(60, 1800);
     let interval = response["interval"].as_u64().unwrap_or(5).clamp(1, 60);
     let flow_id = id();
+    owner.recheck(s).await?;
+    approved.recheck(s).await?;
     let record = Flow {
         plugin: plugin_id.to_owned(),
+        owner,
+        approved: approved.clone(),
         state: "pending",
         user_code,
         verification_uri,
@@ -252,21 +276,34 @@ async fn poll(
             () = s.shutdown.cancelled() => return,
             () = tokio::time::sleep(Duration::from_secs(interval)) => {},
         }
-        let expired = {
+        let current = {
             let flows = flows.flows.lock().unwrap();
             match flows.get(flow_id) {
-                Some(flow) if flow.state == "pending" => flow.expires_at <= now(),
+                Some(flow) if flow.state == "pending" => flow.clone(),
                 _ => return,
             }
         };
-        if expired {
+        if current.expires_at <= now() {
             flows.update(flow_id, |flow| flow.state = "expired");
+            return;
+        }
+        let authorized = current.recheck(s).await;
+        if let Err(error) = authorized {
+            if super::requesters::ExecutionSource::is_unavailable(&error) {
+                continue;
+            }
+            flows.flows.lock().unwrap().remove(flow_id);
             return;
         }
         // Network failures retry until the code expires.
         let Ok(response) = post(s, token_url, body.clone()).await else {
             continue;
         };
+        if current.recheck(s).await.is_err() {
+            // A consumed provider code is never replayed under a replacement owner.
+            flows.flows.lock().unwrap().remove(flow_id);
+            return;
+        }
         if let Some(token) = short_text(&response, "access_token", 4096)
             .filter(|token| !token.chars().any(char::is_whitespace))
         {
@@ -302,13 +339,17 @@ async fn poll(
 }
 
 /// `GET /api/plugins/{id}/device-flow/{flow}`.
-pub fn status(s: &Service, plugin_id: &str, flow_id: &str) -> Result<Value> {
-    let mut flows = s.plugins.device_flows.flows.lock().unwrap();
-    Flows::prune(&mut flows);
-    let flow = flows
-        .get(flow_id)
-        .filter(|flow| flow.plugin == plugin_id)
-        .ok_or_else(|| Error::not_found("This sign-in expired. Sign in again."))?;
+pub async fn status(s: &Service, plugin_id: &str, flow_id: &str) -> Result<Value> {
+    let flow = {
+        let mut flows = s.plugins.device_flows.flows.lock().unwrap();
+        Flows::prune(&mut flows);
+        flows
+            .get(flow_id)
+            .filter(|flow| flow.plugin == plugin_id)
+            .cloned()
+            .ok_or_else(|| Error::not_found("This sign-in expired. Sign in again."))?
+    };
+    flow.recheck(s).await?;
     Ok(flow.public(flow_id))
 }
 

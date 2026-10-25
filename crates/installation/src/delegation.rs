@@ -115,6 +115,7 @@ pub fn tools() -> Vec<Value> {
 /// delegate further, so every task reports to a conversation a person directs.
 pub(crate) fn requester(db: &Db<'_>, bearer: &str) -> Result<(Value, Value)> {
     let run = crate::project_workspaces::authorize_in(db, bearer)?;
+    crate::plugins::requesters::recheck_run_in(db, &run)?;
     if policy(&run["snapshot"]["agent"])["delegation"] != true {
         return Err(Error::forbidden(
             "Delegation is not enabled for this agent.",
@@ -174,7 +175,12 @@ fn working(db: &Db<'_>, chat: &Value) -> Result<bool> {
 }
 
 /// The target agent, which must not reach anything the requester's agent cannot.
-fn target_agent(db: &Db<'_>, run: &Value, input: &Value) -> Result<Value> {
+fn target_agent(
+    db: &Db<'_>,
+    run: &Value,
+    input: &Value,
+    resources: &crate::plugins::grants::DelegationAccess,
+) -> Result<Value> {
     let requesting = &run["snapshot"]["agent"];
     let agent_id = input["agentId"]
         .as_str()
@@ -205,7 +211,12 @@ fn target_agent(db: &Db<'_>, run: &Value, input: &Value) -> Result<Value> {
                 || !crate::nodes::native_mode::reviewed(node, &agent)
                 || crate::nodes::native_mode::reviewed(node, &current)
         });
-    if !covers(&current, &agent) || !nodes || !live_grants || !administrator_reviews {
+    if !covers(&current, &agent)
+        || !nodes
+        || !live_grants
+        || !administrator_reviews
+        || !resources.covers_in(db, text(&current, "id"), text(&agent, "id"))?
+    {
         return Err(Error::forbidden(
             "This agent has access the requesting agent does not have.",
         ));
@@ -223,7 +234,13 @@ fn select_engine(agent: &Value, message: &Value) -> Result<Value> {
     Ok(snapshot["snapshot"]["agent"].clone())
 }
 
-fn create(db: &Db<'_>, bearer: &str, input: &Value) -> Result<Value> {
+fn create(
+    db: &Db<'_>,
+    bearer: &str,
+    input: &Value,
+    source: Option<&crate::plugins::requesters::RunRequester>,
+    resources: &crate::plugins::grants::DelegationAccess,
+) -> Result<Value> {
     let (run, requesting) = requester(db, bearer)?;
     let request_id = input["requestId"].as_str();
     // A retried call returns the task it already created.
@@ -244,7 +261,7 @@ fn create(db: &Db<'_>, bearer: &str, input: &Value) -> Result<Value> {
         )));
     }
 
-    let agent = target_agent(db, &run, input)?;
+    let agent = target_agent(db, &run, input, resources)?;
     let mut message = parse(
         "message",
         json!({
@@ -279,6 +296,7 @@ fn create(db: &Db<'_>, bearer: &str, input: &Value) -> Result<Value> {
         "requestId": request_id,
     });
     db.put("chats", &chat)?;
+    crate::plugins::requesters::capture_delegation(db, &run, &chat_id, &message, source)?;
     chats::send(db, &chat_id, message, None, &origin)?;
     if let Some(title) = input["title"].as_str() {
         let mut chat = required(db.get("chats", &chat_id)?, "Chat not found")?;
@@ -324,10 +342,16 @@ pub async fn delegate(s: &Service, bearer: &str, input: &Value) -> Result<Value>
             "Provide a self-contained task and valid optional agent, project and engine choices.",
         ));
     }
+    let run = crate::project_workspaces::authorize(s, bearer).await?;
+    let source = crate::plugins::requesters::for_run(s, &run).await?;
+    let requesting = text(&run["snapshot"]["agent"], "id");
+    let target = input["agentId"].as_str().unwrap_or(requesting);
+    let resources =
+        crate::plugins::grants::DelegationAccess::capture(s, requesting, target).await?;
     let (bearer, input) = (bearer.to_owned(), input.clone());
     let result = s
         .store
-        .transaction(move |db| create(db, &bearer, &input))
+        .transaction(move |db| create(db, &bearer, &input, source.as_ref(), &resources))
         .await?;
     s.worker.notify();
     Ok(result)
@@ -413,10 +437,14 @@ pub async fn status(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
             "Provide the chatId of a delegated task, or nothing.",
         ));
     }
+    let run = crate::project_workspaces::authorize(s, bearer).await?;
+    let source = crate::plugins::requesters::for_run(s, &run).await?;
     let (bearer, input) = (bearer.to_owned(), input.clone());
-    s.store
+    let reading = bearer.clone();
+    let result = s
+        .store
         .read(move |db| {
-            let (_, requesting) = requester(db, &bearer)?;
+            let (_, requesting) = requester(db, &reading)?;
             if let Some(chat_id) = input["chatId"].as_str() {
                 return summary(db, &delegated(db, &requesting, chat_id)?, true);
             }
@@ -426,16 +454,33 @@ pub async fn status(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
                 .collect::<Result<Vec<_>>>()?;
             Ok(json!({ "tasks": tasks }))
         })
-        .await
+        .await?;
+    if let Some(source) = source {
+        crate::plugins::requesters::recheck(s, &source).await?;
+        s.store
+            .read(move |db| {
+                requester(db, &bearer)?;
+                crate::plugins::requesters::recheck_in(db, &source)?;
+                Ok(result)
+            })
+            .await
+    } else {
+        Ok(result)
+    }
 }
 
 pub async fn cancel(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
+    let run = crate::project_workspaces::authorize(s, bearer).await?;
+    let source = crate::plugins::requesters::for_run(s, &run).await?;
     let chat_id = text(input, "chatId").to_owned();
     let token = bearer.to_owned();
     let target = chat_id.clone();
     s.worker
         .stop_chat_authorized(s, &chat_id, move |db| {
             let (_, requesting) = requester(db, &token)?;
+            if let Some(source) = &source {
+                crate::plugins::requesters::recheck_in(db, source)?;
+            }
             delegated(db, &requesting, &target).map(|_| ())
         })
         .await?;

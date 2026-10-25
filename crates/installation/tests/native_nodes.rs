@@ -275,6 +275,30 @@ impl Fixture {
         let router = common::relay_fixture::router(service.clone())
             .await
             .unwrap();
+
+        // Native host trust does not replace current installation membership.
+        let authority = Router::new().route(
+            "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+            axum::routing::get(|| async {
+                axum::Json(json!({
+                    "owner": {"account_id": "fixture-owner", "access_id": "fixture-owner"},
+                    "members": [
+                        {"account_id": TRUSTED, "access_id": "one"},
+                        {"account_id": OTHER, "access_id": "two"},
+                    ],
+                }))
+            }),
+        );
+        let (origin, _authority_server) = common::serve_locally(authority).await;
+        let identity_path = service
+            .config
+            .data_dir
+            .join("installation-relay/identity.json");
+        let mut identity: Value =
+            serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+        identity["origin"] = json!(origin);
+        std::fs::write(identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+
         let trusted =
             RelayContext::new(&common::relay_fixture::member_context(&service, TRUSTED).await);
         let other =

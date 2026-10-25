@@ -334,6 +334,33 @@ fn check_security(
 /// credentials and remain independent of beacon-account availability.
 fn authenticate_installation(request: &Request) -> Result<()> {
     let path = request.uri().path();
+    if let Some(bound) = request
+        .extensions()
+        .get::<InstallationIdentity>()
+        .and_then(|identity| identity.public_oauth.as_ref())
+    {
+        if bound == path && cairn_protocol::plugin_oauth_path(path) && request.method() == "GET" {
+            return Ok(());
+        }
+        return Err(Error::forbidden(
+            "This public request only permits its OAuth callback.",
+        ));
+    }
+    if let Some(bound) = request
+        .extensions()
+        .get::<InstallationIdentity>()
+        .and_then(|identity| identity.public_webhook.as_ref())
+    {
+        if bound == path
+            && crate::plugins::webhooks::public_path(path)
+            && request.method() == "POST"
+        {
+            return Ok(());
+        }
+        return Err(Error::forbidden(
+            "This public request only permits its signed plugin endpoint.",
+        ));
+    }
     let machine = path == "/health"
         || path == "/internal/deployment-lease"
         || path.starts_with("/internal/nodes/")
@@ -342,6 +369,8 @@ fn authenticate_installation(request: &Request) -> Result<()> {
         || path.starts_with("/internal/execution/")
         || path == "/mcp-workspace"
         || path == "/plugin-command"
+        || crate::plugins::webhooks::public_path(path)
+        || cairn_protocol::plugin_oauth_path(path)
         || path == "/mcp-installation"
         || path.starts_with("/mcp-gateway/");
     if machine {
@@ -378,6 +407,32 @@ fn owner_operation(method: &str, path: &str) -> bool {
         .collect::<Vec<_>>();
     let read = matches!(method, "GET" | "HEAD");
     match segments.as_slice() {
+        ["plugins", "personal-authorizations"] => !read,
+        // The handler checks each provider's audience. Members can manage only
+        // their own personal authorization, never an owner-connected resource.
+        [
+            "plugins",
+            _,
+            "connections",
+            _,
+            "resources",
+            _,
+            _,
+            "oauth",
+            _,
+        ] => !matches!(method, "GET" | "HEAD" | "POST" | "DELETE"),
+        [
+            "plugins",
+            _,
+            "connections",
+            _,
+            "resources",
+            _,
+            _,
+            "oauth",
+            _,
+            "finish",
+        ] => method != "POST",
         // Storage configuration lives under nodes; credentials also include
         // MCP connection flows and plugin instances, with their sign-ins and sources.
         [
@@ -417,10 +472,32 @@ impl Input {
                 path.split('/').collect::<Vec<_>>().as_slice(),
                 ["", "api", "skills", _, _, "bundle"]
             );
+        let plugin_configuration = matches!(
+            (
+                parts.method.as_str(),
+                path.split('/').collect::<Vec<_>>().as_slice()
+            ),
+            (
+                "POST",
+                [
+                    "",
+                    "api",
+                    "plugins",
+                    _,
+                    "form" | "connections" | "setup-drafts"
+                ]
+            ) | ("POST", ["", "api", "plugins", _, "setup-drafts", _, "form"])
+                | ("PUT", ["", "api", "plugins", _, "connections", _])
+                | ("PATCH", ["", "api", "plugins", _, "setup-drafts", _])
+        );
         let limit = if path.starts_with("/internal/node-workspace/") && large {
             2_000_000
         } else if skill_batch {
             // A folder move can carry hundreds of paths even when all file contents are staged.
+            cairn_protocol::MAX_BODY
+        } else if plugin_configuration {
+            // Expanding declared defaults can make a valid configuration larger
+            // than an ordinary JSON request. Keep it within the transport bound.
             cairn_protocol::MAX_BODY
         } else {
             150000
@@ -618,6 +695,12 @@ async fn raw_route(app: &App, path: &str, request: Request) -> Result<Route> {
         }
         ["", "api", "shared-artifacts", token] => {
             crate::artifacts::sharing::http(s, token, request).await?
+        }
+        ["", "api", "plugin-webhooks", instance, endpoint] => {
+            crate::plugins::webhooks::http(s, instance, endpoint, request).await?
+        }
+        ["", "api", "plugin-oauth", instance, "callback"] => {
+            crate::plugins::oauth::callback(s, instance, request).await?
         }
         ["", "api", "runs", run, rest @ ..] => {
             let active = (*run).to_owned();

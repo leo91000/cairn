@@ -62,6 +62,12 @@ pub struct ApiRequest {
     pub mcp_scopes: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_artifact: Option<String>,
+    /// Anonymous ingress is bound to this exact route, with no account authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_webhook: Option<String>,
+    /// Anonymous OAuth code capture only; never an account or exchange capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_oauth: Option<String>,
     pub method: String,
     pub path: String,
     pub headers: Vec<(String, String)>,
@@ -224,7 +230,68 @@ pub enum Frame {
 
 pub fn stream_path(path: &str) -> bool {
     let route = path.split('?').next().unwrap_or("");
+    if plugin_webhook_path(route) {
+        return false;
+    }
     route.ends_with("/stream") || route.starts_with("/api/shared-artifacts/")
+}
+
+/// A public plugin capability never names another installation route.
+pub fn plugin_webhook_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/api/plugin-webhooks/") else {
+        return false;
+    };
+    let Some((instance, endpoint)) = rest.split_once('/') else {
+        return false;
+    };
+    let uuid = instance.len() == 36
+        && instance.bytes().enumerate().all(|(index, byte)| {
+            if [8, 13, 18, 23].contains(&index) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        });
+    uuid && !endpoint.is_empty()
+        && endpoint.len() <= 40
+        && endpoint
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+pub fn plugin_oauth_path(path: &str) -> bool {
+    let Some(instance) = path
+        .strip_prefix("/api/plugin-oauth/")
+        .and_then(|p| p.strip_suffix("/callback"))
+    else {
+        return false;
+    };
+    plugin_webhook_path(&format!("/api/plugin-webhooks/{instance}/callback"))
+}
+
+/// Preserve provider signature and retry headers on anonymous ingress only. Hop,
+/// browser-session and proxy-routing headers cannot acquire meaning downstream.
+pub fn webhook_header(name: &str) -> bool {
+    !matches!(
+        name,
+        "host"
+            | "cookie"
+            | "origin"
+            | "referer"
+            | "connection"
+            | "upgrade"
+            | "keep-alive"
+            | "transfer-encoding"
+            | "content-length"
+            | "proxy-authorization"
+            | "proxy-authenticate"
+            | "expect"
+            | "te"
+            | "trailer"
+            | "forwarded"
+    ) && !["x-forwarded-", "sec-", "x-cairn-"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
 }
 
 pub fn request_header(name: &str) -> bool {

@@ -99,7 +99,10 @@ pub async fn list(s: &Service, plugin_id: &str, input: &Input) -> Result<Value> 
     if search.chars().count() > 200 || search.chars().any(char::is_control) {
         return Err(Error::bad("Search for at most 200 characters."));
     }
-    let scope = Scope::Instance(Box::new(connection));
+    let scope = Scope::Instance(
+        Box::new(connection),
+        std::sync::Arc::new(crate::plugins::operations::Owner::current(s).await?),
+    );
     let payload = json!({
         "op": "list",
         "source": source,
@@ -142,7 +145,10 @@ pub async fn import(s: &Service, input: &Value) -> Result<Value> {
     }) {
         return Ok(project.clone());
     }
-    let scope = Scope::Instance(Box::new(connection.clone()));
+    let scope = Scope::Instance(
+        Box::new(connection.clone()),
+        std::sync::Arc::new(crate::plugins::operations::Owner::current(s).await?),
+    );
     let payload = json!({
         "op": "resolve",
         "source": source,

@@ -39,6 +39,13 @@ it('lists risks as a sentence', () => {
   expect(listed(['a', 'b', 'c'])).toBe('a, b and c')
 })
 
+it('warns listed and public audiences about delegation to other coding agents', () => {
+  for (const everyone of [false, true]) {
+    expect(delegationRisks(agent({ delegation: true }), [], everyone))
+      .toEqual(['delegate work to other coding agents and models'])
+  }
+})
+
 it('warns about grants to the edited instance and unsaved instance', () => {
   const helper = agent({ projects: ['project'] })
   expect(delegationRisks(helper, [{ agentIds: ['helper'] }], true))
@@ -46,4 +53,12 @@ it('warns about grants to the edited instance and unsaved instance', () => {
   expect(delegationRisks(helper, [], true, ['helper']))
     .toEqual(['use its plugins, such as GitHub or 1Password'])
   expect(delegationRisks(helper, [], true, ['other'])).toEqual([])
+})
+
+it('includes scoped resource grants from compact access without an instance grant', () => {
+  const helper = agent({})
+  expect(delegationRisks(helper, [{ agentIds: [], resourceAgentIds: ['helper'] }], true))
+    .toEqual(['use its plugins, such as GitHub or 1Password'])
+  expect(delegationRisks(helper, [{ agentIds: [], resourceAgentIds: [] }], true)).toEqual([])
+  expect(delegationRisks(helper, [{ agentIds: [], resourceAgentIds: ['helper'] }], false)).toEqual([])
 })

@@ -5,25 +5,36 @@ use serde_json::Value;
 mod arguments;
 mod form;
 mod integrations;
+mod oauth;
+mod operations;
+mod resources;
 mod settings;
 mod setup;
 mod sources;
 mod view;
+mod webhooks;
 
 pub use arguments::{parse_arguments, usage};
-pub use form::validate_form_result;
+pub use form::{FormLookup, validate_form_fields, validate_form_result, validate_lookup_result};
 pub use integrations::{
     Condition, DeviceFlow, GitCredential, GitIdentity, OAuth, ProjectSource, RunCredentials,
     RunFile, SkillSource, home_path, render,
 };
+pub use oauth::{OAuth as OAuthProvider, OAuthPersonal, OAuthTokenResponse};
+pub use operations::{Operation, Profile, RequestRule};
+pub use resources::ResourceCollection;
 pub use settings::validate_settings_schema;
 pub use setup::{CopyValue, Effort, Preset, Risk, Setup, Step, StepKind, Task};
 pub use sources::{MAX_MODULES, MAX_SOURCE_BYTES, Sources, module_path, resolve};
 pub use view::{validate_action_result, validate_view};
+pub use webhooks::{Webhook, WebhookSetup, WebhookSignature, WebhookTimestamp};
 
 /// Worker protocol and manifest version. Manifests must declare exactly this one.
 pub const API_VERSION: u32 = 2;
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
+/// Host events include encoded settings and raw signed bodies. JSON escaping
+/// must not prevent an otherwise bounded request from reaching its handler.
+pub const MAX_EVENT_FRAME_BYTES: usize = 2 * MAX_FRAME_BYTES;
 
 /// Host capabilities a package may request, with the sentence the owner approves.
 pub const CAPABILITIES: &[(&str, &str)] = &[
@@ -54,6 +65,18 @@ pub const CAPABILITIES: &[(&str, &str)] = &[
         "Hand messages it receives to Cairn, which keeps only those from people you allow",
     ),
     (
+        "webhooks",
+        "Receive signed public HTTP requests through Beacon or your installation's own HTTPS endpoint",
+    ),
+    (
+        "resources",
+        "Manage the resource collections declared by the package; secrets remain in Cairn",
+    ),
+    (
+        "oauth",
+        "Connect declared resources through OAuth; Cairn exchanges, encrypts and refreshes tokens without exposing them to the plugin",
+    ),
+    (
         "exec",
         "Run the programs listed by the package on this server, outside the Luau sandbox, with the secrets you enter",
     ),
@@ -62,19 +85,24 @@ pub const CAPABILITIES: &[(&str, &str)] = &[
 /// The capability a host method belongs to, if any.
 pub fn capability(method: &str) -> Option<&'static str> {
     let family = match method {
-        "storage.get" | "storage.set" | "storage.delete" | "storage.list" => "storage",
+        "storage.get" | "storage.set" | "storage.max" | "storage.delete" | "storage.list" => {
+            "storage"
+        }
         "http.request" => "http",
         "files.create" | "files.append" | "files.read" | "files.delete" | "files.composeMime" => {
             "files"
         }
         "timers.after" | "timers.cancel" => "timers",
-        "conversations.submit" => "conversations.submit",
-        "conversations.check" | "conversations.answer" | "conversations.cancel" => {
-            "conversations.control"
-        }
+        "conversations.submit" | "delivery.checkpoint" => "conversations.submit",
+        "conversations.check"
+        | "conversations.answer"
+        | "conversations.cancel"
+        | "conversations.reset" => "conversations.control",
         "exec.run" | "download" | "archive.executable" => "exec",
         "socket.connect" | "socket.send" | "socket.close" | "socket.timer" => "socket",
-        "inbound.accept" => "inbound",
+        "inbound.accept" | "inbound.deliver" => "inbound",
+        "resources.get" | "resources.list" => "resources",
+        "oauth.start" | "oauth.finish" | "oauth.status" | "oauth.disconnect" => "oauth",
         _ => return None,
     };
     CAPABILITIES
@@ -159,6 +187,8 @@ pub struct Command {
     pub output: Output,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub arguments: Vec<Argument>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
 }
 
 /// A tool listed by the run's Cairn MCP server. Input is checked against the schema.
@@ -168,6 +198,8 @@ pub struct Tool {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
 }
 
 /// Agents the owner grants on each instance may run the package's commands and tools.
@@ -241,6 +273,15 @@ pub struct Manifest {
     /// guidance while the owner edits an instance, and checks it before it is saved.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub instance_form: bool,
+    /// Public endpoints. The host verifies the original bytes before invoking `webhook`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub webhooks: Vec<Webhook>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<ResourceCollection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<Operation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub oauth: Vec<OAuthProvider>,
     /// Files, Git credentials and identity rendered into granted agents' runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_credentials: Option<RunCredentials>,
@@ -367,7 +408,9 @@ impl Manifest {
         if self.hosts.len() > 10 || !self.hosts.iter().all(|host| hostname(host)) {
             return Err("Plugin manifest lists invalid hosts.");
         }
-        let network = self.permits_capability("http") || self.permits_capability("socket");
+        let network = self.permits_capability("http")
+            || self.permits_capability("socket")
+            || self.permits_capability("oauth");
         if self.hosts.is_empty() == network {
             return Err("Plugin manifest must list hosts exactly when it requests http or socket.");
         }
@@ -384,6 +427,13 @@ impl Manifest {
             return Err("Plugin manifest has an invalid credential rule.");
         }
         validate_settings_schema(&self.settings)?;
+        if !self.instance_form && self.settings.iter().any(|field| field["remote"] == true) {
+            return Err("Remote choices require instanceForm.");
+        }
+        webhooks::validate(self)?;
+        resources::validate(self)?;
+        operations::validate(self)?;
+        oauth::validate(self)?;
         if let Some(instances) = &self.instances
             && [&instances.singular, &instances.plural]
                 .iter()
@@ -498,6 +548,13 @@ impl Manifest {
         self.capabilities.iter().any(|item| item == capability)
     }
 
+    /// People address one root agent only when resource routes do not own
+    /// participant admission and agent selection.
+    pub fn delegates(&self) -> bool {
+        self.permits_capability("conversations.submit")
+            && !self.resources.iter().any(|resource| resource.delegation)
+    }
+
     /// A host method is allowed only through a capability the manifest requests.
     /// Packages that bring their own connection (`socket` or `inbound`) also report its
     /// state with `instance.status`.
@@ -590,6 +647,18 @@ pub enum Frame {
     Failure,
     /// Worker → host: the handler called `cairn.fail(message)`, a message for people.
     Rejected { message: String },
+}
+
+impl Frame {
+    /// Includes the newline. Calls, results and package loads retain their
+    /// existing limit; only host-to-worker event input gets the larger budget.
+    pub fn encoded_limit(&self) -> usize {
+        if matches!(self, Self::Event { .. }) {
+            MAX_EVENT_FRAME_BYTES
+        } else {
+            MAX_FRAME_BYTES
+        }
+    }
 }
 
 #[cfg(test)]

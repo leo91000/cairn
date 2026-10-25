@@ -113,6 +113,8 @@ impl DirectTraffic {
                             request.role = lease.claims.role;
                             request.mcp_scopes = None;
                             request.public_artifact = None;
+                            request.public_webhook = None;
+                            request.public_oauth = None;
 
                             let credit = Arc::new(Semaphore::new(0));
                             let streaming = StreamOutput {

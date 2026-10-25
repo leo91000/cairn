@@ -40,6 +40,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import build.cairn.app.data.*
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.serialization.json.*
 
 /** The installation's web page for steps that stay on the web: package uploads. */
@@ -53,11 +55,11 @@ internal fun webPage(api: CairnApi, path: String): String =
 /** Plugins: what gives the agents new abilities and new places to work. Owner only. */
 @Composable
 fun PluginsScreen(vm: CairnViewModel, state: Workspace, open: (String) -> Unit) {
-    var catalog by remember { mutableStateOf<PluginCatalog?>(null) }
+    var catalog by remember { mutableStateOf<PluginCards?>(null) }
     val context = LocalContext.current
     Poll("plugins", 10_000) {
         try {
-            catalog = vm.api.get("/plugins")
+            catalog = vm.api.pluginCards()
         } catch (e: Exception) {
             vm.report(e)
         }
@@ -79,8 +81,8 @@ fun PluginsScreen(vm: CairnViewModel, state: Workspace, open: (String) -> Unit) 
         val current = catalog
         if (current == null) LinearProgressIndicator(Modifier.fillMaxWidth())
         else
-            current.packages.forEach { entry ->
-                PluginCard(entry, entry.summary(current.connections)) {
+            current.items.forEach { entry ->
+                PluginCard(entry, entry.summary()) {
                     vm.clearMessage()
                     open(entry.id)
                 }
@@ -108,10 +110,10 @@ fun PluginsScreen(vm: CairnViewModel, state: Workspace, open: (String) -> Unit) 
 }
 
 @Composable
-private fun PluginCard(entry: PluginEntry, summary: PluginSummary, open: () -> Unit) {
+private fun PluginCard(entry: PluginCardEntry, summary: PluginSummary, open: () -> Unit) {
     SignalCard(Modifier.fillMaxWidth().testTag("plugin-${entry.id}"), onClick = open) {
         Row(verticalAlignment = Alignment.Top) {
-            PluginMark(entry.id, 44.dp, entry.manifest?.brand)
+            PluginMark(entry.id, 44.dp, entry.presentation?.brand)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -130,7 +132,7 @@ private fun PluginCard(entry: PluginEntry, summary: PluginSummary, open: () -> U
                     )
                 }
                 Text(
-                    entry.manifest?.description?.ifBlank { null } ?: "Aucune description.",
+                    entry.presentation?.description?.ifBlank { null } ?: "Aucune description.",
                     Modifier.padding(top = 2.dp),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -182,7 +184,7 @@ fun PluginScreen(
     id: String,
     openAgents: () -> Unit = {},
     openChat: (String) -> Unit,
-) = PluginInstances(vm, state, id, openChat, openAgents)
+) = key(id) { PluginInstances(vm, state, id, openChat, openAgents) }
 
 @Composable
 private fun PluginInstances(
@@ -192,25 +194,71 @@ private fun PluginInstances(
     openChat: (String) -> Unit,
     openAgents: () -> Unit,
 ) {
-    var catalog by remember { mutableStateOf<PluginCatalog?>(null) }
+    var catalog by remember { mutableStateOf<PluginConfiguration?>(null) }
     var editing by remember { mutableStateOf<PluginConnection?>(null) }
     var removing by remember { mutableStateOf<PluginConnection?>(null) }
     var reviewing by remember { mutableStateOf(false) }
+    var setupId by rememberForm<String?>(null, id)
+    var setupDraft by remember(id) { mutableStateOf<PluginSetupDraft?>(null) }
+    var drafts by remember(id) { mutableStateOf(emptyList<PluginSetupDraft>()) }
+    var discarding by remember(id) { mutableStateOf<PluginSetupDraft?>(null) }
     val context = LocalContext.current
     suspend fun load() {
-        catalog = vm.api.get<PluginCatalog>("/plugins")
+        val nextCatalog = vm.api.pluginConfiguration(id)
+        catalog = nextCatalog
+        val nextDrafts =
+            if (nextCatalog.setupDrafts)
+                vm.api.pluginManagementItems<PluginSetupDraft>(
+                    "/plugins/${segment(id)}/setup-drafts"
+                )
+            else emptyList()
+        drafts = nextDrafts
+        if (setupId != null && setupDraft == null) {
+            setupDraft = nextDrafts.find { it.id == setupId }
+            if (setupDraft == null) {
+                setupId = null
+                vm.report(
+                    IllegalStateException(
+                        "La configuration n’est plus disponible. Actualisez le plugin."
+                    )
+                )
+            }
+        }
     }
-    Poll("plugin-$id", 5000) {
-        if (editing == null && !reviewing && !state.busy)
+    Poll("plugin-$id" to state.busy, 5000) {
+        if ((catalog == null || (editing == null && setupId == null && !reviewing)) && !state.busy)
             try {
                 load()
             } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
                 vm.report(e)
             }
     }
-    val entry = catalog?.packages?.find { it.id == id }
+    val entry = catalog?.entry
     val manifest = entry?.manifest
-    val instances = catalog?.connections.orEmpty().filter { it.pluginId == id }
+    val instances = catalog?.connections.orEmpty()
+    fun addInstance() {
+        val current = manifest ?: return
+        vm.clearMessage()
+        if (current.hasSetup) {
+            vm.perform {
+                setupDraft =
+                    api.send(
+                        "POST",
+                        "/plugins/${segment(id)}/setup-drafts",
+                        buildJsonObject { put("name", current.name) },
+                    )
+                setupId = setupDraft?.id
+                load()
+            }
+        } else {
+            editing =
+                PluginConnection(
+                    name = if (current.instances == null) current.name else "",
+                    accessMode = "requests",
+                )
+        }
+    }
     Column(
         Modifier.fillMaxSize()
             .verticalScroll(rememberScrollState())
@@ -284,46 +332,102 @@ private fun PluginInstances(
                     icon = CairnIcons.Plus,
                     height = 40.dp,
                 ) {
-                    vm.clearMessage()
-                    editing =
-                        PluginConnection(
-                            name = if (manifest.instances == null) manifest.name else "",
-                            accessMode = "requests",
-                        )
+                    addInstance()
                 }
         }
-        if (instances.isEmpty() && entry.active != null)
-            FirstSetup(manifest, entry.resolvedSetup()) {
-                vm.clearMessage()
-                editing =
-                    PluginConnection(
-                        name = if (manifest.instances == null) manifest.name else "",
-                        accessMode = "requests",
-                    )
+        if (drafts.isNotEmpty())
+            Text("Reprendre la configuration", style = MaterialTheme.typography.titleSmall)
+        drafts.forEach { draft ->
+            SignalCard(Modifier.fillMaxWidth()) {
+                Text(draft.name, style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "Inactive · expire le ${java.text.DateFormat.getDateTimeInstance().format(java.util.Date(draft.expiresAt))}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (draft.status != "setup") FormError("Le package doit être approuvé.")
+                TextButton(
+                    onClick = {
+                        vm.clearMessage()
+                        setupDraft = draft
+                        setupId = draft.id
+                    },
+                    enabled = !state.busy && draft.status == "setup",
+                ) {
+                    Text("Continuer ${draft.name}")
+                }
+                TextButton(onClick = { discarding = draft }, enabled = !state.busy) {
+                    Text("Abandonner ${draft.name}")
+                }
             }
+        }
+        if (instances.isEmpty() && drafts.isEmpty() && entry.active != null)
+            FirstSetup(manifest, entry.resolvedSetup(), ::addInstance)
         instances.forEach { connection ->
-            InstanceCard(
-                vm,
-                state,
-                manifest,
-                connection,
-                catalog?.grantsOf(connection.agentId).orEmpty(),
-                openChat = openChat,
-                openAgents = openAgents,
-                edit = {
-                    vm.clearMessage()
-                    editing = connection
-                },
-                remove = {
-                    vm.clearMessage()
-                    removing = connection
-                },
-                changed = { load() },
-            )
+            key(connection.id) {
+                InstanceCard(
+                    vm,
+                    state,
+                    manifest,
+                    connection,
+                    catalog?.grantsOf(connection.agentId).orEmpty(),
+                    openChat = openChat,
+                    openAgents = openAgents,
+                    edit = {
+                        vm.clearMessage()
+                        editing = connection
+                    },
+                    remove = {
+                        vm.clearMessage()
+                        removing = connection
+                    },
+                    changed = { load() },
+                )
+            }
         }
         if (entry.active != null && manifest.programs.any { it.installer.isNotBlank() })
             PluginPrograms(vm, state, manifest.id)
         if (manifest.agentAccess != null) AgentUsage(manifest)
+    }
+    setupDraft?.let { draft ->
+        manifest?.let { current ->
+            key(draft.id) {
+                PluginSetup(
+                    vm,
+                    state,
+                    current,
+                    draft,
+                    close = {
+                        setupId = null
+                        setupDraft = null
+                    },
+                    changed = { load() },
+                    activated = {
+                        setupId = null
+                        setupDraft = null
+                        load()
+                    },
+                )
+            }
+        }
+    }
+    discarding?.let { draft ->
+        Confirm(
+            "Abandonner ${draft.name} ?",
+            "Les réglages et identifiants préparés seront supprimés. Aucune instance n’a été activée.",
+            state.busy,
+            state.error,
+            dismiss = { discarding = null },
+        ) {
+            vm.perform {
+                api.request(
+                    "DELETE",
+                    "/plugins/${segment(id)}/setup-drafts/${segment(draft.id)}",
+                    buildJsonObject { put("revision", draft.revision) },
+                )
+                discarding = null
+                load()
+            }
+        }
     }
     if (reviewing && entry != null)
         PluginReview(
@@ -344,7 +448,7 @@ private fun PluginInstances(
                 requireNotNull(entry),
                 it,
                 initial,
-                catalog?.connections.orEmpty(),
+                catalog,
                 close = { editing = null },
                 openAgents = {
                     editing = null
@@ -437,7 +541,7 @@ private fun InstanceCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = signal.attention,
                 )
-            if (connection.requests.isNotEmpty()) {
+            if (manifest.delegates && connection.requests.isNotEmpty()) {
                 Eyebrow("En attente de validation")
                 connection.requests.forEach { request ->
                     val name = request.name.ifBlank { request.userId }
@@ -492,13 +596,20 @@ private fun InstanceCard(
                         state.agents.find { it.id == id }?.name ?: "Agent supprimé"
                     }
                 Text(
-                    if (names.isEmpty()) "Aucun agent ne peut l’utiliser pour l’instant."
+                    if (manifest.operations.isNotEmpty())
+                        "Accès global à l’instance : ${names.joinToString(", ").ifEmpty { "aucun agent." }}"
+                    else if (names.isEmpty()) "Aucun agent ne peut l’utiliser pour l’instant."
                     else "Agents autorisés : ${names.joinToString(", ")}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 TextButton(onClick = openAgents) { Text("Gérer sur les fiches agents ›") }
             }
+            if (manifest.agentAccess != null && manifest.operations.isNotEmpty())
+                Text(
+                    "Les opérations des ressources ont leurs propres règles d’accès sur chaque ressource.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
             if (manifest.delegates) {
                 Fact(
                     "Répond en tant que",
@@ -578,6 +689,13 @@ private fun InstanceCard(
                     ActivityRow(connection, item) { openChat(item.chatId) }
                 }
             }
+            if (manifest.resources.isNotEmpty())
+                PluginResources(
+                    vm,
+                    state,
+                    manifest,
+                    PluginResourceLocation(connection.pluginId, connection.id),
+                )
             if (manifest.instanceView) PluginPanel(vm, state, path, connection.name)
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Toggle(
@@ -873,6 +991,7 @@ internal fun PluginFields(
     options: Map<String, List<PluginOption>> = emptyMap(),
     errors: Map<String, String> = emptyMap(),
     refresh: (String) -> Unit = {},
+    lookup: PluginChoiceLookup? = null,
 ) {
     var section = ""
     fields
@@ -880,89 +999,97 @@ internal fun PluginFields(
         .forEach { field ->
             fun update(value: String) {
                 change(field.key, value)
-                if (field.refresh) refresh(field.key)
+                if (field.refresh || field.remote) refresh(field.key)
             }
             val choices = (if (field.dynamic) options[field.key] else null) ?: field.options
             if (field.section.isNotBlank() && field.section != section) {
                 section = field.section
                 Eyebrow(field.section, Modifier.padding(top = 4.dp))
             }
-            when (field.type) {
-                "boolean" ->
-                    if (field.risk == null)
-                        Toggle(field.title, values[field.key] == "true") {
-                            if (enabled) update(it.toString())
-                        }
-                    else
-                        RiskToggle(field, values[field.key] == "true") {
-                            if (enabled) update(it.toString())
-                        }
-                "select" ->
-                    // Dynamic and self-explaining choices read better as a list.
-                    if (field.dynamic || choices.any { it.description.isNotBlank() || it.disabled })
-                        ChoiceList(field.title, values[field.key].orEmpty(), choices, enabled) {
-                            update(it)
-                        }
-                    else
-                        Choice(
-                            field.title,
-                            values[field.key].orEmpty(),
-                            choices.map { it.value to it.label },
-                        ) {
-                            update(it)
-                        }
-                "multiselect" -> {
-                    val chosen =
-                        multiselect(values[field.key].orEmpty()).mapNotNull {
-                            it.jsonPrimitive.contentOrNull
-                        }
-                    Text(field.title, style = MaterialTheme.typography.labelLarge)
-                    choices.forEach { option ->
-                        Toggle(option.label, option.value in chosen) { checked ->
-                            if (enabled && !option.disabled) {
-                                val next =
-                                    if (checked) chosen + option.value else chosen - option.value
-                                update(JsonArray(next.map(::JsonPrimitive)).toString())
+            if (field.remote)
+                PluginRemoteChoice(field, values[field.key].orEmpty(), ::update, lookup, enabled)
+            else
+                when (field.type) {
+                    "boolean" ->
+                        if (field.risk == null)
+                            Toggle(field.title, values[field.key] == "true") {
+                                if (enabled) update(it.toString())
+                            }
+                        else
+                            RiskToggle(field, values[field.key] == "true") {
+                                if (enabled) update(it.toString())
+                            }
+                    "select" ->
+                        // Dynamic and self-explaining choices read better as a list.
+                        if (
+                            field.dynamic ||
+                                choices.any { it.description.isNotBlank() || it.disabled }
+                        )
+                            ChoiceList(field.title, values[field.key].orEmpty(), choices, enabled) {
+                                update(it)
+                            }
+                        else
+                            Choice(
+                                field.title,
+                                values[field.key].orEmpty(),
+                                choices.map { it.value to it.label },
+                            ) {
+                                update(it)
+                            }
+                    "multiselect" -> {
+                        val chosen =
+                            multiselect(values[field.key].orEmpty()).mapNotNull {
+                                it.jsonPrimitive.contentOrNull
+                            }
+                        Text(field.title, style = MaterialTheme.typography.labelLarge)
+                        choices.forEach { option ->
+                            Toggle(option.label, option.value in chosen) { checked ->
+                                if (enabled && !option.disabled) {
+                                    val next =
+                                        if (checked) chosen + option.value
+                                        else chosen - option.value
+                                    update(JsonArray(next.map(::JsonPrimitive)).toString())
+                                }
                             }
                         }
                     }
-                }
-                "secret" ->
-                    OutlinedTextField(
-                        secrets[field.key].orEmpty(),
-                        {
-                            changeSecret(field.key, it)
-                            if (field.refresh) refresh(field.key)
-                        },
-                        Modifier.fillMaxWidth(),
-                        label = { Text(field.title) },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = InputKeyboards.Password,
-                        enabled = enabled,
-                        isError = field.key in errors,
-                        placeholder = {
-                            Text(
-                                if (field.key in saved) "Enregistré · laissez vide pour le garder"
-                                else field.placeholder
-                            )
-                        },
-                    )
-                else ->
-                    Field(
-                        field.title,
-                        values[field.key].orEmpty(),
-                        { update(it) },
-                        lines = if (field.type == "text") 4 else 1,
-                        enabled = enabled,
-                        keyboardOptions =
-                            when (field.type) {
-                                "number" -> KeyboardOptions(keyboardType = KeyboardType.Number)
-                                "url" -> KeyboardOptions(keyboardType = KeyboardType.Uri)
-                                else -> InputKeyboards.Sentences
+                    "secret" ->
+                        OutlinedTextField(
+                            secrets[field.key].orEmpty(),
+                            {
+                                changeSecret(field.key, it)
+                                if (field.refresh) refresh(field.key)
                             },
-                    )
-            }
+                            Modifier.fillMaxWidth(),
+                            label = { Text(field.title) },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = InputKeyboards.Password,
+                            enabled = enabled,
+                            isError = field.key in errors,
+                            placeholder = {
+                                Text(
+                                    if (field.key in saved)
+                                        "Enregistré · laissez vide pour le garder"
+                                    else field.placeholder
+                                )
+                            },
+                        )
+                    else ->
+                        Field(
+                            field.title,
+                            values[field.key].orEmpty(),
+                            { update(it) },
+                            lines = if (field.type == "text") 4 else 1,
+                            enabled = enabled,
+                            keyboardOptions =
+                                when (field.type) {
+                                    "number" -> KeyboardOptions(keyboardType = KeyboardType.Number)
+                                    "url" -> KeyboardOptions(keyboardType = KeyboardType.Uri)
+                                    else -> InputKeyboards.Sentences
+                                },
+                        )
+                }
             val note = errors[field.key] ?: field.description.takeIf { it.isNotBlank() }
             if (note != null)
                 Text(
@@ -1014,7 +1141,10 @@ private fun AgentUsage(manifest: PluginManifest) {
             Text("Utilisation par les agents", style = MaterialTheme.typography.titleSmall)
         }
         Text(
-            "Seuls les agents autorisés sur une instance active y ont accès, dans leurs conversations.",
+            if (manifest.operations.isNotEmpty())
+                "Les règles de l’instance et de ses ressources déterminent les commandes et outils accessibles. Les opérations des ressources exigent leurs propres droits."
+            else
+                "Seuls les agents autorisés sur une instance active y ont accès, dans leurs conversations.",
             Modifier.padding(top = 6.dp, bottom = 4.dp),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1055,41 +1185,98 @@ private fun AgentUsage(manifest: PluginManifest) {
 
 /** Review a package: what each version may do, then approve, switch version or uninstall. */
 @Composable
-private fun PluginReview(
+internal fun PluginReview(
     vm: CairnViewModel,
     state: Workspace,
-    entry: PluginEntry,
+    initial: PluginConfigurationEntry,
     capabilities: List<PluginCapability>,
     close: () -> Unit,
     changed: suspend () -> Unit,
 ) {
-    val valid = entry.versions.filter { it.manifest != null }
-    // Review the newest version waiting for approval, otherwise the active one.
-    var selected by
-        remember(entry.id) {
-            mutableStateOf(
-                valid.lastOrNull { it.approved == false }?.version
-                    ?: entry.active
-                    ?: valid.lastOrNull()?.version.orEmpty()
-            )
-        }
+    var read by remember(initial.id) { mutableStateOf<PluginReviewRead?>(null) }
+    val entry = read?.entry?.configuration() ?: initial
+    val valid = read?.entry?.versions.orEmpty().filter { it.error == null }
+    var selected by remember(initial.id) { mutableStateOf("") }
     var uninstalling by remember { mutableStateOf(false) }
-    val version = valid.find { it.version == selected }
+    var loadedVersion by remember(initial.id) { mutableStateOf<PluginVersion?>(null) }
+    var active by remember(initial.id) { mutableStateOf<PluginManifest?>(null) }
+    var reading by remember(initial.id) { mutableStateOf(true) }
+    var readError by remember(initial.id) { mutableStateOf<String?>(null) }
+    val version = loadedVersion
     val manifest = version?.manifest
-    val active = valid.find { it.version == entry.active }?.manifest
     val added =
-        manifest?.capabilities.orEmpty().filter { active != null && it !in active.capabilities }
-    fun act(operation: String) = vm.perform {
-        api.pluginOperation(
-            "/plugins/packages/${segment(entry.id)}/$operation",
-            buildJsonObject {
-                put("version", selected)
-                version?.digest?.let { put("digest", it) }
-            },
-        )
-        notify("${manifest?.name ?: entry.name} $selected est actif")
-        close()
-        changed()
+        manifest?.capabilities.orEmpty().filter { active != null && it !in active!!.capabilities }
+    LaunchedEffect(initial.id) {
+        try {
+            val result = vm.api.pluginReview(initial.id)
+            read = result
+            selected =
+                result.entry.versions
+                    .lastOrNull { it.error == null && it.approved != true }
+                    ?.version
+                    ?: result.entry.active
+                    ?: result.entry.versions.lastOrNull { it.error == null }?.version.orEmpty()
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            readError = e.message
+            reading = false
+        }
+    }
+    LaunchedEffect(read, selected) {
+        loadedVersion = null
+        active = null
+        reading = true
+        val current = read ?: return@LaunchedEffect
+        if (selected.isEmpty()) {
+            reading = false
+            return@LaunchedEffect
+        }
+        val chosen = selected
+        readError = null
+        try {
+            suspend fun exact(name: String): PluginVersion? =
+                if (current.lazy)
+                    vm.api.get("/plugins/packages/${segment(entry.id)}/versions/${segment(name)}")
+                else current.entry.versions.find { it.version == name }
+            val shown = exact(chosen)
+            val baseline =
+                if (entry.active != null && entry.active != chosen) exact(entry.active!!) else shown
+            check(
+                shown?.manifest != null &&
+                    shown.digest != null &&
+                    shown.version == chosen &&
+                    shown.manifest.version == chosen &&
+                    (entry.active == null || baseline?.manifest?.version == entry.active)
+            ) {
+                shown?.error
+                    ?: baseline?.error
+                    ?: "Les fichiers exacts du package sont indisponibles. Rouvrez la revue."
+            }
+            loadedVersion = shown
+            active = if (entry.active != null) baseline?.manifest else null
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            readError = e.message
+        } finally {
+            if (currentCoroutineContext().isActive) reading = false
+        }
+    }
+    fun act(operation: String) {
+        val shown = version
+        if (reading || shown?.manifest == null || shown.digest == null || shown.version != selected)
+            return
+        vm.perform {
+            api.pluginOperation(
+                "/plugins/packages/${segment(entry.id)}/$operation",
+                buildJsonObject {
+                    put("version", shown.version)
+                    put("digest", shown.digest)
+                },
+            )
+            notify("${manifest?.name ?: entry.name} $selected est actif")
+            close()
+            changed()
+        }
     }
     Dialog(
         onDismissRequest = { if (!state.busy) close() },
@@ -1145,12 +1332,16 @@ private fun PluginReview(
                         SignalButton(
                             "Approuver et activer",
                             height = 40.dp,
-                            enabled = !state.busy,
+                            enabled = !state.busy && !reading,
                         ) {
                             act("approve")
                         }
                     else if (!entry.builtin && version != null && selected != entry.active)
-                        SignalButton("Passer à $selected", height = 40.dp, enabled = !state.busy) {
+                        SignalButton(
+                            "Passer à $selected",
+                            height = 40.dp,
+                            enabled = !state.busy && !reading,
+                        ) {
                             act("activate")
                         }
                 }
@@ -1163,7 +1354,8 @@ private fun PluginReview(
                     .padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
-                if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                if (state.busy || reading) LinearProgressIndicator(Modifier.fillMaxWidth())
+                readError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 if (manifest != null)
                     Row(verticalAlignment = Alignment.Top) {
@@ -1185,7 +1377,15 @@ private fun PluginReview(
                     Eyebrow("Versions")
                     valid.forEach { item ->
                         Surface(
-                            onClick = { selected = item.version },
+                            onClick = {
+                                if (selected != item.version) {
+                                    loadedVersion = null
+                                    active = null
+                                    reading = true
+                                    selected = item.version
+                                }
+                            },
+                            enabled = !state.busy,
                             shape = RoundedCornerShape(14.dp),
                             color =
                                 if (item.version == selected)
@@ -1223,7 +1423,10 @@ private fun PluginReview(
                         }
                     }
                 }
-                entry.versions
+                read
+                    ?.entry
+                    ?.versions
+                    .orEmpty()
                     .filter { it.error != null }
                     .forEach {
                         Text(

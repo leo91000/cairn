@@ -26,6 +26,29 @@ use tokio::io::AsyncWriteExt;
 const MAX_DOWNLOAD: u64 = 64 * 1024 * 1024;
 const MAX_EXECUTABLE: u64 = 128 * 1024 * 1024;
 
+#[derive(Clone, Copy)]
+enum Authority<'a> {
+    Approval(&'a super::operations::Owner),
+    Update(&'a super::operations::Owner),
+}
+
+async fn authorized(
+    s: &Service,
+    package: &Package,
+    authority: Option<Authority<'_>>,
+) -> Result<()> {
+    if let Some(authority) = authority {
+        let owner = match authority {
+            Authority::Approval(owner) | Authority::Update(owner) => owner,
+        };
+        owner.recheck(s).await?;
+        if matches!(authority, Authority::Update(_)) {
+            registry::require_digest(s, &package.manifest.id, &package.digest).await?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Release {
@@ -224,7 +247,12 @@ fn invocation_error(error: InvocationError, refused: Option<Error>) -> Error {
     }
 }
 
-async fn resolve(s: &Service, package: &Package, program: &Program) -> Result<Release> {
+async fn resolve(
+    s: &Service,
+    package: &Package,
+    program: &Program,
+    authority: Option<Authority<'_>>,
+) -> Result<Release> {
     let refused = std::sync::Mutex::new(None);
     let refused_ref = &refused;
     let value = s
@@ -240,17 +268,21 @@ async fn resolve(s: &Service, package: &Package, program: &Program) -> Result<Re
                 if method != "http.request" {
                     return Err(Denied("forbidden"));
                 }
-                metadata(s, &package.manifest, &args)
-                    .await
-                    .map_err(|error| {
-                        let code = capabilities::code(&error);
-                        *refused_ref.lock().unwrap() = Some(error);
-                        Denied(code)
-                    })
+                async {
+                    authorized(s, package, authority).await?;
+                    metadata(s, &package.manifest, &args).await
+                }
+                .await
+                .map_err(|error| {
+                    let code = capabilities::code(&error);
+                    *refused_ref.lock().unwrap() = Some(error);
+                    Denied(code)
+                })
             },
         )
         .await
         .map_err(|error| invocation_error(error, refused.into_inner().unwrap()))?;
+    authorized(s, package, authority).await?;
     let release: Release = serde_json::from_value(value)
         .map_err(|_| Error::bad("The installer must resolve an exact release."))?;
     validate(s, &package.manifest, &release)?;
@@ -391,13 +423,16 @@ async fn install(
     directory: &Path,
     lock: &mut Lock,
     release: Release,
+    authority: Option<Authority<'_>>,
 ) -> Result<()> {
+    authorized(s, package, authority).await?;
     validate(s, &package.manifest, &release)?;
     if let Some(installed) = &lock.installed
         && installed.release == release
     {
         installed_path(directory, installed)?;
         lock.candidate = None;
+        authorized(s, package, authority).await?;
         return write_lock(directory, lock);
     }
     std::fs::create_dir_all(directory)?;
@@ -422,17 +457,21 @@ async fn install(
                 let release = &release;
                 async move {
                     let mut preparation = preparation.lock().await;
-                    let result = match method.as_str() {
-                        "download" => {
-                            preparation
-                                .download(s, &package.manifest, release, &args)
-                                .await
+                    let result = async {
+                        authorized(s, package, authority).await?;
+                        match method.as_str() {
+                            "download" => {
+                                preparation
+                                    .download(s, &package.manifest, release, &args)
+                                    .await
+                            }
+                            "archive.executable" => preparation.extract(release, &args),
+                            _ => Err(Error::forbidden(
+                                "Only program preparation is allowed during install.",
+                            )),
                         }
-                        "archive.executable" => preparation.extract(release, &args),
-                        _ => Err(Error::forbidden(
-                            "Only program preparation is allowed during install.",
-                        )),
-                    };
+                    }
+                    .await;
                     result.map_err(|error| {
                         let code = capabilities::code(&error);
                         *refused_ref.lock().unwrap() = Some(error);
@@ -457,6 +496,7 @@ async fn install(
         binary_sha256,
     };
     let target = directory.join(&installed.binary_sha256);
+    authorized(s, package, authority).await?;
     std::fs::rename(binary, target)?;
     lock.previous = lock.installed.take();
     lock.installed = Some(installed);
@@ -487,8 +527,8 @@ pub async fn executable(s: &Service, manifest: &Manifest, program: &Program) -> 
     let _guard = s.plugins.program_installation.lock().await;
     let mut lock = read_lock(&directory)?;
     if lock.installed.is_none() {
-        let release = resolve(s, &package, program).await?;
-        install(s, &package, program, &directory, &mut lock, release).await?;
+        let release = resolve(s, &package, program, None).await?;
+        install(s, &package, program, &directory, &mut lock, release, None).await?;
     }
     installed_path(
         &directory,
@@ -509,7 +549,11 @@ pub(crate) fn needs_preparation(s: &Service, package: &Package) -> bool {
 }
 
 /// Prepare before activating an uploaded version; failure leaves the old version active.
-pub async fn prepare(s: &Service, package: &Package) -> Result<()> {
+pub async fn prepare(
+    s: &Service,
+    package: &Package,
+    owner: Option<&super::operations::Owner>,
+) -> Result<()> {
     if !package
         .manifest
         .programs
@@ -519,6 +563,8 @@ pub async fn prepare(s: &Service, package: &Package) -> Result<()> {
         return Ok(());
     }
     let _guard = s.plugins.program_installation.lock().await;
+    let authority = owner.map(Authority::Approval);
+    authorized(s, package, authority).await?;
     for program in package
         .manifest
         .programs
@@ -530,8 +576,11 @@ pub async fn prepare(s: &Service, package: &Package) -> Result<()> {
         if let Some(installed) = &lock.installed {
             installed_path(&directory, installed)?;
         } else {
-            let release = resolve(s, package, program).await?;
-            install(s, package, program, &directory, &mut lock, release).await?;
+            let release = resolve(s, package, program, authority).await?;
+            install(
+                s, package, program, &directory, &mut lock, release, authority,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -558,18 +607,34 @@ pub async fn action(
     action: &str,
     input: &Value,
 ) -> Result<Value> {
+    let owner = super::operations::Owner::current(s).await?;
+    action_owned(s, id, name, action, input, &owner).await
+}
+
+pub(crate) async fn action_owned(
+    s: &Service,
+    id: &str,
+    name: &str,
+    action: &str,
+    input: &Value,
+    owner: &super::operations::Owner,
+) -> Result<Value> {
     let package = registry::active(s, id).await?;
+    let authority = Some(Authority::Update(owner));
+    authorized(s, &package, authority).await?;
     let program = package
         .manifest
         .program(name)
         .filter(|program| !program.installer.is_empty())
         .ok_or_else(|| Error::not_found("This program has no installer."))?;
     let _guard = s.plugins.program_installation.lock().await;
+    authorized(s, &package, authority).await?;
     let directory = root(s, &package, program);
     let mut lock = read_lock(&directory)?;
     match action {
         "check" => {
-            lock.candidate = Some(resolve(s, &package, program).await?);
+            lock.candidate = Some(resolve(s, &package, program, authority).await?);
+            authorized(s, &package, authority).await?;
             write_lock(&directory, &lock)?;
         }
         "install" => {
@@ -582,7 +647,10 @@ pub async fn action(
                     "The candidate release changed. Check for updates again.",
                 ));
             }
-            install(s, &package, program, &directory, &mut lock, release).await?;
+            install(
+                s, &package, program, &directory, &mut lock, release, authority,
+            )
+            .await?;
         }
         "rollback" => {
             let previous = lock
@@ -593,6 +661,7 @@ pub async fn action(
             lock.previous = lock.installed.take();
             lock.installed = Some(previous);
             lock.candidate = None;
+            authorized(s, &package, authority).await?;
             write_lock(&directory, &lock)?;
         }
         _ => return Err(Error::not_found("Unknown program action.")),

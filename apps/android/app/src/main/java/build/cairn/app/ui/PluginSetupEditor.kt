@@ -65,10 +65,10 @@ internal fun InstanceEditor(
     vm: CairnViewModel,
     state: Workspace,
     pluginId: String,
-    entry: PluginEntry,
+    entry: PluginConfigurationEntry,
     manifest: PluginManifest,
     initial: PluginConnection,
-    connections: List<PluginConnection>,
+    configuration: PluginConfiguration?,
     close: () -> Unit,
     openAgents: () -> Unit,
     saved: suspend () -> Unit,
@@ -80,6 +80,7 @@ internal fun InstanceEditor(
     val setup = remember(entry) { entry.resolvedSetup() }
     // A package with nothing to enter still gets one step, for its name.
     val steps = setup.steps.ifEmpty { listOf(SetupStep("details", "settings", "Details")) }
+    val connections = configuration?.connections.orEmpty()
     val mine = connections.filter { it.pluginId == pluginId }
     val sources = sharedSources(steps, manifest.settings, mine, initial.id.takeIf { !creating })
     val sharedKeys = steps.filter { it.shared }.flatMap { it.settings }
@@ -157,6 +158,7 @@ internal fun InstanceEditor(
             connections,
             everyone = accessMode == "everyone",
             draftGrants = if (creating) grants else emptyList(),
+            pluginAccess = configuration?.hasPluginAccess(agent.id) == true,
         )
     fun refresh(key: String?) {
         asking = (asking.first + 1) to listOf(key)
@@ -171,6 +173,20 @@ internal fun InstanceEditor(
         secrets = secrets - sharedKeys.toSet()
         refresh(null)
     }
+    fun formBody() = buildJsonObject {
+        if (!creating) put("instance", initial.id)
+        put("settings", pluginSettings(stored, values))
+        put("secrets", pluginSecrets(secrets))
+        sharing()
+        credentialInput(token, signIn)?.let { (key, value) -> put(key, value) }
+    }
+    val lookup =
+        PluginChoiceLookup(
+            vm.api,
+            "/plugins/${segment(pluginId)}/form",
+            formBody(),
+            manifest.version,
+        )
     val scope = rememberCoroutineScope()
     /** Forgets the sign-in, on the installation too unless a save consumed it. */
     fun cancelSignIn() {
@@ -305,7 +321,7 @@ internal fun InstanceEditor(
                                 changed?.let { put("changed", it) }
                             },
                         )
-                    wireJson.decodeFromJsonElement<PluginForm>(result)
+                    decodePluginForm(result)
                 }
                     .onSuccess { form ->
                         val derived =
@@ -568,6 +584,7 @@ internal fun InstanceEditor(
                 if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                 state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 completion?.errors?.get("form")?.let { FormError(it) }
+                manifest.unshownFormErrors(completion?.errors.orEmpty()).forEach { FormError(it) }
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     if (steps.size > 1) Eyebrow("Étape ${index + 1} sur ${steps.size}")
                     Text(
@@ -639,6 +656,7 @@ internal fun InstanceEditor(
                         options = completion?.options.orEmpty(),
                         errors = formErrors,
                         refresh = ::refresh,
+                        lookup = lookup,
                     )
                     if (current.presets.isNotEmpty() && switches.isNotEmpty())
                         FineTune(current.matchingPreset(fields, values).isEmpty(), current.id) {
@@ -651,6 +669,7 @@ internal fun InstanceEditor(
                                 enabled = !state.busy,
                                 errors = formErrors,
                                 refresh = ::refresh,
+                                lookup = lookup,
                             )
                         }
                 }
@@ -879,6 +898,12 @@ internal fun InstanceEditor(
                     }
 
                 if (manifest.delegates && current.kind in listOf("people", "agents")) {
+                    agent?.externalBotExecutionWarning()?.let { warning ->
+                        SetupWarning(
+                            title = "Exécution native indisponible pour ce bot",
+                            text = warning,
+                        )
+                    }
                     val chosenRisks = agent?.let(::risks).orEmpty()
                     if (agent != null && chosenRisks.isNotEmpty()) {
                         val everyone = accessMode == "everyone"
@@ -889,7 +914,7 @@ internal fun InstanceEditor(
                                 else
                                     "Les personnes autorisées peuvent utiliser tout ce que ${agent.name} sait faire",
                             text =
-                                "Via le bot, il est possible de ${listed(chosenRisks)}. " +
+                                "Via le bot, ces personnes peuvent ${listed(chosenRisks)}. " +
                                     if (everyone)
                                         "Pour un salon public, préférez un agent en lecture seule avec un seul projet."
                                     else

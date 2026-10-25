@@ -41,6 +41,13 @@ destination. Before changing anything it refuses:
   access explicitly first.
 - Any plugin delegation still pointing at the source, even when disabled.
   Reassign and reapprove it using the normal owner workflow first.
+- Any resource route or granular resource-access rule still naming the source,
+  including paused routes and rules whose package is unavailable. Reassign and
+  approve routes through their normal owner workflow. Grant the needed resource
+  rights on the destination, then explicitly revoke the source's rules before
+  merging. Ordinary agent-access coverage cannot prove equivalence of granular
+  operation profiles, exceptions and resource scopes; merging never transfers or
+  widens those approvals automatically.
 
 A rejected request leaves all references and permissions unchanged. A successful
 request returns `sourceId`, `targetId`, `deleted: true` and `transferred` counts.
@@ -59,3 +66,8 @@ profile identity, while saved snapshots keep the original name and settings.
 Integration coverage exercises the owner API, both MCP interfaces and their
 authorization, archived and trash references, session resumption and reopening
 the database, retained live grants, blocked cases and transaction rollback.
+
+The resource-reference precondition reads a Boolean projection, without loading
+all route configuration and people directories. Its reproducible
+[local read/write comparison](https://github.com/leo91000/cairn/blob/4ccc044c0337bf246f9bae3a785c4c686124cc49/docs/performance/AGENT-MERGE-RESOURCE-READS.md) records
+logical bytes, first/warm reads, unchanged writes, CPU and host conditions.

@@ -7,6 +7,27 @@ import org.junit.Test
 
 class PluginFormValuesTest {
     @Test
+    fun `remote lookup metadata distinguishes unknown empty continued and complete pages`() {
+        val base =
+            """{"lookup":{"field":"channel","query":"","cursor":"empty"},"options":{"channel":[]}}"""
+        val unknown = decodePluginForm(wireJson.parseToJsonElement(base))
+        assertEquals(PluginFormLookup("channel", "", "empty"), unknown.lookup)
+        assertEquals(null, unknown.pages)
+        for (cursor in listOf(JsonNull, JsonPrimitive("next"))) {
+            val page = wireJson.parseToJsonElement(base).jsonObject.toMutableMap()
+            page["pages"] = buildJsonObject {
+                put("channel", buildJsonObject { put("nextCursor", cursor) })
+            }
+            val form = decodePluginForm(JsonObject(page))
+            assertEquals(emptyList<PluginOption>(), form.options["channel"])
+            assertEquals(
+                PluginChoicePage(cursor.jsonPrimitive.contentOrNull),
+                form.pages?.get("channel"),
+            )
+        }
+    }
+
+    @Test
     fun `client whitespace corpus matches actual Kotlin runtime and production helpers`() {
         val corpusFile = File(requireNotNull(System.getProperty("cairn.pluginFormCorpus")))
         val boundaries =

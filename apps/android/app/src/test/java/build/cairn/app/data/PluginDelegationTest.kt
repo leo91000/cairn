@@ -72,4 +72,33 @@ class PluginDelegationTest {
         assertEquals("a", listed(listOf("a")))
         assertEquals("a, b et c", listed(listOf("a", "b", "c")))
     }
+
+    @Test
+    fun `listed and public people get a warning about delegated work`() {
+        for (everyone in listOf(false, true)) {
+            assertEquals(
+                listOf("déléguer du travail à d'autres agents de code et modèles"),
+                agent(limited.copy(delegation = true)).delegationRisks(emptyList(), everyone),
+            )
+        }
+    }
+
+    @Test
+    fun `resource permission metadata warns without an instance grant`() {
+        val helper = agent(limited)
+        assertEquals(
+            listOf("utiliser ses plugins, comme GitHub ou 1Password"),
+            helper.delegationRisks(emptyList(), everyone = true, pluginAccess = true),
+        )
+        assertEquals(emptyList<String>(), helper.delegationRisks(emptyList(), true))
+        assertEquals(
+            emptyList<String>(),
+            helper.delegationRisks(emptyList(), false, pluginAccess = true),
+        )
+        val metadata =
+            wireJson.decodeFromString<RouteEligibility>(
+                """{"agentId":"helper","eligible":true,"pluginAccess":true}"""
+            )
+        assertEquals(true, metadata.pluginAccess)
+    }
 }

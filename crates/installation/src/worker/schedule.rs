@@ -7,6 +7,7 @@ use crate::{
     config::now,
     error::{Error, Result},
     execution,
+    plugins::requesters::ExecutionSource,
     provider::Provider,
     recovery,
     run_status::RunStatus,
@@ -27,6 +28,7 @@ const DAY_MS: i64 = 86_400_000;
 const RECOVERY_WAIT_REASON: &str = "Waiting for the previous execution to stop before recovery.";
 /// Starts the reason of a run that stays queued until a node has room for it.
 pub(super) const CAPACITY_WAIT_REASON: &str = "Waiting for capacity.";
+pub(super) const SOURCE_WAIT_REASON: &str = "Waiting to verify the requester's source access.";
 
 impl Worker {
     pub async fn tick(self: &Arc<Self>, s: &Arc<Service>) -> Result<()> {
@@ -152,6 +154,18 @@ impl Worker {
             return Ok(());
         }
         let current = s.store.run(&run_id).await?;
+        let origin = run.clone();
+        let source = match s
+            .store
+            .read(move |db| ExecutionSource::capture_in(db, &origin))
+            .await
+        {
+            Ok(source) => source,
+            Err(error) => return self.source_failure(s, &run_id, error).await.map(|_| ()),
+        };
+        if !self.source_ready(s, &run_id, source.as_ref()).await? {
+            return Ok(());
+        }
         if current["status"] != RunStatus::Queued
             || crate::run_retry::Retry::waiting(&current, now())
         {
@@ -201,13 +215,23 @@ impl Worker {
             Err(error) => return report_account_wait(s, &run, provider, &error).await,
         };
         let cancel = CancellationToken::new();
-        match self.register(s, &run, cancel.clone()).await {
+        let admitted = match self.source_ready(s, &run_id, source.as_ref()).await {
+            Ok(true) => {
+                self.register(s, &run, cancel.clone(), source.as_ref())
+                    .await
+            }
+            other => other,
+        };
+        match admitted {
             Ok(true) => {}
             result => {
                 if let Some(account) = account {
                     s.accounts.release(&account).await?;
                 }
-                return result.map(|_| ());
+                return match result {
+                    Err(error) => self.source_failure(s, &run_id, error).await.map(|_| ()),
+                    Ok(_) => Ok(()),
+                };
             }
         }
         projects.extend(locked_projects(s, &run));
@@ -221,6 +245,7 @@ impl Worker {
                 Admission {
                     account,
                     preparation,
+                    source,
                 },
                 cancel,
             )
@@ -232,12 +257,54 @@ impl Worker {
         Ok(())
     }
 
+    async fn source_ready(
+        &self,
+        s: &Service,
+        run_id: &str,
+        source: Option<&ExecutionSource>,
+    ) -> Result<bool> {
+        if let Some(source) = source
+            && let Err(error) = source.recheck(s).await
+        {
+            return self.source_failure(s, run_id, error).await;
+        }
+        Ok(true)
+    }
+
+    async fn source_failure(&self, s: &Service, run_id: &str, error: Error) -> Result<bool> {
+        if ExecutionSource::is_revoked(&error) {
+            self.cancel(s, run_id).await?;
+            s.store
+                .event(
+                    run_id,
+                    "status",
+                    "The requester's source access was revoked.",
+                    None,
+                )
+                .await?;
+            return Ok(false);
+        }
+        if ExecutionSource::is_unavailable(&error) {
+            if s.store.run(run_id).await?["accountWaitReason"] == SOURCE_WAIT_REASON {
+                return Ok(false);
+            }
+            let patch = json!({
+                "accountWaitReason": SOURCE_WAIT_REASON,
+                "accountRequired": null,
+            });
+            s.store.patch_run(run_id, patch).await?;
+            return Ok(false);
+        }
+        Err(error)
+    }
+
     /// Rechecks persisted eligibility under the cancellation/cleanup lock before admission.
     async fn register(
         &self,
         s: &Service,
         prepared: &Value,
         cancel: CancellationToken,
+        source: Option<&ExecutionSource>,
     ) -> Result<bool> {
         let run_id = text(prepared, "id");
         let mut active = self.active.lock().await;
@@ -245,6 +312,7 @@ impl Worker {
             return Ok(false);
         }
         let id = run_id.to_owned();
+        let source = source.cloned();
         let expected_agent = prepared["snapshot"]["agent"].clone();
         let expected_message = crate::waits::execution_id(prepared).clone();
         let eligible = s
@@ -252,6 +320,9 @@ impl Worker {
             .transaction(move |db| {
                 if !eligible_run(db, &id)? || super::retry::expire_in(db, &id)? {
                     return Ok(false);
+                }
+                if let Some(source) = source {
+                    source.recheck_in(db)?;
                 }
                 let current = db
                     .run(&id)?
@@ -888,9 +959,10 @@ mod tests {
         })).await.unwrap();
         // Admission captured an eligible run, then waits behind asynchronous work.
         let active = service.worker.active.lock().await;
-        let registration = service
-            .worker
-            .register(&service, &prepared, CancellationToken::new());
+        let registration =
+            service
+                .worker
+                .register(&service, &prepared, CancellationToken::new(), None);
         tokio::pin!(registration);
         std::future::poll_fn(|cx| {
             assert!(registration.as_mut().poll(cx).is_pending());
@@ -924,23 +996,24 @@ mod tests {
         assert!(
             service
                 .worker
-                .register(&service, &prepared, CancellationToken::new())
+                .register(&service, &prepared, CancellationToken::new(), None)
                 .await
                 .unwrap()
         );
         assert!(
             !service
                 .worker
-                .register(&service, &prepared, CancellationToken::new())
+                .register(&service, &prepared, CancellationToken::new(), None)
                 .await
                 .unwrap()
         );
         service.worker.active.lock().await.remove(&run_id);
 
         let active = service.worker.active.lock().await;
-        let registration = service
-            .worker
-            .register(&service, &prepared, CancellationToken::new());
+        let registration =
+            service
+                .worker
+                .register(&service, &prepared, CancellationToken::new(), None);
         tokio::pin!(registration);
         std::future::poll_fn(|cx| {
             assert!(registration.as_mut().poll(cx).is_pending());
@@ -993,7 +1066,7 @@ mod tests {
         assert!(
             !service
                 .worker
-                .register(&service, &prepared, CancellationToken::new())
+                .register(&service, &prepared, CancellationToken::new(), None)
                 .await
                 .unwrap()
         );
@@ -1046,7 +1119,7 @@ mod tests {
         assert!(
             !service
                 .worker
-                .register(&service, &prepared, CancellationToken::new())
+                .register(&service, &prepared, CancellationToken::new(), None)
                 .await
                 .unwrap()
         );
@@ -1054,7 +1127,7 @@ mod tests {
         assert!(
             service
                 .worker
-                .register(&service, &resumed, CancellationToken::new())
+                .register(&service, &resumed, CancellationToken::new(), None)
                 .await
                 .unwrap()
         );

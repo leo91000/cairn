@@ -8,11 +8,16 @@ isolateTestCredentials()
 const nextest = process.argv[2] === '--nextest'
 const args = process.argv.slice(nextest ? 3 : 2)
 const selectsPackage = args.some(arg => arg === '-p' || arg === '--package' || arg.startsWith('--package='))
+const includesInstallation = !selectsPackage || args.includes('--workspace')
+  || args.includes('cairn-installation') || args.includes('--package=cairn-installation')
 // Beacon's real MCP relay tests also execute the installation's isolated code
 // worker. Build it with the same profile flags before tests start, so a
 // nested Cargo invocation cannot overwrite the binary with another profile.
-const needsCodeWorker = !selectsPackage || args.includes('--workspace')
+const needsCodeWorker = includesInstallation
   || args.includes('cairn-beacon') || args.includes('--package=cairn-beacon')
+// Installation journeys also launch a real manager from this example. Cargo's
+// selected integration tests build bins but can leave an old example in place.
+const needsManagerFixture = includesInstallation && !args.includes('--doc')
 if (needsCodeWorker) {
   const delimiter = args.indexOf('--')
   const cargoArgs = delimiter < 0 ? args : args.slice(0, delimiter)
@@ -39,6 +44,7 @@ if (needsCodeWorker) {
     'cairn-installation',
     '--bin',
     'cairn',
+    ...(needsManagerFixture ? ['--example', 'worker_fixture'] : []),
     '--message-format=json',
     ...buildArgs,
   ], { stdio: ['inherit', 'pipe', 'inherit'], encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
@@ -55,6 +61,8 @@ if (needsCodeWorker) {
   const worker = records.find(record => record.reason === 'compiler-artifact' && record.target?.name === 'cairn' && record.executable)
   if (!worker)
     throw new Error('Cargo did not produce the Cairn code worker')
+  if (needsManagerFixture && !records.some(record => record.reason === 'compiler-artifact' && record.target?.name === 'worker_fixture' && record.executable))
+    throw new Error('Cargo did not produce the native manager fixture')
   process.env.CAIRN_TEST_CODE_WORKER = worker.executable
 }
 

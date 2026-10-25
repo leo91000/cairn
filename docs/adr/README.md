@@ -79,6 +79,8 @@ for current behavior.
 | 0068 | [Owner-chosen agents for bot delegation](0068-owner-chosen-agents-for-bot-delegation.md) |
 | 0069 | [Nodes mises en relation par Beacon, sans adresse](0069-nodes-introduced-by-beacon.md) |
 | 0070 | [Automatic bounded native disk growth](0070-automatic-native-disk-growth.md) |
+| 0071 | [Personal plugin authorizations](0071-personal-plugin-authorizations.md) |
+| 0072 | [Transient plugin contexts](0072-transient-plugin-contexts.md) |
 
 ## Renumbered collisions
 
@@ -97,3 +99,5 @@ Earlier links in issues and PRs can be resolved with this table.
 | `0059-owner-chosen-agents-for-bot-delegation.md` | [ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md) |
 | `0059-nodes-introduced-by-beacon.md` | [ADR-0069](0069-nodes-introduced-by-beacon.md) |
 | `0060-automatic-native-disk-growth.md` | [ADR-0070](0070-automatic-native-disk-growth.md) |
+| `0050-personal-plugin-authorizations.md` | [ADR-0071](0071-personal-plugin-authorizations.md) |
+| `0051-transient-plugin-contexts.md` | [ADR-0072](0072-transient-plugin-contexts.md) |

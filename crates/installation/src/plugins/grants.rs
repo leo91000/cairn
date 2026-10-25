@@ -1,0 +1,924 @@
+//! Resource access is owner-managed. A tool/command pins one approved operation,
+//! one resource and its input scopes before any package code can use credentials.
+use super::{
+    capabilities::{self, Context},
+    connections::{self, Connection},
+    registry::{self, Package},
+    resources::{self, Resource},
+    scope::Scope,
+};
+use crate::{
+    config::{id, now},
+    error::{Error, Result},
+    service::Service,
+    store::Db,
+    validation::{text, uuid},
+};
+use cairn_plugin_api::{Manifest, Operation, Profile};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+pub const KIND: &str = "plugin-resource-grants";
+
+/// Operation definitions for comparing two agents' resource permissions. Package
+/// files load outside the write transaction; current rules and exact approvals
+/// are checked together when the delegated conversation is created.
+pub(crate) struct DelegationAccess {
+    packages: HashMap<String, registry::ApprovedPackage>,
+}
+
+impl DelegationAccess {
+    pub(crate) async fn capture(s: &Service, requesting: &str, target: &str) -> Result<Self> {
+        let mut packages = HashMap::new();
+        if requesting != target {
+            for grant in s.store.list(KIND).await? {
+                if grant["agentId"] != target {
+                    continue;
+                }
+                let connection = s
+                    .store
+                    .get(connections::KIND, text(&grant, "connectionId"))
+                    .await?
+                    .ok_or_else(|| Error::forbidden("A target resource grant is unavailable."))?;
+                let plugin = text(&connection, "pluginId");
+                if !packages.contains_key(plugin) {
+                    packages.insert(plugin.to_owned(), registry::approved(s, plugin).await?);
+                }
+            }
+        }
+        Ok(Self { packages })
+    }
+
+    pub(crate) fn covers_in(&self, db: &Db<'_>, requesting: &str, target: &str) -> Result<bool> {
+        if requesting == target {
+            return Ok(true);
+        }
+        for package in self.packages.values() {
+            package.recheck_in(db)?;
+        }
+        let grants = db
+            .list(KIND)?
+            .into_iter()
+            .filter(|grant| grant["agentId"] == requesting || grant["agentId"] == target)
+            .map(serde_json::from_value::<Grant>)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut comparisons = 16_384;
+        for grant in grants.iter().filter(|grant| grant.agent_id == target) {
+            let Some(connection) = db.get(connections::KIND, &grant.connection_id)? else {
+                return Ok(false);
+            };
+            let Some(resource) = db.get(resources::KIND, &grant.resource_id)? else {
+                return Ok(false);
+            };
+            let Some(package) = self.packages.get(text(&connection, "pluginId")) else {
+                // A concurrent new grant needs a fresh comparison, never an
+                // assumption about a package that was not loaded.
+                return Ok(false);
+            };
+            for operation in package
+                .package
+                .manifest
+                .operations
+                .iter()
+                .filter(|operation| {
+                    resource["collection"] == operation.collection
+                        && permits(grant, operation, None)
+                })
+            {
+                let callers = grants
+                    .iter()
+                    .filter(|caller| {
+                        caller.agent_id == requesting
+                            && caller.connection_id == grant.connection_id
+                            && caller.resource_id == grant.resource_id
+                            && caller.owner_access_id == grant.owner_access_id
+                            && permits(caller, operation, None)
+                    })
+                    .collect::<Vec<_>>();
+                if !scopes_covered(&grant.scopes, &callers, &mut comparisons)? {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// Check the union of up to 64 resource rules without expanding the Cartesian
+/// product of scope values. Each bit identifies a caller rule; intersections
+/// retain exactly the rules permitting the chosen values in every dimension.
+fn scopes_covered(
+    requested: &BTreeMap<String, Vec<String>>,
+    callers: &[&Grant],
+    comparisons: &mut usize,
+) -> Result<bool> {
+    // A finite union of restricted values cannot cover an unbounded dimension.
+    let callers = callers
+        .iter()
+        .filter(|grant| grant.scopes.keys().all(|name| requested.contains_key(name)))
+        .collect::<Vec<_>>();
+    if callers.is_empty() {
+        return Ok(false);
+    }
+    if callers.len() > 64 {
+        return Err(Error::too_large(
+            "A resource can have at most 64 grant rules.",
+        ));
+    }
+    let dimensions = requested
+        .iter()
+        .map(|(name, values)| {
+            values
+                .iter()
+                .map(|value| {
+                    callers
+                        .iter()
+                        .enumerate()
+                        .fold(0_u64, |mask, (index, grant)| {
+                            if grant
+                                .scopes
+                                .get(name)
+                                .is_none_or(|allowed| allowed.contains(value))
+                            {
+                                mask | (1_u64 << index)
+                            } else {
+                                mask
+                            }
+                        })
+                })
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let all = u64::MAX >> (64 - callers.len());
+    scope_combinations(&dimensions, 0, all, &mut HashMap::new(), comparisons)
+}
+
+fn scope_combinations(
+    dimensions: &[Vec<u64>],
+    index: usize,
+    candidates: u64,
+    memo: &mut HashMap<(usize, u64), bool>,
+    comparisons: &mut usize,
+) -> Result<bool> {
+    if candidates == 0 {
+        return Ok(false);
+    }
+    if index == dimensions.len() {
+        return Ok(true);
+    }
+    if let Some(covered) = memo.get(&(index, candidates)) {
+        return Ok(*covered);
+    }
+    // A rule present in every remaining partition already covers this range.
+    let common = dimensions[index..]
+        .iter()
+        .flatten()
+        .fold(candidates, |mask, value| mask & value);
+    if common != 0 {
+        return Ok(true);
+    }
+    if *comparisons == 0 {
+        return Err(Error::too_large(
+            "These resource rules are too complex to compare. Choose narrower target grants.",
+        ));
+    }
+    *comparisons -= 1;
+    for mask in &dimensions[index] {
+        if !scope_combinations(dimensions, index + 1, candidates & mask, memo, comparisons)? {
+            memo.insert((index, candidates), false);
+            return Ok(false);
+        }
+    }
+    memo.insert((index, candidates), true);
+    Ok(true)
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Grant {
+    pub id: String,
+    pub connection_id: String,
+    pub resource_id: String,
+    pub agent_id: String,
+    pub profile: Option<Profile>,
+    pub operations: Vec<String>,
+    pub denied_operations: Vec<String>,
+    pub scopes: BTreeMap<String, Vec<String>>,
+    pub owner_access_id: String,
+    pub revision: String,
+    pub updated_at: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Input {
+    agent_id: String,
+    #[serde(default)]
+    profile: Option<Profile>,
+    #[serde(default)]
+    operations: Vec<String>,
+    #[serde(default)]
+    denied_operations: Vec<String>,
+    #[serde(default)]
+    scopes: BTreeMap<String, Vec<String>>,
+}
+
+fn summary(grant: &Grant) -> Value {
+    json!({
+        "id": grant.id,
+        "resourceId": grant.resource_id,
+        "agentId": grant.agent_id,
+        "profile": grant.profile,
+        "operations": grant.operations,
+        "deniedOperations": grant.denied_operations,
+        "scopes": grant.scopes,
+        "revision": grant.revision,
+        "updatedAt": grant.updated_at,
+    })
+}
+
+fn permits(grant: &Grant, operation: &Operation, input: Option<&Value>) -> bool {
+    if grant.denied_operations.contains(&operation.name)
+        || !(grant
+            .profile
+            .is_some_and(|profile| profile >= operation.profile)
+            || grant.operations.contains(&operation.name))
+    {
+        return false;
+    }
+    grant.scopes.iter().all(|(name, allowed)| {
+        operation.scopes.contains(name)
+            && input.is_none_or(|input| {
+                input[name]
+                    .as_str()
+                    .is_some_and(|value| allowed.iter().any(|allowed| allowed == value))
+            })
+    })
+}
+
+/// Saved rules, including inactive rules. Never interpreted as whole-instance access.
+pub(crate) fn counts(db: &Db<'_>) -> Result<Value> {
+    let mut counts = serde_json::Map::new();
+    let rows = db.json_rows(
+        "WITH agents AS MATERIALIZED (
+             SELECT json_extract(data,'$.agentId') AS id FROM records WHERE kind=?
+         ) SELECT json_object('agentId',id,'count',count(*)) FROM agents GROUP BY id",
+        [KIND],
+    )?;
+    for row in rows {
+        let id = text(&row, "agentId");
+        if !id.is_empty() {
+            counts.insert(id.to_owned(), row["count"].clone());
+        }
+    }
+    Ok(Value::Object(counts))
+}
+
+/// The owner can inspect every saved rule for an agent, including rules whose
+/// package is paused or awaiting approval. Credential values never enter this list.
+pub(crate) async fn for_agent(s: &Service, agent: &str, cursor: Option<&str>) -> Result<Value> {
+    uuid(agent)?;
+    if let Some(cursor) = cursor {
+        uuid(cursor)?;
+    }
+    let agent = agent.to_owned();
+    let cursor = cursor.map(str::to_owned);
+    s.store
+        .read(move |db| {
+            db.get("agents", &agent)?
+                .ok_or_else(|| Error::not_found("Agent not found."))?;
+            let mut items = Vec::new();
+            // One lookahead record keeps continuation truthful. Apply the ID and
+            // agent filters before decoding large rules or loading their metadata.
+            let values = db.json_rows(
+                "SELECT data FROM records WHERE kind=? AND json_extract(data,'$.agentId')=?
+                 AND id>? ORDER BY id LIMIT ?",
+                rusqlite::params![
+                    KIND,
+                    agent,
+                    cursor.as_deref().unwrap_or(""),
+                    (super::paging::MAX_ITEMS + 1) as i64,
+                ],
+            )?;
+            for value in values {
+                let grant: Grant = serde_json::from_value(value)?;
+                let connection = db
+                    .get(connections::KIND, &grant.connection_id)?
+                    .unwrap_or(Value::Null);
+                let resource = db
+                    .get(resources::KIND, &grant.resource_id)?
+                    .unwrap_or(Value::Null);
+                let mut item = summary(&grant);
+                item["connectionId"] = grant.connection_id.into();
+                item["pluginId"] = connection["pluginId"].clone();
+                item["instanceName"] = connection["name"].clone();
+                item["collection"] = resource["collection"].clone();
+                item["resourceName"] = resource["name"].clone();
+                items.push(item);
+            }
+            super::paging::page(items, cursor.as_deref())
+        })
+        .await
+}
+
+/// Revocation stays available even when a package/resource can no longer load.
+/// The exact agent and rule must match; removing instance grants never removes it.
+pub(crate) async fn revoke_for_agent(
+    s: &Service,
+    agent: &str,
+    grant: &str,
+    account: &str,
+) -> Result<Value> {
+    uuid(agent)?;
+    uuid(grant)?;
+    let owner = super::operations::Owner::for_account(s, account).await?;
+    let (agent, grant) = (agent.to_owned(), grant.to_owned());
+    owner.recheck(s).await?;
+    s.store
+        .transaction(move |db| {
+            let value = db
+                .get(KIND, &grant)?
+                .ok_or_else(|| Error::not_found("Resource grant not found."))?;
+            if value["agentId"] != agent {
+                return Err(Error::not_found("Resource grant not found."));
+            }
+            db.remove(KIND, &grant)?;
+            db.audit(
+                "plugin.resource.revoked",
+                &json!({ "id": grant, "agentId": agent, "connectionId": value["connectionId"] }),
+            )?;
+            Ok(json!({ "deleted": true }))
+        })
+        .await
+}
+
+pub async fn create(
+    s: &Service,
+    plugin: &str,
+    instance: &str,
+    collection: &str,
+    resource: &str,
+    account: &str,
+    value: &Value,
+) -> Result<Value> {
+    let connection = connections::get(s, plugin, instance).await?;
+    let resource = resources::get(s, plugin, instance, collection, resource).await?;
+    let approved = registry::approved(s, plugin).await?;
+    let package = &approved.package;
+    if package.manifest.agent_access.is_none() {
+        return Err(Error::bad("This package declares no agent access."));
+    }
+    let input: Input =
+        serde_json::from_value(value.clone()).map_err(|_| Error::bad("Invalid resource grant."))?;
+    uuid(&input.agent_id)?;
+    let operations = package
+        .manifest
+        .operations
+        .iter()
+        .filter(|operation| operation.collection == collection)
+        .collect::<Vec<_>>();
+    if operations.is_empty()
+        || (input.profile.is_none() && input.operations.is_empty())
+        || input.operations.len() > 128
+        || input.denied_operations.len() > 128
+        || input
+            .operations
+            .iter()
+            .chain(&input.denied_operations)
+            .any(|name| !operations.iter().any(|operation| &operation.name == name))
+        || input.scopes.len() > 8
+        || !input.scopes.iter().all(|(name, values)| {
+            operations
+                .iter()
+                .any(|operation| operation.scopes.contains(name))
+                && !values.is_empty()
+                && values.len() <= 100
+                && values.iter().all(|value| {
+                    !value.is_empty() && value.len() <= 200 && !value.chars().any(char::is_control)
+                })
+        })
+    {
+        return Err(Error::bad(
+            "Choose declared operations and non-empty scope limits.",
+        ));
+    }
+    let owner = crate::relay::task_author_policy(s)
+        .await?
+        .ok_or_else(|| Error::forbidden("The installation has no verified owner."))?
+        .owner;
+    if owner.account_id != account {
+        return Err(Error::forbidden(
+            "Only the current installation owner can grant resource access.",
+        ));
+    }
+    let grant = Grant {
+        id: id(),
+        connection_id: instance.to_owned(),
+        resource_id: resource.id.clone(),
+        agent_id: input.agent_id,
+        profile: input.profile,
+        operations: input.operations,
+        denied_operations: input.denied_operations,
+        scopes: input.scopes,
+        owner_access_id: owner.access_id,
+        revision: id(),
+        updated_at: now(),
+    };
+    approved.recheck(s).await?;
+    s.store
+        .transaction(move |db| {
+            approved.recheck_in(db)?;
+            let current = db.get(connections::KIND, &connection.id)?;
+            let current_resource = db.get(resources::KIND, &resource.id)?;
+            if !current.is_some_and(|value| value["revision"] == connection.revision)
+                || !current_resource.is_some_and(|value| value["revision"] == resource.revision)
+            {
+                return Err(Error::conflict(
+                    "The resource changed. Reload before granting access.",
+                ));
+            }
+            if db.get("agents", &grant.agent_id)?.is_none() {
+                return Err(Error::bad("Agent not found."));
+            }
+            if db
+                .list(KIND)?
+                .iter()
+                .filter(|value| value["resourceId"] == resource.id)
+                .count()
+                >= 64
+            {
+                return Err(Error::too_large(
+                    "A resource can have at most 64 grant rules.",
+                ));
+            }
+            db.put(KIND, &serde_json::to_value(&grant)?)?;
+            db.audit(
+                "plugin.resource.granted",
+                &json!({ "id": grant.id, "connectionId": connection.id, "agentId": grant.agent_id }),
+            )?;
+            Ok(summary(&grant))
+        })
+        .await
+}
+
+pub async fn list(
+    s: &Service,
+    plugin: &str,
+    instance: &str,
+    collection: &str,
+    resource: &str,
+    cursor: Option<&str>,
+) -> Result<Value> {
+    resources::get(s, plugin, instance, collection, resource).await?;
+    let values = s
+        .store
+        .list(KIND)
+        .await?
+        .into_iter()
+        .filter(|value| value["resourceId"] == resource && value["connectionId"] == instance)
+        .map(serde_json::from_value::<Grant>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    super::paging::page(values.iter().map(summary).collect(), cursor)
+}
+
+pub async fn remove(
+    s: &Service,
+    plugin: &str,
+    instance: &str,
+    collection: &str,
+    resource: &str,
+    grant: &str,
+) -> Result<Value> {
+    resources::get(s, plugin, instance, collection, resource).await?;
+    uuid(grant)?;
+    let (instance, resource, grant) = (instance.to_owned(), resource.to_owned(), grant.to_owned());
+    s.store
+        .transaction(move |db| {
+            let value = db
+                .get(KIND, &grant)?
+                .ok_or_else(|| Error::not_found("Resource grant not found."))?;
+            if value["connectionId"] != instance || value["resourceId"] != resource {
+                return Err(Error::not_found("Resource grant not found."));
+            }
+            db.remove(KIND, &grant)?;
+            db.audit(
+                "plugin.resource.revoked",
+                &json!({ "id": grant, "connectionId": instance }),
+            )?;
+            Ok(json!({ "deleted": true }))
+        })
+        .await
+}
+
+pub(crate) struct Catalog {
+    grants: Vec<Grant>,
+    resources: HashMap<String, Resource>,
+}
+
+impl Catalog {
+    pub async fn load(s: &Service, agent: &str) -> Result<Self> {
+        let mut grants = s
+            .store
+            .list(KIND)
+            .await?
+            .into_iter()
+            .filter(|value| value["agentId"] == agent)
+            .map(serde_json::from_value::<Grant>)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if grants.is_empty() {
+            return Ok(Self {
+                grants,
+                resources: HashMap::new(),
+            });
+        }
+        let owner = crate::relay::task_author_policy(s).await?;
+        grants.retain(|grant| {
+            owner
+                .as_ref()
+                .is_some_and(|owner| owner.owner.access_id == grant.owner_access_id)
+        });
+        let resources = s
+            .store
+            .list(resources::KIND)
+            .await?
+            .into_iter()
+            .map(serde_json::from_value::<Resource>)
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|resource| (resource.id.clone(), resource))
+            .collect();
+        Ok(Self { grants, resources })
+    }
+
+    fn enabled(&self, resource: &Resource) -> bool {
+        let mut current = resource;
+        let mut seen = HashSet::new();
+        loop {
+            if !current.enabled
+                || current.connection_id != resource.connection_id
+                || !seen.insert(&current.id)
+            {
+                return false;
+            }
+            let Some(parent) = &current.parent_id else {
+                return true;
+            };
+            let Some(parent) = self.resources.get(parent) else {
+                return false;
+            };
+            current = parent;
+        }
+    }
+
+    pub fn instances(&self) -> HashSet<String> {
+        self.grants
+            .iter()
+            .filter_map(|grant| self.resources.get(&grant.resource_id))
+            .filter(|resource| self.enabled(resource))
+            .map(|resource| resource.connection_id.clone())
+            .collect()
+    }
+
+    pub fn operations(&self, manifest: &Manifest, instances: &[Connection]) -> HashSet<String> {
+        manifest
+            .operations
+            .iter()
+            .filter(|operation| {
+                self.grants.iter().any(|grant| {
+                    self.resources
+                        .get(&grant.resource_id)
+                        .is_some_and(|resource| {
+                            self.enabled(resource)
+                                && resource.collection == operation.collection
+                                && instances
+                                    .iter()
+                                    .any(|instance| instance.id == resource.connection_id)
+                                && permits(grant, operation, None)
+                        })
+                })
+            })
+            .map(|operation| operation.name.clone())
+            .collect()
+    }
+}
+
+#[derive(Clone)]
+pub struct Authorization {
+    pub connection: Connection,
+    pub resource: Resource,
+    pub operation: Operation,
+    pub scopes: BTreeMap<String, String>,
+    grant: Grant,
+    reference: resources::Reference,
+    pub(crate) requester: Option<super::requesters::RunRequester>,
+    bearer: String,
+}
+
+impl Authorization {
+    pub(crate) fn receipt_authority(&self) -> Value {
+        json!({
+            "grant": self.grant,
+            "resources": self.reference.revisions,
+            "operation": self.operation.name,
+            "scopes": self.scopes,
+            "requester": self.requester.as_ref().map(|requester| &requester.principal),
+        })
+    }
+}
+
+pub async fn authorize(
+    s: &Service,
+    run: &Value,
+    package: &Package,
+    name: &str,
+    input: &Value,
+    bearer: &str,
+) -> Result<Scope> {
+    let agent = text(&run["snapshot"]["agent"], "id");
+    let denied =
+        || Error::forbidden("This agent is not granted that resource operation and scope.");
+    let operation = package
+        .manifest
+        .operations
+        .iter()
+        .find(|operation| operation.name == name)
+        .ok_or_else(denied)?
+        .clone();
+    let catalog = Catalog::load(s, agent).await?;
+    let resource = catalog
+        .resources
+        .get(text(input, "resource"))
+        .ok_or_else(denied)?
+        .clone();
+    if resource.collection != operation.collection || !catalog.enabled(&resource) {
+        return Err(denied());
+    }
+    let grant = catalog
+        .grants
+        .iter()
+        .find(|grant| grant.resource_id == resource.id && permits(grant, &operation, Some(input)))
+        .ok_or_else(denied)?
+        .clone();
+    let connection = connections::get(s, &package.manifest.id, &resource.connection_id).await?;
+    if !connection.enabled {
+        return Err(denied());
+    }
+    let scopes = operation
+        .scopes
+        .iter()
+        .map(|name| {
+            let value = input[name]
+                .as_str()
+                .filter(|value| {
+                    !value.is_empty() && value.len() <= 200 && !value.chars().any(char::is_control)
+                })
+                .ok_or_else(denied)?;
+            Ok((name.clone(), value.to_owned()))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let context = Context {
+        management: None,
+        connection: connection.clone(),
+        manifest: package.manifest.clone(),
+        event: Value::Null,
+        link: None,
+        draft: None,
+        resource_grant: None,
+    };
+    let reference = resources::reference(s, &context, &resource.id).await?;
+    let authorization = Authorization {
+        connection,
+        resource,
+        operation,
+        scopes,
+        grant,
+        reference,
+        requester: super::requesters::for_run(s, run).await?,
+        bearer: bearer.to_owned(),
+    };
+    recheck(s, &authorization).await?;
+    Ok(Scope::ResourceAgent(Box::new(authorization)))
+}
+
+pub async fn recheck(s: &Service, authorization: &Authorization) -> Result<()> {
+    crate::project_workspaces::authorize(s, &authorization.bearer).await?;
+    if let Some(requester) = &authorization.requester {
+        super::requesters::recheck(s, requester).await?;
+    }
+    let owner = crate::relay::task_author_policy(s).await?;
+    if !owner.is_some_and(|owner| owner.owner.access_id == authorization.grant.owner_access_id) {
+        return Err(Error::forbidden(
+            "The resource grant changed or was revoked.",
+        ));
+    }
+    let authorization = authorization.clone();
+    s.store
+        .transaction(move |db| recheck_in(db, &authorization))
+        .await
+}
+
+pub(crate) fn recheck_in(db: &Db<'_>, authorization: &Authorization) -> Result<()> {
+    if let Some(requester) = &authorization.requester {
+        super::requesters::recheck_in(db, requester)?;
+    }
+    let expected = authorization.connection.clone();
+    let grant = authorization.grant.clone();
+    let resource = authorization.resource.clone();
+    let requester = authorization.requester.clone();
+    let reference = authorization.reference.clone();
+    let scopes = authorization.scopes.clone();
+    let bearer = authorization.bearer.clone();
+    crate::project_workspaces::authorize_in(db, &bearer)?;
+    connections::authorize(db, &expected)?;
+    if let Some(requester) = requester
+        && let super::requesters::Principal::External(actor) = requester.principal
+    {
+        let origin = db
+            .get(connections::KIND, &actor.connection_id)?
+            .ok_or_else(|| Error::forbidden("The requester's instance was removed."))?;
+        // A source route constrains operations on that integration. Other
+        // integrations still require the agent's own explicit grants.
+        if origin["pluginId"] == expected.plugin_id {
+            let within_resource = actor
+                .binding
+                .resources
+                .iter()
+                .any(|(id, _)| id == &resource.id)
+                || reference
+                    .revisions
+                    .iter()
+                    .any(|(id, _)| id == &actor.binding.resource);
+            let route = db
+                .get(super::routes::KIND, &actor.binding.id)?
+                .ok_or_else(|| Error::forbidden("The requester's route was removed."))?;
+            let within_scopes = scopes.iter().all(|(key, value)| {
+                route["match"]
+                    .get(key)
+                    .is_none_or(|selected| selected == value)
+            });
+            if expected.id != actor.connection_id || !within_resource || !within_scopes {
+                return Err(Error::forbidden(
+                    "This operation is outside the requester's admitted resource and source scope.",
+                ));
+            }
+        }
+    }
+    if db.get("agents", &grant.agent_id)?.is_none()
+        || !db
+            .get(KIND, &grant.id)?
+            .is_some_and(|value| value["revision"] == grant.revision)
+    {
+        return Err(Error::forbidden(
+            "The resource grant changed or was revoked.",
+        ));
+    }
+    if !db
+        .get(resources::KIND, &resource.id)?
+        .is_some_and(|value| value["revision"] == resource.revision)
+    {
+        return Err(Error::forbidden(
+            "The resource changed during the operation.",
+        ));
+    }
+    for (id, revision) in &reference.revisions {
+        if !db
+            .get(resources::KIND, id)?
+            .is_some_and(|value| value["revision"] == *revision && value["enabled"] == true)
+        {
+            return Err(Error::forbidden("The resource changed during the request."));
+        }
+    }
+    Ok(())
+}
+
+fn request_permitted(authorization: &Authorization, args: &Value) -> bool {
+    if args["auth"]["resource"] != authorization.resource.id {
+        return false;
+    }
+    if args
+        .get("operation")
+        .is_some_and(|value| value != &authorization.operation.name)
+    {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(text(args, "url")) else {
+        return false;
+    };
+    let method = args["method"].as_str().unwrap_or("GET");
+    authorization.operation.requests.iter().any(|rule| {
+        if !rule.bindings.is_empty() {
+            if args.get("body").is_some_and(|value| !value.is_null())
+                || args.get("multipart").is_some_and(|value| !value.is_null())
+                || args.get("bodyFile").is_some_and(|value| !value.is_null())
+            {
+                return false;
+            }
+            let form = args.get("form").is_some_and(|value| !value.is_null());
+            let json = args.get("json").is_some_and(|value| !value.is_null());
+            if form && json {
+                return false;
+            }
+            if form || json {
+                let content_types = args["headers"]
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|headers| headers.iter())
+                    .filter(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+                    .map(|(_, value)| value.as_str().unwrap_or_default())
+                    .collect::<Vec<_>>();
+                if content_types.len() > 1
+                    || content_types.first().is_some_and(|value| {
+                        !value
+                            .split(';')
+                            .next()
+                            .unwrap_or_default()
+                            .trim()
+                            .eq_ignore_ascii_case(if form {
+                                "application/x-www-form-urlencoded"
+                            } else {
+                                "application/json"
+                            })
+                    })
+                {
+                    return false;
+                }
+            }
+        }
+        let path = rule.path.strip_suffix('*').map_or_else(
+            || url.path() == rule.path,
+            |prefix| url.path().starts_with(prefix),
+        );
+        rule.method == method
+            && url.host_str() == Some(rule.host.as_str())
+            && path
+            && rule.bindings.iter().all(|(field, scope)| {
+                let mut values = url
+                    .query_pairs()
+                    .filter(|(name, _)| name == field)
+                    .map(|(_, value)| value.into_owned())
+                    .collect::<Vec<_>>();
+                for body in ["json", "form"] {
+                    if let Some(value) = args[body].get(field) {
+                        let Some(value) = value.as_str() else {
+                            return false;
+                        };
+                        values.push(value.to_owned());
+                    }
+                }
+                let expected = if let Some(key) = scope.strip_prefix("resource.") {
+                    authorization.resource.settings[key].as_str()
+                } else {
+                    authorization.scopes.get(scope).map(String::as_str)
+                };
+                values.len() == 1 && expected == values.first().map(String::as_str)
+            })
+    })
+}
+
+pub async fn call(
+    s: &Service,
+    package: &Package,
+    authorization: &Authorization,
+    method: &str,
+    args: &Value,
+) -> Result<Value> {
+    let denied = || {
+        Error::forbidden("This capability or request is outside the granted resource operation.")
+    };
+    let result = match method {
+        "resources.get"
+            if args["resource"] == authorization.resource.id
+                && args["collection"] == authorization.resource.collection =>
+        {
+            serde_json::to_value(&authorization.resource)?
+        }
+        "resources.list" if args["collection"] == authorization.resource.collection => {
+            json!({ "items": [&authorization.resource], "nextCursor": null })
+        }
+        "http.request" if request_permitted(authorization, args) => {
+            let context = Context {
+                management: None,
+                connection: authorization.connection.clone(),
+                manifest: package.manifest.clone(),
+                event: Value::Null,
+                link: None,
+                draft: None,
+                resource_grant: Some(std::sync::Arc::new(authorization.clone())),
+            };
+            capabilities::effect(s, &context, method, args.clone(), || async {
+                recheck(s, authorization).await?;
+                registry::require_digest(s, &package.manifest.id, &package.digest).await
+            })
+            .await?
+        }
+        _ => return Err(denied()),
+    };
+    recheck(s, authorization).await?;
+    if registry::active(s, &package.manifest.id).await?.digest != package.digest {
+        return Err(Error::forbidden("The plugin approval changed."));
+    }
+    Ok(result)
+}

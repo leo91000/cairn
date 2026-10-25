@@ -29,6 +29,7 @@ import {
   withBackend,
   withRun,
 } from '../src/agent-access'
+import { agentPluginPackage } from '../src/agent-plugin-directory'
 
 const gpu = {
   id: 'gpu',
@@ -72,7 +73,7 @@ const context: Context = {
   skills: [],
   mcps: [],
   nodes: [gpu],
-  packages: [onePassword],
+  packages: [agentPluginPackage(onePassword)],
   connections: [production],
 }
 
@@ -260,7 +261,7 @@ it('reports a held grant whose plugin cannot give agents access any more', () =>
   }) as PluginConnection
   const held: Context = {
     ...context,
-    packages: [onePassword, review, broken, withdrawn],
+    packages: [onePassword, review, broken, withdrawn].map(agentPluginPackage),
     connections: [production, instance('queue', 'tickets'), instance('old', 'broken'), instance('memo', 'notes')],
   }
   expect(grantablePackages(held.packages).map(entry => entry.id)).toEqual(['onepassword'])
@@ -272,7 +273,7 @@ it('reports a held grant whose plugin cannot give agents access any more', () =>
   const found = issues(draft, held, false)
   expect(found.map(issue => issue.section)).toEqual(['plugins', 'plugins', 'plugins'])
   expect(found[0]!.text).toBe('Tickets “queue” is unavailable: its plugin needs review or no longer gives agents access.')
-  expect(found[1]!.text).toBe('Plugin “old” is unavailable: its plugin needs review or no longer gives agents access.')
+  expect(found[1]!.text).toBe('broken “old” is unavailable: its plugin needs review or no longer gives agents access.')
 })
 
 it('lists every reduction the Android review lists', () => {
@@ -635,6 +636,12 @@ it('keeps read-only exclusive reservations when run permissions or the backend c
   // An older installation keeps them on its nodes and never receives them: nothing to remove.
   expect(withRun(access, ['gpu'], 'other', true)).toEqual({ nodes: ['gpu', 'box', 'other'], exclusiveNodes: ['gpu'] })
   expect(withBackend()).toEqual({ nodes: [], exclusiveNodes: [] })
+})
+
+it('keeps scoped resource rules visible when no whole instance is granted', () => {
+  const agent = { id: 'scoped', plugins: [], access: { projects: [], nodes: ['local'] } } as unknown as Agent
+  expect(accessSummary(agent, { packages: [], connections: [], resourceGrantCounts: { scoped: 2 } })).toContain('2 saved resource rules')
+  expect(agent.plugins).toEqual([])
 })
 
 it('reviews administrator node admission as a power even after converting a wildcard grant', () => {

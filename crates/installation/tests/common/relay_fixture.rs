@@ -213,3 +213,44 @@ pub async fn claimed(service: &Service) -> Result<()> {
     });
     Ok(())
 }
+
+/// Replaces this fixture's owner grant without changing the owner's account ID.
+/// Callers keep the returned local server alive for the authority checks.
+pub async fn replace_owner_access(
+    service: &Service,
+    access_id: &str,
+) -> tokio::task::JoinHandle<()> {
+    let access_id = access_id.to_owned();
+    let app = Router::new().route(
+        "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+        get(move || {
+            let access_id = access_id.clone();
+            async move {
+                Json(TaskAuthorPolicy {
+                    owner: TaskAuthorGrant {
+                        account_id: "fixture-owner".into(),
+                        access_id,
+                    },
+                    members: Vec::new(),
+                })
+            }
+        }),
+    );
+    // This module is also included directly by examples/worker_fixture.rs.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let path = service
+        .config
+        .data_dir
+        .join("installation-relay/identity.json");
+    let mut identity: Value =
+        serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+    identity["origin"] = origin.into();
+    tokio::fs::write(path, serde_json::to_vec(&identity).unwrap())
+        .await
+        .unwrap();
+    server
+}

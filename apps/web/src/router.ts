@@ -21,6 +21,7 @@ export function workspaceRouter(base = '/') {
       { path: '/atelier', component: () => import('./views/Atelier.vue') },
       { path: '/chats/:id?', component: () => import('./views/Chats.vue') },
       { path: '/plugins', component: () => import('./views/Plugins.vue') },
+      { path: '/personal-connections', component: () => import('./views/PersonalPluginAccounts.vue') },
       { path: '/plugins/oauth/callback', component: () => import('./views/PluginOAuthCallback.vue') },
       { path: '/plugins/:id', component: () => import('./views/PluginGeneric.vue') },
       { path: '/mcps', component: () => import('./views/Mcps.vue') },

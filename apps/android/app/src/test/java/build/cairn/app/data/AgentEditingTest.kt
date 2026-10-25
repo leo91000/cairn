@@ -36,6 +36,7 @@ class AgentEditingTest {
                             PluginManifest(
                                 id = "onepassword",
                                 name = "1Password",
+                                instances = PluginInstances("compte", "comptes"),
                                 agentAccess = PluginAgentAccess("Lecture seule"),
                             ),
                     ),
@@ -59,7 +60,8 @@ class AgentEditingTest {
             access =
                 AccessPolicy(nodes = listOf(LOCAL_NODE_ID, "gpu"), projects = listOf("p1", "p2")),
         )
-    private val resources = AgentResources(projects, nodes = nodes, catalog = catalog)
+    private val resources =
+        AgentResources(projects, nodes = nodes, catalog = catalog.agentDirectory())
 
     @Test
     fun newFieldsDecodeWithDefaultsAndUnknownKeys() {
@@ -140,10 +142,13 @@ class AgentEditingTest {
         assertEquals("Toutes, y compris futures", selectionSummary(null, 12, feminine = true))
         assertEquals("3 sur 12", selectionSummary(listOf("a", "b", "c"), 12))
         assertEquals("Aucun", selectionSummary(emptyList(), 12))
-        assertEquals("", pluginSummary(agent, catalog))
+        assertEquals("", pluginSummary(agent, catalog.agentDirectory()))
         assertEquals(
             "1Password : 2 comptes",
-            pluginSummary(agent.copy(plugins = listOf("prod", "staging")), catalog),
+            pluginSummary(
+                agent.copy(plugins = listOf("prod", "staging")),
+                catalog.agentDirectory(),
+            ),
         )
         assertEquals("review · Global", skillLabel(Skill("review", scope = "global"), projects))
         assertEquals("lint · cairn", skillKeyLabel("p1/lint", projects))
@@ -448,7 +453,10 @@ class AgentEditingTest {
             agentAccessSummary(agent.withExclusive("gpu", true), nodes = nodes),
         )
         // With them: package names, and exclusivity only where it applies (mac cannot run it).
-        assertEquals("2 projets · 2 nodes · 1Password", agentAccessSummary(granted, catalog, nodes))
+        assertEquals(
+            "2 projets · 2 nodes · 1Password",
+            agentAccessSummary(granted, catalog.agentDirectory(), nodes),
+        )
     }
 
     @Test
@@ -797,17 +805,20 @@ class AgentEditingTest {
         val holder = agent.copy(plugins = listOf("prod", "bot", "v1", "b1"))
         assertEquals(
             listOf("bot", "v1", "b1"),
-            ungrantable.unavailableGrants(holder.plugins).map { it.id },
+            ungrantable.agentDirectory().unavailableGrants(holder.plugins).map { it.id },
         )
-        assertEquals(listOf("onepassword"), ungrantable.agentGrantable().map { it.first.id })
-        val issues = agentIssues(holder, resources.copy(catalog = ungrantable))
+        assertEquals(
+            listOf("onepassword"),
+            ungrantable.agentDirectory().agentGrantable().map { it.first.id },
+        )
+        val issues = agentIssues(holder, resources.copy(catalog = ungrantable.agentDirectory()))
         assertEquals(3, issues.size)
         assertTrue(issues.all { it.section == AgentSection.Plugins })
         assertTrue(issues.any { "« Coffre » n’est plus disponible" in it.text })
         assertEquals("3 points à vérifier", issuesLabel(issues.size))
 
         // An instance it does not hold is not reported.
-        assertTrue(ungrantable.unavailableGrants(listOf("prod")).isEmpty())
+        assertTrue(ungrantable.agentDirectory().unavailableGrants(listOf("prod")).isEmpty())
     }
 
     @Test
@@ -867,6 +878,22 @@ class AgentEditingTest {
         assertEquals(explicit, omitted)
         assertTrue(agentChanges(omitted, AgentDraft(explicit)).isEmpty())
         assertFalse(profileChanged(omitted, explicit))
+    }
+
+    @Test
+    fun resourceRulesRemainVisibleWithoutWholeInstanceAccess() {
+        val scoped = agent.copy(plugins = emptyList())
+        val catalog = PluginCatalog(resourceGrantCounts = mapOf(scoped.id to 2))
+        assertEquals("2 règles sur les ressources", pluginSummary(scoped, catalog.agentDirectory()))
+        assertTrue(scoped.plugins.isEmpty())
+        assertTrue(
+            agentAccessSummary(scoped, catalog.agentDirectory())
+                .contains("2 règles sur les ressources")
+        )
+        assertEquals(
+            "",
+            pluginSummary(scoped, catalog.copy(resourceGrantCounts = emptyMap()).agentDirectory()),
+        )
     }
 
     @Test

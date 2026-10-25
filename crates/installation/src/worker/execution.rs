@@ -53,8 +53,31 @@ pub(super) async fn execute(
         &mut sensitive,
     )
     .await;
-    if let Err(error) = result {
-        record_failure(s, &checkpoint, &cancel, &error, &sensitive).await?;
+    if let Err(failure) = result {
+        match failure {
+            launch::Failure::SourceUnavailable(_)
+                if !cancel.is_cancelled()
+                    && !s.shutdown.is_cancelled()
+                    && !checkpoint.expired() =>
+            {
+                s.store
+                    .patch_run(
+                        &checkpoint.id,
+                        json!({
+                            "status": RunStatus::Queued,
+                            "recoveryPending": true,
+                            "finishedAt": null,
+                            "error": null,
+                            "accountWaitReason": super::schedule::SOURCE_WAIT_REASON,
+                            "accountRequired": null,
+                        }),
+                    )
+                    .await?;
+            }
+            launch::Failure::Other(error) | launch::Failure::SourceUnavailable(error) => {
+                record_failure(s, &checkpoint, &cancel, &error, &sensitive).await?;
+            }
+        }
     }
     let fenced = fence(s, &checkpoint).await?;
     stop_heartbeat.cancel();

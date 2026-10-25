@@ -68,7 +68,7 @@ impl Host {
         manifest.validate().map_err(str::to_owned)?;
         let sources = source.into();
         sources.validate().map_err(str::to_owned)?;
-        let Sources { main, modules } = sources;
+        let Sources { main, modules } = sources.clone();
         let permit = self
             .slots
             .clone()
@@ -92,6 +92,7 @@ impl Host {
             input,
             output,
             manifest: manifest.clone(),
+            sources,
             deadline: self.deadline,
             broken: false,
             _permit: permit,
@@ -151,6 +152,7 @@ pub struct Session {
     input: ChildStdin,
     output: BufReader<ChildStdout>,
     manifest: Manifest,
+    sources: Sources,
     deadline: Duration,
     broken: bool,
     _permit: OwnedSemaphorePermit,
@@ -166,6 +168,11 @@ impl Session {
 
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
+    }
+
+    /// The immutable bytes this worker actually loaded, for approval checks.
+    pub fn sources(&self) -> &Sources {
+        &self.sources
     }
 
     /// Runs one handler. Calls outside the manifest's capabilities end the session;
@@ -244,7 +251,7 @@ impl Session {
 
     async fn write(&mut self, frame: &Frame) -> Result<(), String> {
         let mut bytes = serde_json::to_vec(frame).map_err(|_| "Invalid plugin input.")?;
-        if bytes.len() >= MAX_FRAME_BYTES {
+        if bytes.len() >= frame.encoded_limit() {
             return Err("Plugin frame is too large.".into());
         }
         bytes.push(b'\n');

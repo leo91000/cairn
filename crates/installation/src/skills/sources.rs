@@ -112,7 +112,10 @@ async fn origin(s: &Service, plugin: &str, source: &str, instance: Option<&str>)
 }
 
 async fn call(s: &Service, origin: &Origin, payload: Value) -> Result<Value> {
-    let scope = Scope::Instance(Box::new(origin.connection.clone()));
+    let scope = Scope::Instance(
+        Box::new(origin.connection.clone()),
+        std::sync::Arc::new(crate::plugins::operations::Owner::current(s).await?),
+    );
     let mut payload = payload;
     payload["source"] = origin.source.clone().into();
     payload["instance"] = scope.instances()[0].clone();

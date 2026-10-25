@@ -102,6 +102,19 @@ class ActivityPresentationTest {
 
     private fun event(type: String, text: String) = RunEvent(1, 1000, type, text)
 
+    @Test
+    fun `question retirement keeps recovery instructions visible in the conversation`() {
+        val instructions =
+            "Questions saved before this update could not be matched to their original turn. " +
+                "They were withdrawn without answering. Ask the agent to repeat them in this conversation."
+        val notice = event("error", instructions)
+        val entries = timelineEntries(listOf(notice), chat = true)
+        assertTrue(entries.flatMap { it.events }.contains(notice))
+        val presentation = presentActivity(notice)
+        assertEquals(ActivityKind.NOTICE, presentation.kind)
+        assertEquals(instructions, presentation.output)
+    }
+
     private fun tool(command: String, code: Int = 0) =
         RunEvent(
             1,

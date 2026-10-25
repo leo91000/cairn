@@ -26,10 +26,14 @@ export function chatFixture() {
   const finish = () => {
     if (!active)
       return
-    const text = `I reviewed the workspace. **The approach looks good.**\n\n${active.items.filter(item => item.type === 'userMessage').map(item => item.content[0].text).join('\n\n')}\n\nReady for the next step.`
+    const input = active.items.filter(item => item.type === 'userMessage').map(item => item.content[0].text).join('\n\n')
+    const text = input.endsWith('fixture:short-final') ? 'SECOND_AFTER_FAILED' : `I reviewed the workspace. **The approach looks good.**\n\n${input}\n\nReady for the next step.`
     const item = { id: `reply-${thread.fixtureGeneration || 'legacy'}-${active.id}`, type: 'agentMessage', text }
     active.items.push(item)
-    active.status = 'completed'
+    const failedFinal = active.items.some(item => item.type === 'userMessage' && item.content[0].text.startsWith('fixture:failed-final '))
+    active.status = failedFinal ? 'failed' : 'completed'
+    if (failedFinal)
+      active.error = { message: 'Fixture failed after producing its final text', codexErrorInfo: 'other' }
     save()
     notify('item/completed', { threadId: thread.id, item })
     notify('turn/completed', { threadId: thread.id, turn: active })
@@ -151,6 +155,25 @@ export function chatFixture() {
       }
 
       const text = params.input[0].text
+      if (method === 'turn/start' && text.includes('fixture:progress-step')) {
+        const progressTurn = active
+        const progressThread = thread
+        setTimeout(() => {
+          if (active !== progressTurn || thread !== progressThread)
+            return
+          const item = { id: `progress-${active.id}`, type: 'agentMessage', text: '' }
+          active.items.push(item)
+          save()
+          notify('item/started', { threadId: thread.id, turnId: active.id, item })
+          notify('item/agentMessage/delta', {
+            threadId: thread.id,
+            turnId: active.id,
+            itemId: item.id,
+            delta: 'PRIVATE_PROVIDER_PROGRESS_DO_NOT_EXPORT',
+          })
+        }, 10000).unref()
+      }
+
       if (text.includes('fixture:codex-reconnect')) {
         for (const scope of [
           { threadId: 'another-thread', turnId: active.id, willRetry: true },
@@ -257,7 +280,7 @@ export function chatFixture() {
         asked = true
         hold = true
         questionRequest = 'question-1'
-        emit({
+        const ask = () => emit({
           id: questionRequest,
           method: 'item/tool/requestUserInput',
           params: {
@@ -268,13 +291,26 @@ export function chatFixture() {
             questions: [{
               id: 'direction',
               header: 'Direction',
-              question: 'How should we introduce the new navigation?',
+              question: text.includes('fixture:question-secret') ? 'PRIVATE_NATIVE_QUESTION_DO_NOT_EXPORT' : 'How should we introduce the new navigation?',
               isOther: true,
-              isSecret: false,
+              isSecret: text.includes('fixture:question-secret'),
               options: [{ label: 'Gradual rollout (Recommended)', description: 'Start with the chat view, then extend it to the rest of the app.' }, { label: 'Update everything', description: 'Refresh all views together in one release.' }],
-            }],
+            }, ...(text.includes('fixture:question-multiple')
+              ? [{
+                  id: 'delivery',
+                  header: 'Delivery',
+                  question: 'Which output should be delivered?',
+                  isOther: false,
+                  isSecret: false,
+                  options: [{ label: 'Patch', description: 'Deliver the implementation.' }, { label: 'Report', description: 'Deliver a written report.' }],
+                }]
+              : [])],
           },
         })
+        if (text.includes('fixture:question-delay'))
+          setTimeout(ask, 1500)
+        else
+          ask()
         if (text.includes('expire')) {
           notify('serverRequest/resolved', { threadId: thread.id, requestId: questionRequest })
           questionRequest = undefined

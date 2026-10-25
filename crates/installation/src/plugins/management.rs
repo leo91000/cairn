@@ -9,18 +9,55 @@ use crate::{
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+pub(crate) mod resources;
+pub(crate) mod setup;
+
 /// Management access does not replace a saved instance's separate agent grant, for
 /// the instance it edits and for the one whose shared setup it reuses.
 #[derive(Clone)]
 pub struct Authority {
     bearer: String,
+    requester: Option<super::requesters::RunRequester>,
     instance: Option<Box<connections::Connection>>,
     shared: Option<Box<connections::Connection>>,
+    setup: Option<Box<super::setup::SetupDraft>>,
+    uses_setup_credentials: bool,
 }
 
 impl Authority {
+    pub(super) fn configuration_credentials(
+        &mut self,
+        target: &super::resources::target::Target,
+        private: bool,
+        include_root: bool,
+    ) -> Result<()> {
+        if include_root && target.is_setup() {
+            self.uses_setup_credentials = true;
+        }
+        if private {
+            if target.is_setup() {
+                return Err(Error::forbidden(
+                    "Private setup credentials belong to the owner. Finish this configuration from the owner's plugin page.",
+                ));
+            }
+            self.instance = Some(Box::new(target.connection()));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
+        if let Some(requester) = &self.requester {
+            super::requesters::recheck(s, requester).await?;
+        }
+        let expected = self.clone();
+        s.store.read(move |db| expected.authorize(db)).await
+    }
+
     pub(crate) fn authorize(&self, db: &crate::store::Db<'_>) -> Result<()> {
         let run = crate::installation_mcp::authorize_in(db, &self.bearer)?;
+        if let Some(requester) = &self.requester {
+            super::requesters::recheck_in(db, requester)?;
+        }
         let agent = text(&run["snapshot"]["agent"], "id");
         for expected in [&self.instance, &self.shared].into_iter().flatten() {
             let current = db
@@ -33,7 +70,30 @@ impl Authority {
                 ));
             }
         }
+        if let Some(expected) = &self.setup {
+            expected.recheck_in(db)?;
+            if self.uses_setup_credentials
+                && (expected.credential || !expected.secret_keys.is_empty())
+            {
+                return Err(Error::forbidden(
+                    "Installation management does not grant this setup's saved credentials. Finish private setup from the owner's plugin page.",
+                ));
+            }
+        }
         Ok(())
+    }
+}
+
+async fn requester(
+    s: &Service,
+    bearer: Option<&str>,
+) -> Result<Option<super::requesters::RunRequester>> {
+    match bearer {
+        Some(bearer) => {
+            let run = crate::installation_mcp::authorize(s, bearer).await?;
+            super::requesters::for_run(s, &run).await
+        }
+        None => Ok(None),
     }
 }
 
@@ -43,12 +103,13 @@ pub(crate) async fn invoke(
     args: &Value,
     bearer: Option<&str>,
 ) -> Result<Value> {
-    if let Some(bearer) = bearer {
-        crate::installation_mcp::authorize(s, bearer).await?;
-    }
+    let requester = requester(s, bearer).await?;
     if name == "list_plugins" {
         let mut catalog = registry::catalog(s).await?;
         catalog["connections"] = json!(connections::overview(s).await?);
+        if let Some(requester) = &requester {
+            super::requesters::recheck(s, requester).await?;
+        }
         return Ok(catalog);
     }
     let plugin = text(args, "pluginId");
@@ -82,8 +143,11 @@ pub(crate) async fn invoke(
     };
     let authority = bearer.map(|bearer| Authority {
         bearer: bearer.to_owned(),
+        requester,
         instance: saved_instance,
         shared: shared_instance,
+        setup: None,
+        uses_setup_credentials: false,
     });
     let authorize = {
         let authority = authority.clone();
@@ -161,7 +225,7 @@ pub(crate) async fn invoke(
                 if let Some(instance) = instance {
                     input["instance"] = json!(instance);
                 }
-                oauth::start(s, plugin, &input, &owner_binding).await?
+                oauth::credential::start(s, plugin, &input, &owner_binding).await?
             } else {
                 device_flow::start(s, plugin).await?
             }
@@ -172,7 +236,7 @@ pub(crate) async fn invoke(
                     .oauth_flows
                     .status(plugin, text(args, "flowId"), &owner_binding)?
             } else {
-                device_flow::status(s, plugin, text(args, "flowId"))?
+                device_flow::status(s, plugin, text(args, "flowId")).await?
             }
         }
         "signin_cancel" => {
@@ -207,6 +271,9 @@ pub(crate) async fn invoke(
         }
         _ => return Err(Error::bad("Unknown plugin management action.")),
     };
+    if let Some(authority) = &authority {
+        authority.recheck(s).await?;
+    }
     s.store.read(move |db| authorize(db)).await?;
     Ok(result)
 }

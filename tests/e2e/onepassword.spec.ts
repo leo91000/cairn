@@ -64,8 +64,8 @@ test('1Password service accounts are plugin instances with private tokens, grant
   // Even the main agent gets an account only when granted on its page, after a review.
   await page.goto(workspacePath(`/agents/${MAIN_AGENT_ID}`))
   await openAgentSection(page, 'Secrets & plugins')
-  const accounts1Password = page.getByRole('region', { name: '1Password · service accounts' })
-  await expect(accounts1Password).toContainText('Read-only · no access by default, including Main')
+  const accounts1Password = page.getByRole('region', { name: '1Password', exact: true })
+  await expect(accounts1Password).toContainText('Off by default, including for Main agent')
   await expect(accounts1Password.getByText('Not granted', { exact: true })).toBeVisible()
   await accounts1Password.getByRole('switch', { name: 'Access to 1Password Production secrets' }).check()
   for (const width of [1440, 390, 320]) {
@@ -116,7 +116,7 @@ test('1Password service accounts are plugin instances with private tokens, grant
 
   // The agent keeps the grant, shown as unusable while the account is disabled; revoking needs no review.
   await page.goto(workspacePath(`/agents/${MAIN_AGENT_ID}?section=plugins`))
-  await expect(accounts1Password.getByText('Account disabled', { exact: true })).toBeVisible()
+  await expect(accounts1Password.getByText('Disabled', { exact: true })).toBeVisible()
   await page.getByRole('link', { name: 'Overview', exact: true }).click()
   await expect(page.getByRole('status').filter({ hasText: '1 thing to check' })).toContainText('1Password “Production secrets” is disabled')
   await openAgentSection(page, 'Secrets & plugins')

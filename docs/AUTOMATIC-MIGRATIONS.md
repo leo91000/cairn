@@ -32,6 +32,23 @@ native-execution and GitHub transition plans, including
 [ADR 0052](adr/0052-native-ublk-workspaces-and-idle-eviction.md). Their conversion,
 trust and recovery rules remain required.
 
+## Slack draft boundary
+
+Main's owner-reviewed native administrator transition now uses epoch 13 /
+SQLite 12, following guided plugin setup at epoch 12 / SQLite 11. PR #226 reserves
+**epoch 14 / SQLite 13** for its incompatible plugin/requester contract. Its
+previous, unreleased 13/12 reservation cannot share Main's reviewed boundary.
+`Store::open` advances the SQLite marker before service startup, so an older
+Main reader refuses this candidate rather than interpreting partial plugin state.
+The local marker regression preserves native review, resource, route and opaque
+KV records; it does not qualify the complete service or encrypted-token recovery.
+
+The retained transitions below do not qualify Slack. This draft declares no
+automatic migration to epoch 14; deployment from an earlier epoch remains blocked
+until [Slack's compatibility inventory](SLACK-PLUGIN-COMPATIBILITY.md) and a
+separate forward transition are fully qualified and independently reviewed.
+Do not lower the version fence to bypass this gate.
+
 ## Retained transition: epochs 3–8 to 9
 
 The served production source inspected during preparation was
@@ -138,6 +155,8 @@ state, diagnose and retry it or apply a reviewed forward fix. Never lower
 Manager/runner rollout uses the existing automatic migration gate. This release
 does not create or restore backups, convert conversations, or grant host trust.
 
+<a id="current-transition-epochs-311-to-12"></a>
+
 ## Retained transition: epochs 3–11 to 12
 
 Epoch 12 adds optional `[setup]` declarations to installed plugin manifests.
@@ -149,7 +168,8 @@ steps; declaring it requires the new reader. Shared settings copy into each new
 connection's existing settings and vault format.
 
 `upgrades_version_ten_preserving_plugin_packages_and_fences_older_binaries`
-checks preservation of package files and plugin records, the version-11 fence,
+checks preservation of package files and plugin records and the candidate fence
+(which is now SQLite 13 on the unqualified Slack branch),
 and refusal of a newer database without downgrading it. All earlier migration
 regressions remain required by the exact-tree release gate. The version advance
 changes only the compatibility marker; it adds no read/write storage format or
@@ -162,7 +182,9 @@ forward fix. Never lower SQLite `user_version`, the epoch or the legacy tree, or
 start an older manager against the migrated installation. Merging does not
 release or deploy an installation.
 
-## Current transition: epochs 3–12 to 13
+<a id="current-transition-epochs-312-to-13"></a>
+
+## Retained transition: epochs 3–12 to 13
 
 Epoch 13 adds native node privilege requests, observed generation/state and
 owner-reviewed administrator admission. SQLite advances from 11 to 12 before

@@ -33,6 +33,20 @@ sans jamais retirer. Une réservation exclusive exige le droit d’exécuter sur
 le retirer retire aussi la réservation. Elle ne concerne que les VM Firecracker : un
 agent natif, ou une node native, ne peut pas en recevoir.
 
+Les opérations limitées à une ressource de plugin étendent ce modèle : leurs
+règles (profil, exceptions et périmètres) restent indépendantes de `plugins`.
+La fiche de l’agent les découvre par pages, les distingue des droits globaux et
+permet leur ajout et leur révocation. Les compteurs décrivent des règles
+**enregistrées**, y compris lorsqu’un plugin ou une ressource est indisponible ;
+ils ne promettent pas que le fournisseur autorise chaque appel. Un ancien hôte
+qui ne fournit pas ces compteurs est affiché comme inconnu lorsqu’il déclare des
+opérations de ressources. Le même éditeur contextuel reste accessible depuis la
+ressource pour ces règles granulaires ; cette extension ne rétablit pas
+l’édition des droits globaux `agentIds` depuis une ressource. Les changements de
+règles s’enregistrent immédiatement et séparément du brouillon de profil de
+l’agent. Retirer un droit global ne retire pas implicitement une règle granulaire,
+et inversement. Leur révocation reste possible même si le package ne charge plus.
+
 Ces deux droits restent appliqués en direct, pas figés au moment de la mise en file :
 ils ne font pas partie de `access`, donc de `policy()`. Les retirer n’interrompt donc pas le travail en file et ne
 suspend pas une délégation externe ; accorder un compte 1Password (ou une autre

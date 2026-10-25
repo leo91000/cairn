@@ -578,6 +578,95 @@ async fn native_in_flight_question_accepts_answer_and_preserves_receipt() {
 }
 
 #[tokio::test]
+async fn reusing_a_question_item_in_another_provider_turn_issues_a_new_question() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    let mut ids = Vec::new();
+    for turn in 0..2 {
+        let mut input = plan(&root, "fixture:question blocking");
+        input["execution"]["messageId"] = json!(format!("source-{turn}"));
+        if turn > 0 {
+            input["sessionId"] = json!("fixture-chat");
+        }
+        let (tx, mut rx) = mpsc::channel(64);
+        let (config, home) = (config.clone(), home.clone());
+        let running = tokio::spawn(async move {
+            chat_process::run(&config, &home, input, tx, CancellationToken::new()).await
+        });
+        tokio::time::timeout(Duration::from_secs(6), async {
+            while let Some(event) = rx.recv().await {
+                if event["type"] == "chat.question" {
+                    ids.push(event["question"]["id"].clone());
+                    deliver(
+                        &root,
+                        &json!([{
+                            "id": format!("answer-{turn}"), "questionId": event["question"]["id"],
+                            "answers": { "direction": ["Gradual rollout"] }, "text": "My answer",
+                        }]),
+                    )
+                    .await;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        running.await.unwrap().unwrap();
+    }
+    assert_eq!(ids.len(), 2);
+    assert_ne!(
+        ids[0], ids[1],
+        "A later provider turn reused an earlier question's authority"
+    );
+}
+
+#[tokio::test]
+async fn an_early_blocking_answer_waits_for_its_native_request() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    let plan = plan(&root, "fixture:question blocking fixture:question-delay");
+    // Recovery can republish an already admitted answer before the provider
+    // reissues its RPC. It must not become turn/steer or be marked attempted.
+    deliver(
+        &root,
+        &json!([{
+            "id": "early-answer",
+            "questionId": cairn_installation::auth::hex_digest("fixture-chat:turn-1:question-item"),
+            "blockingQuestion": true,
+            "answers": { "direction": ["Gradual rollout"] },
+            "text": "My answer",
+        }]),
+    )
+    .await;
+    let (tx, mut rx) = mpsc::channel(64);
+    let running = tokio::spawn(async move {
+        chat_process::run(&config, &home, plan, tx, CancellationToken::new()).await
+    });
+    let mut receipts = 0;
+    tokio::time::timeout(Duration::from_secs(6), async {
+        while let Some(event) = rx.recv().await {
+            receipts += usize::from(
+                event["type"] == "chat.delivered" && event["messageId"] == "early-answer",
+            );
+        }
+    })
+    .await
+    .expect("The answer was consumed before its native question became available");
+    running.await.unwrap().unwrap();
+    assert_eq!(receipts, 1);
+    let state = conversation(&root.path().join("codex"));
+    assert!(
+        state["turns"][0]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == "fixtureAnswer"
+                && item["answers"]["direction"]["answers"] == json!(["Gradual rollout"]))
+    );
+}
+
+#[tokio::test]
 async fn withdrawn_native_questions_resume_without_an_answer_or_user_receipt() {
     for blocking in [false, true] {
         let root = TempDir::new().unwrap();

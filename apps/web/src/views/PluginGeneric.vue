@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import type { Agent } from '../../../../packages/contracts/contracts'
+import type { PluginConfiguration } from '../plugin-catalogue'
 import type { SetupStep } from '../plugin-setup'
 import type {
-  Catalog,
   FormResult,
   PluginConnection,
-  PluginEntry,
+  PluginSetupDraft,
   SettingField,
 } from '../plugins'
 import {
@@ -31,10 +31,13 @@ import PluginInstancePanel from '../components/PluginInstancePanel.vue'
 import PluginMark from '../components/PluginMark.vue'
 import PluginPresets from '../components/PluginPresets.vue'
 import PluginPrograms from '../components/PluginPrograms.vue'
+import PluginResources from '../components/PluginResources.vue'
 import PluginReview from '../components/PluginReview.vue'
+import PluginSetup from '../components/PluginSetup.vue'
 import PluginView from '../components/PluginView.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
+import UiNotice from '../components/UiNotice.vue'
 import {
   credentialInput,
   signInProblem,
@@ -57,6 +60,8 @@ import {
   X,
   Zap,
 } from '../icons'
+import { pluginConfiguration } from '../plugin-catalogue'
+import { pluginFormLookup } from '../plugin-form-lookups'
 import {
   pluginFieldAnswer,
   pluginFormSecrets,
@@ -65,6 +70,7 @@ import {
   pluginSecrets,
   pluginSettings,
 } from '../plugin-form-values'
+import { pluginManagementItems } from '../plugin-management'
 import { pluginOperation } from '../plugin-operations'
 import {
   effortLabels,
@@ -81,21 +87,28 @@ import {
   contributions,
   delegates as delegating,
   delegationRisks,
+  externalBotExecutionWarning,
+  formResult,
+  hasSetup,
   instanceNoun,
   listed,
   personName,
+  unshownFormErrors,
 } from '../plugins'
 import { buttonBase, buttonSizes, buttonVariants } from '../ui'
 
 const route = useRoute()
 const id = computed(() => String(route.params.id))
-const catalog = ref<Catalog>({ packages: [], capabilities: [], connections: [] })
+const configuration = ref<PluginConfiguration>()
 const loaded = ref(false)
 const busy = ref(false)
 const error = ref('')
 const reviewing = ref(false)
 const editing = ref<PluginConnection | null>()
 const removing = ref<PluginConnection>()
+const setupDraft = ref<PluginSetupDraft>()
+const drafts = ref<PluginSetupDraft[]>([])
+const discarding = ref<PluginSetupDraft>()
 const form = ref<Record<string, any>>({})
 const values = ref<Record<string, any>>({})
 const secrets = ref<Record<string, string>>(pluginFormSecrets())
@@ -114,10 +127,11 @@ const named = ref(false)
 let timer: ReturnType<typeof setInterval> | undefined
 let typing: ReturnType<typeof setTimeout> | undefined
 let asked = 0
+let reader: AbortController | undefined
 
-const entry = computed<PluginEntry | undefined>(() => catalog.value.packages.find(item => item.id === id.value))
+const entry = computed(() => configuration.value?.entry)
 const manifest = computed(() => entry.value?.manifest)
-const connections = computed(() => catalog.value.connections.filter(item => item.pluginId === id.value))
+const connections = computed(() => configuration.value?.connections ?? [])
 const delegates = computed(() => delegating(manifest.value))
 const fields = computed(() => (manifest.value?.settings ?? []).filter(field => !field.hidden))
 const plainFields = computed(() => fields.value.filter(field => field.type !== 'secret'))
@@ -158,12 +172,14 @@ const activityTones = {
 
 /** What this instance's people could do through an agent, for the owner's warning. */
 function risks(agent: Agent) {
-  return delegationRisks(agent, catalog.value.connections, form.value.accessMode === 'everyone', editing.value ? [] : grants.value)
+  return delegationRisks(agent, configuration.value?.access ?? [], form.value.accessMode === 'everyone', [...(editing.value ? [] : grants.value), ...(configuration.value?.resourceAgentIds ?? [])])
 }
 
 const agents = computed(() => [...state.agents].sort((a, b) => Number(risks(a).length > 0) - Number(risks(b).length > 0)))
 const chosenAgent = computed(() => state.agents.find(agent => agent.id === form.value.agentId))
 const chosenRisks = computed(() => chosenAgent.value ? risks(chosenAgent.value) : [])
+const chosenExecutionWarning = computed(() => chosenAgent.value ? externalBotExecutionWarning(chosenAgent.value) : '')
+const delegationReady = computed(() => !delegates.value || Boolean(chosenAgent.value))
 const singular = computed(() => instanceNoun(manifest.value, 1))
 const plural = computed(() => instanceNoun(manifest.value, 2))
 // A completed device sign-in gives the draft its credential; the package's form handler then
@@ -201,8 +217,29 @@ const tones = {
 }
 
 async function load() {
-  catalog.value = await api<Catalog>('/plugins')
-  loaded.value = true
+  reader?.abort()
+  const controller = new AbortController()
+  reader = controller
+  try {
+    const nextConfiguration = await pluginConfiguration(id.value, controller.signal)
+    if (reader !== controller || controller.signal.aborted)
+      return
+    configuration.value = nextConfiguration
+    loaded.value = true
+    const nextDrafts = nextConfiguration.setupDrafts
+      ? await pluginManagementItems<PluginSetupDraft>(`/plugins/${id.value}/setup-drafts`, controller.signal)
+      : []
+    if (reader === controller && !controller.signal.aborted)
+      drafts.value = nextDrafts
+  }
+  catch (e) {
+    if (!controller.signal.aborted)
+      throw e
+  }
+  finally {
+    if (reader === controller)
+      reader = undefined
+  }
 }
 
 async function action(operation: () => Promise<void>) {
@@ -231,7 +268,18 @@ function agentNames(connection: PluginConnection) {
   return (connection.agentIds ?? []).map(agent => state.agents.find(item => item.id === agent)?.name ?? 'Removed agent')
 }
 
-function edit(connection: PluginConnection | null) {
+async function edit(connection: PluginConnection | null) {
+  if (!connection && hasSetup(manifest.value)) {
+    await action(async () => {
+      setupDraft.value = await api<PluginSetupDraft>(`/plugins/${id.value}/setup-drafts`, {
+        method: 'POST',
+        body: JSON.stringify({ name: manifest.value?.name }),
+      })
+      await load()
+    })
+    return
+  }
+
   error.value = ''
   void signIn.cancel()
   copied.value = false
@@ -266,10 +314,30 @@ function edit(connection: PluginConnection | null) {
   void complete()
 }
 
+async function discard(draft: PluginSetupDraft) {
+  await action(async () => {
+    await api(`/plugins/${id.value}/setup-drafts/${draft.id}`, { method: 'DELETE', body: JSON.stringify({ revision: draft.revision }) })
+    discarding.value = undefined
+    await load()
+  })
+}
+
 /**
  * Asks the package's form handler for choices, derived values, errors and guidance.
  * Only the latest answer counts.
  */
+function formBody() {
+  return {
+    instance: editing.value?.id,
+    ...sharing.value,
+    settings: pluginSettings(storedFields.value, values.value),
+    secrets: pluginSecrets(secrets.value),
+    ...credentialInput(form.value.token, signIn.flow.value),
+  }
+}
+
+const lookup = pluginFormLookup(() => `/plugins/${id.value}/form`, formBody, () => manifest.value?.version)
+
 async function complete(changed?: string) {
   if (!manifest.value?.instanceForm)
     return
@@ -277,14 +345,10 @@ async function complete(changed?: string) {
   const inputs = Object.fromEntries(fields.value.map(field => [field.key, fieldInput(field)]))
   completing.value = true
   try {
-    const result = await pluginOperation<FormResult>(`/plugins/${id.value}/form`, {
-      instance: editing.value?.id,
-      settings: pluginSettings(storedFields.value, values.value),
-      secrets: pluginSecrets(secrets.value),
-      ...sharing.value,
-      ...credentialInput(form.value.token, signIn.flow.value),
+    const result = formResult(await pluginOperation<FormResult | null>(`/plugins/${id.value}/form`, {
+      ...formBody(),
       ...(changed ? { changed } : {}),
-    })
+    }))
     if (ask !== asked)
       return
     for (const field of storedFields.value) {
@@ -386,7 +450,7 @@ function stepProblem(item: SetupStep | undefined): string {
     return form.value.token ? '' : `Enter the ${credential?.label.toLowerCase() ?? 'credential'}.`
   }
 
-  if (item.kind === 'people') {
+  if (item.kind === 'people' && delegates.value) {
     if (!chosenAgent.value)
       return 'Choose the agent that answers.'
     if (form.value.accessMode === 'allowlist' && !people.value.length)
@@ -436,15 +500,17 @@ function addPerson() {
   const value = person.value.trim()
   if (!value || people.value.some(item => item.id === value))
     return
-  people.value.push({ id: value, name: catalog.value.connections.flatMap(item => item.requests).find(request => request.userId === value)?.name ?? '' })
+  people.value.push({ id: value, name: connections.value.flatMap(item => item.requests).find(request => request.userId === value)?.name ?? '' })
   person.value = ''
 }
 
 async function save() {
   // The package's derived values must be in the form before it is saved.
-  if (completing.value)
+  if (busy.value || completing.value || !delegationReady.value)
     return
   await action(async () => {
+    const plugin = id.value
+    const connection = editing.value
     const agent = state.agents.find(item => item.id === form.value.agentId)
     const body = {
       name: form.value.name,
@@ -453,7 +519,7 @@ async function save() {
       settings: pluginSettings(storedFields.value, values.value),
       // Blank secret fields keep what is saved.
       secrets: pluginSecrets(secrets.value),
-      // Agents are granted on their own page; omitting the list keeps it.
+      // Editing keeps current grants; creation uses the final setup step.
       ...(delegates.value && {
         agentId: form.value.agentId,
         // An agent with one project answers in it; a broader one answers outside projects.
@@ -466,11 +532,10 @@ async function save() {
       }),
       enabled: form.value.enabled,
       ...sharing.value,
-      // New instances grant the chosen agents; editing keeps current grants.
-      ...(!editing.value && grants.value.length ? { agentIds: grants.value } : {}),
+      ...(!connection && grants.value.length ? { agentIds: [...grants.value] } : {}),
     }
-    const path = `/plugins/${id.value}/connections${editing.value ? `/${editing.value.id}` : ''}`
-    await pluginOperation(path, body, editing.value ? 'PUT' : 'POST')
+    const path = `/plugins/${plugin}/connections${connection ? `/${connection.id}` : ''}`
+    await pluginOperation(path, body, connection ? 'PUT' : 'POST')
     signIn.consumed()
     form.value.token = ''
     secrets.value = pluginFormSecrets()
@@ -536,11 +601,13 @@ function closeEditor() {
 onMounted(async () => {
   await action(load)
   timer = setInterval(() => {
-    if (!busy.value && editing.value === undefined)
+    if (!busy.value && editing.value === undefined && !setupDraft.value)
       void load().catch(() => {})
   }, 5000)
 })
 onBeforeUnmount(() => {
+  reader?.abort()
+  reader = undefined
   clearInterval(timer)
   clearTimeout(typing)
   void signIn.cancel()
@@ -590,7 +657,12 @@ onBeforeUnmount(() => {
           <UiButton @click="reviewing = true">
             <Icon :name="ShieldCheck" :size="15" />Access and versions
           </UiButton>
-          <UiButton v-if="entry.active" variant="primary" @click="edit(null)">
+          <UiButton
+            v-if="entry.active"
+            variant="primary"
+            :disabled="busy"
+            @click="edit(null)"
+          >
             <Icon :name="Plus" :size="15" />Add {{ singular.toLowerCase() }}
           </UiButton>
         </div>
@@ -616,7 +688,31 @@ onBeforeUnmount(() => {
 
       <div class="mt-1 grid items-start gap-5" :class="manifest.agentAccess ? 'grid-cols-[minmax(0,1fr)_300px] tablet:grid-cols-1' : ''">
         <div class="min-w-0">
-          <section v-if="loaded && !connections.length && entry.active" class="mt-5 grid gap-4 rounded-2xl border border-line bg-surface p-5" aria-labelledby="plugin-first">
+          <section v-if="drafts.length" class="mt-5 grid gap-3" aria-label="Unfinished setup">
+            <h2 class="text-sm! font-bold">
+              Continue setup
+            </h2>
+            <article
+              v-for="draft in drafts"
+              :key="draft.id"
+              class="flex flex-wrap items-center gap-3 rounded-xl border border-line bg-inset p-4"
+              :aria-label="draft.name"
+            >
+              <div class="min-w-0 flex-1">
+                <b class="break-words text-sm">{{ draft.name }}</b>
+                <p class="text-xs text-muted">
+                  {{ draft.status === 'setup' ? 'Inactive · expires' : 'Package review needed · expires' }} {{ new Date(draft.expiresAt).toLocaleString() }}
+                </p>
+              </div>
+              <UiButton :disabled="busy || draft.status !== 'setup'" :aria-label="`Continue ${draft.name}`" @click="setupDraft = draft">
+                Continue
+              </UiButton>
+              <UiButton :disabled="busy" :aria-label="`Discard ${draft.name}`" @click="discarding = draft">
+                Discard
+              </UiButton>
+            </article>
+          </section>
+          <section v-if="loaded && !connections.length && !drafts.length && entry.active" class="mt-5 grid gap-4 rounded-2xl border border-line bg-surface p-5" aria-labelledby="plugin-first">
             <header class="flex items-start justify-between gap-3 phone:flex-wrap">
               <div class="min-w-0">
                 <h2 id="plugin-first" class="text-[15px]! font-bold">
@@ -658,6 +754,12 @@ onBeforeUnmount(() => {
             <p v-if="connection.status.message" class="-mt-2 text-xs" :class="connection.status.state === 'needs_review' ? 'text-coral' : 'text-muted'">
               {{ connection.status.message }}
             </p>
+            <PluginResources
+              v-if="manifest.resources?.length"
+              :plugin="id"
+              :manifest="manifest"
+              :instance="connection.id"
+            />
             <dl v-if="shownFields.length || secretFields.length || delegates" class="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3">
               <div v-for="field in shownFields" :key="field.key" class="rounded-xl border border-line bg-inset px-3.5 py-2.5">
                 <dt class="text-3xs font-semibold uppercase tracking-[.12em] text-subtle">
@@ -703,7 +805,12 @@ onBeforeUnmount(() => {
               </div>
             </dl>
             <p v-if="manifest.agentAccess" class="text-xs text-muted">
-              <template v-if="agentNames(connection).length">
+              <template v-if="manifest.operations?.length">
+                Instance-wide access: <b v-if="agentNames(connection).length" class="text-ink">{{ agentNames(connection).join(', ') }}</b><template v-else>
+                  no agents.
+                </template>
+              </template>
+              <template v-else-if="agentNames(connection).length">
                 Authorized agents: <b class="text-ink">{{ agentNames(connection).join(', ') }}</b>
               </template>
               <template v-else>
@@ -712,6 +819,9 @@ onBeforeUnmount(() => {
               <RouterLink to="/agents" class="ml-1 text-accent hover:underline">
                 Manage on agent pages ›
               </RouterLink>
+            </p>
+            <p v-if="manifest.agentAccess && manifest.operations?.length" class="text-xs text-muted">
+              Resource operations have separate access rules on each resource.
             </p>
             <section v-if="delegates">
               <h3 class="text-xs! font-semibold">
@@ -828,7 +938,12 @@ onBeforeUnmount(() => {
             <Icon :name="Terminal" :size="16" class="text-accent" />How agents use it
           </h2>
           <p class="text-xs leading-relaxed text-muted">
-            Only agents granted an active {{ singular.toLowerCase() }} on their page get these, in their conversations.
+            <template v-if="manifest.operations?.length">
+              Instance and resource access rules determine which commands and tools an agent receives. Resource operations require their own grants.
+            </template>
+            <template v-else>
+              Only agents granted an active {{ singular.toLowerCase() }} on their page get these, in their conversations.
+            </template>
           </p>
           <div v-if="manifest.commands?.length" class="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
             <h3 class="text-3xs! font-semibold uppercase tracking-[.12em] text-subtle">
@@ -874,12 +989,41 @@ onBeforeUnmount(() => {
 
     <PluginReview
       v-if="reviewing && entry"
-      :entry="entry"
-      :capabilities="catalog.capabilities"
+      :id="entry.id"
+      :package-name="entry.manifest?.name"
+      :capabilities="configuration?.capabilities ?? []"
       @close="reviewing = false"
       @changed="load"
     />
 
+    <Modal v-if="discarding" :title="`Discard ${discarding.name}?`" @close="discarding = undefined">
+      <div class="grid gap-4 p-5">
+        <p class="text-sm text-muted">
+          Prepared settings and credentials will be deleted. This instance has never been activated.
+        </p>
+        <UiAlert v-if="error">
+          {{ error }}
+        </UiAlert>
+        <div class="flex justify-end gap-2">
+          <UiButton :disabled="busy" @click="discarding = undefined">
+            Cancel
+          </UiButton>
+          <UiButton :disabled="busy" @click="discard(discarding)">
+            Discard setup
+          </UiButton>
+        </div>
+      </div>
+    </Modal>
+    <PluginSetup
+      v-if="setupDraft && manifest"
+      :key="setupDraft.id"
+      :plugin="id"
+      :manifest="manifest"
+      :initial="setupDraft"
+      @close="setupDraft = undefined; load()"
+      @changed="load"
+      @activated="setupDraft = undefined; load()"
+    />
     <Modal
       v-if="editing !== undefined && manifest && current"
       wide
@@ -914,6 +1058,9 @@ onBeforeUnmount(() => {
           </UiAlert>
           <UiAlert v-if="completion?.errors.form">
             {{ completion.errors.form }}
+          </UiAlert>
+          <UiAlert v-for="(message, index) in unshownFormErrors(manifest, completion?.errors)" :key="index">
+            {{ message }}
           </UiAlert>
           <header>
             <p class="text-3xs font-semibold uppercase tracking-[.12em] text-subtle">
@@ -986,6 +1133,7 @@ onBeforeUnmount(() => {
               v-model:values="values"
               v-model:secrets="secrets"
               :fields="stepShown(current)"
+              :lookup="lookup"
               :saved="editing?.secretKeys ?? []"
               :disabled="busy"
               :options="completion?.options"
@@ -1001,6 +1149,7 @@ onBeforeUnmount(() => {
                 v-model:secrets="secrets"
                 class="mt-3"
                 :fields="switches(current)"
+                :lookup="lookup"
                 :disabled="busy"
                 :errors="formErrors"
                 @refresh="complete"
@@ -1215,6 +1364,14 @@ onBeforeUnmount(() => {
             </section>
           </template>
 
+          <UiNotice
+            v-if="delegates && ['people', 'agents'].includes(current.kind) && chosenExecutionWarning"
+            tone="warning"
+            role="status"
+            title="Native execution unavailable for this bot"
+          >
+            {{ chosenExecutionWarning }}
+          </UiNotice>
           <div v-if="delegates && ['people', 'agents'].includes(current.kind) && chosenAgent && chosenRisks.length" class="flex gap-2.5 rounded-xl bg-warning-surface px-3.5 py-2.5 text-xs leading-relaxed text-warning" role="status">
             <Icon :name="TriangleAlert" :size="15" class="mt-0.5 shrink-0" />
             <p>

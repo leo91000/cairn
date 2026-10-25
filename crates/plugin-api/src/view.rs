@@ -136,6 +136,7 @@ fn node(value: &Value, depth: usize, budget: &mut Budget) -> Result<(), &'static
                 .ok_or("Form fields must be a list.")?;
             super::validate_settings_schema(fields)?;
             !fields.is_empty()
+                && !fields.iter().any(|field| field["remote"] == true)
                 && value["submit"].is_object()
                 && text(&value["submit"], "label", 60, true)
                 && action_name(&value["submit"])

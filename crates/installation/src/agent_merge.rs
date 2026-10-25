@@ -97,6 +97,12 @@ fn merge(db: &Db<'_>, input: &Value, executing: &[String]) -> Result<Value> {
             ));
         }
     }
+    if resource_references(db, source_id)? {
+        return Err(Error::conflict(
+            "Resolve the source's resource access before merging: reassign its routes, grant needed rights to the destination, then revoke the source's resource rules.",
+        ));
+    }
+
     let runs = db.json_rows(
         "SELECT data FROM runs WHERE json_extract(data,'$.snapshot.agent.id')=?",
         [source_id],
@@ -210,3 +216,17 @@ mod tests {
         assert_eq!(s.get("agents", &source_id).await.unwrap(), source);
     }
 }
+
+/// Management only: ask for existence without materializing scoped rights or people.
+fn resource_references(db: &Db<'_>, source: &str) -> Result<bool> {
+    let exists: bool = db.0.query_row(
+        "SELECT EXISTS(SELECT 1 FROM records WHERE kind IN (?1, ?2) AND json_extract(data,'$.agentId')=?3)",
+        rusqlite::params![crate::plugins::routes::KIND, crate::plugins::grants::KIND, source],
+        |row| row.get(0),
+    )?;
+    Ok(exists)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "agent_merge/measurement.rs"]
+mod measurement;
