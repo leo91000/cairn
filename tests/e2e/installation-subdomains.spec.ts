@@ -52,7 +52,13 @@ test('installation subdomains preserve browser drafts and canonical account acce
       response.writeHead(source.statusCode || 502, source.headers)
       source.pipe(response)
     })
-    upstream.on('error', () => response.writeHead(502).end())
+    upstream.on('error', () => {
+      if (!response.destroyed)
+        response.writeHead(502).end()
+    })
+    // A closed browser stream must release its Beacon and installation stream slots.
+    response.on('close', () => upstream.destroy())
+    request.on('aborted', () => upstream.destroy())
     request.pipe(upstream)
   })
   proxy.on('upgrade', (request, socket, head) => {

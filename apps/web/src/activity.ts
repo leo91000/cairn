@@ -108,7 +108,6 @@ export interface ActivityWait {
   reason?: string
 }
 
-/** Historical marker for events that predate the explicit immediate boolean. */
 // Where a scheduled wait's card is placed: its turn ended, or a message or another wait event came.
 const waitBoundaries = new Set(['turn.started', 'turn.completed', 'turn.failed', 'chat.user', 'chat.sleep', 'chat.wait', 'chat.wait_ready', 'chat.wakeup', 'run.wait', 'run.wait_ready', 'run.wakeup'])
 const terminalStatuses = new Set(['succeeded', 'failed', 'cancelled', 'interrupted'])
