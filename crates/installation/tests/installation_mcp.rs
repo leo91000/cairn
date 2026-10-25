@@ -812,6 +812,47 @@ async fn model_speeds_and_agent_speeds_match_public_mcp_and_installation_tools()
     .await;
     assert_eq!(result(&switched)["provider"], "claude");
     assert_eq!(result(&switched)["speed"], "");
+
+    // A queued message keeps its speed through edits that do not send one, on both tools.
+    let chat = s.chat_create(json!({})).await.unwrap();
+    let chat_id = chat["id"].as_str().unwrap();
+    s.chat_pause(chat_id, true).await.unwrap();
+    let message_id = uuid::Uuid::new_v4().to_string();
+    let sent = public_call(
+        &s,
+        &["run"],
+        "send_chat_message",
+        json!({
+            "chatId": chat_id,
+            "message": { "id": message_id, "text": "Next", "provider": "codex", "speed": "priority" },
+        }),
+    )
+    .await;
+    assert_eq!(result(&sent)["speed"], "priority", "{sent}");
+    let edited = public_call(
+        &s,
+        &["run"],
+        "edit_chat_message",
+        json!({ "chatId": chat_id, "messageId": message_id, "message": { "text": "Reworded" } }),
+    )
+    .await;
+    assert_eq!(result(&edited)["speed"], "priority", "{edited}");
+    let edited = call(
+        &s,
+        &configuration,
+        "edit_chat_message",
+        json!({ "chatId": chat_id, "messageId": message_id, "message": { "text": "Again" } }),
+    )
+    .await;
+    assert_eq!(result(&edited)["speed"], "priority", "{edited}");
+    let standard = call(
+        &s,
+        &configuration,
+        "edit_chat_message",
+        json!({ "chatId": chat_id, "messageId": message_id, "message": { "text": "Again", "speed": "standard" } }),
+    )
+    .await;
+    assert_eq!(result(&standard)["speed"], "standard", "{standard}");
 }
 
 #[tokio::test]
