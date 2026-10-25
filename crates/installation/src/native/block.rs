@@ -31,7 +31,7 @@ pub fn exists(state: &Path, run: &str) -> Result<bool> {
 /// mount, without bootstrap's legacy whole-image materialization.
 fn preparation_size(directory: &Path, requested: u64) -> Result<u64> {
     if storage::runtime::exists(directory) {
-        return Ok(storage::LazyDisk::geometry(&directory.join("lazy"))?.0);
+        return Ok(storage::LazyDisk::geometry(&directory.join("lazy"))?);
     }
     Ok(requested)
 }
@@ -310,11 +310,6 @@ pub async fn mount(
             .await?;
         }
         let volume = storage::runtime::load(directory).await?;
-        if volume.disk.layout()? != storage::layout::Layout::Flat {
-            return Err(Error::conflict(
-                "Native workspaces require a flat ext4 layout.",
-            ));
-        }
         let target = root.join("data");
         if !root.join("block-initialized").exists() && !root.join("block-seeding").exists() {
             if target.exists() && !root.join("initialized").exists() {
@@ -838,7 +833,6 @@ pub async fn restore(state: &Path, run: &str, request: Value) -> Result<Value> {
         || manifest["runtime"]["storage"] != "ublk"
         || manifest["runtime"]["os"] != "linux"
         || manifest["runtime"]["arch"] != "x86_64"
-        || storage::layout::Layout::from_manifest(manifest)? != storage::layout::Layout::Flat
     {
         return Err(Error::conflict(
             "Native block checkpoints require native Linux x86-64 and flat ext4.",
@@ -874,7 +868,7 @@ pub async fn restore(state: &Path, run: &str, request: Value) -> Result<Value> {
         .await?;
     }
     let runtime = manifest["runtime"].clone();
-    let result = crate::nodes::restore::restore_journal(state, run, request, false).await?;
+    let result = crate::nodes::restore::restore_journal(state, run, request).await?;
     let data = root.join("data");
     if data.exists() {
         let mut entries = tokio::fs::read_dir(&data).await?;
@@ -1182,9 +1176,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            storage::LazyDisk::geometry(&directory.join("lazy"))
-                .unwrap()
-                .0,
+            storage::LazyDisk::geometry(&directory.join("lazy")).unwrap(),
             size
         );
         assert!(!directory.join("data.ext4").exists());

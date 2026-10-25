@@ -139,10 +139,7 @@ def gateway_arguments(master):
             '-e', f'CAIRN_NODE_GATEWAY_SOCKET={GATEWAY_SOCKETS}/gateway.sock']
 
 
-def block_device_arguments(transport='ublk'):
-    # Upgrade the former persisted selection; no legacy backend is launched.
-    if transport not in ('ublk', 'vhost-user'):
-        raise ValueError('Unsupported block transport')
+def block_device_arguments():
     # Package upgrades can remove the running kernel's module files while the
     # driver is still loaded. Its live devices remain usable until reboot.
     if not Path('/sys/module/ublk_drv').is_dir():
@@ -169,8 +166,7 @@ def block_device_arguments(transport='ublk'):
     # Dynamic ublk minors require their detected classes, never all host devices.
     return ['--cap-add=SYS_RESOURCE', '--device=/dev/ublk-control',
             f'--device-cgroup-rule=c {character}:* rwm',
-            f'--device-cgroup-rule=b {block}:* rwm',
-            '-e', 'CAIRN_BLOCK_TRANSPORT=ublk']
+            f'--device-cgroup-rule=b {block}:* rwm']
 
 
 def vm_arguments(config):
@@ -181,23 +177,11 @@ def vm_arguments(config):
     pool_size = config.get('readyVmPoolSize')
     if pool_size is not None and (type(pool_size) is not int or not 1 <= pool_size <= 4):
         raise ValueError('readyVmPoolSize must be an integer between 1 and 4')
-    snapshots = config.get('vmSnapshots', False)
-    if not isinstance(snapshots, bool):
-        raise ValueError('vmSnapshots must be a boolean')
-    layout = config.get('diskLayout', 'paired-ext4-v1' if snapshots else None)
-    if layout not in (None, 'flat-ext4-v1', 'paired-ext4-v1'):
-        raise ValueError('Unsupported disk layout')
-    if snapshots and layout != 'paired-ext4-v1':
-        raise ValueError('Snapshots require paired disks')
     arguments = []
     if 'readyVmPool' in config:
         arguments += ['-e', 'CAIRN_READY_VM_POOL=' + ('true' if config['readyVmPool'] else 'false')]
     if pool_size is not None:
         arguments += ['-e', 'CAIRN_READY_VM_POOL_SIZE=' + str(pool_size)]
-    if layout is not None:
-        arguments += ['-e', 'CAIRN_DISK_LAYOUT=' + layout]
-    if 'vmSnapshots' in config:
-        arguments += ['-e', 'CAIRN_VM_SNAPSHOTS=' + ('true' if snapshots else 'false')]
     return arguments
 
 
@@ -207,13 +191,13 @@ def launch(image):
     config_path = ROOT / 'config.json'
     config = json.loads(config_path.read_text()) if config_path.exists() else {}
     vm_options = vm_arguments(config)
-    devices = block_device_arguments(config.get('blockTransport', 'ublk'))
+    devices = block_device_arguments()
     remove()
     command(['docker', 'run', '-d', '--name', NAME, '--init', '--user', '0:0', '--read-only',
              '--health-cmd', '/usr/local/bin/node -e ' + shlex.quote(HEALTH_CHECK),
              '--restart=unless-stopped', '--label', 'dev.cairn.node.owner=' + json.loads((ROOT / 'data/node/identity.json').read_text())['nodeId'], '--cap-drop=ALL', *['--cap-add=' + cap for cap in ('SYS_ADMIN', 'SYS_PTRACE', 'SYS_NICE', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE')],
              '--security-opt=apparmor:unconfined', '--security-opt=seccomp:unconfined',
-             '--device=/dev/kvm', '--device=/dev/net/tun', *(['--device=/dev/fuse'] if Path('/dev/fuse').exists() else []), *devices, *vm_options, '--sysctl=net.ipv4.ip_forward=1',
+             '--device=/dev/kvm', '--device=/dev/net/tun', *devices, *vm_options, '--sysctl=net.ipv4.ip_forward=1',
              '--sysctl=net.ipv6.conf.all.disable_ipv6=1', '--tmpfs=/run', '--tmpfs=/tmp',
              '-v', f'{ROOT}/data:/data', '-v', f'{ROOT}/state:/runner-state',
              '-e', 'DATA_DIR=/data', '-e', 'RUNNER_STATE_DIR=/runner-state',

@@ -161,10 +161,7 @@ impl<'a> Request<'a> {
             || (node["capabilities"]["kvm"] == true
                 && node["executionReady"] == true
                 && super::seen_within(node, FRESH_HEARTBEAT_MS));
-        // A moved disk is mounted from its published S3 state. A node that
-        // has not passed the storage probe cannot receive that disk.
-        (native || node["capabilities"]["fuse"] == true)
-            && !node["maintenance"].is_string()
+        !node["maintenance"].is_string()
             && !node["exclusiveReservation"].is_object()
             && !(local_unconfigured && run["isolated"] == true)
             && has_tags
@@ -348,7 +345,7 @@ fn development_node(configured: bool) -> Value {
             "diskMiB": 1_099_511_627_776u64,
         },
         "slots": 4096,
-        "capabilities": { "kvm": configured, "fuse": true },
+        "capabilities": { "kvm": configured },
         "runtimeId": "local",
     })
 }
@@ -530,11 +527,6 @@ fn claim_reservation(
         || native && record["capabilities"]["ublk"] != true
     {
         return Err(Error::conflict("Destination execution backend changed."));
-    }
-    if !native && record["capabilities"]["fuse"] != true {
-        return Err(Error::conflict(
-            "Destination no longer supports on-demand disks.",
-        ));
     }
     if record["maintenance"].is_string() {
         return Err(Error::unavailable(

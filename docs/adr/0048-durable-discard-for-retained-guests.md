@@ -1,3 +1,5 @@
+> Statut : Le support des vues paired est abandonné ; le trim durable du disque ext4 plat et le contrôle des VM restent applicables.
+
 # Durable discard for current and retained guest images
 
 Date: 2026-10-17.

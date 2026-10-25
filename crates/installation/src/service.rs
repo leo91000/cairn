@@ -48,12 +48,9 @@ pub struct Service {
 
 impl Service {
     pub async fn new(config: Config) -> Result<Arc<Self>> {
-        if config.worker_enabled
-            && config.runner_url.is_empty()
-            && std::env::var("NODE_ENV").is_ok_and(|v| v == "production")
-        {
+        if config.worker_enabled && config.runner_url.is_empty() && !cfg!(debug_assertions) {
             return Err(Error::bad(
-                "Production execution requires the Firecracker runner. Set RUNNER_URL; \
+                "Release execution requires the Firecracker runner. Set RUNNER_URL; \
                     shared host execution is available only in development.",
             ));
         }

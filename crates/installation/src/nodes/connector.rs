@@ -233,7 +233,6 @@ pub fn capabilities(path: &Path) -> Result<Value> {
         }
         .into(),
         kvm,
-        fuse: device_opens("/dev/fuse").is_some(),
         ublk: device_opens("/dev/ublk-control").is_some(),
         native_mode_protocol: u32::from(crate::native::enabled()),
         cpu: u32::try_from(cpu).unwrap_or(u32::MAX),
