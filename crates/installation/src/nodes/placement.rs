@@ -110,7 +110,6 @@ impl<'a> Request<'a> {
     fn new(run: &'a Value, access: &'a Value, checkpoint: &'a Value) -> Result<Self> {
         if run["requiredRuntime"]
             .as_str()
-            .or(checkpoint["runtimeId"].as_str())
             .is_some_and(|runtime| runtime != super::component_runtime())
             && run["isolated"] == true
         {
@@ -123,9 +122,7 @@ impl<'a> Request<'a> {
             access,
             checkpoint,
             moving: run["placementTransition"] == true,
-            required_runtime: run["requiredRuntime"]
-                .as_str()
-                .or(checkpoint["runtimeId"].as_str()),
+            required_runtime: run["requiredRuntime"].as_str(),
         })
     }
 

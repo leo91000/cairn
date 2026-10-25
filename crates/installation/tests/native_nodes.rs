@@ -2358,7 +2358,7 @@ async fn native_mode_transition_keeps_automatic_recovery_and_capacity_moves_on_t
         .put(
             "node-backups",
             json!({
-                "id": point, "runId": run_id, "destination": "s3", "sessionId": "saved-session",
+                "id": point, "runId": run_id, "destination": "s3", "blockFormat": "shared-v1", "sessionId": "saved-session",
                 "manifest": f.service.vault.encrypt(&format!("backup:{point}"), &manifest).unwrap(),
             }),
         )

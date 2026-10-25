@@ -89,17 +89,13 @@ pub(super) async fn handler(State(broker): State<Broker>, request: Request) -> R
 }
 
 async fn health(broker: &Broker) -> Result<Response> {
-    let mut runtimes = Vec::new();
-    if let Ok(mut entries) = tokio::fs::read_dir(broker.state.join("images")).await {
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let complete =
-                entry.path().join("root.ext4").exists() && entry.path().join("vmlinux").exists();
-            if complete {
-                runtimes.push(entry.file_name().to_string_lossy().into_owned());
-            }
-        }
-    }
-    let runtime_id = std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into());
+    let runtime_id = crate::nodes::component_runtime();
+    let image = broker.state.join("images").join(&runtime_id);
+    let runtimes = if image.join("root.ext4").exists() && image.join("vmlinux").exists() {
+        vec![runtime_id.clone()]
+    } else {
+        Vec::new()
+    };
     let active_runs = broker.active.lock().await.len();
     let mut capabilities = crate::nodes::connector::capabilities(&broker.state).ok();
     if let (Some(capabilities), Some(hardware)) = (&mut capabilities, broker.pool.hardware()) {

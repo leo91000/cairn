@@ -36,6 +36,32 @@ fn preparation_size(directory: &Path, requested: u64) -> Result<u64> {
     Ok(requested)
 }
 
+async fn record_runtime(directory: &Path, plan: &Value) -> Result<()> {
+    let runtime = json!({
+        "backend": "native",
+        "storage": "ublk",
+        "os": "linux",
+        "arch": "x86_64",
+        "runtimeId": plan["runtimeId"],
+    });
+    if directory.join("runtime.json").exists() {
+        let previous: Value =
+            serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
+        if ["backend", "storage", "os", "arch"]
+            .iter()
+            .any(|field| previous[*field] != runtime[*field])
+        {
+            return Err(Error::conflict("Native disk platform changed."));
+        }
+    }
+    atomic_write(
+        &directory.join("runtime.json"),
+        &serde_json::to_vec(&runtime)?,
+    )
+    .await?;
+    Ok(())
+}
+
 fn ext4_bytes(superblock: &[u8; 1024]) -> Result<u64> {
     if u16::from_le_bytes(superblock[56..58].try_into().unwrap()) != 0xef53 {
         return Err(Error::conflict("Invalid native ext4 geometry."));
@@ -291,23 +317,7 @@ pub async fn mount(
             }
         })?;
         let physical = crate::file_lock::exclusive(&directory.join("lock"), DISK_BUSY)?;
-        let runtime = json!({
-            "backend": "native", "storage": "ublk", "os": "linux", "arch": "x86_64",
-            "runtimeId": plan["runtimeId"],
-        });
-        if directory.join("runtime.json").exists() {
-            let previous: Value =
-                serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
-            if previous != runtime {
-                return Err(Error::conflict("Native disk runtime changed."));
-            }
-        } else {
-            atomic_write(
-                &directory.join("runtime.json"),
-                &serde_json::to_vec(&runtime)?,
-            )
-            .await?;
-        }
+        record_runtime(directory, plan).await?;
         let volume = storage::runtime::load(directory).await?;
         let target = root.join("data");
         if !root.join("block-initialized").exists() && !root.join("block-seeding").exists() {
@@ -820,7 +830,7 @@ pub async fn restore(state: &Path, run: &str, request: Value) -> Result<Value> {
         ));
     }
     crate::nodes::snapshots::validate(manifest)?;
-    super::systemd::tools(text(&manifest["runtime"], "runtimeId"))?;
+    super::systemd::tools(&crate::nodes::component_runtime())?;
     crate::validation::uuid(text(&request, "backupId"))?;
     let root = workspace::directory(state, run)?;
     private_dir(&root).await?;
@@ -1033,6 +1043,49 @@ pub fn used_bytes(path: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_disks_resume_with_current_tools_and_keep_the_platform_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("runtime.json");
+        let previous = json!({
+            "backend": "native", "storage": "ublk", "os": "linux", "arch": "x86_64",
+            "runtimeId": "previous-release",
+        });
+        atomic_write(&path, &serde_json::to_vec(&previous).unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(root.path().join("workspace"), b"retained")
+            .await
+            .unwrap();
+        record_runtime(root.path(), &json!({ "runtimeId": "current-release" }))
+            .await
+            .unwrap();
+        let current: Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(current["runtimeId"], "current-release");
+        assert_eq!(current["storage"], "ublk");
+        assert_eq!(
+            tokio::fs::read(root.path().join("workspace"))
+                .await
+                .unwrap(),
+            b"retained"
+        );
+        let mut incompatible = current.clone();
+        incompatible["arch"] = "aarch64".into();
+        atomic_write(&path, &serde_json::to_vec(&incompatible).unwrap())
+            .await
+            .unwrap();
+        assert!(
+            record_runtime(root.path(), &json!({ "runtimeId": "next-release" }))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&tokio::fs::read(path).await.unwrap()).unwrap(),
+            incompatible
+        );
+    }
 
     #[tokio::test]
     async fn unapplied_grant_resumes_retained_journal_without_materializing_it() {

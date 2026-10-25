@@ -618,19 +618,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_startup_deadline_follows_the_route_and_resets_on_fallback() {
+    async fn fetch_startup_deadline_follows_the_route() {
         use std::time::Duration;
 
-        for (direct, fallback, delay, succeeds) in [
-            (false, false, TRANSFER_IDLE + Duration::from_secs(1), false),
-            (true, false, TRANSFER_IDLE + Duration::from_secs(1), true),
+        for (direct, delay, succeeds) in [
+            (false, TRANSFER_IDLE + Duration::from_secs(1), false),
+            (true, TRANSFER_IDLE + Duration::from_secs(1), true),
             (
                 true,
-                false,
                 DIRECT_PUBLICATION_STARTUP + Duration::from_secs(1),
                 false,
             ),
-            (true, true, TRANSFER_IDLE + Duration::from_secs(1), false),
         ] {
             let arrived = Arc::new(tokio::sync::Notify::new());
             let release = Arc::new(tokio::sync::Notify::new());
@@ -640,14 +638,7 @@ mod tests {
                 let received = received.clone();
                 let released = released.clone();
                 async move {
-                    if fallback && request.uri().path() == "/publication" {
-                        return axum::http::StatusCode::NOT_FOUND.into_response();
-                    }
-
-                    assert_eq!(
-                        request.uri().path(),
-                        if fallback { "/blocks" } else { "/publication" }
-                    );
+                    assert_eq!(request.uri().path(), "/publication");
                     received.notify_one();
                     released.notified().await;
                     vec![7_u8].into_response()

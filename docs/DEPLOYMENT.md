@@ -271,7 +271,7 @@ variables listed in the [production setup](PRODUCTION-CAIRN-SETUP.md#read-only-r
 Follow that setup's credential transition before removing required reviewers;
 the legacy `COOLIFY_TOKEN` environment secret must be deleted so historical
 workflows cannot bypass current checks. Routine stable releases deploy automatically
-after installation data compatibility verification; they create no backups.
+after release validation; they create no backups.
 The obsolete `CAIRN_PUBLIC_URL` and standalone-manager deployment target are no
 longer used by the CLI. The script refuses a manager/runner Compose target.
 

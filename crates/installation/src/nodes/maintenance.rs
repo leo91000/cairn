@@ -107,58 +107,17 @@ pub async fn downloads(State(app): State<App>, request: Request) -> Result<Respo
         .map_err(Error::internal)
 }
 
-/// The release document, after recording its image as the one for this runtime.
+/// The current release and configured shutdown deadline.
 async fn advertise(s: &Service) -> Result<String> {
     let mut release = release()?;
-    let runtime = std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into());
-    if super::valid_runtime(&runtime) {
-        advertise_runtime(&s.store, &runtime, &release.image, crate::config::now()).await?;
-    }
     release.shutdown_timeout_seconds =
         super::publication::settings(s).await?["shutdownTimeoutSeconds"].clone();
     Ok(serde_json::to_value(release)?.to_string())
 }
 
-const RUNTIME_ADVERTISEMENT_MS: i64 = 24 * 60 * 60 * 1000;
-
-async fn advertise_runtime(
-    store: &crate::store::Store,
-    runtime: &str,
-    image: &str,
-    now: i64,
-) -> Result<()> {
-    let key = format!("node-runtime:{runtime}");
-    let runtime = runtime.to_owned();
-    let image = image.to_owned();
-    let deadline = now.saturating_add(RUNTIME_ADVERTISEMENT_MS);
-    store
-        .transaction(move |db| {
-            db.set(
-                &key,
-                &json!({
-                    "runtimeId": runtime,
-                    "image": image,
-                    "advertisedUntil": deadline,
-                }),
-                Some(deadline),
-            )
-        })
-        .await
-}
-
 pub async fn request(s: &Service, node: &str, input: &Value) -> Result<Value> {
     match text(input, "action") {
         "status" => s.get("nodes", node).await,
-        "runtimes" => {
-            let runtimes = s
-                .store
-                .keys("node-runtime:")
-                .await?
-                .into_iter()
-                .map(|(_, value)| value)
-                .collect::<Vec<_>>();
-            Ok(json!({ "runtimes": runtimes }))
-        }
         "complete" => complete(s, node, input).await,
         "drain" => start_drain(s, node).await,
         _ => Err(Error::bad("Invalid maintenance action.")),
@@ -329,26 +288,4 @@ async fn drain(s: &Service, node: &str) -> Result<()> {
         }
     }
     failure.map_or(Ok(()), Err)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn runtime_announcements_expire_without_refresh() {
-        let root = tempfile::tempdir().unwrap();
-        let store = crate::store::Store::open(root.path()).unwrap();
-        let previous = crate::config::now() - 86_400_001;
-        advertise_runtime(&store, "previous", "previous-image", previous)
-            .await
-            .unwrap();
-        advertise_runtime(&store, "current", "current-image", crate::config::now())
-            .await
-            .unwrap();
-
-        let entries = store.keys("node-runtime:").await.unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].1["runtimeId"], "current");
-    }
 }

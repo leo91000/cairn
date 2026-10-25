@@ -46,10 +46,7 @@ fields persist a ten-minute window from the first failure. Once it expires,
 admission does not launch another recovery attempt; an already resumed agent turn
 continues under its normal execution budget. Admission rechecks the persisted
 deadline transactionally after slow account preparation and releases any acquired
-account if the window expired while preparing. Old records without these fields
-remain readable and acquire a window when scheduling their next retry. The old
-release ignores the added fields, so the persisted-data compatibility epoch stays
-unchanged. Restart preserves the count and the
+account if the window expired while preparing. Restart preserves the count and
 timestamp; it does not restart the delay or reset the budget. Backoff does not hold
 an account lease. Existing workspace ownership, permission checks, execution budgets
 and storage protections still apply when admission resumes the run.

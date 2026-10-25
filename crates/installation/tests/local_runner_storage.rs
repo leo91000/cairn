@@ -73,7 +73,7 @@ async fn installation_runner_reads_disks_from_the_private_manager_origin_only() 
     // Resuming a published disk on the local node sends the same origin to
     // the runner's restore endpoint.
     let state = root.path().join("runner-state");
-    let images = state.join("images/fixture");
+    let images = state.join("images/development");
     std::fs::create_dir_all(&images).unwrap();
     for file in ["root.ext4", "vmlinux"] {
         std::fs::write(images.join(file), b"").unwrap();
@@ -85,7 +85,7 @@ async fn installation_runner_reads_disks_from_the_private_manager_origin_only() 
                 "size": 4096,
                 "blockSize": snapshots::BLOCK,
                 "blocks": [{ "offset": 0, "size": 4096, "hash": null }],
-                "runtime": { "runtimeId": "fixture" },
+                "runtime": { "runtimeId": "development" },
             },
             "master": master,
             "grant": "fixture",

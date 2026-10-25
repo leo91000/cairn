@@ -415,6 +415,7 @@ async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
         "status": RunStatus::Running,
         "createdAt": now(),
         "trigger": "chat",
+        "snapshot": { "agent": { "id": MAIN_AGENT_ID, "provider": "codex" } },
     });
     common::add_run(&service.store, &run).await;
     let question = json!({

@@ -170,8 +170,6 @@ def block_device_arguments():
 
 
 def vm_arguments(config):
-    if not isinstance(config.get('cacheApprovedRuntimes', True), bool):
-        raise ValueError('cacheApprovedRuntimes must be a boolean')
     if not isinstance(config.get('readyVmPool', True), bool):
         raise ValueError('readyVmPool must be a boolean')
     pool_size = config.get('readyVmPoolSize')
@@ -276,25 +274,6 @@ def update(config, release):
     reconcile(config)
 
 
-def cache_runtimes(master):
-    value = request(master, '/internal/nodes/maintenance', {'action': 'runtimes'})
-    for runtime in value.get('runtimes', []):
-        identifier, image = runtime.get('runtimeId', ''), runtime.get('image', '')
-        if not re.fullmatch(r'[a-zA-Z0-9-]{1,100}', identifier) or not IMAGE.fullmatch(image):
-            raise RuntimeError('Invalid approved runtime package')
-        cache = ROOT / 'state/images' / identifier
-        if (cache / 'root.ext4').is_file() and (cache / 'vmlinux').is_file():
-            continue
-        (ROOT / 'state/images').mkdir(parents=True, exist_ok=True, mode=0o700)
-        command(['docker', 'pull', image], timeout=1200)
-        # Extract from the approved digest, with no network or host Docker access.
-        # Publish atomically; repair missing files without replacing an existing image.
-        script = 'test "$APP_RUNTIME_ID" = "$CAIRN_EXPECTED_RUNTIME"; staging="/cache/$APP_RUNTIME_ID.partial"; mkdir -p "$staging"; zstd -d -f /opt/cairn-vm/root.ext4.zst -o "$staging/root.ext4"; cp /opt/cairn-vm/vmlinux "$staging/vmlinux"; chmod 444 "$staging/root.ext4" "$staging/vmlinux"; sync; if test ! -d "/cache/$APP_RUNTIME_ID"; then mv "$staging" "/cache/$APP_RUNTIME_ID"; else for file in root.ext4 vmlinux; do test -s "/cache/$APP_RUNTIME_ID/$file" || mv "$staging/$file" "/cache/$APP_RUNTIME_ID/$file"; done; rm -rf "$staging"; fi; sync'
-        command(['docker', 'run', '--rm', '--network=none', '--read-only', '--cap-drop=ALL', '--user=0:0',
-                 '-v', str(ROOT / 'state/images') + ':/cache', '-e', 'CAIRN_EXPECTED_RUNTIME=' + identifier,
-                 '--entrypoint=/bin/sh', image, '-ec', script], timeout=1200)
-
-
 def reconcile(config):
     # Persist acknowledgements independently of the image selection: a lost HTTP
     # response must not trigger another restart or strand the node in maintenance.
@@ -343,8 +322,6 @@ def run():
                     atomic(ROOT / 'config.json', config)
                 if release['image'] not in (config['image'], config.get('failedImage')):
                     update(config, release)
-                if not STOP and config.get('cacheApprovedRuntimes', True):
-                    cache_runtimes(config['master'])
             except (OSError, ValueError, RuntimeError):
                 print('Node update check failed; retaining current image and data', flush=True)
             for _ in range(1 if config.get('pendingCompletion') or config.get('pendingSupervisor') else 30):

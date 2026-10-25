@@ -374,10 +374,7 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
         run(docker + ['stop', '--timeout', '300', 'manager'], timeout=310)
         run(docker + ['stop', '--timeout', '60', 'runner'], timeout=70)
         atomic(ROOT / 'compose.json', json.dumps(deployment, indent=2))
-        try:
-            run(docker + ['up', '-d', '--wait', '--wait-timeout', '120', '--pull', 'never', '--no-deps', 'runner', 'manager'], timeout=150)
-        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
-            raise
+        run(docker + ['up', '-d', '--wait', '--wait-timeout', '120', '--pull', 'never', '--no-deps', 'runner', 'manager'], timeout=150)
 
         # A JSON verdict proves the probe ran. Docker exec failures before the
         # probe starts remain transient, rather than blacklisting an untested image.
@@ -400,9 +397,12 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
         except RuntimeError:
             containers = docker_output(docker[1:] + ['ps', '--all', '--format', 'json', 'manager'])
             manager = containers[0] if isinstance(containers, list) and containers else containers
-            stopped = not manager or (manager.get('Image') in (config['image'], config['pendingImage'])
-                                      and manager.get('State') in ('exited', 'dead', 'created', 'restarting'))
-            if not config.get('leaseAcquired') or not stopped:
+            owned_image = manager and manager.get('Image') in (config['image'], config['pendingImage'])
+            stopped = not manager or (owned_image and manager.get('State') in ('exited', 'dead', 'created', 'restarting'))
+            unavailable_candidate = (owned_image and manager.get('Image') == config['pendingImage']
+                                     and manager.get('State') == 'running'
+                                     and not manager_health(inspect(config['pendingImage'])))
+            if not config.get('leaseAcquired') or not (stopped or unavailable_candidate):
                 raise
         launch(config['pendingImage'])
         finish(True)

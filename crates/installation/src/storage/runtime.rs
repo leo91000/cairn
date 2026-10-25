@@ -1118,7 +1118,11 @@ mod tests {
         assert!(volume.inspect().await.unwrap()["grantId"].is_null());
         assert!(volume.source.grant_id().is_err());
         assert_eq!(
-            volume.source.fetch(&"a".repeat(64)).unwrap_err().kind(),
+            volume
+                .source
+                .fetch(&format!("b3-{}", "a".repeat(64)))
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::PermissionDenied
         );
         let wrong = environment::ownership(state.path(), &crate::config::id(), "busy")
@@ -1162,7 +1166,7 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let context = prepared_context();
         let mut remote = prepared_manifest();
-        remote["blocks"][0]["hash"] = "a".repeat(64).into();
+        remote["blocks"][0]["hash"] = format!("b3-{}", "a".repeat(64)).into();
         let physical = state.path().join("environments").join(crate::config::id());
         assert!(
             create_prepared(&physical.join("lazy"), &remote, &context)
@@ -1321,7 +1325,11 @@ mod tests {
         let vm = uuid::Uuid::new_v4().to_string();
         let jail = root.join("jails/firecracker").join(&vm).join("root");
         std::fs::create_dir_all(&jail).unwrap();
-        std::fs::write(root.join("attempt.vm.json"), json!({"vmId":vm}).to_string()).unwrap();
+        std::fs::write(
+            root.join("attempt.vm.json"),
+            json!({"vmId":vm,"runId":"run"}).to_string(),
+        )
+        .unwrap();
         (
             volume,
             attempt,
@@ -1571,7 +1579,7 @@ mod tests {
                 "version": 1,
                 "size": 4096,
                 "blockSize": 4194304,
-                "blocks": [{"offset": 0,"size": 4096,"hash": "a".repeat(64)}]
+                "blocks": [{"offset": 0,"size": 4096,"hash": format!("b3-{}", "a".repeat(64))}]
             }),
             source,
         )

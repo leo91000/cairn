@@ -41,9 +41,9 @@ appears. The priority lock is visible across the connector and controller
 processes. Cancellation discards the incomplete download before releasing the
 mutation lock. Heartbeat and lease renewal do not await downloads.
 
-## Compatibility and recovery
+## Storage and recovery
 
-The installation data epoch stays unchanged. Conversation filesystems, journals,
+Conversation filesystems, journals,
 database records, published manifests and storage grants retain their format.
 The new ZIPs and JSON descriptors are disposable caches, not a new backup format;
 this does not reopen the historical conversation-archive behavior in ADR-0008.

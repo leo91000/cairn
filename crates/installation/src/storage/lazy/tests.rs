@@ -160,7 +160,7 @@ fn publication_retires_obsolete_clean_cache_without_evicting_current_blocks() {
     });
     let disk = LazyDisk::create(&directory, &manifest, source).unwrap();
     disk.read_at(0, &mut [0]).unwrap();
-    let obsolete = "a".repeat(64);
+    let obsolete = format!("b3-{}", "a".repeat(64));
     let old_file = directory.join("cache").join(&obsolete);
     std::fs::write(&old_file, b"obsolete verified cache").unwrap();
     // Register the historical file as an existing clean cache entry.
@@ -208,7 +208,6 @@ fn node_cache_evicts_the_oldest_clean_block_after_a_verified_read() {
     }
     let root = tempfile::tempdir().unwrap();
     let policy = serde_json::json!({
-        "enabled": true,
         "cacheMiB": 8,
         "reserveMiB": 64,
         "reservePercent": 1,

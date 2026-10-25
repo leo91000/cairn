@@ -404,7 +404,7 @@ mod tests {
         let cache = root.path().join("disks/conversation/lazy/cache");
         std::fs::create_dir_all(&cache).unwrap();
         for index in 0..8_000 {
-            std::fs::write(cache.join(format!("{index:064x}")), [1_u8; 4096]).unwrap();
+            std::fs::write(cache.join(format!("b3-{index:064x}")), [1_u8; 4096]).unwrap();
         }
         let policy = Policy {
             cache_mi_b: 102400,
@@ -427,7 +427,11 @@ mod tests {
         for (namespace, name) in [("disks", "first"), ("environments", "second")] {
             let disk = root.path().join(namespace).join(name).join("lazy");
             std::fs::create_dir_all(disk.join("cache")).unwrap();
-            std::fs::write(disk.join("cache").join("a".repeat(64)), b"clean").unwrap();
+            std::fs::write(
+                disk.join("cache").join(format!("b3-{}", "a".repeat(64))),
+                b"clean",
+            )
+            .unwrap();
             std::fs::write(disk.join("journal-v2.sqlite"), b"unsaved work").unwrap();
         }
         let policy = Policy {

@@ -12,7 +12,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -32,8 +31,6 @@ if args[0]=='inspect':
  print(json.dumps([value]))
 elif args[0]=='rm':
  state.unlink(missing_ok=True)
-elif args[0]=='run' and '--network=none' in args:
- cache=root/'state/images/retained-runtime';cache.mkdir(parents=True);(cache/'root.ext4').write_bytes(b'fixture');(cache/'vmlinux').write_bytes(b'fixture')
 elif args[0]=='run':
  image=args[-3];healthy=not (image.endswith('2'*64) and os.environ.get('FAIL_CANDIDATE')=='1')
  state.write_text(json.dumps({'Config':{'Image':image,'Labels':{'dev.cairn.node.owner':'fixture-node'}},'State':{'Running':healthy}}))
@@ -158,7 +155,7 @@ class Supervisor(unittest.TestCase):
                 result = subprocess.run(['node', '-e', shim + probe[-1], json.dumps(value)], capture_output=True)
                 self.assertEqual(result.returncode, expected, result.stderr.decode())
 
-    def scenario(self, fail, lost_completion=False, retained=False, cache=True):
+    def scenario(self, fail, lost_completion=False):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / 'data/node').mkdir(parents=True)
@@ -168,7 +165,6 @@ class Supervisor(unittest.TestCase):
             (root / 'docker.json').write_text(json.dumps({'Config': {'Image': OLD, 'Labels': {'dev.cairn.node.owner': 'fixture-node'}}, 'State': {'Running': True}}))
             completed = queue.Queue()
             completion_attempts = []
-            runtime_requests = []
 
             class Master(http.server.BaseHTTPRequestHandler):
                 def log_message(self, *_):
@@ -185,8 +181,6 @@ class Supervisor(unittest.TestCase):
                         self.end_headers()
                         return
                     value = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-                    if value['action'] == 'runtimes':
-                        runtime_requests.append(value)
                     if value['action'] == 'complete' and (value['image'] == NEW or value.get('error')):
                         completion_attempts.append(value)
                         if lost_completion and len(completion_attempts) == 1:
@@ -196,22 +190,17 @@ class Supervisor(unittest.TestCase):
                         completed.put(value)
                     self.send_response(200)
                     self.end_headers()
-                    self.wfile.write(json.dumps({'runtimes': [{'runtimeId': 'retained-runtime', 'image': OLD}]} if value['action'] == 'runtimes' and retained else {'maintenance': 'ready-to-update'}).encode())
+                    self.wfile.write(json.dumps({'maintenance': 'ready-to-update'}).encode())
 
             server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Master)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
-            (root / 'config.json').write_text(json.dumps({'image': OLD, 'master': f'http://127.0.0.1:{server.server_port}', 'cacheApprovedRuntimes': cache}))
+            (root / 'config.json').write_text(json.dumps({'image': OLD, 'master': f'http://127.0.0.1:{server.server_port}'}))
             _, supervisor = write_supervisors(root)
             env = {**os.environ, 'PATH': str(root) + os.pathsep + os.environ['PATH'], 'CAIRN_NODE_ROOT': str(root), 'FAIL_CANDIDATE': str(int(fail)), 'FIXTURE_SUPERVISOR': str(supervisor)}
             process = subprocess.Popen([sys.executable, str(supervisor), 'run'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
                 value = completed.get(timeout=40)
-                if retained and cache:
-                    deadline = time.monotonic() + 10
-                    while not (root / 'state/images/retained-runtime/root.ext4').exists():
-                        self.assertLess(time.monotonic(), deadline)
-                        time.sleep(0.05)
                 process.send_signal(signal.SIGTERM)
                 output, errors = process.communicate(timeout=10)
                 self.assertEqual(process.returncode, 0, errors.decode())
@@ -225,9 +214,6 @@ class Supervisor(unittest.TestCase):
                 self.assertEqual(launches, [NEW, OLD] if fail else [NEW])
                 self.assertTrue(any(cmd[0] == 'stop' for cmd in commands))
                 self.assertFalse(any('fixture-token' in ' '.join(cmd) for cmd in commands))
-                if not cache:
-                    self.assertEqual(runtime_requests, [])
-                    self.assertFalse(any('--network=none' in cmd for cmd in commands))
             finally:
                 if process.poll() is None:
                     process.kill()
@@ -235,12 +221,6 @@ class Supervisor(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=2)
-
-    def test_fetches_retained_runtime_from_its_approved_digest(self):
-        self.scenario(False, retained=True)
-
-    def test_disabled_runtime_preloading_keeps_the_healthy_node_without_downloading_old_images(self):
-        self.scenario(False, retained=True, cache=False)
 
     def test_success_commits_new_digest_and_stops_cleanly(self):
         self.scenario(False)

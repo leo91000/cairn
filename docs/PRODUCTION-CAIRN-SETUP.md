@@ -297,9 +297,9 @@ Configure GitHub's **production** environment:
 
 Keep the environment's deployment branch/tag policy restricted to the intended
 release refs. Routine stable tags deploy automatically, without required
-reviewers, after data compatibility checks succeed.
+reviewers, after the release checks succeed.
 Enable this only after the host helper, SSH identity and new workflow are installed;
-approve any older pending release separately after its own compatibility checks.
+approve any older pending release separately after its own release checks.
 Use a fresh `CAIRN_RELEASE_COOLIFY_TOKEN` credential for this workflow, then remove
 the old environment secret `COOLIFY_TOKEN` before removing required reviewers.
 Historical workflows lack the current release checks and must no longer have a usable

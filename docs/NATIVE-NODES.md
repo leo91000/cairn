@@ -134,7 +134,7 @@ local block cache and obsolete generated attempt files. The sweep checks bounded
 batches every minute, so reclamation can occur later than the one-hour threshold.
 It requires the exact latest acknowledged S3 generation and no active attempt,
 pending publication or movement. Unpublished journal writes are never evicted. The
-journal metadata, base manifest, scoped grant and pinned runtime remain, so the
+journal metadata, base manifest and scoped grant remain, so the
 next execution can read its files from S3 on demand. Chat history, published
 artifacts and shared engine/tool bundles remain available.
 

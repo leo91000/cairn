@@ -931,10 +931,13 @@ impl Execution<'_> {
                     child.stop().await;
                     exit.code = Some(STOPPED);
                 }
-                _ = timeout.tick(), if running && self.checkpoint.expired() => {
+                _ = timeout.tick(), if running => {
                     // The controller owns confirmed suspension timing. An unavailable
                     // observation must not turn an administratively paused VM into a timeout.
-                    if self.checkpoint.refresh_pause(s).await.is_ok() && self.checkpoint.expired() {
+                    if self.checkpoint.expired()
+                        && self.checkpoint.refresh_pause(s).await.is_ok()
+                        && self.checkpoint.expired()
+                    {
                         exit.timed_out = true;
                         child.stop().await;
                         exit.code = Some(STOPPED);

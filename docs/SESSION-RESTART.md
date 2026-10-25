@@ -1,11 +1,10 @@
 # Fresh sessions after a conversation restoration
 
 A failed or interrupted restored run can offer a fresh native agent session.
-The installation derives `canRequestNewSession` from `run.restoredAt`, with
-`chat.restoredAt` as a historical fallback, and an active chat without an already
-pending request. Web and Android consume that availability. The historical offer
-lifetime is preserved: a successful turn hides it, but a later failure can offer
-it again while the restoration marker remains. This change introduces no expiry.
+The installation derives `canRequestNewSession` from `run.restoredAt` and an active
+chat without an already pending request. Web and Android consume that availability.
+A successful turn hides it, but a later failure can offer it again while the
+restoration marker remains. The offer has no expiry.
 
 Confirmation clears the run's native session and resume availability, pauses the
 queue, clears its durable wakeup and records `chat.sessionRestartRequested`.

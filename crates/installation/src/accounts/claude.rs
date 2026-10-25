@@ -765,6 +765,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::Provider;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},

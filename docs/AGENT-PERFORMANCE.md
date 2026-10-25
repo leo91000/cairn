@@ -27,8 +27,7 @@ across reads and long fragments. Control-sequence bodies are discarded while
 streaming rather than buffered, and incomplete UTF-8 characters wait for the next read.
 Archive transfers add a UUID linking host and guest phases; see
 [VM import timings](#vm-import-timings) for reading, transport, extraction and
-acknowledgement measurements. Guest measurements require the updated VM image;
-host measurements also work with retained older images.
+acknowledgement measurements. Host and guest run the same application build.
 
 ## Timings
 
@@ -177,8 +176,5 @@ the current phase and elapsed time. Completed stream totals are only available
 when streaming reaches its end.
 
 Host timings are in the runner/controller logs; guest timings are in the VM's
-`{vm-id}.boot.log` in runner state. Old guest images accept the optional trace
-field but do not emit guest timings. The current controller still supplies host
-timings for those retained images. New guest code also accepts requests without
-a valid UUID trace ID, recording them as `id="legacy"`. No startup timeouts, archive
-encoding, import contents or transfer ordering are changed.
+`{vm-id}.boot.log` in runner state. Import trace IDs correlate host and guest
+measurements; invalid or absent trace IDs are recorded as `untraced`.

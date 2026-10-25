@@ -122,11 +122,6 @@ fn client() -> Result<reqwest::Client> {
         .map_err(Error::internal)
 }
 
-fn runtime() -> String {
-    std::env::var("APP_RUNTIME_ID")
-        .unwrap_or_else(|_| format!("cairn-{}", env!("CARGO_PKG_VERSION")))
-}
-
 fn mi_b(blocks: libc::fsblkcnt_t, block_size: libc::c_ulong) -> u64 {
     (u128::from(blocks) * u128::from(block_size) / 1_048_576).min(u128::from(u64::MAX)) as u64
 }
@@ -276,7 +271,7 @@ async fn register(origin: &url::Url, directory: &Path, file: &mut tokio::fs::Fil
         name: "Linux node",
         protocol: 1,
         capabilities: capabilities(directory)?,
-        runtime_id: runtime(),
+        runtime_id: super::component_runtime(),
     };
     let response = client()?
         .post(
@@ -529,7 +524,7 @@ async fn heartbeat(
                             identity.token.clone(),
                             stop.clone(),
                         );
-                        let warm_bases = health["nativeProjectBases"] == 1;
+                        let warm_bases = health["backend"] == "native";
                         tokio::spawn(async move {
                             let _guard = guard;
                             let warming = descriptors.clone();
@@ -630,6 +625,7 @@ mod capacity_tests {
         let mut health = json!({
             "status": "ok",
             "nodeProtocol": NODE_PROTOCOL,
+            "runtimeId": super::super::component_runtime(),
             "dataRoot": super::super::node_data_dir(),
             "pool": { "quarantined": false },
         });

@@ -1292,7 +1292,7 @@ async fn heartbeat(s: &Service, input: &Input) -> Result<Value> {
         record_lease(s, &lease.id, lease.remaining_ms).await;
     }
     let mut value = serde_json::to_value(&reply)?;
-    // Older connectors ignore this optional, credential-free cache catalogue.
+    // Catalogue failures must not interrupt current execution leases.
     match crate::project_archives::catalog(s, &reply.node_id).await {
         Ok(archives) => value["projectArchives"] = serde_json::to_value(archives)?,
         Err(error) => tracing::warn!(

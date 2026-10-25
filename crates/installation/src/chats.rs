@@ -1178,7 +1178,7 @@ mod tests {
             .transaction(|db| {
                 for (id, agent) in [
                     ("switched", json!({ "provider": "claude" })),
-                    ("legacy", json!({})),
+                    ("codex", json!({ "provider": "codex" })),
                 ] {
                     let run = json!({
                         "id": id,
@@ -1203,14 +1203,14 @@ mod tests {
                     chats.iter().find(|chat| chat["id"] == id).unwrap()["provider"].clone()
                 };
                 assert_eq!(provider("switched"), "claude");
-                assert_eq!(provider("legacy"), "codex");
+                assert_eq!(provider("codex"), "codex");
                 assert!(provider("new").is_null());
 
                 let runs = db.runs(None, None, 10, 0, false)?;
                 let provider =
                     |id: &str| runs.iter().find(|run| run["id"] == id).unwrap()["provider"].clone();
                 assert_eq!(provider("switched"), "claude");
-                assert_eq!(provider("legacy"), "codex");
+                assert_eq!(provider("codex"), "codex");
                 Ok(())
             })
             .await

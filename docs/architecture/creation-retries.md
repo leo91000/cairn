@@ -29,6 +29,3 @@ identity; there is no permanent request tombstone or deduplication by mission te
 
 No installation persistent schema, record shape, storage codec, or database version changes.
 `creationId` is removed by input normalization and is not stored as an extra field.
-The resulting UUIDs and records are readable by the previous release, and the new
-release continues to read existing records. The compatibility epoch remains
-unchanged under `docs/PRODUCTION-CAIRN.md`.

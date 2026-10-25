@@ -1094,7 +1094,7 @@ async fn native_worker_records_artifacts_and_completes_task() {
     let id = text(&run, "id").to_owned();
     let complete = fixture.until_finished(&id).await;
     assert_eq!(complete["status"], RunStatus::Succeeded, "{complete}");
-    assert_eq!(complete["sessionId"], "fixture-session");
+    assert_eq!(complete["sessionId"], "fixture-chat");
     let events = fixture
         .service
         .store
@@ -1164,7 +1164,7 @@ async fn abrupt_restart_fences_previous_process_and_resumes_workspace() {
     let run = fixture.enqueue("fixture:restart").await;
     let id = text(&run, "id");
     let running = fixture
-        .until(id, |r| r["sessionId"] == "fixture-session")
+        .until(id, |r| r["sessionId"] == "fixture-chat")
         .await;
     fixture.stop(true).await;
     fixture.start().await;
@@ -1692,10 +1692,12 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
     if path == "/health" {
         return Json(json!({
             "status": "ok",
+            "nodeProtocol": 2,
+            "dataRoot": state.data,
             "sharedResources": true,
             "budget": { "slots": state.slots, "limits": { "cpu": 7, "memoryMiB": 15872, "diskMiB": 104857 } },
-            "runtimeId": "fixture",
-            "runtimes": ["fixture"],
+            "runtimeId": "development",
+            "runtimes": ["development"],
             "capabilities": {
                 "os": "linux",
                 "arch": "x86_64",
@@ -1918,17 +1920,11 @@ impl WorkspaceProbe {
             .find(|import| import["target"] == "/home/node")
             .map(|import| PathBuf::from(text(import, "source")))
             .unwrap();
-        // The URL Codex receives: `-c mcp_servers.cairn_workspace={…,"url"="…"}`.
-        let url = plan["args"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(Value::as_str)
-            .filter(|arg| arg.starts_with("mcp_servers.cairn_workspace="))
-            .find_map(|arg| arg.split("\"url\"=\"").nth(1))
-            .and_then(|rest| rest.split('"').next())
-            .unwrap()
-            .to_owned();
+        let url = text(
+            &plan["chat"]["codexConfig"]["mcp_servers"]["cairn_workspace"],
+            "url",
+        )
+        .to_owned();
         let token = text(&plan["mcpEnv"], "CAIRN_MCP_RUN_TOKEN");
         let client = reqwest::Client::builder()
             .unix_socket(home.join("cairn-mcp.sock"))
@@ -2008,7 +2004,7 @@ async fn vm_agents_call_workspace_tools_through_their_run_channel_without_a_publ
         hold: std::sync::atomic::AtomicBool::new(false),
     });
     // A token granted to another run of the same installation.
-    let other_run = json!({ "id": id(), "snapshot": { "agent": { "id": MAIN_AGENT_ID } } });
+    let other_run = json!({ "id": id(), "snapshot": { "agent": { "id": MAIN_AGENT_ID, "provider": "codex" } } });
     let other = fixture
         .service
         .mcps
@@ -2560,13 +2556,7 @@ async fn controller_interruptions_resume_saved_threads_and_stop_after_three_reco
         let plans = controller.plans.lock().await;
         assert_eq!(plans.len(), attempts);
         for plan in plans.iter().skip(1) {
-            assert!(
-                plan["args"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!("fixture-session")),
-                "{plan}"
-            );
+            assert_eq!(plan["chat"]["sessionId"], "fixture-session", "{plan}");
             assert_eq!(plan["runId"], run_id);
             assert_eq!(plan["cwd"], plans[0]["cwd"]);
         }
@@ -2758,14 +2748,14 @@ async fn claude_conversations_run_together_and_lowering_limit_does_not_cancel_th
 }
 
 #[tokio::test]
-async fn unlimited_runs_can_be_cancelled_and_finite_checkpoints_still_expire() {
+async fn unlimited_runs_cancel_and_resume_without_creating_a_deadline() {
     let mut fixture = Fixture::new().await;
     let s = fixture.service.clone();
     let run = fixture.enqueue("fixture:restart").await;
     let id = text(&run, "id");
     assert_eq!(run["snapshot"]["agent"]["timeoutMinutes"], 0);
     fixture
-        .until(id, |r| r["sessionId"] == "fixture-session")
+        .until(id, |r| r["sessionId"] == "fixture-chat")
         .await;
     assert_eq!(s.store.run(id).await.unwrap()["status"], RunStatus::Running);
     assert_eq!(
@@ -2838,6 +2828,13 @@ async fn unlimited_runs_can_be_cancelled_and_finite_checkpoints_still_expire() {
         Some(&Value::Null)
     );
     fixture.stop(false).await;
+}
+
+#[tokio::test]
+async fn quiet_chat_protocol_keeps_a_finite_checkpoint_deadline() {
+    let mut fixture = Fixture::new().await;
+    fixture.stop(false).await;
+    let s = fixture.service.clone();
     let run = fixture.enqueue("fixture:hang").await;
     let id = text(&run, "id");
     let mut snapshot = run["snapshot"].clone();
@@ -2846,20 +2843,23 @@ async fn unlimited_runs_can_be_cancelled_and_finite_checkpoints_still_expire() {
         .patch_run(id, json!({ "snapshot": snapshot }))
         .await
         .unwrap();
-    // Resume the final five seconds of an existing one-minute budget.
+    // Resume the final second of an existing one-minute budget.
     common::set_checkpoint(
         &s.store,
         id,
-        json!({ "launched": false, "remainingMs": 5000 }),
+        json!({ "launched": false, "remainingMs": 1000 }),
     )
     .await;
     fixture.start().await;
     fixture
-        .until(id, |r| r["sessionId"] == "fixture-session")
+        .until(id, |r| r["sessionId"] == "fixture-chat")
         .await;
-    let failed = fixture
-        .until(id, |r| r["status"] == RunStatus::Failed)
-        .await;
+    let failed = tokio::time::timeout(
+        Duration::from_secs(8),
+        fixture.until(id, |r| r["status"] == RunStatus::Failed),
+    )
+    .await
+    .expect("a quiet chat must stop when its finite checkpoint budget expires");
     assert!(text(&failed, "summary").contains("time limit"), "{failed}");
     fixture.stop(false).await;
 }
@@ -2896,13 +2896,6 @@ async fn queued_work_continues_with_equivalent_or_wider_access_but_not_reduced_a
         .enqueue("Inspect the fixture after an equivalent access change")
         .await;
     let id = text(&run, "id");
-    // Queued by an older version that saved a setting the policy no longer has.
-    let mut snapshot = s.store.run(id).await.unwrap()["snapshot"].clone();
-    snapshot["agent"]["access"]["maxResources"] = Value::Null;
-    s.store
-        .patch_run(id, json!({ "snapshot": snapshot }))
-        .await
-        .unwrap();
     let mut agent = s.get("agents", MAIN_AGENT_ID).await.unwrap();
     agent["name"] = "Renamed agent".into();
     s.store.put("agents", agent.clone()).await.unwrap();
@@ -2938,6 +2931,8 @@ async fn queued_work_waits_for_node_capacity_without_failing() {
             "name": name,
             "accepting": true,
             "executionReady": true,
+            "runtimeId": "development",
+            "runtimes": ["development"],
             "lastSeen": now() + 60_000,
             "capabilities": {"kvm": true },
             "limits": {"cpu": 1, "memoryMiB": 8192, "diskMiB": 65536},

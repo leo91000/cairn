@@ -16,7 +16,7 @@ NEW = 'ghcr.io/leo91000/cairn@sha256:' + '2' * 64
 
 class Updates(unittest.TestCase):
     def test_candidate_is_retained_and_retry_preserves_data_and_operator_settings(self):
-        for failure in ('', 'ublk', 'unapproved', 'digest', 'lease', 'stop', 'up', 'health'):
+        for failure in ('', 'ublk', 'unapproved', 'digest', 'lease', 'stop', 'up', 'health', 'unresponsive'):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
 
@@ -57,10 +57,20 @@ if 'inspect' in args:
     print(json.dumps([{'RepoDigests': [] if failure == 'digest' else [args[-1]], 'Config': {'Env': ['APP_RUNTIME_ID=fixture']}}]))
 if failure == 'stop' and 'stop' in args or failure == 'up' and 'up' in args:
     sys.exit(1)
+if 'ps' in args:
+    image = json.loads((root / 'compose.json').read_text())['services']['manager']['image']
+    if failure == 'foreign-manager':
+        image = 'foreign-image'
+    print(json.dumps({'Image': image, 'State': 'running', 'Health': 'unhealthy'}))
 if 'exec' in args:
-    if 'deployment-lease' in args[-1] and failure == 'lease':
+    launches = sum('up' in json.loads(event) for event in (root / 'events').read_text().splitlines())
+    unavailable = failure == 'candidate-unavailable' and launches < 2
+    if 'deployment-lease' in args[-1] and (failure in ('lease', 'foreign-lease', 'foreign-manager') or unavailable):
         sys.exit(1)
-    print(json.dumps({'healthy': failure != 'health'}))
+    if failure == 'unresponsive' and 'deployment-lease' not in args[-1]:
+        sys.exit(1)
+    healthy = failure != 'health' and (failure != 'candidate-unavailable' or launches >= 2)
+    print(json.dumps({'healthy': healthy}))
 ''')
                 docker.chmod(0o755)
                 installer, _ = write_supervisors(root)
@@ -76,7 +86,7 @@ if 'exec' in args:
                     self.assertEqual(result.returncode, int(bool(failure)), result.stderr)
                     config = json.loads((root / 'installation.json').read_text())
                     self.assertEqual(config['image'], OLD if failure else NEW)
-                    if failure in ('lease', 'stop', 'up', 'health'):
+                    if failure in ('lease', 'stop', 'up', 'health', 'unresponsive'):
                         self.assertEqual(config['pendingImage'], NEW)
                     events = [json.loads(line) for line in (root / 'events').read_text().splitlines()] if (root / 'events').exists() else []
                     starts = [event for event in events if 'up' in event]
@@ -84,7 +94,15 @@ if 'exec' in args:
                     if failure in ('ublk', 'unapproved', 'digest', 'lease'):
                         self.assertFalse(any('stop' in event for event in events))
                     if failure not in ('ublk', 'unapproved'):
-                        retry = update('')
+                        if failure in ('health', 'unresponsive'):
+                            for refused in ('foreign-lease', 'foreign-manager'):
+                                rejected = update(refused)
+                                self.assertNotEqual(rejected.returncode, 0)
+                                after = [json.loads(line) for line in (root / 'events').read_text().splitlines()]
+                                self.assertEqual(sum('up' in event for event in after), len(starts))
+                            retry = update('candidate-unavailable')
+                        else:
+                            retry = update('')
                         self.assertEqual(retry.returncode, 0, retry.stderr)
                         config = json.loads((root / 'installation.json').read_text())
                         self.assertEqual(config['image'], NEW)

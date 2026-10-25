@@ -1121,8 +1121,8 @@ async fn cancellation_and_provider_errors_do_not_complete_the_turn() {
 }
 
 #[test]
-fn provider_defaults_and_sandbox_arguments_preserve_boundaries() {
-    assert_eq!(Provider::of_agent(&json!({})).unwrap(), Provider::Codex);
+fn explicit_provider_and_sandbox_arguments_preserve_boundaries() {
+    assert!(Provider::of_agent(&json!({})).is_err());
     assert!(
         claude::validate_agent(&json!({ "provider": "claude", "reasoning": "ultra" })).is_err()
     );

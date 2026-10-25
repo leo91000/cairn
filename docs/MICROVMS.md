@@ -21,14 +21,10 @@ while live inbox updates are delivered.
 It can prepare anonymous VMs with native Codex initialized, within those same
 slots and shared budgets. The manager can update both through authenticated
 `/node-budget`. `CAIRN_READY_VM_POOL=false` disables speculative preparation;
-the default is `true`. Guests without the readiness capability keep booting cold.
+the default is `true`. Host and guest run the same build.
 `CAIRN_READY_VM_POOL_SIZE=1..4` controls the target size (default one). The node
 supervisor preserves the equivalent `readyVmPoolSize` in its `config.json`.
 The same file accepts `readyVmPool: false` to disable preparation entirely.
-Setting `cacheApprovedRuntimes` to `false` in that file disables background
-downloads of historical runtime packages. The current image and locally pinned
-environments remain available; moving an older environment to this node can
-require re-enabling preloading. The default remains `true`.
 Additional spares need measured resident RAM plus 2 GiB of startup headroom
 within one quarter of the node's RAM budget, bounded between 2 and 8 GiB.
 Actual RAM is checked again after preparation; an oversized pool shrinks oldest
@@ -85,7 +81,7 @@ path for compatibility with older images. Imports still stream directly to guest
 extraction and preserve the existing authorization, atomic publication and
 read-only policy.
 
-Each VM boots a pinned kernel and a read-only root image. A sparse 32 GiB ext4
+Each VM boots the current controller’s kernel and read-only root image. A sparse 32 GiB ext4
 private disk supplies the writable overlay, repositories, home, sessions, installed
 tools and Docker cache. Docker and containerd data are mounted directly from that disk. The daemon
 starts only when the `docker` command first needs it. VM recreation retains the disk;

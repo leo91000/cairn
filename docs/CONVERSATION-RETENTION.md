@@ -32,11 +32,8 @@ keeps its promised recovery deadline.
 
 `GET /api/settings/conversations` returns `{ "inactivityDays": 7 }` by default.
 `PUT` at the same owner-only endpoint accepts the same shape and records an audit
-entry. The additive `conversation-expiration` KV record deliberately differs
-from the retired archive policy (`conversation-retention`), which stays ignored.
-No database schema, disk encoding or object format changes are required; the
-existing installation data compatibility version is unchanged. Rolling the code
-back stops future expiration but cannot restore deleted conversations.
+entry. The `conversation-expiration` KV record stores the current policy.
+Deleted conversations cannot be restored by changing the policy.
 
 ## Validation
 

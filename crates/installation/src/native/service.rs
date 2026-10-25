@@ -1388,7 +1388,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             Value::Null
         };
         return Ok(Json(json!({
-            "status": "ok", "backend": "native", "nodeProtocol": 2, "projectArchives": 1, "nativeProjectBases": 1,
+            "status": "ok", "backend": "native", "nodeProtocol": 2,
             "runtimeId": std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into()),
             "dataRoot": controller.data, "capabilities": capabilities,
             "nativeMode": controller.mode.lock().await.clone(),

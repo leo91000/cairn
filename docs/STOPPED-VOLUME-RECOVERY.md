@@ -17,7 +17,6 @@ synchronous open returns that error immediately while the old readers remain.
 
 This preserves the one-writer journal lock, durable frames, authorization checks,
 publication generations and receipts described in ADRs 0007, 0021 and 0027. It
-does not reset or repair a disk. Persisted formats and the compatibility epoch
-are unchanged. The tests reproduce the failed next write before the fix, then
+does not reset or repair a disk. The tests reproduce the failed next write before the fix, then
 verify delayed reopening, unchanged prior bytes, new writes, a bounded wait,
 independent disk admission and replacement fencing with a retained journal.

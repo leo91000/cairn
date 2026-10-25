@@ -204,8 +204,7 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
         return Err(Error::conflict("A movement is already pending."));
     }
     let checkpoint = super::checkpoint(s, run_id).await?;
-    let deadline =
-        (now() + wait as i64 * 1000).min(checkpoint["deadline"].as_i64().unwrap_or(i64::MAX));
+    let deadline = now() + wait as i64 * 1000;
     // A finished conversation with a VM session moves without being resumed.
     let idle = run["status"] == RunStatus::Succeeded
         && run["sessionId"].is_string()
@@ -553,8 +552,6 @@ async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
     };
     let mut selecting = current.clone();
     selecting["placementTransition"] = true.into();
-    selecting["requiredRuntime"] =
-        super::publication::manifest(s, &backup).await?["runtime"]["runtimeId"].clone();
     let reservation = id();
     let Ok(selected) = super::placement::reserve(s, &selecting, &reservation).await else {
         let body = "The node running this conversation is unavailable and no other authorized node can resume it yet.";

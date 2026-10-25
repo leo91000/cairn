@@ -41,7 +41,7 @@ async fn additional_nodes_enroll_directly_and_keep_their_channel_outside_the_rel
             "code": invitation["code"],
             "name": "Direct execution node",
             "protocol": 1,
-            "runtimeId": "fixture",
+            "runtimeId": "development",
             "capabilities": {
                 "os": "linux",
                 "arch": "x86_64",

@@ -130,9 +130,7 @@ async fn reclaim_idle_memory(
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AttemptRecord {
-    #[serde(default)]
     pub vm_id: String,
-    #[serde(default)]
     pub run_id: String,
 }
 
@@ -140,8 +138,7 @@ pub(crate) struct AttemptRecord {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeRecord {
-    #[serde(default)]
-    runtime_id: Option<String>,
+    runtime_id: String,
 }
 
 /// Owns every resource of a booted VM. A prepared disk can be adopted once only.
@@ -214,35 +211,24 @@ fn lock_disk(disk_dir: &Path) -> Result<std::fs::File> {
     Ok(lock)
 }
 
-/// A disk keeps booting the image it was created with; a new disk adopts `image`.
-async fn retained_image(state: &Path, image: &Path, disk_dir: &Path) -> Result<PathBuf> {
-    let runtime_file = disk_dir.join("runtime.json");
-    let retained = if runtime_file.exists() {
-        let runtime: RuntimeRecord =
-            serde_json::from_slice(&tokio::fs::read(&runtime_file).await?)?;
-        let name = runtime.runtime_id.unwrap_or_default();
-        if name.is_empty() || !valid_runtime_name(&name) {
-            return Err(Error::bad("Invalid retained runtime."));
-        }
-        state.join("images").join(name)
-    } else {
-        image.to_owned()
-    };
-    if !retained.join("root.ext4").exists() || !retained.join("vmlinux").exists() {
-        return Err(Error::conflict(
-            "The conversation requires an unavailable retained VM runtime.",
-        ));
+/// Resume persistent workspace data with the controller's current guest build.
+async fn current_image(image: &Path, disk_dir: &Path) -> Result<PathBuf> {
+    if !image.join("root.ext4").exists() || !image.join("vmlinux").exists() {
+        return Err(Error::conflict("Current VM runtime is not installed."));
     }
-    if !runtime_file.exists() {
-        let record = RuntimeRecord {
-            runtime_id: retained
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_owned),
-        };
-        atomic_write(&runtime_file, &serde_json::to_vec(&record)?).await?;
-    }
-    Ok(retained)
+    let runtime_id = image
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty() && valid_runtime_name(name))
+        .ok_or_else(|| Error::bad("Invalid VM runtime identity."))?
+        .to_owned();
+    let record = RuntimeRecord { runtime_id };
+    atomic_write(
+        &disk_dir.join("runtime.json"),
+        &serde_json::to_vec(&record)?,
+    )
+    .await?;
+    Ok(image.to_owned())
 }
 
 fn firecracker_config(
@@ -395,7 +381,7 @@ impl Vm {
         let id = crate::config::id();
         let current_kernel = image.join("vmlinux");
         let current_control = image.join("control.squashfs");
-        let image = retained_image(state, image, &disk_dir).await?;
+        let image = current_image(image, &disk_dir).await?;
         if disk_dir.join("restore.pending").exists() {
             return Err(Error::conflict("VM restore is incomplete."));
         }
@@ -999,6 +985,35 @@ mod tests {
     use std::os::unix::process::CommandExt;
 
     #[tokio::test]
+    async fn resumed_disks_use_the_current_guest_image_without_changing_workspace_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let image = root.path().join("images/current");
+        let disk = root.path().join("disk");
+        tokio::fs::create_dir_all(&image).await.unwrap();
+        tokio::fs::create_dir_all(&disk).await.unwrap();
+        for file in ["root.ext4", "vmlinux"] {
+            tokio::fs::write(image.join(file), b"current")
+                .await
+                .unwrap();
+        }
+        tokio::fs::write(disk.join("runtime.json"), br#"{"runtimeId":"previous"}"#)
+            .await
+            .unwrap();
+        tokio::fs::write(disk.join("workspace"), b"retained")
+            .await
+            .unwrap();
+        assert_eq!(current_image(&image, &disk).await.unwrap(), image);
+        let saved: RuntimeRecord =
+            serde_json::from_slice(&tokio::fs::read(disk.join("runtime.json")).await.unwrap())
+                .unwrap();
+        assert_eq!(saved.runtime_id, "current");
+        assert_eq!(
+            tokio::fs::read(disk.join("workspace")).await.unwrap(),
+            b"retained"
+        );
+    }
+
+    #[tokio::test]
     async fn reduced_resume_seed_cannot_initialize_an_empty_guest() {
         let plan = Plan::new(json!({"workspaceSeeded":false,"imports":[]}));
         let error = import_workspace(Path::new("/no-guest.sock"), &plan)
@@ -1111,7 +1126,7 @@ mod tests {
         let (reader, mut writer) = UnixStream::pair().unwrap();
         let output = tokio::spawn(async move {
             writer
-                .write_all(b"{\"type\":\"output\",\"data\":")
+                .write_all(b"{\"type\":\"output\",\"stderr\":false,\"data\":")
                 .await
                 .unwrap();
             tokio::time::sleep(Duration::from_millis(40)).await;

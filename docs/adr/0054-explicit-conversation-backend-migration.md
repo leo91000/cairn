@@ -82,11 +82,7 @@ This supersedes the blanket native/VM conversion prohibition in
 Ordinary node moves retain their backend checks; only this explicit conversion
 creates a destination-compatible image. Cross-OS conversion remains unsupported.
 
-The installation data compatibility epoch remains **9**. No new persistent disk,
-manifest or checkpoint encoding is introduced: the result uses existing VM flat
-ext4 or `native-ext4-v1`, existing S3 objects and existing fresh-session handoff.
-The additive migration coordination fields are ignored by old readers and retain
-an unchanged source checkpoint until success. Downgrading during the operation is
-unsupported because old schedulers do not understand its admission guard; finish
-or retry it with the current manager first. Controllers need no new conversion API.
-This change does not release or deploy either runtime.
+The conversion uses current VM flat ext4 or `native-ext4-v1`, current S3 objects
+and the fresh-session handoff. The source checkpoint stays unchanged until success.
+Controllers need no separate conversion API. This change does not release or
+deploy either runtime.

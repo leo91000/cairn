@@ -432,7 +432,7 @@ async fn exercise_vm_control(case: ControlScenario) {
     let _physical = cairn_installation::file_lock::exclusive(&disk.join("lock"), "busy").unwrap();
     std::fs::write(
         root.path().join(format!("{attempt}.vm.json")),
-        json!({ "vmId": vm }).to_string(),
+        json!({ "vmId": vm, "runId": run }).to_string(),
     )
     .unwrap();
     create_lazy_disk(&disk, case.emergency());
@@ -450,7 +450,7 @@ async fn exercise_vm_control(case: ControlScenario) {
     assert!(Arc::ptr_eq(&live, &runtime::load(&resolved).await.unwrap()));
     std::fs::write(
         disk.join("runtime.json"),
-        json!({"runtimeId":"fixture"}).to_string(),
+        json!({"runtimeId":"development"}).to_string(),
     )
     .unwrap();
     let api = root.path().join("jails/firecracker").join(vm).join("root");
@@ -534,12 +534,12 @@ async fn restore_does_not_replace_a_journal_still_in_use() {
     let run = id();
     let directory = root.path().join("disks").join(&run);
     std::fs::create_dir_all(&directory).unwrap();
-    let image = root.path().join("images/fixture");
+    let image = root.path().join("images/development");
     std::fs::create_dir_all(&image).unwrap();
     std::fs::write(image.join("root.ext4"), []).unwrap();
     std::fs::write(image.join("vmlinux"), []).unwrap();
     let mut manifest = EMPTY_DISK.clone();
-    manifest["runtime"] = json!({ "runtimeId": "fixture" });
+    manifest["runtime"] = json!({ "runtimeId": "development" });
     let context = json!({
         "master": "http://127.0.0.1:1/",
         "grant": "old-grant",
