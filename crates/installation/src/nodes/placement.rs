@@ -103,27 +103,16 @@ struct Request<'a> {
     access: &'a Value,
     checkpoint: &'a Value,
     moving: bool,
-    required_runtime: Option<&'a str>,
 }
 
 impl<'a> Request<'a> {
-    fn new(run: &'a Value, access: &'a Value, checkpoint: &'a Value) -> Result<Self> {
-        if run["requiredRuntime"]
-            .as_str()
-            .is_some_and(|runtime| runtime != super::component_runtime())
-            && run["isolated"] == true
-        {
-            return Err(Error::conflict(
-                "Saved execution version mismatch; start a new conversation with the current components.",
-            ));
-        }
-        Ok(Self {
+    fn new(run: &'a Value, access: &'a Value, checkpoint: &'a Value) -> Self {
+        Self {
             run,
             access,
             checkpoint,
             moving: run["placementTransition"] == true,
-            required_runtime: run["requiredRuntime"].as_str(),
-        })
+        }
     }
 
     fn run_id(&self) -> &'a str {
@@ -144,13 +133,6 @@ impl<'a> Request<'a> {
             .into_iter()
             .flatten()
             .all(|tag| super::node_tags(node).any(|present| present == tag));
-        let has_runtime = self.required_runtime.is_none_or(|runtime| {
-            node["runtimes"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|r| r == runtime)
-        });
         let only = |field: &str| run[field].as_str().is_none_or(|only| only == id);
         // An existing environment stays where it is unless it is moving.
         let existing = self.moving || self.checkpoint["nodeId"].as_str().is_none_or(|p| p == id);
@@ -174,7 +156,6 @@ impl<'a> Request<'a> {
             && !node["exclusiveReservation"].is_object()
             && !(local_unconfigured && run["isolated"] == true)
             && has_tags
-            && has_runtime
             && only("targetNodeId")
             && allowed(&self.access["nodes"], id)
             && only("pinnedNodeId")
@@ -457,7 +438,7 @@ fn shortage(full: &[String]) -> String {
 
 fn reserve_in(db: &Db<'_>, run: &Value, attempt: &str, configured: bool) -> Result<Value> {
     let snapshot = Snapshot::load(db, run, configured)?;
-    let request = Request::new(run, &snapshot.access, &snapshot.checkpoint)?;
+    let request = Request::new(run, &snapshot.access, &snapshot.checkpoint);
     if !request.moving
         && let Some(reservation) = run["moveReservation"].as_str()
     {
@@ -469,7 +450,7 @@ fn reserve_in(db: &Db<'_>, run: &Value, attempt: &str, configured: bool) -> Resu
 
 fn request_reclamation(db: &Db<'_>, run: &Value, configured: bool) -> Result<()> {
     let snapshot = Snapshot::load(db, run, configured)?;
-    let request = Request::new(run, &snapshot.access, &snapshot.checkpoint)?;
+    let request = Request::new(run, &snapshot.access, &snapshot.checkpoint);
     for node in &snapshot.nodes {
         if node["diskGrowthProtocol"] == 1
             && request.eligible(node, configured)
@@ -499,7 +480,7 @@ pub async fn check(s: &Service, run: &Value) -> Result<()> {
     s.store
         .transaction(move |db| {
             let snapshot = Snapshot::load(db, &run, configured)?;
-            let request = Request::new(&run, &snapshot.access, &snapshot.checkpoint)?;
+            let request = Request::new(&run, &snapshot.access, &snapshot.checkpoint);
             if !request.moving && run["moveReservation"].is_string() {
                 return Ok(Ok(()));
             }
@@ -587,9 +568,7 @@ fn admit(
             "Previous execution still owns this conversation.",
         ));
     }
-    let runtime_id = request
-        .required_runtime
-        .unwrap_or_else(|| text(&best.node, "runtimeId"));
+    let runtime_id = text(&best.node, "runtimeId");
     let volume_id = format!("{}:{id}", request.run_id());
     let mut volume = match db.get("node-volumes", &volume_id)? {
         Some(volume) => volume,

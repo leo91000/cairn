@@ -373,7 +373,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     let mut candidate = retried.clone();
     candidate["placementTransition"] = true.into();
     candidate["targetNodeId"] = native_node.clone().into();
-    candidate["requiredRuntime"] = "fixture".into();
+    candidate["requiredRuntime"] = "development".into();
     placement::reserve(&owner.service, &candidate, &reservation)
         .await
         .unwrap();

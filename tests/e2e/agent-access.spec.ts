@@ -44,7 +44,7 @@ async function enroll(page: Page, workspace: Workspace, name: string, exclusive:
   const node = await response.json()
   const heartbeat = await page.request.post(`${workspace.installationUrl}/internal/nodes/heartbeat`, {
     headers: { authorization: `Bearer ${node.token}` },
-    data: { exclusiveReservations: exclusive },
+    data: { exclusiveReservations: exclusive, runtimeId: 'development', nodeProtocol: 2 },
   })
   expect(heartbeat.ok()).toBe(true)
   return node.nodeId as string

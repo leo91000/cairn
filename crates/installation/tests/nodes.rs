@@ -2030,7 +2030,7 @@ async fn bulk_stream_backpressure_and_reader_cancellation_bound_the_upload() {
 }
 
 #[tokio::test]
-async fn current_components_resume_an_environment_recorded_before_an_application_update() {
+async fn current_components_resume_a_backend_converted_environment_after_an_application_update() {
     let owner = Owner::new().await;
     let (node, agent, run) = (id(), id(), id());
     owner
@@ -2049,6 +2049,8 @@ async fn current_components_resume_an_environment_recorded_before_an_application
         .await;
     let mut record = agent_run(&run, &agent);
     record["isolated"] = true.into();
+    // A successful live backend conversion records this runtime on the run too.
+    record["requiredRuntime"] = "previous-release".into();
     let placement = placement::reserve(&owner.service, &record, &id())
         .await
         .unwrap();

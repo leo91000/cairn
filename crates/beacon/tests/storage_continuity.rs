@@ -2,7 +2,7 @@ mod common;
 
 use axum::{
     Json, Router,
-    body::Body,
+    body::{Body, to_bytes},
     http::{Request, StatusCode},
     response::IntoResponse,
 };
@@ -13,7 +13,6 @@ use cairn_installation::{
 };
 use common::RelayedInstallation;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
 #[tokio::test]
@@ -38,19 +37,23 @@ async fn existing_disks_keep_publishing_reading_and_purging_on_their_original_st
                         "blocks": [{
                             "offset": 0,
                             "size": data.len(),
-                            "hash": hex::encode(Sha256::digest(&data))
+                            "hash": cairn_installation::storage::digest::block(&data)
                         }]
                     }
                 }))
                 .into_response();
             }
-            if request.uri().path().ends_with("/blocks")
-                || request.uri().path().ends_with("/publication")
-            {
-                // Exercise the supported single-block transport, without a VM.
-                return StatusCode::NOT_FOUND.into_response();
+            if request.method() == "POST" && request.uri().path().ends_with("/publication") {
+                let body = to_bytes(request.into_body(), 4096).await.unwrap();
+                let request: Value = serde_json::from_slice(&body).unwrap();
+                let data = source.lock().unwrap().clone();
+                assert_eq!(
+                    request["hashes"],
+                    json!([cairn_installation::storage::digest::block(&data)])
+                );
+                return data.into_response();
             }
-            source.lock().unwrap().clone().into_response()
+            StatusCode::METHOD_NOT_ALLOWED.into_response()
         }
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
