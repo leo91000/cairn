@@ -41,7 +41,6 @@ fun NodesScreen(
     // Never persist enrollment secrets in saved instance state.
     var enrollment by remember { mutableStateOf<NodeEnrollment?>(null) }
     // Machines known when the code was created, to recognise the newly connected one.
-    var knownBeforeEnrollment by remember { mutableStateOf(emptySet<String>()) }
     var recovery by remember { mutableStateOf<NodeSyncSettings?>(null) }
     var editing by remember { mutableStateOf<ExecutionNode?>(null) }
     var revoking by remember { mutableStateOf<ExecutionNode?>(null) }
@@ -71,15 +70,12 @@ fun NodesScreen(
         if (nodes.any { it.capabilities.backend == "native" })
             nativeCallers = vm.api.get("/nodes/native-callers")
         val invitation = enrollment ?: return
-        // A guided switch needs the identity assigned to this exact invitation.
-        if (replacing != null && invitation.nodeId == null) return
         nodes
             .firstOrNull {
                 !it.local &&
                     !it.revoked &&
                     it.capabilities.backend == invitation.backend &&
-                    (invitation.nodeId?.let { expected -> it.id == expected }
-                        ?: (it.id !in knownBeforeEnrollment))
+                    it.id == invitation.nodeId
             }
             ?.let {
                 enrollment = null
@@ -384,7 +380,6 @@ fun NodesScreen(
             Button(
                 enabled = !state.busy && name.isNotBlank(),
                 onClick = {
-                    knownBeforeEnrollment = nodes.map { it.id }.toSet()
                     vm.perform {
                         enrollment =
                             api.send(
@@ -405,10 +400,6 @@ fun NodesScreen(
                 Text("Créer un code d’inscription")
             }
             enrollment?.let {
-                if (replacing != null && it.nodeId == null)
-                    Text(
-                        "Mettez à jour cette installation pour suivre le remplacement et terminer la bascule guidée. L’ancienne node est conservée."
-                    )
                 val command = it.installCommand
                 if (command != null) {
                     Text(

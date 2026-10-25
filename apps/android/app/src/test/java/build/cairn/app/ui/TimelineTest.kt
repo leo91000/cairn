@@ -226,7 +226,6 @@ class TimelineTest {
             listOf(
                 event(2, "turn.completed"),
                 event(2, "item.completed", "answer", "agent_message"),
-                event(2, "item.completed").copy(text = "Recovered answer"),
                 successfulTool,
             )) {
             assertFalse(timelineEntries(listOf(retry, continued), chat = true).any { it.notice })

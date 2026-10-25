@@ -703,7 +703,7 @@ async fn detachment_forgets_members_and_pending_invitations() {
             "/api/relay/device-claim/start",
             json!({
                 "name": "Recovered",
-                "protocol": 2,
+                "protocol": cairn_protocol::PROTOCOL_VERSION,
                 "identity": identity,
             }),
         )

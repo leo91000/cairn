@@ -203,12 +203,12 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
     await page.getByRole('button', { name: 'Add an installation', exact: true }).click()
     const otherCode = await page.getByLabel('Installation claim code').inputValue()
     const other = await page.request.post(`${url}/api/relay/claim`, {
-      data: { code: otherCode, name: 'Existing OAuth machine', protocol: 1 },
+      data: { code: otherCode, name: 'Existing OAuth machine', protocol: 5 },
     })
     expect(other.status()).toBe(201)
 
     const started = await page.request.post(`${url}/api/relay/device-claim/start`, {
-      data: { name: 'OAuth claim machine', protocol: 1 },
+      data: { name: 'OAuth claim machine', protocol: 5 },
     })
     expect(started.status()).toBe(201)
     const device = await started.json()

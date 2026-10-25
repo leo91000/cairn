@@ -28,6 +28,7 @@ data class Installation(
     val name: String,
     val role: InstallationRole = InstallationRole.Member,
     val online: Boolean = false,
+    val updateRequired: Boolean = false,
 )
 
 const val MAIN_AGENT_ID = "00000000-0000-4000-8000-000000000001"
@@ -42,11 +43,8 @@ data class AccessPolicy(
     val mcps: List<String>? = null,
     val mcpTools: Map<String, List<String>> = emptyMap(),
     val installation: Boolean = false,
-    /**
-     * Hands tasks to conversations that report back, on any coding agent and model. Null when the
-     * installation never stored it: left out of saves, so an older installation accepts them.
-     */
-    val delegation: Boolean? = null,
+    /** Hands tasks to conversations that report back, on any coding agent and model. */
+    val delegation: Boolean = false,
     val sandbox: String = "yolo",
     val backend: String = "firecracker",
 )
@@ -82,11 +80,6 @@ data class Agent(
     val plugins: List<String> = emptyList(),
     val provider: String = "codex",
     val avatar: AgentPortrait? = null,
-    /**
-     * Set by installations that store live grants on the agent (computed, never stored, never
-     * sent). Absent on earlier or rolled-back releases, which keep them on the resources.
-     */
-    val grantsOnAgent: Boolean = false,
     /** Changes on every save; sent back so a stale editor cannot overwrite newer access. */
     val revision: String = "",
 )

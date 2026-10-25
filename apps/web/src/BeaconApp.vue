@@ -766,7 +766,7 @@ onMounted(async () => {
   </main>
   <div v-else-if="session?.authenticated && installation" class="flex h-dvh min-h-0 flex-col bg-canvas text-ink">
     <!-- While an update is required the workspace is unavailable, so phones keep this bar. -->
-    <header class="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2 text-sm phone:gap-2 phone:px-3" :class="{ 'phone:hidden': !installation.updateRequired }" aria-label="Current installation">
+    <header class="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2 text-sm phone:gap-2 phone:px-3" :class="{ 'phone:hidden': !installation.updateRequired && !state.protocolError }" aria-label="Current installation">
       <VirtualSelect
         v-if="session.installations.length > 1"
         :model-value="installation.id"
@@ -835,13 +835,13 @@ onMounted(async () => {
     <UiAlert v-if="error" class="mx-4 my-2">
       {{ error }}
     </UiAlert>
-    <UiAlert v-if="installation.updateRequired" class="mx-4 my-2">
-      Mise à jour nécessaire. This installation must finish updating before it can be used here.
+    <UiAlert v-if="installation.updateRequired || state.protocolError" class="mx-4 my-2">
+      {{ state.protocolError || 'Mise à jour nécessaire. This installation must finish updating before it can be used here.' }}
     </UiAlert>
     <p v-if="navigationPending" role="status" class="px-6 py-4 text-muted">
       Opening installation…
     </p>
-    <App v-if="!navigationPending && (!installation.updateRequired || router.currentRoute.value.path.startsWith('/settings'))">
+    <App v-if="!navigationPending && ((!installation.updateRequired && !state.protocolError) || router.currentRoute.value.path.startsWith('/settings'))">
       <template #settings-account>
         <UiButton v-if="installationSubdomains && centralAccount" size="small" @click="openInstallation(installation)">
           Back to installation

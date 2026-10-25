@@ -107,7 +107,7 @@ export function newAgentDraft(): AgentDraft {
   }
 }
 
-/** The editable part of a saved agent, with the defaults older records omit. */
+/** The editable part of a saved agent. */
 export function draftOf(agent: Agent): AgentDraft {
   const access = (agent.access ?? {}) as Partial<AgentAccess>
   return {
@@ -217,60 +217,6 @@ export function savedDraft(draft: AgentDraft, existingMcps?: string[]): AgentDra
   return { ...draft, access: { ...draft.access, mcpTools: granted } }
 }
 
-/**
- * An installation that predates live grants on the agent ignores top-level `exclusiveNodes` and
- * `plugins` and keeps them on the resources, as Android handles it. Current installations mark
- * every listed agent with the computed `grantsOnAgent` capability; revisions alone are not proof,
- * since agents keep them after a rollback.
- */
-export function olderInstallation(agents: object[]) {
-  return agents.length > 0 && !agents.some(agent => (agent as { grantsOnAgent?: unknown }).grantsOnAgent === true)
-}
-
-/** The draft as the server applies it: an older installation never receives live grant changes. */
-export function sentDraft(saved: AgentDraft, draft: AgentDraft, older: boolean): AgentDraft {
-  return older ? { ...draft, exclusiveNodes: saved.exclusiveNodes, plugins: saved.plugins } : draft
-}
-
-/** On an older installation, the agent's live grants as its resources record them. */
-export function withResourceGrants(draft: AgentDraft, agentId: string, connections: Pick<PluginConnection, 'id' | 'agentIds'>[], nodes: Pick<ExecutionNode, 'id' | 'local' | 'exclusiveAgents'>[]): AgentDraft {
-  return {
-    ...draft,
-    plugins: connections.filter(connection => connection.agentIds?.includes(agentId)).map(connection => connection.id),
-    exclusiveNodes: nodes.filter(node => node.exclusiveAgents?.includes(agentId)).map(node => node.local ? LOCAL_NODE_ID : node.id),
-  }
-}
-
-/**
- * The agents an instance save must send back unchanged on an older installation (or one not known
- * yet), which replaces the list when it is omitted; undefined when it should be omitted.
- */
-export function keptAgentIds(agents: object[], entry: Pick<PluginEntry, 'manifest'> | undefined, connection: Pick<PluginConnection, 'agentIds'> | null | undefined) {
-  // Main always exists: no agent at all means the list did not load, and the installation is unknown.
-  const unknown = agents.length === 0
-  if (!(unknown || olderInstallation(agents)) || !entry?.manifest?.agentAccess || !connection?.agentIds?.length)
-    return undefined
-  return [...connection.agentIds]
-}
-
-/**
- * `keptAgentIds` from the instance as it is now, re-read right before saving: an agent revoked
- * meanwhile from its page is not granted back. Undefined when nothing has to be sent.
- */
-export async function currentAgentIds(
-  agents: object[],
-  entry: Pick<PluginEntry, 'manifest'> | undefined,
-  connection: Pick<PluginConnection, 'id' | 'agentIds'> | null | undefined,
-  connections: () => Promise<Pick<PluginConnection, 'id' | 'agentIds'>[]>,
-) {
-  if (!connection || keptAgentIds(agents, entry, { agentIds: ['?'] }) === undefined)
-    return undefined
-  const fresh = (await connections()).find(item => item.id === connection.id)
-  return keptAgentIds(agents, entry, fresh ?? connection)
-}
-
-export const updateForGrants = 'Update the installation to grant these from the agent page.'
-
 /** "All, including future" | "3 of 12" | "None". */
 export function selectionSummary(selected: string[] | null, total: number) {
   if (selected === null)
@@ -379,20 +325,19 @@ export function runProblem(id: string, access: AgentAccess, nodes: ExecutionNode
 
 /**
  * Node access after allowing or forbidding a node: forbidding it also drops its exclusive
- * reservation, which could never be used, unless reservations are read-only (an older installation
- * keeps them on its nodes and never receives them from here).
+ * reservation, which could never be used.
  */
-export function withRun(access: AgentAccess, exclusiveNodes: string[], node: string, on: boolean, readOnlyGrants = false) {
+export function withRun(access: AgentAccess, exclusiveNodes: string[], node: string, on: boolean) {
   const nodes = (access.nodes ?? []).filter(id => id !== node)
   return {
     nodes: on ? [...nodes, node] : nodes,
-    exclusiveNodes: on || readOnlyGrants ? exclusiveNodes : exclusiveNodes.filter(id => id !== node),
+    exclusiveNodes: on ? exclusiveNodes : exclusiveNodes.filter(id => id !== node),
   }
 }
 
 /** Node access for another execution backend: the choices start over, read-only reservations stay. */
-export function withBackend(exclusiveNodes: string[], readOnlyGrants = false) {
-  return { nodes: [] as string[], exclusiveNodes: readOnlyGrants ? exclusiveNodes : [] }
+export function withBackend() {
+  return { nodes: [] as string[], exclusiveNodes: [] }
 }
 
 /** Whether the agent may run on a node: listed, or every node allowed. */
@@ -719,12 +664,9 @@ export function issues(draft: AgentDraft, context: Context, isMain: boolean, age
 }
 
 /** "3 projects · 2 nodes · 1Password" for the agents list. */
-export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 'connections'> & { nodes?: ExecutionNode[] }, older = false) {
+export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 'connections'> & { nodes?: ExecutionNode[] }) {
   const access = agent.access ?? {} as AgentAccess
-  // An older installation keeps plugin grants on its instances (unknown to members, who get none).
-  const plugins = older
-    ? context.connections.filter(connection => connection.agentIds?.includes(agent.id)).map(connection => connection.id)
-    : agent.plugins ?? []
+  const plugins = agent.plugins ?? []
   const count = (value: string[] | null | undefined, noun: string, all: string) => value === null || value === undefined
     ? all
     : `${value.length || 'No'} ${noun}${value.length === 1 ? '' : 's'}`
@@ -750,7 +692,7 @@ export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 
   if (unnamed)
     parts.push(`${unnamed} ${packages.size ? 'other ' : ''}plugin${unnamed === 1 ? '' : 's'}`)
   // Only an effective reservation, which the node list says; without it, none is claimed.
-  if (!older && agent.exclusiveNodes?.length && context.nodes && effectiveExclusive({ access, exclusiveNodes: agent.exclusiveNodes }, context.nodes).length)
+  if (agent.exclusiveNodes?.length && context.nodes && effectiveExclusive({ access, exclusiveNodes: agent.exclusiveNodes }, context.nodes).length)
     parts.push('Exclusive reservation')
   if (access.installation)
     parts.push('Installation management')
