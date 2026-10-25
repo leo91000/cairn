@@ -2456,3 +2456,156 @@ async fn deleting_an_agent_revokes_admin_review_before_reusing_its_creation_id()
     let (status, _) = f.owner_call("PUT", &path, json!({ "name": "Explicit replay", "access": { "backend": "native", "nodes": [node_id] } })).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
+
+async fn saved_native_mission(f: &Fixture) -> Value {
+    let mut run = f.run();
+    run["status"] = "failed".into();
+    run["resumeAvailable"] = true.into();
+    run["sessionId"] = "retained-session".into();
+    common::add_run(&f.service.store, &run).await;
+    common::set_checkpoint(
+        &f.service.store,
+        text(&run, "id"),
+        json!({
+            "launched": true, "prepared": { "cwd": "/saved/native/workspace" },
+        }),
+    )
+    .await;
+    run
+}
+
+async fn resume_coordinator(f: &Fixture, traced: bool) -> (Value, Value) {
+    let agent = f
+        .service
+        .agent(
+            json!({
+                "name": "Resume coordinator", "access": { "installation": true },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut caller = f.run();
+    caller["snapshot"]["agent"] = agent;
+    caller["status"] = "running".into();
+    caller["nativeProvenanceUnknown"] = (!traced).into();
+    common::add_run(&f.service.store, &caller).await;
+    let configuration = f
+        .service
+        .mcps
+        .run_configuration(&f.service, &caller)
+        .await
+        .unwrap();
+    (caller, configuration)
+}
+
+#[tokio::test]
+async fn resume_run_preserves_native_human_and_delegated_provenance() {
+    let f = Fixture::new().await;
+    let run = saved_native_mission(&f).await;
+    let run_id = text(&run, "id");
+    let path = format!("/api/runs/{run_id}/resume");
+    let (status, _) = f.call(&f.other, "POST", &path, json!({})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(f.service.store.run(run_id).await.unwrap(), run);
+    let public = common::relay_fixture::grant(&f.service, &["run"]).await;
+    let request = common::request("POST", "/mcp").header("authorization", format!("Bearer {public}"))
+        .body(Body::from(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": common::mcp_arguments("resume_run", &json!({ "runId": run_id })) }).to_string())).unwrap();
+    let denied = read_json(common::send(&f.router, request).await).await;
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    let (_, unknown) = resume_coordinator(&f, false).await;
+    let denied = delegated_call(&f, &unknown, "resume_run", json!({ "runId": run_id })).await;
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    assert_eq!(f.service.store.run(run_id).await.unwrap(), run);
+    let (caller, traced) = resume_coordinator(&f, true).await;
+    let resumed = delegated_call(&f, &traced, "resume_run", json!({ "runId": run_id })).await;
+    assert_ne!(resumed["result"]["isError"], true, "{resumed}");
+    let after = f.service.store.run(run_id).await.unwrap();
+    assert_eq!(after["nativeParentRunId"], caller["id"]);
+    assert_eq!(after["nativePrincipals"], json!([TRUSTED]));
+    assert_eq!(after["sessionId"], "retained-session");
+    f.service.worker.cancel(&f.service, run_id).await.unwrap();
+    f.service
+        .store
+        .patch_run(
+            run_id,
+            json!({ "status": "cancelled", "recoveryPending": false }),
+        )
+        .await
+        .unwrap();
+    let (status, _) = f.call(&f.trusted, "POST", &path, json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let after = f.service.store.run(run_id).await.unwrap();
+    assert_eq!(after["nativePrincipals"], json!([TRUSTED]));
+    assert_eq!(after["nativeParentRunId"], caller["id"]);
+}
+
+#[tokio::test]
+async fn resume_run_rechecks_grant_and_cancellation_after_native_preparation() {
+    for revoke in [true, false] {
+        let f = Fixture::new().await;
+        let target = saved_native_mission(&f).await;
+        let (caller, configuration) = resume_coordinator(&f, true).await;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let server = Router::new().route("/api/relay/00000000-0000-4000-8000-000000000055/native-authority", axum::routing::get({
+            let entered = entered.clone();
+            let release = release.clone();
+            move || {
+                let entered = entered.clone();
+                let release = release.clone();
+                async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    axum::Json(json!({ TRUSTED: { "email": "trusted@example.test", "accessId": "one" } }))
+                }
+            }
+        }));
+        let (origin, authority) = common::serve_locally(server).await;
+        let identity_path = f
+            .service
+            .config
+            .data_dir
+            .join("installation-relay/identity.json");
+        let mut identity: Value =
+            serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+        identity["origin"] = origin.into();
+        std::fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+        f.service.store.delete("native-authority").await.unwrap();
+        let attempt = delegated_call(
+            &f,
+            &configuration,
+            "resume_run",
+            json!({ "runId": target["id"] }),
+        );
+        tokio::pin!(attempt);
+        tokio::select! {
+            () = entered.notified() => {},
+
+            response = &mut attempt => panic!("Resume did not enter preparation: {response}"),
+
+            () = tokio::time::sleep(std::time::Duration::from_secs(5)) => panic!("Native preparation did not start"),
+        }
+        if revoke {
+            f.service
+                .mcps
+                .revoke_run(&f.service, text(&caller, "id"))
+                .await
+                .unwrap();
+        } else {
+            f.service
+                .store
+                .patch_run(text(&caller, "id"), json!({ "cancelRequestedAt": now() }))
+                .await
+                .unwrap();
+        }
+        release.notify_one();
+        let response = attempt.await;
+        authority.abort();
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        assert_eq!(
+            f.service.store.run(text(&target, "id")).await.unwrap(),
+            target
+        );
+    }
+}

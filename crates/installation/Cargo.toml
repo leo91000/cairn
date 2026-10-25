@@ -13,6 +13,7 @@ path = "src/main.rs"
 name = "native_storage_qualifier"
 
 [dependencies]
+cairn-contracts = { path = "../contracts" }
 rquickjs = "=0.14.0"
 cairn-protocol = { path = "../protocol" }
 cairn-plugin-api = { path = "../plugin-api" }

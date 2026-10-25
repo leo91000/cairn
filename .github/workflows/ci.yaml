@@ -121,6 +121,15 @@ jobs:
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt && rustup default 1.97.1
       - name: Check formatting, lint, tests and frontend build
         run: pnpm check
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Regenerate Rust-owned contracts without a diff
+        run: pnpm check:contracts
+      - name: Decode the shared corpus with generated Kotlin models
+        run: apps/android/gradlew -p scripts/contracts-kotlin spotlessCheck test --no-daemon
       - name: Check generated API schemas
         run: |
           node --import tsx scripts/backend-schemas.mjs
