@@ -699,10 +699,12 @@ impl Vm {
         let mcp_listener = UnixListener::bind(&mcp_path)?;
         std::os::unix::fs::chown(&mcp_path, Some(self.uid), Some(self.uid))?;
 
-        let adapter = plan.chat_provider()?.adapter();
-        let auth_socket = format!("{}/cairn-auth.sock", adapter.state_directory());
+        let provider = plan.chat_provider()?;
         let home = plan.import_to(HOME);
-        let manager = home.map(|home| home.source.join(&auth_socket));
+        let manager = provider.and_then(|provider| {
+            let auth_socket = format!("{}/cairn-auth.sock", provider.adapter().state_directory());
+            home.map(|home| home.source.join(auth_socket))
+        });
         let channel = home.map(|home| home.source.join(mcp::SOCKET));
         let relay_stop = CancellationToken::new();
         let relay = auth_relay(listener, manager, relay_stop.clone());
@@ -830,8 +832,10 @@ async fn refresh_imports(socket: &Path, plan: &Plan) -> Result<()> {
         if import.target != HOME {
             continue;
         }
-        let adapter = plan.chat_provider()?.adapter();
-        if adapter.refresh_state_on_resume() {
+        if let Some(provider) = plan.chat_provider()?
+            && provider.adapter().refresh_state_on_resume()
+        {
+            let adapter = provider.adapter();
             let source = import.source.join(adapter.state_directory());
             let target = format!("{HOME}/{}", adapter.state_directory());
             if source.exists() {
