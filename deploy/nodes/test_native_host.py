@@ -215,27 +215,94 @@ class NativeHostTests(unittest.TestCase):
             self.assertFalse(paths[3].exists())
 
     def test_failed_candidate_health_retains_candidate_for_restart(self):
-        previous, candidate = Path('/synthetic/previous'), Path('/synthetic/candidate')
-        active, trial, restored = Mock(), Mock(), Mock()
+        candidate = Path('/synthetic/candidate')
+        active, trial = Mock(), Mock()
         trial.poll.return_value = None
-        with patch.object(host, 'terminate') as terminate, patch.object(host, 'start_node', side_effect=[trial, restored]), \
-                patch.object(host, 'health', side_effect=[False, True]), patch.object(host, 'select') as select:
+        with patch.object(host, 'terminate') as terminate, patch.object(host, 'start_node', return_value=trial) as start, \
+                patch.object(host, 'health', return_value=False), patch.object(host, 'select') as select:
             with self.assertRaisesRegex(RuntimeError, 'candidate retained'):
-                host.activate(candidate, previous, active)
+                host.activate(candidate, active)
+            start.assert_called_once_with(candidate)
             select.assert_called_once_with(candidate)
             self.assertEqual([unittest.mock.call(active), unittest.mock.call(trial)], terminate.call_args_list)
 
-    def test_success_selects_the_candidate_only_after_health_passes(self):
-        previous, candidate = Path('/synthetic/previous'), Path('/synthetic/candidate')
+    def test_healthy_candidate_runs_after_selection(self):
+        candidate = Path('/synthetic/candidate')
         active, trial = Mock(), Mock()
         trial.poll.return_value = None
         with patch.object(host, 'terminate'), patch.object(host, 'start_node', return_value=trial), \
                 patch.object(host, 'health', return_value=True), patch.object(host, 'select') as select:
-            child, selected, error = host.activate(candidate, previous, active)
+            child = host.activate(candidate, active)
             self.assertIs(trial, child)
-            self.assertEqual(candidate, selected)
-            self.assertIsNone(error)
             select.assert_called_once_with(candidate)
+
+    def test_restarted_healthy_candidate_completes_maintenance_even_after_a_lost_reply(self):
+        for lost_reply in [False, True]:
+            with self.subTest(lost_reply=lost_reply), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / 'state'
+                install = Path(temporary) / 'install'
+                identity = root / 'data/node/identity.json'
+                identity.parent.mkdir(parents=True)
+                identity.write_text(json.dumps({'token': 'synthetic-node-token'}))
+                (root / 'settings.json').write_text(json.dumps({'manager': 'https://manager.example.test'}))
+                previous_release = release(sha256='0' * 64, toolsSha256='1' * 64, runtimeId='previous')
+                candidate_release = release(sha256='2' * 64, toolsSha256='3' * 64, runtimeId='candidate')
+                versions = []
+                for metadata in [previous_release, candidate_release]:
+                    directory = install / 'versions' / (metadata['sha256'] + '-' + metadata['toolsSha256'])
+                    directory.mkdir(parents=True)
+                    (directory / 'release.json').write_text(json.dumps(metadata))
+                    versions.append(directory)
+                previous, candidate = versions
+                maintenance = None
+                completions = []
+
+                def request(_manager, path, body=None, token=None):
+                    nonlocal maintenance
+                    if path.endswith('/native-release'):
+                        return candidate_release
+                    self.assertEqual(token, 'synthetic-node-token')
+                    if body['action'] == 'drain':
+                        maintenance = 'ready-to-update'
+                    elif body['action'] == 'complete':
+                        self.assertIsNone(body['error'])
+                        maintenance = None
+                        completions.append(body)
+                        host.STOP = True
+                        if lost_reply and len(completions) == 1:
+                            raise OSError('Synthetic lost acknowledgement')
+                    return {'maintenance': maintenance}
+
+                def terminate(child):
+                    child.poll.return_value = 0
+
+                children = [Mock() for _ in range(4)]
+                for child in children:
+                    child.poll.return_value = None
+                with patch.object(host, 'ROOT', root), patch.object(host, 'INSTALL', install), \
+                        patch.object(host, 'STOP', False), patch.object(host, 'require_storage'), \
+                        patch.object(host, 'start_node', side_effect=children), \
+                        patch.object(host, 'terminate', side_effect=terminate), \
+                        patch.object(host, 'prepare', return_value=candidate), \
+                        patch.object(host, 'verify_workload_tools'), patch.object(host, 'json_request', side_effect=request):
+                    host.select(previous)
+                    with patch.object(host, 'health', side_effect=[True, False]):
+                        with self.assertRaisesRegex(RuntimeError, 'no longer running'):
+                            host.run()
+                    self.assertEqual((install / 'current').resolve(), candidate)
+                    self.assertEqual(maintenance, 'ready-to-update')
+                    self.assertTrue((root / 'update-pending.json').exists())
+                    self.assertEqual(completions, [])
+
+                    with patch.object(host, 'health', return_value=True):
+                        host.run()
+                        if lost_reply:
+                            self.assertTrue((root / 'update-pending.json').exists())
+                            host.STOP = False
+                            host.run()
+                    self.assertIsNone(maintenance)
+                    self.assertFalse((root / 'update-pending.json').exists())
+                    self.assertEqual(len(completions), 2 if lost_reply else 1)
 
 
 if __name__ == '__main__':

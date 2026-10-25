@@ -26,6 +26,11 @@ and leaves native execution disabled. In Configure, explicitly enable native wor
 select trusted people and conservative CPU/RAM/disk limits. Configure a native
 agent and select this node. Other agents retain their Firecracker backend.
 
+Approved updates drain the node before selecting the verified candidate. The
+selected candidate is retained across failed health checks and service restarts.
+A durable update record retries the manager's maintenance-completion
+acknowledgement once the candidate is healthy, including after a lost reply.
+
 Start a new conversation as a trusted person. An authorized coordinator can also
 start a conversation with that native agent through its installation tools. Each
 follow-up, resume, scheduled dispatch and delegated run retains and rechecks its

@@ -401,14 +401,24 @@ def start_node(directory):
     return subprocess.Popen([str(directory / 'cairn'), 'node-daemon', str(ROOT / 'data/node')], env=environment(directory))
 
 
-def activate(candidate, previous, child):
+def activate(candidate, child):
     terminate(child)
     select(candidate)
     trial = start_node(candidate)
     if trial.poll() is None and health(candidate):
-        return trial, candidate, None
+        return trial
     terminate(trial)
     raise RuntimeError('Native candidate failed health checks; candidate retained for retry.')
+
+
+def complete_update(manager, token, current):
+    pending = ROOT / 'update-pending.json'
+    if not pending.exists() or json.loads(pending.read_text())['candidate'] != current.name:
+        return
+    if not health(current):
+        raise RuntimeError('Pending native candidate is not healthy.')
+    json_request(manager, '/internal/nodes/maintenance', {'action': 'complete', 'image': '', 'error': None}, token)
+    pending.unlink()
 
 
 def run():
@@ -418,7 +428,7 @@ def run():
     token = identity['token']
     current = (INSTALL / 'current').resolve(strict=True)
     child = None
-    failed = None
+    pending_update = ROOT / 'update-pending.json'
     try:
         child = start_node(current)
         if not health(current):
@@ -428,11 +438,11 @@ def run():
                 raise RuntimeError('Native node process exited unexpectedly.')
             draining = False
             try:
+                complete_update(manager, token, current)
                 release = validate_release(json_request(manager, '/internal/nodes/native-release', token=token))
                 installed = json.loads((current / 'release.json').read_text())
                 same = release['sha256'] == installed['sha256'] and release['toolsSha256'] == installed['toolsSha256']
-                candidate_id = release['sha256'] + '-' + release['toolsSha256']
-                if not same and candidate_id != failed:
+                if not same:
                     candidate = prepare(manager, release, token=token)
                     verify_workload_tools(candidate)
                     if STOP:
@@ -447,23 +457,21 @@ def run():
                         time.sleep(1)
                     else:
                         raise RuntimeError('Native update drain did not finish; preserving current version.')
+                    atomic_json(pending_update, {'candidate': candidate.name})
                     previous = current
-                    child, selected, error = activate(candidate, current, child)
-                    current = selected
-                    if not error:
-                        try:
-                            collect_versions(current, previous)
-                        except (OSError, ValueError, KeyError):
-                            print('Native version collection postponed; local versions retained.', file=sys.stderr)
-                    if error:
-                        failed = candidate_id
-                    json_request(manager, '/internal/nodes/maintenance', {'action': 'complete', 'image': '', 'error': error}, token)
+                    child = activate(candidate, child)
+                    current = candidate
+                    try:
+                        collect_versions(current, previous)
+                    except (OSError, ValueError, KeyError):
+                        print('Native version collection postponed; local versions retained.', file=sys.stderr)
+                    complete_update(manager, token, current)
             except (OSError, ValueError, RuntimeError, zipfile.BadZipFile, KeyError, TypeError, urllib.error.URLError, subprocess.SubprocessError) as error:
                 # Do not print request bodies, response bodies, identities or credentials.
                 print('Native update postponed: ' + type(error).__name__, file=sys.stderr)
                 if child.poll() is not None:
                     raise RuntimeError('Native node is no longer running.') from None
-                if draining:
+                if draining and not pending_update.exists():
                     try:
                         json_request(manager, '/internal/nodes/maintenance', {'action': 'complete', 'image': '', 'error': 'Native update failed; inspect the retained candidate.'}, token)
                     except (OSError, ValueError):
