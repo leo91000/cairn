@@ -1121,8 +1121,8 @@ async fn cancellation_and_provider_errors_do_not_complete_the_turn() {
 }
 
 #[test]
-fn provider_defaults_and_sandbox_arguments_preserve_boundaries() {
-    assert_eq!(Provider::of_agent(&json!({})).unwrap(), Provider::Codex);
+fn explicit_provider_and_sandbox_arguments_preserve_boundaries() {
+    assert!(Provider::of_agent(&json!({})).is_err());
     assert!(
         claude::validate_agent(&json!({ "provider": "claude", "reasoning": "ultra" })).is_err()
     );
@@ -1207,14 +1207,9 @@ async fn steering_waits_for_both_responses_and_acknowledges_each_message() {
 }
 
 #[tokio::test]
-async fn restored_background_results_cannot_complete_an_undelivered_prompt_or_receipt() {
+async fn restored_background_results_cannot_complete_an_undelivered_prompt() {
     let root = TempDir::new().unwrap();
     let c = setup(&root);
-    std::fs::write(
-        root.path().join("result.claude-receipt.json"),
-        json!({ "messageId": "original", "delivered": [], "text": "" }).to_string(),
-    )
-    .unwrap();
     let events = run_events(&c, plan(&root, "fixture:startup-result")).await;
     assert!(
         events

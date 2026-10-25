@@ -46,18 +46,6 @@ un segment manquant ou une queue tronquée dans une génération scellée fait
 échouer l'ouverture. Ces tests établissent la reprise après arrêt de processus ;
 ils ne remplacent pas une qualification après perte physique d'alimentation.
 
-## Migration et retour arrière
-
-La migration copie uniquement les métadonnées dans `journal-v2.sqlite`, via un
-fichier temporaire synchronisé et renommé. Les BLOBs historiques restent dans
-`journal.sqlite`, sont vérifiés et lus directement jusqu'à leur publication.
-Les nouveaux append utilisent immédiatement les segments. Dès que la génération
-historique est publiée, ses fichiers SQLite sont remplacés par un petit marqueur,
-sans compacter ni recopier les BLOBs. Le journal historique est invalidé pour les
-anciens lecteurs après la copie durable ; le marqueur empêche ensuite un ancien
-binaire de servir une vue périmée. Il faut restaurer une sauvegarde correspondante
-des volumes pour revenir à une version antérieure au format v2.
-
 ## Contrôleur
 
 Le contrôle de sécurité utilise des compteurs mémoire courts et les signaux de

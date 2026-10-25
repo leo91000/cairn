@@ -218,8 +218,7 @@ async fn seed_source(
     if tokio::fs::canonicalize(&source).await? != source {
         return Err(Error::bad("Workspace seed changed location."));
     }
-    // Older nodes omit `workspace` and keep receiving a complete seed. Never
-    // let a node omit bootstrap files for a fresh VM or a native environment.
+    // A node may omit projects only when its disk or verified archives supply them.
     let resumed_vm = plan["backend"] == "firecracker" && plan["resumeWorkspace"] == true;
     let skip_projects = text(selection, "kind") == "initial"
         && selection["workspace"] == false

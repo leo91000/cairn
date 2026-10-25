@@ -23,11 +23,10 @@ MCP authorization builds an engine-independent collection of HTTP and command
 servers with their allowed tools. Only the selected adapter serializes that
 collection into its native configuration. The gateway and run grants remain shared;
 Codex receives allowlists and per-thread bearer headers, while Claude receives its
-native MCP document and denied command-tool names. Existing run-plan field names
-remain compatible with older native adapters.
+native MCP document and denied command-tool names. All components run the same version.
 
 Explicit unknown or malformed coding-agent values fail rather than selecting Codex.
-Only an absent provider field keeps the historical Codex default. Web and Android
+ Web and Android
 store model catalogs by coding-agent identifier and use a metadata registry for
 selection and labels. Existing model endpoints and saved model selections remain
 unchanged.

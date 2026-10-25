@@ -185,15 +185,6 @@ pub(crate) async fn seal_target(
     let paused_at = std::time::Instant::now();
     timing.next("freeze_and_pause");
     if let Some(socket) = &socket {
-        if volume.paused() || volume.transition_pending() {
-            suspension::adopt_storage_state(
-                state,
-                &attempt,
-                volume.paused(),
-                volume.transition_pending(),
-            )
-            .await?;
-        }
         let held = suspension::inspect(state, &attempt).await?;
         // An administrative owner cannot be released by a storage checkpoint.
         // Its already-fenced disk can still produce a crash-consistent capture.

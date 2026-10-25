@@ -26,29 +26,21 @@ Prepare the host before stopping workloads: check/load the driver, require a
 character controller and enabled io_uring, discover character/block classes and
 grant SYS_RESOURCE for I/O flusher threads. The installation updater and node
 supervisor share these checks. Existing operator resource limits, environment
-expressions and capabilities survive. Unknown transport selections fail;
-persisted supervisor selections for the former backend migrate to ublk.
+expressions and capabilities survive. Unknown transport selections fail.
 
-## Data compatibility and rollout
+## Operational setup
 
-No disk layout, block encoding, journal, checkpoint, installation schema or
-identity changes. Keep epoch 9/database version 8. Existing flat journals mount
-through ublk without conversion. The production v0.58.0 release predates other
-main-branch migrations; those retain their separate reviewed forward migration
-contract and must never be rolled back after the database fence advances.
+Installations use flat ext4 journals through ublk. The supervisor provisions the
+required permissions before launching the controller. Verify the immutable image,
+healthy manager and execution nodes, native Firecracker data drives, conversation
+recovery and no owned fixture devices after tests.
 
-Refresh the existing installation's host supervisor before approving its first
-ublk-only image. The old installed updater cannot add new permissions by merely
-pulling an image. Checkpoint the manager before stopping the runner; retain all
-data and Garage. Verify the immutable image, healthy manager and both execution
-nodes, native path-based Firecracker data drives, conversation recovery and no
-owned fixture devices after tests. Keep snapshots and disk-layout choices as
-configured; this rollout does not enable them.
+The next release requires the [complete reinstallation](../PRODUCTION-CAIRN.md#réinstallation-complète).
 
 ## Qualification
 
-The deployment regressions cover default ublk, migration of the previous
-selection, exact host device permissions, preserved operator settings and refusal
+The deployment regressions cover default ublk, exact host device permissions,
+preserved operator settings and refusal
 to stop services when prerequisites fail. VM smoke tests cover actual native
 block drives, checkpoint/reopen, retention, memory reclamation and teardown.
 

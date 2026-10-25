@@ -44,13 +44,9 @@ pub async fn metadata() -> Result<Value> {
     let tools = TOOLS
         .get_or_try_init(|| artifact_digest("/opt/cairn-native-tools.zip", 512 * 1024 * 1024))
         .await?;
-    let contract: Value = serde_json::from_str(include_str!(
-        "../../../../deploy/installations/data-compatibility.json"
-    ))?;
     Ok(json!({
         "sha256": digest, "size": size, "version": env!("CARGO_PKG_VERSION"),
-        "os": "linux", "arch": "x86_64", "protocolMin": 2, "protocolMax": 2,
-        "dataEpoch": contract["epoch"],
+        "os": "linux", "arch": "x86_64", "nodeProtocol": 2,
         "runtimeId": std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into()),
         "binaryPath": "/internal/nodes/native-binary",
         "toolsPath": "/internal/nodes/native-tools", "toolsSha256": tools.0, "toolsSize": tools.1

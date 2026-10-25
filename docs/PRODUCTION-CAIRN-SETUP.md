@@ -278,9 +278,11 @@ so. Do not enable the proxy's access logs without first updating `/privacy`
 Start the new service only after Léo's approval. Verify `/health` reports the
 expected tested commit, `/install/release` reports the paired digest, `/` and
 `/claim` serve the SPA with framing protection, and an email-code sign-in works.
-Use the compatibility checks and failure procedure in the
+Use the release checks and failure procedure in the
 [release runbook](PRODUCTION-CAIRN.md#failed-releases) for subsequent updates.
-Releases create no backups. Automatic checksum-checked migrations run on startup; do not reuse a historical development database.
+Releases create no backups. The next installation release requires the
+[complete reinstallation](PRODUCTION-CAIRN.md#réinstallation-complète); do not reuse
+a historical manager database.
 
 Configure GitHub's **production** environment:
 
@@ -297,9 +299,9 @@ Configure GitHub's **production** environment:
 
 Keep the environment's deployment branch/tag policy restricted to the intended
 release refs. Routine stable tags deploy automatically, without required
-reviewers, after data compatibility checks succeed.
+reviewers, after the release checks succeed.
 Enable this only after the host helper, SSH identity and new workflow are installed;
-approve any older pending release separately after its own compatibility checks.
+approve any older pending release separately after its own release checks.
 Use a fresh `CAIRN_RELEASE_COOLIFY_TOKEN` credential for this workflow, then remove
 the old environment secret `COOLIFY_TOKEN` before removing required reviewers.
 Historical workflows lack the current release checks and must no longer have a usable

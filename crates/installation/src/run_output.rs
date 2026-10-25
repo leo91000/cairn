@@ -343,11 +343,6 @@ pub fn exhausted(event: &Value) -> bool {
         || EXHAUSTED.is_match(text(error, "message"))
 }
 
-/// Compatibility entrypoint for the legacy Codex exec protocol.
-pub fn args(run: &Value, output: &str, session: Option<&str>) -> Vec<String> {
-    crate::coding_agent::codex_args(run, output, session)
-}
-
 /// The rule that sets chat turns apart from scheduled work.
 pub const INTERACTIVE: &str = "This is an interactive chat. Use native user-input questions when \
     clarification is useful. Nonblocking questions let you continue independent \
@@ -587,13 +582,10 @@ fn skill_index(skills: &Value) -> String {
         .into_iter()
         .flatten()
         .map(|skill| {
-            let description = match text(skill, "description") {
-                "" => crate::skills::parse(text(skill, "content"))
-                    .map(|parsed| text(&parsed, "description").to_owned())
-                    .unwrap_or_default(),
-                description => description.to_owned(),
-            };
-            let description = description.split_whitespace().collect::<Vec<_>>().join(" ");
+            let description = text(skill, "description")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
             format!(
                 "- {}: {description}\n  {}",
                 text(skill, "name"),
@@ -713,11 +705,10 @@ mod tests {
     fn selected_skills_list_paths_instead_of_contents() {
         let skills = json!([
             { "name": "review", "description": "Review a\n  change.", "path": "/home/node/.agents/skills/0/review/SKILL.md", "content": "body" },
-            { "name": "legacy", "path": "/skills/1/legacy/SKILL.md", "content": "---\nname: legacy\ndescription: Older snapshot\n---\nBody" },
         ]);
         assert_eq!(
             skill_index(&skills),
-            "- review: Review a change.\n  /home/node/.agents/skills/0/review/SKILL.md\n- legacy: Older snapshot\n  /skills/1/legacy/SKILL.md"
+            "- review: Review a change.\n  /home/node/.agents/skills/0/review/SKILL.md"
         );
     }
 

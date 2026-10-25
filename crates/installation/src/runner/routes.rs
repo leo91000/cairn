@@ -89,17 +89,7 @@ pub(super) async fn handler(State(broker): State<Broker>, request: Request) -> R
 }
 
 async fn health(broker: &Broker) -> Result<Response> {
-    let mut runtimes = Vec::new();
-    if let Ok(mut entries) = tokio::fs::read_dir(broker.state.join("images")).await {
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let complete =
-                entry.path().join("root.ext4").exists() && entry.path().join("vmlinux").exists();
-            if complete {
-                runtimes.push(entry.file_name().to_string_lossy().into_owned());
-            }
-        }
-    }
-    let runtime_id = std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into());
+    let runtime_id = crate::nodes::component_runtime();
     let active_runs = broker.active.lock().await.len();
     let mut capabilities = crate::nodes::connector::capabilities(&broker.state).ok();
     if let (Some(capabilities), Some(hardware)) = (&mut capabilities, broker.pool.hardware()) {
@@ -115,7 +105,6 @@ async fn health(broker: &Broker) -> Result<Response> {
         "nodeProtocol": NODE_PROTOCOL,
         "sharedResources": broker.pool.budget().await.is_some(),
         "exclusiveReservations": true,
-        "runtimes": runtimes,
         "dataRoot": broker.data,
         "activeRuns": active_runs,
         "capabilities": capabilities,
@@ -379,10 +368,7 @@ async fn prune_stale_disks(directory: &Path) -> Result<Vec<String>> {
             continue;
         }
         let is_dir = entry.file_type().await?.is_dir();
-        if is_dir
-            && (entry.path().join("journal.sqlite").exists()
-                || entry.path().join("journal-v2.sqlite").exists())
-        {
+        if is_dir && entry.path().join("journal-v2.sqlite").exists() {
             let context = crate::storage::LazyDisk::context(&entry.path())?;
             retired_grants.push(crate::auth::digest(text(&context, "grant")));
         }
@@ -621,12 +607,13 @@ fn wait(broker: Broker, id: String) -> Response {
         .into_response()
 }
 
-/// Older managers omit the mode and keep the coherent filesystem capture path.
 async fn snapshot_consistency(request: Request) -> Result<crate::storage::checkpoint::Consistency> {
     let bytes = body(request, 1024, "Invalid snapshot request.").await?;
-    let value = serde_json::from_slice::<Value>(&bytes).unwrap_or_default();
+    let value = serde_json::from_slice::<Value>(&bytes).map_err(|_| {
+        Error::bad("Invalid snapshot request; an explicit consistency is required.")
+    })?;
     match value.get("consistency") {
-        None => Ok(crate::storage::checkpoint::Consistency::default()),
+        None => Err(Error::bad("Missing snapshot consistency.")),
         Some(value) => serde_json::from_value(value.clone())
             .map_err(|_| Error::bad("Invalid snapshot consistency.")),
     }
@@ -638,13 +625,10 @@ mod snapshot_request_tests {
     use crate::storage::checkpoint::Consistency;
 
     #[tokio::test]
-    async fn legacy_requests_keep_guest_flushing_and_unknown_modes_are_rejected() {
-        for legacy in ["", "{}", r#"{"baseline":"previous"}"#] {
-            let request = Request::new(Body::from(legacy));
-            assert!(matches!(
-                snapshot_consistency(request).await.unwrap(),
-                Consistency::Filesystem
-            ));
+    async fn snapshot_requests_require_an_explicit_valid_consistency() {
+        for invalid in ["", "{}", r#"{"baseline":"previous"}"#] {
+            let request = Request::new(Body::from(invalid));
+            assert!(snapshot_consistency(request).await.is_err());
         }
         let request = Request::new(Body::from(r#"{"consistency":"crash"}"#));
         assert!(matches!(

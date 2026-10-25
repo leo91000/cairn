@@ -164,20 +164,18 @@ async fn prepare_source(
     if !resizing {
         if marker.exists() {
             let bytes = tokio::fs::read(&marker).await?;
-            if bytes != b"initializing" {
-                if bytes == b"resizing" {
-                    return Err(Error::conflict(
-                        "Disk resize requires its original journal.",
-                    ));
-                }
-                let pending: Value = serde_json::from_slice(&bytes)?;
-                if pending["phase"] != "initializing" {
-                    return Err(Error::conflict(
-                        "Disk resize requires its original journal.",
-                    ));
-                }
-                super::layout::validate(&pending)?;
+            if bytes == b"resizing" {
+                return Err(Error::conflict(
+                    "Disk resize requires its original journal.",
+                ));
             }
+            let pending: Value = serde_json::from_slice(&bytes)?;
+            if pending["phase"] != "initializing" {
+                return Err(Error::conflict(
+                    "Disk resize requires its original journal.",
+                ));
+            }
+            super::layout::validate(&pending)?;
         }
         let pending = serde_json::json!({
             "phase": "initializing",

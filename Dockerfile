@@ -52,7 +52,6 @@ COPY plugins ./plugins
 COPY crates/installation ./crates/installation
 COPY crates/protocol ./crates/protocol
 COPY deploy/nodes ./deploy/nodes
-COPY deploy/installations/data-compatibility.json ./deploy/installations/data-compatibility.json
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     touch crates/contracts/src/lib.rs crates/installation/src/main.rs crates/installation/src/lib.rs crates/protocol/src/lib.rs \
     crates/plugin-api/src/lib.rs crates/plugin-host/src/lib.rs crates/plugin-runtime/src/lib.rs && \

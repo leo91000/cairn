@@ -386,7 +386,7 @@ mod tests {
         let response = router(broker)
             .oneshot(authorized_post(
                 format!("/runs/{id}/snapshot"),
-                Body::from("{}"),
+                Body::from(r#"{"consistency":"filesystem"}"#),
             ))
             .await
             .unwrap();
@@ -418,7 +418,7 @@ mod tests {
         let response = app
             .oneshot(authorized_post(
                 format!("/runs/{id}/snapshot"),
-                Body::from("{}"),
+                Body::from(r#"{"consistency":"filesystem"}"#),
             ))
             .await
             .unwrap();

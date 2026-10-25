@@ -34,12 +34,7 @@ pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Resu
     let manifest = super::publication::manifest(s, backup).await?;
     let record = s.get("nodes", node).await?;
     let native = crate::native::policy::node_native(&record);
-    if native
-        != matches!(
-            manifest["kind"].as_str(),
-            Some("native-files-v1" | "native-ext4-v1")
-        )
-    {
+    if native != matches!(manifest["kind"].as_str(), Some("native-ext4-v1")) {
         return Err(Error::conflict(
             "Conversation moves cannot change execution backend.",
         ));
@@ -130,15 +125,11 @@ pub async fn controller(state: &Path, run: &str, value: Value) -> Result<Value> 
     crate::validation::uuid(run)?;
     let manifest = &value["manifest"];
     super::snapshots::validate(manifest)?;
-    let runtime = text(&manifest["runtime"], "runtimeId");
-    if !super::valid_runtime(runtime) {
-        return Err(Error::bad("Invalid runtime identity."));
-    }
     let _images = crate::microvm::images::IMAGE_LIFECYCLE.read().await;
-    let image = state.join("images").join(runtime);
+    let image = state.join("images").join(super::component_runtime());
     if !image.join("root.ext4").exists() || !image.join("vmlinux").exists() {
         return Err(Error::conflict(
-            "Required VM runtime is not installed on this node.",
+            "Current VM runtime is not installed on this node.",
         ));
     }
     restore_journal(state, run, value).await
@@ -183,9 +174,11 @@ pub(crate) async fn restore_journal(state: &Path, run: &str, value: Value) -> Re
     });
     let root = directory.join("lazy");
     drop(crate::storage::runtime::create(&root, manifest, &context).await?);
+    let mut runtime = manifest["runtime"].clone();
+    runtime["runtimeId"] = super::component_runtime().into();
     crate::skills::atomic_write(
         &directory.join("runtime.json"),
-        &serde_json::to_vec(&manifest["runtime"])?,
+        &serde_json::to_vec(&runtime)?,
     )
     .await?;
     crate::skills::atomic_write(

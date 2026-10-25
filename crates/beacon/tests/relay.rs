@@ -41,7 +41,7 @@ async fn additional_nodes_enroll_directly_and_keep_their_channel_outside_the_rel
             "code": invitation["code"],
             "name": "Direct execution node",
             "protocol": 1,
-            "runtimeId": "fixture",
+            "runtimeId": "development",
             "capabilities": {
                 "os": "linux",
                 "arch": "x86_64",
@@ -85,7 +85,7 @@ async fn additional_nodes_enroll_directly_and_keep_their_channel_outside_the_rel
         .post(format!("{direct_url}/internal/nodes/heartbeat"))
         .header("host", "manager.vpn.example")
         .bearer_auth(identity["token"].as_str().unwrap())
-        .json(&json!({}))
+        .json(&json!({ "runtimeId": "development", "nodeProtocol": 2 }))
         .send()
         .await
         .unwrap();

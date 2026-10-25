@@ -2,7 +2,6 @@
 use super::{Disk, DiskWrite};
 use rusqlite::{Connection, params};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::{
     fs::File,
     io,
@@ -230,39 +229,6 @@ impl LazyDisk {
         })
     }
 
-    fn record(row: &rusqlite::Row<'_>, size: u64) -> io::Result<(u64, Vec<u8>)> {
-        let start: i64 = row.get(0).map_err(failure)?;
-        let reference = row.get_ref(1).map_err(failure)?;
-        let data = reference.as_blob().map_err(failure)?;
-        let checksum: String = row.get(2).map_err(failure)?;
-        let sequence: i64 = row.get(3).map_err(failure)?;
-        let generation: i64 = row.get(4).map_err(failure)?;
-        let end: i64 = row.get(5).map_err(failure)?;
-        if start < 0
-            || sequence < 1
-            || generation < 1
-            || data.is_empty()
-            || data.len() > MAX_IO
-            || end < start
-            || end as u64 > size
-            || end as u64 != (start as u64).saturating_add(data.len() as u64)
-            || Self::checksum(sequence, generation, start as u64, data) != checksum
-        {
-            return Err(failure("Local journal integrity check failed"));
-        }
-        Ok((start as u64, data.to_vec()))
-    }
-
-    fn checksum(sequence: i64, generation: i64, offset: u64, bytes: &[u8]) -> String {
-        let mut hash = Sha256::new();
-        hash.update(sequence.to_le_bytes());
-        hash.update(generation.to_le_bytes());
-        hash.update(offset.to_le_bytes());
-        hash.update((bytes.len() as u64).to_le_bytes());
-        hash.update(bytes);
-        hex::encode(hash.finalize())
-    }
-
     fn check(&self, offset: u64, length: usize) -> io::Result<()> {
         if length > MAX_IO {
             return Err(failure("Disk request exceeds the I/O limit"));
@@ -279,7 +245,7 @@ impl LazyDisk {
         if let Some(bytes) = self.records.lock().map_err(failure)?.get(&key, foreground) {
             return Ok((record.start, bytes));
         }
-        let bytes = record.read(self.size())?;
+        let bytes = record.read()?;
         let bytes = self
             .records
             .lock()

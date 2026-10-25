@@ -1,6 +1,5 @@
 //! Adapter for the unmodified Claude Code streaming CLI.
 use crate::{
-    accounts::lenient,
     claude,
     config::Config,
     error::{Error, Result},
@@ -323,46 +322,31 @@ fn subagent_report(block: &Value, outcome: &Value) -> String {
 }
 
 /// Saved before a turn completes, so a restart never repeats a finished request.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Receipt {
-    #[serde(default, deserialize_with = "lenient::optional_string")]
-    message_id: Option<String>,
-    #[serde(default, deserialize_with = "lenient::strings")]
+    message_id: String,
     delivered: Vec<String>,
-    #[serde(default, deserialize_with = "lenient::optional_string")]
-    text: Option<String>,
-    #[serde(default, deserialize_with = "lenient::optional_string")]
-    item_id: Option<String>,
+    text: String,
+    item_id: String,
 }
 
 impl Receipt {
     async fn read(path: &Path, message_id: &str) -> Option<Self> {
         let bytes = tokio::fs::read(path).await.ok()?;
         let receipt = serde_json::from_slice::<Self>(&bytes).ok()?;
-        // Older adapters could save an unrelated startup/background result before Claude
-        // consumed this request. Such a receipt must never complete it.
-        let completes = receipt.message_id.as_deref() == Some(message_id)
-            && receipt.delivered.iter().any(|id| id == message_id);
+        let completes =
+            receipt.message_id == message_id && receipt.delivered.iter().any(|id| id == message_id);
         completes.then_some(receipt)
     }
 
     /// Replays a completed request without starting Claude Code.
-    async fn replay(
-        self,
-        plan: &Value,
-        message_id: &str,
-        events: &mpsc::Sender<Value>,
-    ) -> Result<()> {
+    async fn replay(self, plan: &Value, events: &mpsc::Sender<Value>) -> Result<()> {
         for id in &self.delivered {
             emit(events, delivered(id)).await?;
         }
-        let body = self.text.as_deref().unwrap_or_default();
-        atomic_write(Path::new(text(plan, "output")), body.as_bytes()).await?;
-        let item_id = self
-            .item_id
-            .unwrap_or_else(|| format!("{message_id}-recovered"));
-        let item = json!({ "id": item_id, "type": "agent_message", "text": self.text });
+        atomic_write(Path::new(text(plan, "output")), self.text.as_bytes()).await?;
+        let item = json!({ "id": self.item_id, "type": "agent_message", "text": self.text });
         emit(events, json!({ "type": "item.completed", "item": item })).await?;
         emit(events, json!({ "type": "turn.completed" })).await
     }
@@ -1290,10 +1274,10 @@ impl Turn<'_> {
 
     async fn complete(&self) -> Result<()> {
         let receipt = Receipt {
-            message_id: Some(self.initial_id.into()),
+            message_id: self.initial_id.into(),
             delivered: self.delivered.iter().cloned().collect(),
-            text: Some(self.last.clone()),
-            item_id: Some(self.last_id.clone()),
+            text: self.last.clone(),
+            item_id: self.last_id.clone(),
         };
         // Save the receipt before completion so restart cannot repeat a finished request.
         atomic_write(&self.receipt, &serde_json::to_vec(&receipt)?).await?;
@@ -1375,7 +1359,7 @@ pub async fn run(
     let receipt = Path::new(text(&plan, "output")).with_extension("claude-receipt.json");
     let initial_id = text(&plan["execution"], "messageId");
     if let Some(saved) = Receipt::read(&receipt, initial_id).await {
-        return saved.replay(&plan, initial_id, &events).await;
+        return saved.replay(&plan, &events).await;
     }
 
     // Completed receipts above do not launch Claude and must remain replayable.

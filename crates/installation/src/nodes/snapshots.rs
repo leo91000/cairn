@@ -52,6 +52,7 @@ pub(crate) fn blocks(manifest: &Value) -> Result<Vec<ManifestBlock>> {
 }
 
 /// Content hashes of the manifest's data blocks, in disk order.
+#[cfg(test)]
 pub(crate) fn hashes(manifest: &Value) -> impl Iterator<Item = &str> {
     manifest["blocks"]
         .as_array()
@@ -415,7 +416,7 @@ pub async fn response_block(response: reqwest::Response) -> Result<Vec<u8>> {
 }
 
 /// Fetch missing blocks in manifest order with bounded response and allocation
-/// sizes. Older controllers keep working through their single-block endpoint.
+/// sizes, using the current publication endpoint.
 pub struct Fetch {
     http: reqwest::Client,
     url: String,
@@ -423,8 +424,6 @@ pub struct Fetch {
     pending: std::collections::VecDeque<(String, u64)>,
     stream: Option<std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>>,
     remaining: usize,
-    legacy: bool,
-    publication: bool,
     direct_publication: bool,
 }
 
@@ -442,8 +441,6 @@ impl Fetch {
             pending: blocks.into(),
             stream: None,
             remaining: 0,
-            legacy: false,
-            publication: true,
             direct_publication: false,
         }
     }
@@ -462,10 +459,8 @@ impl Fetch {
             .filter(|(expected, size)| expected == hash && *size <= BLOCK)
             .map(|(_, size)| *size)
             .ok_or_else(|| Error::bad("Unexpected snapshot block."))?;
-        while self.stream.is_none() && !self.legacy {
-            let count = if !self.publication {
-                READ_BATCH
-            } else if self.direct_publication {
+        while self.stream.is_none() {
+            let count = if self.direct_publication {
                 MAX_PUBLICATION_BLOCKS
             } else {
                 PUBLICATION_BATCH
@@ -473,22 +468,14 @@ impl Fetch {
             let batch: Vec<_> = self.pending.iter().take(count).collect();
             let length: u64 = batch.iter().map(|(_, size)| *size).sum();
             let hashes: Vec<_> = batch.iter().map(|(hash, _)| hash).collect();
-            let endpoint = if self.publication {
-                "publication"
-            } else {
-                "blocks"
-            };
-            let mut request = self
+            let request = self
                 .http
-                .post(format!("{}/{endpoint}", self.url))
+                .post(format!("{}/publication", self.url))
                 .bearer_auth(&self.credential)
                 .json(&json!({ "hashes": hashes }));
-            if !self.publication {
-                request = request.timeout(TRANSFER_IDLE);
-            }
             // A stopped local journal is verified once before the response starts.
             // Its byte stream still has the ordinary per-block idle deadline.
-            let startup = if self.publication && self.direct_publication {
+            let startup = if self.direct_publication {
                 DIRECT_PUBLICATION_STARTUP
             } else {
                 TRANSFER_IDLE
@@ -497,15 +484,7 @@ impl Fetch {
                 .await
                 .map_err(|_| Error::unavailable("Backup block transfer interrupted."))?
                 .map_err(|_| Error::unavailable("Backup block transfer interrupted."))?;
-            // Old relays translate unsupported operations into 503. Retry the
-            // existing endpoint once; actual unavailability still fails there.
-            if matches!(response.status().as_u16(), 404 | 405 | 503) {
-                if self.publication {
-                    self.publication = false;
-                    continue;
-                }
-                self.legacy = true;
-            } else {
+            {
                 if !response.status().is_success() {
                     return Err(Error::unavailable("Backup block batch unavailable."));
                 }
@@ -541,18 +520,7 @@ impl Fetch {
             }
             bytes
         } else {
-            let response = self
-                .http
-                .get(format!("{}/{hash}", self.url))
-                .bearer_auth(&self.credential)
-                .timeout(std::time::Duration::from_secs(120))
-                .send()
-                .await
-                .map_err(|_| Error::unavailable("Backup block transfer interrupted."))?;
-            if !response.status().is_success() {
-                return Err(Error::unavailable("Backup block unavailable."));
-            }
-            response_block(response).await?
+            return Err(Error::internal("Missing publication stream."));
         };
         self.pending.pop_front();
         Ok(bytes)
@@ -650,19 +618,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_startup_deadline_follows_the_route_and_resets_on_fallback() {
+    async fn fetch_startup_deadline_follows_the_route() {
         use std::time::Duration;
 
-        for (direct, fallback, delay, succeeds) in [
-            (false, false, TRANSFER_IDLE + Duration::from_secs(1), false),
-            (true, false, TRANSFER_IDLE + Duration::from_secs(1), true),
+        for (direct, delay, succeeds) in [
+            (false, TRANSFER_IDLE + Duration::from_secs(1), false),
+            (true, TRANSFER_IDLE + Duration::from_secs(1), true),
             (
                 true,
-                false,
                 DIRECT_PUBLICATION_STARTUP + Duration::from_secs(1),
                 false,
             ),
-            (true, true, TRANSFER_IDLE + Duration::from_secs(1), false),
         ] {
             let arrived = Arc::new(tokio::sync::Notify::new());
             let release = Arc::new(tokio::sync::Notify::new());
@@ -672,14 +638,7 @@ mod tests {
                 let received = received.clone();
                 let released = released.clone();
                 async move {
-                    if fallback && request.uri().path() == "/publication" {
-                        return axum::http::StatusCode::NOT_FOUND.into_response();
-                    }
-
-                    assert_eq!(
-                        request.uri().path(),
-                        if fallback { "/blocks" } else { "/publication" }
-                    );
+                    assert_eq!(request.uri().path(), "/publication");
                     received.notify_one();
                     released.notified().await;
                     vec![7_u8].into_response()
@@ -725,95 +684,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_batches_in_order_and_falls_back_once_for_old_runners() {
-        for legacy_status in [None, Some(404), Some(405), Some(503)] {
-            let legacy = legacy_status.is_some();
-            let requests = Arc::new(Mutex::new(Vec::new()));
-            let captured = requests.clone();
-            let app = Router::new().fallback(any(move |request: Request| {
-                let captured = captured.clone();
-                async move {
-                    assert_eq!(request.headers()["authorization"], "Bearer fixture");
-                    let method = request.method().clone();
-                    let path = request.uri().path().to_owned();
-                    if path == "/publication" {
-                        captured.lock().unwrap().push((method, Vec::new()));
-                        return axum::http::StatusCode::from_u16(legacy_status.unwrap_or(404))
-                            .unwrap()
-                            .into_response();
-                    }
-                    let bytes = axum::body::to_bytes(request.into_body(), 4096)
-                        .await
-                        .unwrap();
-                    let mut hashes = Vec::new();
-                    if method == "POST" && !legacy {
-                        let body: Value = serde_json::from_slice(&bytes).unwrap();
-                        hashes = body["hashes"]
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .map(|hash| hash.as_str().unwrap().to_owned())
-                            .collect();
-                        assert!(hashes.len() <= READ_BATCH);
-                    }
-                    captured
-                        .lock()
-                        .unwrap()
-                        .push((method.clone(), hashes.clone()));
-                    if method == "POST" && legacy {
-                        return axum::http::StatusCode::from_u16(legacy_status.unwrap())
-                            .unwrap()
-                            .into_response();
-                    }
-                    if method == "GET" {
-                        hashes.push(path.trim_start_matches('/').to_owned());
-                    }
-                    let bytes: Vec<_> = hashes
-                        .iter()
-                        .flat_map(|hash| {
-                            let index = u8::from_str_radix(&hash[62..], 16).unwrap();
-                            vec![index; index as usize + 1]
-                        })
-                        .collect();
-                    bytes.into_response()
-                }
-            }));
-            let (url, server) = peer(app).await;
-            let blocks: Vec<_> = (0..READ_BATCH + 1)
-                .map(|i| (format!("{i:064x}"), i as u64 + 1))
-                .collect();
-            let mut fetch = Fetch::new(
-                reqwest::Client::new(),
-                url,
-                "fixture".into(),
-                blocks.clone(),
-            );
-            for (index, (hash, size)) in blocks.iter().enumerate() {
-                assert_eq!(
-                    fetch.block(hash).await.unwrap(),
-                    vec![index as u8; *size as usize]
-                );
-            }
-            let requests = requests.lock().unwrap();
-            let posts: Vec<_> = requests
-                .iter()
-                .filter(|(method, _)| *method == "POST")
-                .collect();
-            if legacy {
-                assert_eq!(posts.len(), 2);
-                assert_eq!(requests.len(), READ_BATCH + 3);
-            } else {
-                assert_eq!(requests.len(), 3);
-                assert_eq!(posts[1].1.len(), READ_BATCH);
-                assert_eq!(posts[2].1.len(), 1);
-            }
-            server.abort();
-        }
-    }
-
-    #[tokio::test]
     async fn fetch_rejects_truncated_excess_and_failed_batches() {
-        for (status, actual, expected) in [(200, 2, 3), (200, 4, 3), (500, 3, 3)] {
+        for (status, actual, expected) in [
+            (200, 2, 3),
+            (200, 4, 3),
+            (404, 3, 3),
+            (405, 3, 3),
+            (503, 3, 3),
+            (500, 3, 3),
+        ] {
             let app = Router::new().fallback(any(move |request: Request| async move {
                 assert_eq!(
                     request.method(),

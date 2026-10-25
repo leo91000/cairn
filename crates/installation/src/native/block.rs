@@ -36,6 +36,32 @@ fn preparation_size(directory: &Path, requested: u64) -> Result<u64> {
     Ok(requested)
 }
 
+async fn record_runtime(directory: &Path, plan: &Value) -> Result<()> {
+    let runtime = json!({
+        "backend": "native",
+        "storage": "ublk",
+        "os": "linux",
+        "arch": "x86_64",
+        "runtimeId": plan["runtimeId"],
+    });
+    if directory.join("runtime.json").exists() {
+        let previous: Value =
+            serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
+        if ["backend", "storage", "os", "arch"]
+            .iter()
+            .any(|field| previous[*field] != runtime[*field])
+        {
+            return Err(Error::conflict("Native disk platform changed."));
+        }
+    }
+    atomic_write(
+        &directory.join("runtime.json"),
+        &serde_json::to_vec(&runtime)?,
+    )
+    .await?;
+    Ok(())
+}
+
 fn ext4_bytes(superblock: &[u8; 1024]) -> Result<u64> {
     if u16::from_le_bytes(superblock[56..58].try_into().unwrap()) != 0xef53 {
         return Err(Error::conflict("Invalid native ext4 geometry."));
@@ -269,8 +295,7 @@ pub async fn mount(
                 "Native journal restore must finish before execution resumes.",
             ));
         }
-        // A later execution invalidates restore idempotence, just as the native
-        // file backend invalidates restored.json when it acquires its writer.
+        // A later execution invalidates restore idempotence.
         remove(&directory.join("recovery.json")).await?;
         tokio::fs::File::open(directory).await?.sync_all().await?;
         let requested = plan["resources"]["diskMiB"]
@@ -292,42 +317,10 @@ pub async fn mount(
             }
         })?;
         let physical = crate::file_lock::exclusive(&directory.join("lock"), DISK_BUSY)?;
-        let runtime = json!({
-            "backend": "native", "storage": "ublk", "os": "linux", "arch": "x86_64",
-            "runtimeId": plan["runtimeId"],
-        });
-        if directory.join("runtime.json").exists() {
-            let previous: Value =
-                serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
-            if previous != runtime {
-                return Err(Error::conflict("Native disk runtime changed."));
-            }
-        } else {
-            atomic_write(
-                &directory.join("runtime.json"),
-                &serde_json::to_vec(&runtime)?,
-            )
-            .await?;
-        }
+        record_runtime(directory, plan).await?;
         let volume = storage::runtime::load(directory).await?;
         let target = root.join("data");
         if !root.join("block-initialized").exists() && !root.join("block-seeding").exists() {
-            if target.exists() && !root.join("initialized").exists() {
-                let mut entries = tokio::fs::read_dir(&target).await?;
-                if entries.next_entry().await?.is_some() {
-                    return Err(Error::conflict(
-                        "Incomplete legacy native preparation requires review before migration.",
-                    ));
-                }
-            }
-            // Existing stopped file workspaces are retained until the new disk
-            // has been published. A failed migration never erases its source.
-            if target.exists() {
-                if root.join("legacy-data").exists() {
-                    return Err(Error::conflict("Ambiguous native migration sources."));
-                }
-                tokio::fs::rename(&target, root.join("legacy-data")).await?;
-            }
             atomic_write(&root.join("block-seeding"), b"1").await?;
         }
         private_dir(&target).await?;
@@ -638,9 +631,7 @@ pub async fn initialize(state: &Path, run: &str, plan: &Value, budget: u64) -> R
         if staged.exists() {
             tokio::fs::remove_dir_all(&staged).await?;
         }
-        if root.join("legacy-data").exists() {
-            workspace::copy_durable(&root.join("legacy-data"), &staged, budget).await?;
-        } else {
+        {
             private_dir(&staged).await?;
             let seed = crate::microvm::plan::Plan::new(plan.clone());
             let source = seed
@@ -839,19 +830,12 @@ pub async fn restore(state: &Path, run: &str, request: Value) -> Result<Value> {
         ));
     }
     crate::nodes::snapshots::validate(manifest)?;
-    super::systemd::tools(text(&manifest["runtime"], "runtimeId"))?;
+    super::systemd::tools(&crate::nodes::component_runtime())?;
     crate::validation::uuid(text(&request, "backupId"))?;
     let root = workspace::directory(state, run)?;
     private_dir(&root).await?;
     let _owner =
         crate::file_lock::exclusive(&root.join("owner.lock"), "Native workspace is active.")?;
-    if root.join("legacy-block-restore.pending.json").exists()
-        || root.join("restore.pending.json").exists()
-    {
-        return Err(Error::conflict(
-            "Finish the pending native file restore first.",
-        ));
-    }
     let pending = root.join("block-restore.pending.json");
     if pending.exists() {
         let current: Value = serde_json::from_slice(&tokio::fs::read(&pending).await?)?;
@@ -907,8 +891,6 @@ pub async fn evict(data: &Path, state: &Path, run: &str, expected: &Value) -> Re
         crate::file_lock::exclusive(&root.join("owner.lock"), "Native workspace is active.")?;
     let lease = environment::lock(state, run, DISK_BUSY).await?;
     if root.join("block-restore.pending.json").exists()
-        || root.join("restore.pending.json").exists()
-        || root.join("legacy-block-restore.pending.json").exists()
         || lease.directory.join("restore.pending").exists()
         || !root.join("block-initialized").exists()
     {
@@ -936,12 +918,8 @@ pub async fn evict(data: &Path, state: &Path, run: &str, expected: &Value) -> Re
         tokio::task::spawn_blocking(move || storage::cache::evict_clean(&state, &directory))
             .await
             .map_err(Error::internal)??;
-    // Legacy migration is complete and its replacement is acknowledged. Other
-    // stale recovery trees still need explicit prune; no S3 reference is removed.
-    remove(&root.join("legacy-data")).await?;
     remove(&root.join("tmp")).await?;
     cleanup_attempt_files(data, state_path(&lease.directory)?, run).await?;
-    workspace::collect_archives(state_path(&lease.directory)?, run, None).await?;
     let mut status = volume.inspect().await?;
     status["evictedBytes"] = evicted.into();
     Ok(status)
@@ -1023,8 +1001,7 @@ pub async fn action(state: &Path, run: &str, delete: bool) -> Result<Vec<String>
         }
         if entry.file_type().await?.is_dir()
             && name.to_string_lossy().starts_with("stale-")
-            && (entry.path().join("journal-v2.sqlite").exists()
-                || entry.path().join("journal.sqlite").exists())
+            && entry.path().join("journal-v2.sqlite").exists()
         {
             let context = storage::LazyDisk::context(&entry.path())?;
             grants.push(crate::auth::digest(text(&context, "grant")));
@@ -1049,89 +1026,6 @@ pub async fn recover_completed(state: &Path, run: &str, attempt: &str) -> Result
     Ok(())
 }
 
-pub async fn restore_files(
-    state: &Path,
-    run: &str,
-    request: &Value,
-    budget: u64,
-    growth: u64,
-) -> Result<Value> {
-    let root = workspace::directory(state, run)?;
-    private_dir(&root).await?;
-    let pending = root.join("legacy-block-restore.pending.json");
-    crate::validation::uuid(text(request, "backupId"))?;
-    {
-        let _owner =
-            crate::file_lock::exclusive(&root.join("owner.lock"), "Native workspace is active.")?;
-        if root.join("block-restore.pending.json").exists() {
-            return Err(Error::conflict(
-                "Finish the pending native block restore first.",
-            ));
-        }
-        if pending.exists() {
-            let current: Value = serde_json::from_slice(&tokio::fs::read(&pending).await?)?;
-            if current["backupId"] != request["backupId"] {
-                return Err(Error::conflict(
-                    "Another native file restore must finish first.",
-                ));
-            }
-        } else {
-            atomic_write(
-                &pending,
-                &serde_json::to_vec(&json!({ "backupId": request["backupId"] }))?,
-            )
-            .await?;
-        }
-        let lease = environment::lock(state, run, DISK_BUSY).await?;
-        let _replacement = storage::runtime::replacement(&lease.directory).await?;
-        if lease.directory.join("restore.pending").exists() {
-            return Err(Error::conflict(
-                "Finish the pending native journal restore first.",
-            ));
-        }
-        if lease.directory.join("lazy").exists() {
-            tokio::fs::rename(
-                lease.directory.join("lazy"),
-                lease
-                    .directory
-                    .join(format!("stale-native-{}", crate::config::id())),
-            )
-            .await?;
-        }
-        for name in ["runtime.json", "recovery.json", "restore.pending"] {
-            let source = lease.directory.join(name);
-            if source.exists() {
-                tokio::fs::rename(
-                    &source,
-                    lease
-                        .directory
-                        .join(format!("stale-native-{}-{name}", crate::config::id())),
-                )
-                .await?;
-            }
-        }
-        if root.join("legacy-data").exists() {
-            tokio::fs::rename(
-                root.join("legacy-data"),
-                root.join(format!("stale-native-{}", crate::config::id())),
-            )
-            .await?;
-        }
-        tokio::fs::File::open(&lease.directory)
-            .await?
-            .sync_all()
-            .await?;
-        tokio::fs::File::open(&root).await?.sync_all().await?;
-    }
-    let result = workspace::restore(state, run, request, budget, growth).await?;
-    for name in ["block-initialized", "block-seeding", "file-owner.json"] {
-        remove(&root.join(name)).await?;
-    }
-    remove(&pending).await?;
-    tokio::fs::File::open(&root).await?.sync_all().await?;
-    Ok(result)
-}
-
 pub fn used_bytes(path: &Path) -> Result<u64> {
     use std::os::unix::ffi::OsStrExt;
     let path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(Error::internal)?;
@@ -1149,6 +1043,49 @@ pub fn used_bytes(path: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_disks_resume_with_current_tools_and_keep_the_platform_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("runtime.json");
+        let previous = json!({
+            "backend": "native", "storage": "ublk", "os": "linux", "arch": "x86_64",
+            "runtimeId": "previous-release",
+        });
+        atomic_write(&path, &serde_json::to_vec(&previous).unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(root.path().join("workspace"), b"retained")
+            .await
+            .unwrap();
+        record_runtime(root.path(), &json!({ "runtimeId": "current-release" }))
+            .await
+            .unwrap();
+        let current: Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(current["runtimeId"], "current-release");
+        assert_eq!(current["storage"], "ublk");
+        assert_eq!(
+            tokio::fs::read(root.path().join("workspace"))
+                .await
+                .unwrap(),
+            b"retained"
+        );
+        let mut incompatible = current.clone();
+        incompatible["arch"] = "aarch64".into();
+        atomic_write(&path, &serde_json::to_vec(&incompatible).unwrap())
+            .await
+            .unwrap();
+        assert!(
+            record_runtime(root.path(), &json!({ "runtimeId": "next-release" }))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&tokio::fs::read(path).await.unwrap()).unwrap(),
+            incompatible
+        );
+    }
 
     #[tokio::test]
     async fn unapplied_grant_resumes_retained_journal_without_materializing_it() {

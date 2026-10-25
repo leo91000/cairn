@@ -119,15 +119,6 @@ procedure before it can be trusted again.
 
 ## Compatibility and qualification
 
-Epoch 13 / SQLite 12 fence older managers before they read administrative records.
-Old nodes remain protected by default and cannot change mode without capability
-`nativeModeProtocol: 1`. New plans carry the exact reviewed mode/generation.
-Native state budgets carry a strict `nativeModeProtocol` marker: old native
-controllers reject that on-disk budget, and the installer's independent epoch
-check forbids ordinary cross-epoch fallback. See [automatic migrations](AUTOMATIC-MIGRATIONS.md).
-No workspace, checkpoint, encryption or S3 encoding changes are introduced; the
-existing storage measurements remain the reference.
-
 `scripts/tests/native_runtime_test.py` runs only as root with
 `CAIRN_NATIVE_DISPOSABLE_HOST=1` and loopback synthetic S3. It exercises ordinary
 UID plus host sudo and a real `/etc` write, protected denial of sudo/personal

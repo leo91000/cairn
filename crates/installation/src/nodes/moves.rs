@@ -204,8 +204,7 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
         return Err(Error::conflict("A movement is already pending."));
     }
     let checkpoint = super::checkpoint(s, run_id).await?;
-    let deadline =
-        (now() + wait as i64 * 1000).min(checkpoint["deadline"].as_i64().unwrap_or(i64::MAX));
+    let deadline = now() + wait as i64 * 1000;
     // A finished conversation with a VM session moves without being resumed.
     let idle = run["status"] == RunStatus::Succeeded
         && run["sessionId"].is_string()
@@ -553,8 +552,6 @@ async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
     };
     let mut selecting = current.clone();
     selecting["placementTransition"] = true.into();
-    selecting["requiredRuntime"] =
-        super::publication::manifest(s, &backup).await?["runtime"]["runtimeId"].clone();
     let reservation = id();
     let Ok(selected) = super::placement::reserve(s, &selecting, &reservation).await else {
         let body = "The node running this conversation is unavailable and no other authorized node can resume it yet.";
@@ -742,12 +739,8 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
     } else {
         RunStatus::Queued
     };
-    // Publication validated this manifest before the move; an unreadable one keeps the default.
-    let manifest = super::publication::manifest(s, backup)
-        .await
-        .unwrap_or_default();
     let patch = json!({
-        "storage": { "mode": restored_storage_mode(&manifest) },
+        "storage": { "mode": super::ON_DEMAND },
         "movementError": null,
         "accountWaitReason": null,
         "nodeId": node,
@@ -820,17 +813,6 @@ pub async fn latest(s: &Service, run: &str) -> Result<Option<Value>> {
     }
 }
 
-/// The storage a restored point mounts until the next launch records its own: a
-/// legacy native file checkpoint restores a file workspace, every other point an
-/// on-demand journal disk.
-fn restored_storage_mode(manifest: &Value) -> &'static str {
-    if manifest["kind"] == "native-files-v1" {
-        "native"
-    } else {
-        super::ON_DEMAND
-    }
-}
-
 async fn release_destination(s: &Service, run: &Value) -> Result<()> {
     for reservation in [
         run["moveRequest"]["reservation"].as_str(),
@@ -842,25 +824,4 @@ async fn release_destination(s: &Service, run: &Value) -> Result<()> {
         super::placement::release(s, reservation).await?;
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::restored_storage_mode;
-    use serde_json::json;
-
-    #[test]
-    fn only_legacy_native_file_checkpoints_restore_without_a_journal() {
-        assert_eq!(
-            restored_storage_mode(&json!({ "kind": "native-files-v1" })),
-            "native"
-        );
-        for manifest in [
-            json!({ "kind": "native-ext4-v1" }),
-            json!({ "version": 1 }),
-            json!(null),
-        ] {
-            assert_eq!(restored_storage_mode(&manifest), "on-demand");
-        }
-    }
 }

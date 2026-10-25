@@ -89,10 +89,6 @@ engine does not implement Cairn's read-only/workspace-write sandbox. Production
 runner isolation still applies. OAuth, custom endpoints and quota reporting are
 outside this first integration. See [ADR 0042](adr/0042-opencode-api-key-integration.md).
 
-## Migration
-
-The first start of this version migrates existing data once: Codex account records and their raw rate limits move into the shared collection, runs record `accountId`/`accountName` instead of their Codex-only fields, and the single Claude login in `DATA_DIR/claude` becomes an account named **Claude** with its email, plan and simultaneous-conversation limit. Local runs keep their Claude sessions, which are copied into each run. A login still marked by the earlier serialized credential transfer (`sync-required`) is migrated as **Reconnect**, because a guest may have rotated its refresh token. Drain existing runs with the deployment lease before upgrading, and keep the data volume and encryption key: nobody needs to reconnect. Rolling back to an earlier version would not see the migrated accounts; restore the backup taken before upgrading instead.
-
 Screenshots use synthetic accounts: [desktop](screenshots/agent-accounts/desktop-light.png) · [account detail](screenshots/agent-accounts/detail-light.png) · [mobile, dark theme](screenshots/agent-accounts/mobile-dark.png) · [Android](screenshots/agent-accounts/android-light.png).
 
 ## API
@@ -113,4 +109,4 @@ Screenshots use synthetic accounts: [desktop](screenshots/agent-accounts/desktop
 
 ## Validation
 
-`crates/installation/tests/accounts.rs` covers the migration and per-agent selection, `crates/installation/tests/codex.rs` and `crates/installation/tests/claude.rs` each driver's sign-in, usage, rotation and parallel limits against synthetic CLIs, and `crates/installation/tests/worker.rs` real runs, exhaustion failover and simultaneous Claude conversations. `tests/e2e/accounts.spec.ts` drives the web page in Chromium and WebKit, and `AccountsJourneyTest` and `AccountsDeviceTest` the Android screen. These fixtures never contact OpenAI or Anthropic and never spend subscription allowance or banked resets.
+`crates/installation/tests/accounts.rs` covers per-agent selection, `crates/installation/tests/codex.rs` and `crates/installation/tests/claude.rs` each driver's sign-in, usage, rotation and parallel limits against synthetic CLIs, and `crates/installation/tests/worker.rs` real runs, exhaustion failover and simultaneous Claude conversations. `tests/e2e/accounts.spec.ts` drives the web page in Chromium and WebKit, and `AccountsJourneyTest` and `AccountsDeviceTest` the Android screen. These fixtures never contact OpenAI or Anthropic and never spend subscription allowance or banked resets.
