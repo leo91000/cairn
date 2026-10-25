@@ -38,14 +38,22 @@ const limit = (status: string, blocked = false) => event('provider.limit', { sta
 const notice = (level: string) => event('engine.notice', { level, message: 'Context is almost full.' })
 
 function step() {
-  return event('item.completed', {
+  return event('item.started', {
     item: {
       id: `tool-${serial}`,
       type: 'command_execution',
       command: 'ls',
-      exit_code: 0,
+      status: 'in_progress',
     },
   })
+}
+
+function reply(type: 'item.started' | 'item.completed', text: string) {
+  return event(type, { item: { id: `message-${serial}`, type: 'agent_message', text } })
+}
+
+function runLog(events: RunEvent[]) {
+  return activityEntries(events).flatMap(entry => entry.kind === 'group' ? entry.artifacts : [])
 }
 
 function notices(events: RunEvent[]) {
@@ -77,15 +85,49 @@ describe('engine status', () => {
     expect(notices([first, second, step()])).toEqual([])
     expect(notices([first, event('turn.completed')])).toEqual([])
 
+    expect(notices([first, reply('item.started', 'Here')])).toEqual([])
+
     // The run log keeps every retry, marking those work recovered from.
-    const log = activityEntries([first, step()]).flatMap(entry => entry.kind === 'group' ? entry.artifacts : [])
+    const log = runLog([first, step()])
     expect(log.find(artifact => artifact.title.startsWith('Claude Code is retrying'))).toMatchObject({ statusLabel: 'Recovered', status: 'info' })
   })
 
-  it('shows the usage limit until it no longer applies or the turn fails', () => {
+  it('does not call retries recovered when the engine gives up on the request', () => {
+    // Claude Code reports the last API error as a message, then the turn fails.
+    const last = retry(10)
+    const gaveUp = reply('item.completed', 'API Error: 529 Overloaded')
+    const failed = event('turn.failed', { error: { message: 'API Error: 529 Overloaded' } })
+    expect(notices([last, gaveUp]).map(notice => notice.title)).toEqual(['Claude Code is retrying the request · attempt 10/10'])
+    expect(notices([last, gaveUp, failed]).map(notice => notice.title)).not.toContain('Claude Code is retrying the request · attempt 10/10')
+    const retried = runLog([last, gaveUp, failed]).find(artifact => artifact.title.startsWith('Claude Code is retrying'))
+    expect(retried?.statusLabel).not.toBe('Recovered')
+
+    // A subagent's progress does not mean the agent's own request went through.
+    const progress = event('item.updated', {
+      item: {
+        id: 'agent-1',
+        type: 'subagent',
+        status: 'in_progress',
+        activity: 'Reading',
+      },
+    })
+    expect(notices([last, progress]).map(notice => notice.title)).toContain('Claude Code is retrying the request · attempt 10/10')
+  })
+
+  it('shows the usage limit until it no longer applies, its window resets or the turn fails', () => {
     const warning = limit('allowed_warning')
     expect(notices([warning, step()]).map(notice => notice.title)).toEqual(['Approaching the 5-hour limit'])
     expect(notices([warning, limit('allowed')])).toEqual([])
+
+    // A limit no longer applies once its window resets, even when no later state says so.
+    const reset = (resetsAt: number) => event('provider.limit', {
+      status: 'allowed_warning',
+      window: 'five_hour',
+      blocked: false,
+      resetsAt,
+    })
+    expect(notices([reset(Date.now() - 60_000)])).toEqual([])
+    expect(notices([reset(Date.now() + 3_600_000)]).map(notice => notice.title)).toEqual(['Approaching the 5-hour limit'])
 
     const blocked = limit('rejected', true)
     expect(notices([blocked]).map(notice => notice.title)).toEqual(['5-hour limit reached'])

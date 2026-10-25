@@ -463,6 +463,8 @@ struct Turn<'a> {
     tasks: HashMap<String, String>,
     /// The usage limit Claude Code last reported, unless requests run normally.
     limit: Option<UsageLimit>,
+    /// Tool uses whose progress notice was reported: Claude Code repeats it while the tool runs.
+    tool_notices: HashSet<String>,
     /// Streamed blocks of the current message, by index.
     streams: HashMap<usize, Value>,
     /// Content blocks seen per assistant message.
@@ -665,10 +667,15 @@ impl Turn<'_> {
         self.emit(retry).await
     }
 
-    /// A warning or notice Claude Code raised during the turn (CLI 2.1.283 and later).
-    async fn engine_notice(&self, value: &Value) -> Result<()> {
+    /// A warning or notice Claude Code raised during the turn.
+    async fn engine_notice(&mut self, value: &Value) -> Result<()> {
         let message = text(value, "content");
         if message.trim().is_empty() {
+            return Ok(());
+        }
+        // Notices naming a tool use report its progress: the first one says it is running.
+        let tool_use = text(value, "tool_use_id");
+        if !tool_use.is_empty() && !self.tool_notices.insert(tool_use.to_owned()) {
             return Ok(());
         }
         let level = match text(value, "level") {
@@ -817,8 +824,9 @@ impl Turn<'_> {
     }
 
     /// The subagent a message comes from, or None for the agent's own. Claude Code names the
-    /// tool use that started it and, from 2.1.292, its agent ID: the task ID it keeps when it is
-    /// resumed, so a resumed subagent's steps stay with it.
+    /// tool use that started it and, from 2.1.292, its agent ID (absent on the agent's own
+    /// messages): the task ID it keeps when it is resumed, so a resumed subagent's steps stay
+    /// with it.
     fn parent(&self, value: &Value) -> Option<String> {
         let agent = text(value, "agent_id");
         if let Some(id) = self.tasks.get(agent) {
@@ -938,7 +946,7 @@ impl Turn<'_> {
         } else if let Some(id) = self.tasks.get(task) {
             id.clone()
         } else {
-            return Ok(());
+            return self.subagent_resumed(value).await;
         };
         if !task.is_empty() {
             self.tasks.insert(task.to_owned(), id.clone());
@@ -953,7 +961,8 @@ impl Turn<'_> {
         }
         let item = self.subagents.get_mut(&id).unwrap();
 
-        // Run IDs sort in the order a task's runs opened: a frame of an earlier run is late.
+        // Claude Code promises that a task's run IDs sort, by plain string comparison, in the
+        // order its runs opened: a frame naming an earlier run is late.
         let run = text(value, "run_id");
         let current = text(item, "run_id").to_owned();
         if !run.is_empty() && !current.is_empty() && run < current.as_str() {
@@ -1021,6 +1030,46 @@ impl Turn<'_> {
             self.settled.insert(id, item.clone());
         }
         self.emit(json!({ "type": "item.updated", "item": item }))
+            .await
+    }
+
+    /// A subagent an earlier execution started, resumed in this one: by a SendMessage call, or
+    /// by Claude Code itself. It keeps its task ID, but this execution never saw the tool use that
+    /// started it, so it shows as a new row marked resumed.
+    async fn subagent_resumed(&mut self, value: &Value) -> Result<()> {
+        let task = text(value, "task_id");
+        let tool_use = text(value, "tool_use_id");
+        let by_message = self
+            .tools
+            .get(tool_use)
+            .is_some_and(|tool| tool["tool"] == "SendMessage");
+        if value["subtype"] != "task_started"
+            || value["task_type"] != "local_agent"
+            || task.is_empty()
+            || !(tool_use.is_empty() || by_message)
+        {
+            return Ok(());
+        }
+        let input = json!({
+            "description": value["description"],
+            "subagent_type": value["subagent_type"],
+            "prompt": value["prompt"],
+        });
+        let mut item = subagent(task, &input);
+        item["resumed"] = true.into();
+        item["task_id"] = task.into();
+        item["background"] = (value["is_backgrounded"] == true).into();
+        for key in ["run_id", "parent_task_id"] {
+            if !text(value, key).is_empty() {
+                item[key] = value[key].clone();
+            }
+        }
+        if let Some(parent) = self.tasks.get(text(value, "parent_task_id")) {
+            item["parent_id"] = parent.as_str().into();
+        }
+        self.tasks.insert(task.to_owned(), task.to_owned());
+        self.subagents.insert(task.to_owned(), item.clone());
+        self.emit(json!({ "type": "item.started", "item": item }))
             .await
     }
 
@@ -1342,6 +1391,7 @@ pub async fn run(
         settled: HashMap::new(),
         tasks: HashMap::new(),
         limit: None,
+        tool_notices: HashSet::new(),
         streams: HashMap::new(),
         blocks: HashMap::new(),
         stream_message: String::new(),

@@ -49,14 +49,26 @@ class EngineStatusTest {
         }
 
     private fun step() =
-        event("item.completed") {
+        event("item.started") {
             put(
                 "item",
                 buildJsonObject {
                     put("id", "tool-$serial")
                     put("type", "command_execution")
                     put("command", "ls")
-                    put("exit_code", 0)
+                    put("status", "in_progress")
+                },
+            )
+        }
+
+    private fun reply(type: String, text: String) =
+        event(type) {
+            put(
+                "item",
+                buildJsonObject {
+                    put("id", "message-$serial")
+                    put("type", "agent_message")
+                    put("text", text)
                 },
             )
         }
@@ -111,13 +123,61 @@ class EngineStatusTest {
         assertEquals(listOf(second.id), notices(listOf(first, second)).map { it.id })
         assertTrue(notices(listOf(first, second, step())).isEmpty())
         assertTrue(notices(listOf(first, event("turn.completed"))).isEmpty())
+        assertTrue(notices(listOf(first, reply("item.started", "Here"))).isEmpty())
+
+        // The run log keeps every retry, marking the one work recovered from.
+        val log = timelineEntries(listOf(first, second, step())).flatMap { it.events }
+        val states = log.filter { it.type == "engine.retry" }.map { presentActivity(it).state }
+        assertEquals(listOf("Terminé", "Rétablie"), states)
     }
 
     @Test
-    fun `a conversation shows the usage limit until it no longer applies or the turn fails`() {
+    fun `retries the engine gave up on are not recovered`() {
+        // Claude Code reports the last API error as a message, then the turn fails.
+        val last = retry(10)
+        val gaveUp = reply("item.completed", "API Error: 529 Overloaded")
+        val failed =
+            event("turn.failed") {
+                put("error", buildJsonObject { put("message", "API Error: 529 Overloaded") })
+            }
+        assertEquals(listOf(last.id), notices(listOf(last, gaveUp)).map { it.id })
+        assertFalse(last.id in notices(listOf(last, gaveUp, failed)).map { it.id })
+        assertTrue(recoveredEngineRetries(listOf(last, gaveUp, failed)).isEmpty())
+        val log = timelineEntries(listOf(last, gaveUp, failed)).flatMap { it.events }
+        assertNotEquals("Rétablie", presentActivity(log.first { it.id == last.id }).state)
+
+        // A subagent's progress does not mean the agent's own request went through.
+        val progress =
+            event("item.updated") {
+                put(
+                    "item",
+                    buildJsonObject {
+                        put("id", "agent-1")
+                        put("type", "subagent")
+                        put("status", "in_progress")
+                    },
+                )
+            }
+        assertEquals(listOf(last.id), notices(listOf(last, progress)).map { it.id })
+    }
+
+    @Test
+    fun `a conversation shows the usage limit until it no longer applies, resets or the turn fails`() {
         val warning = limit("allowed_warning")
         assertEquals(listOf(warning.id), notices(listOf(warning, step())).map { it.id })
         assertTrue(notices(listOf(warning, limit("allowed"))).isEmpty())
+
+        // A limit no longer applies once its window resets, even when no later state says so.
+        fun resetting(resetsAt: Long) =
+            event("provider.limit") {
+                put("status", "allowed_warning")
+                put("window", "five_hour")
+                put("resetsAt", resetsAt)
+            }
+        val now = System.currentTimeMillis()
+        assertTrue(notices(listOf(resetting(now - 60_000))).isEmpty())
+        val upcoming = resetting(now + 3_600_000)
+        assertEquals(listOf(upcoming.id), notices(listOf(upcoming)).map { it.id })
 
         val blocked = limit("rejected", blocked = true)
         assertEquals(listOf(blocked.id), notices(listOf(blocked)).map { it.id })

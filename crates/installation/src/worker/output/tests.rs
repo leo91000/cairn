@@ -324,6 +324,8 @@ async fn engine_reports_survive_log_budget_redacted_and_only_a_reported_limit_ex
         json!({ "type": "engine.retry", "attempt": 1, "maxRetries": 10, "delayMs": 500, "reason": "overloaded" }),
         json!({ "type": "provider.limit", "status": "rejected", "window": "five_hour", "blocked": true }),
         json!({ "type": "engine.notice", "level": "warning", "message": "Hook printed sensitive-tool-credential" }),
+        // Notices the conversation does not show stay within the run log's budget.
+        json!({ "type": "engine.notice", "level": "info", "message": "Tool Bash running for 30s" }),
     ] {
         fixture.event(event).await;
     }

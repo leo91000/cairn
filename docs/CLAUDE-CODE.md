@@ -74,11 +74,15 @@ kind of wait stays separate:
 - **Engine retry.** `system/api_retry` becomes `engine.retry`: attempt, retry budget,
   delay, HTTP status, reason and, for a first-byte timeout, `noResponse`. Claude Code
   retries the request itself. The turn continues, so this is neither a failure nor a
-  receipt. The conversation shows the latest retry until work continues.
+  receipt. The conversation shows the latest retry until work continues: the reply
+  streams, a tool starts or the turn completes. The run log then marks it recovered.
+  When Claude Code gives up, it reports the last API error as a message and the turn
+  fails; that retry is not marked recovered.
 - **Provider usage limit.** `rate_limit_event` becomes `provider.limit` when its state
   changes. That covers a warning, a limit covered by extra usage, a limit that stops
   requests (`blocked`), and the return to normal after one of these. Window and reset
-  time are included. If a turn fails while the latest state blocks requests, the
+  time are included. The conversation shows it until the limit no longer applies, its
+  reset time passes or the turn fails. If a turn fails while the latest state blocks requests, the
   adapter fails it with `code: usage_limit_reached`, the window and `resetsAt`. The
   worker then takes Cairn's durable account wait or fails over, without matching
   Claude's wording.
@@ -86,10 +90,12 @@ kind of wait stays separate:
   own. They release the execution's resources. Léo does not enable Claude's unattended
   `CLAUDE_CODE_RETRY_WATCHDOG`, which would keep the process waiting for a usage window
   instead of releasing it.
-- **Notices.** `system/informational` (Claude Code 2.1.283 and later) becomes
+- **Notices.** `system/informational` (already emitted by 2.1.280) becomes
   `engine.notice` with its level, cut at 4,000 characters. Like all run output, it is
-  redacted before storage. Warnings and suggestions show in the conversation. Notices
-  and info lines stay in the run log.
+  redacted before storage. Warnings, suggestions and notices that stop the turn show in
+  the conversation and are always recorded. Notices and info lines stay in the run log,
+  within its diagnostic budget. Claude Code repeats a running tool's progress line
+  (same `tool_use_id`); it is reported once.
 
 `session_state_changed` is opt-in (`CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS`) and
 not enabled. Completion stays correlated with result messages and consumed message
@@ -101,9 +107,13 @@ Code 2.1.292 and later add `agent_id` to a subagent's messages (equal to its tas
 kept when resumed), plus `parent_task_id` and `run_id` to task frames. A subagent's
 messages are never taken as the agent's reply, even without `parent_tool_use_id`.
 When the agent resumes a subagent, its new run reopens the same item, marked
-`resumed`. That holds even when the run names another tool use. A frame from an
-earlier run (a smaller `run_id`) is ignored. Nested subagents keep their parent and
-`parent_task_id`. The minimum supported CLI stays **2.1.280**: older frames without
+`resumed`. That holds even when the run names another tool use. Claude Code promises
+that a task's run IDs sort, by plain string comparison, in the order its runs opened,
+so a frame naming an earlier run is late and ignored. A subagent an earlier execution
+started, resumed by a `SendMessage` call or by Claude Code itself, shows as a new row
+of the current execution marked `resumed`, keyed by its task ID: Cairn rows belong to
+one execution. Other unknown agent tasks, such as a workflow's agents, are ignored.
+Nested subagents keep their parent and `parent_task_id`. The minimum supported CLI stays **2.1.280**: older frames without
 these fields keep the earlier correlation, and the fixtures cover both shapes. The
 events reach the public MCP and `cairn_installation` through `get_run`.
 

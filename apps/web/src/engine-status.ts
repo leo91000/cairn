@@ -83,13 +83,14 @@ export function engineNoticeTitle(data: Data) {
 
 /**
  * Whether a conversation shows the event as a notice. A limit that stops requests leaves it to the
- * usage-limit banner once the turn fails; informational notices stay in the run log.
+ * usage-limit banner once the turn fails, and a limit no longer applies once its window resets;
+ * informational notices stay in the run log.
  */
-export function engineAttention(type: string, data: Data) {
+export function engineAttention(type: string, data: Data, now = Date.now()) {
   if (type === 'engine.retry')
     return true
   if (type === 'provider.limit')
-    return data.status !== 'allowed'
+    return data.status !== 'allowed' && !((count(data.resetsAt) ?? Infinity) <= now)
   if (type === 'engine.notice')
     return data.level === 'warning' || data.level === 'suggestion' || data.stopsTurn === true
   return false

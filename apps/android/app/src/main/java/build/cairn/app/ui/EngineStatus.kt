@@ -18,6 +18,9 @@ import kotlinx.serialization.json.longOrNull
 
 internal val ENGINE_EVENTS = setOf("engine.retry", "engine.notice", "provider.limit")
 
+/** Marks, for the run log, an engine retry that work continued after. */
+internal val RECOVERED = "recovered" to JsonPrimitive(true)
+
 private val RETRY_REASONS =
     mapOf(
         "rate_limit" to "Limite de débit",
@@ -110,24 +113,63 @@ internal fun engineNoticeTitle(data: JsonObject?): String =
         else -> "Note de Claude Code"
     }
 
+/** A limit no longer applies once its window resets. */
+private fun limitApplies(data: JsonObject?, now: Long): Boolean =
+    data.string("status") != "allowed" && (data.count("resetsAt") ?: Long.MAX_VALUE) > now
+
 /**
  * Whether a conversation shows the event as a notice. Informational notices stay in the run log.
  */
-internal fun engineAttention(type: String, data: JsonObject?): Boolean =
+internal fun engineAttention(
+    type: String,
+    data: JsonObject?,
+    now: Long = System.currentTimeMillis(),
+): Boolean =
     when (type) {
         "engine.retry" -> true
-        "provider.limit" -> data.string("status") != "allowed"
+        "provider.limit" -> limitApplies(data, now)
         "engine.notice" ->
             data.string("level") in listOf("warning", "suggestion") || data.flag("stopsTurn")
         else -> false
     }
 
 /**
+ * Whether the agent's own work goes on: its reply streams or its tools start. Claude Code reports a
+ * request it gave up on as a completed message, which the turn's failure follows.
+ */
+private fun workContinues(event: RunEvent): Boolean {
+    if (event.type == "turn.completed") return true
+    if (event.type != "item.started" && event.type != "item.updated") return false
+    val item = event.item()
+    return item.string("type") != "subagent" && item.string("parent_id").isEmpty()
+}
+
+/** The engine's latest retry before work continued, which the run log marks recovered. */
+internal fun recoveredEngineRetries(events: List<RunEvent>): Set<Long> {
+    val recovered = mutableSetOf<Long>()
+    var retry: Long? = null
+    for (event in events) {
+        when {
+            event.type == "turn.started" || event.type == "turn.failed" -> retry = null
+            workContinues(event) -> {
+                retry?.let(recovered::add)
+                retry = null
+            }
+            event.type == "engine.retry" -> retry = event.id
+        }
+    }
+    return recovered
+}
+
+/**
  * Engine notices a conversation no longer shows: the engine's retries share one notice until work
  * continues, the usage limit shows its latest state until it no longer applies, and the failure
  * that ends a turn says why it ended (a limit that stopped it shows as the usage banner).
  */
-internal fun hiddenEngineNotices(events: List<RunEvent>): Set<Long> {
+internal fun hiddenEngineNotices(
+    events: List<RunEvent>,
+    now: Long = System.currentTimeMillis(),
+): Set<Long> {
     val hidden = mutableSetOf<Long>()
     val retries = mutableListOf<Long>()
     val limits = mutableListOf<Long>()
@@ -142,7 +184,7 @@ internal fun hiddenEngineNotices(events: List<RunEvent>): Set<Long> {
                 retries.clear()
                 limits.clear()
             }
-            event.type == "turn.completed" || event.type.startsWith("item.") -> {
+            workContinues(event) -> {
                 hidden.addAll(retries)
                 retries.clear()
             }
@@ -154,8 +196,8 @@ internal fun hiddenEngineNotices(events: List<RunEvent>): Set<Long> {
             event.type == "provider.limit" -> {
                 hidden.addAll(limits)
                 limits.clear()
-                if (event.activityData().string("status") == "allowed") hidden.add(event.id)
-                else limits.add(event.id)
+                if (limitApplies(event.activityData(), now)) limits.add(event.id)
+                else hidden.add(event.id)
             }
         }
     }

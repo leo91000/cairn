@@ -689,6 +689,7 @@ internal fun timelineEntries(
                 )
             else emptySet()
         val hiddenEngine = if (chat) hiddenEngineNotices(events) else emptySet()
+        val recoveredRetries = if (chat) emptySet() else recoveredEngineRetries(events)
         var via = ""
         // The plan its updates change, until the agent finishes it or writes another one.
         var planIndex: Int? = null
@@ -1106,6 +1107,8 @@ internal fun timelineEntries(
                     activity.add(
                         if (!chat && repeated && event.type == "status")
                             event.copy(payload = event.payload?.minus("error"))
+                        else if (event.id in recoveredRetries)
+                            event.copy(payload = event.payload.orEmpty() + RECOVERED)
                         else event
                     )
                 }

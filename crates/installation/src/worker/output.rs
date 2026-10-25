@@ -85,8 +85,8 @@ const MESSAGE_LIMIT: usize = 100_000;
 const ERROR_LIMIT: usize = 10_000;
 
 /// Event types that are always recorded. Clients use turn markers to scope reused message IDs,
-/// and show the engine's retries, usage limits and notices in the conversation.
-const CONVERSATION_EVENTS: [&str; 10] = [
+/// and show the engine's retries and usage limits in the conversation.
+const CONVERSATION_EVENTS: [&str; 9] = [
     "thread.started",
     "turn.started",
     "turn.completed",
@@ -95,9 +95,15 @@ const CONVERSATION_EVENTS: [&str; 10] = [
     "error",
     "runner.failed",
     "engine.retry",
-    "engine.notice",
     "provider.limit",
 ];
+
+/// An engine notice the conversation shows. Other notices only reach the run log, within its
+/// budget.
+fn shown_notice(event: &Value) -> bool {
+    event["type"] == "engine.notice"
+        && (matches!(text(event, "level"), "warning" | "suggestion") || event["stopsTurn"] == true)
+}
 
 // Separate pipe readers keep stderr draining even while stdout applies database backpressure.
 pub(super) async fn read_output(
@@ -292,7 +298,8 @@ pub(super) async fn record(
     apply_event(s, id, &event, checkpoint, secrets).await?;
     // Every activity item has its own detail limit, regardless of earlier output.
     let conversation = event["item"]["type"] == "agent_message"
-        || CONVERSATION_EVENTS.contains(&text(&event, "type"));
+        || CONVERSATION_EVENTS.contains(&text(&event, "type"))
+        || shown_notice(&event);
     let activity_item = text(&event, "type").starts_with("item.") && event["item"].is_object();
     if conversation || activity_item || *log_total < LOG_BUDGET {
         let abbreviated = !conversation && activity_item && raw.len() > ITEM_DETAIL_LIMIT;

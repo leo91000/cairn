@@ -456,8 +456,8 @@ else {
     }
 
     if (prompt.includes('fixture:engine-retry')) {
-      // Claude Code retries API requests itself, reports the subscription limit and, from
-      // 2.1.283, its notices. None of them ends the turn.
+      // Claude Code retries API requests itself, and reports the subscription limit and its
+      // notices. None of them ends the turn.
       out(value)
       out({ type: 'system', subtype: 'session_state_changed', state: 'running' })
       out({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed', rateLimitType: 'five_hour', resetsAt: 1893499200 } })
@@ -556,6 +556,77 @@ else {
         is_error: true,
         result: message,
       })
+      return
+    }
+
+    if (prompt.includes('fixture:resumed-later')) {
+      // A later execution resumes a subagent an earlier one started: this process never saw the
+      // tool use that started it. An agent a workflow starts is not one the agent resumed.
+      out(value)
+      out({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: {
+          id: 'send',
+          content: [{
+            type: 'tool_use',
+            id: 'send-later',
+            name: 'SendMessage',
+            input: { to: 'task-old', message: 'Go on.' },
+          }],
+        },
+      })
+      for (const seconds of [5, 10]) {
+        out({
+          type: 'system',
+          subtype: 'informational',
+          level: 'info',
+          tool_use_id: 'send-later',
+          content: `Tool SendMessage running for ${seconds}s…`,
+        })
+      }
+
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-old',
+        run_id: 'run-3',
+        tool_use_id: 'send-later',
+        description: 'Review the change',
+        subagent_type: 'general-purpose',
+        is_backgrounded: true,
+        task_type: 'local_agent',
+      })
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-workflow',
+        tool_use_id: 'workflow-call',
+        description: 'Workflow step',
+        task_type: 'local_agent',
+      })
+      out({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        agent_id: 'task-old',
+        message: { id: 'old-1', content: [{ type: 'text', text: 'Picked up again.' }] },
+      })
+      out({
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: 'task-old',
+        run_id: 'run-3',
+        tool_use_id: 'send-later',
+        status: 'completed',
+        summary: 'Picked up again.',
+        output_file: '',
+      })
+      out({
+        type: 'user',
+        parent_tool_use_id: null,
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'send-later', content: [{ type: 'text', text: 'Message delivered.' }] }] },
+      })
+      complete('Resumed in a later turn', false, correlation)
       return
     }
 

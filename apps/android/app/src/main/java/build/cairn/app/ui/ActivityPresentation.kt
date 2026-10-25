@@ -413,6 +413,9 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
                     else ActivityKind.NOTICE,
                 title = title,
                 subtitle = subtitle,
+                state =
+                    if (data?.get(RECOVERED.first) == JsonPrimitive(true)) "Rétablie"
+                    else base.state,
                 output =
                     if (
                         event.type in

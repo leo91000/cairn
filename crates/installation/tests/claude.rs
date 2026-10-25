@@ -1633,6 +1633,51 @@ async fn nested_and_resumed_subagents_keep_their_identity_and_the_parent_reply()
 }
 
 #[tokio::test]
+async fn a_subagent_resumed_by_a_later_execution_shows_as_resumed() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let events = run_events(&c, plan(&root, "fixture:resumed-later")).await;
+    let subagents: Vec<_> = events
+        .iter()
+        .filter(|event| event["item"]["type"] == "subagent")
+        .collect();
+    // Only the subagent the agent resumed: an agent its workflow starts is not one.
+    assert!(
+        subagents
+            .iter()
+            .all(|event| event["item"]["id"] == "task-old")
+    );
+    let started = subagents.first().unwrap();
+    assert_eq!(started["type"], "item.started");
+    assert_eq!(started["item"]["resumed"], true);
+    assert_eq!(started["item"]["task_id"], "task-old");
+    assert_eq!(started["item"]["run_id"], "run-3");
+    assert_eq!(started["item"]["name"], "Review the change");
+    let last = &subagents.last().unwrap()["item"];
+    assert_eq!(last["status"], "completed");
+    assert_eq!(last["result"], "Picked up again.");
+
+    // Its message is one of its steps, never the agent's reply.
+    let step = events
+        .iter()
+        .find(|event| event["item"]["type"] == "subagent_message")
+        .unwrap();
+    assert_eq!(step["item"]["parent_id"], "task-old");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("result.md")).unwrap(),
+        "Resumed in a later turn"
+    );
+
+    // Claude Code repeats a running tool's progress notice; it is reported once.
+    let notices: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "engine.notice")
+        .collect();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0]["message"], "Tool SendMessage running for 5s…");
+}
+
+#[tokio::test]
 async fn ambient_watchers_do_not_keep_the_run_alive() {
     for prompt in [
         "fixture:background-ambient",

@@ -580,7 +580,9 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
 
     if (event.type === 'turn.completed' || (type === 'command_execution' && event.type === 'item.completed' && item.exit_code === 0 && item.status !== 'failed'))
       recovered()
-    if (event.type === 'turn.completed' || event.type.startsWith('item.'))
+    // Work continues once the agent's own reply streams or its tools start. Claude Code reports
+    // a request it gave up on as a completed message, which the turn's failure follows.
+    if (event.type === 'turn.completed' || (['item.started', 'item.updated'].includes(event.type) && type !== 'subagent' && !text(item.parent_id)))
       retriesRecovered()
     const itemId = text(item.id)
     // A subagent keeps its row when its updates arrive after the turn that started it.
