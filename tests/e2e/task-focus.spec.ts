@@ -9,7 +9,7 @@ import {
 } from './fixtures'
 
 test('a completed mission becomes a chat and follows up in the same session after reload', async ({ page, workspace }) => {
-  const project = workspace.service.store.list('projects')[0]
+  const project = workspace.service.store.projects()[0]
   const task = workspace.service.task({
     name: 'Deployment review to discuss',
     agentId: workspace.service.store.list('agents')[0]!.id,
@@ -51,7 +51,7 @@ test('a completed mission becomes a chat and follows up in the same session afte
 test('reconnects after a temporary restart and resumes a cancelled conversation in place', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const agent = workspace.service.agent({ name: 'Recovery engineer' })
-  const project = workspace.service.store.list('projects')[0]
+  const project = workspace.service.store.projects()[0]
   const task = workspace.service.task({
     name: 'Recover a deployment review',
     agentId: agent.id,
@@ -60,7 +60,7 @@ test('reconnects after a temporary restart and resumes a cancelled conversation 
     worktree: false,
   })
   const run = await workspace.service.enqueue(task.id)
-  await expect.poll(() => workspace.service.store.run(run.id)?.sessionId).toBe('fixture-session')
+  await expect.poll(() => workspace.service.store.run(run.id)?.sessionId).toBe('fixture-chat')
   await page.goto(workspacePath('/tasks'))
   await authenticateWorkspace(page)
   await expect(page.locator('.task-focus-detail')).toBeVisible()
@@ -217,7 +217,7 @@ test('keeps the selected mission across reloads and runs it from its mobile shee
 test('mission cards and sheet show the schedule, the brief and the history, as on Android', async ({ page, workspace }) => {
   await workspace.restart()
   const agent = workspace.service.store.list('agents')[0]
-  const project = workspace.service.store.list('projects')[0]
+  const project = workspace.service.store.projects()[0]
   const task = await workspace.api('/api/tasks', 'POST', {
     name: 'Weekly Graphile Worker upstream ports',
     agentId: agent.id,

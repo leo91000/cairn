@@ -24,7 +24,7 @@ quatre arrivées. Codex parallélise déjà la connexion WebSocket et la prépar
 des outils ; les traces confirment un chevauchement de 232 à 1 003 ms.
 
 Une tâche longue parcourt 15 scripts suivis du dépôt Leo, modifie le traitement
-des dates de `ci-timings.mjs`, ajoute et exécute des régressions Node, puis
+des dates de la sonde de durées CI (depuis retirée), ajoute et exécute des régressions Node, puis
 vérifie le diff. Chaque tour exécute 20 appels d'outils séquentiels. Les tests
 et une vérification indépendante du résultat passent dans les deux modes.
 

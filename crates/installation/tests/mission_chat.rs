@@ -25,6 +25,9 @@ async fn fixture() -> (tempfile::TempDir, std::sync::Arc<Service>, Value, Value)
         .await
         .unwrap();
     let mut run = service.snapshot(task.clone(), "manual").await.unwrap();
+    run["nativeProvenanceUnknown"] = true.into();
+    run["nativePrincipals"] = json!([]);
+    run["nativeAuthorityNodes"] = json!([]);
     run["status"] = "succeeded".into();
     run["sessionId"] = "saved-session".into();
     run["summary"] = "Deployment reviewed".into();
@@ -97,10 +100,14 @@ async fn mission_conversion_preserves_history_session_workspace_and_schedule() {
     service.chat_tick(&HashSet::new()).await.unwrap();
     let continued = service.store.run(run_id).await.unwrap();
     assert_eq!(continued["status"], "queued");
-    assert_eq!(
-        continued["chatExecution"]["text"],
-        "What should I monitor next?"
+    // Codex keeps the unattended instructions the mission thread started with.
+    let turn = text(&continued["chatExecution"], "text");
+    assert!(
+        turn.contains(cairn_installation::run_output::INTERACTIVE),
+        "{turn}"
     );
+    assert!(turn.ends_with("\n\nWhat should I monitor next?"), "{turn}");
+    assert_eq!(continued["sourceSessionId"], "saved-session");
     assert_eq!(continued["sessionId"], "saved-session");
     assert_eq!(continued["workspace"], "/saved/workspace");
     assert_eq!(continued["snapshot"]["task"]["id"], chat["id"]);

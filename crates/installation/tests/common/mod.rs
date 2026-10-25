@@ -226,3 +226,52 @@ impl Credentials<'_> {
 
 /// Authenticated relay transport and task-author adapter, confined to tests.
 pub mod relay_fixture;
+
+/// Build a current typed project from the concise setup used by older domain fixtures.
+pub trait ProjectFixture {
+    fn project_fixture(
+        &self,
+        input: Value,
+        existing: Option<&str>,
+    ) -> impl std::future::Future<Output = cairn_installation::error::Result<Value>>;
+}
+
+impl ProjectFixture for Service {
+    async fn project_fixture(
+        &self,
+        mut input: Value,
+        existing: Option<&str>,
+    ) -> cairn_installation::error::Result<Value> {
+        let creation = input
+            .as_object_mut()
+            .and_then(|fields| fields.remove("creationId"));
+        let settings: cairn_contracts::ProjectSettings = serde_json::from_value(input)
+            .map_err(|error| cairn_installation::error::Error::bad(error.to_string()))?;
+        let project = if let Some(id) = existing {
+            let current = self.get_project(id).await?;
+            self.replace_project(
+                cairn_contracts::ReplaceProjectInput {
+                    project_id: current.id,
+                    revision: current.revision,
+                    settings,
+                },
+                |_| Ok(()),
+            )
+            .await?
+        } else {
+            let input = serde_json::from_value(
+                serde_json::json!({ "settings": settings, "creationId": creation }),
+            );
+            let input: cairn_contracts::CreateProjectInput = if creation.is_some() {
+                input.map_err(|error| cairn_installation::error::Error::bad(error.to_string()))?
+            } else {
+                cairn_contracts::CreateProjectInput {
+                    settings,
+                    creation_id: None,
+                }
+            };
+            self.create_project(input, None, |_| Ok(())).await?
+        };
+        Ok(serde_json::to_value(project)?)
+    }
+}

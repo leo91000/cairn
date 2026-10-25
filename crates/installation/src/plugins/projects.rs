@@ -11,9 +11,10 @@ use crate::{
     error::{Error, Result},
     http::Input,
     service::Service,
-    validation::{parse, text, uuid},
+    validation::{text, uuid},
 };
-use serde_json::{Map, Value, json};
+use cairn_contracts::{CreateProjectInput, Project, ProjectSettings, ProjectSource};
+use serde_json::{Value, json};
 
 const MAX_ITEMS: usize = 200;
 
@@ -54,7 +55,7 @@ async fn instance(
 }
 
 /// One item as the owner sees it, or `None` when the package returned nonsense.
-fn item(raw: &Value, projects: &[Value], plugin: &str) -> Option<Value> {
+fn item(raw: &Value, projects: &[Project], plugin: &str) -> Option<Value> {
     let id = plain(&raw["id"], 200).filter(|id| !id.is_empty())?;
     let name = plain(&raw["name"], 100).filter(|name| !name.is_empty())?;
     let origin = plain(&raw["origin"], 500).unwrap_or_default();
@@ -66,8 +67,11 @@ fn item(raw: &Value, projects: &[Value], plugin: &str) -> Option<Value> {
         .take(4)
         .collect::<Vec<_>>();
     let imported = projects.iter().any(|project| {
-        (project["source"]["pluginId"] == plugin && project["source"]["id"] == id.as_str())
-            || (!origin.is_empty() && same_remote(text(project, "origin"), &origin))
+        (project
+            .source
+            .as_ref()
+            .is_some_and(|source| source.plugin_id == plugin && source.id == id))
+            || (!origin.is_empty() && same_remote(&project.origin, &origin))
     });
     let url = plain(&raw["url"], 500)
         .filter(|raw| url::Url::parse(raw).is_ok_and(|url| url.scheme() == "https"));
@@ -108,7 +112,7 @@ pub async fn list(s: &Service, plugin_id: &str, input: &Input) -> Result<Value> 
         "instance": scope.instances()[0],
     });
     let result = scope::invoke(s, &package, "projects", payload, &scope).await?;
-    let projects = s.store.list("projects").await?;
+    let projects = s.store.projects().await?;
     let raw = result["items"]
         .as_array()
         .filter(|items| items.len() <= MAX_ITEMS)
@@ -135,12 +139,15 @@ pub async fn import(s: &Service, input: &Value) -> Result<Value> {
     let item_id = plain(&input["id"], 200)
         .filter(|id| !id.is_empty())
         .ok_or_else(|| Error::bad("Choose a project to import."))?;
-    let projects = s.store.list("projects").await?;
+    let projects = s.store.projects().await?;
     // Repeat submissions return the registered project, including after a timeout.
     if let Some(project) = projects.iter().find(|project| {
-        project["source"]["pluginId"] == plugin_id && project["source"]["id"] == item_id.as_str()
+        project
+            .source
+            .as_ref()
+            .is_some_and(|source| source.plugin_id == plugin_id && source.id == item_id)
     }) {
-        return Ok(project.clone());
+        return Ok(serde_json::to_value(project)?);
     }
     let scope = Scope::Instance(Box::new(connection.clone()));
     let payload = json!({
@@ -166,9 +173,9 @@ pub async fn import(s: &Service, input: &Value) -> Result<Value> {
     }
     if let Some(project) = projects
         .iter()
-        .find(|project| same_remote(text(project, "origin"), &origin))
+        .find(|project| same_remote(&project.origin, &origin))
     {
-        return Ok(project.clone());
+        return Ok(serde_json::to_value(project)?);
     }
     let branch = input["baseBranch"]
         .as_str()
@@ -195,34 +202,38 @@ pub async fn import(s: &Service, input: &Value) -> Result<Value> {
         .map(str::to_owned)
         .or_else(|| plain(&resolved["description"], 500))
         .unwrap_or_default();
-    let mut project = parse(
-        "project",
-        json!({
-            "name": name,
-            "description": description,
-            "path": root,
-            "baseBranch": branch,
-            "sourceMode": "remote",
-        }),
-    )?;
+    let mut settings: ProjectSettings = serde_json::from_value(json!({
+        "name": name, "description": description, "path": root,
+        "baseBranch": branch, "sourceMode": "remote",
+    }))
+    .map_err(|error| Error::bad(error.to_string()))?;
+    settings.validate().map_err(Error::bad)?;
     let directory = tempfile::Builder::new()
         .prefix(&format!("{plugin_id}-"))
         .tempdir_in(&root)?;
     let path = directory.path().join("repository");
     let credentials = run_credentials::for_instance(s, &package, &connection).await?;
     crate::project_git::import(&s.config, &credentials, &origin, &path, &branch).await?;
-    project["path"] = path.to_string_lossy().into_owned().into();
-    let mut record = Map::new();
-    record.insert("pluginId".into(), plugin_id.into());
-    record.insert("source".into(), source.into());
-    record.insert("instance".into(), connection.id.clone().into());
-    record.insert("id".into(), item_id.into());
+    settings.path = path.to_string_lossy().into_owned();
+    let source = ProjectSource {
+        plugin_id: plugin_id.into(),
+        source: source.into(),
+        instance: connection.id.clone(),
+        id: item_id,
+    };
     let saved = s
-        .project_from_source(project, Value::Object(record))
+        .create_project(
+            CreateProjectInput {
+                creation_id: None,
+                settings,
+            },
+            Some(source),
+            |_| Ok(()),
+        )
         .await?;
     // The registered project now owns the clone.
     let _ = directory.keep();
-    Ok(saved)
+    Ok(serde_json::to_value(saved)?)
 }
 
 #[cfg(test)]
@@ -248,9 +259,31 @@ mod tests {
 
     #[test]
     fn items_are_bounded_and_marked_imported() {
+        let project = |origin: &str, source: Option<ProjectSource>| Project {
+            id: cairn_contracts::ProjectId(uuid::Uuid::new_v4()),
+            settings: ProjectSettings {
+                name: "Fixture".into(),
+                path: "/fixture".into(),
+                description: "".into(),
+                base_branch: "main".into(),
+                source_mode: "remote".into(),
+            },
+            origin: origin.into(),
+            source,
+            revision: "fixture".into(),
+            created_at: 0,
+        };
         let projects = vec![
-            json!({ "origin": "forge.example:team/old.git" }),
-            json!({ "origin": "", "source": { "pluginId": "forge", "id": "team/new" } }),
+            project("forge.example:team/old.git", None),
+            project(
+                "",
+                Some(ProjectSource {
+                    plugin_id: "forge".into(),
+                    source: "repositories".into(),
+                    instance: uuid::Uuid::new_v4().to_string(),
+                    id: "team/new".into(),
+                }),
+            ),
         ];
         let old = item(
             &json!({ "id": "team/old", "name": "old", "origin": "https://forge.example/team/old.git" }),

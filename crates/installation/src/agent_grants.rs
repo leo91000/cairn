@@ -225,7 +225,7 @@ pub(crate) fn forget_resource(db: &Db<'_>, key: &str, resource: &str) -> Result<
 
 /// Rebuilds the agent side from the resource copies, drops copies that name agents
 /// which no longer exist, and gives every agent a revision. Idempotent; runs at
-/// every startup after the other agent migrations.
+/// every startup.
 pub(crate) fn reconcile(db: &Db<'_>) -> Result<()> {
     let agents = db.list("agents")?;
     let known = |id: &Value| agents.iter().any(|agent| agent["id"] == *id);

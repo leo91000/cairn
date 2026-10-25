@@ -43,10 +43,10 @@ class SignalJourneyTest {
             "designer",
             "Designer",
             provider = "claude",
-            access = AccessPolicy(projects = listOf("site")),
+            access = AccessPolicy(projects = listOf("e11e98cf-45bf-5364-83b7-7606435a2154")),
         )
-    private val manager = Project("manager", "Cairn")
-    private val site = Project("site", "Site vitrine")
+    private val manager = Project("bac8fd52-058a-52cd-8904-a2d40746b051", "Cairn")
+    private val site = Project("e11e98cf-45bf-5364-83b7-7606435a2154", "Site vitrine")
     private val daily =
         Task(
             "daily",
@@ -144,7 +144,13 @@ class SignalJourneyTest {
                             path == "/api/installations/fixture/api/agents" ->
                                 json(wireJson.encodeToString(listOf(main, designer)))
                             path == "/api/installations/fixture/api/projects" ->
-                                json(wireJson.encodeToString(listOf(manager, site)))
+                                json(
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListProjectsOutput(
+                                            listOf(manager, site)
+                                        )
+                                    )
+                                )
                             path == "/api/installations/fixture/api/tasks" &&
                                 request.method == "GET" ->
                                 json(wireJson.encodeToString(listOf(daily)))
@@ -483,7 +489,10 @@ class SignalJourneyTest {
                 )
                 .jsonObject
         assertEquals("designer", created["agentId"]?.jsonPrimitive?.content)
-        assertEquals("site", created["projectId"]?.jsonPrimitive?.content)
+        assertEquals(
+            "e11e98cf-45bf-5364-83b7-7606435a2154",
+            created["projectId"]?.jsonPrimitive?.content,
+        )
         waitCall("POST", "/api/installations/fixture/api/chats/created/messages")
         val message =
             wireJson

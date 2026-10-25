@@ -1,6 +1,7 @@
 package build.cairn.app.data
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
@@ -61,6 +62,11 @@ data class ChatWakeup(
     val createdAt: Long,
     val wakeAt: Long,
     val condition: JsonObject? = null,
+    /**
+     * A group's progress, in the order of its conditions: `{ observation, display, nextCheckAt,
+     * lastError }` each. Kept as JSON, like [display].
+     */
+    val members: JsonArray? = null,
     val observation: JsonObject? = null,
     /** Plugin conditions: when Cairn checks again, and why its last check failed. */
     val nextCheckAt: Long? = null,
@@ -71,6 +77,9 @@ data class ChatWakeup(
      */
     val display: JsonObject? = null,
 )
+
+/** The conversation whose agent delegated a conversation. */
+@Serializable data class ChatRequester(val chatId: String, val title: String = "")
 
 @Serializable
 data class Chat(
@@ -106,6 +115,8 @@ data class Chat(
     val lifecycleError: String? = null,
     val wakeup: ChatWakeup? = null,
     val suspendedByExclusive: ExclusiveReservation? = null,
+    /** The conversation that delegated this one, while it still exists. */
+    val requester: ChatRequester? = null,
 ) {
     val exclusiveSuspended
         get() =

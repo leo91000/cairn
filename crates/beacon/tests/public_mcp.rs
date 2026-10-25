@@ -64,6 +64,22 @@ async fn personal_mcp_token_enforces_scopes_and_revocation() {
         "{result}"
     );
 
+    // A real owner-issued public grant still has no global account authority.
+    let account_denied: Value = call("list_account_methods", json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let refusal: cairn_contracts::beacon::ListAccountMethodsOutput =
+        serde_json::from_value(account_denied["result"]["structuredContent"]["result"].clone())
+            .unwrap();
+    assert!(matches!(
+        refusal,
+        cairn_contracts::beacon::ListAccountMethodsOutput::AccountProofRequired { .. }
+    ));
+
     let denied: Value = call(
         "save_project",
         json!({
@@ -92,6 +108,14 @@ async fn personal_mcp_token_enforces_scopes_and_revocation() {
 
     assert_eq!(
         call("list_agents", json!({}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call("list_account_methods", json!({}))
             .send()
             .await
             .unwrap()
@@ -447,7 +471,7 @@ async fn detaching_and_reclaiming_an_installation_permanently_revokes_its_mcp_gr
             "/api/relay/device-claim/start",
             json!({
                 "name": "Reclaimed machine",
-                "protocol": 1,
+                "protocol": cairn_protocol::PROTOCOL_VERSION,
                 "identity": { "installationId": id, "token": identity["token"] },
             }),
         )
@@ -688,8 +712,10 @@ async fn slow_mcp_uploads_cannot_block_owner_access_even_after_revocation() {
             "arguments": {
                 "code": "return await cairn.save_project(input);",
                 "input": {
-                    "name": "Rejected after revocation",
-                    "path": relay.root.path().to_str().unwrap(),
+                    "settings": {
+                        "name": "Rejected after revocation",
+                        "path": relay.root.path().to_str().unwrap(),
+                    },
                 },
             },
         },
@@ -724,7 +750,7 @@ async fn slow_mcp_uploads_cannot_block_owner_access_even_after_revocation() {
         .json()
         .await
         .unwrap();
-    assert_eq!(projects, json!([]));
+    assert_eq!(projects, json!({ "projects": [] }));
     relay.close().await;
 }
 

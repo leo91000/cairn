@@ -146,7 +146,7 @@ async fn only_the_owner_can_forget_an_installation_and_its_machine_keeps_its_dat
                 "/api/relay/device-claim/start",
                 json!({
                     "name": "Old proof",
-                    "protocol": 1,
+                    "protocol": cairn_protocol::PROTOCOL_VERSION,
                     "identity": identity,
                 })
             )

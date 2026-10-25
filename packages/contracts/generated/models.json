@@ -1,0 +1,418 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AccountSignInMethod": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "label"
+      ],
+      "type": "object"
+    },
+    "CreateProjectInput": {
+      "additionalProperties": false,
+      "properties": {
+        "creationId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "settings": {
+          "$ref": "#/definitions/ProjectSettings"
+        }
+      },
+      "required": [
+        "settings"
+      ],
+      "type": "object"
+    },
+    "DeleteProjectOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "deleted"
+      ],
+      "type": "object"
+    },
+    "ListAccountMethodsInput": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "ListAccountMethodsOutput": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "listed",
+              "type": "string"
+            },
+            "methods": {
+              "items": {
+                "$ref": "#/definitions/AccountSignInMethod"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "methods"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "accountProofRequired",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ListProjectsInput": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "ListProjectsOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "projects": {
+          "items": {
+            "$ref": "#/definitions/Project"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "projects"
+      ],
+      "type": "object"
+    },
+    "Project": {
+      "properties": {
+        "baseBranch": {
+          "default": "main",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_/.-]*$",
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "description": {
+          "default": "",
+          "maxLength": 500,
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "origin": {
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProjectSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourceMode": {
+          "default": "remote",
+          "pattern": "^(remote|local)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "path",
+        "description",
+        "sourceMode",
+        "baseBranch",
+        "origin",
+        "source",
+        "revision",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "ProjectInput": {
+      "additionalProperties": false,
+      "properties": {
+        "projectId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectId"
+      ],
+      "type": "object"
+    },
+    "ProjectSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "baseBranch": {
+          "default": "main",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_/.-]*$",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "maxLength": 500,
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "sourceMode": {
+          "default": "remote",
+          "pattern": "^(remote|local)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "path",
+        "description",
+        "sourceMode",
+        "baseBranch"
+      ],
+      "type": "object"
+    },
+    "ProjectSource": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "instance": {
+          "type": "string"
+        },
+        "pluginId": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pluginId",
+        "source",
+        "instance",
+        "id"
+      ],
+      "type": "object"
+    },
+    "QualificationFixture": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991,
+          "type": "integer"
+        },
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "id": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        },
+        "labels": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "names": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "nullable": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "omitted": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "result": {
+          "$ref": "#/definitions/QualificationResult"
+        }
+      },
+      "required": [
+        "id",
+        "result",
+        "enabled",
+        "nullable",
+        "count",
+        "labels",
+        "names"
+      ],
+      "type": "object"
+    },
+    "QualificationResult": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "resumed",
+              "type": "string"
+            },
+            "runId": {
+              "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "runId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "rejected",
+              "type": "string"
+            },
+            "response": {
+              "$ref": "#/definitions/ResumeRunError"
+            }
+          },
+          "required": [
+            "kind",
+            "response"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ReplaceProjectInput": {
+      "additionalProperties": false,
+      "properties": {
+        "projectId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "settings": {
+          "$ref": "#/definitions/ProjectSettings"
+        }
+      },
+      "required": [
+        "projectId",
+        "revision",
+        "settings"
+      ],
+      "type": "object"
+    },
+    "ResumeRunError": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "type": "object"
+    },
+    "ResumeRunInput": {
+      "additionalProperties": false,
+      "properties": {
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId"
+      ],
+      "type": "object"
+    },
+    "ResumeRunOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId"
+      ],
+      "type": "object"
+    }
+  }
+}

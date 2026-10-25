@@ -179,6 +179,10 @@ struct Question {
     message_id: Option<String>,
 }
 
+// Codex persists client IDs in history. A reserved wire namespace preserves
+// operational identity across turns without changing provider message UUIDs.
+const OPERATIONAL_ID: &str = "cairn-runtime-disk:";
+
 struct Chat<'a> {
     session: &'a mut Session,
     events: mpsc::Sender<Value>,
@@ -189,6 +193,7 @@ struct Chat<'a> {
     last_message: String,
     seen: HashSet<String>,
     attempted: HashSet<String>,
+    turn_submitted: bool,
     texts: HashMap<String, String>,
     questions: HashMap<String, Question>,
     /// Subagents this conversation started, by the ID of the item that started them.
@@ -230,7 +235,7 @@ impl Chat<'_> {
     }
 
     async fn acknowledge(&mut self, id: &str) -> Result<()> {
-        if self.seen.insert(id.to_owned()) {
+        if self.seen.insert(id.to_owned()) && !id.starts_with(OPERATIONAL_ID) {
             self.emit(json!({ "type": "chat.delivered", "messageId": id }))
                 .await?;
         }
@@ -950,6 +955,7 @@ impl Chat<'_> {
             service_tier: Some(text(plan, "serviceTier")).filter(|tier| !tier.is_empty()),
         };
         let params = serde_json::to_value(params)?;
+        self.turn_submitted = true;
         let started = self.request("turn/start", params).await?;
         self.turn = text(&started["turn"], "id").to_owned();
         self.acknowledge(text(&plan["execution"], "messageId"))
@@ -1001,8 +1007,13 @@ impl Chat<'_> {
         };
         for message in messages {
             let id = text(&message, "id");
+            let client_id = if message["operationalNotice"] == true {
+                format!("{OPERATIONAL_ID}{id}")
+            } else {
+                id.to_owned()
+            };
             if self.completed.is_some()
-                || self.seen.contains(id)
+                || self.seen.contains(&client_id)
                 || !self.attempted.insert(id.to_owned())
             {
                 continue;
@@ -1044,13 +1055,13 @@ impl Chat<'_> {
             let params = json!({
                 "threadId": self.thread,
                 "expectedTurnId": self.turn,
-                "clientUserMessageId": id,
+                "clientUserMessageId": client_id,
                 "input": input,
             });
             if self.request("turn/steer", params).await.is_err() {
                 break;
             }
-            self.acknowledge(id).await?;
+            self.acknowledge(&client_id).await?;
         }
         Ok(())
     }
@@ -1100,7 +1111,15 @@ pub async fn run(
         .map(str::to_owned)
         .collect::<Vec<_>>();
     let mut session =
-        Session::codex(config, home, &args, Some(Path::new(text(&plan, "cwd")))).await?;
+        match Session::codex(config, home, &args, Some(Path::new(text(&plan, "cwd")))).await {
+            Ok(session) => session,
+            Err(error) => {
+                if let Some(failure) = crate::run_retry::startup_failure(&error) {
+                    let _ = events.send(failure).await;
+                }
+                return Err(error);
+            }
+        };
     let result = run_session(&mut session, home, plan, events, cancel, false).await;
     crate::performance::wait("codex_shutdown", session.close()).await;
     result
@@ -1125,6 +1144,9 @@ async fn run_session(
     if let Some(auth) = &mut auth
         && let Err(error) = auth.login(session).await
     {
+        if let Some(failure) = crate::run_retry::startup_failure(&error) {
+            let _ = events.send(failure).await;
+        }
         return Err(error);
     }
     session.auth = auth;
@@ -1138,12 +1160,19 @@ async fn run_session(
         last_message: String::new(),
         seen: HashSet::new(),
         attempted: HashSet::new(),
+        turn_submitted: false,
         texts: HashMap::new(),
         subagents: HashMap::new(),
         children: HashMap::new(),
         questions: HashMap::new(),
     };
     let mut result = chat.execute(&plan).await;
+    if let Err(error) = &result
+        && !chat.turn_submitted
+        && let Some(failure) = crate::run_retry::startup_failure(error)
+    {
+        chat.emit(failure).await?;
+    }
     if result.is_ok() && reusable {
         result = chat.release().await;
     }

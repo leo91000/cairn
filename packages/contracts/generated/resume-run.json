@@ -1,0 +1,6 @@
+{
+  "description": "Resume an existing stopped mission run with its saved workspace, session and checkpoint. This does not create a new run (unlike run_task or retry).",
+  "id": "resume_run",
+  "path": "/runs/{runId}/resume",
+  "scope": "run"
+}

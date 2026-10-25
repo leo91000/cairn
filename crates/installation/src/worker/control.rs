@@ -240,7 +240,17 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
             checkpoint.completed = Some(false);
         }
         checkpoint.settled = None;
-        checkpoint.retry_cause = Some(None);
+        // A confirmed pre-turn failure may have no session yet. Its safety
+        // evidence survives a manual budget reset until the next supervised launch.
+        let pending_startup = !run["sessionId"].is_string()
+            && checkpoint
+                .retry_cause
+                .as_ref()
+                .and_then(Option::as_ref)
+                .is_some_and(|cause| cause.startup);
+        if !pending_startup {
+            checkpoint.retry_cause = Some(None);
+        }
         checkpoint.store_in(db, id)?;
     }
     let wait_reason = (!before_launch).then_some("Resuming saved conversation.");
@@ -343,9 +353,15 @@ pub async fn routes(s: &Arc<Service>, input: &crate::http::Input) -> Option<Resu
     let result = match segments.as_slice() {
         ["runs", id, "cancel"] => s.worker.cancel(s, id).await.map(|()| json!({ "ok": true })),
         ["runs", id, "resume"] => {
-            s.worker
-                .resume_authorized(s, id, crate::native::policy::run_authorization(id))
-                .await
+            async {
+                let command = crate::capabilities::RESUME_RUN.decode(json!({ "runId": id }))?;
+                let context = crate::capabilities::ResumeContext::http(input)?;
+                let output = crate::capabilities::RESUME_RUN
+                    .invoke(s, command, context)
+                    .await?;
+                Ok(serde_json::to_value(output)?)
+            }
+            .await
         }
         ["runs", id, "cleanup"] => s.worker.cleanup(s, id).await,
         ["chats", id, "pause"] => pause_chat(s, input, id).await,

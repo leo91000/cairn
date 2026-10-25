@@ -24,6 +24,16 @@ even when the agent's direct resource, plugin or node permissions are restricted
 It includes changing other agents' permissions and managing their work. Account
 administration remains outside the public MCP catalogue.
 
+**Task delegation** is a narrower opt-in power in the same section. It gives a
+conversation's agent the `cairn_workspace` tools `delegate_task`, `task_status` and
+`task_cancel`, without installation management. A delegated task is an ordinary
+conversation, possibly on another coding agent and model, that records its
+requester and reports back; the requester waits with the `task_finished`
+condition of `wait_for`. The task runs as the requesting agent or as another agent
+whose access the requester covers, in its own workspace. Delegated conversations
+cannot delegate further and a requester has at most five working tasks. Turning
+the power off is a reduction. See [delegated tasks](adr/0059-delegated-tasks.md).
+
 The `delete_agent` management tool removes an unused agent, including its saved
 portrait and plugin grants (GitHub accounts, 1Password). Main, agents referenced by tasks
 (including archived tasks), and agents with active work cannot be deleted. Move
@@ -59,14 +69,9 @@ queued. Reducing an agent's access (fewer projects, skills, MCP servers or tools
 or a stricter sandbox) prevents its queued runs, resumptions and chat
 follow-ups from executing under the old grants, and revokes their project and MCP
 access; enqueue again or start a new chat to use the new policy. Unchanged or wider
-access, other agent settings, settings older versions saved and node grants do not
+access, other saved agent settings and node grants do not
 interrupt work: it continues with the grants it was queued with. Running work keeps
 its snapshot: cancel it before changing permissions when immediate revocation matters.
-
-Existing tasks retain their project, explicit skills, schedules, and history.
-Existing agents retain unrestricted YOLO behavior. Database schema 3 is required;
-back up before upgrading from 0.1.x. Restore the matching schema-2 backup as well as
-the old image if rolling back.
 
 ## Execution modes
 

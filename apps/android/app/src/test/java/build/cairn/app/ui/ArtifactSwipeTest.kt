@@ -324,7 +324,14 @@ class ArtifactSwipeTest {
                                 "/api/installations/fixture/api/overview",
                                 "/api/installations/fixture/api/codex/models",
                                 "/api/installations/fixture/api/claude/models" -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
                             }
                         )
                 }

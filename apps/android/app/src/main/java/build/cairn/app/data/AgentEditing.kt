@@ -90,31 +90,6 @@ fun newAgent() =
         plugins = emptyList(),
     )
 
-/**
- * An installation that does not mark its agents with `grantsOnAgent` (an earlier release, or one
- * rolled back to it, whose agents may still carry a revision) ignores top-level `exclusiveNodes`
- * and `plugins` and keeps them on the resources (instance `agentIds`, node `exclusiveAgents`).
- */
-fun olderInstallation(agents: List<Agent>) = agents.isNotEmpty() && agents.none { it.grantsOnAgent }
-
-/**
- * What the review compares against: on an older installation live grants are read-only and never
- * saved from the agent, so their differences are not reviewed.
- */
-fun reviewBaseline(baseline: Agent, edited: Agent, legacy: Boolean): Agent =
-    if (legacy) baseline.copy(exclusiveNodes = edited.exclusiveNodes, plugins = edited.plugins)
-    else baseline
-
-/** On an older installation, the agent's live grants as its resources record them. */
-fun Agent.withResourceGrants(catalog: PluginCatalog?, nodes: List<ExecutionNode>): Agent =
-    copy(
-        plugins = catalog?.connections?.filter { id in it.agentIds }?.map { it.id }.orEmpty(),
-        exclusiveNodes =
-            nodes
-                .filter { id in it.exclusiveAgents }
-                .map { if (it.local) LOCAL_NODE_ID else it.id },
-    )
-
 /** Everything the page shows the agent's access against. */
 data class AgentResources(
     val projects: List<Project> = emptyList(),
@@ -186,6 +161,7 @@ fun agentChanges(original: Agent, draft: AgentDraft): List<AgentSection> {
             add(AgentSection.Nodes)
         if (after.sandbox != before.sandbox) add(AgentSection.Sandbox)
         if (after.installation != before.installation) add(AgentSection.Powers)
+        if ((after.delegation == true) != (before.delegation == true)) add(AgentSection.Powers)
     }
 }
 
@@ -299,12 +275,12 @@ fun Agent.nodeChoices(nodes: List<ExecutionNode>) = agentNodeChoices(nodes, acce
  * Switches between a VM and native execution on the host. Nodes of the other backend no longer
  * apply, so node execution and exclusive reservations start again from none.
  */
-fun Agent.withBackend(native: Boolean, readOnlyGrants: Boolean = false): Agent {
+fun Agent.withBackend(native: Boolean): Agent {
     val backend = if (native) NATIVE_BACKEND else VM_BACKEND
     if (backend == access.backend) return this
     return copy(
         access = access.copy(backend = backend, nodes = emptyList()),
-        exclusiveNodes = if (readOnlyGrants) exclusiveNodes else emptyList(),
+        exclusiveNodes = emptyList(),
     )
 }
 
@@ -320,11 +296,11 @@ fun Agent.effectiveExclusive(nodes: List<ExecutionNode>): List<ExecutionNode> =
     }
 
 /** Allows or stops running on one node. Stopping also drops the exclusive grant there. */
-fun Agent.withNodeRun(node: String, run: Boolean, readOnlyGrants: Boolean = false): Agent {
+fun Agent.withNodeRun(node: String, run: Boolean): Agent {
     val current = access.nodes ?: return this
     return copy(
         access = access.copy(nodes = if (run) (current + node).distinct() else current - node),
-        exclusiveNodes = if (run || readOnlyGrants) exclusiveNodes else exclusiveNodes - node,
+        exclusiveNodes = if (run) exclusiveNodes else exclusiveNodes - node,
     )
 }
 
@@ -468,23 +444,17 @@ fun agentAccessSummary(
     catalog: PluginCatalog? = null,
     /** Known machines, to show exclusivity only where it takes effect; null (unknown) omits it. */
     nodes: List<ExecutionNode>? = null,
-    /**
-     * An older installation keeps live grants on its resources: they come from [catalog] and
-     * [nodes], and are omitted without them.
-     */
-    older: Boolean = false,
 ): String {
     val access = agent.access
-    val shown = if (older) agent.withResourceGrants(catalog, nodes.orEmpty()) else agent
     return buildList {
             add(access.projects?.let { plural(it.size, "projet") } ?: "Tous les projets")
             add(access.nodes?.let { plural(it.size, "node") } ?: "Toutes les nodes")
             if (access.backend == NATIVE_BACKEND) add(backendLabel(access.backend))
-            if (shown.plugins.isNotEmpty())
-                if (catalog == null) add(plural(shown.plugins.size, "plugin"))
+            if (agent.plugins.isNotEmpty())
+                if (catalog == null) add(plural(agent.plugins.size, "plugin"))
                 else
                     addAll(
-                        shown.plugins
+                        agent.plugins
                             .map { id ->
                                 val connection = catalog.connections.find { it.id == id }
                                 catalog.packages.find { it.id == connection?.pluginId }?.name
@@ -494,10 +464,11 @@ fun agentAccessSummary(
                     )
             if (
                 // Only where it takes effect, so never while the machines are unknown.
-                nodes != null && shown.effectiveExclusive(nodes).isNotEmpty()
+                nodes != null && agent.effectiveExclusive(nodes).isNotEmpty()
             )
                 add("Exclusivité")
             if (access.installation) add("Gestion de l’installation")
+            if (access.delegation == true) add("Délégation de tâches")
         }
         .joinToString(" · ")
 }
@@ -718,6 +689,7 @@ fun agentReductions(
         .filter { it !in edited.plugins }
         .forEach { id -> add(pluginGrantLabel(id, resources.catalog)) }
     if (before.installation && !after.installation) add("gestion de l’installation")
+    if (before.delegation == true && after.delegation != true) add("délégation de tâches")
     if (before.backend == NATIVE_BACKEND && after.backend != NATIVE_BACKEND) add("exécution native")
     if ((sandboxStrictness[after.sandbox] ?: 0) > (sandboxStrictness[before.sandbox] ?: 0))
         add("mode d’exécution « ${sandboxLabel(after.sandbox)} »")
@@ -799,6 +771,13 @@ fun agentReview(
                 "Ajout : gestion de l’installation. Cet agent pourra créer et modifier les agents (y compris leurs permissions), projets, skills, connexions MCP, missions et exécutions de toute l’installation.",
             )
         )
+    if (after.delegation == true && before.delegation != true)
+        add(
+            ReviewLine(
+                ReviewKind.Power,
+                "Ajout : délégation de tâches. Cet agent pourra lancer des conversations qui lui rendent compte, sur tout agent de code et modèle, en tant que lui-même ou qu’un agent dont il couvre les accès.",
+            )
+        )
     edited.plugins
         .filter { it !in original.plugins }
         .forEach { id ->
@@ -819,17 +798,6 @@ fun agentReview(
         // The server reports work the change stops even when nothing listed here is removed.
         add(ReviewLine(ReviewKind.Reduction, "Accès modifié. ${runsSentence(runs)}"))
 }
-
-/**
- * The preview of a save, or null when the installation predates it (404/405): the page then reviews
- * what it computes locally.
- */
-suspend fun <T> optionalPreview(load: suspend () -> T): T? =
-    try {
-        load()
-    } catch (e: ApiException) {
-        if (e.status == 404 || e.status == 405) null else throw e
-    }
 
 /** Delegations the save would suspend: these get a reapproval checkbox. */
 fun AgentPreview.suspendedDelegations() = delegations.filter { it.suspended }
@@ -904,6 +872,7 @@ fun rebaseAgent(
                 mcps = mergeList(a.mcps, m.mcps, t.mcps),
                 mcpTools = tools,
                 installation = pick(a.installation, m.installation, t.installation),
+                delegation = pick(a.delegation, m.delegation, t.delegation),
                 sandbox = pick(a.sandbox, m.sandbox, t.sandbox),
                 backend = pick(a.backend, m.backend, t.backend),
             ),
@@ -956,11 +925,6 @@ fun agentSaveBody(
     reapprove: List<String> = emptyList(),
     /** MCP connections that exist; tool choices of deleted ones are not sent. Null keeps all. */
     mcpIds: Set<String>? = null,
-    /**
-     * False on an older or not yet known installation: live grants and the revision are left out,
-     * so an installation upgraded between load and save never reads them as "none".
-     */
-    liveGrants: Boolean = true,
     nativeNodeReviews: List<String> = emptyList(),
 ): JsonObject {
     val fields =
@@ -969,14 +933,8 @@ fun agentSaveBody(
             .jsonObject
             .toMutableMap()
     fields.remove("avatar")
-    fields.remove("grantsOnAgent")
     fields.remove("revision")
     if (agent.revision.isNotBlank()) fields["revision"] = JsonPrimitive(agent.revision)
-    if (!liveGrants) {
-        fields.remove("exclusiveNodes")
-        fields.remove("plugins")
-        fields.remove("revision")
-    }
     fun list(value: List<String>?): JsonElement =
         value?.let { JsonArray(it.map(::JsonPrimitive)) } ?: JsonNull
     val access = fields["access"]!!.jsonObject.toMutableMap()

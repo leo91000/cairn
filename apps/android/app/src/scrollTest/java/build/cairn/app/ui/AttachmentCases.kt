@@ -153,9 +153,6 @@ abstract class AttachmentCases {
                         if (path.startsWith(prefix)) {
                             val id = path.removePrefix(prefix).removeSuffix("/stream")
                             requested += "${path.removePrefix(prefix)}?$query"
-                            if (path.endsWith("/stream") && id in listOf("shot", "hdr"))
-                                return MockResponse()
-                                    .setResponseCode(if (id == "shot") 404 else 501)
                             val picture = pictures[id]
                             return when {
                                 query == "summary" ->
@@ -189,7 +186,14 @@ abstract class AttachmentCases {
                                     wireJson.encodeToString(listOf(agent))
                                 "/api/installations/fixture/api/codex/models" -> """{"models":[]}"""
                                 "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
@@ -239,12 +243,11 @@ abstract class AttachmentCases {
             }
             assertNotNull(clipboard.primaryClip?.getItemAt(0)?.uri)
             assertTrue("shot/stream?" in requested)
-            assertTrue("shot?" in requested)
 
             compose.onNodeWithContentDescription("IMG_20261017_141502_HDR.jpg").performClick()
             compose.onNodeWithTag("attachment-viewer").assertExists()
             compose.onNodeWithText("JPG · 3,2 Mo · 2 / 6").assertExists()
-            compose.waitUntil(10000) { "hdr/stream?" in requested && "hdr?" in requested }
+            compose.waitUntil(10000) { "hdr/stream?" in requested }
             capture("02-viewer")
             // The filmstrip jumps between files (Robolectric cannot render PDF pages, so the
             // journey stays among the pictures).

@@ -72,7 +72,14 @@ abstract class ChatProviderCases {
                                 "/api/installations/fixture/api/claude/models" ->
                                     """{"models":[]}"""
                                 "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
@@ -171,7 +178,14 @@ abstract class ChatProviderCases {
                                 "/api/installations/fixture/api/claude/models" ->
                                     """{"models":[{"model":"opus[1m]","displayName":"Opus 1M","isDefault":true,"supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}"""
                                 "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
@@ -419,7 +433,14 @@ abstract class ChatProviderCases {
                                     "{}"
                                 }
                                 "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(body)
                     }

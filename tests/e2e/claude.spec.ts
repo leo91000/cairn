@@ -62,10 +62,10 @@ test('a saved quota failure really resumes its session from the inline card', as
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
   const before = (await workspace.api(`/api/chats/${chat.id}`)).run
   const message = 'You\'ve hit your individual spend limit · your weekly limit resets 3pm (UTC)'
-  // Reproduce a pre-fix persisted failure with a real prepared session and workspace.
+  // A saved structured failure keeps its real prepared session and workspace.
   workspace.service.store.updateRun(before.id, { status: 'failed', error: message, resumeAvailable: true })
   workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, paused: true })
-  workspace.service.store.event(before.id, 'turn.failed', JSON.stringify({ type: 'turn.failed', error: { message } }))
+  workspace.service.store.event(before.id, 'turn.failed', message, { type: 'turn.failed', error: { message } })
   workspace.service.store.event(before.id, 'status', 'failed')
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
@@ -124,8 +124,9 @@ test('Claude agents, chats, questions and scheduled work run on a connected Clau
   const run = await workspace.api(`/api/tasks/${task.id}/run`, 'POST')
   await expect.poll(async () => (await workspace.api(`/api/runs/${run.id}`)).status, { timeout: 20000 }).toBe('succeeded')
   // The run is recorded with the Claude account it used.
-  const account = (await workspace.api('/api/accounts')).accounts.find((a: { provider: string }) => a.provider === 'claude')
-  expect((await workspace.api(`/api/runs/${run.id}`)).accountId).toBe(account.id)
+  const completed = await workspace.api(`/api/runs/${run.id}`)
+  const account = (await workspace.api('/api/accounts')).accounts.find((a: { id: string }) => a.id === completed.accountId)
+  expect(account?.provider).toBe('claude')
 })
 
 test('switching coding agents preserves one chat, context and provider selection after reload', async ({ page, workspace }, testInfo) => {
@@ -220,6 +221,52 @@ test('an agent idle until its background build finishes says it is waiting, not 
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
   await expect(waiting).toHaveCount(0)
   await expect(page.getByText('Build checked and task finished', { exact: true })).toBeVisible()
+})
+
+test('Claude retries and warnings read as the engine reported them, not as failures', async ({ page, workspace }, testInfo) => {
+  test.setTimeout(120000)
+  await useRelayForHttpMocks(page)
+  if (!(await workspace.api('/api/accounts')).accounts.some((a: { provider: string }) => a.provider === 'claude'))
+    expect((await connectClaude(workspace)).state).toBe('complete')
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text: 'fixture:engine-retry-slow', provider: 'claude' })
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const retry = page.locator('.chat-notice').filter({ hasText: 'Claude Code is retrying the request · attempt 1/10' })
+  await expect(retry).toBeVisible({ timeout: 20000 })
+  await expect(retry.getByText('Servers overloaded · HTTP 529 · next attempt after under a second')).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('claude-engine-retry.png'), animations: 'disabled' })
+
+  // Once work continues the retry leaves the conversation; the engine's warning stays.
+  await expect(page.getByText('Answered after the retries', { exact: true })).toBeVisible({ timeout: 20000 })
+  await expect(retry).toHaveCount(0)
+  const warning = page.locator('.chat-notice').filter({ hasText: 'Claude Code warning' })
+  await expect(warning).toBeVisible()
+  await expect(warning.getByText('Context is almost full.')).toBeVisible()
+  await expect(page.getByText('The agent ran into an error')).toHaveCount(0)
+  await page.screenshot({ path: testInfo.outputPath('claude-engine-warning.png'), animations: 'disabled' })
+})
+
+test('a Claude limit that stops requests waits for an account and shows the reported reset', async ({ page, workspace }, testInfo) => {
+  test.setTimeout(120000)
+  expect((await connectClaude(workspace, 'Structured limit', 'fixture-code:structured-limit@example.test')).state).toBe('complete')
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text: 'fixture:usage-limit', provider: 'claude' })
+  try {
+    // The provider's wording is not a known quota message: only the engine's report says so.
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.accountWaitReason, { timeout: 30000 }).toContain('Usage exhausted.')
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+    const card = page.getByRole('status', { name: 'Coding agent quota reached' })
+    await expect(card).toBeVisible()
+    const reset = await page.evaluate(() => new Date(1893499200000).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }))
+    await expect(card.getByText(/Reset announced:/)).toContainText(reset)
+    await expect(page.locator('.chat-notice').filter({ hasText: '5-hour limit reached' })).toHaveCount(0)
+    await page.screenshot({ path: testInfo.outputPath('claude-structured-limit.png'), animations: 'disabled' })
+  }
+  finally {
+    await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
+  }
 })
 
 test('Claude default names follow available metadata without pinning the model', async ({ page, workspace }, testInfo) => {

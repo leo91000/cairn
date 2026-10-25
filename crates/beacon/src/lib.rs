@@ -4,6 +4,7 @@ extern crate sqlx_core as sqlx;
 
 mod account;
 mod audit;
+mod capabilities;
 mod fcm;
 mod hosts;
 pub mod html;
@@ -283,7 +284,10 @@ pub async fn router_with_installation_hosts(
             "/api/installations/{installation}/sharing/membership",
             axum::routing::delete(sharing::leave),
         )
-        .route("/api/account/methods", get(methods::list))
+        .route(
+            cairn_contracts::beacon::LIST_ACCOUNT_METHODS_PATH,
+            get(methods::list),
+        )
         .route("/api/account/methods/remove", post(methods::remove))
         .route("/api/installations", get(installations::status))
         .route(
@@ -388,7 +392,21 @@ pub async fn router_with_installation_hosts(
                     "/api/relay/device-claim/poll",
                     post(installations::poll_device),
                 )
-                .route("/api/relay/{installation}/connect", get(relay::upgrade)),
+                .route("/api/relay/{installation}/connect", get(relay::upgrade))
+                .route(
+                    "/api/relay/{installation}/nodes/connect",
+                    get(relay::nodes::connect),
+                )
+                .route(
+                    "/api/relay/{installation}/nodes/direct",
+                    get(relay::nodes::ice)
+                        .post(relay::nodes::offer)
+                        .layer(relay::nodes::offer_limit()),
+                )
+                .route(
+                    "/api/relay/{installation}/nodes/{channel}/accept",
+                    get(relay::nodes::accept),
+                ),
         )
         .with_state(service)
         .merge(installer)
@@ -748,11 +766,10 @@ async fn create_session(
 
 async fn session(State(service): State<Service>, headers: HeaderMap) -> Result<Response, ApiError> {
     let token = session_token(&headers);
-    let row: Option<(String, String, String, i64)> = query_as("SELECT a.id, a.email, s.csrf, GREATEST(0, floor(extract(epoch FROM (s.expires_at - clock_timestamp())))::bigint) FROM web_sessions s JOIN cairn_accounts a ON a.id = s.account_id WHERE s.digest = $1 AND s.expires_at > clock_timestamp()")
+    let row: Option<(String, String, String)> = query_as("SELECT a.id, a.email, s.csrf FROM web_sessions s JOIN cairn_accounts a ON a.id = s.account_id WHERE s.digest = $1 AND s.expires_at > clock_timestamp()")
         .bind(digest(token)).fetch_optional(&service.pool).await?;
-    let remaining = row.as_ref().map(|row| row.3);
     let body = match row {
-        Some((id, email, csrf, _)) => json!({
+        Some((id, email, csrf)) => json!({
             "authenticated": true,
             "account": { "id": id, "email": email },
             "csrf": csrf,
@@ -765,22 +782,7 @@ async fn session(State(service): State<Service>, headers: HeaderMap) -> Result<R
             "installations": [],
         }),
     };
-    let mut response = Json(body).into_response();
-    if service.hosts.has_cookie_domain()
-        && service.hosts.central(&headers)
-        && let Some(remaining) = remaining
-    {
-        for value in service
-            .hosts
-            .session_cookies(token, remaining)
-            .get_all(header::SET_COOKIE)
-        {
-            response
-                .headers_mut()
-                .append(header::SET_COOKIE, value.clone());
-        }
-    }
-    Ok(response)
+    Ok(Json(body).into_response())
 }
 
 async fn browser_security(

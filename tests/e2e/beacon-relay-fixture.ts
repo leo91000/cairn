@@ -7,9 +7,7 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
-import { config as loadConfig } from '../fixtures/legacy/server/config'
-import { Service as SeedService } from '../fixtures/legacy/server/service'
-import { Store } from '../fixtures/legacy/server/store'
+import { NativeFixture } from './native-fixture'
 
 // Shared by journeys-beacon-relay and the network bench: real processes, fake mail only.
 export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', directory = tmpdir()) {
@@ -28,15 +26,13 @@ export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', dire
   await Promise.all([mkdir(join(root, 'data')), mkdir(join(root, 'home'))])
   const url = `http://localhost:${port}`
   const children: ChildProcess[] = []
-  // As in the native browser fixtures, open the seeding module before the
-  // native process applies newer database migrations.
-  const seed = new SeedService(new Store(join(root, 'data')), loadConfig({
+  const seed = new NativeFixture({
     dataDir: join(root, 'data'),
     home: join(root, 'home'),
     workspaceRoots: [root],
     workerEnabled: false,
     logger: false,
-  }))
+  })
 
   function start(binary: string, env: NodeJS.ProcessEnv) {
     const executable = binary === 'target/debug/cairn' ? process.env.CAIRN_NETWORK_INSTALLATION_BINARY || binary : binary
@@ -73,8 +69,6 @@ export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', dire
 
   async function close() {
     await Promise.all(children.map(stop))
-    await seed.accounts.close()
-    seed.store.close()
     await new Promise<void>(resolve => mail.close(() => resolve()))
     await rm(root, { recursive: true, force: true })
   }

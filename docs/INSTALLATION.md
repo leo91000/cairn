@@ -15,8 +15,8 @@ and verifies the embedded SHA-256 of `host.py` before installing it. No local pa
 is needed. The installation connects out using the existing claim and relay.
 
 Use a host with systemd. Install Docker Engine with its Compose plugin, Python 3 and curl first. Enable
-hardware virtualization, `/dev/kvm`, `/dev/net/tun` and `/dev/fuse` (install
-`fuse3` and load the kernel modules). The script checks each requirement before
+hardware virtualization, `/dev/kvm`, `/dev/net/tun` and a working `ublk_drv` kernel module
+(`/dev/ublk-control`, with io_uring enabled). The script checks each requirement before
 downloading or starting services, including a working Docker daemon and 16 GiB
 of free disk for runtime images and recovery staging. Conversation disks need
 additional space. It does not install Docker or change virtualization settings.
@@ -31,7 +31,11 @@ The manager's origin, `http://manager:4310`, exists only on that private Compose
 network. At startup the manager records it in the data directory it shares with
 its local runner, which then reads conversation disks from exactly this origin.
 Every other controller keeps the HTTPS rule: remote nodes enroll, connect and
-read disks over HTTPS, HTTP being accepted only on loopback for tests.
+read disks over HTTPS, HTTP being accepted only on loopback. A node added without
+an address uses that loopback exception: its local gateway carries each connection
+to the manager, directly or through Beacon, encrypted to the manager's pinned node
+certificate, so this installation still publishes no port. See
+[additional execution nodes](DEPLOYMENT.md#additional-execution-nodes).
 
 Agents never use this origin: their VMs cannot resolve or reach it. Inside a VM,
 `cairn_workspace` and MCP connections use `http://127.0.0.1:5202`. The guest
@@ -91,7 +95,7 @@ data; keep Garage and its directory while disks still use it. Local S3 does not
 protect against losing the machine. Back up the entire installation, including
 Garage, with the services stopped. Never discard volumes containing needed data.
 
-Nonempty `STORAGE_S3_*` or legacy `ARCHIVE_S3_*` overrides remain authoritative;
+Nonempty `STORAGE_S3_*` overrides remain authoritative;
 remove them before editing the default in the app. For an environment-managed R2
 endpoint, set `STORAGE_S3_PRIVATE_BUCKET_CONFIRMED=true` only after checking in the
 Cloudflare dashboard that public domains and bucket locks are disabled. This
@@ -108,29 +112,23 @@ If the Beacon or registry is unavailable, the current image keeps running.
 The update channel is independent of the relay, so an incompatible installation
 can still update.
 
-The supervisor reuses the node supervisor's pull/prepare/launch/rollback cycle.
-It takes the existing persisted deployment lease to pause new work, stops the
-manager gracefully to checkpoint active conversations, then stops the local runner.
-It replaces both images together, preserving Compose settings, Garage, identity,
-agent credentials, workspaces and runner state. Compose checks both containers;
-the manager's health must report the downloaded image's runtime identity.
-Failed health restores and verifies the previous approved image before releasing
-the lease. Each replacement has a 550-second maximum, including Docker inspection,
-graceful stops, runner readiness and HTTP runtime verification; candidate and
-rollback, including checks for a failed candidate container, together remain within
-the twenty-minute lease. A journal written before replacement lets the next timer
-restore the last committed image after interruption. A refused lease or interrupted
-supervisor leaves the same approved digest eligible for the next check. Only a
-candidate confirmed unhealthy by its runtime probe or by Docker container health
-is retained in
-`installation.json` and is not retried automatically until the approved digest
-changes. After diagnosing and fixing a host problem, the operator may remove
-`failedImage` from that private file to retry the same approved digest.
+The supervisor pulls and verifies the approved image, then takes the persisted
+deployment lease to pause new work. It stops the manager gracefully to checkpoint
+active conversations, then stops the local runner. It replaces both images
+together, preserving Compose settings, Garage, identity, agent credentials,
+workspaces and runner state. Compose checks both containers; the manager's health
+must report the downloaded image's runtime identity before the image is committed
+and the lease released.
 
-Routine automatic updates require compatible persisted data. An image rollback
-cannot undo an incompatible migration, and no automatic installation backups are
-created. Preserve active data and review forward recovery separately before
-deploying a release with a new data format.
+A durable pending candidate lets the next timer retry an interrupted replacement,
+including an exited or unresponsive candidate container. Failed health leaves the
+candidate pending for repair and retry. The supervisor does not start a previous
+binary against the data. The replacement's stop, readiness and verification
+bounds remain within the twenty-minute lease.
+
+The next release requires the
+[complete reinstallation](PRODUCTION-CAIRN.md#réinstallation-complète). Automatic
+updates create no backups.
 
 ```sh
 sudo systemctl status cairn-installation-update.timer
@@ -144,9 +142,10 @@ checksum-verified host supervisors on an existing one-command installation. Reco
 renews the recorded deployment lease before stopping a running manager, because
 a durable acknowledgement may outlive the lease. If the interrupted replacement
 already removed/stopped it, or the exact recorded candidate has never started, is
-crash-looping or is running without a healthy HTTP endpoint, the host lock and recorded acknowledgement permit restoring only the previously
-committed approved image. An unrelated or functioning manager still requires
-lease acquisition.
+crash-looping or is running without a healthy HTTP endpoint, the host lock and
+recorded acknowledgement permit retrying the same pending candidate. The
+supervisor never restores a previous image. An unrelated or functioning manager
+still requires lease acquisition.
 
 ## Operation and validation
 
@@ -166,7 +165,7 @@ is independently parsed by real `docker compose config`, including healthchecks,
 claim substitution, dependencies and uid 1000. Loopback HTTP download transport
 is adapted only in the fixture; the production script requires HTTPS. Inert
 devices and command adapters exercise prerequisite and checksum failures.
-Claim, relay, deployment leases, runtime health and S3 write/read/delete checks are real. The fixture also verifies an approved update and rollback from a wrong-runtime candidate, preserving relay identity and S3 configuration. A disk published to Garage
+Claim, relay, deployment leases, runtime health and S3 write/read/delete checks are real. The fixture also verifies an approved update and repair/retry of a wrong-runtime candidate, preserving relay identity and S3 configuration. A disk published to Garage
 continues publishing, reading remotely and purging there after relayed settings
 select external HTTPS S3. No VM boots; this is not runtime/KVM coverage. Containers, network and data are cleaned up on exit.
 `CAIRN_BEACON_TEST_DATABASE_URL=… python3 tests/installation_update_containers.py`
@@ -175,7 +174,7 @@ fixture images, including interrupted recovery with `restart: unless-stopped`.
 Only the registry is adapted; Compose, persistent mounts, runtime
 metadata, deployment leases, recovery from a running candidate with a dead HTTP
 endpoint, relay reconnection and conversation reads are real.
-It checks successful replacement and an exited-candidate rollback, including
+It checks successful replacement and retry of exited and HTTP-dead candidates, including
 identity, synthetic credentials, workspaces and runner state. The readiness runner
 boots no VM; active VM checkpointing remains covered by the existing node tests.
 `python3 scripts/tests/installation_installer_test.py` checks failure cleanup and

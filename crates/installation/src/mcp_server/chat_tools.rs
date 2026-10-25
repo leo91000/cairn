@@ -33,6 +33,8 @@ fn summary(chat: &Value) -> Value {
         "updatedAt",
         "finishedAt",
         "pendingQuestions",
+        "requestedBy",
+        "requester",
     ] {
         result[key] = chat[key].clone();
     }

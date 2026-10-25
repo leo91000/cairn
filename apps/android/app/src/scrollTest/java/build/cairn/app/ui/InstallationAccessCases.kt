@@ -26,8 +26,7 @@ abstract class InstallationAccessCases {
     fun ownerCanEnableAndRevokeInstallationAccessOnTheAgentPage() {
         MockWebServer().use { server ->
             val saved = CopyOnWriteArrayList<Agent>()
-            val agent =
-                AtomicReference(Agent(MAIN_AGENT_ID, "Agent principal", grantsOnAgent = true))
+            val agent = AtomicReference(Agent(MAIN_AGENT_ID, "Agent principal"))
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
@@ -37,9 +36,7 @@ abstract class InstallationAccessCases {
                                 path == "/api/installations/fixture/api/agents/$MAIN_AGENT_ID" &&
                                     request.method == "PUT" -> {
                                     val updated =
-                                        wireJson
-                                            .decodeFromString<Agent>(request.body.readUtf8())
-                                            .copy(grantsOnAgent = true)
+                                        wireJson.decodeFromString<Agent>(request.body.readUtf8())
                                     agent.set(updated)
                                     saved += updated
                                     wireJson.encodeToString(updated)
@@ -51,7 +48,14 @@ abstract class InstallationAccessCases {
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path.endsWith("/models") -> """{"models":[]}"""
                                 path.endsWith("/overview") -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")

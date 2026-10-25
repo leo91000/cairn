@@ -101,6 +101,7 @@
             "mcps": null,
             "mcpTools": {},
             "installation": false,
+            "delegation": false,
             "sandbox": "yolo"
           },
           "type": "object",
@@ -204,6 +205,10 @@
               "default": false,
               "type": "boolean"
             },
+            "delegation": {
+              "default": false,
+              "type": "boolean"
+            },
             "sandbox": {
               "default": "yolo",
               "type": "string",
@@ -222,6 +227,7 @@
             "mcps",
             "mcpTools",
             "installation",
+            "delegation",
             "sandbox"
           ],
           "additionalProperties": false
@@ -403,6 +409,9 @@
                   }
                 },
                 "installation": {
+                  "type": "boolean"
+                },
+                "delegation": {
                   "type": "boolean"
                 },
                 "sandbox": {
@@ -845,66 +854,6 @@
     }
   },
   {
-    "name": "list_projects",
-    "description": "List registered project workspaces.",
-    "scope": "read",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {},
-      "additionalProperties": false
-    }
-  },
-  {
-    "name": "save_project",
-    "description": "Register an existing directory inside an allowed workspace root.",
-    "scope": "manage",
-    "destructive": false,
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 100
-        },
-        "path": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 2000
-        },
-        "description": {
-          "default": "",
-          "type": "string",
-          "maxLength": 500
-        },
-        "baseBranch": {
-          "default": "main",
-          "type": "string",
-          "pattern": "^[a-z0-9][\\w/.-]*$"
-        },
-        "sourceMode": {
-          "type": "string",
-          "enum": [
-            "remote",
-            "local"
-          ],
-          "default": "remote"
-        }
-      },
-      "required": [
-        "name",
-        "path",
-        "description",
-        "baseBranch",
-        "sourceMode"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
     "name": "list_tasks",
     "description": "List task instructions and schedules.",
     "scope": "read",
@@ -1170,7 +1119,7 @@
   },
   {
     "name": "cancel_run",
-    "description": "Cancel queued or running work. Already completed external effects are preserved.",
+    "description": "Cancel queued or running work, including a pending automatic retry. Already completed external effects are preserved.",
     "scope": "run",
     "destructive": true,
     "inputSchema": {
@@ -1223,7 +1172,7 @@
   },
   {
     "name": "get_run",
-    "description": "Get a run and a byte-bounded page of its event log. Continue with nextAfter while hasMore is true, even when a page has fewer than 100 events. A run or event marked truncated remains available in full through read_run_content.",
+    "description": "Get a run, including retry attempt, limit, nextAttemptAt, deadlineAt and cause when recovering, and a byte-bounded page of its event log. Continue with nextAfter while hasMore is true, even when a page has fewer than 100 events. A run or event marked truncated remains available in full through read_run_content. Claude Code runs also record engine.retry (the engine retrying an API request itself; the turn continues), provider.limit (usage-limit warnings, a limit that stops requests with resetsAt, and its end) and engine.notice (the engine's warnings); their subagent items carry task_id, run_id, parent_task_id and resumed.",
     "scope": "read",
     "destructive": false,
     "inputSchema": {
@@ -1837,7 +1786,7 @@
   },
   {
     "name": "stop_chat",
-    "description": "Stop the current turn, cancel a scheduled wakeup and pause follow-ups. Queued messages remain available for later resumption.",
+    "description": "Stop the current turn or pending automatic retry, cancel a scheduled wakeup and pause follow-ups. Queued messages remain available for later resumption.",
     "scope": "run",
     "destructive": true,
     "inputSchema": {
@@ -2287,7 +2236,7 @@
   },
   {
     "name": "create_node_enrollment",
-    "description": "Create a single-use enrollment for a separate node. To switch an existing machine, choose the other backend, install its runtime on that machine, then wait for this exact nodeId in list_nodes. Configure it and agent grants before offering to retire the previous node. Does not convert existing conversations or install anything.",
+    "description": "Create a single-use enrollment for a separate node. Without managerUrl, the returned installCommand lets Beacon introduce the machine to the manager (route beacon): no address, certificate or open port. They connect directly when the networks allow it; otherwise node traffic, including conversation disks, transits Beacon encrypted end to end to the manager certificate pinned in the command. Pass a direct HTTPS managerUrl reachable from the machine (LAN or VPN) to keep that traffic off Beacon entirely. To switch an existing machine, choose the other backend, install its runtime on that machine, then wait for this exact nodeId in list_nodes. Configure it and agent grants before offering to retire the previous node. Does not convert existing conversations or install anything.",
     "scope": "manage",
     "destructive": false,
     "inputSchema": {
@@ -2309,7 +2258,8 @@
         },
         "managerUrl": {
           "type": "string",
-          "maxLength": 2000
+          "maxLength": 2000,
+          "description": "Optional direct HTTPS manager origin. Omit it to let Beacon introduce the machine to the manager."
         }
       },
       "required": [

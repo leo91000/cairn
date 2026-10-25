@@ -169,37 +169,6 @@ async fn merge_transfers_archived_tasks_trash_chats_and_resumable_run_identities
 }
 
 #[tokio::test]
-async fn legacy_restricted_sessions_keep_their_mcp_denial_after_merge_and_resume() {
-    let (_root, s, source) = fixture().await;
-    let task = task(&s, &source).await;
-    let mut run = s.snapshot(task, "manual").await.unwrap();
-    run["status"] = "failed".into();
-    run["chatExecution"] = json!({ "messageId": id() });
-    run["snapshot"]["agent"]["access"] = json!({
-        "projects": [], "skills": [], "sandbox": "read-only",
-    });
-    let legacy = s
-        .store
-        .transaction(move |db| db.add_run(&run, None))
-        .await
-        .unwrap();
-    let original_policy = cairn_installation::service::policy(&legacy["snapshot"]["agent"]);
-    assert_eq!(original_policy["mcps"], json!([]));
-    s.merge_agents(input(&source)).await.unwrap();
-    let resumed = s
-        .worker
-        .resume(&s, legacy["id"].as_str().unwrap())
-        .await
-        .unwrap();
-    assert_eq!(resumed["snapshot"]["agent"]["id"], MAIN_AGENT_ID);
-    assert_eq!(
-        cairn_installation::service::policy(&resumed["snapshot"]["agent"]),
-        original_policy
-    );
-    assert_eq!(resumed["snapshot"]["agent"]["access"]["mcps"], json!([]));
-}
-
-#[tokio::test]
 async fn same_engine_merge_keeps_the_conversation_model_on_implicit_follow_up() {
     let (_root, s, original) = fixture().await;
     let source = s.agent(json!({ "name": "Claude", "provider": "claude", "model": "opus", "reasoning": "medium" }), original["id"].as_str()).await.unwrap();

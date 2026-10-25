@@ -46,17 +46,17 @@ else process.exit(Number(process.env.CAIRN_FIXTURE_STATUS));
 
 describe('backend test launcher', () => {
   it('keeps cargo test and documentation checks as the default', () => {
-    const { calls, status } = invoke(['--doc', '--features', 'ublk-prototype'])
+    const { calls, status } = invoke(['--doc'])
     expect(status).toBe(0)
-    expect(calls[0].args).toContain('ublk-prototype')
-    expect(calls[1]).toEqual({ args: ['test', '--locked', '--workspace', '--doc', '--features', 'ublk-prototype'], worker: '/fixture/cairn' })
+    expect(calls[0].args).toContain('build')
+    expect(calls[1]).toEqual({ args: ['test', '--locked', '--workspace', '--doc'], worker: '/fixture/cairn' })
   })
 
-  it('isolates credentials and builds the code worker with the nextest feature graph', () => {
-    const { calls, status } = invoke(['--nextest', '--features', 'ublk-prototype', '--test-threads', '4', '--no-fail-fast'])
+  it('isolates credentials and builds the code worker with the nextest profile', () => {
+    const { calls, status } = invoke(['--nextest', '--test-threads', '4', '--no-fail-fast'])
     expect(status).toBe(0)
-    expect(calls[0]).toEqual({ args: ['build', '--locked', '-p', 'cairn-installation', '--bin', 'cairn', '--message-format=json', '--features', 'ublk-prototype'] })
-    expect(calls[1]).toEqual({ args: ['nextest', 'run', '--locked', '--workspace', '--features', 'ublk-prototype', '--test-threads', '4', '--no-fail-fast'], worker: '/fixture/cairn' })
+    expect(calls[0]).toEqual({ args: ['build', '--locked', '-p', 'cairn-installation', '--bin', 'cairn', '--message-format=json'] })
+    expect(calls[1]).toEqual({ args: ['nextest', 'run', '--locked', '--workspace', '--test-threads', '4', '--no-fail-fast'], worker: '/fixture/cairn' })
   })
 
   it('preserves the nextest failure exit code and package selection', () => {

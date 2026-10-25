@@ -21,11 +21,9 @@ fn base_metadata(source: &Path, db: &Connection) -> io::Result<(u64, Vec<String>
         )
         .map_err(failure)?;
     let context: Value = serde_json::from_str(&context).map_err(failure)?;
-    let legacy: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM settings WHERE key='legacyThrough' AND CAST(value AS INTEGER)>0)", [], |row| row.get(0)).map_err(failure)?;
     if context["unassigned"] != true
         || context.get("master").is_some()
         || context.get("grant").is_some()
-        || legacy
         || manifest["blocks"]
             .as_array()
             .unwrap()
@@ -113,7 +111,8 @@ impl LazyDisk {
             .create_new(true)
             .mode(0o600)
             .open(target.join("journal.lock"))?;
-        for name in ["journal-v2.sqlite", "journal.sqlite"] {
+        {
+            let name = "journal-v2.sqlite";
             let mut input = File::options()
                 .read(true)
                 .custom_flags(libc::O_NOFOLLOW)

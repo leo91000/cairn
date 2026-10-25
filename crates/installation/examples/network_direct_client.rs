@@ -6,7 +6,7 @@ use bytes::BytesMut;
 use cairn_installation::direct::peer::PeerConfig;
 use cairn_protocol::{
     ApiRequest, Frame, REQUEST_TIMEOUT, Role,
-    data_channel::{EncodedFrame, FrameDecoder},
+    data_channel::{DecodeError, EncodedFrame, FrameDecoder},
     direct::{DirectAuthorization, DirectSignal},
 };
 use reqwest::Client;
@@ -181,7 +181,7 @@ async fn direct_read(
             .header("x-csrf-token", csrf)
             .json(&json!({
                 "fingerprint": fingerprint,
-                "versions": [4],
+                "version": 4,
             }))
             .send()
             .await?
@@ -322,9 +322,11 @@ async fn direct_read(
                     }
                     diagnostics.response_messages += 1;
                     diagnostics.response_bytes += message.data.len();
-                    if let Some(Frame::Response(response)) =
-                        decoder.push(&message.data).map_err(std::io::Error::other)?
-                    {
+                    let frame = decoder.push(&message.data)?;
+                    if matches!(&frame, Some(Frame::UpdateRequired { .. })) {
+                        return Err(DecodeError::VersionMismatch.into());
+                    }
+                    if let Some(Frame::Response(response)) = frame {
                         if response.id != "bench-read" || response.status != 200 {
                             return Err("Direct API read failed".into());
                         }
@@ -455,6 +457,7 @@ async fn main() -> TestResult<()> {
             "direct".to_owned(),
             Some(json!({ "local": local, "remote": remote })),
         ),
+        Err(error) if protocol_refusal(error.as_ref()) => return Err(error),
         Err(_) => {
             // Prove authenticated recovery after the failure, rather than label
             // the preflight body as a newly completed relay operation.
@@ -509,6 +512,18 @@ async fn main() -> TestResult<()> {
         })
     );
     Ok(())
+}
+
+fn protocol_refusal(error: &(dyn std::error::Error + 'static)) -> bool {
+    let envelope = matches!(
+        error.downcast_ref::<DecodeError>(),
+        Some(DecodeError::VersionMismatch)
+    );
+    let authorization = error
+        .downcast_ref::<reqwest::Error>()
+        .and_then(reqwest::Error::status)
+        .is_some_and(|status| matches!(status.as_u16(), 422 | 426));
+    envelope || authorization
 }
 
 #[cfg(test)]

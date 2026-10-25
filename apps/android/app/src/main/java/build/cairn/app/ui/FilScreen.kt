@@ -179,6 +179,15 @@ internal fun buildFeed(
                     chat.run?.startedAt,
                     chatId = chat.id,
                     runId = chat.runId,
+                    // A delegated conversation names the conversation that delegated it.
+                    requester =
+                        chat.requester?.let {
+                            FeedRequester(
+                                it.title.ifBlank { "Nouvelle conversation" },
+                                it.chatId,
+                                null,
+                            )
+                        },
                     harness = chat.provider,
                 )
             val wait = chatWaitNotice(chat.run)
@@ -788,6 +797,16 @@ private fun FeedRow(
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
                     if (item.unread) UnreadLabel(item)
+                    val delegatedBy = item.requester?.takeIf { item.key.startsWith("chat:") }
+                    if (delegatedBy != null)
+                        Text(
+                            "↳ Délégué par ${delegatedBy.title}",
+                            Modifier.testTag("fil-requester"),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     Text(
                         item.title,
                         style = MaterialTheme.typography.titleMedium,

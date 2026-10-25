@@ -18,7 +18,8 @@ use tokio::{
 };
 
 pub const CATALOG: &str = "claude-models";
-const EFFORTS: [&str; 6] = ["", "low", "medium", "high", "xhigh", "max"];
+/// Effort levels agents may save; "" leaves the CLI's default.
+pub const EFFORTS: [&str; 6] = ["", "low", "medium", "high", "xhigh", "max"];
 
 /// The CLI's environment with `directory` as its home, without any inherited credentials.
 pub fn environment(config: &Config, directory: &Path) -> Environment {

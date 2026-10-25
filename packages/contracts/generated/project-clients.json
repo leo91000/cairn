@@ -1,0 +1,37 @@
+[
+  {
+    "input": "ListProjectsInput",
+    "method": "GET",
+    "name": "listProjects",
+    "output": "ListProjectsOutput",
+    "path": "/projects"
+  },
+  {
+    "input": "ProjectInput",
+    "method": "GET",
+    "name": "getProject",
+    "output": "Project",
+    "path": "/projects/{projectId}"
+  },
+  {
+    "input": "CreateProjectInput",
+    "method": "POST",
+    "name": "createProject",
+    "output": "Project",
+    "path": "/projects"
+  },
+  {
+    "input": "ReplaceProjectInput",
+    "method": "PUT",
+    "name": "replaceProject",
+    "output": "Project",
+    "path": "/projects/{projectId}"
+  },
+  {
+    "input": "ProjectInput",
+    "method": "DELETE",
+    "name": "deleteProject",
+    "output": "DeleteProjectOutput",
+    "path": "/projects/{projectId}"
+  }
+]

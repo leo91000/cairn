@@ -77,11 +77,25 @@ async function main() {
       await setTimeout(200)
     }
 
-    const claudeVersion = (await docker('exec', name, 'claude', '--version')).stdout.trim()
-    assert.match(claudeVersion, /^2\.1\.280\b/, 'official Claude Code CLI is installed')
     const health = await fetch(`${url}/health`)
     assert.equal(health.headers.get('cache-control'), 'no-store')
     const version = await health.json()
+    // CI passes the versions it resolved; the image must report and run exactly those.
+    for (const [tool, variable] of Object.entries({
+      codex: 'CODEX_VERSION',
+      gh: 'GH_VERSION',
+      claude: 'CLAUDE_VERSION',
+      opencode: 'OPENCODE_VERSION',
+    })) {
+      assert.match(version.tools[tool] ?? '', /^\d+\.\d+\.\d+$/, `${tool} version is recorded`)
+      if (process.env[variable])
+        assert.equal(version.tools[tool], process.env[variable], `${tool} is the resolved release`)
+    }
+
+    const claudeVersion = (await docker('exec', name, 'claude', '--version')).stdout.trim()
+    assert.equal(claudeVersion, `${version.tools.claude} (Claude Code)`, 'official Claude Code CLI is installed')
+    const opencodeVersion = (await docker('exec', name, 'opencode', '--version')).stdout.trim()
+    assert.equal(opencodeVersion, version.tools.opencode, 'official OpenCode CLI is installed')
     assert.equal(typeof version.commit, 'string')
     const expectedCommit = process.env.SMOKE_COMMIT || process.env.GITHUB_SHA
     if (expectedCommit)

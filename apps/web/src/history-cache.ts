@@ -50,18 +50,10 @@ function valid(value: CachedHistory): boolean {
     && value.events.every(e => !!e && typeof e.text === 'string' && Number.isSafeInteger(e.id) && e.id > 0 && e.id <= value.cursor && typeof e.type === 'string')
 }
 
-// Saved conversations, with an index of their ages and sizes so eviction never loads
-// one. The previous database had no index: it is removed rather than migrated, and a
-// previous build that opens it again simply starts from an empty one.
+// Saved conversations indexed by age and size for bounded eviction.
 const DATABASE = 'cairn-history-v2'
-let previousRemoved = false
 
 function db() {
-  if (!previousRemoved) {
-    previousRemoved = true
-    indexedDB.deleteDatabase('cairn-history-v1')
-  }
-
   return new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DATABASE, 1)
     request.onupgradeneeded = () => {

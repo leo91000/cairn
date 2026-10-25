@@ -18,6 +18,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import build.cairn.contracts.ResumeRunInput
+import build.cairn.contracts.resumeRun
 
 @Composable
 fun RunsScreen(vm: CairnViewModel, state: Workspace, open: (String) -> Unit) {
@@ -270,7 +272,7 @@ fun RunScreen(
                                     enabled = !state.busy,
                                     onClick = {
                                         menu = false
-                                        vm.perform { api.request("POST", "/runs/$id/resume") }
+                                        vm.perform { api.resumeRun(ResumeRunInput(id)) }
                                     },
                                 )
                             if (!current.active && current.trigger != "chat")
@@ -347,7 +349,9 @@ fun RunScreen(
                         title = if (error != null && ended) statusLabel(current.status) else null,
                         maxLines = 4,
                     )
-                RunWaitingReason(current)
+                RunWaitingReason(current, state.busy || current.cancelRequestedAt != null) {
+                    vm.perform { api.request("POST", "/runs/$id/cancel") }
+                }
                 if (current.status == "waiting")
                     current.wakeup?.let { wakeup ->
                         Notice(
@@ -443,6 +447,8 @@ fun RunScreen(
                                                 paused = false,
                                                 settled = current.status == "waiting",
                                                 canPause = false,
+                                                openRun = openRun,
+                                                openChat = openChat,
                                             )
                                     ) {
                                         TimelineRow(

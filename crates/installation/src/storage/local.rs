@@ -4,8 +4,6 @@ use crate::{
 };
 use std::path::{Path, PathBuf};
 
-mod paired;
-
 pub(crate) async fn prepare_seeded(
     directory: &Path,
     size: u64,
@@ -44,17 +42,6 @@ pub(crate) async fn prepare_seeded(
     let disk = directory.join("data.ext4");
     tokio::fs::rename(&image, &disk).await?;
     Ok(disk)
-}
-
-pub(crate) async fn prepare_layout(
-    directory: &Path,
-    desired: u64,
-    layout: super::layout::Layout,
-) -> Result<(PathBuf, super::layout::Layout)> {
-    match layout {
-        super::layout::Layout::Flat => Ok((prepare(directory, desired).await?, layout)),
-        super::layout::Layout::Paired { .. } => paired::prepare(directory, desired, layout).await,
-    }
 }
 
 /// Format or grow the temporary ext4 image used to build an S3-backed journal.

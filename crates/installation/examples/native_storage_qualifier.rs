@@ -191,7 +191,7 @@ async fn main() -> Result<()> {
     tokio::fs::write(&wrapper, script).await?;
     tokio::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).await?;
     tokio::fs::write(
-        data.join("archive-s3.json"),
+        data.join("storage-s3.json"),
         serde_json::to_vec(&json!({ "bucket": "cairn-node-test", "awsBinary": wrapper }))?,
     )
     .await?;
@@ -216,7 +216,14 @@ async fn main() -> Result<()> {
     s.store.put("nodes", json!({
         "id": nodes::LOCAL_NODE_ID, "local": true, "name": "Disposable fixture", "accepting": true,
         "nativeEnabled": true, "nativeAccounts": [TRUSTED], "lastSeen": now(),
-        "capabilities": { "backend": "native", "ublk": true, "os": "linux", "arch": "x86_64" },
+        "capabilities": {
+            "backend": "native",
+            "ublk": true,
+            "nativeModeProtocol": 1,
+            "os": "linux",
+            "arch": "x86_64",
+        },
+        "nativeModeObserved": { "mode": "protected", "generation": null, "status": "applied" },
         "storage": { "reserveMiB": 64, "reservePercent": 1, "memoryCacheMiB": 4, "cacheMiB": 128 }
     })).await?;
     let requests = Arc::new(AtomicU64::new(0));

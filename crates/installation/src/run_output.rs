@@ -203,6 +203,9 @@ fn compact_activity_preview(event: &Value, secrets: Option<&[String]>) -> Value 
         "name",
         "agent_type",
         "background",
+        "run_id",
+        "parent_task_id",
+        "resumed",
     ] {
         if let Some(value) = source
             .get(key)
@@ -340,10 +343,16 @@ pub fn exhausted(event: &Value) -> bool {
         || EXHAUSTED.is_match(text(error, "message"))
 }
 
-/// Compatibility entrypoint for the legacy Codex exec protocol.
-pub fn args(run: &Value, output: &str, session: Option<&str>) -> Vec<String> {
-    crate::coding_agent::codex_args(run, output, session)
-}
+/// The rule that sets chat turns apart from scheduled work.
+pub const INTERACTIVE: &str = "This is an interactive chat. Use native user-input questions when \
+    clarification is useful. Nonblocking questions let you continue independent \
+    work while the user considers the options; a suggested answer is never user \
+    approval. Follow the latest user instructions and do not treat a question \
+    as authorization to publish changes. Use cairn_workspace.pending_questions and \
+    cairn_workspace.withdraw_question to retire a question that became unnecessary \
+    or was answered in ordinary chat. Withdrawal never supplies approval. A completed \
+    outcome retires unanswered questions at the end of the turn; report needs_input \
+    when an answer is still required.";
 
 pub fn prompt(run: &Value, chat: bool) -> String {
     // Set at launch from the plugins granting this run's agent (`agents::with_instructions`).
@@ -372,15 +381,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
         ""
     };
     let interaction = if chat {
-        "This is an interactive chat. Use native user-input questions when \
-            clarification is useful. Nonblocking questions let you continue independent \
-            work while the user considers the options; a suggested answer is never user \
-            approval. Follow the latest user instructions and do not treat a question \
-            as authorization to publish changes. Use cairn_workspace.pending_questions and \
-            cairn_workspace.withdraw_question to retire a question that became unnecessary \
-            or was answered in ordinary chat. Withdrawal never supplies approval. A completed \
-            outcome retires unanswered questions at the end of the turn; report needs_input \
-            when an answer is still required."
+        INTERACTIVE
     } else {
         "This unattended task cannot answer clarification questions; report a \
             concrete blocker if required information is missing."
@@ -439,7 +440,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             unopened repositories are not on disk):\n{}\n\n{tooling}\n{storage}\n\nSelected skills (read a skill's SKILL.md before using it; its \
             scripts and references sit beside it):\n{skills}\n\n{plugins}\n\nRun this task to completion within \
             its stated scope. Preserve unrelated files. Do not expose credentials. \
-            {interaction}\n{deliverables}{requested}\n{waiting} All task-authorized effects such as creating \
+            {interaction}\n{deliverables}{requested}\n{waiting}{delegation} All task-authorized effects such as creating \
             PRs or releasing must follow their checks. Use .agents/skills for skills. \
             Summarize actual changes, validation, external links and remaining blockers \
             at the end.",
@@ -461,6 +462,14 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             crate::waits::INSTRUCTIONS
         } else {
             ""
+        },
+        delegation = match (
+            run["isolated"] == true,
+            text(&run["snapshot"], "delegation")
+        ) {
+            (true, "requester") => format!(" {}", crate::delegation::INSTRUCTIONS),
+            (true, "delegated") => format!(" {}", crate::delegation::DELEGATED_INSTRUCTIONS),
+            _ => String::new(),
         },
     )
 }
@@ -525,7 +534,7 @@ pub fn chat_plan(
     let mut plan = json!({
         "provider": provider,
         "execution": run["chatExecution"],
-        "instructions": prompt(&context, true),
+        "instructions": prompt(&context, interactive(run)),
         "inputDirectory": input_directory,
         "output": prepared["output"],
         "cwd": prepared["cwd"],
@@ -542,6 +551,30 @@ pub fn chat_plan(
     Ok(plan)
 }
 
+/// Only chat turns can answer questions. Scheduled work also uses the chat
+/// protocol, without a conversation to deliver them to.
+fn interactive(run: &Value) -> bool {
+    run["chatExecution"].is_object()
+}
+
+/// The first turn of scheduled work sent through the chat protocol. The
+/// instructions already carry the Cairn frame, so a fresh turn sends only the
+/// task brief; a resumed turn sends its resume prompt. The brief follows a
+/// fixed lead-in: Claude Code runs a turn that starts with a command such as
+/// `/clear` as that command, and unattended work has nobody to notice.
+pub fn scheduled_turn(run: &Value, resume_prompt: Option<&str>) -> Value {
+    let turn = resume_prompt.map_or_else(
+        || format!("Task brief:\n{}", text(&run["snapshot"]["task"], "prompt")),
+        str::to_owned,
+    );
+    json!({
+        "messageId": run["missionTurnId"].as_str().unwrap_or_else(|| text(run, "id")),
+        "text": turn,
+        "recovery": resume_prompt.is_some(),
+        "attachments": [],
+    })
+}
+
 /// One line per selected skill: name, description and `SKILL.md` path. The
 /// agent reads the file itself, so supporting files load only when used.
 fn skill_index(skills: &Value) -> String {
@@ -550,13 +583,10 @@ fn skill_index(skills: &Value) -> String {
         .into_iter()
         .flatten()
         .map(|skill| {
-            let description = match text(skill, "description") {
-                "" => crate::skills::parse(text(skill, "content"))
-                    .map(|parsed| text(&parsed, "description").to_owned())
-                    .unwrap_or_default(),
-                description => description.to_owned(),
-            };
-            let description = description.split_whitespace().collect::<Vec<_>>().join(" ");
+            let description = text(skill, "description")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
             format!(
                 "- {}: {description}\n  {}",
                 text(skill, "name"),
@@ -574,7 +604,7 @@ pub(crate) fn native_chat_privileges(chat: &mut Value, run: &Value, mode: &Value
     context["nativeMode"] = mode.clone();
     context["snapshot"]["task"]["prompt"] = "".into();
     let notice = native_privileges(mode);
-    chat["instructions"] = format!("{notice}\n\n{}", prompt(&context, true)).into();
+    chat["instructions"] = format!("{notice}\n\n{}", prompt(&context, interactive(run))).into();
     chat["execution"]["text"] = format!("{notice}\n\n{}", text(&chat["execution"], "text")).into();
 }
 
@@ -676,12 +706,97 @@ mod tests {
     fn selected_skills_list_paths_instead_of_contents() {
         let skills = json!([
             { "name": "review", "description": "Review a\n  change.", "path": "/home/node/.agents/skills/0/review/SKILL.md", "content": "body" },
-            { "name": "legacy", "path": "/skills/1/legacy/SKILL.md", "content": "---\nname: legacy\ndescription: Older snapshot\n---\nBody" },
         ]);
         assert_eq!(
             skill_index(&skills),
-            "- review: Review a change.\n  /home/node/.agents/skills/0/review/SKILL.md\n- legacy: Older snapshot\n  /skills/1/legacy/SKILL.md"
+            "- review: Review a change.\n  /home/node/.agents/skills/0/review/SKILL.md"
         );
+    }
+
+    #[test]
+    fn chat_protocol_runs_receive_one_frame_matching_their_interaction() {
+        let guest = "/home/node/.agents/skills/0/review/SKILL.md";
+        let host = "/installation/skills/review/SKILL.md";
+        for provider in ["codex", "claude", "opencode"] {
+            let mut run = json!({
+                "id": "run", "isolated": true, "missionTurnId": "turn",
+                "pluginInstructions": "Mail: never print credentials.",
+                "snapshot": {
+                    "agent": { "provider": provider, "instructions": "Agent rules." },
+                    "task": { "prompt": "Check the deployment." },
+                    "skills": [{ "name": "review", "description": "Review a change.", "path": host }],
+                },
+            });
+            let prepared = json!({
+                "isolated": true,
+                "output": "/run/output/result.md",
+                "skills": [{ "name": "review", "description": "Review a change.", "path": guest }],
+            });
+            let plan = chat_plan(&run, &prepared, Path::new("/tmp"), &json!({}), None).unwrap();
+            let instructions = text(&plan, "instructions");
+            for expected in [
+                "Agent rules.",
+                "Mail: never print credentials.",
+                guest,
+                "This unattended task",
+            ] {
+                assert!(instructions.contains(expected), "{provider}: {expected}");
+            }
+            assert!(!instructions.contains(host));
+            assert!(!instructions.contains("This is an interactive chat"));
+
+            let turn = scheduled_turn(&run, None);
+            assert_eq!(turn["messageId"], "turn");
+            assert_eq!(turn["text"], "Task brief:\nCheck the deployment.");
+            assert_eq!(turn["recovery"], false);
+            let resumed = scheduled_turn(&run, Some("Continue."));
+            assert_eq!(resumed["text"], "Continue.");
+            assert_eq!(resumed["recovery"], true);
+
+            run["chatExecution"] = json!({ "messageId": "message", "text": "Hello" });
+            let plan = chat_plan(&run, &prepared, Path::new("/tmp"), &json!({}), None).unwrap();
+            let instructions = text(&plan, "instructions");
+            assert!(instructions.contains("This is an interactive chat"));
+            assert!(instructions.contains("Mail: never print credentials."));
+            assert!(!instructions.contains("This unattended task"));
+            assert_eq!(plan["execution"]["text"], "Hello");
+        }
+    }
+
+    #[test]
+    fn native_chat_protocol_runs_keep_the_frame_of_their_interaction() {
+        for provider in ["codex", "claude", "opencode"] {
+            let mut run = json!({
+                "id": "run",
+                "isolated": true,
+                "pluginInstructions": "Mail: never print credentials.",
+                "snapshot": {
+                    "agent": { "provider": provider, "access": { "backend": "native" } },
+                    "task": { "prompt": "Check the deployment." },
+                },
+            });
+            let mode = json!({ "mode": "protected" });
+            let mut chat = json!({
+                "execution": { "text": "Task brief:\nCheck the deployment." },
+            });
+            native_chat_privileges(&mut chat, &run, &mode);
+            let instructions = text(&chat, "instructions");
+            assert!(instructions.contains("Mail: never print credentials."));
+            assert!(instructions.contains("This unattended task"), "{provider}");
+            assert!(!instructions.contains("This is an interactive chat"));
+            assert!(!instructions.contains("Check the deployment."));
+
+            run["chatExecution"] = json!({ "messageId": "message", "text": "Hello" });
+            let mut chat = json!({ "execution": { "text": "Hello" } });
+            native_chat_privileges(&mut chat, &run, &mode);
+            let instructions = text(&chat, "instructions");
+            assert!(instructions.contains("Mail: never print credentials."));
+            assert!(
+                instructions.contains("This is an interactive chat"),
+                "{provider}"
+            );
+            assert!(!instructions.contains("This unattended task"));
+        }
     }
 
     #[test]

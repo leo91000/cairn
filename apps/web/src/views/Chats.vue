@@ -22,6 +22,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { providers } from '../../../../packages/contracts/accounts'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
+import { resumeRun } from '../../../../packages/contracts/generated/resume-run'
 import { failureReason, sameReason, stopEcho } from '../activity'
 import { api, apiUpload, state } from '../api'
 import { reuseAttachmentKey } from '../attachment-media'
@@ -50,6 +51,7 @@ import Modal from '../components/Modal.vue'
 import NodeExecution from '../components/NodeExecution.vue'
 import PlanBar from '../components/PlanBar.vue'
 import QueueStrip from '../components/QueueStrip.vue'
+import RecoveryNotice from '../components/RecoveryNotice.vue'
 import SkillTextarea from '../components/SkillTextarea.vue'
 import SubagentBar from '../components/SubagentBar.vue'
 import SubagentPanel from '../components/SubagentPanel.vue'
@@ -67,6 +69,7 @@ import {
   Check,
   ChevronDown,
   ChevronLeft,
+  CornerDownRight,
   FileText,
   FolderGit2,
   Hourglass,
@@ -88,11 +91,11 @@ import {
 import { connectionTone, installationKey, routeLabel } from '../installation-context'
 import { modelCatalogs } from '../models'
 import { useReadWhileOpen } from '../reads'
-import { useRetryNotice } from '../run-retry'
+import { useRetryState } from '../run-retry'
 import { exclusiveSuspensionLabel, isExclusivelySuspended } from '../run-status'
 import { backgroundWait } from '../signal'
 import { chatSkills } from '../skill-mentions'
-import { openSubagentKey, subagentState } from '../subagents'
+import { delegatedChatsKey, openSubagentKey, subagentState } from '../subagents'
 import { iconButton } from '../ui'
 import { useLiveRun } from '../use-live-run'
 import { workspaceActionsKey } from '../workspace-actions'
@@ -149,8 +152,8 @@ const live = useLiveRun(() => streamPath.value, {
   // Also saved under its slug when a link by identifier opened it: the Fil links to slugs.
   savedAs: state => state.chat ? `/chats/${state.chat.slug || state.chat.id}/stream` : undefined,
 })
-// Its stream carries the list while available; a failed open or a finite relay read
-// releases it to the shell, so the Fil keeps working even when the conversation cannot.
+// Its stream carries the list while available; a failed open releases it to the shell,
+// so the Fil keeps working even when the conversation cannot.
 watch(live.carriesList, value => chatListCarried.value = value, { immediate: true, flush: 'sync' })
 onBeforeUnmount(() => chatListCarried.value = false)
 const { events, connectionNotice, catchingUp } = live
@@ -184,7 +187,16 @@ const onWide = () => wide.value = wideQuery.matches
 wideQuery.addEventListener('change', onWide)
 onBeforeUnmount(() => wideQuery.removeEventListener('change', onWide))
 
+const currentSubagents = computed(() => activity.value?.subagents ?? [])
+
 function openSubagent(id: string, opener?: HTMLElement) {
+  // A delegated task is a conversation of its own: open it rather than a panel.
+  const delegation = currentSubagents.value.find(agent => agent.id === id)?.subagent?.delegation
+  if (delegation) {
+    void router.push(chatPath({ id: delegation.chatId }))
+    return
+  }
+
   subagentOpener = opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
   openedSubagent.value = id
 }
@@ -200,10 +212,11 @@ async function closeSubagent() {
 }
 
 provide(openSubagentKey, openSubagent)
+const delegatedChats = computed(() => new Map(chats.value.map(chat => [chat.id, chat])))
+provide(delegatedChatsKey, delegatedChats)
 const runActive = computed(() => detail.value?.run?.status === 'running')
 const subagentTeam = computed(() => activity.value?.teams.find(team => team.some(agent => agent.id === openedSubagent.value)))
-const currentSubagents = computed(() => activity.value?.subagents ?? [])
-const subagentBar = computed(() => currentSubagents.value.some(agent => subagentState(agent, runActive.value) === 'running'))
+const subagentBar = computed(() => currentSubagents.value.some(agent => subagentState(agent, runActive.value, delegatedChats.value) === 'running'))
 
 async function detailAction(action: () => void) {
   detailsOpen.value = false
@@ -353,12 +366,10 @@ const active = computed(() => !!detail.value?.run && ['queued', 'running'].inclu
 const suspended = computed(() => isExclusivelySuspended(detail.value?.run))
 // The plan of the current request stays in sight beside the composer while the agent follows it.
 const currentPlan = computed(() => runActive.value && !suspended.value ? activity.value?.plan : undefined)
-const retryNotice = useRetryNotice(() => detail.value?.run)
+const recovery = useRetryState(() => detail.value?.run)
 const scheduled = computed(() => scheduledWakeup(detail.value))
 // The scheduled wait shows as a card in the conversation; these notices explain a run that cannot start.
-const waitNotice = computed(() => retryNotice.value
-  ? { account: null, message: retryNotice.value }
-  : chatWaitNotice(detail.value?.run))
+const waitNotice = computed(() => recovery.value ? null : chatWaitNotice(detail.value?.run))
 const waitNow = ref(Date.now())
 let waitClock: ReturnType<typeof setInterval> | undefined
 watch(() => !!scheduled.value, (waiting) => {
@@ -658,7 +669,7 @@ async function resumeQuota() {
   error.value = ''
   try {
     if (chat.run?.status === 'failed')
-      await api(`/runs/${chat.run.id}/resume`, { method: 'POST' })
+      await resumeRun(api, { runId: chat.run.id })
     await api(`/chats/${chat.id}/pause`, { method: 'POST', body: JSON.stringify({ paused: false }) })
   }
   catch (e) {
@@ -762,6 +773,15 @@ function key(event: KeyboardEvent) {
         </dt><dd class="m-0 wrap-anywhere">
           {{ detail?.projectName || state.projects.find(project => project.id === projectId)?.name || 'No project' }}
         </dd>
+        <template v-if="detail?.requester">
+          <dt class="text-muted">
+            From
+          </dt><dd class="m-0 wrap-anywhere">
+            <RouterLink :to="chatPath({ id: detail.requester.chatId })" class="font-semibold text-accent" @click="detailsOpen = false">
+              Delegated by {{ detail.requester.title || 'New conversation' }}
+            </RouterLink>
+          </dd>
+        </template>
         <dt class="text-muted">
           Status
         </dt><dd class="m-0 flex items-center gap-2">
@@ -910,6 +930,14 @@ function key(event: KeyboardEvent) {
                 <span aria-hidden="true" class="text-muted/40">/</span>
                 <span class="flex min-w-0 items-center gap-1.5"><Icon :name="FolderGit2" :size="13" /><span class="truncate max-w-48">{{ heading.projectName }}</span></span>
               </template>
+              <RouterLink
+                v-if="heading.requester"
+                :to="chatPath({ id: heading.requester.chatId })"
+                class="flex min-w-0 items-center gap-1.5 font-semibold text-accent hover:underline"
+                data-testid="chat-requester"
+              >
+                <Icon :name="CornerDownRight" :size="13" /><span class="truncate max-w-56">Delegated by {{ heading.requester.title || 'New conversation' }}</span>
+              </RouterLink>
               <span v-if="detail" class="flex items-center gap-1.5 font-semibold" :class="chatStatus === 'Working' ? 'text-accent' : chatStatus === 'Failed' || chatStatus === 'Interrupted' ? 'text-coral' : ''"><span v-if="chatStatus !== 'Working'" class="size-1 shrink-0 rounded-full" :class="active ? 'bg-accent' : 'bg-muted'" />{{ chatStatus }}<span v-if="chatStatus === 'Working'" class="working-wave"><i /><i /><i /></span></span>
               <NodeExecution v-if="detail?.run && state.installationRole === 'owner'" :key="detail.run.id" :run="detail.run" />
             </div>
@@ -1117,8 +1145,14 @@ function key(event: KeyboardEvent) {
                 </button>
               </template>
             </UiNotice>
+            <RecoveryNotice
+              v-if="recovery && !quota"
+              :recovery="recovery"
+              :busy="busy"
+              @cancel="action('stop')"
+            />
             <UiNotice
-              v-if="waitNotice && !quota"
+              v-else-if="waitNotice && !quota"
               role="status"
               class="mb-3"
               :tone="waitNotice.account ? 'warning' : 'info'"

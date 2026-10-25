@@ -738,7 +738,8 @@ mod tests {
             db.put("agents", &agent)?;
             db.put("nodes", &json!({
                 "id": node,
-                "capabilities": { "backend": "native" },
+                "capabilities": { "backend": "native", "nativeModeProtocol": 1 },
+                "nativeModeObserved": { "mode": "protected", "generation": null, "status": "applied" },
                 "nativeEnabled": true,
                 "nativeAccounts": ["owner", "editor"],
             }))?;
