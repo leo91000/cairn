@@ -91,11 +91,14 @@ kind of wait stays separate:
   attempt on another account, reports its own state. If a
   turn fails because the usage limit refused the agent's request (its message carries
   `error: "rate_limit"`) while the latest state blocks requests, the adapter fails it
-  with `code: usage_limit_reached`, the window and `resetsAt`. The worker then takes Cairn's durable account wait or fails over, without
-  matching Claude's wording. A limit Claude Code answered after (for example a limit on
-  one model's weekly window, with the reply coming from another model), one that only
-  refused a subagent's request, or one whose reset time has passed does not explain the
-  failure: the turn fails as usual.
+  with `code: usage_limit_reached`, the window and `resetsAt`. The worker then takes
+  Cairn's durable account wait or fails over, without matching Claude's wording. A limit
+  Claude Code answered after (for example a limit on one model's weekly window, with the
+  reply coming from another model), one that only refused a subagent's request, or one
+  whose reset time has passed does not explain the failure: the turn fails as usual.
+  While a limit refuses requests, Claude Code re-emits it at most about every 30 seconds
+  per window, which counts as a new refusal. A refusal after an answered request with no
+  such repeat falls back to recognizing Claude's wording.
 - **Cairn durable wait.** Account waits, `wait_for` and automatic retries are Cairn's
   own. They release the execution's resources. Léo does not enable Claude's unattended
   `CLAUDE_CODE_RETRY_WATCHDOG`, which would keep the process waiting for a usage window
@@ -123,7 +126,8 @@ When the agent resumes a subagent, its new run reopens the same item, marked
 `resumed`. That holds even when the run names another tool use. Claude Code promises
 that a task's run IDs sort, by plain string comparison, in the order its runs opened,
 so a frame naming an earlier run, or repeating the start of the run that reported, is
-late and ignored. A subagent an earlier execution started, resumed by a `SendMessage`
+late and ignored. The call that started a subagent can return after a later run
+resumed it; that run then reports for itself. A subagent an earlier execution started, resumed by a `SendMessage`
 call or by Claude Code itself (its run then names the earlier execution's call, or no
 call), shows as a new row of the current execution marked `resumed`, keyed by its task
 and run IDs: Cairn rows belong to one execution, and a later execution that resumes it

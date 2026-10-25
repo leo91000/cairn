@@ -756,6 +756,95 @@ else {
       return
     }
 
+    if (prompt.includes('fixture:resumed-before-result')) {
+      // A foreground subagent reports, and is resumed before the call that started it returns.
+      out(value)
+      out({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: {
+          id: 'spawn',
+          content: [{
+            type: 'tool_use',
+            id: 'agent-a',
+            name: 'Agent',
+            input: { description: 'Check A', subagent_type: 'general-purpose', prompt: 'Check A' },
+          }],
+        },
+      })
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-a',
+        run_id: 'run-1',
+        tool_use_id: 'agent-a',
+        description: 'Check A',
+        task_type: 'local_agent',
+      })
+      out({
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: 'task-a',
+        run_id: 'run-1',
+        tool_use_id: 'agent-a',
+        status: 'completed',
+        summary: 'A done.',
+        output_file: '',
+      })
+      out({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: {
+          id: 'send',
+          content: [{
+            type: 'tool_use',
+            id: 'send-a',
+            name: 'SendMessage',
+            input: { to: 'task-a', message: 'One more thing.' },
+          }],
+        },
+      })
+      out({
+        type: 'system',
+        subtype: 'task_started',
+        task_id: 'task-a',
+        run_id: 'run-2',
+        tool_use_id: 'send-a',
+        description: 'Check A',
+        is_backgrounded: true,
+        task_type: 'local_agent',
+      })
+      out({
+        type: 'user',
+        parent_tool_use_id: null,
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'agent-a', content: [{ type: 'text', text: 'A done.' }] }] },
+        tool_use_result: {
+          status: 'completed',
+          agentId: 'task-a',
+          totalTokens: 10,
+          content: [{ type: 'text', text: 'A done.' }],
+        },
+      })
+      out({
+        type: 'system',
+        subtype: 'task_notification',
+        task_id: 'task-a',
+        run_id: 'run-2',
+        tool_use_id: 'send-a',
+        status: 'completed',
+        summary: 'A second report.',
+        output_file: '',
+        usage: { total_tokens: 700, tool_uses: 2, duration_ms: 400 },
+      })
+      out({
+        type: 'user',
+        parent_tool_use_id: null,
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'send-a', content: [{ type: 'text', text: 'Message delivered.' }] }] },
+      })
+      complete('Both checks done', false, correlation)
+      return
+    }
+
     if (prompt.includes('fixture:subagents-resumed')) {
       // Mirrors Claude Code 2.1.292 and later: task frames carry run and parent task IDs, and a
       // subagent's messages carry its agent ID, which stays the same when it is resumed.

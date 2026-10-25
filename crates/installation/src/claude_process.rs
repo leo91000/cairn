@@ -695,7 +695,9 @@ impl Turn<'_> {
             return Ok(());
         }
         if self.limit.as_ref() == Some(&limit) {
-            // Claude Code repeats an unchanged limit when it refuses another request.
+            // While the limit refuses requests, Claude Code re-emits it (at most about every 30
+            // seconds per window): a refusal after an answered request. One within that time
+            // falls back to recognizing Claude's wording.
             if limit.blocks() {
                 self.answered = false;
             }
@@ -906,6 +908,12 @@ impl Turn<'_> {
             if item["task_id"].is_null() {
                 item["task_id"] = agent.into();
             }
+        }
+        // The call that started the subagent can return after a later run resumed it: that run
+        // reports for itself, so the earlier run's result leaves it open.
+        if item["resumed"] == true && item["status"] == "in_progress" {
+            self.subagents.insert(id, item);
+            return Ok(());
         }
         let launched = matches!(
             text(outcome, "status"),

@@ -1679,6 +1679,30 @@ async fn nested_and_resumed_subagents_keep_their_identity_and_the_parent_reply()
 }
 
 #[tokio::test]
+async fn a_subagent_resumed_before_its_call_returns_keeps_its_new_run() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let events = run_events(&c, plan(&root, "fixture:resumed-before-result")).await;
+    let rows: Vec<_> = events
+        .iter()
+        .filter(|event| event["item"]["type"] == "subagent" && event["item"]["id"] == "agent-a")
+        .map(|event| &event["item"])
+        .collect();
+    // The call that started it returns during the new run, which reports for itself.
+    let last = rows.last().unwrap();
+    assert_eq!(last["status"], "completed");
+    assert_eq!(last["run_id"], "run-2");
+    assert_eq!(last["resumed"], true);
+    assert_eq!(last["result"], "A second report.");
+    assert_eq!(last["tokens"], 700);
+    assert!(
+        rows.iter()
+            .filter(|item| item["run_id"] == "run-2")
+            .all(|item| item["result"] != "A done.")
+    );
+}
+
+#[tokio::test]
 async fn a_subagent_resumed_by_a_later_execution_shows_as_resumed() {
     let root = TempDir::new().unwrap();
     let c = setup(&root);
