@@ -315,7 +315,7 @@ pub(super) async fn record(
             .as_str()
             .filter(|_| stored["type"] == "engine.notice")
         {
-            stored["message"] = truncate(message, NOTICE_LIMIT).into();
+            stored["message"] = cut_notice(message).into();
         }
         let serialized = serde_json::to_string(&stored)?;
         if !conversation && !activity_item {
@@ -453,6 +453,23 @@ async fn store_event(s: &Service, id: &str, raw: &str, event: &Value) -> Result<
 
 fn truncate(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
+}
+
+/// A redacted notice cut to its limit, never inside a redaction marker, marked as cut.
+fn cut_notice(message: &str) -> String {
+    const MARKER: &str = "[redacted]";
+    if message.chars().count() <= NOTICE_LIMIT {
+        return message.to_owned();
+    }
+    let mut cut = truncate(message, NOTICE_LIMIT - 1);
+    if let Some(start) = cut.rfind('[')
+        && message[start..].starts_with(MARKER)
+        && start + MARKER.len() > cut.len()
+    {
+        cut.truncate(start);
+    }
+    cut.push('…');
+    cut
 }
 
 #[cfg(test)]

@@ -2239,6 +2239,7 @@ async fn disconnect_during_the_final_authority_check_prevents_a_personal_request
     let authorization: Arc<grants::Authorization> = Arc::from(authorization);
     let context = capabilities::Context {
         management: None,
+        local_authority: None,
         connection: authorization.connection.clone(),
         manifest: package.manifest,
         event: Value::Null,

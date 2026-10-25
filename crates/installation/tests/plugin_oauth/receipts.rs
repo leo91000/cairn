@@ -204,6 +204,7 @@ async fn an_implicit_get_cannot_claim_a_mutation_receipt() {
     let package = registry::active(&s, "example").await.unwrap();
     let context = capabilities::Context {
         management: None,
+        local_authority: None,
         connection: connections::get(&s, "example", &instance).await.unwrap(),
         manifest: package.manifest,
         event: Value::Null,

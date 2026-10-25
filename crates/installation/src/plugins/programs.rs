@@ -156,7 +156,7 @@ where
     // Secret loading is I/O too. A changed instance must not launch with either
     // an obsolete credential or a replacement credential from its new revision.
     authorize().await?;
-    capabilities::authorize_management(s, context).await?;
+    capabilities::authorize_caller(s, context).await?;
     if let Some(effects) = effects {
         effects.start();
     }

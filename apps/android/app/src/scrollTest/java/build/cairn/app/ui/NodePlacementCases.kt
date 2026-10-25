@@ -8,6 +8,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
@@ -239,8 +241,17 @@ abstract class NodePlacementCases {
     @Test
     fun dismissingTheConfigurationOfANewNativeNodeCancelsTheLastStep() = nativeEnrollment(false)
 
-    private fun nativeEnrollment(save: Boolean) {
+    @Test
+    fun creatingAnEnrollmentWaitsForTheInitialInstallationLoad() = nativeEnrollment(false, true)
+
+    private fun nativeEnrollment(save: Boolean, delayInitialOverview: Boolean = false) {
         MockWebServer().use { server ->
+            val overviewEntered = CountDownLatch(1)
+            val releaseOverview = CountDownLatch(if (delayInitialOverview) 1 else 0)
+            val initialOverview = AtomicBoolean(delayInitialOverview)
+            var overviewRelease: Thread? = null
+            val mounted = mutableStateOf(true)
+            val models = androidx.lifecycle.ViewModelStore()
             val writes = CopyOnWriteArrayList<Pair<String, JsonObject>>()
             val enrolled = AtomicBoolean(false)
             val enrollmentConfigured = AtomicBoolean(false)
@@ -275,7 +286,13 @@ abstract class NodePlacementCases {
                                     """[{"id":"vm","name":"Agent VM","revision":"r1"},{"id":"native","name":"Agent natif","revision":"r1","access":{"backend":"native","nodes":[]}}]"""
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
-                                "/api/installations/fixture/api/overview" -> "{}"
+                                "/api/installations/fixture/api/overview" -> {
+                                    if (initialOverview.compareAndSet(true, false)) {
+                                        overviewEntered.countDown()
+                                        check(releaseOverview.await(10, TimeUnit.SECONDS))
+                                    }
+                                    "{}"
+                                }
                                 "/api/installations/fixture/api/projects" -> """{"projects":[]}"""
                                 else -> if (request.method == "PUT") "{}" else "[]"
                             }
@@ -299,112 +316,159 @@ abstract class NodePlacementCases {
                     vault,
                     beaconOrigin = "",
                 )
-            compose.setContent {
-                val state by vm.state.collectAsStateWithLifecycle()
-                LaunchedEffect(Unit) {
-                    vm.state.first { it.ready }
-                    vm.connect(server.url("/").toString())
+            models.put("fixture", vm)
+            try {
+                compose.setContent {
+                    if (mounted.value) {
+                        val state by vm.state.collectAsStateWithLifecycle()
+                        LaunchedEffect(Unit) {
+                            vm.state.first { it.ready }
+                            vm.connect(server.url("/").toString())
+                        }
+                        CairnTheme { if (state.session.authenticated) NodesScreen(vm, state) }
+                    }
                 }
-                CairnTheme { if (state.session.authenticated) NodesScreen(vm, state) }
-            }
-            compose.waitUntil(20000) {
-                compose.onAllNodesWithText("Ajouter une machine").fetchSemanticsNodes().isNotEmpty()
-            }
-            compose.onNodeWithText("Ajouter une machine").performScrollTo().performClick()
-            compose.onNodeWithText("Nom de la machine").performTextInput("Desk")
-            compose.onNodeWithText("Exécution native sur l’hôte").performClick()
-            compose.onNodeWithText("Créer un code d’inscription").performScrollTo().performClick()
-            compose.waitUntil(10000) {
-                compose.onAllNodesWithText("native-enrollment").fetchSemanticsNodes().isNotEmpty()
-            }
-            // Once the machine connects, it is configured first: native execution and people.
-            repeat(15) {
-                if (
+                compose.waitUntil(20000) {
+                    compose
+                        .onAllNodesWithText("Ajouter une machine")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.onNodeWithText("Ajouter une machine").performScrollTo().performClick()
+                compose.onNodeWithText("Nom de la machine").performTextInput("Desk")
+                compose.onNodeWithText("Exécution native sur l’hôte").performClick()
+                if (delayInitialOverview) {
+                    assertTrue(overviewEntered.await(10, TimeUnit.SECONDS))
+                    compose.onNodeWithText("Créer un code d’inscription").assertIsNotEnabled()
+                    assertTrue(vm.state.value.busy)
+                    assertTrue(writes.isEmpty())
+                    overviewRelease =
+                        kotlin.concurrent.thread(name = "fixture-overview-release") {
+                            Thread.sleep(500)
+                            releaseOverview.countDown()
+                        }
+                }
+                compose.onNodeWithText("Créer un code d’inscription").performScrollTo()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodes(hasText("Créer un code d’inscription") and isEnabled())
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.onNodeWithText("Créer un code d’inscription").performClick()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("native-enrollment")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                // Once the machine connects, it is configured first: native execution and people.
+                repeat(15) {
+                    if (
+                        compose
+                            .onAllNodesWithText("Activer l’exécution native")
+                            .fetchSemanticsNodes()
+                            .isEmpty()
+                    ) {
+                        compose.mainClock.advanceTimeBy(2_000)
+                        elapse(2_000)
+                        compose.waitForIdle()
+                    }
+                }
+                compose.waitUntil(10000) {
                     compose
                         .onAllNodesWithText("Activer l’exécution native")
                         .fetchSemanticsNodes()
-                        .isEmpty()
-                ) {
-                    compose.mainClock.advanceTimeBy(2_000)
-                    elapse(2_000)
-                    compose.waitForIdle()
+                        .isNotEmpty()
                 }
-            }
-            compose.waitUntil(10000) {
+                if (!save) {
+                    // Dismissed without saving: like the web, the last step is cancelled.
+                    compose.onNodeWithContentDescription("Fermer").performClick()
+                    repeat(6) {
+                        compose.mainClock.advanceTimeBy(2_000)
+                        elapse(2_000)
+                        compose.waitForIdle()
+                    }
+                    compose.onNodeWithText("Qui peut utiliser « Desk » ?").assertDoesNotExist()
+                    compose.onNodeWithText("Activer l’exécution native").assertDoesNotExist()
+                    assertTrue(
+                        writes.none {
+                            it.first.startsWith("/api/installations/fixture/api/nodes/desk")
+                        }
+                    )
+                    return
+                }
                 compose
-                    .onAllNodesWithText("Activer l’exécution native")
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            }
-            if (!save) {
-                // Dismissed without saving: like the web, the last step is cancelled.
-                compose.onNodeWithContentDescription("Fermer").performClick()
-                repeat(6) {
-                    compose.mainClock.advanceTimeBy(2_000)
-                    elapse(2_000)
-                    compose.waitForIdle()
-                }
-                compose.onNodeWithText("Qui peut utiliser « Desk » ?").assertDoesNotExist()
-                compose.onNodeWithText("Activer l’exécution native").assertDoesNotExist()
-                assertTrue(
-                    writes.none { it.first.startsWith("/api/installations/fixture/api/nodes/desk") }
-                )
-                return
-            }
-            compose.onNodeWithText("Activer l’exécution native").performScrollTo().performClick()
-            compose.onNodeWithText("trusted@example.test").performScrollTo().performClick()
-            compose.onNodeWithText("Enregistrer").performClick()
+                    .onNodeWithText("Activer l’exécution native")
+                    .performScrollTo()
+                    .performClick()
+                compose.onNodeWithText("trusted@example.test").performScrollTo().performClick()
+                compose.onNodeWithText("Enregistrer").performClick()
 
-            // Then the same add-only step, offering native agents only.
-            compose.waitUntil(15000) {
-                compose
-                    .onAllNodesWithText("Qui peut utiliser « Desk » ?")
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            }
-            compose.onNode(isOff() and hasText("Agent VM")).assertIsNotEnabled()
-            compose.onNodeWithText("Agent en VM : réservé aux nodes VM").assertExists()
-            compose.onNode(isOff() and hasText("Agent natif")).assertIsEnabled().performClick()
-            compose.onNodeWithText("Terminer").performScrollTo().performClick()
-            compose.waitUntil(10000) {
-                writes.any { it.first == "/api/installations/fixture/api/nodes/desk/agents" }
-            }
-            val configured = writes.first {
-                it.first == "/api/installations/fixture/api/nodes/desk"
-            }
-            assertEquals(JsonPrimitive(true), configured.second["nativeEnabled"])
-            val grant =
-                writes
-                    .first { it.first == "/api/installations/fixture/api/nodes/desk/agents" }
-                    .second
-            assertEquals(
-                listOf("native"),
-                grant["agentIds"]!!.jsonArray.map { it.jsonPrimitive.content },
-            )
-            assertEquals(JsonPrimitive(true), grant["add"])
-            // The ublk storage policy applies to native disks; technical details name ublk.
-            compose.onNodeWithText("Stockage").performScrollTo().assertExists()
-            compose.onNodeWithText("Détails techniques").performScrollTo().performClick()
-            compose.onNodeWithText("disque · ublk indisponible", substring = true).assertExists()
-            compose
-                .onNodeWithText(
-                    "ublk indisponible : cette node a besoin d’un runtime natif à jour",
-                    substring = true,
+                // Then the same add-only step, offering native agents only.
+                compose.waitUntil(15000) {
+                    compose
+                        .onAllNodesWithText("Qui peut utiliser « Desk » ?")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.onNode(isOff() and hasText("Agent VM")).assertIsNotEnabled()
+                compose.onNodeWithText("Agent en VM : réservé aux nodes VM").assertExists()
+                compose.onNode(isOff() and hasText("Agent natif")).assertIsEnabled().performClick()
+                compose.onNodeWithText("Terminer").performScrollTo().performClick()
+                compose.waitUntil(10000) {
+                    writes.any { it.first == "/api/installations/fixture/api/nodes/desk/agents" }
+                }
+                val configured = writes.first {
+                    it.first == "/api/installations/fixture/api/nodes/desk"
+                }
+                assertEquals(JsonPrimitive(true), configured.second["nativeEnabled"])
+                val grant =
+                    writes
+                        .first { it.first == "/api/installations/fixture/api/nodes/desk/agents" }
+                        .second
+                assertEquals(
+                    listOf("native"),
+                    grant["agentIds"]!!.jsonArray.map { it.jsonPrimitive.content },
                 )
-                .assertExists()
-            compose.onNodeWithText("Révoquer").performScrollTo().performClick()
-            compose.onNodeWithText("grep ^/var/lib/cairn-native/", substring = true).assertExists()
-            compose.onNodeWithText("Copier la commande").performScrollTo().assertIsDisplayed()
-            compose.waitUntil(10000) {
+                assertEquals(JsonPrimitive(true), grant["add"])
+                // The ublk storage policy applies to native disks; technical details name ublk.
+                compose.onNodeWithText("Stockage").performScrollTo().assertExists()
+                compose.onNodeWithText("Détails techniques").performScrollTo().performClick()
                 compose
-                    .onAllNodes(hasText("Confirmer") and isEnabled())
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
+                    .onNodeWithText("disque · ublk indisponible", substring = true)
+                    .assertExists()
+                compose
+                    .onNodeWithText(
+                        "ublk indisponible : cette node a besoin d’un runtime natif à jour",
+                        substring = true,
+                    )
+                    .assertExists()
+                compose.onNodeWithText("Révoquer").performScrollTo().performClick()
+                compose
+                    .onNodeWithText("grep ^/var/lib/cairn-native/", substring = true)
+                    .assertExists()
+                compose.onNodeWithText("Copier la commande").performScrollTo().assertIsDisplayed()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodes(hasText("Confirmer") and isEnabled())
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.onNodeWithText("Confirmer").assertIsEnabled()
+                compose
+                    .onNodeWithText("l’affiche et s’arrête avant de supprimer", substring = true)
+                    .assertExists()
+            } finally {
+                releaseOverview.countDown()
+                overviewRelease?.join(1_000)
+                try {
+                    compose.runOnIdle { mounted.value = false }
+                    compose.waitForIdle()
+                } finally {
+                    compose.runOnIdle { models.clear() }
+                }
             }
-            compose.onNodeWithText("Confirmer").assertIsEnabled()
-            compose
-                .onNodeWithText("l’affiche et s’arrête avant de supprimer", substring = true)
-                .assertExists()
         }
     }
 

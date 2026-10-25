@@ -939,12 +939,22 @@ async fn proxy(
     params: Value,
 ) -> Result<Value> {
     let _guard = s.mcps.lock(id).await;
-    let (server, scope) = s.mcps.grant(s, id, bearer).await?;
+    let authority = crate::mcps::GatewayAuthority::capture(s, id, bearer).await?;
+    let (server, scope) = authority.recheck(s).await?;
     if method == "tools/call" && !scope.allows(text(&params, "name")) {
         return Err(Error::forbidden("This tool is unavailable to this agent."));
     }
     let result = async {
-        let mut client = crate::mcp_client::Client::connect_server(s, &server).await?;
+        let refresh_authority = authority.clone();
+        let mut client =
+            crate::mcp_client::Client::connect_server_authorized(s, &server, move |db| {
+                refresh_authority.current(db).map(|_| ())
+            })
+            .await?;
+        if let Err(error) = authority.recheck(s).await {
+            client.close().await;
+            return Err(error);
+        }
         let unsupported = match method {
             "resources/list" | "resources/templates/list" => {
                 client.capabilities.get("resources").is_none()
@@ -973,8 +983,13 @@ async fn proxy(
         result
     }
     .await;
+    authority.recheck(s).await?;
     if let Err(error) = &result {
-        s.mcps.failure(s, server, error).await?;
+        s.mcps
+            .failure_authorized(s, server, error, move |db| {
+                authority.current(db).map(|_| ())
+            })
+            .await?;
     }
     result
 }

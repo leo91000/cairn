@@ -21,13 +21,17 @@ pub enum Claim {
     Cached(Value),
 }
 
-pub async fn claim(
+pub async fn claim<F>(
     s: &Service,
     context: &Context,
     args: &Value,
     resource: Option<&resources::Access>,
     oauth: Option<&oauth::Reference>,
-) -> Result<Option<Claim>> {
+    authorize: F,
+) -> Result<Option<Claim>>
+where
+    F: FnOnce(&crate::store::Db<'_>) -> Result<()> + Send + 'static,
+{
     let Some(key) = args.get("idempotencyKey").filter(|v| !v.is_null()) else {
         return Ok(None);
     };
@@ -64,6 +68,7 @@ pub async fn claim(
     let management = context.management.clone();
     s.store.transaction(move |db| {
         if let Some(authority) = &management { authority.authorize(db)?; }
+        authorize(db)?;
         connections::authorize(db, &connection)?;
         if let Some(existing) = db.get(KIND, &id)? {
             if existing["fingerprint"] != fingerprint { return Err(Error::conflict("This idempotency key was already used for another request.")); }

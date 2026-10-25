@@ -84,12 +84,12 @@ pub async fn renew(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
     if !jsonschema::is_valid(&renew_tool()["inputSchema"], input) {
         return Err(Error::bad("Provide a reservation ID and 1 to 900 seconds."));
     }
-    let bearer = bearer.to_owned();
+    let authority = project_workspaces::Authority::capture(s, bearer).await?;
     let input = input.clone();
     let record = s
         .store
         .transaction(move |db| {
-            let run = project_workspaces::authorize_in(db, &bearer)?;
+            let run = authority.current(db)?;
             let mut record = db
                 .get(KIND, text(&input, "reservationId"))?
                 .ok_or_else(|| Error::not_found("Reservation missing."))?;
@@ -131,6 +131,7 @@ fn enabled(node: &Value, agent: &str) -> bool {
 }
 
 fn authorize_run(db: &Db<'_>, run: &Value, node_id: &str) -> Result<String> {
+    crate::plugins::requesters::recheck_run_in(db, run)?;
     let denied = || Error::forbidden("Exclusive node access is unavailable or was revoked.");
     let node = db.get("nodes", node_id)?.ok_or_else(denied)?;
     let agent_id = super::run_agent(run);
@@ -209,7 +210,7 @@ pub async fn acquire(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
             "Provide a concrete reason and a duration of 1 to 900 seconds.",
         ));
     }
-    let bearer = bearer.to_owned();
+    let authority = project_workspaces::Authority::capture(s, bearer).await?;
     let mut input = crate::run_output::payload(input, &[]);
     for (field, default) in [
         ("durationSeconds", 1),
@@ -228,7 +229,7 @@ pub async fn acquire(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
     let request = s
         .store
         .transaction(move |db| {
-            let run = project_workspaces::authorize_in(db, &bearer)?;
+            let run = authority.current(db)?;
             let checkpoint = super::db_checkpoint(db, text(&run, "id"))?;
             let node_id = checkpoint["nodeId"]
                 .as_str()
@@ -337,9 +338,11 @@ pub async fn acquire(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
 }
 
 pub async fn status(s: &Service, bearer: &str) -> Result<Value> {
-    let run = project_workspaces::authorize(s, bearer).await?;
+    let authority = project_workspaces::Authority::capture(s, bearer).await?;
+    let run = authority.recheck(s).await?;
     let run_id = text(&run, "id").to_owned();
     s.store.read(move |db| {
+        authority.current(db)?;
         let requests = db.json_rows(
             "SELECT data FROM records WHERE kind=? AND json_extract(data,'$.ownerRunId')=? ORDER BY CASE WHEN json_extract(data,'$.state') IN ('queued','acquiring','acquired','releasing') THEN 0 ELSE 1 END, json_extract(data,'$.createdAt') DESC LIMIT 20",
             [KIND, &run_id],
@@ -352,17 +355,36 @@ pub async fn release(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
     if !jsonschema::is_valid(&release_tool()["inputSchema"], input) {
         return Err(Error::bad("Provide a reservation ID."));
     }
-    let run = project_workspaces::authorize(s, bearer).await?;
-    release_owned(s, text(input, "reservationId"), Some(text(&run, "id"))).await
+    let authority = project_workspaces::Authority::capture(s, bearer).await?;
+    let run = authority.recheck(s).await?;
+    release_authorized(
+        s,
+        text(input, "reservationId"),
+        Some(text(&run, "id")),
+        Some(authority),
+    )
+    .await
 }
 
 pub async fn release_owned(s: &Service, request_id: &str, owner: Option<&str>) -> Result<Value> {
+    release_authorized(s, request_id, owner, None).await
+}
+
+async fn release_authorized(
+    s: &Service,
+    request_id: &str,
+    owner: Option<&str>,
+    authority: Option<project_workspaces::Authority>,
+) -> Result<Value> {
     uuid(request_id)?;
     let request_id = request_id.to_owned();
     let owner = owner.map(str::to_owned);
     let record = s
         .store
         .transaction(move |db| {
+            if let Some(authority) = authority {
+                authority.current(db)?;
+            }
             let mut record = db
                 .get(KIND, &request_id)?
                 .ok_or_else(|| Error::not_found("Reservation missing."))?;

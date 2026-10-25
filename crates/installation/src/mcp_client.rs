@@ -93,7 +93,7 @@ impl Client {
         Self::connect_server_authorized(s, server, |_| Ok(())).await
     }
 
-    async fn connect_server_authorized<F>(
+    pub(crate) async fn connect_server_authorized<F>(
         s: &Service,
         server: &McpServer,
         authorize: F,
@@ -111,10 +111,13 @@ impl Client {
             crate::mcp_oauth::refresh_authorized(s, server, authorize.clone()).await?;
             secrets = s.mcps.server_secrets(s, &server.id).await?;
         }
+        let before_connect = authorize.clone();
+        s.store.read(move |db| before_connect(db)).await?;
         let first = Self::open(s, server, &secrets).await;
         if first.as_ref().is_err_and(Error::is_unauthorized) && refreshable(&secrets) {
             crate::mcp_oauth::refresh_authorized(s, server, authorize.clone()).await?;
             let secrets = s.mcps.server_secrets(s, &server.id).await?;
+            s.store.read(move |db| authorize(db)).await?;
             return Self::open(s, server, &secrets).await;
         }
         first

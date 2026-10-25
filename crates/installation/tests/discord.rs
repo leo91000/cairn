@@ -523,6 +523,7 @@ async fn sockets_reach_only_declared_hosts_from_the_transport_worker() {
     }
     let context = cairn_installation::plugins::capabilities::Context {
         management: None,
+        local_authority: None,
         connection: connection.clone(),
         manifest: package.manifest.clone(),
         event: json!({ "name": "socket" }),
@@ -956,6 +957,7 @@ async fn same_credential_reserves_the_last_session_start_across_instances() {
     let (link, mut commands) = socket::Link::channel();
     let context = |connection| Context {
         management: None,
+        local_authority: None,
         connection,
         manifest: package.manifest.clone(),
         event: json!({ "name": "socket" }),

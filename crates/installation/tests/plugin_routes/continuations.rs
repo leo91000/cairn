@@ -1,5 +1,8 @@
 //! Native lifecycle/occupancy fixtures. Actual Slack provider/manager recovery
 //! is proved separately by slack::recovery, without seeded execution results.
+#[path = "agent_effects.rs"]
+mod agent_effects;
+
 use super::*;
 use cairn_installation::{chats::wait_for, plugins::work};
 use tokio::sync::{Mutex, Notify};
@@ -16,7 +19,11 @@ struct Started {
 
 impl Started {
     async fn new(origin: Option<String>) -> Self {
-        let (root, s, instance, resource, app) = fixture().await;
+        Self::with_runner(origin, "http://runner:4311").await
+    }
+
+    async fn with_runner(origin: Option<String>, runner: &str) -> Self {
+        let (root, s, instance, resource, app) = configured_fixture_with_runner(None, runner).await;
         s.plugins.route_http_to(origin.clone());
         let agent = s
             .agent(
@@ -134,6 +141,357 @@ impl Started {
             .await
             .unwrap()
     }
+}
+
+#[tokio::test]
+async fn workspace_effects_refuse_the_revoked_external_source_of_a_running_turn() {
+    let f = Started::new(None).await;
+    let admitted = json!({"status": "needs_input", "reason": "Original author", "evidence": []});
+    cairn_installation::outcome::report(&f.s, &f.bearer, &admitted)
+        .await
+        .unwrap();
+    let route = f.delivery["routing"]["id"].as_str().unwrap().to_owned();
+    f.s.store
+        .transaction(move |db| db.remove("plugin-routes", &route))
+        .await
+        .unwrap();
+
+    let result = cairn_installation::project_workspaces::rpc(
+        &f.s,
+        &f.bearer,
+        "tools/call",
+        &json!({"name": "report_outcome", "arguments": {
+            "status": "completed", "reason": "Retired author", "evidence": [],
+        }}),
+    )
+    .await;
+    let run = f.s.store.run(text(&f.run, "id")).await.unwrap();
+    assert_eq!(
+        run["outcome"]["reason"], admitted["reason"],
+        "A still-running workspace bearer committed after its source route was revoked"
+    );
+    assert!(result.is_err() || result.unwrap()["isError"] == true);
+}
+
+#[tokio::test]
+async fn workspace_publication_keeps_its_source_across_file_transfer_and_reapproval() {
+    for change in ["route", "approval"] {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let (waiting, resume) = (entered.clone(), release.clone());
+        let guest = axum::Router::new().fallback(axum::routing::post(
+            move |axum::Json(input): axum::Json<Value>| {
+                let (waiting, resume) = (waiting.clone(), resume.clone());
+                async move {
+                    if input["path"] == "/private/held.md" {
+                        waiting.notify_one();
+                        resume.notified().await;
+                    }
+                    "# Synthetic private fixture\n"
+                }
+            },
+        ));
+        let (origin, guest) = common::serve_locally(guest).await;
+        let f = Started::with_runner(None, &origin).await;
+        common::set_checkpoint(
+            &f.s.store,
+            text(&f.run, "id"),
+            json!({
+                "runnerId": cairn_installation::config::id(),
+            }),
+        )
+        .await;
+        f.s.artifacts
+            .publish(
+                &f.s,
+                &f.bearer,
+                &json!({
+                    "path": "/private/initial.md", "title": "Original file", "key": "original",
+                }),
+            )
+            .await
+            .unwrap();
+        let before = cairn_installation::artifacts::list(&f.s, text(&f.run, "id"))
+            .await
+            .unwrap();
+        assert_eq!(before.len(), 1);
+        let (s, bearer) = (f.s.clone(), f.bearer.clone());
+        let publication = tokio::spawn(async move {
+            s.artifacts
+                .publish(
+                    &s,
+                    &bearer,
+                    &json!({
+                        "path": "/private/held.md", "title": "Retired file", "key": "retired",
+                    }),
+                )
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        if change == "route" {
+            let route = text(&f.delivery["routing"], "id").to_owned();
+            f.s.store
+                .transaction(move |db| db.remove("plugin-routes", &route))
+                .await
+                .unwrap();
+        } else {
+            let package = registry::active(&f.s, "router").await.unwrap();
+            registry::approve(&f.s, "router", "1", &package.digest)
+                .await
+                .unwrap();
+        }
+        release.notify_one();
+        let result = publication.await.unwrap();
+        guest.abort();
+        assert!(
+            result.is_err(),
+            "Publication borrowed a new {change} authority"
+        );
+        assert_eq!(
+            cairn_installation::artifacts::list(&f.s, text(&f.run, "id"))
+                .await
+                .unwrap(),
+            before
+        );
+    }
+}
+
+#[tokio::test]
+async fn upstream_mcp_keeps_the_original_source_during_connection_and_response() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    for phase in ["connection", "response"] {
+        let held = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let (hold, seen, waiting, resume) = (
+            held.clone(),
+            calls.clone(),
+            entered.clone(),
+            release.clone(),
+        );
+        let upstream = axum::Router::new().fallback(axum::routing::post(
+            move |axum::Json(input): axum::Json<Value>| {
+                let (hold, seen, waiting, resume) = (hold.clone(), seen.clone(), waiting.clone(), resume.clone());
+                async move {
+                    let method = text(&input, "method");
+                    let result = if method == "server/discover" {
+                        if phase == "connection" && hold.load(Ordering::SeqCst) {
+                            waiting.notify_one();
+                            resume.notified().await;
+                        }
+                        json!({"supportedVersions": [cairn_installation::mcp_client::MODERN], "capabilities": {"tools": {}}})
+                    } else {
+                        assert_eq!(method, "tools/call");
+                        seen.fetch_add(1, Ordering::SeqCst);
+                        if phase == "response" && hold.load(Ordering::SeqCst) {
+                            waiting.notify_one();
+                            resume.notified().await;
+                        }
+                        json!({"content": [{"type": "text", "text": "private-upstream-result"}]})
+                    };
+                    axum::Json(json!({"jsonrpc": "2.0", "id": input["id"], "result": result}))
+                }
+            },
+        ));
+        let (origin, upstream) = common::serve_locally(upstream).await;
+        let f = Started::new(None).await;
+        let connection =
+            f.s.mcps
+                .save(
+                    &f.s,
+                    json!({
+                        "name": "Source-bound upstream", "url": origin, "allowPrivateNetwork": true,
+                    }),
+                    None,
+                )
+                .await
+                .unwrap();
+        let configuration = f.s.mcps.run_configuration(&f.s, &f.run).await.unwrap();
+        let bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN").to_owned();
+        f.s.mcps
+            .grant(&f.s, text(&connection, "id"), &bearer)
+            .await
+            .unwrap();
+        let app = cairn_installation::http::router(f.s.clone()).await.unwrap();
+        let path = format!("/mcp-gateway/{}", text(&connection, "id"));
+        let invoke = |app: axum::Router, bearer: String, path: String| async move {
+            let response = common::send(
+                &app,
+                common::request("POST", &path)
+                    .header("authorization", format!("Bearer {bearer}"))
+                    .header(
+                        "mcp-protocol-version",
+                        cairn_installation::mcp_client::MODERN,
+                    )
+                    .header("mcp-method", "tools/call")
+                    .body(Body::from(
+                        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "probe", "arguments": {}}})
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+            let status = response.status();
+            (status, common::read_json(response).await)
+        };
+        let first = invoke(app.clone(), bearer.clone(), path.clone()).await;
+        assert_eq!(first.0, StatusCode::OK, "{first:?}");
+        assert!(first.1.to_string().contains("private-upstream-result"));
+        held.store(true, Ordering::SeqCst);
+        let pending = tokio::spawn(invoke(app, bearer, path));
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        let package = registry::active(&f.s, "router").await.unwrap();
+        registry::approve(&f.s, "router", "1", &package.digest)
+            .await
+            .unwrap();
+        release.notify_one();
+        let response = pending.await.unwrap();
+        upstream.abort();
+        assert!(
+            !response.1.to_string().contains("private-upstream-result"),
+            "{response:?}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            if phase == "connection" { 1 } else { 2 }
+        );
+    }
+}
+
+#[tokio::test]
+async fn local_plugin_effects_queued_on_the_writer_retain_their_original_source() {
+    let mut changed = Vec::new();
+    for change in [
+        "source",
+        "target-grant",
+        "source-approval",
+        "target-approval",
+    ] {
+        for method in ["set", "max", "delete", "after", "cancel"] {
+            let f = Started::new(None).await;
+            let package = registry::install(&f.s, &json!({
+            "manifest": {
+                "id": "local-effects", "name": "Local effects", "version": "1", "apiVersion": 2,
+                "capabilities": ["storage", "timers"], "agentAccess": {},
+                "tools": [{"name": "local_effects_write", "description": "Exercise an instance-owned effect",
+                    "inputSchema": {"type": "object", "properties": {
+                        "method": {"type": "string"}, "timer": {"type": "string"}
+                    }, "required": ["method"]}}],
+            },
+            "source": r#"return {tool = function(event)
+                local input = event.input
+                if input.method == 'seed' then
+                    cairn.storage.set('value', 1)
+                    return cairn.timers.after(3600, 'seed', {})
+                elseif input.method == 'set' then cairn.storage.set('value', 2)
+                elseif input.method == 'max' then cairn.storage.max('value', 2)
+                elseif input.method == 'delete' then cairn.storage.delete('value')
+                elseif input.method == 'after' then return cairn.timers.after(3600, 'retired', {})
+                elseif input.method == 'cancel' then cairn.timers.cancel(input.timer) end
+                return true
+            end}"#,
+        })).await.unwrap();
+            registry::approve(&f.s, "local-effects", "1", text(&package, "digest"))
+                .await
+                .unwrap();
+            let instance = connections::save(
+                &f.s,
+                "local-effects",
+                &json!({
+                    "name": "Granted local state", "enabled": true,
+                    "agentIds": [f.run["snapshot"]["agent"]["id"]],
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+            let timer = agents::call_tool(
+                &f.s,
+                &f.bearer,
+                "local_effects_write",
+                &json!({"method": "seed"}),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let before_storage = f.s.store.list("plugin-storage").await.unwrap();
+            let before_timers = f.s.store.list("plugin-timers").await.unwrap();
+            assert_eq!(before_storage.len(), 1);
+            assert_eq!(before_timers.len(), 1);
+            assert_eq!(before_storage[0]["connectionId"], instance["id"]);
+
+            // WAL readers remain available. The real worker can finish its admission
+            // reads while its local effect waits behind this transaction's writer.
+            let (release, blocked) = std::sync::mpsc::channel();
+            let (entered, ready) = tokio::sync::oneshot::channel();
+            let s = f.s.clone();
+            let route = f.delivery["routing"]["id"].as_str().unwrap().to_owned();
+            let target = text(&instance, "id").to_owned();
+            let writer = tokio::spawn(async move {
+                s.store
+                    .transaction(move |db| {
+                        entered.send(()).unwrap();
+                        blocked
+                            .recv_timeout(std::time::Duration::from_secs(10))
+                            .unwrap();
+                        match change {
+                            "source" => db.remove("plugin-routes", &route)?,
+                            "target-grant" => {
+                                let mut target = db.get(connections::KIND, &target)?.unwrap();
+                                target["agentIds"] = json!([]);
+                                db.put(connections::KIND, &target)?;
+                            }
+                            _ => {
+                                let plugin = if change == "source-approval" {
+                                    "router"
+                                } else {
+                                    "local-effects"
+                                };
+                                let key = format!("package:{plugin}");
+                                let mut package = db.get("plugin-packages", &key)?.unwrap();
+                                package["revision"] = json!(cairn_installation::config::id());
+                                db.put("plugin-packages", &package)?;
+                            }
+                        }
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            });
+            ready.await.unwrap();
+            let s = f.s.clone();
+            let bearer = f.bearer.clone();
+            let input = json!({"method": method, "timer": timer});
+            let effect = tokio::spawn(async move {
+                agents::call_tool(&s, &bearer, "local_effects_write", &input).await
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let pending = !effect.is_finished();
+            release.send(()).unwrap();
+            writer.await.unwrap();
+            let result = effect.await.unwrap();
+            assert!(pending, "The {method} fixture did not wait for the writer");
+            assert!(
+                result.is_err(),
+                "The retired invocation returned success: {method}"
+            );
+            if f.s.store.list("plugin-storage").await.unwrap() != before_storage
+                || f.s.store.list("plugin-timers").await.unwrap() != before_timers
+            {
+                changed.push(format!("{change}/{method}"));
+            }
+        }
+    }
+    assert!(
+        changed.is_empty(),
+        "Refused invocations still changed persistent state: {changed:?}"
+    );
 }
 
 #[tokio::test]

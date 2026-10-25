@@ -207,12 +207,12 @@ pub async fn for_agent(s: &Service, bearer: &str, input: Option<&Value>) -> Resu
             "Provide a valid questionId from pending_questions.",
         ));
     }
-    let bearer = bearer.to_owned();
+    let authority = crate::project_workspaces::Authority::capture(s, bearer).await?;
     let input = input.cloned();
     let result = s
         .store
         .transaction(move |db| {
-            let run = crate::project_workspaces::authorize_in(db, &bearer)?;
+            let run = authority.current(db)?;
             let run_id = text(&run, "id");
             let chat = required(chat_for_run(db, run_id)?, "This run has no conversation.")?;
             let chat_id = text(&chat, "id");

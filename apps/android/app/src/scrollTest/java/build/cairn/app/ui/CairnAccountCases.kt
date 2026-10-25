@@ -122,6 +122,13 @@ abstract class CairnAccountCases {
         val methodsRequested = java.util.concurrent.CountDownLatch(1)
         val releaseMethods = java.util.concurrent.CountDownLatch(if (deferAccountMethods) 1 else 0)
         val server = MockWebServer()
+        val ownedModels = mutableListOf<androidx.lifecycle.ViewModelStore>()
+        val mounted = mutableStateOf(true)
+        var contentSet = false
+        fun <T : androidx.lifecycle.ViewModel> own(model: T): T {
+            ownedModels += androidx.lifecycle.ViewModelStore().apply { put("fixture", model) }
+            return model
+        }
         try {
             val installations =
                 """[{"id":"selection-home","name":"Maison","role":"owner","online":true},{"id":"selection-work","name":"Bureau","role":"member","online":true}]"""
@@ -211,17 +218,20 @@ abstract class CairnAccountCases {
             val origin = server.url("/").toString()
             val vault = sessionVault(application)
             vault.write(origin, "cairn_session=selection-fixture; Path=/; Max-Age=3600; HttpOnly")
-            val model = mutableStateOf(CairnViewModel(application, vault, beaconOrigin = ""))
-            val updates = build.cairn.app.update.UpdateViewModel(application)
+            val model = mutableStateOf(own(CairnViewModel(application, vault, beaconOrigin = "")))
+            val updates = own(build.cairn.app.update.UpdateViewModel(application))
+            contentSet = true
             compose.setContent {
-                val vm = model.value
-                key(vm) {
-                    LaunchedEffect(Unit) {
-                        vm.state.first { it.ready }
-                        vm.perform { connect(origin) }
-                    }
-                    CompositionLocalProvider(LocalAppUpdates provides updates) {
-                        CairnTheme { CairnApp(vm = vm) }
+                if (mounted.value) {
+                    val vm = model.value
+                    key(vm) {
+                        LaunchedEffect(Unit) {
+                            vm.state.first { it.ready }
+                            vm.perform { connect(origin) }
+                        }
+                        CompositionLocalProvider(LocalAppUpdates provides updates) {
+                            CairnTheme { CairnApp(vm = vm) }
+                        }
                     }
                 }
             }
@@ -318,9 +328,12 @@ abstract class CairnAccountCases {
             assertTrue(workFile.exists())
             val previouslyNotified = setOf("existing-question")
             runBlocking { model.value.notifications.setSeen(previouslyNotified) }
+            val retiredModel = ownedModels.first()
             compose.runOnIdle {
-                model.value = CairnViewModel(application, vault, beaconOrigin = "")
+                model.value = own(CairnViewModel(application, vault, beaconOrigin = ""))
             }
+            compose.waitForIdle()
+            compose.runOnIdle { retiredModel.clear() }
             compose.waitUntil(30000) {
                 compose
                     .onAllNodes(installationHeader("Bureau", "En ligne"))
@@ -378,7 +391,18 @@ abstract class CairnAccountCases {
             assertTrue(model.value.state.value.session.authenticated)
         } finally {
             releaseMethods.countDown()
-            server.close()
+            try {
+                if (contentSet) {
+                    compose.runOnIdle { mounted.value = false }
+                    compose.waitForIdle()
+                }
+            } finally {
+                try {
+                    compose.runOnIdle { ownedModels.forEach { it.clear() } }
+                } finally {
+                    server.close()
+                }
+            }
         }
     }
 

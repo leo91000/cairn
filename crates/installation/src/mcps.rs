@@ -504,9 +504,29 @@ impl Mcps {
             .await
     }
 
-    pub async fn failure(&self, s: &Service, mut server: McpServer, error: &Error) -> Result<()> {
+    pub async fn failure(&self, s: &Service, server: McpServer, error: &Error) -> Result<()> {
+        self.failure_authorized(s, server, error, |_| Ok(())).await
+    }
+
+    pub(crate) async fn failure_authorized<F>(
+        &self,
+        s: &Service,
+        mut server: McpServer,
+        error: &Error,
+        authorize: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
         record_failure(&mut server, error);
-        self.put_server(s, &server).await
+        let record = serde_json::to_value(server)?;
+        s.store
+            .transaction(move |db| {
+                authorize(db)?;
+                db.put("mcps", &record)?;
+                Ok(())
+            })
+            .await
     }
 
     /// Records a discovery outcome: the tool catalog on success, the failure otherwise.
@@ -640,35 +660,9 @@ impl Mcps {
         id: &str,
         bearer: &str,
     ) -> Result<(McpServer, GrantScope)> {
-        let (id, bearer) = (id.to_owned(), bearer.to_owned());
-        s.store
-            .read(move |db| {
-                let expired = || Error::unauthorized("MCP run access expired or was revoked.");
-                let grant = db.kv(&grant_key(&bearer))?.ok_or_else(expired)?;
-                let grant = RunGrant::deserialize(&grant)?;
-                let run = db.run(&grant.run_id)?.ok_or_else(expired)?;
-                let item = db.get("mcps", &id)?.ok_or_else(expired)?;
-                let server = McpServer::deserialize(&item)?;
-                let Some(scope) = grant.servers.get(&id) else {
-                    return Err(expired());
-                };
-                let revoked = grant.message_id != *crate::waits::execution_id(&run)
-                    || !run["cancelRequestedAt"].is_null()
-                    || run["status"] != RunStatus::Running
-                    || !server.enabled
-                    || server.revision != scope.revision;
-                if revoked {
-                    return Err(expired());
-                }
-                let agent = &run["snapshot"]["agent"];
-                let current = db
-                    .get("agents", text(agent, "id"))?
-                    .ok_or_else(|| Error::forbidden("Agent permissions changed."))?;
-                if !covers(&current, agent) {
-                    return Err(Error::forbidden("Agent permissions were reduced."));
-                }
-                Ok((server, scope.clone()))
-            })
+        GatewayAuthority::capture(s, id, bearer)
+            .await?
+            .recheck(s)
             .await
     }
 
@@ -684,5 +678,75 @@ impl Mcps {
                 Ok(())
             })
             .await
+    }
+}
+
+/// The original run source remains authoritative while a gateway connects,
+/// refreshes credentials, waits for a response or records a connection failure.
+#[derive(Clone)]
+pub(crate) struct GatewayAuthority {
+    id: String,
+    bearer: String,
+    requester: Option<crate::plugins::requesters::RunRequester>,
+}
+
+fn gateway_in(db: &Db<'_>, id: &str, bearer: &str) -> Result<(McpServer, GrantScope, Value)> {
+    let expired = || Error::unauthorized("MCP run access expired or was revoked.");
+    let grant = db.kv(&grant_key(bearer))?.ok_or_else(expired)?;
+    let grant = RunGrant::deserialize(&grant)?;
+    let run = db.run(&grant.run_id)?.ok_or_else(expired)?;
+    let item = db.get("mcps", id)?.ok_or_else(expired)?;
+    let server = McpServer::deserialize(&item)?;
+    let Some(scope) = grant.servers.get(id) else {
+        return Err(expired());
+    };
+    let revoked = grant.message_id != *crate::waits::execution_id(&run)
+        || !run["cancelRequestedAt"].is_null()
+        || run["status"] != RunStatus::Running
+        || !server.enabled
+        || server.revision != scope.revision;
+    if revoked {
+        return Err(expired());
+    }
+    let agent = &run["snapshot"]["agent"];
+    let current = db
+        .get("agents", text(agent, "id"))?
+        .ok_or_else(|| Error::forbidden("Agent permissions changed."))?;
+    if !covers(&current, agent) {
+        return Err(Error::forbidden("Agent permissions were reduced."));
+    }
+    crate::plugins::requesters::recheck_run_in(db, &run)?;
+    Ok((server, scope.clone(), run))
+}
+
+impl GatewayAuthority {
+    pub(crate) async fn capture(s: &Service, id: &str, bearer: &str) -> Result<Self> {
+        let (connection, token) = (id.to_owned(), bearer.to_owned());
+        let (_, _, run) = s
+            .store
+            .read(move |db| gateway_in(db, &connection, &token))
+            .await?;
+        let requester = crate::plugins::requesters::for_run(s, &run).await?;
+        Ok(Self {
+            id: id.to_owned(),
+            bearer: bearer.to_owned(),
+            requester,
+        })
+    }
+
+    pub(crate) fn current(&self, db: &Db<'_>) -> Result<(McpServer, GrantScope)> {
+        let (server, scope, _) = gateway_in(db, &self.id, &self.bearer)?;
+        if let Some(requester) = &self.requester {
+            crate::plugins::requesters::recheck_in(db, requester)?;
+        }
+        Ok((server, scope))
+    }
+
+    pub(crate) async fn recheck(&self, s: &Service) -> Result<(McpServer, GrantScope)> {
+        if let Some(requester) = &self.requester {
+            crate::plugins::requesters::recheck(s, requester).await?;
+        }
+        let expected = self.clone();
+        s.store.read(move |db| expected.current(db)).await
     }
 }

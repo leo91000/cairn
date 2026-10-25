@@ -77,16 +77,14 @@ pub(super) async fn call(
 ) -> Result<Value> {
     const KIND: &str = "plugin-storage";
     let connection = context.connection.id.clone();
-    let management = context.management.clone();
+    let caller = context.caller();
     let expected = context.connection.clone();
     let event = context.event.clone();
     let method = method.to_owned();
     let args = args.clone();
     s.store
         .transaction(move |db| {
-            if let Some(authority) = management {
-                authority.authorize(db)?;
-            }
+            caller.authorize(db)?;
             let owned = || {
                 db.list(KIND).map(|values| {
                     values

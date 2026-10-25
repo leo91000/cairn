@@ -40,6 +40,7 @@ impl InvocationEffects {
 /// What a handler acts for: its connection and the event being handled.
 pub struct Context {
     pub management: Option<super::management::Authority>,
+    pub local_authority: Option<Arc<super::scope::LocalAuthority>>,
     pub connection: Connection,
     pub manifest: Manifest,
     pub event: Value,
@@ -49,6 +50,52 @@ pub struct Context {
     pub draft: Option<Arc<super::forms::Draft>>,
     /// A slow credential renewal must not let a revoked run start a new request.
     pub resource_grant: Option<Arc<super::grants::Authorization>>,
+}
+
+/// Captured native caller proof, shared by effects and their delayed writes.
+/// It neither supplies owner authority nor accepts a package-selected identity.
+#[derive(Clone, Default)]
+pub(crate) struct Caller {
+    management: Option<Arc<super::management::Authority>>,
+    local: Option<Arc<super::scope::LocalAuthority>>,
+}
+
+impl Caller {
+    pub(super) fn for_management(authority: Option<&super::management::Authority>) -> Self {
+        Self {
+            management: authority.cloned().map(Arc::new),
+            local: None,
+        }
+    }
+
+    pub(super) fn authorize(&self, db: &crate::store::Db<'_>) -> Result<()> {
+        if let Some(authority) = &self.management {
+            authority.authorize(db)?;
+        }
+        if let Some(authority) = &self.local {
+            authority.recheck_in(db)?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn recheck(&self, s: &Service) -> Result<()> {
+        if let Some(authority) = &self.management {
+            authority.recheck(s).await?;
+        }
+        if let Some(authority) = &self.local {
+            authority.recheck(s).await?;
+        }
+        Ok(())
+    }
+}
+
+impl Context {
+    pub(super) fn caller(&self) -> Caller {
+        Caller {
+            management: self.management.clone().map(Arc::new),
+            local: self.local_authority.clone(),
+        }
+    }
 }
 
 /// Maps host errors to the short codes scripts may see. Messages stay in the host.
@@ -232,7 +279,7 @@ where
         "timers.after" | "timers.cancel" => timers(s, context, method, &args).await,
         "exec.run" => super::programs::run_tracked(s, context, &args, authorize, effects).await,
         "files.create" | "files.append" | "files.read" | "files.delete" | "files.composeMime" => {
-            authorize_management(s, context).await?;
+            authorize_caller(s, context).await?;
             s.plugins.files.call(&context.connection, method, &args)
         }
         _ => Err(Error::forbidden("Unknown plugin capability.")),
@@ -358,12 +405,7 @@ pub(crate) async fn authorization(
         let secret = match &context.draft {
             Some(draft) => draft.credential.clone(),
             None => {
-                super::oauth::access_token_managed(
-                    s,
-                    &context.connection,
-                    context.management.as_ref(),
-                )
-                .await?
+                super::oauth::access_token_managed(s, &context.connection, context.caller()).await?
             }
         }
         .ok_or_else(|| Error::forbidden("This connection has no credential."))?;
@@ -617,9 +659,16 @@ where
     if file_response.is_some() && !context.manifest.permits_capability("files") {
         return Err(Error::forbidden("File transfers are not approved."));
     }
-    authorize_management(s, context).await?;
-    let claim =
-        super::idempotency::claim(s, context, args, resource.as_ref(), oauth.as_ref()).await?;
+    authorize_caller(s, context).await?;
+    let claim = super::idempotency::claim(
+        s,
+        context,
+        args,
+        resource.as_ref(),
+        oauth.as_ref(),
+        http_access_check(s, context, resource.as_ref(), oauth.as_ref()),
+    )
+    .await?;
     if let Some(super::idempotency::Claim::Cached(response)) = &claim {
         authorize().await?;
         recheck_http_access(s, context, resource.as_ref(), oauth.as_ref()).await?;
@@ -712,6 +761,8 @@ async fn recheck_http_access(
     let checked = resource.is_some()
         || oauth.is_some()
         || context.resource_grant.is_some()
+        || context.local_authority.is_some()
+        || context.management.is_some()
         || context
             .draft
             .as_ref()
@@ -740,8 +791,10 @@ fn http_access_check(
     let resource = resource.cloned();
     let oauth = oauth.cloned();
     let grant = context.resource_grant.clone();
+    let caller = context.caller();
     let vault = s.vault.clone();
     move |db| {
+        caller.authorize(db)?;
         if let Some(grant) = &grant {
             super::grants::recheck_in(db, grant)?;
         }
@@ -765,14 +818,12 @@ fn http_access_check(
 async fn timers(s: &Service, context: &Context, method: &str, args: &Value) -> Result<Value> {
     const KIND: &str = "plugin-timers";
     let connection = context.connection.clone();
-    let management = context.management.clone();
+    let caller = context.caller();
     let method = method.to_owned();
     let args = args.clone();
     s.store
         .transaction(move |db| {
-            if let Some(authority) = management {
-                authority.authorize(db)?;
-            }
+            caller.authorize(db)?;
             let owned = db
                 .list(KIND)?
                 .into_iter()
@@ -821,9 +872,6 @@ async fn timers(s: &Service, context: &Context, method: &str, args: &Value) -> R
         .await
 }
 
-pub(crate) async fn authorize_management(s: &Service, context: &Context) -> Result<()> {
-    if let Some(authority) = &context.management {
-        authority.recheck(s).await?;
-    }
-    Ok(())
+pub(crate) async fn authorize_caller(s: &Service, context: &Context) -> Result<()> {
+    context.caller().recheck(s).await
 }

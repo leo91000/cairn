@@ -230,6 +230,7 @@ async fn interact(
 fn context(connection: &Connection, event: &Value) -> capabilities::Context {
     capabilities::Context {
         management: None,
+        local_authority: None,
         connection: connection.clone(),
         manifest: registry::builtin("discord").unwrap().manifest,
         event: event.clone(),

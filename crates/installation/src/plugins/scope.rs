@@ -33,12 +33,34 @@ pub enum Scope {
 
 /// Host-only proof of both the issuing run and its original requester. The target
 /// instance's agent grant cannot replace a revoked source participant grant.
+#[derive(Clone)]
 pub struct Agent {
     agent_id: String,
     instances: Vec<Connection>,
     bearer: String,
     requester: Option<super::requesters::RunRequester>,
     observation: Option<Arc<super::requesters::Observation>>,
+}
+
+/// Opaque host proof retained by a handler through its effects and delayed writes.
+/// It cannot be supplied by a package or reconstructed from its arguments.
+#[derive(Clone)]
+pub struct LocalAuthority {
+    agent: Agent,
+    approval: registry::Approval,
+}
+
+impl LocalAuthority {
+    pub(super) async fn recheck(&self, s: &Service) -> Result<()> {
+        self.agent.recheck(s).await?;
+        let expected = self.clone();
+        s.store.read(move |db| expected.recheck_in(db)).await
+    }
+
+    pub(super) fn recheck_in(&self, db: &crate::store::Db<'_>) -> Result<()> {
+        self.approval.recheck_in(db)?;
+        self.agent.recheck_in(db)
+    }
 }
 
 impl Agent {
@@ -314,7 +336,8 @@ pub async fn call(
         ));
     }
     let connection = current(s, original_scope, args).await?;
-    if registry::active(s, &package.manifest.id).await?.digest != package.digest {
+    let approved = registry::approved(s, &package.manifest.id).await?;
+    if approved.package.digest != package.digest {
         return Err(Error::forbidden("The plugin approval changed."));
     }
     if let Scope::ResourceAgent(authorization) = scope {
@@ -344,6 +367,13 @@ pub async fn call(
         draft,
         resource_grant: None,
         management: management.clone(),
+        local_authority: match scope {
+            Scope::Agent(agent) => Some(Arc::new(LocalAuthority {
+                agent: agent.as_ref().clone(),
+                approval: approved.snapshot(),
+            })),
+            _ => None,
+        },
     };
     if matches!(scope, Scope::Ingress(_)) && matches!(method, "inbound.accept" | "inbound.deliver")
     {

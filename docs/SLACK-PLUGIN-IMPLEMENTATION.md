@@ -1,7 +1,7 @@
 # Slack plugin implementation
 
-Current integration follows Main40a's current-only data contract: database version
-2, fresh installation data for a future owner-authorized release, no automatic
+Current integration follows Main85 with Main40a's current-only data contract:
+database version 2, fresh installation data for a future owner-authorized release, no automatic
 installation migration or downgrade reader. Earlier epoch/SQLite and transition
 statements below are historical checkpoint evidence, not the current release
 contract. [Current data inventory](SLACK-PLUGIN-COMPATIBILITY.md).

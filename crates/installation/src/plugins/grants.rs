@@ -681,6 +681,7 @@ pub async fn authorize(
         .collect::<Result<BTreeMap<_, _>>>()?;
     let context = Context {
         management: None,
+        local_authority: None,
         connection: connection.clone(),
         manifest: package.manifest.clone(),
         event: Value::Null,
@@ -901,6 +902,7 @@ pub async fn call(
         "http.request" if request_permitted(authorization, args) => {
             let context = Context {
                 management: None,
+                local_authority: None,
                 connection: authorization.connection.clone(),
                 manifest: package.manifest.clone(),
                 event: Value::Null,

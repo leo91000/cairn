@@ -46,6 +46,7 @@ impl Native {
         let context = capabilities::Context {
             connection,
             management: None,
+            local_authority: None,
             manifest: registry::builtin("slack").unwrap().manifest,
             event: json!({"name": "question", "id": delivery["id"], "authorId": "UALICE"}),
             link: None,

@@ -32,7 +32,7 @@ pub(crate) async fn setup_token(
     access_token_with(
         s,
         &connection,
-        management,
+        Caller::for_management(management),
         Some(ConfigurationRefresh {
             owner,
             approved,

@@ -77,11 +77,14 @@ pub async fn set(
     value: &str,
     bearer: Option<&str>,
 ) -> Result<Value> {
-    let bearer = bearer.map(str::to_owned);
+    let authority = match bearer {
+        Some(bearer) => Some(crate::project_workspaces::Authority::capture(s, bearer).await?),
+        None => None,
+    };
     let expected_run = run.to_owned();
     set_authorized(s, run, artifact, value, move |db| {
-        if let Some(token) = bearer {
-            let authorized = crate::project_workspaces::authorize_in(db, &token)?;
+        if let Some(authority) = authority {
+            let authorized = authority.current(db)?;
             if authorized["id"] != expected_run {
                 return Err(Error::forbidden("Artifact is outside this run."));
             }

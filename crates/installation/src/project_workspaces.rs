@@ -46,12 +46,48 @@ pub fn authorize_in(db: &crate::store::Db<'_>, bearer: &str) -> Result<Value> {
     if !covers(&current, agent) {
         return Err(Error::forbidden("Agent permissions were reduced."));
     }
+    crate::plugins::requesters::recheck_run_in(db, &run)?;
     Ok(run)
 }
 
+/// One workspace operation keeps its original source approval across awaited
+/// preparation and checks it again in the transaction that publishes its effect.
+#[derive(Clone)]
+pub(crate) struct Authority {
+    bearer: String,
+    requester: Option<crate::plugins::requesters::RunRequester>,
+}
+
+impl Authority {
+    pub(crate) async fn capture(s: &Service, bearer: &str) -> Result<Self> {
+        let token = bearer.to_owned();
+        let run = s.store.read(move |db| authorize_in(db, &token)).await?;
+        let requester = crate::plugins::requesters::for_run(s, &run).await?;
+        Ok(Self {
+            bearer: bearer.to_owned(),
+            requester,
+        })
+    }
+
+    pub(crate) fn current(&self, db: &crate::store::Db<'_>) -> Result<Value> {
+        let run = authorize_in(db, &self.bearer)?;
+        if let Some(requester) = &self.requester {
+            crate::plugins::requesters::recheck_in(db, requester)?;
+        }
+        Ok(run)
+    }
+
+    pub(crate) async fn recheck(&self, s: &Service) -> Result<Value> {
+        if let Some(requester) = &self.requester {
+            crate::plugins::requesters::recheck(s, requester).await?;
+        }
+        let expected = self.clone();
+        s.store.read(move |db| expected.current(db)).await
+    }
+}
+
 pub async fn authorize(s: &Service, bearer: &str) -> Result<Value> {
-    let bearer = bearer.to_owned();
-    s.store.read(move |db| authorize_in(db, &bearer)).await
+    Authority::capture(s, bearer).await?.recheck(s).await
 }
 
 /// Whether the registered project still matches the one this run was granted.
@@ -73,12 +109,13 @@ impl Projects {
 
     pub async fn open(&self, s: &Service, bearer: &str, project_id: &str) -> Result<Value> {
         uuid(project_id)?;
-        let run = authorize(s, bearer).await?;
+        let authority = Authority::capture(s, bearer).await?;
+        let run = authority.recheck(s).await?;
         let lock = self
             .lock(format!("{}:{project_id}", text(&run, "id")))
             .await;
         let _guard = lock.lock().await;
-        let run = authorize(s, bearer).await?;
+        let run = authority.recheck(s).await?;
         let run_id = text(&run, "id");
         let project = catalog(&run)
             .into_iter()
@@ -113,6 +150,7 @@ impl Projects {
         let status = format!("Opening {}", text(&project, "name"));
         s.store.event(run_id, "status", &status, None).await?;
         let agent_id = text(&run["snapshot"]["agent"], "id");
+        authority.recheck(s).await?;
         let access = crate::plugins::run_credentials::fetch(
             s,
             Some(agent_id),
@@ -123,12 +161,14 @@ impl Projects {
             fetch: [(project_id.to_owned(), access)].into(),
             ..Default::default()
         };
+        authority.recheck(s).await?;
         let entry =
             crate::execution::project_seed(&run, &project, &s.config, root, &credentials).await?;
         // Recheck the grant after a potentially slow clone and before transferring anything.
-        authorize(s, bearer).await?;
-        let imported = import(s, &run, attempt, project_id, &entry).await?;
-        record_workspace(s, run_id, entry.clone()).await?;
+        authority.recheck(s).await?;
+        let imported = import(s, &run, attempt, project_id, &entry, &authority).await?;
+        authority.recheck(s).await?;
+        record_workspace(s, run_id, entry.clone(), authority).await?;
         Ok(json!({
             "projectId": project_id,
             "name": project["name"],
@@ -146,9 +186,11 @@ async fn import(
     attempt: &str,
     project_id: &str,
     entry: &Value,
+    authority: &Authority,
 ) -> Result<Value> {
     let credential = crate::execution::secret(&s.config.data_dir, "runner-secret").await?;
     let node = crate::nodes::transport::url(s, text(run, "id")).await?;
+    authority.recheck(s).await?;
     let body = json!({
         "runId": run["id"],
         "source": entry["path"],
@@ -180,10 +222,19 @@ async fn import(
 }
 
 /// Adds the project to the run's opened workspaces, once.
-async fn record_workspace(s: &Service, run_id: &str, entry: Value) -> Result<()> {
+async fn record_workspace(
+    s: &Service,
+    run_id: &str,
+    entry: Value,
+    authority: Authority,
+) -> Result<()> {
     let id = run_id.to_owned();
     s.store
         .write(move |db| {
+            let authorized = authority.current(db)?;
+            if authorized["id"] != id {
+                return Err(Error::conflict("The workspace's run changed."));
+            }
             let run = db
                 .run(&id)?
                 .ok_or_else(|| Error::not_found("Run not found."))?;
@@ -316,6 +367,22 @@ async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Resul
 }
 
 pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Result<Value> {
+    let authority = Authority::capture(s, bearer).await?;
+    let result = crate::plugins::requesters::CURRENT
+        .scope(
+            authority.requester.clone(),
+            Box::pin(rpc_inner(s, bearer, method, params)),
+        )
+        .await?;
+    // Mutating tools fence their own commit. A saved wait can legitimately end
+    // this running turn before its deferred acknowledgement is returned.
+    if method != "tools/call" {
+        authority.recheck(s).await?;
+    }
+    Ok(result)
+}
+
+async fn rpc_inner(s: &Service, bearer: &str, method: &str, params: &Value) -> Result<Value> {
     if method == "tools/call" {
         return call_tool(s, bearer, text(params, "name"), &params["arguments"]).await;
     }

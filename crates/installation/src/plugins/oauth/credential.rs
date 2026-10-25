@@ -1,6 +1,9 @@
 //! Host-owned authorization-code sign-in and refresh for any plugin. Package code
 //! sees only the account's API responses; neither it nor a client receives tokens.
-use super::super::{capabilities::target, connections, registry};
+use super::super::{
+    capabilities::{Caller, target},
+    connections, registry,
+};
 use super::super::{resources::target::Target, setup::SetupDraft};
 use crate::{
     auth::{digest, hex_digest, token},
@@ -553,15 +556,15 @@ pub async fn access_token(
     s: &Service,
     connection: &connections::Connection,
 ) -> Result<Option<String>> {
-    access_token_managed(s, connection, None).await
+    access_token_managed(s, connection, Caller::default()).await
 }
 
 pub(crate) async fn access_token_managed(
     s: &Service,
     connection: &connections::Connection,
-    management: Option<&super::super::management::Authority>,
+    caller: Caller,
 ) -> Result<Option<String>> {
-    access_token_with(s, connection, management, None).await
+    access_token_with(s, connection, caller, None).await
 }
 
 struct ConfigurationRefresh<'a> {
@@ -572,7 +575,7 @@ struct ConfigurationRefresh<'a> {
 
 struct RefreshSnapshot {
     connection: connections::Connection,
-    management: Option<super::super::management::Authority>,
+    caller: Caller,
     editing: bool,
     setup: Option<Box<SetupDraft>>,
     approval: registry::Approval,
@@ -582,14 +585,14 @@ struct RefreshSnapshot {
 impl RefreshSnapshot {
     fn new(
         connection: &connections::Connection,
-        management: Option<&super::super::management::Authority>,
+        caller: &Caller,
         configuration: Option<&ConfigurationRefresh<'_>>,
         approval: registry::Approval,
         credential: Value,
     ) -> Self {
         Self {
             connection: connection.clone(),
-            management: management.cloned(),
+            caller: caller.clone(),
             editing: configuration.is_some(),
             setup: configuration
                 .and_then(|configuration| configuration.setup.cloned().map(Box::new)),
@@ -600,9 +603,7 @@ impl RefreshSnapshot {
 
     fn authorize(&self, db: &crate::store::Db<'_>, vault: &crate::vault::Vault) -> Result<()> {
         self.approval.recheck_in(db)?;
-        if let Some(authority) = &self.management {
-            authority.authorize(db)?;
-        }
+        self.caller.authorize(db)?;
         authorize_token(db, &self.connection, self.editing, self.setup.as_deref())?;
         let key = connections::credential_key(&self.connection.id);
         if vault.get_in(db, &key)?.as_ref() != Some(&self.credential) {
@@ -616,7 +617,7 @@ impl RefreshSnapshot {
 
 async fn recheck_refresh(
     s: &Service,
-    management: Option<&super::super::management::Authority>,
+    caller: &Caller,
     configuration: Option<&ConfigurationRefresh<'_>>,
     approved: &registry::ApprovedPackage,
 ) -> Result<()> {
@@ -626,10 +627,8 @@ async fn recheck_refresh(
             root_setup::recheck_snapshot(s, setup, approved).await?;
         }
     }
-    if let Some(authority) = management {
-        authority.recheck(s).await?;
-    }
-    approved.recheck(s).await
+    approved.recheck(s).await?;
+    caller.recheck(s).await
 }
 
 /// Compare the credential and its authority in the same transaction. A second
@@ -637,7 +636,7 @@ async fn recheck_refresh(
 async fn persist_refresh_state(
     s: &Service,
     connection: &connections::Connection,
-    management: Option<&super::super::management::Authority>,
+    caller: &Caller,
     configuration: Option<&ConfigurationRefresh<'_>>,
     approval: registry::Approval,
     previous: Value,
@@ -646,7 +645,7 @@ async fn persist_refresh_state(
     let key = connections::credential_key(&connection.id);
     let vault = s.vault.clone();
     let encrypted = vault.encrypt(&key, replacement)?;
-    let snapshot = RefreshSnapshot::new(connection, management, configuration, approval, previous);
+    let snapshot = RefreshSnapshot::new(connection, caller, configuration, approval, previous);
     s.store
         .transaction(move |db| {
             snapshot.authorize(db, &vault)?;
@@ -669,7 +668,7 @@ pub(crate) async fn draft_token(
     access_token_with(
         s,
         connection,
-        management,
+        Caller::for_management(management),
         Some(ConfigurationRefresh {
             owner,
             approved,
@@ -682,15 +681,13 @@ pub(crate) async fn draft_token(
 async fn access_token_with(
     s: &Service,
     connection: &connections::Connection,
-    management: Option<&super::super::management::Authority>,
+    caller: Caller,
     configuration: Option<ConfigurationRefresh<'_>>,
 ) -> Result<Option<String>> {
     let editing = configuration.is_some();
     let lock = s.plugins.oauth_flows.lock(&connection.id);
     let _guard = lock.lock().await;
-    if let Some(authority) = management {
-        authority.recheck(s).await?;
-    }
+    caller.recheck(s).await?;
     if let Some(configuration) = &configuration {
         configuration.owner.recheck(s).await?;
         if let Some(setup) = configuration.setup {
@@ -705,12 +702,10 @@ async fn access_token_with(
     let initial_setup = configuration
         .as_ref()
         .and_then(|configuration| configuration.setup.cloned());
-    let initial_authority = management.cloned();
+    let initial_authority = caller.clone();
     s.store
         .read(move |db| {
-            if let Some(authority) = initial_authority {
-                authority.authorize(db)?;
-            }
+            initial_authority.authorize(db)?;
             authorize_token(db, &expected, editing, initial_setup.as_ref())
         })
         .await?;
@@ -786,19 +781,19 @@ async fn access_token_with(
     persist_refresh_state(
         s,
         connection,
-        management,
+        &caller,
         configuration.as_ref(),
         approval.clone(),
         saved.clone(),
         &consuming,
     )
     .await?;
-    recheck_refresh(s, management, configuration.as_ref(), approved).await?;
+    recheck_refresh(s, &caller, configuration.as_ref(), approved).await?;
     // The final owner lookup can outlive a local edit/removal. Recheck the exact
     // instance and consumed credential after it, immediately before token I/O.
     let snapshot = RefreshSnapshot::new(
         connection,
-        management,
+        &caller,
         configuration.as_ref(),
         approval.clone(),
         consuming.clone(),
@@ -832,11 +827,11 @@ async fn access_token_with(
         message: None,
     };
     let refreshed = credentials(&response, &flow, oauth, Some(&saved))?;
-    recheck_refresh(s, management, configuration.as_ref(), approved).await?;
+    recheck_refresh(s, &caller, configuration.as_ref(), approved).await?;
     persist_refresh_state(
         s,
         connection,
-        management,
+        &caller,
         configuration.as_ref(),
         approval,
         consuming,

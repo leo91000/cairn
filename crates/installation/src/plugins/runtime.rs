@@ -486,6 +486,7 @@ async fn dispatch(
     let context = Context {
         connection,
         management: None,
+        local_authority: None,
         manifest: session.manifest().clone(),
         event: event.clone(),
         link: None,

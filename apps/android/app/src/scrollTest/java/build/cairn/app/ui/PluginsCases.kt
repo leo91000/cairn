@@ -31,6 +31,10 @@ import org.junit.Test
 abstract class PluginsCases {
     @get:Rule val compose = createComposeRule()
 
+    private class Rendered(val vm: CairnViewModel, val mounted: MutableState<Boolean>)
+
+    private var rendered: Rendered? = null
+
     protected open fun capture(name: String) {}
 
     @Test
@@ -38,7 +42,7 @@ abstract class PluginsCases {
         val blocked = mutableStateOf(true)
         val composed = CountDownLatch(1)
         val firstRead = CountDownLatch(1)
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { path ->
@@ -69,7 +73,7 @@ abstract class PluginsCases {
                     compose.onAllNodesWithText("1Password").fetchSemanticsNodes().isNotEmpty()
                 }
             } finally {
-                models.clear()
+                closeScreen(models)
             }
         }
     }
@@ -376,7 +380,7 @@ abstract class PluginsCases {
 
     @Test
     fun theCatalogueOpens1PasswordAsAPlugin() {
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher = dispatcher { _, _ -> null }
             server.start()
             var opened = ""
@@ -415,7 +419,7 @@ abstract class PluginsCases {
                     ),
                 summary = PluginInstanceSummary(3, mapOf("ready" to 1, "paused" to 2), 4, 2),
             )
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { path ->
@@ -462,7 +466,7 @@ abstract class PluginsCases {
                 compose.onNodeWithTag("plugin-onepassword").performClick()
                 assertEquals("onepassword", opened)
             } finally {
-                models.clear()
+                closeScreen(models)
             }
         }
     }
@@ -482,7 +486,7 @@ abstract class PluginsCases {
         val approvalStarted = CountDownLatch(1)
         val releaseApproval = CountDownLatch(1)
         val writes = CopyOnWriteArrayList<JsonObject>()
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { path ->
@@ -623,7 +627,7 @@ abstract class PluginsCases {
             } finally {
                 releaseLate.countDown()
                 releaseApproval.countDown()
-                models.clear()
+                closeScreen(models)
             }
         }
     }
@@ -631,7 +635,7 @@ abstract class PluginsCases {
     @Test
     fun missingSelectedPackageShowsNotInstalledFromCompactSupport() {
         val paths = CopyOnWriteArrayList<String>()
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { path ->
@@ -664,7 +668,7 @@ abstract class PluginsCases {
                 assertTrue(paths.any { it.endsWith("/plugins/packages/removed") })
                 capture("plugin-selected-package-missing")
             } finally {
-                models.clear()
+                closeScreen(models)
             }
         }
     }
@@ -681,7 +685,7 @@ abstract class PluginsCases {
                 agentId = "helper",
                 accessMode = "everyone",
             )
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { path ->
@@ -793,14 +797,14 @@ abstract class PluginsCases {
                 assertFalse(paths.any { it.endsWith("/api/plugins") })
                 assertTrue(paths.any { it.endsWith("/instance-access?cursor=next") })
             } finally {
-                models.clear()
+                closeScreen(models)
             }
         }
     }
 
     @Test
     fun discordBotsAreGenericDelegatingInstances() {
-        MockWebServer().use { server ->
+        withServer { server ->
             val actions = CopyOnWriteArrayList<Pair<String, String>>()
             server.dispatcher = dispatcher { path, body ->
                 if (path.contains("/connections/bot/")) {
@@ -849,7 +853,7 @@ abstract class PluginsCases {
 
     @Test
     fun genericInstanceIsCreatedWithItsSettingsAndDelegation() {
-        MockWebServer().use { server ->
+        withServer { server ->
             val saved = CopyOnWriteArrayList<String>()
             server.dispatcher = dispatcher { path, body ->
                 if (path.endsWith("/plugins/notes/connections")) {
@@ -966,7 +970,7 @@ abstract class PluginsCases {
                         )
                 )
                 .let { it.copy(setup = it.manifest!!.setup) }
-        MockWebServer().use { server ->
+        withServer { server ->
             val forms = CopyOnWriteArrayList<JsonObject>()
             val saved = CopyOnWriteArrayList<String>()
             server.dispatcher =
@@ -1091,7 +1095,7 @@ abstract class PluginsCases {
                             ),
                     ),
             )
-        MockWebServer().use { server ->
+        withServer { server ->
             val saved = CopyOnWriteArrayList<String>()
             server.dispatcher =
                 dispatcher(includeGet = true) { path, body ->
@@ -1152,7 +1156,7 @@ abstract class PluginsCases {
 
     @Test
     fun discordBotIsSetUpThroughItsPackageForm() {
-        MockWebServer().use { server ->
+        withServer { server ->
             val forms = CopyOnWriteArrayList<JsonObject>()
             val saved = CopyOnWriteArrayList<String>()
             server.dispatcher = dispatcher { path, body ->
@@ -1362,7 +1366,7 @@ abstract class PluginsCases {
                                 ),
                         ),
             )
-        MockWebServer().use { server ->
+        withServer { server ->
             val starts = CopyOnWriteArrayList<JsonObject>()
             val saved = CopyOnWriteArrayList<JsonObject>()
             val flow =
@@ -1444,7 +1448,7 @@ abstract class PluginsCases {
 
     @Test
     fun anAccountSignsInWithADeviceCodeAndSavesTheSignInNotAToken() {
-        MockWebServer().use { server ->
+        withServer { server ->
             val forms = CopyOnWriteArrayList<JsonObject>()
             val saved = CopyOnWriteArrayList<String>()
             val requests = CopyOnWriteArrayList<String>()
@@ -1602,7 +1606,7 @@ abstract class PluginsCases {
 
     @Test
     fun programReleasesCanBeCheckedInstalledAndRestored() {
-        MockWebServer().use { server ->
+        withServer { server ->
             val initial = InstalledProgram(release = ProgramRelease(version = "2.39.0"))
             val program =
                 AtomicReference(
@@ -1697,7 +1701,7 @@ abstract class PluginsCases {
 
     @Test
     fun onePasswordIsAGenericPluginWithItsPanelAndAgentUsage() {
-        MockWebServer().use { server ->
+        withServer { server ->
             val actions = CopyOnWriteArrayList<String>()
             server.dispatcher = dispatcher { path, body ->
                 if (path.endsWith("/connections/op1/actions")) {
@@ -1737,7 +1741,7 @@ abstract class PluginsCases {
 
     @Test
     fun serviceAccountsSendTheirTokenOnceAndAreGrantedToTheAgentsChosen() {
-        MockWebServer().use { server ->
+        withServer { server ->
             val saved = CopyOnWriteArrayList<String>()
             server.dispatcher = dispatcher { path, body ->
                 if (path.endsWith("/plugins/onepassword/connections")) {
@@ -1820,7 +1824,7 @@ abstract class PluginsCases {
             operations[id] = result
             return buildJsonObject { put("operation", id) }.toString()
         }
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { path ->
@@ -2139,7 +2143,7 @@ abstract class PluginsCases {
         val started = CountDownLatch(1)
         val release = CountDownLatch(1)
         val deleted = CopyOnWriteArrayList<String>()
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { path ->
@@ -2237,7 +2241,7 @@ abstract class PluginsCases {
                 )
             )
         val deleted = CopyOnWriteArrayList<String>()
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { path ->
@@ -2323,7 +2327,7 @@ abstract class PluginsCases {
             )
         val activated = java.util.concurrent.atomic.AtomicBoolean(false)
         val formRequests = CopyOnWriteArrayList<JsonObject>()
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { path ->
@@ -2466,7 +2470,7 @@ abstract class PluginsCases {
                         )
                     ),
             )
-        MockWebServer().use { server ->
+        withServer { server ->
             val fallback = dispatcher { _, _ -> null }
             server.dispatcher =
                 object : Dispatcher() {
@@ -2550,7 +2554,7 @@ abstract class PluginsCases {
                     compose.onAllNodes(isRoot()).fetchSemanticsNodes()
                     cancelled.get()
                 }
-                return@use
+                return@withServer
             }
             compose.waitUntil(10000) {
                 compose
@@ -2603,7 +2607,7 @@ abstract class PluginsCases {
 
     @Test
     fun membersCanOpenTheirOwnPluginAccountsWithoutOwnerManagement() {
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher = dispatcher { _, _ -> null }
             server.start()
             var destination = ""
@@ -2659,7 +2663,7 @@ abstract class PluginsCases {
                         )
                     else PluginOAuthStatus(),
             )
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { path ->
@@ -2781,7 +2785,7 @@ abstract class PluginsCases {
             if (connected.get())
                 """{"status":"authorized","scopes":["messages:read"],"requestedScopes":["messages:read"],"subject":"U111"}"""
             else """{"status":"disconnected"}"""
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { path ->
@@ -2912,7 +2916,7 @@ abstract class PluginsCases {
                 name = "Application",
                 status = PluginStatus("ready"),
             )
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { path ->
@@ -3074,7 +3078,7 @@ abstract class PluginsCases {
             if (id in connected)
                 """{"status":"authorized","scopes":["messages:read"],"requestedScopes":["messages:read"]}"""
             else """{"status":"disconnected"}"""
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { path ->
@@ -3386,7 +3390,7 @@ abstract class PluginsCases {
         fun status() =
             if (revised.get()) """{"status":"authorized","scopes":["messages:read"]}"""
             else """{"status":"disconnected"}"""
-        MockWebServer().use { server ->
+        withServer { server ->
             val common =
                 dispatcher(
                     read = { path ->
@@ -3546,7 +3550,7 @@ abstract class PluginsCases {
             if (provider in connected)
                 """{"status":"authorized","scopes":["messages:read"],"requestedScopes":["messages:read"]}"""
             else """{"status":"disconnected"}"""
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { path ->
@@ -3690,7 +3694,7 @@ abstract class PluginsCases {
         val uncertain = java.util.concurrent.atomic.AtomicBoolean(false)
         val grantsStarted = CountDownLatch(1)
         val releaseGrants = CountDownLatch(1)
-        MockWebServer().use { server ->
+        withServer { server ->
             val normal =
                 dispatcher(
                     read = { path ->
@@ -3920,7 +3924,7 @@ abstract class PluginsCases {
                 revision = "r1",
             )
         val grantReads = java.util.concurrent.atomic.AtomicInteger()
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { path ->
@@ -3965,7 +3969,7 @@ abstract class PluginsCases {
         val reads = AtomicInteger()
         val mode = AtomicInteger()
         val period = 1_700_002_800_000L
-        MockWebServer().use { server ->
+        withServer { server ->
             val normal = dispatcher { _, _ -> null }
             server.dispatcher =
                 object : Dispatcher() {
@@ -4082,7 +4086,7 @@ abstract class PluginsCases {
                 capture("route-summary-refreshed")
             } finally {
                 release.countDown()
-                models.clear()
+                closeScreen(models)
             }
         }
     }
@@ -4091,7 +4095,7 @@ abstract class PluginsCases {
     fun resourceRouteWarningsFollowTheCurrentParticipationMode() {
         val root = "/plugins/warnings/connections/app/resources/workspace/engineering"
         val previews = AtomicInteger()
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { path ->
@@ -4209,7 +4213,7 @@ abstract class PluginsCases {
                 compose.onNodeWithText("déléguer du travail", substring = true).assertExists()
                 compose.onNodeWithText("Enregistrer").assertIsEnabled()
             } finally {
-                models.clear()
+                closeScreen(models)
             }
         }
     }
@@ -4265,7 +4269,7 @@ abstract class PluginsCases {
                     listOf("channel"),
                 )
             )
-        MockWebServer().use { server ->
+        withServer { server ->
             val normal = dispatcher { _, _ -> null }
             server.dispatcher =
                 object : Dispatcher() {
@@ -4376,7 +4380,7 @@ abstract class PluginsCases {
         val releaseEditPreview = CountDownLatch(1)
         val routePath = "/plugins/routes-ui/connections/app/resources/workspace/engineering"
         val path = "$routePath/routes"
-        MockWebServer().use { server ->
+        withServer { server ->
             val normal =
                 dispatcher(
                     read = { requested ->
@@ -4589,7 +4593,7 @@ abstract class PluginsCases {
                     ),
             )
         val writes = CopyOnWriteArrayList<Pair<String, JsonObject>>()
-        MockWebServer().use { server ->
+        withServer { server ->
             val normal =
                 dispatcher(
                     read = { path ->
@@ -4846,7 +4850,7 @@ abstract class PluginsCases {
                             )
                         ))
             )
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { path ->
@@ -4893,7 +4897,7 @@ abstract class PluginsCases {
         val writes = CopyOnWriteArrayList<String>()
         val restoration = StateRestorationTester(compose)
         val registry = AtomicReference<androidx.compose.runtime.saveable.SaveableStateRegistry>()
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { requested ->
@@ -4983,7 +4987,7 @@ abstract class PluginsCases {
                 compose.onAllNodesWithText("Routes de conversation").assertCountEquals(routes.size)
                 assertTrue("Restoration must not submit a route", writes.isEmpty())
             } finally {
-                models.clear()
+                closeScreen(models)
             }
         }
     }
@@ -5024,7 +5028,7 @@ abstract class PluginsCases {
         val releaseRestoredRead = CountDownLatch(1)
         val restoration = StateRestorationTester(compose)
         val registry = AtomicReference<androidx.compose.runtime.saveable.SaveableStateRegistry>()
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { path ->
@@ -5225,7 +5229,7 @@ abstract class PluginsCases {
                 )
             } finally {
                 releaseRestoredRead.countDown()
-                models.clear()
+                closeScreen(models)
             }
         }
     }
@@ -5252,7 +5256,7 @@ abstract class PluginsCases {
         val writes = CopyOnWriteArrayList<JsonObject>()
         val restoration = StateRestorationTester(compose)
         val registry = AtomicReference<androidx.compose.runtime.saveable.SaveableStateRegistry>()
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { requested ->
@@ -5381,7 +5385,7 @@ abstract class PluginsCases {
                 )
                 capture("large-grant-input-restored")
             } finally {
-                models.clear()
+                closeScreen(models)
             }
         }
     }
@@ -5411,7 +5415,7 @@ abstract class PluginsCases {
         val registry = AtomicReference<androidx.compose.runtime.saveable.SaveableStateRegistry>()
         val writes = CopyOnWriteArrayList<String>()
         val input = "\"".repeat(10000)
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { path ->
@@ -5496,7 +5500,7 @@ abstract class PluginsCases {
                 )
                 assertTrue(writes.isEmpty())
             } finally {
-                models.clear()
+                closeScreen(models)
             }
         }
     }
@@ -5533,7 +5537,7 @@ abstract class PluginsCases {
         val restoration = StateRestorationTester(compose)
         val registry = AtomicReference<androidx.compose.runtime.saveable.SaveableStateRegistry>()
         val writes = CopyOnWriteArrayList<String>()
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { path ->
@@ -5637,7 +5641,7 @@ abstract class PluginsCases {
                 )
                 assertTrue(writes.isEmpty())
             } finally {
-                models.clear()
+                closeScreen(models)
             }
         }
     }
@@ -5689,7 +5693,7 @@ abstract class PluginsCases {
             compose.waitUntil(10000) {
                 compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty()
             }
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { path ->
@@ -5850,7 +5854,7 @@ abstract class PluginsCases {
                 assertTrue(lookups.none { it.containsKey("changed") })
             } finally {
                 release.countDown()
-                models.clear()
+                closeScreen(models)
             }
         }
     }
@@ -5865,7 +5869,7 @@ abstract class PluginsCases {
             compose.waitUntil(10000) {
                 compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty()
             }
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher = dispatcher { path, body ->
                 if (!path.endsWith("/plugins/remote-multi/form")) return@dispatcher null
                 val input = wireJson.parseToJsonElement(body).jsonObject
@@ -5948,7 +5952,7 @@ abstract class PluginsCases {
                     }
                 )
             } finally {
-                models.clear()
+                closeScreen(models)
             }
         }
     }
@@ -6016,7 +6020,7 @@ abstract class PluginsCases {
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     read = { path ->
@@ -6232,7 +6236,7 @@ abstract class PluginsCases {
                 assertEquals(1, writes.size)
             } finally {
                 release.countDown()
-                models.clear()
+                closeScreen(models)
             }
         }
     }
@@ -6296,7 +6300,7 @@ abstract class PluginsCases {
         val laterReads = AtomicInteger()
         val writes = CopyOnWriteArrayList<Pair<String, JsonObject>>()
         val rules = CopyOnWriteArrayList<PluginResourceGrant>()
-        MockWebServer().use { server ->
+        withServer { server ->
             val normal =
                 dispatcher(
                     read = { path ->
@@ -6411,7 +6415,7 @@ abstract class PluginsCases {
                 )
                 capture("later-page-grant-restored")
             } finally {
-                models.clear()
+                closeScreen(models)
             }
         }
     }
@@ -6488,7 +6492,7 @@ abstract class PluginsCases {
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
-        MockWebServer().use { server ->
+        withServer { server ->
             val normal =
                 dispatcher(
                     read = { path ->
@@ -6730,7 +6734,7 @@ abstract class PluginsCases {
             } finally {
                 releaseRead.countDown()
                 releaseWrite.countDown()
-                models.clear()
+                closeScreen(models)
             }
         }
     }
@@ -6795,7 +6799,7 @@ abstract class PluginsCases {
         val root =
             "/api/installations/fixture/api/plugins/scoped-rights/connections/app/resources/workspace"
         val directory = "/api/installations/fixture/api/agents/helper/plugin-resource-grants"
-        MockWebServer().use { server ->
+        withServer { server ->
             server.dispatcher =
                 dispatcher(
                     includeGet = true,
@@ -6991,7 +6995,7 @@ abstract class PluginsCases {
                 name = "Work",
                 agentIds = listOf("helper"),
             )
-        MockWebServer().use { server ->
+        withServer { server ->
             val saved = CopyOnWriteArrayList<JsonObject>()
             server.dispatcher =
                 dispatcher(packages = listOf(github), connections = listOf(work)) { path, body ->
@@ -7158,7 +7162,7 @@ abstract class PluginsCases {
                     },
                 secretKeys = listOf("clientSecret"),
             )
-        MockWebServer().use { server ->
+        withServer { server ->
             val forms = CopyOnWriteArrayList<JsonObject>()
             val starts = CopyOnWriteArrayList<JsonObject>()
             val saved = CopyOnWriteArrayList<JsonObject>()
@@ -7337,7 +7341,7 @@ abstract class PluginsCases {
         revokedMeanwhile: Boolean = false,
         bounded: Boolean = false,
     ) {
-        MockWebServer().use { server ->
+        withServer { server ->
             val saved = CopyOnWriteArrayList<String>()
             val editing = java.util.concurrent.atomic.AtomicBoolean(false)
             server.dispatcher =
@@ -7556,31 +7560,60 @@ abstract class PluginsCases {
         compose.waitForIdle()
     }
 
+    private inline fun withServer(block: (MockWebServer) -> Unit) {
+        MockWebServer().use { server ->
+            try {
+                block(server)
+            } finally {
+                closeScreen()
+            }
+        }
+    }
+
+    private fun closeScreen(models: ViewModelStore? = null) {
+        val screen = rendered ?: return
+        rendered = null
+        val owned = models ?: ViewModelStore().apply { put("fixture", screen.vm) }
+        try {
+            compose.runOnIdle { screen.mounted.value = false }
+            compose.waitForIdle()
+        } finally {
+            compose.runOnIdle { owned.clear() }
+        }
+    }
+
     private fun show(
         server: MockWebServer,
         restoration: StateRestorationTester? = null,
         content: @Composable (CairnViewModel, Workspace) -> Unit,
     ): CairnViewModel {
+        check(rendered == null) { "Close the previous plugin screen first." }
         val vm =
             CairnViewModel(
                 ApplicationProvider.getApplicationContext<Application>(),
                 PluginVault(),
                 beaconOrigin = "",
             )
+        val mounted = mutableStateOf(true)
+        rendered = Rendered(vm, mounted)
         val render: @Composable () -> Unit = {
-            val state by vm.state.collectAsStateWithLifecycle()
-            // Once loaded, the screen stays composed even if a refresh briefly empties the agents.
-            var loaded by remember { mutableStateOf(false) }
-            if (state.agents.isNotEmpty()) loaded = true
-            LaunchedEffect(Unit) {
-                vm.state.first { it.ready }
-                if (vm.state.value.installation == null) vm.connect(server.url("/").toString())
-            }
-            // The app's scaffold keeps screens clear of the system bars; this host does the same.
-            CairnTheme {
-                Surface(Modifier.fillMaxSize()) {
-                    Box(Modifier.systemBarsPadding()) {
-                        if (loaded) content(vm, state)
+            if (mounted.value) {
+                val state by vm.state.collectAsStateWithLifecycle()
+                // Once loaded, the screen stays composed even if a refresh briefly empties the
+                // agents.
+                var loaded by remember { mutableStateOf(false) }
+                if (state.agents.isNotEmpty()) loaded = true
+                LaunchedEffect(Unit) {
+                    vm.state.first { it.ready }
+                    if (vm.state.value.installation == null) vm.connect(server.url("/").toString())
+                }
+                // The app's scaffold keeps screens clear of the system bars; this host does the
+                // same.
+                CairnTheme {
+                    Surface(Modifier.fillMaxSize()) {
+                        Box(Modifier.systemBarsPadding()) {
+                            if (loaded) content(vm, state)
+                        }
                     }
                 }
             }

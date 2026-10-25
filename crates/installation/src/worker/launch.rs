@@ -1175,30 +1175,41 @@ impl Execution<'_> {
             patch["retry"] = Value::Null;
         }
         let id = self.id.clone();
-        let status = s.store.transaction(move |db| {
-            let current = db.run(&id)?.ok_or_else(|| Error::not_found("Run not found"))?;
-            let status = if !current["cancelRequestedAt"].is_null() {
-                RunStatus::Cancelled
-            } else if status == RunStatus::Succeeded && current["trigger"] != "chat" && current["wakeup"].is_object() {
-                if !has_session {
-                    return Err(Error::conflict("Cannot wait without a saved agent session. Working files were preserved."));
-                }
-                RunStatus::Waiting
-            } else { status };
-            patch["status"] = status.into();
-            if status == RunStatus::Waiting {
-                patch["finishedAt"] = Value::Null;
-                patch["resumeAvailable"] = true.into();
-                patch["outcome"] = Value::Null;
-            } else if current["trigger"] != "chat" {
-                patch["wakeup"] = Value::Null;
-            }
-            db.patch_run(&id, &patch)?;
-            Ok(status)
-        }).await?;
-        let details = details.filter(|_| status == RunStatus::Failed);
         s.store
-            .event(&self.id, "status", status.as_str(), details)
+            .transaction(move |db| {
+                let current = db
+                    .run(&id)?
+                    .ok_or_else(|| Error::not_found("Run not found"))?;
+                let status = if !current["cancelRequestedAt"].is_null() {
+                    RunStatus::Cancelled
+                } else if status == RunStatus::Succeeded
+                    && current["trigger"] != "chat"
+                    && current["wakeup"].is_object()
+                {
+                    if !has_session {
+                        return Err(Error::conflict(
+                            "Cannot wait without a saved agent session. Working files were preserved.",
+                        ));
+                    }
+                    RunStatus::Waiting
+                } else {
+                    status
+                };
+                patch["status"] = status.into();
+                if status == RunStatus::Waiting {
+                    patch["finishedAt"] = Value::Null;
+                    patch["resumeAvailable"] = true.into();
+                    patch["outcome"] = Value::Null;
+                } else if current["trigger"] != "chat" {
+                    patch["wakeup"] = Value::Null;
+                }
+                db.patch_run(&id, &patch)?;
+                // Readers and a worker restart must never see a terminal row whose
+                // journal entry has not committed yet.
+                let details = details.filter(|_| status == RunStatus::Failed);
+                db.event(&id, "status", status.as_str(), details.as_ref())?;
+                Ok(())
+            })
             .await
     }
 

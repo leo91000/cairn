@@ -256,12 +256,13 @@ fn excerpt(kind: &str, sample: &[u8]) -> Option<String> {
 
 impl Artifacts {
     pub async fn publish(&self, s: &Service, bearer: &str, args: &Value) -> Result<Value> {
+        let authority = crate::project_workspaces::Authority::capture(s, bearer).await?;
         let visibility = match args.get("visibility") {
             Some(_) => Some(sharing::visibility(args)?),
             None => None,
         };
         let _permit = self.transfers.acquire().await.map_err(Error::internal)?;
-        let run = crate::project_workspaces::authorize(s, bearer).await?;
+        let run = authority.recheck(s).await?;
         let publication = Publication::parse(args, visibility)?;
         let run_id = text(&run, "id");
         let checkpoint = required(
@@ -270,11 +271,11 @@ impl Artifacts {
         )?;
         let attempt = text(&checkpoint, "runnerId");
         uuid(attempt)?;
-        let response = export(s, run_id, attempt, publication.path).await?;
+        let response = export(s, run_id, attempt, publication.path, &authority).await?;
         let directory = s.config.data_dir.join("artifacts");
         let download = receive(response, &directory).await?;
         // Recheck cancellation and permissions after the potentially long transfer.
-        let current = crate::project_workspaces::authorize(s, bearer).await?;
+        let current = authority.recheck(s).await?;
         let current_checkpoint = s
             .store
             .kv(&format!("run-checkpoint:{run_id}"))
@@ -335,7 +336,7 @@ impl Artifacts {
             .map_err(|e| Error::internal(e.error))?;
         std::fs::File::open(&directory)?.sync_all()?;
         let visibility = publication.visibility.unwrap_or("private");
-        let artifact = match commit(s, bearer, attempt, record, visibility).await {
+        let artifact = match commit(s, authority, attempt, record, visibility).await {
             Ok(artifact) => artifact,
             Err(error) => {
                 // A revocation can win after the file's fsync but before the
@@ -366,9 +367,16 @@ impl Artifacts {
 }
 
 /// Streams a finished file out of the run's VM.
-async fn export(s: &Service, run_id: &str, attempt: &str, path: &str) -> Result<reqwest::Response> {
+async fn export(
+    s: &Service,
+    run_id: &str,
+    attempt: &str,
+    path: &str,
+    authority: &crate::project_workspaces::Authority,
+) -> Result<reqwest::Response> {
     let credential = crate::execution::secret(&s.config.data_dir, "runner-secret").await?;
     let node = crate::nodes::transport::url(s, run_id).await?;
+    authority.recheck(s).await?;
     let response = s
         .http
         .post(format!("{node}/runs/{attempt}/artifact"))
@@ -392,7 +400,7 @@ async fn export(s: &Service, run_id: &str, attempt: &str, path: &str) -> Result<
 /// Commits the record if the publishing turn is still the active one.
 async fn commit(
     s: &Service,
-    bearer: &str,
+    authority: crate::project_workspaces::Authority,
     attempt: &str,
     mut record: Value,
     visibility: &str,
@@ -403,13 +411,12 @@ async fn commit(
     } else {
         String::new()
     };
-    let token = bearer.to_owned();
     let expected_attempt = attempt.to_owned();
     s.store
         .transaction(move |db| {
             let run = text(&record, "runId").to_owned();
             crate::conversation_lifecycle::require_active_run(db, &run)?;
-            let current = crate::project_workspaces::authorize_in(db, &token)?;
+            let current = authority.current(db)?;
             let checkpoint = db.kv(&format!("run-checkpoint:{run}"))?.unwrap_or_default();
             if current["id"] != run
                 || checkpoint["runnerId"] != expected_attempt

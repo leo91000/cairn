@@ -65,12 +65,12 @@ pub async fn report(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
         fields.remove("waitingOn");
     }
     outcome["reportedAt"] = now().into();
-    let bearer = bearer.to_owned();
+    let authority = crate::project_workspaces::Authority::capture(s, bearer).await?;
     s.store
         .write(move |db| {
             // Authorize and write in the same transaction; a report from an expired
             // attempt cannot overwrite the next user message's outcome.
-            let run = crate::project_workspaces::authorize_in(db, &bearer)?;
+            let run = authority.current(db)?;
             outcome["messageId"] = crate::waits::execution_id(&run).clone();
             db.patch_run(
                 text(&run, "id"),
