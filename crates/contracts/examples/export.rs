@@ -1,4 +1,4 @@
-use cairn_contracts::*;
+use cairn_contracts::{beacon::*, *};
 use schemars::{JsonSchema, generate::SchemaSettings};
 use std::{fs, path::Path};
 use ts_rs::TS;

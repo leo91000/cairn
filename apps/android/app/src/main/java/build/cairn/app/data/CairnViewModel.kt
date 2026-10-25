@@ -6,9 +6,8 @@ import androidx.lifecycle.viewModelScope
 import build.cairn.app.BuildConfig
 import build.cairn.contracts.AccountSignInMethod
 import build.cairn.contracts.ListAccountMethodsOutput
-import build.cairn.contracts.listAccountMethods
-
 import build.cairn.contracts.ListProjectsInput
+import build.cairn.contracts.listAccountMethods
 import build.cairn.contracts.listProjects
 import java.io.IOException
 import kotlinx.coroutines.CancellationException

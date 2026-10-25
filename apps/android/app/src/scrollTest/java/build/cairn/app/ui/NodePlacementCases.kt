@@ -276,6 +276,7 @@ abstract class NodePlacementCases {
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/overview" -> "{}"
+                                "/api/installations/fixture/api/projects" -> """{"projects":[]}"""
                                 else -> if (request.method == "PUT") "{}" else "[]"
                             }
                         return MockResponse().setBody(body)

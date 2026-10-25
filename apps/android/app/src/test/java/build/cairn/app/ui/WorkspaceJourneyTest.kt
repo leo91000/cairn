@@ -219,7 +219,7 @@ class WorkspaceJourneyTest {
                                     else "[$existingTask]"
                                 "/api/installations/fixture/api/tasks/task/run",
                                 "/api/installations/fixture/api/runs/run" ->
-                                    """{"id":"run","taskId":"task","status":"running","snapshot":{"task":$task,"agent":{"name":"Reviewer"},"46d045dd-9bce-51e3-8a99-65aa9384efc9":null,"projects":[{"name":"Cairn"}]}}"""
+                                    """{"id":"run","taskId":"task","status":"running","snapshot":{"task":$task,"agent":{"name":"Reviewer"},"project":null,"projects":[{"id":"46d045dd-9bce-51e3-8a99-65aa9384efc9","name":"Cairn","path":"/fixtures/cairn","origin":"","revision":"fixture","createdAt":0}]}}"""
                                 "/api/installations/fixture/api/runs/run/events" ->
                                     """[{"id":1,"createdAt":1789315200000,"type":"run.started","text":"Le worker démarre la mission"}]"""
                                 else ->

@@ -135,7 +135,16 @@ abstract class ResourceSaveCases {
                             val output =
                                 if (resourceKind == "projects")
                                     JsonObject(
-                                        settings +
+                                        settings.filterKeys {
+                                            it in
+                                                setOf(
+                                                    "name",
+                                                    "path",
+                                                    "description",
+                                                    "baseBranch",
+                                                    "sourceMode",
+                                                )
+                                        } +
                                             projectPath +
                                             mapOf(
                                                 "id" to JsonPrimitive(savedId),
