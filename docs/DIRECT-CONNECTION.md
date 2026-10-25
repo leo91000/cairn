@@ -111,8 +111,8 @@ Beacon's memory and logs; it is not end-to-end encryption against it.
 - Strict UDP filtering or symmetric NAT on both sides falls back to the relay.
 - The installation needs outbound UDP for direct connection; a setting disables
   direct connection entirely.
-- Older installations or clients without the new protocol version stay on the
-  relay.
+- A protocol mismatch requires updating Beacon, the installation and the client
+  together; it cannot use the relay as a version fallback.
 - A single beacon process remains required
   ([single-relay-process decision](adr/0032-single-official-relay-process.md)).
 - Signaling relays the DTLS fingerprints, so the Beacon could
@@ -141,7 +141,7 @@ emulator through simulated networks:
 - reconnection with event resume: no lost or duplicated events, no double send;
 - revocation during a stream on both routes: logout, session expiry, member
   removal, detachment, rotation;
-- an old installation or client: relay only;
+- a protocol mismatch: update required on both clients;
 - the beacon tunnel down: no new direct connection, existing ones end at
   grant expiry, agent executions continue.
 - beacon restart and tunnel reconnection: the new key closes old leases before
@@ -180,7 +180,7 @@ The installation receives its public verification key only from the authenticate
 tunnel. Ed25519 signatures cover the protocol context and every claim. Keys are
 per tunnel, so a reconnect cannot restore an old authorization. Nonces, leases and
 signal queues are bounded in-memory control state. Access generations also remain
-in memory for the lifetime of the tunnel; none of these are conversation storage. See [Version 4 limits and installation integration](INSTALLATION-RELAY.md#version-4-direct-authorization-and-signaling-100).
+in memory for the lifetime of the tunnel; none of these are conversation storage. See [Direct limits and installation integration](INSTALLATION-RELAY.md#direct-authorization-and-signaling-100).
 
 The installation tolerates up to 30 seconds of signing clock skew in the maximum
 remaining grant lifetime; its local expiry is strict. Direct signaling uses
