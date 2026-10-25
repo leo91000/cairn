@@ -56,7 +56,7 @@ it('publishes resource, skill and MCP tool bounds from the Rust contract', () =>
 
   for (const field of ['nodes', 'projects', 'mcps', 'skills'] as const) {
     const input = structuredClone(wire.creates[0]) as CreateAgentInput
-    input.settings.access[field] = Array.from({ length: 100 }).fill(field === 'skills' ? 'global/review' : id)
+    input.settings.access[field] = Array.from<string>({ length: 100 }).fill(field === 'skills' ? 'global/review' : id)
     expect(create(input), JSON.stringify(create.errors)).toBe(true)
     input.settings.access[field]!.push(field === 'skills' ? 'global/extra' : id)
     expect(create(input)).toBe(false)
@@ -64,7 +64,7 @@ it('publishes resource, skill and MCP tool bounds from the Rust contract', () =>
 
   for (const field of ['plugins', 'exclusiveNodes'] as const) {
     const input = structuredClone(wire.creates[0]) as CreateAgentInput
-    input.settings[field] = Array.from({ length: 100 }).fill(id)
+    input.settings[field] = Array.from<string>({ length: 100 }).fill(id)
     expect(create(input), JSON.stringify(create.errors)).toBe(true)
     input.settings[field].push(id)
     expect(create(input)).toBe(false)
@@ -74,7 +74,7 @@ it('publishes resource, skill and MCP tool bounds from the Rust contract', () =>
 
   for (const field of ['nativeNodeReviews', 'reapproveDelegations'] as const) {
     const input = structuredClone(wire.creates[0]) as CreateAgentInput
-    input.review[field] = Array.from({ length: 100 }).fill(id)
+    input.review[field] = Array.from<string>({ length: 100 }).fill(id)
     expect(create(input), JSON.stringify(create.errors)).toBe(true)
     input.review[field]!.push(id)
     expect(create(input)).toBe(false)
@@ -84,9 +84,9 @@ it('publishes resource, skill and MCP tool bounds from the Rust contract', () =>
 
   const input = structuredClone(wire.creates[0]) as CreateAgentInput
   input.settings.access.skills = ['é'.repeat(160)]
-  input.settings.access.mcpTools = { [id]: Array.from({ length: 500 }).fill('r'.repeat(200)) }
+  input.settings.access.mcpTools = { [id]: Array.from({ length: 500 }, () => 'r'.repeat(200)) }
   expect(create(input), JSON.stringify(create.errors)).toBe(true)
-  for (const invalid of [Array.from({ length: 501 }).fill('read'), [''], ['r'.repeat(201)]]) {
+  for (const invalid of [Array.from<string>({ length: 501 }).fill('read'), [''], ['r'.repeat(201)]]) {
     input.settings.access.mcpTools = { [id]: invalid }
     expect(create(input)).toBe(false)
   }
