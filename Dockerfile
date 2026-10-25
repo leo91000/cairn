@@ -94,6 +94,7 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharin
     && printf '' > crates/protocol/src/lib.rs \
     && cargo build --locked --release --bin cairn-beacon \
     && cargo build --locked --release --target x86_64-unknown-linux-musl --bin cairn-node-gateway
+COPY crates/contracts ./crates/contracts
 COPY crates/beacon ./crates/beacon
 COPY crates/protocol ./crates/protocol
 COPY crates/node-gateway ./crates/node-gateway
@@ -101,7 +102,7 @@ COPY deploy/installations ./deploy/installations
 COPY deploy/nodes ./deploy/nodes
 # Beacon serves the node gateway to machines added without a manager address.
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    touch crates/beacon/src/main.rs crates/beacon/src/lib.rs crates/protocol/src/lib.rs \
+    touch crates/contracts/src/lib.rs crates/beacon/src/main.rs crates/beacon/src/lib.rs crates/protocol/src/lib.rs \
     crates/node-gateway/src/main.rs crates/node-gateway/src/lib.rs \
     && cargo build --locked --release --bin cairn-beacon \
     && cargo build --locked --release --target x86_64-unknown-linux-musl --bin cairn-node-gateway \

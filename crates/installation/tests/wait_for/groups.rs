@@ -379,9 +379,12 @@ async fn recorded_member_and_final_group_results_recheck_authorization_before_re
                     .await
                     .unwrap();
             } else {
-                let mut project = f.s.get("projects", &f.project).await.unwrap();
-                project["origin"] = "https://github.com/another/repository.git".into();
-                f.s.store.put("projects", project).await.unwrap();
+                let mut project = f.s.get_project(&f.project).await.unwrap();
+                project.origin = "https://github.com/another/repository.git".into();
+                f.s.store
+                    .transaction(move |db| db.save_project(&project, Some(&project.revision)))
+                    .await
+                    .unwrap();
             }
             let resumed = f.tick().await;
             assert_eq!(resumed["run"]["status"], "queued");

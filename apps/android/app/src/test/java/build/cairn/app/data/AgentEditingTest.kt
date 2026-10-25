@@ -25,7 +25,11 @@ class AgentEditingTest {
         )
     private val mac = ExecutionNode("mac", "mac-mini", status = "offline")
     private val nodes = listOf(gpu, mac)
-    private val projects = listOf(Project("p1", "cairn"), Project("p2", "SheetOM"))
+    private val projects =
+        listOf(
+            Project("2450c72e-6174-56da-b0fc-b06868e8e8e5", "cairn"),
+            Project("6501040b-e89b-5102-9fa7-24510fb014c8", "SheetOM"),
+        )
     private val catalog =
         PluginCatalog(
             packages =
@@ -58,7 +62,14 @@ class AgentEditingTest {
             name = "Release engineer",
             revision = "r1",
             access =
-                AccessPolicy(nodes = listOf(LOCAL_NODE_ID, "gpu"), projects = listOf("p1", "p2")),
+                AccessPolicy(
+                    nodes = listOf(LOCAL_NODE_ID, "gpu"),
+                    projects =
+                        listOf(
+                            "2450c72e-6174-56da-b0fc-b06868e8e8e5",
+                            "6501040b-e89b-5102-9fa7-24510fb014c8",
+                        ),
+                ),
         )
     private val resources =
         AgentResources(projects, nodes = nodes, catalog = catalog.agentDirectory())
@@ -151,7 +162,10 @@ class AgentEditingTest {
             ),
         )
         assertEquals("review · Global", skillLabel(Skill("review", scope = "global"), projects))
-        assertEquals("lint · cairn", skillKeyLabel("p1/lint", projects))
+        assertEquals(
+            "lint · cairn",
+            skillKeyLabel("2450c72e-6174-56da-b0fc-b06868e8e8e5/lint", projects),
+        )
         assertEquals("2 projets · 2 nodes", agentAccessSummary(agent))
         assertEquals("Limite : 120 min", timeoutSummary(120))
     }
@@ -203,7 +217,11 @@ class AgentEditingTest {
     fun reviewListsPowersSecretsAndWorkAReductionStops() {
         val edited =
             agent.copy(
-                access = agent.access.copy(projects = listOf("p1"), installation = true),
+                access =
+                    agent.access.copy(
+                        projects = listOf("2450c72e-6174-56da-b0fc-b06868e8e8e5"),
+                        installation = true,
+                    ),
                 exclusiveNodes = listOf("gpu"),
                 plugins = listOf("prod"),
             )
@@ -239,7 +257,10 @@ class AgentEditingTest {
         val reduced =
             agentReview(
                 agent,
-                agent.copy(access = agent.access.copy(projects = listOf("p1"))),
+                agent.copy(
+                    access =
+                        agent.access.copy(projects = listOf("2450c72e-6174-56da-b0fc-b06868e8e8e5"))
+                ),
                 resources,
                 AgentPreview(),
             )
@@ -389,7 +410,7 @@ class AgentEditingTest {
             base.copy(
                 access =
                     base.access.copy(
-                        projects = listOf("p1"),
+                        projects = listOf("2450c72e-6174-56da-b0fc-b06868e8e8e5"),
                         mcpTools = mapOf("m" to listOf("t1", "t2")),
                     ),
                 plugins = listOf("prod", "staging"),
@@ -397,13 +418,21 @@ class AgentEditingTest {
         val theirs =
             base.copy(
                 revision = "r2",
-                access = base.access.copy(projects = listOf("p1", "p2", "p3")),
+                access =
+                    base.access.copy(
+                        projects =
+                            listOf(
+                                "2450c72e-6174-56da-b0fc-b06868e8e8e5",
+                                "6501040b-e89b-5102-9fa7-24510fb014c8",
+                                "p3",
+                            )
+                    ),
                 plugins = listOf("prod", "bot"),
                 exclusiveNodes = emptyList(),
             )
         val rebased = rebaseAgent(base, mine, theirs, mcpIds = setOf("m"))
         // I removed p2; they added p3.
-        assertEquals(listOf("p1", "p3"), rebased.access.projects)
+        assertEquals(listOf("2450c72e-6174-56da-b0fc-b06868e8e8e5", "p3"), rebased.access.projects)
         assertEquals(listOf("prod", "bot", "staging"), rebased.plugins)
         assertEquals(emptyList<String>(), rebased.exclusiveNodes)
         assertEquals(mapOf("m" to listOf("t1", "t2")), rebased.access.mcpTools)
@@ -703,7 +732,13 @@ class AgentEditingTest {
                 Mcp(id = "off", name = "Sentry", enabled = false),
             )
         val gone =
-            agent.copy(access = agent.access.copy(projects = listOf("p1", "gone"), mcps = null))
+            agent.copy(
+                access =
+                    agent.access.copy(
+                        projects = listOf("2450c72e-6174-56da-b0fc-b06868e8e8e5", "gone"),
+                        mcps = null,
+                    )
+            )
         val issues = agentIssues(gone, resources.copy(mcps = mcps))
         assertEquals(listOf(AgentSection.Projects, AgentSection.Mcp), issues.map { it.section })
         assertEquals("Un projet sélectionné n’existe plus.", issues[0].text)

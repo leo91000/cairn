@@ -171,19 +171,19 @@ fn project(db: &Db<'_>, run: &Value, condition: &Value) -> Result<Value> {
         .find(|p| p["id"] == id)
         .ok_or_else(|| Error::forbidden("This project is not authorized for the wait."))?;
     let current = db
-        .get("projects", id)?
+        .project(id)?
         .ok_or_else(|| Error::not_found("Project no longer exists."))?;
-    if current["origin"] != granted["origin"] {
+    if current.origin != granted["origin"].as_str().unwrap_or("") {
         return Err(Error::conflict(
             "Project origin changed; register a new wait.",
         ));
     }
     Ok(json!({
-        "id": current["id"],
-        "name": current["name"],
-        "origin": current["origin"],
-        "baseBranch": current["baseBranch"],
-        "source": current["source"],
+        "id": current.id,
+        "name": current.settings.name,
+        "origin": current.origin,
+        "baseBranch": current.settings.base_branch,
+        "source": current.source,
     }))
 }
 
@@ -232,6 +232,21 @@ pub struct Observed {
     pub result: Option<Value>,
     pub display: Option<Value>,
     pub check_after: Option<i64>,
+    agent: Box<scope::Agent>,
+    approval: registry::Approval,
+    digest: String,
+}
+
+impl Observed {
+    pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
+        self.agent.recheck(s).await?;
+        self.approval.recheck(s, &self.digest).await
+    }
+
+    pub(crate) fn recheck_in(&self, db: &Db<'_>) -> Result<()> {
+        self.approval.recheck_in(db)?;
+        self.agent.recheck_in(db)
+    }
 }
 
 pub async fn observe(
@@ -263,6 +278,12 @@ pub async fn observe(
         .ok_or_else(|| {
             Error::forbidden("This agent is no longer granted the plugin of this wait.")
         })?;
+    let expected_plugin = package.manifest.id.clone();
+    let expected_digest = package.digest.clone();
+    let approval = s
+        .store
+        .read(move |db| registry::Approval::capture_in(db, &expected_plugin, &expected_digest))
+        .await?;
     let kind = text(condition, "type");
     let declared = package
         .manifest
@@ -278,6 +299,7 @@ pub async fn observe(
         Some(bearer) => Scope::for_agent(s, run, instances, bearer).await?,
         None => Scope::for_condition(s, run, condition, instances).await?,
     };
+    approval.recheck(s, &package.digest).await?;
     let payload = json!({
         "condition": declared.name,
         "input": input,
@@ -291,11 +313,17 @@ pub async fn observe(
     )
     .await
     .map_err(|_| Error::bad_gateway("The condition could not be checked in time."))??;
+    approval.recheck(s, &package.digest).await?;
     if serde_json::to_string(&value)?.len() > MAX_OBSERVATION_BYTES {
         return Err(Error::bad_gateway(
             "The plugin returned too large a result.",
         ));
     }
+    let Scope::Agent(agent) = scope else {
+        return Err(Error::forbidden(
+            "The condition has no agent authorization.",
+        ));
+    };
     let check_after = value["checkAfter"]
         .as_i64()
         .map(|seconds| seconds.clamp(10, 3600) * 1000);
@@ -311,6 +339,9 @@ pub async fn observe(
             result: None,
             display: waiting_display(&value["display"]),
             check_after,
+            agent,
+            approval,
+            digest: package.digest,
         });
     };
     let mut result = value.as_object().cloned().unwrap_or_default();
@@ -331,6 +362,9 @@ pub async fn observe(
         result: Some(Value::Object(result)),
         display: None,
         check_after,
+        agent,
+        approval,
+        digest: package.digest,
     })
 }
 
@@ -389,8 +423,33 @@ fn watched(owner: &crate::waits::Owner, run: &Value, time: i64) -> Vec<Slot> {
         .collect()
 }
 
-/// One batch is capped and deduplicated; slow services never hold the admission tick.
-pub async fn poll_once(s: &Service) -> Result<()> {
+/// A finished probe owns its unchanged wait snapshots until publication. A queued
+/// store write may outlive a source change; callers cannot rebuild this proof.
+pub struct PendingObservation {
+    group: Vec<Watch>,
+    observed: Result<Observed>,
+}
+
+impl PendingObservation {
+    pub async fn publish(self, s: &Service) -> Result<()> {
+        let observed = match self.observed {
+            Ok(observed) => match observed.recheck(s).await {
+                Ok(()) => Ok(observed),
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        };
+        s.store
+            .transaction(move |db| record(db, self.group, &observed))
+            .await
+    }
+}
+
+/// One batch is capped and deduplicated. Completed probes retain their original
+/// wait snapshots while a publication waits for the store writer.
+pub async fn pending(
+    s: &Service,
+) -> Result<impl futures_util::Stream<Item = PendingObservation> + '_> {
     let groups = s
         .store
         .read(|db| {
@@ -454,15 +513,22 @@ pub async fn poll_once(s: &Service) -> Result<()> {
             Ok(groups)
         })
         .await?;
-    let results = stream::iter(groups)
-        .map(|group| async move {
+    Ok(stream::iter(groups)
+        .map(move |group| async move {
             let (first, run, slot) = &group[0];
             let condition = condition_of(&first.record["wakeup"], *slot);
             let observed = observe(s, run, condition, None).await;
-            s.store
-                .transaction(move |db| record(db, group, &observed))
-                .await
+            PendingObservation { group, observed }
         })
+        .buffer_unordered(4))
+}
+
+/// Slow services never hold the admission tick. Successful probes publish as they
+/// finish; a slow or refused group does not postpone the healthy groups.
+pub async fn poll_once(s: &Service) -> Result<()> {
+    let results = pending(s)
+        .await?
+        .map(|observed| observed.publish(s))
         .buffer_unordered(4)
         .collect::<Vec<_>>()
         .await;
@@ -518,12 +584,19 @@ fn record(db: &Db<'_>, group: Vec<Watch>, observed: &Result<Observed>) -> Result
     {
         return Ok(());
     }
+    // Check the shared probe before publishing any peer. A successful first
+    // publication changes its representative's progress; it must not invalidate
+    // the same authorized result for the remaining peers in this transaction.
+    let source = match observed {
+        Ok(observed) => observed.recheck_in(db),
+        Err(_) => Ok(()),
+    };
     for (expected, observed_run, slot) in group {
         let Some((mut owner, run)) = current_wait(db, &expected, &observed_run, slot)? else {
             continue;
         };
         let condition = condition_of(&owner.record["wakeup"], slot).clone();
-        let authorized = crate::waits::access(db, &run, &condition);
+        let authorized = crate::waits::access(db, &run, &condition).and_then(|()| source.clone());
         let result = match (&authorized, observed) {
             (Err(error), _) => Some(json!({ "state": "unavailable", "message": error.message })),
             (Ok(()), Ok(value)) => value.result.clone(),
@@ -543,11 +616,15 @@ fn record(db: &Db<'_>, group: Vec<Watch>, observed: &Result<Observed>) -> Result
             // A successful check means the service answers again.
             progress.remove("lastError");
         }
-        if let Ok(observed) = observed {
-            if let Some(display) = &observed.display {
-                progress["display"] = display.clone();
+        if authorized.is_ok() {
+            if let Ok(observed) = observed {
+                if let Some(display) = &observed.display {
+                    progress["display"] = display.clone();
+                }
+                delay = observed.check_after.unwrap_or(POLL_MS);
             }
-            delay = observed.check_after.unwrap_or(POLL_MS);
+        } else if let Some(progress) = progress.as_object_mut() {
+            progress.remove("display");
         }
         progress["nextCheckAt"] = (now() + delay).into();
         if slot.is_some() {
@@ -589,87 +666,6 @@ pub(crate) async fn maintain(s: Arc<Service>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn observations_captured_before_a_merge_are_retried_under_the_destination() {
-        let root = tempfile::tempdir().unwrap();
-        let store = crate::store::Store::open(root.path()).unwrap();
-        store
-            .transaction(|db| {
-                let source = json!({ "id": "source" });
-                let target = json!({ "id": "target" });
-                db.put("agents", &target)?;
-                db.put(
-                    connections::KIND,
-                    &json!({
-                        "id": "instance", "pluginId": "fixture", "enabled": true,
-                        "agentIds": ["target"],
-                    }),
-                )?;
-                let captured_run = json!({
-                    "id": "run", "taskId": "task", "status": "succeeded", "createdAt": now(),
-                    "snapshot": { "agent": source }, "chatExecution": { "messageId": "message" },
-                });
-                db.add_run(&captured_run, None)?;
-                let chat = db.put(
-                    "chats",
-                    &json!({
-                        "id": "chat", "agentId": "target", "runId": "run",
-                        "wakeup": {
-                            "messageId": "message", "wakeAt": now() + 60_000,
-                            "condition": { "type": "fixture_ready", "pluginId": "fixture" },
-                        },
-                    }),
-                )?;
-                let current_run =
-                    db.patch_run("run", &json!({ "snapshot": { "agent": target } }))?;
-                let stale_denial =
-                    crate::waits::access(db, &captured_run, &chat["wakeup"]["condition"])
-                        .unwrap_err();
-                record(
-                    db,
-                    vec![(
-                        crate::waits::Owner {
-                            chat: true,
-                            record: chat.clone(),
-                        }
-                        .into(),
-                        captured_run.into(),
-                        None,
-                    )],
-                    &Err(stale_denial),
-                )?;
-                assert_eq!(db.get("chats", "chat")?.unwrap(), chat);
-                assert!(db.events("run", 0, 10)?.is_empty());
-
-                let fresh = Ok(Observed {
-                    result: Some(json!({ "state": "completed" })),
-                    display: None,
-                    check_after: None,
-                });
-                record(
-                    db,
-                    vec![(
-                        crate::waits::Owner {
-                            chat: true,
-                            record: chat,
-                        }
-                        .into(),
-                        current_run.into(),
-                        None,
-                    )],
-                    &fresh,
-                )?;
-                assert_eq!(
-                    db.get("chats", "chat")?.unwrap()["wakeup"]["observation"]["state"],
-                    "completed"
-                );
-                assert_eq!(db.events("run", 0, 10)?.len(), 1);
-                Ok(())
-            })
-            .await
-            .unwrap();
-    }
 
     #[test]
     fn displays_are_bounded_and_toned() {

@@ -9,10 +9,15 @@ mod continuations;
 mod delegation;
 #[path = "plugin_routes/delegation_storage.rs"]
 mod delegation_storage;
+#[allow(dead_code)]
+#[path = "common/management.rs"]
+mod management;
 #[path = "plugin_routes/metadata.rs"]
 mod metadata;
 #[path = "plugin_routes/oauth_recovery.rs"]
 mod oauth_recovery;
+#[path = "plugin_routes/queued_inputs.rs"]
+mod queued_inputs;
 
 use aws_lc_rs::hmac;
 use axum::{body::Body, http::StatusCode, response::IntoResponse};
@@ -23,6 +28,7 @@ use cairn_installation::{
     service::Service,
     validation::text,
 };
+use common::ProjectFixture;
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
 use tempfile::TempDir;
@@ -5273,7 +5279,7 @@ async fn external_route_configuration_does_not_grant_native_host_provenance() {
 async fn route_eligibility_requires_the_selected_project_and_allows_paused_configuration() {
     let (root, s, instance, resource, app) = fixture().await;
     let project = s
-        .project(
+        .project_fixture(
             json!({ "name": "Support", "path": root.path().join("home") }),
             None,
         )
@@ -5282,7 +5288,7 @@ async fn route_eligibility_requires_the_selected_project_and_allows_paused_confi
     let other_path = root.path().join("other-project");
     std::fs::create_dir(&other_path).unwrap();
     let other_project = s
-        .project(json!({"name": "Other", "path": other_path}), None)
+        .project_fixture(json!({"name": "Other", "path": other_path}), None)
         .await
         .unwrap();
     let agent = s

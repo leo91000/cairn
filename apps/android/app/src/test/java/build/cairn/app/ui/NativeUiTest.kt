@@ -34,7 +34,7 @@ class NativeUiTest {
                 Installation("fixture", "Installation de test", InstallationRole.Owner, true),
             ready = true,
             agents = listOf(Agent(id = "agent", name = "Reviewer")),
-            projects = listOf(Project(id = "project", name = "Cairn")),
+            projects = listOf(Project(id = "46d045dd-9bce-51e3-8a99-65aa9384efc9", name = "Cairn")),
         )
 
     @Test
@@ -43,7 +43,11 @@ class NativeUiTest {
         val restoration = StateRestorationTester(compose)
         restoration.setContent {
             CairnTheme {
-                TaskEditor(vm, workspace, Task(agentId = "agent", projectId = "project")) {}
+                TaskEditor(
+                    vm,
+                    workspace,
+                    Task(agentId = "agent", projectId = "46d045dd-9bce-51e3-8a99-65aa9384efc9"),
+                ) {}
             }
         }
         compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
@@ -75,7 +79,7 @@ class NativeUiTest {
                                     id = "a",
                                     name = "Revue quotidienne",
                                     agentId = "agent",
-                                    projectId = "project",
+                                    projectId = "46d045dd-9bce-51e3-8a99-65aa9384efc9",
                                     cron = "0 9 * * *",
                                     nextRun = 1789405200000,
                                 ),
@@ -83,7 +87,7 @@ class NativeUiTest {
                                     id = "b",
                                     name = "Ancienne mission",
                                     agentId = "agent",
-                                    projectId = "project",
+                                    projectId = "46d045dd-9bce-51e3-8a99-65aa9384efc9",
                                     archived = true,
                                     enabled = false,
                                 ),

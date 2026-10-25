@@ -49,6 +49,7 @@ pub mod process;
 pub(crate) mod project_archives;
 pub mod project_git;
 pub mod project_workspaces;
+pub mod projects;
 pub mod provider;
 mod reads;
 pub mod recovery;

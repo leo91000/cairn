@@ -1,4 +1,4 @@
-use cairn_contracts::*;
+use cairn_contracts::{beacon::*, *};
 use schemars::{JsonSchema, generate::SchemaSettings};
 use std::{fs, path::Path};
 use ts_rs::TS;
@@ -27,6 +27,70 @@ fn main() {
     export::<ResumeRunInput>(root, &mut generator, Contract::Deserialize);
     export::<ResumeRunOutput>(root, &mut generator, Contract::Serialize);
     export::<QualificationFixture>(root, &mut generator, Contract::Serialize);
+    export::<CreateProjectInput>(root, &mut generator, Contract::Deserialize);
+    export::<ReplaceProjectInput>(root, &mut generator, Contract::Deserialize);
+    export::<ProjectInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListProjectsInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListProjectsOutput>(root, &mut generator, Contract::Serialize);
+    export::<Project>(root, &mut generator, Contract::Serialize);
+    export::<DeleteProjectOutput>(root, &mut generator, Contract::Serialize);
+    let projects: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/project-contracts.json"
+    ))
+    .unwrap();
+    let creates: Vec<CreateProjectInput> = projects["creates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| serde_json::from_value(value.clone()).unwrap())
+        .collect();
+    let views: Vec<Project> = creates
+        .iter()
+        .enumerate()
+        .map(|(index, input)| Project {
+            id: ProjectId(uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap()),
+            settings: input.settings.clone(),
+            origin: "forge.example:team/project.git".into(),
+            source: if index == 0 {
+                None
+            } else {
+                Some(ProjectSource {
+                    plugin_id: "forge".into(),
+                    source: "repositories".into(),
+                    instance: "00000000-0000-4000-8000-000000000003".into(),
+                    id: "team/project".into(),
+                })
+            },
+            revision: "00000000-0000-4000-8000-000000000004".into(),
+            created_at: 9007199254740991,
+        })
+        .collect();
+    fs::write(
+        root.join("project-wire.json"),
+        serde_json::to_string_pretty(&serde_json::json!({ "creates": creates, "views": views }))
+            .unwrap()
+            + "\n",
+    )
+    .unwrap();
+    let clients = serde_json::json!([
+        { "name": "listProjects", "input": "ListProjectsInput", "output": "ListProjectsOutput", "method": "GET", "path": "/projects" },
+        { "name": "getProject", "input": "ProjectInput", "output": "Project", "method": "GET", "path": "/projects/{projectId}" },
+        { "name": "createProject", "input": "CreateProjectInput", "output": "Project", "method": "POST", "path": "/projects" },
+        { "name": "replaceProject", "input": "ReplaceProjectInput", "output": "Project", "method": "PUT", "path": "/projects/{projectId}" },
+        { "name": "deleteProject", "input": "ProjectInput", "output": "DeleteProjectOutput", "method": "DELETE", "path": "/projects/{projectId}" }
+    ]);
+    fs::write(
+        root.join("project-clients.json"),
+        serde_json::to_string_pretty(&clients).unwrap() + "\n",
+    )
+    .unwrap();
+    export::<ListAccountMethodsInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListAccountMethodsOutput>(root, &mut generator, Contract::Serialize);
+    fs::write(
+        root.join("list-account-methods.json"),
+        serde_json::to_string_pretty(&list_account_methods_descriptor()).unwrap() + "\n",
+    )
+    .unwrap();
     // Canonical wire values come from the Rust serializer, including omission/null semantics.
     let corpus: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/resume-contracts.json"

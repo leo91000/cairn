@@ -84,16 +84,7 @@ data class Agent(
     val revision: String = "",
 )
 
-@Serializable
-data class Project(
-    val id: String = "",
-    val name: String = "",
-    val path: String = "",
-    val description: String = "",
-    val baseBranch: String = "main",
-    val origin: String? = null,
-    val sourceMode: String = "remote",
-)
+typealias Project = build.cairn.contracts.Project
 
 @Serializable
 data class Task(

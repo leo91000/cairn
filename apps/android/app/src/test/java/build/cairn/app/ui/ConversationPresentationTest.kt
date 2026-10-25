@@ -491,7 +491,10 @@ class ConversationPresentationTest {
         assertEquals("À examiner", taskGroup(Task(), run))
         assertEquals("abcdef", run.workspaces.single().revision)
         assertEquals(listOf("403"), run.outcome!!.evidence)
-        val project = wireJson.decodeFromString<Project>("""{"sourceMode":"local"}""")
+        val project =
+            wireJson.decodeFromString<Project>(
+                """{"id":"00000000-0000-4000-8000-000000000001","name":"Project","path":"/project","origin":"","revision":"fixture","createdAt":0,"sourceMode":"local"}"""
+            )
         assertEquals("local", project.sourceMode)
         assertEquals(
             "Terminées",

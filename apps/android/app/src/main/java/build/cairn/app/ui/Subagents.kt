@@ -38,6 +38,8 @@ internal data class Subagent(
     val activity: String,
     val model: String,
     val background: Boolean,
+    /** The agent resumed it after it reported back; it keeps its identity and steps. */
+    val resumed: Boolean,
     val state: SubagentState,
     val taskId: String,
     val startedAt: Long,
@@ -84,6 +86,7 @@ private class SubagentBuilder(val id: String, val startedAt: Long) {
     var activity = ""
     var model = ""
     var background = false
+    var resumed = false
     var state = SubagentState.RUNNING
     var taskId = ""
     var durationMs: Long? = null
@@ -113,6 +116,7 @@ private class SubagentBuilder(val id: String, val startedAt: Long) {
         activity = item.string("activity")
         model = item.string("model").ifBlank { model }
         background = (item?.get("background") as? JsonPrimitive)?.booleanOrNull == true
+        resumed = resumed || (item?.get("resumed") as? JsonPrimitive)?.booleanOrNull == true
         tokens = (item?.get("tokens") as? JsonPrimitive)?.longOrNull
         toolUses = (item?.get("tool_uses") as? JsonPrimitive)?.longOrNull
         val reported = (item?.get("duration_ms") as? JsonPrimitive)?.longOrNull
@@ -149,6 +153,7 @@ private class SubagentBuilder(val id: String, val startedAt: Long) {
             activity,
             model,
             background,
+            resumed,
             state,
             taskId,
             startedAt,

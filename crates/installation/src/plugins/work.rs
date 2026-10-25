@@ -1717,21 +1717,34 @@ pub(crate) async fn checkpoint_state(s: &Service, delivery: &Value) -> Result<Va
 
 /// Removes a delivery and records how its exchange ended.
 pub async fn finish(s: &Service, delivery: &Value, status: &'static str) -> Result<()> {
-    let id = text(delivery, "id").to_owned();
     let delivery = delivery.clone();
     s.store
-        .transaction(move |db| {
-            remove_delivery(db, &delivery)?;
-            for mut value in db.list("plugin-activity")? {
-                if value["deliveryId"] == id {
-                    value["status"] = json!(status);
-                    value["updatedAt"] = json!(now());
-                    db.put("plugin-activity", &value)?;
-                }
-            }
-            Ok(())
-        })
+        .transaction(move |db| finish_in(db, &delivery, status))
         .await
+}
+
+fn finish_in(db: &Db<'_>, delivery: &Value, status: &'static str) -> Result<()> {
+    let id = text(delivery, "id");
+    remove_delivery(db, delivery)?;
+    for mut value in db.list("plugin-activity")? {
+        if value["deliveryId"] == id {
+            value["status"] = json!(status);
+            value["updatedAt"] = json!(now());
+            db.put("plugin-activity", &value)?;
+        }
+    }
+    Ok(())
+}
+
+/// Editing or withdrawing a queued input retires its external destination in
+/// the same transaction. A replacement cannot export another requester's turn.
+pub(crate) fn retire_queued_input(db: &Db<'_>, chat: &str, message: &str) -> Result<()> {
+    if let Some(delivery) = db.get(DELIVERIES, message)?
+        && delivery["chatId"] == chat
+    {
+        finish_in(db, &delivery, "cancelled")?;
+    }
+    Ok(())
 }
 
 pub(crate) fn remove_delivery(db: &Db<'_>, delivery: &Value) -> Result<()> {

@@ -165,7 +165,20 @@ pub(crate) fn capture_delegation(
     message: &Value,
     requester: Option<&RunRequester>,
 ) -> Result<()> {
-    if captured_run(db, run)?.as_ref() != requester {
+    // Compare the native input identity; the retained approval is verified by
+    // recheck_in below and must not be replaced by a new capture here.
+    let same_turn = match (captured_run(db, run)?.as_ref(), requester) {
+        (None, None) => true,
+        (Some(current), Some(expected)) => {
+            current.principal == expected.principal
+                && current.run == expected.run
+                && current.chat == expected.chat
+                && current.message == expected.message
+                && current.suspended == expected.suspended
+        }
+        _ => false,
+    };
+    if !same_turn {
         return Err(Error::conflict("The delegation's requesting turn changed."));
     }
     if let Some(requester) = requester {
@@ -361,6 +374,13 @@ pub(crate) async fn external(
     Ok(connection)
 }
 
+// One native operation retains its original source across nested capabilities.
+// Store callbacks capture a clone before crossing to the store task; they never
+// replace this proof with a then-current package approval at publication.
+tokio::task_local! {
+    pub(crate) static CURRENT: Option<RunRequester>;
+}
+
 #[derive(Clone, PartialEq)]
 pub(crate) struct RunRequester {
     pub principal: Principal,
@@ -368,6 +388,7 @@ pub(crate) struct RunRequester {
     chat: String,
     message: String,
     suspended: bool,
+    approval: Option<super::registry::Approval>,
 }
 
 /// A dormant plugin condition keeps the exact waiting turn and its source identity.
@@ -623,13 +644,39 @@ fn captured_run(db: &Db<'_>, run: &Value) -> Result<Option<RunRequester>> {
             chat: chat_id.into(),
             message: message.into(),
             suspended,
+            approval: None,
         }),
     )
 }
 
 pub(crate) async fn for_run(s: &Service, run: &Value) -> Result<Option<RunRequester>> {
-    let run = run.clone();
-    let requester = s.store.read(move |db| captured_run(db, &run)).await?;
+    let inherited = CURRENT
+        .try_with(Clone::clone)
+        .ok()
+        .flatten()
+        .filter(|requester| requester.run == text(run, "id"));
+    let requester = match inherited {
+        Some(requester) => Some(requester),
+        None => {
+            let run = run.clone();
+            s.store
+                .read(move |db| {
+                    let mut requester = captured_run(db, &run)?;
+                    if let Some(requester) = &mut requester
+                        && let Principal::External(actor) = &requester.principal
+                    {
+                        let connection = external_in(db, actor)?;
+                        requester.approval = Some(super::registry::Approval::capture_in(
+                            db,
+                            &connection.plugin_id,
+                            &actor.binding.digest,
+                        )?);
+                    }
+                    Ok(requester)
+                })
+                .await?
+        }
+    };
     if let Some(requester) = &requester {
         recheck(s, requester).await?;
     }
@@ -656,6 +703,9 @@ pub(crate) async fn recheck(s: &Service, requester: &RunRequester) -> Result<()>
         }
         Principal::External(actor) => {
             external(s, actor).await?;
+            if let Some(approval) = &requester.approval {
+                approval.recheck(s, &actor.binding.digest).await?;
+            }
         }
     }
     let requester = requester.clone();
@@ -664,6 +714,9 @@ pub(crate) async fn recheck(s: &Service, requester: &RunRequester) -> Result<()>
 
 /// Local authority fences can share a snapshot with resource and credential checks.
 pub(crate) fn recheck_in(db: &Db<'_>, requester: &RunRequester) -> Result<()> {
+    if let Some(approval) = &requester.approval {
+        approval.recheck_in(db)?;
+    }
     let run = recheck_turn_in(db, requester)?;
     if run["status"] != RunStatus::Running
         || suspended(db, &requester.chat, &run)? != requester.suspended

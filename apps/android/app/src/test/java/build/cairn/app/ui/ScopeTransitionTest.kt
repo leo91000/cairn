@@ -88,7 +88,13 @@ class ScopeTransitionTest {
                                 return MockResponse().setResponseCode(503).setBody("{}")
                             path == "/api/account/options" || path == "/api/account/methods" -> "{}"
                             path.endsWith("/models") || path.endsWith("/overview") -> "{}"
-                            else -> "[]"
+                            else ->
+                                if (
+                                    request.requestUrl?.encodedPath?.endsWith("/api/projects") ==
+                                        true
+                                )
+                                    """{"projects":[]}"""
+                                else "[]"
                         }
                     return MockResponse().setBody(result)
                 }

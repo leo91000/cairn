@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
 pub enum Scope {
-    Managed(Box<Scope>, super::management::Authority),
+    Managed(Box<Scope>, Box<super::management::Authority>),
     /// The owner, through one instance: views, actions and tests.
     Instance(Box<Connection>, Arc<super::operations::Owner>),
     /// A signed public request. It has no Cairn account or owner authority.
@@ -39,6 +39,38 @@ pub struct Agent {
     bearer: String,
     requester: Option<super::requesters::RunRequester>,
     observation: Option<Arc<super::requesters::Observation>>,
+}
+
+impl Agent {
+    pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
+        if let Some(observation) = &self.observation {
+            observation.recheck(s).await?;
+        }
+        if let Some(requester) = &self.requester {
+            super::requesters::recheck(s, requester).await?;
+        }
+        Ok(())
+    }
+
+    /// A condition's result remains bound to the source and instance snapshots
+    /// supplied to its handler, including while publication waits for the writer.
+    pub(crate) fn recheck_in(&self, db: &crate::store::Db<'_>) -> Result<()> {
+        if let Some(observation) = &self.observation {
+            observation.recheck_in(db)?;
+        } else {
+            crate::project_workspaces::authorize_in(db, &self.bearer)?;
+        }
+        if let Some(requester) = &self.requester {
+            super::requesters::recheck_in(db, requester)?;
+        }
+        for instance in &self.instances {
+            let current = connections::authorize(db, instance)?;
+            if !current.grants(&self.agent_id) {
+                return Err(Error::forbidden("The condition's instance grant changed."));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Scope {
@@ -273,7 +305,7 @@ pub async fn call(
 ) -> Result<Value> {
     let original_scope = scope;
     let (scope, management) = match scope {
-        Scope::Managed(inner, authority) => (inner.as_ref(), Some(authority.clone())),
+        Scope::Managed(inner, authority) => (inner.as_ref(), Some(authority.as_ref().clone())),
         _ => (scope, None),
     };
     if matches!(scope, Scope::Setup(_)) {

@@ -277,7 +277,7 @@ impl Form {
         let scope = super::super::scope::Scope::Draft(Box::new(connection), Arc::new(draft));
         let scope = match &self.configuration.management {
             Some(authority) => {
-                super::super::scope::Scope::Managed(Box::new(scope), authority.clone())
+                super::super::scope::Scope::Managed(Box::new(scope), Box::new(authority.clone()))
             }
             None => scope,
         };

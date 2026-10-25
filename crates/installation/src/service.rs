@@ -194,6 +194,12 @@ impl Service {
                     }
                     crate::agent_grants::normalize(&mut agent);
                 }
+                for project in access["projects"].as_array().into_iter().flatten() {
+                    required(
+                        db.project(project.as_str().unwrap_or(""))?,
+                        "Project no longer exists",
+                    )?;
+                }
                 crate::agent_grants::validate(db, &agent, &accepts_agents)?;
                 let agent = save_agent(db, agent, &access, owner_review, &native_reviews)?;
                 for connection in &reapprove {
@@ -395,7 +401,10 @@ impl Service {
 
     /// Every project, MCP connection and tool permission must reference an existing record.
     async fn require_access_targets(&self, access: &Value) -> Result<()> {
-        for kind in ["projects", "mcps"] {
+        for value in access["projects"].as_array().into_iter().flatten() {
+            self.get_project(value.as_str().unwrap_or("")).await?;
+        }
+        for kind in ["mcps"] {
             for value in access[kind].as_array().into_iter().flatten() {
                 self.get(kind, value.as_str().unwrap_or("")).await?;
             }
@@ -412,82 +421,6 @@ impl Service {
             }
         }
         Ok(())
-    }
-
-    pub async fn project(&self, input: Value, existing: Option<&str>) -> Result<Value> {
-        self.project_authorized(input, existing, |_| Ok(())).await
-    }
-
-    /// Registers a project a plugin's project source resolved. `source` names the
-    /// plugin, instance and item, so later fetches prefer that instance's credentials.
-    pub(crate) async fn project_from_source(&self, input: Value, source: Value) -> Result<Value> {
-        self.save_project(input, None, Some(source), |_| Ok(()))
-            .await
-    }
-
-    pub(crate) async fn project_authorized<F>(
-        &self,
-        input: Value,
-        existing: Option<&str>,
-        authorize: F,
-    ) -> Result<Value>
-    where
-        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
-    {
-        self.save_project(input, existing, None, authorize).await
-    }
-
-    async fn save_project<F>(
-        &self,
-        input: Value,
-        existing: Option<&str>,
-        source: Option<Value>,
-        authorize: F,
-    ) -> Result<Value>
-    where
-        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
-    {
-        let creation_id = creation_id(&input, existing)?;
-        let mut project = parse("project", input)?;
-        let actual = crate::skills::workspace(
-            Path::new(text(&project, "path")),
-            &self.config.workspace_roots,
-        )
-        .await?;
-        let previous = match existing {
-            Some(id) => Some(self.get("projects", id).await?),
-            None => None,
-        };
-        project["origin"] = normalize_origin(&git_origin(&actual).await).into();
-        // An edit keeps the plugin source while the project still has its origin.
-        let source = source.or_else(|| {
-            previous
-                .as_ref()
-                .filter(|previous| previous["origin"] == project["origin"])
-                .map(|previous| previous["source"].clone())
-                .filter(Value::is_object)
-        });
-        if let Some(source) = source {
-            project["source"] = source;
-        }
-        project["path"] = actual.to_string_lossy().into_owned().into();
-        project["id"] = existing
-            .map(str::to_owned)
-            .or(creation_id.clone())
-            .unwrap_or_else(id)
-            .into();
-        project["createdAt"] = previous.map_or_else(|| now().into(), |v| v["createdAt"].clone());
-        self.store
-            .transaction(move |db| {
-                authorize(db)?;
-                if let Some(previous) = replayed_creation(db, "projects", creation_id.as_deref())? {
-                    return Ok(previous);
-                }
-                let project = db.put("projects", &project)?;
-                db.audit("project.saved", &json!({ "id": project["id"] }))?;
-                Ok(project)
-            })
-            .await
     }
 
     pub async fn task(&self, input: Value, existing: Option<&str>) -> Result<Value> {
@@ -509,7 +442,7 @@ impl Service {
         if crate::native::policy::native(&agent) && !reduces_execution {
             crate::native::policy::refresh(self).await?;
         }
-        task_projects(&agent, &task, &self.store.list("projects").await?)?;
+        task_projects(&agent, &task, &self.store.projects().await?)?;
         if let Some(cron) = task["cron"].as_str() {
             next_occurrences(cron, text(&task, "timezone"), now(), 1)?;
         }
@@ -572,6 +505,11 @@ impl Service {
                 if let Some(previous) = replayed_creation(db, "tasks", creation_id.as_deref())? {
                     return Ok(previous);
                 }
+                let agent = required(
+                    db.get("agents", text(&task, "agentId"))?,
+                    "Agent no longer exists",
+                )?;
+                task_projects(&agent, &task, &db.projects()?)?;
                 db.put("tasks", &task)?;
                 db.audit("task.saved", &json!({ "id": task["id"] }))?;
                 Ok(task)
@@ -610,13 +548,13 @@ impl Service {
     pub async fn agent_skills(&self, agent: &Value) -> Result<Vec<Value>> {
         let access = policy(agent);
         let mut available = self.skills.list("global", None).await?;
-        for project in self.store.list("projects").await? {
-            if allowed(&access["projects"], text(&project, "id")) {
+        for project in self.store.projects().await? {
+            if allowed(&access["projects"], &project.id.to_string()) {
                 available.extend(
                     self.skills
                         .list(
-                            text(&project, "id"),
-                            Some(Path::new(text(&project, "path"))),
+                            &project.id.to_string(),
+                            Some(Path::new(&project.settings.path)),
                         )
                         .await?,
                 );
@@ -633,20 +571,25 @@ impl Service {
             ));
         }
         let agent = self.get("agents", text(&task, "agentId")).await?;
-        let all_projects = self.store.list("projects").await?;
+        let all_projects = self.store.projects().await?;
         let projects = task_projects(&agent, &task, &all_projects)?;
         let available_projects =
             task_projects(&agent, &json!({ "projectId": null }), &all_projects)?;
         let project = if projects.len() == 1 {
-            projects[0].clone()
+            Some(projects[0].clone())
         } else {
-            Value::Null
+            None
         };
         let available = self
             .agent_skills(&agent)
             .await?
             .into_iter()
-            .filter(|s| s["scope"] == "global" || projects.iter().any(|p| p["id"] == s["scope"]))
+            .filter(|s| {
+                s["scope"] == "global"
+                    || projects
+                        .iter()
+                        .any(|p| Some(p.id.to_string().as_str()) == s["scope"].as_str())
+            })
             .collect::<Vec<_>>();
         let keys = task["skills"].as_array().cloned().unwrap_or_else(|| {
             available
@@ -688,7 +631,7 @@ impl Service {
         Ok(json!({
             "id": id(),
             "taskId": task["id"],
-            "projectId": project["id"],
+            "projectId": project.as_ref().map(|p| p.id),
             "status": RunStatus::Queued,
             "trigger": trigger,
             "createdAt": now(),
@@ -953,7 +896,7 @@ fn skill_key(skill: &Value) -> String {
     format!("{}/{}", text(skill, "scope"), text(skill, "name"))
 }
 
-async fn git_origin(path: &Path) -> String {
+pub(crate) async fn git_origin(path: &Path) -> String {
     let args = [
         "-C",
         path.to_str().unwrap_or(""),
@@ -984,7 +927,7 @@ fn uses_project(run: &Value, id: &str) -> bool {
 }
 
 /// Refuses to remove a record still referenced by an agent, a task or active work.
-fn ensure_removable(db: &Db<'_>, kind: &str, id: &str) -> Result<()> {
+pub(crate) fn ensure_removable(db: &Db<'_>, kind: &str, id: &str) -> Result<()> {
     if kind == "agents" && id == MAIN_AGENT_ID {
         return Err(Error::conflict("The main agent cannot be removed."));
     }
@@ -1247,17 +1190,21 @@ pub fn isolated(agent: &Value) -> bool {
         || a["mcpTools"].as_object().is_some_and(|a| !a.is_empty())
 }
 
-pub fn task_projects(agent: &Value, task: &Value, projects: &[Value]) -> Result<Vec<Value>> {
+pub fn task_projects(
+    agent: &Value,
+    task: &Value,
+    projects: &[cairn_contracts::Project],
+) -> Result<Vec<cairn_contracts::Project>> {
     let a = policy(agent);
     let available = projects
         .iter()
-        .filter(|p| allowed(&a["projects"], text(p, "id")))
+        .filter(|p| allowed(&a["projects"], &p.id.to_string()))
         .cloned()
         .collect::<Vec<_>>();
     if !task["projectId"].is_null() {
         return available
             .into_iter()
-            .find(|p| p["id"] == task["projectId"])
+            .find(|p| Some(p.id.to_string().as_str()) == task["projectId"].as_str())
             .map(|p| vec![p])
             .ok_or_else(|| Error::bad("This project is unavailable to the selected agent."));
     }
@@ -1318,7 +1265,7 @@ pub fn next_occurrences(pattern: &str, zone: &str, time: i64, count: usize) -> R
     Ok(result)
 }
 
-fn normalize_origin(remote: &str) -> String {
+pub(crate) fn normalize_origin(remote: &str) -> String {
     if let Ok(mut url) = url::Url::parse(remote)
         && ["http", "https", "ssh", "git"].contains(&url.scheme())
     {
@@ -1370,6 +1317,11 @@ pub(crate) fn replayed_creation(
     let Some(id) = creation_id else {
         return Ok(None);
     };
+    if db.project(id)?.is_some() {
+        return Err(Error::conflict(
+            "This creation identity belongs to a different resource.",
+        ));
+    }
     let rows = db.json_rows(
         "SELECT json_object('kind',kind,'record',json(data)) FROM records WHERE id=?",
         [id],

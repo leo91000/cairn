@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test'
+import type { ListProjectsOutput } from '../../packages/contracts/generated/typescript/ListProjectsOutput'
 import type { Workspace } from './fixtures'
 import {
   signIn as authenticateWorkspace,
@@ -157,7 +158,8 @@ for (const kind of ['projects'] as const) {
       await expect(dialog.getByRole('alert')).toContainText(failure === 'refresh' ? 'saved, but the workspace could not be reloaded' : `Could not confirm whether the ${label} was saved`)
       await expectUncovered(dialog.getByRole('alert'))
       rejectRefresh = false
-      const first = (await workspace.api(`/api/${kind}`)).filter((item: { id: string }) => item.id === createdId)
+      const initialProjects: ListProjectsOutput = await workspace.api(`/api/${kind}`)
+      const first = initialProjects.projects.filter(item => item.id === createdId)
       expect(first).toHaveLength(1)
       const createdAt = first[0].createdAt
       await page.screenshot({ path: testInfo.outputPath(`${kind}-${failure.replaceAll(' ', '-')}-mobile.png`), animations: 'disabled' })
@@ -174,7 +176,8 @@ for (const kind of ['projects'] as const) {
       await dialog.getByRole('button', { name: `Save ${label}`, exact: true }).click()
       await expect(dialog).toHaveCount(0)
 
-      const saved = (await workspace.api(`/api/${kind}`)).filter((item: { name: string }) => item.name.startsWith(name))
+      const updatedProjects: ListProjectsOutput = await workspace.api(`/api/${kind}`)
+      const saved = updatedProjects.projects.filter(item => item.name.startsWith(name))
       expect(saved).toHaveLength(1)
       expect(saved[0]).toMatchObject({ id: createdId, name: `${name} edited`, createdAt })
       expect(updates).toBe(failure === 'refresh' ? 2 : 1)

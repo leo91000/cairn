@@ -204,7 +204,7 @@ async fn run(
     let management = draft.management.clone();
     let scope = Scope::Draft(Box::new(connection), Arc::new(draft));
     let scope = match management {
-        Some(authority) => Scope::Managed(Box::new(scope), authority),
+        Some(authority) => Scope::Managed(Box::new(scope), Box::new(authority)),
         None => scope,
     };
     let result = scope::invoke(s, package, "form", payload, &scope).await?;

@@ -57,7 +57,7 @@ pub(crate) struct ApprovedPackage {
 
 /// Durable proof of the precise approval which admitted an unfinished operation.
 /// Hash the complete record so restoring identical source files cannot revive it.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Approval {
     plugin: String,
     record_digest: Option<String>,

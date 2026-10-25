@@ -1,7 +1,7 @@
 # Slack plugin implementation
 
-Current integration follows Main403's current-only data contract: database version
-1, fresh installation data for a future owner-authorized release, no automatic
+Current integration follows Main40a's current-only data contract: database version
+2, fresh installation data for a future owner-authorized release, no automatic
 installation migration or downgrade reader. Earlier epoch/SQLite and transition
 statements below are historical checkpoint evidence, not the current release
 contract. [Current data inventory](SLACK-PLUGIN-COMPATIBILITY.md).
@@ -2113,3 +2113,51 @@ located the missing step; it is removed, the fixture supplies the current Settin
 step, and both active/inert choice journeys pass with unchanged assertions/deadlines.
 A separate enrollment JVM timeout passes isolated but remains unexplained. These
 fixture corrections and scoped passes do not establish full contract qualification.
+
+
+## Converted commands and queued input retirement
+
+Installation operations share the captured requester's live source check and native
+parent context before dispatch, including typed project/account/resume contracts.
+Typed read results also recheck the original requester and execution grant before
+returning. Their generated input validation and SQL transaction fences remain in
+the owning capability; conversion does not bypass source package, owner or member
+revocation. The typed project read regression holds a post-read authority lookup,
+revokes its source participant, and refuses the late result.
+
+Editing a queued Cairn input retains normal reattribution to its authenticated
+editor. It atomically retires the previous external delivery, checkpoint and bound
+control state, so the editor's turn has no inherited Slack output destination.
+Withdrawing an input before its first native launch is terminal too: the same
+cleanup releases pending capacity and marks its activity cancelled. HTTP, public
+MCP and the installation tool use this common queued-message transaction. These
+are current-data lifecycle changes, with no old-format migration or implicit
+production reset. Complete Q1–Q20 and the existing delivery gates remain open.
+
+
+## Source proofs through management and wait publication
+
+A native operation retains the source approval captured before remote owner or
+membership checks. Nested capabilities reuse that requester; store callbacks
+capture it before leaving the invocation task. Source files are checked after
+remote authority I/O, and the original approval record is checked again inside
+the effect/read transaction. Activating another package while an owner lookup is
+held prevents a project write as well as a late read; a refused write leaves no
+project behind. Native resume uses this same management authorization closure.
+
+Every native wait kind checks its original requester, including a repeated time
+request and immediate run/task observations. Registration retains that proof
+through initial probes and checks it again before storing wakeup or history.
+These scopes remain in memory and preserve the current schema-2 data contract.
+
+A completed condition probe now owns its wait snapshots and source/instance/code
+proofs until publication. The observer consumes completed probes as they become
+available, with four concurrent probes; it does not collect a slow batch before
+publishing healthy groups. A store transaction validates the shared probe before
+writing any peer, then retains each member's current wait and target-grant checks.
+An unavailable source contributes no new provider result or display metadata.
+Initial registration uses the same observation fence. Source participant removal
+and exact source reapproval are checked even when active files remain identical.
+The regressions cross the production probe/publication interface with real Luau
+workers and retire authority between those two steps. Full Q1–Q20, remaining
+mutation/setup parity and live Slack qualification remain required.

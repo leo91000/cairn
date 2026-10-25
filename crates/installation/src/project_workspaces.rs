@@ -55,10 +55,10 @@ pub async fn authorize(s: &Service, bearer: &str) -> Result<Value> {
 }
 
 /// Whether the registered project still matches the one this run was granted.
-fn unchanged(current: &Value, granted: &Value) -> bool {
-    current["path"] == granted["path"]
-        && current["baseBranch"] == granted["baseBranch"]
-        && (current["sourceMode"] == "local") == (granted["sourceMode"] == "local")
+fn unchanged(current: &cairn_contracts::Project, granted: &Value) -> bool {
+    current.settings.path == granted["path"].as_str().unwrap_or("")
+        && current.settings.base_branch == granted["baseBranch"].as_str().unwrap_or("")
+        && (current.settings.source_mode == "local") == (granted["sourceMode"] == "local")
 }
 
 impl Projects {
@@ -86,7 +86,7 @@ impl Projects {
             .ok_or_else(|| Error::forbidden("This project is not authorized for this run."))?;
         let current = s
             .store
-            .get("projects", project_id)
+            .project(project_id)
             .await?
             .ok_or_else(|| Error::not_found("Project no longer exists."))?;
         if !unchanged(&current, &project) {
@@ -113,7 +113,12 @@ impl Projects {
         let status = format!("Opening {}", text(&project, "name"));
         s.store.event(run_id, "status", &status, None).await?;
         let agent_id = text(&run["snapshot"]["agent"], "id");
-        let access = crate::plugins::run_credentials::fetch(s, Some(agent_id), &current).await?;
+        let access = crate::plugins::run_credentials::fetch(
+            s,
+            Some(agent_id),
+            &serde_json::to_value(&current)?,
+        )
+        .await?;
         let credentials = crate::plugins::run_credentials::RunCredentials {
             fetch: [(project_id.to_owned(), access)].into(),
             ..Default::default()

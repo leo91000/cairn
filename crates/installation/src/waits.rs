@@ -513,14 +513,34 @@ fn run_result(db: &Db<'_>, condition: &Value) -> Result<Option<Value>> {
 }
 
 pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
+    let run = crate::project_workspaces::authorize(s, bearer).await?;
+    let requester = crate::plugins::requesters::for_run(s, &run).await?;
+    crate::plugins::requesters::CURRENT
+        .scope(
+            requester.clone(),
+            schedule_authorized(s, bearer, raw, requester),
+        )
+        .await
+}
+
+async fn schedule_authorized(
+    s: &Service,
+    bearer: &str,
+    raw: &Value,
+    requester: Option<crate::plugins::requesters::RunRequester>,
+) -> Result<Value> {
     let input = input(s, bearer, raw).await?;
     let token = bearer.to_owned();
     let request = input.clone();
+    let initial_requester = requester.clone();
     // Keep the input checks and revision atomic: an acknowledged steering
     // message must not become the baseline of an already-started registration.
     let (run, owner, revision) = s
         .store
         .transaction(move |db| {
+            if let Some(requester) = &initial_requester {
+                crate::plugins::requesters::recheck_in(db, requester)?;
+            }
             let (run, owner) = registering(db, &token, &request)?;
             let revision = input_revision(db, &run, &owner.record)?;
             Ok((run, owner, revision))
@@ -567,10 +587,19 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
         let (index, observed) = observed?;
         checked[index] = Some(observed);
     }
+    if let Some(requester) = &requester {
+        crate::plugins::requesters::recheck(s, requester).await?;
+    }
+    for observed in checked.iter().flatten() {
+        observed.recheck(s).await?;
+    }
     let token = bearer.to_owned();
     let result = s
         .store
         .transaction(move |db| {
+            if let Some(requester) = &requester {
+                crate::plugins::requesters::recheck_in(db, requester)?;
+            }
             let (run, mut owner) = registering(db, &token, &input)?;
             if input_revision(db, &run, &owner.record)? != revision {
                 return Err(Error::conflict("User input changed while the condition was checked. Handle it before registering a wait."));
@@ -591,6 +620,9 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
                 created + seconds * 1000
             };
 
+            for observed in checked.iter().flatten() {
+                observed.recheck_in(db)?;
+            }
             // What each condition already shows: its result, or what to check next.
             let mut results = Vec::new();
             let mut slots = Vec::new();

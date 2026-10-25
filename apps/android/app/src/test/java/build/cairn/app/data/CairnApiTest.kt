@@ -412,7 +412,7 @@ class CairnApiTest {
         assertEquals(task, wireJson.decodeFromString<Task>(wireJson.encodeToString(task)))
         val run =
             wireJson.decodeFromString<Run>(
-                """{"id":"run","status":"interrupted","projectId":null,"snapshot":{"project":null,"projects":[{"id":"project","name":"Cairn"}]},"resumeAvailable":true}"""
+                """{"id":"run","status":"interrupted","projectId":null,"snapshot":{"project":null,"projects":[{"id":"46d045dd-9bce-51e3-8a99-65aa9384efc9","name":"Cairn","path":"/workspace/cairn","origin":"","revision":"fixture","createdAt":0}]},"resumeAvailable":true}"""
             )
         assertNull(run.snapshot.project)
         assertEquals("Cairn", run.snapshot.projects.single().name)

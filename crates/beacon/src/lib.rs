@@ -4,6 +4,7 @@ extern crate sqlx_core as sqlx;
 
 mod account;
 mod audit;
+mod capabilities;
 mod fcm;
 mod hosts;
 pub mod html;
@@ -283,7 +284,10 @@ pub async fn router_with_installation_hosts(
             "/api/installations/{installation}/sharing/membership",
             axum::routing::delete(sharing::leave),
         )
-        .route("/api/account/methods", get(methods::list))
+        .route(
+            cairn_contracts::beacon::LIST_ACCOUNT_METHODS_PATH,
+            get(methods::list),
+        )
         .route("/api/account/methods/remove", post(methods::remove))
         .route("/api/installations", get(installations::status))
         .route(

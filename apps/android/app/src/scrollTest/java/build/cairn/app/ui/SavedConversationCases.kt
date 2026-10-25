@@ -80,7 +80,14 @@ abstract class SavedConversationCases {
                                 "/api/account/session" -> beaconAccountFixture()
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(body)
                     }

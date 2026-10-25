@@ -3,14 +3,14 @@
 {{#properties}}{{#constValue}}@SerialName("{{&.}}")
 {{/constValue}}{{/properties}}{{#additionalPropertiesSchema}}@JvmInline
 value class {{&className}}(val value: Map<String, {{#additionalProperties}}{{>type}}{{/additionalProperties}}>)
-{{/additionalPropertiesSchema}}{{^additionalPropertiesSchema}}data class {{&className}}(
+{{/additionalPropertiesSchema}}{{^additionalPropertiesSchema}}{{#hasProperties}}data {{/hasProperties}}class {{&className}}(
 {{#properties}}{{^constValue}}{{^isRequired}}{{^defaultValue}}{{#nullable}}    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
 {{/nullable}}{{/defaultValue}}{{/isRequired}}    val {{&kotlinName}}: {{>type}}{{#defaultValue}} = {{>default_value}}{{/defaultValue}}{{^defaultValue}}{{^isRequired}} = null{{/isRequired}}{{/defaultValue}},
 {{/constValue}}{{/properties}}){{#interfaces}}{{#first}} : {{/first}}{{^first}}, {{/first}}{{&className}}{{/interfaces}} {
     init {
 {{#properties}}{{^constValue}}{{#minimum}}        require({{&kotlinName}} >= {{&.}}{{#isLong}}L{{/isLong}})
 {{/minimum}}{{#maximum}}        require({{&kotlinName}} <= {{&.}}{{#isLong}}L{{/isLong}})
-{{/maximum}}{{#isSystemClass}}{{#systemClass}}{{#UUID}}        java.util.UUID.fromString({{&kotlinName}})
+{{/maximum}}{{#isSystemClass}}{{#systemClass}}{{#UUID}}        {{#nullable}}{{&kotlinName}}?.let { java.util.UUID.fromString(it) }{{/nullable}}{{^nullable}}java.util.UUID.fromString({{&kotlinName}}){{/nullable}}
 {{/UUID}}{{/systemClass}}{{/isSystemClass}}{{/constValue}}{{/properties}}    }
 }
 {{/additionalPropertiesSchema}}

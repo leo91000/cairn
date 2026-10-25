@@ -105,7 +105,16 @@ class MissionBackDeviceTest {
                             path == "/api/installations/fixture/api/overview" ||
                                 path.endsWith("/models") ||
                                 path == "/api/installations/fixture/api/accounts" -> json("{}")
-                            else -> json("[]")
+                            else ->
+                                json(
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else "[]"
+                                )
                         }
                     }
                 }

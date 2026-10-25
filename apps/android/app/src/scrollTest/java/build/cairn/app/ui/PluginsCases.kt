@@ -7532,7 +7532,10 @@ abstract class PluginsCases {
                             """{"view":[{"type":"section","title":"Vaults","children":[{"type":"actions","children":[{"type":"button","label":"Show vaults","action":"vaults"}]}]}]}"""
                         "/api/installations/fixture/api/overview",
                         "/api/installations/fixture/api/codex/models" -> "{}"
-                        else -> "[]"
+                        else ->
+                            if (request.requestUrl?.encodedPath?.endsWith("/api/projects") == true)
+                                """{"projects":[]}"""
+                            else "[]"
                     }
                 return MockResponse().setBody(result)
             }

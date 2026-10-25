@@ -9,14 +9,12 @@ import {
 import {
   agentInput,
   agentUpdate,
-  projectInput,
   taskInput,
 } from '../packages/contracts/contracts.ts'
 import { mcpInput } from '../packages/contracts/mcp.ts'
 
 const schemas = {
   agent: agentInput,
-  project: projectInput,
   task: taskInput,
   chat: chatInput,
   message: chatMessageInput,

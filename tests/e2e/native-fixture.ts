@@ -66,6 +66,7 @@ export class NativeFixture {
   questions = { list: (id: string) => this.chats.detail(id).questions }
   vault = { set: (id: string, value: unknown) => this.call('vault', id, value) }
   store = {
+    projects: (): Project[] => this.call('projects'),
     get: (kind: string, id: string) => this.call('get', kind, id),
     list: (kind: string): any[] => this.call('list', kind),
     put: (kind: string, value: unknown) => this.call('put', kind, value),

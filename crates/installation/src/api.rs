@@ -85,7 +85,7 @@ async fn overview(s: &Service) -> Result<Value> {
             Ok(json!({
                 "counts": db.stats()?,
                 "agents": db.list("agents")?.len(),
-                "projects": db.list("projects")?.len(),
+                "projects": db.projects()?.len(),
                 "tasks": db.list("tasks")?,
                 "runs": db.runs(None, None, 8, 0, false)?,
                 "concurrency": concurrency,
@@ -96,6 +96,27 @@ async fn overview(s: &Service) -> Result<Value> {
 
 /// Agents, projects, tasks and their scheduling.
 async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result<Option<Value>> {
+    let project_command = match route {
+        ("GET", ["projects"]) => Some(("list_projects", json!({}))),
+        ("GET", ["projects", id]) => Some(("get_project", json!({ "projectId": id }))),
+        ("POST", ["projects"]) => Some(("save_project", input.body.clone())),
+        ("PUT", ["projects", id]) => {
+            if input.body["projectId"] != *id {
+                return Err(Error::bad("Project identity does not match the path."));
+            }
+            Some(("replace_project", input.body.clone()))
+        }
+        ("DELETE", ["projects", id]) => Some(("delete_project", json!({ "projectId": id }))),
+        _ => None,
+    };
+    if let Some((name, body)) = project_command {
+        let context = crate::capabilities::ResumeContext::http(input)?;
+        let output = crate::capabilities::project_operation(name)
+            .expect("project operation")
+            .invoke(s, body, context)
+            .await?;
+        return Ok(Some(output));
+    }
     let result = match route {
         ("POST", ["projects", "import"]) => {
             static IMPORT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -134,16 +155,14 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
             s.merge_agents(args).await?
         }
         ("GET", ["agents"]) => s.store.list("agents").await?.into(),
-        ("GET", [kind @ ("projects" | "tasks")]) => s.store.list(kind).await?.into(),
+        ("GET", [kind @ "tasks"]) => s.store.list(kind).await?.into(),
         ("POST", ["task-authors", "refresh"]) => {
             s.synchronize_task_authors().await?;
             json!({ "updated": true })
         }
-        ("POST", [kind @ ("agents" | "projects" | "tasks")]) => save(s, kind, input, None).await?,
-        ("PUT", [kind @ ("agents" | "projects" | "tasks"), id]) => {
-            save(s, kind, input, Some(id)).await?
-        }
-        ("DELETE", [kind @ ("agents" | "projects" | "tasks"), id]) => {
+        ("POST", [kind @ ("agents" | "tasks")]) => save(s, kind, input, None).await?,
+        ("PUT", [kind @ ("agents" | "tasks"), id]) => save(s, kind, input, Some(id)).await?,
+        ("DELETE", [kind @ ("agents" | "tasks"), id]) => {
             s.remove(kind, id).await?;
             json!({ "deleted": true })
         }
@@ -323,9 +342,9 @@ async fn skill_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resu
     let result = match route {
         ("GET", ["skills"]) => {
             let mut items = s.skills.list("global", None).await?;
-            for project in s.store.list("projects").await? {
-                let path = Path::new(text(&project, "path"));
-                items.extend(s.skills.list(text(&project, "id"), Some(path)).await?);
+            for project in s.store.projects().await? {
+                let path = Path::new(&project.settings.path);
+                items.extend(s.skills.list(&project.id.to_string(), Some(path)).await?);
             }
             sources::attach(s, &mut items).await?;
             items.into()
@@ -555,7 +574,6 @@ async fn settings_routes(
 async fn save(s: &Arc<Service>, kind: &str, input: &Input, id: Option<&str>) -> Result<Value> {
     match kind {
         "agents" => s.agent(input.body.clone(), id).await,
-        "projects" => s.project(input.body.clone(), id).await,
         _ => {
             s.task_as(input.body.clone(), id, input.identity.as_ref())
                 .await
@@ -567,8 +585,7 @@ async fn skill_project(s: &Service, scope: &str) -> Result<Option<PathBuf>> {
     if scope == "global" {
         return Ok(None);
     }
-    Ok(Some(PathBuf::from(text(
-        &s.get("projects", scope).await?,
-        "path",
-    ))))
+    Ok(Some(PathBuf::from(
+        s.get_project(scope).await?.settings.path,
+    )))
 }

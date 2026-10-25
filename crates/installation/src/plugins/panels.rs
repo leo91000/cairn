@@ -68,7 +68,7 @@ async fn view_authorized(
     }
     let scope = Scope::Instance(Box::new(connection), owner);
     let scope = match management {
-        Some(authority) => Scope::Managed(Box::new(scope), authority),
+        Some(authority) => Scope::Managed(Box::new(scope), Box::new(authority)),
         None => scope,
     };
     let payload = json!({ "instance": scope.instances()[0] });
@@ -131,7 +131,7 @@ async fn action_authorized(
     }
     let scope = Scope::Instance(Box::new(connection), owner);
     let scope = match management {
-        Some(authority) => Scope::Managed(Box::new(scope), authority),
+        Some(authority) => Scope::Managed(Box::new(scope), Box::new(authority)),
         None => scope,
     };
     let event = json!({
@@ -184,7 +184,7 @@ async fn test_authorized(
     }
     let scope = Scope::Instance(Box::new(connection), owner);
     let scope = match management {
-        Some(authority) => Scope::Managed(Box::new(scope), authority),
+        Some(authority) => Scope::Managed(Box::new(scope), Box::new(authority)),
         None => scope,
     };
     let payload = json!({ "instance": scope.instances()[0] });

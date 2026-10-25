@@ -51,7 +51,11 @@ abstract class AgentPageCases {
             access =
                 AccessPolicy(
                     nodes = listOf(LOCAL_NODE_ID),
-                    projects = listOf("p1", "p2"),
+                    projects =
+                        listOf(
+                            "2450c72e-6174-56da-b0fc-b06868e8e8e5",
+                            "6501040b-e89b-5102-9fa7-24510fb014c8",
+                        ),
                     skills = listOf("global/review"),
                 ),
         )
@@ -233,17 +237,23 @@ abstract class AgentPageCases {
                                 else """{"runs":{"queued":0,"running":0},"delegations":[]}"""
                             path == "/agents" -> wireJson.encodeToString(agents.get())
                             path == "/projects" ->
-                                """[{"id":"p1","name":"cairn","path":"/srv/cairn"},{"id":"p2","name":"SheetOM","path":"/srv/sheetom"}]"""
+                                """{"projects":[{"id":"2450c72e-6174-56da-b0fc-b06868e8e8e5","name":"cairn","path":"/srv/cairn","description":"","baseBranch":"main","sourceMode":"remote","origin":"","source":null,"revision":"fixture-revision","createdAt":0},{"id":"6501040b-e89b-5102-9fa7-24510fb014c8","name":"SheetOM","path":"/srv/sheetom","description":"","baseBranch":"main","sourceMode":"remote","origin":"","source":null,"revision":"fixture-revision","createdAt":0}]}"""
                             path == "/mcps" -> mcps.get()
                             path == "/skills" ->
-                                """[{"name":"review","scope":"global"},{"name":"lint","scope":"p1"}]"""
+                                """[{"name":"review","scope":"global"},{"name":"lint","scope":"2450c72e-6174-56da-b0fc-b06868e8e8e5"}]"""
                             path == "/nodes" -> nodes
                             path == "/plugins" -> wireJson.encodeToString(catalog)
                             path == "/api/installations" -> beaconInstallationsFixture()
                             path == "/api/account/session" -> beaconAccountFixture("fixture")
                             path.endsWith("/models") -> """{"models":[]}"""
                             path.endsWith("/overview") -> "{}"
-                            else -> "[]"
+                            else ->
+                                if (
+                                    request.requestUrl?.encodedPath?.endsWith("/api/projects") ==
+                                        true
+                                )
+                                    """{"projects":[]}"""
+                                else "[]"
                         }
                     return response.setBody(body)
                 }

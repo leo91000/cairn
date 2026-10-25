@@ -1,4 +1,4 @@
-# Generated contracts pilot: resume_run
+# Generated Rust contracts
 
 Issue #401 qualifies the toolchain selected by #396/#397 for the first converted
 capability. The Rust DTOs in `crates/contracts` own the wire fields. The installation's
@@ -87,3 +87,82 @@ Generated clients replace the raw resume routes in the web and Android run scree
 and chat recovery controls. The remaining catalogue, persistence and other client
 models are outside this pilot. Their existing writers and schemas stay in place
 until their own conversion tickets; no new compatibility layer or SQL adapter was added.
+
+## Beacon account first slice
+
+B6 (#421) adds `list_account_methods` to the same static catalogue and generation
+pipeline. Its DTOs and descriptor live in `crates/contracts/src/beacon.rs`; the
+business read and account-session policy execute at Beacon. Both tools can
+discover it and return the typed `accountProofRequired` variant under their
+existing installation grants. They never read a local account copy or manufacture
+a proof. Both apps use generated calls and method models. The bounded Kotlin
+object template now handles an empty command input as a serializable ordinary
+class; the shared account corpus qualifies this case and the new result union.
+See [the action inventory and follow-up boundary](BEACON-CAPABILITIES.md).
+
+## Projects: first SQL domain (#402)
+
+The project lifecycle extends the B1 registry and generation command. `save_project`
+creates from `{creationId?, settings}`; `replace_project` replaces all settings from
+`{projectId, revision, settings}`; `get_project`, `list_projects` and `delete_project`
+complete the shared HTTP/public MCP/installation operations. HTTP uses `/projects`
+and `/projects/{projectId}`; listing returns `{projects: [...]}`. Creation replays
+return the current project without overwriting later edits. Every replacement
+requires the current revision, generates a fresh revision and retains `createdAt`.
+Web and Android keep their existing editors and retry identities, using generated
+models and calls. Plugin import keeps its existing API for B3 and registers through
+the same typed writer. No new authorization scope is introduced: public reads use
+`read`, writes use `manage`, HTTP writes require the owner, and installation reads
+and writes recheck their execution grant in the database transaction.
+
+`projects` has explicit columns for id, name, canonical path, source mode, base
+branch, description, origin, the four nullable plugin-source fields, revision,
+creation time and update time. The source columns are all null or all present.
+SQL checks source mode, required/bounded text and the wire timestamp range; indexes
+cover update ordering and plugin/item lookup. Paths retain their existing behavior:
+registration canonicalizes and confines them to configured workspace roots; several
+registrations may name the same path. There is no new uniqueness rule or historical
+migration. References from agents, missions and active work retain their existing
+transactional validators until those domains gain tables. Completed run snapshots
+remain intact on deletion. There are no cascading deletes into other domains.
+
+The generic records writer rejects projects; all current reads use `Db::project`
+and `Db::projects` (or their async Store methods). JSON serialization remains only
+at the boundaries of run snapshots, archive/credential preparation and other
+unconverted domains. A2–A18 replace those owning domains; A18 removes the remaining
+adapters. SQL mapping is local to `projects.rs`, without a generic repository or ORM.
+
+The new shared corpus `tests/fixtures/project-contracts.json` qualifies defaults,
+creation omission, required settings, source metadata and project wire output in
+Rust, TS and Kotlin. UUID version 4 for creation identities is a server rule beyond
+JSON Schema's UUID format; clients never grant authority through validation.
+
+### Development reset
+
+The fresh installation schema is now version 2. Version 1 databases from #394
+are rejected, without being rewritten. Stop the development processes, remove the
+**disposable development data directory** (SQLite, vault and related local state)
+and start with a newly empty data directory. Recreate projects/agents and rerun
+fixtures. Do not point a development reset at an existing installation. No migration
+or legacy-data reader is shipped, and this change does not reset or deploy anything.
+
+### Local storage qualification
+
+```sh
+pnpm test:backend -p cairn-installation --test project_measurement -- \
+  --ignored --nocapture --test-threads=1
+```
+
+The opt-in harness compares the records SQL mapping at `40349271` against the
+current typed SQL methods in one build, using identical complete project values.
+It runs five alternating-order repetitions of 1,000 inserts/replacements/deletes,
+1,000 point reads, 50 lists of 1,000 rows and 100 connection-cold reads. Two complete
+point-read warmups precede measurements. It reports p50/p95, process CPU, wire bytes,
+DB bytes, live WAL bytes and pages by table/index. Cold means a fresh connection and
+statement cache; the OS page cache remains warm. Connection opening is excluded from
+read latency and included in its separate CPU total. Deletion measures the database
+write, with audit, without reference-checking scans in either variant. This is a
+local SQLite layout comparison, not an HTTP/actor/clone benchmark or production
+network latency. Store pool initialization and corpus construction are untimed.
+Raw results belong outside Git; PR descriptions record the command, SHAs, host
+conditions, result summaries and limitations.

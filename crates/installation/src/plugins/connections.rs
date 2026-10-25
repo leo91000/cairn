@@ -154,7 +154,7 @@ pub(crate) fn delegation_eligibility(
     mode: AccessMode,
 ) -> Result<Value> {
     if let Some(project) = project
-        && db.get("projects", project)?.is_none()
+        && db.project(project)?.is_none()
     {
         return Err(Error::bad("Project not found."));
     }
@@ -1221,7 +1221,7 @@ fn project_access(db: &Db<'_>, project: Option<&str>, access: &Value) -> Result<
     let Some(project) = project else {
         return Ok(());
     };
-    if db.get("projects", project)?.is_none() {
+    if db.project(project)?.is_none() {
         return Err(Error::bad("Project not found."));
     }
     let reachable = access["projects"]

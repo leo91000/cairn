@@ -223,7 +223,9 @@ where
         "storage.get" | "storage.set" | "storage.max" | "storage.delete" | "storage.list" => {
             super::storage::call(s, context, method, &args).await
         }
-        "http.request" => http(s, context, &args, authorize, effects).await,
+        // HTTP can re-enter live requester checks while this capability is
+        // polled from a form, test or tool. Keep its future off those frames.
+        "http.request" => Box::pin(http(s, context, &args, authorize, effects)).await,
         "resources.get" | "resources.list" => {
             super::resources::call(s, context, method, &args).await
         }

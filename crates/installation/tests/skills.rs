@@ -1,5 +1,7 @@
 mod common;
 
+use common::ProjectFixture;
+
 use axum::{Router, body::Body, http::StatusCode};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use cairn_installation::plugins::run_credentials::RunCredentials;
@@ -1026,16 +1028,7 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
     let gate_path = std::ffi::CString::new(gate.as_os_str().as_encoded_bytes()).unwrap();
     assert_eq!(unsafe { libc::mkfifo(gate_path.as_ptr(), 0o600) }, 0);
     api.service
-        .store
-        .save(
-            "projects",
-            json!({
-                "id": cairn_installation::config::id(),
-                "name": "Listing trigger",
-                "path": project.to_string_lossy(),
-            }),
-            "project.saved",
-        )
+        .project_fixture(json!({ "name": "Listing trigger", "path": project }), None)
         .await
         .unwrap();
     let service = api.service.clone();

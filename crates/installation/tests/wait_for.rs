@@ -42,6 +42,14 @@ impl Fixture {
         origin: &str,
         identity: Option<cairn_installation::auth::InstallationIdentity>,
     ) -> Self {
+        Self::configured(origin, identity, false).await
+    }
+
+    async fn configured(
+        origin: &str,
+        identity: Option<cairn_installation::auth::InstallationIdentity>,
+        delegation: bool,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         common::managed_codex_home(&root.path().join("home"));
         let github = Github::start(root.path()).await;
@@ -53,7 +61,7 @@ impl Fixture {
         .unwrap();
         github.attach(&s);
         s.agent(
-            json!({ "name": "Main agent", "access": { "installation": true } }),
+            json!({ "name": "Main agent", "access": { "installation": true, "delegation": delegation } }),
             Some(MAIN_AGENT_ID),
         )
         .await
@@ -63,18 +71,20 @@ impl Fixture {
         let project = id();
         let path = root.path().join("project");
         std::fs::create_dir(&path).unwrap();
+        let registered = cairn_contracts::Project {
+            id: cairn_contracts::ProjectId(uuid::Uuid::parse_str(&project).unwrap()),
+            settings: serde_json::from_value(json!({
+                "name": "Wait fixture", "path": path,
+                "sourceMode": "remote", "baseBranch": "main",
+            }))
+            .unwrap(),
+            origin: origin.to_owned(),
+            source: None,
+            revision: id(),
+            created_at: cairn_installation::config::now(),
+        };
         s.store
-            .put(
-                "projects",
-                json!({
-                        "id": project,
-                        "name": "Wait fixture",
-                        "path": path,
-                        "sourceMode": "remote",
-                        "baseBranch": "main",
-                "origin": origin,
-                    }),
-            )
+            .transaction(move |db| db.save_project(&registered, None))
             .await
             .unwrap();
         let chat = s.chat_create(json!({})).await.unwrap();
@@ -585,9 +595,12 @@ async fn permissions_origins_and_workflow_commit_mismatches_are_rechecked() {
     f.schedule(f.github_condition()).await;
     f.finish().await;
     let calls = f.calls().len();
-    let mut project = f.s.get("projects", &f.project).await.unwrap();
-    project["origin"] = "https://github.com/another/repository.git".into();
-    f.s.store.put("projects", project).await.unwrap();
+    let mut project = f.s.get_project(&f.project).await.unwrap();
+    project.origin = "https://github.com/another/repository.git".into();
+    f.s.store
+        .transaction(move |db| db.save_project(&project, Some(&project.revision)))
+        .await
+        .unwrap();
     conditions::poll_once(&f.s).await.unwrap();
     assert_eq!(f.calls().len(), calls);
     assert_eq!(
@@ -867,9 +880,12 @@ async fn watchers_share_requests_only_for_the_same_granted_project_origin() {
         f.schedule(f.github_condition()).await;
         f.finish().await;
         if origin_changed {
-            let mut project = f.s.get("projects", &f.project).await.unwrap();
-            project["origin"] = "git@github.com:fixture/repo.git".into();
-            f.s.store.put("projects", project).await.unwrap();
+            let mut project = f.s.get_project(&f.project).await.unwrap();
+            project.origin = "git@github.com:fixture/repo.git".into();
+            f.s.store
+                .transaction(move |db| db.save_project(&project, Some(&project.revision)))
+                .await
+                .unwrap();
         }
         let second = f.s.chat_create(json!({})).await.unwrap();
         let chat = text(&second, "id");
@@ -1686,4 +1702,267 @@ async fn mission_dependency_wait_observes_completion_and_not_another_missions_wa
         resumed["waitContinuation"]["observation"]["status"],
         "failed"
     );
+}
+
+#[tokio::test]
+async fn native_time_wait_refuses_the_requesters_retired_membership() {
+    native_wait_membership(NativeWait::Time).await;
+}
+
+#[tokio::test]
+async fn native_completed_run_wait_refuses_the_requesters_retired_membership() {
+    native_wait_membership(NativeWait::Run).await;
+}
+
+#[tokio::test]
+async fn native_completed_task_wait_refuses_the_requesters_retired_membership() {
+    native_wait_membership(NativeWait::Task).await;
+}
+
+#[derive(Clone, Copy)]
+enum NativeWait {
+    Time,
+    Run,
+    Task,
+}
+
+async fn native_wait_membership(kind: NativeWait) {
+    use cairn_installation::auth::{InstallationIdentity, InstallationRole};
+    let f = Fixture::configured(
+        "https://github.com/fixture/repo.git",
+        Some(InstallationIdentity::trusted(
+            InstallationRole::Owner,
+            "fixture-owner",
+        )),
+        matches!(kind, NativeWait::Task),
+    )
+    .await;
+    let condition = match kind {
+        NativeWait::Time => json!({ "type": "delay", "seconds": 60 }),
+        NativeWait::Run => {
+            let target = f.target().await;
+            // Arrange existing terminal state; this regression tests authorization
+            // of its observation, not execution or a provider completion callback.
+            f.s.store
+                .patch_run(
+                    text(&target, "id"),
+                    json!({
+                        "status": "failed", "error": "Private existing run failure",
+                    }),
+                )
+                .await
+                .unwrap();
+            json!({ "type": "run_finished", "runId": target["id"] })
+        }
+        NativeWait::Task => {
+            let delegated = cairn_installation::delegation::delegate(
+                &f.s,
+                &f.token,
+                &json!({ "task": "A task whose stored outcome is private to its requester" }),
+            )
+            .await
+            .unwrap();
+            f.s.chat_tick(&HashSet::new()).await.unwrap();
+            let child = f.s.chat_detail(text(&delegated, "chatId")).await.unwrap();
+            f.s.chat_acknowledge(
+                text(&child["run"], "id"),
+                text(&child["run"]["chatExecution"], "messageId"),
+            )
+            .await
+            .unwrap();
+            f.s.store
+                .patch_run(
+                    text(&child["run"], "id"),
+                    json!({
+                        "status": "failed", "error": "Private existing child failure",
+                        "outcome": { "status": "blocked", "waitingOn": "requester" },
+                    }),
+                )
+                .await
+                .unwrap();
+            json!({ "type": "task_finished", "chatId": delegated["chatId"] })
+        }
+    };
+    let mut input = json!({
+        "conditions": [condition], "reason": "The original source must still be allowed",
+    });
+    if !matches!(kind, NativeWait::Time) {
+        input["timeoutSeconds"] = 60.into();
+    }
+    let positive = wait_for::schedule(&f.s, &f.token, &input).await.unwrap();
+    assert_eq!(positive["deferred"], matches!(kind, NativeWait::Time));
+    if matches!(kind, NativeWait::Task) {
+        assert_eq!(
+            positive["observation"]["error"],
+            "Private existing child failure"
+        );
+        assert_eq!(positive["observation"]["waitingOn"], "requester");
+    }
+    let original_wakeup = f.s.get("chats", &f.chat).await.unwrap()["wakeup"].clone();
+    let run_id = f.run.clone();
+    let before_events =
+        f.s.store
+            .read(move |db| db.events(&run_id, 0, 500))
+            .await
+            .unwrap();
+    let authority = axum::Router::new().route(
+        "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+        axum::routing::get(|| async {
+            axum::Json(cairn_protocol::TaskAuthorPolicy {
+                owner: cairn_protocol::TaskAuthorGrant {
+                    account_id: "fixture-owner".into(),
+                    access_id: "replacement-grant".into(),
+                },
+                members: Vec::new(),
+            })
+        }),
+    );
+    let (origin, authority) = common::serve_locally(authority).await;
+    let path = f.s.config.data_dir.join("installation-relay/identity.json");
+    let mut identity: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    identity["origin"] = origin.into();
+    std::fs::write(path, serde_json::to_vec(&identity).unwrap()).unwrap();
+    let result = wait_for::schedule(&f.s, &f.token, &input).await;
+    assert!(
+        matches!(&result, Err(error) if error.status == 403),
+        "A retired requester observed or registered a native wait: {result:?}"
+    );
+    assert_eq!(
+        f.s.get("chats", &f.chat).await.unwrap()["wakeup"],
+        original_wakeup
+    );
+    let run_id = f.run.clone();
+    let after_events =
+        f.s.store
+            .read(move |db| db.events(&run_id, 0, 500))
+            .await
+            .unwrap();
+    assert_eq!(
+        before_events, after_events,
+        "Refused observations must not append history"
+    );
+    authority.abort();
+}
+
+#[tokio::test]
+async fn observations_captured_before_a_merge_are_retried_under_the_destination() {
+    use futures_util::StreamExt;
+
+    for refused in [false, true] {
+        let f = Fixture::new().await;
+        let source =
+            f.s.agent(
+                json!({
+                    "name": "Original observer", "access": { "installation": true },
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        connections::save(
+            &f.s,
+            "github",
+            &json!({
+                "name": "Shared", "enabled": true, "agentIds": [MAIN_AGENT_ID, source["id"]],
+            }),
+            Some(&f.instance),
+        )
+        .await
+        .unwrap();
+        let chat =
+            f.s.chat_create(json!({"agentId": source["id"]}))
+                .await
+                .unwrap();
+        let chat_id = text(&chat, "id").to_owned();
+        let message = id();
+        f.s.chat_send(
+            &chat_id,
+            json!({"id": message, "text": "Observe before merging"}),
+        )
+        .await
+        .unwrap();
+        f.s.chat_tick(&HashSet::new()).await.unwrap();
+        let run = f.s.chat_detail(&chat_id).await.unwrap()["run"].clone();
+        let run_id = text(&run, "id");
+        let run =
+            f.s.store
+                .patch_run(run_id, json!({"status": "running"}))
+                .await
+                .unwrap();
+        f.s.chat_acknowledge(text(&run, "id"), &message)
+            .await
+            .unwrap();
+        let configuration = f.s.mcps.run_configuration(&f.s, &run).await.unwrap();
+        f.s.store
+            .set(
+                &format!("run-checkpoint:{}", text(&run, "id")),
+                json!({"completed": true, "launched": true}),
+                None,
+            )
+            .await
+            .unwrap();
+        let request = json!({
+            "conditions": [f.github_condition()],
+            "reason": "Observe under the destination",
+            "timeoutSeconds": 420,
+        });
+        let scheduled = wait_for::schedule(
+            &f.s,
+            text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN"),
+            &request,
+        )
+        .await
+        .unwrap();
+        assert_eq!(scheduled["deferred"], true);
+        // Arrange a parked native turn; the observations below execute the actual
+        // plugin worker and loopback provider, without a synthetic source proof.
+        let parked = json!({
+            "status": "succeeded",
+            "sessionId": "saved-session",
+            "workspace": "/saved/workspace",
+        });
+        f.s.store.patch_run(text(&run, "id"), parked).await.unwrap();
+        if refused {
+            connections::save(
+                &f.s,
+                "github",
+                &json!({
+                    "name": "Shared", "enabled": true, "agentIds": [MAIN_AGENT_ID],
+                }),
+                Some(&f.instance),
+            )
+            .await
+            .unwrap();
+        }
+        f.github_state("completed", Some("success"), 0);
+        let mut probes = Box::pin(conditions::pending(&f.s).await.unwrap());
+        let old = probes
+            .next()
+            .await
+            .expect("The original agent's probe must finish");
+        drop(probes);
+        assert_eq!(f.calls().len(), if refused { 1 } else { 2 });
+
+        f.s.merge_agents(json!({
+            "sourceId": source["id"], "targetId": MAIN_AGENT_ID, "confirm": true,
+        }))
+        .await
+        .unwrap();
+        let merged = f.s.chat_detail(&chat_id).await.unwrap();
+        assert_eq!(merged["agentId"], MAIN_AGENT_ID);
+        let before = merged["wakeup"].clone();
+        old.publish(&f.s).await.unwrap();
+        assert_eq!(f.s.chat_detail(&chat_id).await.unwrap()["wakeup"], before);
+        assert!(before["observation"].is_null());
+
+        conditions::poll_once(&f.s).await.unwrap();
+        let current = f.s.chat_detail(&chat_id).await.unwrap();
+        assert_eq!(current["wakeup"]["observation"]["state"], "completed");
+        assert_eq!(current["wakeup"]["observation"]["conclusion"], "success");
+        assert_eq!(
+            f.calls().len(),
+            if refused { 2 } else { 3 },
+            "The destination must make its own authorized probe"
+        );
+    }
 }

@@ -66,6 +66,78 @@ activity heartbeat reports `waiting_for_background` with the number of tasks.
 Completion receipts record acknowledged requests and prevent completed messages
 from being repeated after a restart.
 
+## Engine status and subagent identity
+
+Léo reads Claude Code's structured stream-json frames rather than its wording. Each
+kind of wait stays separate:
+
+- **Engine retry.** `system/api_retry` becomes `engine.retry`: attempt, retry budget,
+  delay, HTTP status, reason and, for a first-byte timeout, `noResponse`. Claude Code
+  retries the request itself. The turn continues, so this is neither a failure nor a
+  receipt. The conversation shows the latest retry until work continues: the reply
+  streams, a tool (a subagent among them) starts or the turn completes. The run log
+  then marks it recovered. A subagent's progress or resumption does not count. When
+  Claude Code gives up, it reports the last API error as a message and the turn fails;
+  that retry is not marked recovered. Neither is a retry whose execution is stopped,
+  interrupted, failed by the runner or replaced by a new attempt: the conversation stops
+  showing it. These are the
+  agent's own requests: Claude Code reports a subagent's retries in its tool progress
+  (`subagent_retry`), which Cairn does not show.
+- **Provider usage limit.** `rate_limit_event` becomes `provider.limit` when its state
+  changes. That covers a warning, a limit covered by extra usage, a limit that stops
+  requests (`blocked`), and the return to normal after one of these. Window and reset
+  time are included. The conversation shows it until the limit no longer applies, its
+  reset time passes, or its execution ends or fails: a later execution, perhaps a new
+  attempt on another account, reports its own state. If a
+  turn fails because the usage limit refused the agent's request (its message carries
+  `error: "rate_limit"`) while the latest state blocks requests, the adapter fails it
+  with `code: usage_limit_reached`, the window and `resetsAt`. The worker then takes Cairn's durable account wait or fails over, without
+  matching Claude's wording. A limit Claude Code answered after (for example a limit on
+  one model's weekly window, with the reply coming from another model), one that only
+  refused a subagent's request, or one whose reset time has passed does not explain the
+  failure: the turn fails as usual.
+- **Cairn durable wait.** Account waits, `wait_for` and automatic retries are Cairn's
+  own. They release the execution's resources. Léo does not enable Claude's unattended
+  `CLAUDE_CODE_RETRY_WATCHDOG`, which would keep the process waiting for a usage window
+  instead of releasing it.
+- **Notices.** `system/informational` (already emitted by 2.1.280) becomes
+  `engine.notice` with its level, cut at 4,000 characters. Like all run output, it is
+  redacted before storage. Warnings, suggestions and notices that stop the turn show in
+  the conversation and are always recorded. Notices and info lines stay in the run log,
+  within its diagnostic budget. Claude Code repeats a running tool's progress line
+  (same `tool_use_id`); it is reported once. Warnings, suggestions and notices that stop
+  the turn are always reported.
+
+`session_state_changed` is opt-in (`CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS`) and
+not enabled. Completion stays correlated with result messages and consumed message
+IDs. Léo answers permission requests itself, so `requires_action` would add no state.
+Frames Léo does not know, including future ones, are ignored.
+
+Subagents are followed by the tool use that started them and by their task ID. Claude
+Code 2.1.292 and later add `agent_id` to a subagent's messages (equal to its task ID,
+kept when resumed), plus `parent_task_id` and `run_id` to task frames. From then on, a
+subagent's messages are never taken as the agent's reply, even without
+`parent_tool_use_id`. Older frames rely on `parent_tool_use_id` alone.
+When the agent resumes a subagent, its new run reopens the same item, marked
+`resumed`. That holds even when the run names another tool use. Claude Code promises
+that a task's run IDs sort, by plain string comparison, in the order its runs opened,
+so a frame naming an earlier run, or repeating the start of the run that reported, is
+late and ignored. A subagent an earlier execution started, resumed by a `SendMessage`
+call or by Claude Code itself (its run then names the earlier execution's call, or no
+call), shows as a new row of the current execution marked `resumed`, keyed by its task
+and run IDs: Cairn rows belong to one execution, and a later execution that resumes it
+again gets its own row. A call this execution never made only counts
+for a top-level subagent (no `parent_task_id`, `spawn_depth` 1). Other unknown agent
+tasks, such as a workflow's agents, nested agents started from work this execution does
+not see, or housekeeping agents Claude Code marks `skip_transcript` or `ambient`, are
+ignored. Nested subagents keep their parent and `parent_task_id`. Without `agent_id`,
+a resumed subagent's messages may name the call that resumed it (such as
+`SendMessage`) in `parent_tool_use_id`; once a task frame ties that call to the
+subagent, they stay its steps. The minimum supported CLI stays **2.1.280**: older
+frames without these fields keep the earlier correlation, and the fixtures cover both
+shapes. The events reach the public MCP and `cairn_installation` through
+`get_run`.
+
 An explicit provider choice is saved with each queued message. Steering cannot
 change the running turn's provider. Messages that omit the provider continue
 with the chat's current provider. Completion receipts prevent finished requests

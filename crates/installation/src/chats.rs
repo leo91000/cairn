@@ -155,7 +155,14 @@ pub(crate) fn view(db: &Db<'_>, mut chat: Value) -> Result<Value> {
     chat["projectName"] = if chat["projectId"].is_null() {
         Value::Null
     } else {
-        record_name(db, &chat, "projects", "projectName", "Deleted project")?
+        db.project(text(&chat, "projectId"))?.map_or_else(
+            || {
+                chat.get("projectName")
+                    .cloned()
+                    .unwrap_or_else(|| "Deleted project".into())
+            },
+            |project| Value::from(project.settings.name),
+        )
     };
     let run = db.run(text(&chat, "runId"))?;
     chat["canRequestNewSession"] =
@@ -305,7 +312,7 @@ fn require_sendable(db: &Db<'_>, chat: &Value, messages: &[Value], id: &str) -> 
         "This agent is no longer available.",
     )?;
     crate::nodes::require_node(&agent)?;
-    task_projects(&agent, chat, &db.list("projects")?)?;
+    task_projects(&agent, chat, &db.projects()?)?;
     let cleaned = db
         .run(text(chat, "runId"))?
         .is_some_and(|run| !run["workspaceCleanedAt"].is_null());
@@ -378,6 +385,7 @@ pub(crate) fn send(
 
 /// Deletes a queued message; an answer message reopens its question.
 fn withdraw(db: &Db<'_>, chat_id: &str, message: &Value) -> Result<Value> {
+    crate::plugins::work::retire_queued_input(db, chat_id, text(message, "id"))?;
     if let Some(question_id) = message["questionId"].as_str()
         && let Some(mut question) = find_question(db, chat_id, question_id)?
     {
@@ -420,6 +428,7 @@ pub(crate) fn edit_as(
     validate_steer(db, &chat, &values)?;
     crate::store::merge(&mut current, &values);
     db.delete(&crate::plugins::turns::key(chat_id, message_id))?;
+    crate::plugins::work::retire_queued_input(db, chat_id, message_id)?;
     db.put_message(&current)
 }
 
@@ -980,7 +989,7 @@ fn from_run(db: &Db<'_>, run_id: &str, origin: &crate::native::policy::Origin) -
         "lastActivityAt": created_at,
     });
     crate::native::policy::apply(&mut chat, &run);
-    task_projects(&agent, &chat, &db.list("projects")?)?;
+    task_projects(&agent, &chat, &db.projects()?)?;
 
     let chat = db.put("chats", &chat)?;
     db.patch_run(
@@ -1033,7 +1042,7 @@ pub(crate) fn create_as(
         last_activity_at: created_at,
     })?;
     crate::native::policy::authorize_chat(db, &mut chat, origin)?;
-    task_projects(&agent, &chat, &db.list("projects")?)?;
+    task_projects(&agent, &chat, &db.projects()?)?;
     db.put("chats", &chat)
 }
 
