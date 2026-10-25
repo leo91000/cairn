@@ -262,11 +262,18 @@ fn changes_running_agent(message: &Value, run: &Value) -> Result<bool> {
         || changes_speed)
 }
 
-/// The coding agent a message's turn runs with: the one it names, else the one the
-/// queued messages ahead of it, the conversation's latest turn or its agent select.
+/// The coding agent a message's turn runs with: the one it names, else the running turn's
+/// for a steering message, else the one the queued messages ahead of it, the conversation's
+/// latest turn or its agent select.
 fn message_provider(db: &Db<'_>, chat: &Value, message: &Value) -> Result<String> {
     if !text(message, "provider").is_empty() {
         return Ok(text(message, "provider").to_owned());
+    }
+    let run = db.run(text(chat, "runId"))?;
+    if message["mode"] == MessageMode::Steer
+        && let Some(run) = run.as_ref().filter(|run| run_is_active(run))
+    {
+        return Ok(Provider::of_run(run)?.as_str().to_owned());
     }
 
     let ahead = db
@@ -282,7 +289,7 @@ fn message_provider(db: &Db<'_>, chat: &Value, message: &Value) -> Result<String
         return Ok(text(&queued, "provider").to_owned());
     }
 
-    if let Some(run) = db.run(text(chat, "runId"))? {
+    if let Some(run) = run {
         return Ok(Provider::of_run(&run)?.as_str().to_owned());
     }
     let agent = required(
@@ -1681,6 +1688,30 @@ mod tests {
                 ahead["status"] = "delivered".into();
                 db.put_message(&ahead)?;
                 assert!(refused(&switched, &fast("")));
+
+                // A steering message joins the running turn, whatever the queue switches to next.
+                let running = json!({
+                    "id": "codex-run",
+                    "taskId": "steering",
+                    "createdAt": 0,
+                    "status": "running",
+                    "snapshot": { "agent": { "provider": "codex", "speed": "priority" } },
+                });
+                db.add_run(&running, None)?;
+                let steering = json!({ "id": "steering", "runId": "codex-run", "agentId": "codex" });
+                let switching = json!({
+                    "id": "switching",
+                    "chatId": "steering",
+                    "createdAt": 1,
+                    "status": "queued",
+                    "provider": "claude",
+                });
+                db.put_message(&switching)?;
+                let mut steer = fast("");
+                steer["mode"] = "steer".into();
+                validate_speed(db, &steering, &steer)?;
+                steer["mode"] = "queue".into();
+                assert!(refused(&steering, &steer));
                 Ok(())
             })
             .await

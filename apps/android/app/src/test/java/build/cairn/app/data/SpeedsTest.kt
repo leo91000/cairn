@@ -19,6 +19,20 @@ class SpeedsTest {
     }
 
     @Test
+    fun namesAQueuedSpeedAsItsModelRunsIt() {
+        val fast = astra.copy(model = "fast")
+        val deep = astra.copy(model = "deep", serviceTiers = emptyList())
+        assertEquals("vitesse fast", speedNote("priority", "fast", listOf(fast, deep)))
+        assertEquals(
+            "vitesse standard (fast non proposée)",
+            speedNote("priority", "deep", listOf(fast, deep)),
+        )
+        // A model the catalog does not list leaves the check to Codex.
+        assertEquals("vitesse fast", speedNote("priority", "custom", listOf(fast, deep)))
+        assertNull(speedNote("", "deep", listOf(fast, deep)))
+    }
+
+    @Test
     fun treatsCatalogsWithoutSpeedsAsUnknownRatherThanUnsupported() {
         assertTrue(offersSpeed(astra, "priority"))
         assertFalse(offersSpeed(astra, "ultrafast"))

@@ -1,6 +1,6 @@
 import type { Provider } from '../../../packages/contracts/accounts'
 import type { CodingAgentModel, ServiceTier } from '../../../packages/contracts/models'
-import { STANDARD_SPEED } from '../../../packages/contracts/models'
+import { speedLabel, STANDARD_SPEED } from '../../../packages/contracts/models'
 
 // A speed is independent of the model and the reasoning level: it is kept when either
 // changes. Only Codex lists speeds, per model and account, in its catalog.
@@ -26,6 +26,17 @@ export function offersSpeed(model: CodingAgentModel | undefined, speed: string) 
 /** The speed section shows for Codex models that list speeds, or to keep a saved choice. */
 export function showsSpeed(provider: Provider, model: CodingAgentModel | undefined, speed: string) {
   return provider === 'codex' && (!!model?.serviceTiers?.length || !!speed)
+}
+
+/**
+ * A queued or saved speed as it runs: one its model lacks runs at Standard. A model missing from
+ * the catalog leaves the check to Codex, as the run does.
+ */
+export function speedNote(speed: string, model: string, models: CodingAgentModel[]) {
+  if (!speed)
+    return ''
+  const label = speedLabel(speed, models.flatMap(item => item.serviceTiers ?? []))
+  return offersSpeed(models.find(item => item.model === model), speed) ? `${label} speed` : `Standard speed (${label} not offered)`
 }
 
 export function speedTier(model: CodingAgentModel | undefined, speed: string): ServiceTier | undefined {

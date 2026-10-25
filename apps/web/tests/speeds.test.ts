@@ -5,6 +5,7 @@ import {
   effectiveSpeed,
   offersSpeed,
   showsSpeed,
+  speedNote,
   speedTier,
 } from '../src/speeds'
 
@@ -30,6 +31,16 @@ describe('codex speeds', () => {
     expect(effectiveSpeed('', '')).toBe('standard')
     expect(effectiveSpeed('', 'priority')).toBe('priority')
     expect(effectiveSpeed('standard', 'priority')).toBe('standard')
+  })
+
+  it('names a queued speed as its model runs it', () => {
+    const deep = model({ model: 'deep', serviceTiers: [] })
+    const fast = model({ model: 'fast', serviceTiers: [{ id: 'priority', name: 'Fast', description: '' }] })
+    expect(speedNote('priority', 'fast', [fast, deep])).toBe('Fast speed')
+    expect(speedNote('priority', 'deep', [fast, deep])).toBe('Standard speed (Fast not offered)')
+    // A model the catalog does not list leaves the check to Codex.
+    expect(speedNote('priority', 'custom', [fast, deep])).toBe('Fast speed')
+    expect(speedNote('', 'deep', [fast, deep])).toBe('')
   })
 
   it('treats catalogs without speeds as unknown rather than unsupported', () => {

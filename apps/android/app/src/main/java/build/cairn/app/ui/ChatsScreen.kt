@@ -1448,10 +1448,7 @@ internal fun ChatPage(
                                             steer = ::steerQueued,
                                             remove = { removing = it },
                                             togglePause = { chat?.let(::togglePause) },
-                                            tiers =
-                                                state.modelCatalog("codex").models.flatMap {
-                                                    it.serviceTiers.orEmpty()
-                                                },
+                                            models = state.modelCatalog("codex").models,
                                             attachments = {
                                                 MessageAttachments(
                                                     vm,

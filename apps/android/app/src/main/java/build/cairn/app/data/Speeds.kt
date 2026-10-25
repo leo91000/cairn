@@ -30,6 +30,17 @@ fun offersSpeed(model: CodingAgentModel?, speed: String): Boolean {
 fun showsSpeed(provider: String, model: CodingAgentModel?, speed: String) =
     provider == "codex" && (!model?.serviceTiers.isNullOrEmpty() || speed.isNotBlank())
 
+/**
+ * A queued or saved speed as it runs: one its model lacks runs at Standard. A model missing from
+ * the catalog leaves the check to Codex, as the run does.
+ */
+fun speedNote(speed: String, model: String, models: List<CodingAgentModel>): String? {
+    if (speed.isBlank()) return null
+    val label = speedLabel(speed, models.flatMap { it.serviceTiers.orEmpty() }).lowercase()
+    return if (offersSpeed(models.find { it.model == model }, speed)) "vitesse $label"
+    else "vitesse standard ($label non proposée)"
+}
+
 /** Codex's own name for a speed, in its catalog; a readable id otherwise. */
 fun speedLabel(value: String, tiers: List<ServiceTier> = emptyList()): String =
     when {

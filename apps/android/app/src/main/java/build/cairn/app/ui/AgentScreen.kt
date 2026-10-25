@@ -390,9 +390,7 @@ private fun AgentPage(
                             issues,
                             errors.keys + listOfNotNull(errorSection),
                             changes.toSet(),
-                            state.modelCatalog("codex").models.flatMap {
-                                it.serviceTiers.orEmpty()
-                            },
+                            state.modelCatalog("codex").models,
                         ) {
                             section = it.name
                         }
@@ -771,8 +769,8 @@ private fun AgentOverview(
     issues: List<AgentIssue>,
     errors: Set<AgentSection>,
     changed: Set<AgentSection>,
-    /** Codex speeds, to name the agent's. */
-    speedTiers: List<ServiceTier>,
+    /** Codex's catalog, to name the agent's speed as its model runs it. */
+    codexModels: List<CodingAgentModel>,
     open: (AgentSection) -> Unit,
 ) {
     val agent = draft.agent
@@ -924,11 +922,7 @@ private fun AgentOverview(
                     providerLabel(agent.provider),
                     agent.model.ifBlank { "modèle par défaut" },
                     effortLabel(agent.reasoning).lowercase(),
-                    agent.speed
-                        .ifBlank { null }
-                        ?.let {
-                            "vitesse ${speedLabel(it, speedTiers).lowercase()}"
-                        },
+                    speedNote(agent.speed, agent.model, codexModels),
                 )
                 .joinToString(" · "),
             error = AgentSection.Engine in errors,

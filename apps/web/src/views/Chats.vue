@@ -163,7 +163,7 @@ const model = ref('')
 const reasoning = ref('')
 const speed = ref('')
 // Names queued messages' speeds; the composer's picker keeps this catalog current.
-const codexTiers = computed(() => modelCatalogs.codex.catalog.models.flatMap(item => item.serviceTiers ?? []))
+const codexModels = computed(() => modelCatalogs.codex.catalog.models)
 const provider = ref<'' | Provider>('')
 const history = ref(false)
 const deletingConversation = ref<ChatDetail>()
@@ -1210,7 +1210,7 @@ function key(event: KeyboardEvent) {
               <template v-if="pending.length || detail?.paused">
                 <QueueStrip
                   :pending="pending"
-                  :tiers="codexTiers"
+                  :models="codexModels"
                   :paused="!!detail?.paused"
                   :working="active"
                   :busy="busy"

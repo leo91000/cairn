@@ -24,8 +24,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.ChatAttachment
 import build.cairn.app.data.ChatMessage
-import build.cairn.app.data.ServiceTier
-import build.cairn.app.data.speedLabel
+import build.cairn.app.data.CodingAgentModel
+import build.cairn.app.data.speedNote
 
 /**
  * Follow-ups waiting for the agent, shown at the top of the composer. Each message keeps the full
@@ -45,8 +45,8 @@ internal fun QueueStrip(
     steer: (ChatMessage) -> Unit,
     remove: (ChatMessage) -> Unit,
     togglePause: () -> Unit,
-    /** Codex speeds, to name a queued message's speed. */
-    tiers: List<ServiceTier> = emptyList(),
+    /** Codex's catalog, to name a queued message's speed as its model runs it. */
+    models: List<CodingAgentModel> = emptyList(),
     attachments: @Composable (List<ChatAttachment>) -> Unit,
 ) {
     var selected by rememberSaveable { mutableStateOf<String?>(null) }
@@ -114,10 +114,7 @@ internal fun QueueStrip(
                                     overflow = TextOverflow.Ellipsis,
                                 )
                                 // Each queued message keeps the speed chosen when it was written.
-                                val speed =
-                                    message.speed
-                                        .ifBlank { null }
-                                        ?.let { "vitesse ${speedLabel(it, tiers).lowercase()}" }
+                                val speed = speedNote(message.speed, message.model, models)
                                 val note =
                                     when {
                                         message.status == "sending" -> "Envoi en cours…"
