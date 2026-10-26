@@ -1614,6 +1614,9 @@ async fn local_locations(s: &Service, run: &str) -> Result<Vec<Value>> {
 }
 
 #[cfg(test)]
+use crate::run_fixture::DbRunFixture;
+
+#[cfg(test)]
 mod capture_policy_tests {
     use super::*;
 
@@ -1652,7 +1655,7 @@ mod capture_policy_tests {
         let store = crate::store::Store::open(root.path()).unwrap();
         store.transaction(|db| {
             for (id, dirty, backup) in [("dirty", 4096, "synced"), ("pending", 0, "pending"), ("error", 0, "error"), ("clean", 0, "synced")] {
-                db.add_run(&json!({
+                db.add_run_fixture(&json!({
                     "id": id, "taskId": id, "status": "waiting", "createdAt": 0,
                     "isolated": true, "storage": { "mode": "on-demand", "dirtyBytes": dirty },
                     "backup": { "status": backup, "requestedRevision": 1, "acknowledgedRevision": 1 },

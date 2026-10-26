@@ -319,7 +319,7 @@ class EngineStatusTest {
             )
         val run =
             Run(
-                "run",
+                id = "run",
                 status = "running",
                 accountWaitReason = "Usage exhausted.",
                 snapshot =
@@ -340,8 +340,16 @@ class EngineStatusTest {
                                         mcps = null,
                                     ),
                                 provider = "claude",
-                            )
+                            ),
+                        task =
+                            build.cairn.contracts.RunTaskSnapshot(
+                                agentId = build.cairn.app.data.MAIN_AGENT_ID,
+                                id = "00000000-0000-4000-8000-000000000003",
+                                name = "Fixture",
+                                prompt = "Fixture",
+                            ),
                     ),
+                taskId = "",
             )
         val quota = chatQuota(run, listOf(failed))!!
         assertEquals("Your usage allowance is used up for now.", quota.message)

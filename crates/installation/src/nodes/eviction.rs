@@ -394,6 +394,9 @@ async fn evict_clean(
 }
 
 #[cfg(test)]
+use crate::run_fixture::DbRunFixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{config::id, store::Store};
@@ -408,7 +411,7 @@ mod tests {
         db.put("nodes", &json!({
             "id": node, "lastSeen": now(), "capabilities": { "backend": "native", "ublk": true },
         }))?;
-        db.add_run(&json!({
+        db.add_run_fixture(&json!({
             "id": run, "taskId": id(), "createdAt": time - IDLE_MS, "finishedAt": time - IDLE_MS,
             "status": "succeeded", "executionBackend": "native", "recoveryPending": false,
             "nodeState": null, "moveRequest": null,

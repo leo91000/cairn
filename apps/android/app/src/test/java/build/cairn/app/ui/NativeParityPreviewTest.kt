@@ -107,7 +107,7 @@ class NativeParityPreviewTest {
                 )
             val run =
                 Run(
-                    "run",
+                    id = "run",
                     taskId = task.id,
                     status = "succeeded",
                     taskName = task.name,

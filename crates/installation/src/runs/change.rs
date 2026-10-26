@@ -7,6 +7,7 @@ use serde_json::Value;
 /// JSON merge, every lifecycle assignment is checked by Rust and SQL.
 #[derive(Default)]
 pub struct RunChanges {
+    pub snapshot: Option<cairn_contracts::RunSnapshot>,
     pub task_id: Option<String>,
     pub project_id: Option<Option<String>>,
     pub status: Option<RunStatus>,
@@ -35,7 +36,10 @@ pub struct RunChanges {
 }
 
 impl RunChanges {
-    pub fn apply(self, state: &mut RunState) -> Result<Option<Value>> {
+    pub fn apply(
+        self,
+        state: &mut RunState,
+    ) -> Result<(Option<cairn_contracts::RunSnapshot>, Option<Value>)> {
         if let Some(value) = self.task_id {
             state.task_id = value;
         }
@@ -105,6 +109,6 @@ impl RunChanges {
         if let Some(value) = self.retry {
             state.retry = value;
         }
-        Ok(self.boundary)
+        Ok((self.snapshot, self.boundary))
     }
 }

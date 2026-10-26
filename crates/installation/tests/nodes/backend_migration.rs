@@ -1,4 +1,5 @@
 use super::*;
+use crate::common::run_fixture::DbRunFixture;
 
 async fn wait_migration(owner: &Owner, run: &str) -> Value {
     tokio::time::timeout(Duration::from_secs(90), async {
@@ -150,7 +151,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     record["sessionId"] = "old-engine-session".into();
     record["resources"] = limits(1, 512, 128);
     record["snapshot"] = json!({ "agent": original_agent });
-    owner.add_run(&record).await;
+    owner.add_run_fixture(&record).await;
     owner.put("chats", json!({ "id": chat, "runId": run, "agentId": agent, "paused": false, "title": "same conversation" })).await;
     let message = json!({ "id": id(), "chatId": chat, "text": "keep this history", "createdAt": now(), "status": "delivered" });
     let saved = message.clone();

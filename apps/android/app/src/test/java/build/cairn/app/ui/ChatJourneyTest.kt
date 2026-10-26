@@ -177,7 +177,13 @@ class ChatJourneyTest {
                                 agentName = "Cairn",
                                 status = "running",
                                 runId = "run",
-                                run = Run("run", status = "running", trigger = "chat"),
+                                run =
+                                    Run(
+                                        id = "run",
+                                        status = "running",
+                                        trigger = "chat",
+                                        taskId = "",
+                                    ),
                                 questions = if (answered) emptyList() else listOf(question),
                                 messages =
                                     if (edited) emptyList()

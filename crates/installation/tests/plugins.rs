@@ -2158,7 +2158,7 @@ async fn failures_before_acknowledgement_finish_and_followups_resume_stopped_run
             .change_run(
                 run,
                 cairn_installation::runs::RunChanges {
-                    status: Some(status),
+                    status: Some(cairn_contracts::RunStatus::parse(status).unwrap()),
                     recovery_pending: Some(false),
                     ..Default::default()
                 },
@@ -2693,7 +2693,7 @@ async fn plugin_management_is_owner_only_and_mcp_never_returns_secret_reads() {
         .await
         .unwrap();
     let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
-    let run = s
+    s
         .store
         .change_run(
             text(&run, "id"),
@@ -2705,6 +2705,7 @@ async fn plugin_management_is_owner_only_and_mcp_never_returns_secret_reads() {
         )
         .await
         .unwrap();
+    let run = s.store.run(text(&run, "id")).await.unwrap();
     let config = s.mcps.run_configuration(&s, &run).await.unwrap();
     let token = text(&config["env"], "CAIRN_MCP_RUN_TOKEN");
     let response = common::send(

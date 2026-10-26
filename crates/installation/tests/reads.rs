@@ -1,3 +1,4 @@
+use crate::common::run_fixture::DbRunFixture;
 use crate::common::run_fixture::RunFixture;
 use common::MissionFixture;
 
@@ -103,10 +104,7 @@ impl App {
         self.service
             .store
             .transaction(move |db| {
-                db.0.execute(
-                    "INSERT INTO runs(id,task_id,project_id,status,created_at,data) VALUES(?1,?2,'',?3,?4,?5)",
-                    rusqlite::params![run_id, task, status.as_str(), now(), record.to_string()],
-                )?;
+                db.add_run_fixture(&record, None)?;
                 Ok(())
             })
             .await

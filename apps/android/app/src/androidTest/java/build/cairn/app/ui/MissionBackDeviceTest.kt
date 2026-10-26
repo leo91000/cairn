@@ -49,7 +49,7 @@ class MissionBackDeviceTest {
         )
     private val done =
         Run(
-            "done-run",
+            id = "done-run",
             taskId = "a05f5991-ec1e-57a2-a8e5-ec314581a110",
             status = "succeeded",
             trigger = "schedule",

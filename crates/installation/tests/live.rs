@@ -1,3 +1,4 @@
+use crate::common::run_fixture::DbRunFixture;
 use common::MissionFixture;
 
 mod common;
@@ -1184,7 +1185,7 @@ async fn profile_conversation_opening() {
                     run["trigger"] = "chat".into();
                     run["summary"] = summary.clone().into();
                     run["finishedAt"] = 1.into();
-                    db.add_run(&run, None)?;
+                    db.add_run_fixture(&run, None)?;
                     id
                 };
                 let mut chat = chat;

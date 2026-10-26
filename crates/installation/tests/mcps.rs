@@ -188,7 +188,7 @@ async fn assert_large_metadata_is_chunked_consistently(
     assert_eq!(empty["events"], json!([]));
     assert_eq!(empty["nextAfter"], *cursor);
     assert_eq!(empty["hasMore"], false);
-    assert_eq!(empty["run"]["truncated"], true);
+    assert_eq!(empty["run"]["kind"], "truncated");
     let response = mcp
         .call("read_run_content", json!({ "runId": run, "offset": 0 }))
         .await;

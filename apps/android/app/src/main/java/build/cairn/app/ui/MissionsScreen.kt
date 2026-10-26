@@ -33,10 +33,12 @@ import build.cairn.app.data.*
 import build.cairn.contracts.CreateMissionInput
 import build.cairn.contracts.MissionInput
 import build.cairn.contracts.MissionStateInput
+import build.cairn.contracts.RunMissionInput
 import build.cairn.contracts.SchedulePreviewInput
 import build.cairn.contracts.createMission
 import build.cairn.contracts.deleteMission
 import build.cairn.contracts.previewSchedule
+import build.cairn.contracts.runMission
 import build.cairn.contracts.setMissionState
 
 private val filters =
@@ -109,7 +111,7 @@ fun MissionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Un
     val lifecycle by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
     fun launch(task: Task) {
         vm.perform {
-            val started = api.send<Run>("POST", "/tasks/${segment(task.id)}/run")
+            val started = api.runMission(RunMissionInput(task.id))
             activity = listOf(started) + activity.filter { it.taskId != task.id }
             selectedId = null
             openRun(started.id)
@@ -469,7 +471,7 @@ internal fun MissionPanel(
     val actions =
         MissionActions(
             launch = {
-                vm.perform { openRun(api.send<Run>("POST", "/tasks/${segment(it.id)}/run").id) }
+                vm.perform { openRun(api.runMission(RunMissionInput(it.id)).id) }
             },
             edit = { editing = true },
             delete = { deleting = true },

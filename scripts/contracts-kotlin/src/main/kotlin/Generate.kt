@@ -11,6 +11,7 @@ fun main(args: Array<String>) {
         true,
         "kotlinx.serialization.json.JsonObject",
     )
+    generator.configure(File("boundaries.json"))
     generator.setTemplateDirectory(File("templates"))
     generator.additionalPropertiesOption = CodeGenerator.AdditionalPropertiesOption.STRICT
     generator.baseDirectoryName = args[1]

@@ -135,7 +135,14 @@ class NativeUiTest {
         var opened = ""
         compose.setContent {
             CairnTheme {
-                RunCard(Run(id = "run-1", status = "failed", taskName = "Revue du projet")) {
+                RunCard(
+                    Run(
+                        id = "run-1",
+                        status = "failed",
+                        taskName = "Revue du projet",
+                        taskId = "",
+                    )
+                ) {
                     opened = it
                 }
             }

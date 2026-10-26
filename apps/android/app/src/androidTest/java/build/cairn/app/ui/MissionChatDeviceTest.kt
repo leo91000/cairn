@@ -26,7 +26,7 @@ class MissionChatDeviceTest {
     fun waitingMissionShowsItsReasonAndCanBeCancelled() {
         val run =
             Run(
-                "waiting",
+                id = "waiting",
                 taskId = "mission",
                 status = "waiting",
                 trigger = "manual",
@@ -156,7 +156,7 @@ class MissionChatDeviceTest {
     fun completedMissionOpensTheConvertedChat() {
         val run =
             Run(
-                "done",
+                id = "done",
                 taskId = "mission",
                 status = "succeeded",
                 trigger = "manual",
@@ -260,7 +260,7 @@ class MissionChatDeviceTest {
     fun failedMissionResumesTheExistingRun() {
         val run =
             Run(
-                "123e4567-e89b-42d3-a456-426614174000",
+                id = "123e4567-e89b-42d3-a456-426614174000",
                 taskId = "mission",
                 status = "failed",
                 resumeAvailable = true,

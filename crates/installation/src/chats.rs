@@ -1004,7 +1004,7 @@ fn launch_turn(
     } else {
         crate::native::policy::apply(&mut snapshot, &chat);
         snapshot["chatExecution"] = serde_json::to_value(execution)?;
-        db.add_run(&snapshot, None)?;
+        crate::runs::admit_prepared(db, &snapshot, None)?;
         chat["runId"] = snapshot["id"].clone();
     }
     chat["cancelledByDeletion"] = false.into();
@@ -1470,6 +1470,9 @@ impl Service {
 }
 
 #[cfg(test)]
+use crate::run_fixture::DbRunFixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1513,7 +1516,7 @@ mod tests {
                         "status": "succeeded",
                         "snapshot": { "agent": agent },
                     });
-                    db.add_run(&run, None)?;
+                    db.add_run_fixture(&run, None)?;
                     db.put(
                         "chats",
                         &json!({ "id": id, "runId": id, "agentId": "agent" }),
@@ -1722,7 +1725,7 @@ mod tests {
                             "sessionId": "old-native",
                             "snapshot": { "agent": { "provider": "codex" } },
                         });
-                        db.add_run(&run, None)?;
+                        let run = db.add_run_fixture(&run, None)?;
                         db.event("run", "chat.user", "Context to preserve", None)?;
                         let chat = json!({
                             "id": "chat",
@@ -1788,13 +1791,14 @@ mod tests {
                         assert_eq!(question["blocking"], false);
 
                         // A later ordinary continuation resumes the newly established session.
-                        let resumed = db.change_run(
+                        let _resumed = db.change_run(
                             "run",
                             crate::runs::RunChanges {
                                 session_id: Some(Some("new-native".into())),
                                 ..Default::default()
                             },
                         )?;
+                        let resumed = db.run("run")?.unwrap();
                         continue_run(
                             db,
                             &chat,
@@ -1847,7 +1851,7 @@ mod tests {
                         run["sourceTaskPrompt"] = "Check the deployment.".into();
                         run["sourceSessionId"] = source.into();
                     }
-                    db.add_run(&run, None)?;
+                    let run = db.add_run_fixture(&run, None)?;
                     db.set("run-checkpoint:run", &json!({ "completed": true }), None)?;
                     let chat = json!({ "id": "chat", "runId": "run" });
                     db.put("chats", &chat)?;
@@ -2054,7 +2058,7 @@ mod tests {
                     "status": "succeeded",
                     "snapshot": { "agent": { "provider": "claude" } },
                 });
-                db.add_run(&run, None)?;
+                db.add_run_fixture(&run, None)?;
                 let new_codex = json!({ "id": "new-codex", "runId": null, "agentId": codex });
                 let new_claude = json!({ "id": "new-claude", "runId": null, "agentId": claude });
                 let switched = json!({ "id": "switched", "runId": "claude-run", "agentId": codex });
@@ -2095,7 +2099,7 @@ mod tests {
                     "status": "running",
                     "snapshot": { "agent": { "provider": "codex", "speed": "priority" } },
                 });
-                db.add_run(&running, None)?;
+                db.add_run_fixture(&running, None)?;
                 let steering = json!({ "id": "steering", "runId": "codex-run", "agentId": codex });
                 let switching = json!({
                     "id": "switching",

@@ -87,3 +87,7 @@ pub(crate) mod agent_fixture;
 #[cfg(test)]
 #[path = "../tests/common/mission_fixture.rs"]
 pub(crate) mod mission_fixture;
+
+#[cfg(test)]
+#[path = "../tests/common/run_fixture.rs"]
+pub(crate) mod run_fixture;

@@ -1,5 +1,6 @@
 use super::*;
 use crate::config::Config;
+use crate::run_fixture::DbRunFixture;
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
@@ -636,7 +637,7 @@ async fn queued_conversation_interrupts_portrait_and_gets_the_single_account_slo
     let (_, reply) = f.next().await;
     f.s.store
         .transaction(|db| {
-            db.add_run(&foreground_run(), None)?;
+            db.add_run_fixture(&foreground_run(), None)?;
             Ok(())
         })
         .await
@@ -667,7 +668,7 @@ async fn foreground_queue_and_deployment_prevent_starting_a_portrait() {
         } else {
             f.s.store
                 .transaction(|db| {
-                    db.add_run(&foreground_run(), None)?;
+                    db.add_run_fixture(&foreground_run(), None)?;
                     Ok(())
                 })
                 .await

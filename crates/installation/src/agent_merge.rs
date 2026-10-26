@@ -86,7 +86,7 @@ pub(crate) fn merge(
         }
     }
     let runs = db.json_rows(
-        "SELECT data FROM runs WHERE json_extract(data,'$.snapshot.agent.id')=?",
+        "SELECT data FROM runs WHERE json_extract(snapshot,'$.agent.id')=?",
         [source_id],
     )?;
     if runs.iter().any(|run| {
@@ -121,15 +121,18 @@ pub(crate) fn merge(
     // Keep each run's provider, model, instructions and access snapshot. Only its
     // profile identity changes so recovery and live authorization find the target.
     for run in &runs {
-        let mut snapshot = run["snapshot"].clone();
-        let mut profile: cairn_contracts::Agent =
-            serde_json::from_value(snapshot["agent"].clone())?;
-        profile.id = target.id;
-        snapshot["agent"] = serde_json::to_value(profile)?;
-        if snapshot["task"]["agentId"] == source_id {
-            snapshot["task"]["agentId"] = target_id.into();
+        let mut snapshot = required(db.run_snapshot(text(run, "id"))?, "Run snapshot not found")?;
+        snapshot.agent.id = target.id;
+        if snapshot.task.settings.agent_id == source.id {
+            snapshot.task.settings.agent_id = target.id;
         }
-        db.update_run_boundary(text(run, "id"), &json!({ "snapshot": snapshot }))?;
+        db.change_run(
+            text(run, "id"),
+            crate::runs::RunChanges {
+                snapshot: Some(snapshot),
+                ..Default::default()
+            },
+        )?;
     }
     crate::service::forget_agent(db, source_id)?;
     db.remove_agent(source_id)?;

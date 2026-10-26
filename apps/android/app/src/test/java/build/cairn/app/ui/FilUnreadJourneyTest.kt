@@ -70,7 +70,7 @@ class FilUnreadJourneyTest {
     private val activity =
         listOf(
             Run(
-                "notes-run",
+                id = "notes-run",
                 taskId = "348988cc-0279-5ed4-801b-ac44d6987c6e",
                 status = "succeeded",
                 trigger = "schedule",
@@ -83,7 +83,7 @@ class FilUnreadJourneyTest {
                     "Trois nouveautés cette semaine : reprise à la demande, partage d’installations et notifications.",
             ),
             Run(
-                "audit-run",
+                id = "audit-run",
                 taskId = "b7ec3b50-62dd-530b-8060-bd5700fb7eb6",
                 status = "failed",
                 trigger = "schedule",
@@ -432,7 +432,7 @@ class FilUnreadJourneyTest {
                             check(release.await(20, TimeUnit.SECONDS))
                             val run =
                                 Run(
-                                    "done-run",
+                                    id = "done-run",
                                     taskId = "done",
                                     status = "succeeded",
                                     trigger = "chat",

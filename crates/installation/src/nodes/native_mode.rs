@@ -318,6 +318,9 @@ pub async fn change(
 }
 
 #[cfg(test)]
+use crate::run_fixture::DbRunFixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent_fixture::StoreAgentFixture;
@@ -369,7 +372,7 @@ mod tests {
             .unwrap();
         let saved = run.clone();
         store
-            .transaction(move |db| db.add_run(&saved, None).map(|_| ()))
+            .transaction(move |db| db.add_run_fixture(&saved, None).map(|_| ()))
             .await
             .unwrap();
         let placement = json!({ "nodeId": node_id, "nativeMode": mode });

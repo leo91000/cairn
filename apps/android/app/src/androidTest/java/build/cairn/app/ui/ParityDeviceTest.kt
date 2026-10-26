@@ -52,7 +52,7 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
         )
     private val run =
         Run(
-            "run",
+            id = "run",
             taskId = "85aac3c3-27f5-5b76-a34d-d59120d410eb",
             status = "succeeded",
             taskName = task.name,

@@ -1,3 +1,5 @@
+use crate::common::run_fixture::DbRunFixture;
+
 mod common;
 
 use common::relay_fixture::router;
@@ -81,10 +83,7 @@ impl App {
         self.service
             .store
             .transaction(move |db| {
-                db.0.execute(
-                    "INSERT INTO runs(id,task_id,project_id,status,created_at,data) VALUES(?1,?1,'',?2,0,?3)",
-                    rusqlite::params![run, status.as_str(), record.to_string()],
-                )?;
+                db.add_run_fixture(&record, None)?;
                 db.event(&run, "chat.user", &context, None)?;
                 Ok(())
             })
@@ -403,7 +402,7 @@ async fn fresh_session_availability_uses_restored_runs_and_keeps_its_lifetime() 
                 .change_run(
                     &run,
                     cairn_installation::runs::RunChanges {
-                        status: Some(status),
+                        status: Some(RunStatus::parse(status).unwrap()),
                         ..Default::default()
                     },
                 )

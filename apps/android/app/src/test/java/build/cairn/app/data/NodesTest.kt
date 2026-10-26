@@ -133,7 +133,13 @@ class NodesTest {
             reservation,
             wireJson.decodeFromString<ExecutionNode>(encodedNode).exclusiveReservation,
         )
-        val run = Run("neighbor", status = "running", suspendedByExclusive = reservation)
+        val run =
+            Run(
+                id = "neighbor",
+                status = "running",
+                suspendedByExclusive = reservation,
+                taskId = "",
+            )
         assertEquals(
             reservation,
             wireJson

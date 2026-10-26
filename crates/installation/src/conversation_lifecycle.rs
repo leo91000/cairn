@@ -527,6 +527,9 @@ impl Service {
 }
 
 #[cfg(test)]
+use crate::run_fixture::DbRunFixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -551,7 +554,7 @@ mod tests {
         let before = store.kv("run-checkpoint:run").await.unwrap();
         store
             .transaction(|db| {
-                db.add_run(
+                db.add_run_fixture(
                     &json!({
                         "id": "run",
                         "taskId": "chat",

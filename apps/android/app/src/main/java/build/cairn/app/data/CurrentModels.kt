@@ -1,8 +1,6 @@
 package build.cairn.app.data
 
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
 
 @Serializable
 data class ChatAttachment(
@@ -52,30 +50,7 @@ data class ChatQuestion(
     val createdAt: Long = 0,
 )
 
-@Serializable
-data class ChatWakeup(
-    val id: String,
-    val messageId: String? = null,
-    val reason: String,
-    val seconds: Long,
-    val createdAt: Long,
-    val wakeAt: Long,
-    val condition: JsonObject? = null,
-    /**
-     * A group's progress, in the order of its conditions: `{ observation, display, nextCheckAt,
-     * lastError }` each. Kept as JSON, like [display].
-     */
-    val members: JsonArray? = null,
-    val observation: JsonObject? = null,
-    /** Plugin conditions: when Cairn checks again, and why its last check failed. */
-    val nextCheckAt: Long? = null,
-    val lastError: String? = null,
-    /**
-     * A plugin condition's words while it waits: `{ title, short, details[] }`. Kept as JSON so a
-     * plugin's unexpected shape never hides the conversation.
-     */
-    val display: JsonObject? = null,
-)
+typealias ChatWakeup = build.cairn.boundary.ChatWakeup
 
 /**
  * How full the coding agent's context was at its latest report. [contextTokens] is what the latest
@@ -300,13 +275,7 @@ fun Mcp.settings(
 
 @Serializable data class UrlResult(val url: String)
 
-@Serializable
-data class RunWorkspace(
-    val projectId: String,
-    val path: String,
-    val kind: String = "worktree",
-    val revision: String? = null,
-)
+typealias RunWorkspace = build.cairn.contracts.RunWorkspace
 
 /**
  * Recognize only a delivered file on the connected origin; tool-provided URLs are never fetched.

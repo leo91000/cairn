@@ -218,6 +218,19 @@ pub(crate) async fn operation(
             )
             .await;
     }
+    if let Some(op) = crate::capabilities::run_operation(name) {
+        let origin = crate::validation::text(&run, "id").to_owned();
+        return crate::native::policy::PARENT
+            .scope(
+                origin,
+                op.invoke(
+                    s,
+                    args,
+                    crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+                ),
+            )
+            .await;
+    }
     if name == cairn_contracts::RESUME_RUN_ID {
         let input = crate::capabilities::RESUME_RUN.decode(args)?;
         let context = crate::capabilities::ResumeContext::Installation(bearer.to_owned());
@@ -250,56 +263,5 @@ async fn invoke(s: &Arc<Service>, bearer: &str, name: &str, args: Value) -> Resu
 }
 
 async fn invoke_inner(s: &Arc<Service>, bearer: &str, name: &str, args: Value) -> Result<Value> {
-    let token = bearer.to_owned();
-    let operation = name.to_owned();
-    let input = args.clone();
-    let listing = s
-        .store
-        .read(move |db| {
-            // Authorize database reads in the same snapshot as the returned data.
-            let transaction = rusqlite::Transaction::new_unchecked(
-                db.0,
-                rusqlite::TransactionBehavior::Deferred,
-            )?;
-            let db = &Db(&transaction);
-            authorize_in(db, &token)?;
-
-            let result = match operation.as_str() {
-                "list_runs" => Some(
-                    db.runs(
-                        input["status"].as_str(),
-                        None,
-                        input["limit"].as_i64().unwrap(),
-                        input["offset"].as_i64().unwrap(),
-                        false,
-                    )?
-                    .into(),
-                ),
-                "get_run" => Some(crate::mcp_server::run_history(
-                    db,
-                    text(&input, "runId"),
-                    input["after"].as_i64().unwrap(),
-                )?),
-                "read_run_content" => Some(crate::mcp_server::read_run_content(db, &input)?),
-                _ => None,
-            };
-
-            transaction.commit()?;
-            Ok(result)
-        })
-        .await?;
-    if let Some(listing) = listing {
-        return Ok(listing);
-    }
-
-    match name {
-        "run_task" => s.enqueue_from_run(text(&args, "taskId"), bearer).await,
-        "cancel_run" => {
-            s.worker
-                .cancel_from_run(s, text(&args, "runId"), bearer)
-                .await?;
-            Ok(json!({ "cancelled": true }))
-        }
-        _ => crate::mcp_server::invoke(s, name, args, Some(bearer)).await,
-    }
+    crate::mcp_server::invoke(s, name, args, Some(bearer)).await
 }

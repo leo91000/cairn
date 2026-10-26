@@ -1,6 +1,7 @@
 //! Fixture builders fill complete typed run assignments for tests of other domains.
 //! These are not production commands or historical readers.
 #![allow(dead_code)]
+
 use cairn_contracts::RunState;
 use cairn_installation::{
     error::{Result, required},
@@ -9,13 +10,81 @@ use cairn_installation::{
 };
 use serde_json::Value;
 
+/// Give snapshots used by other-domain tests complete current contracts. Explicit
+/// test values still win, including malformed values a test intentionally supplies.
+pub fn complete_snapshot_fixture(input: &Value) -> Value {
+    let agent: cairn_contracts::Agent = serde_json::from_value(serde_json::json!({
+        "id": cairn_installation::config::MAIN_AGENT_ID, "name": "Fixture",
+        "revision": "fixture", "createdAt": 0, "access": cairn_contracts::AccessPolicy::default(),
+        "exclusiveNodes": [], "plugins": [],
+    }))
+    .unwrap();
+    let task: cairn_contracts::RunTaskSnapshot = serde_json::from_value(serde_json::json!({
+        "id": "00000000-0000-4000-8000-000000000003", "name": "Fixture", "prompt": "Fixture",
+        "agentId": cairn_installation::config::MAIN_AGENT_ID,
+    }))
+    .unwrap();
+    let snapshot = cairn_contracts::RunSnapshot {
+        task,
+        agent,
+        project: None,
+        projects: vec![],
+        available_projects: vec![],
+        skills: vec![],
+        delegation: None,
+    };
+    let mut snapshot = serde_json::to_value(snapshot).unwrap();
+    merge(&mut snapshot, input);
+    #[cfg(test)]
+    if std::env::var_os("A5_DIAGNOSE_FIXTURE").is_some() {
+        serde_json::from_value::<cairn_contracts::RunSnapshot>(snapshot.clone()).expect("complete fixture snapshot");
+    }
+    snapshot
+}
+
+pub trait DbRunFixture {
+    fn add_run_fixture(&self, input: &Value, dedupe: Option<&str>) -> Result<Value>;
+}
+
+impl DbRunFixture for Db<'_> {
+    fn add_run_fixture(&self, input: &Value, dedupe: Option<&str>) -> Result<Value> {
+        let state: RunState = serde_json::from_value(input.clone())?;
+        let mut payload = input.clone();
+        for key in cairn_installation::runs::RUN_FIELDS {
+            if *key != "snapshot" {
+                payload.as_object_mut().unwrap().remove(*key);
+            }
+        }
+        let snapshot = payload
+            .as_object_mut()
+            .unwrap()
+            .remove("snapshot")
+            .map(|s| complete_snapshot_fixture(&s));
+        self.admit_run(&state, None, &payload, dedupe)?;
+        if let Some(snapshot) = snapshot {
+            self.0.execute(
+                "UPDATE runs SET snapshot=? WHERE id=?",
+                rusqlite::params![snapshot.to_string(), state.id],
+            )?;
+        }
+        required(self.run(&state.id)?, "Run not found")
+    }
+}
+
 pub fn change_run_fixture(db: &Db<'_>, id: &str, input: &Value) -> Result<Value> {
     let mut current = required(db.run(id)?, "Run not found")?;
     merge(&mut current, input);
     let state: RunState = serde_json::from_value(current.clone())?;
-    for key in serde_json::to_value(&state)?.as_object().unwrap().keys() {
-        current.as_object_mut().unwrap().remove(key);
+    for key in cairn_installation::runs::RUN_FIELDS {
+        if *key != "snapshot" {
+            current.as_object_mut().unwrap().remove(*key);
+        }
     }
+    let snapshot = current.as_object_mut().unwrap().remove("snapshot");
+    db.0.execute(
+        "UPDATE runs SET snapshot=? WHERE id=?",
+        rusqlite::params![snapshot.map(|s| s.to_string()), id],
+    )?;
     db.change_run(
         id,
         RunChanges {
@@ -43,8 +112,10 @@ pub fn change_run_fixture(db: &Db<'_>, id: &str, input: &Value) -> Result<Value>
             requested_by: Some(state.requested_by),
             retry: Some(state.retry),
             boundary: Some(current),
+            ..Default::default()
         },
-    )
+    )?;
+    required(db.run(id)?, "Run not found")
 }
 
 pub trait RunFixture {

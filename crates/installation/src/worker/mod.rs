@@ -14,7 +14,6 @@ use crate::{
     run_status::RunStatus,
     service::Service,
     store::{Db, Store},
-    validation::text,
 };
 use serde_json::{Value, json};
 use std::{
@@ -182,12 +181,12 @@ async fn schedule_tasks(s: Arc<Service>) {
 /// Recovers executions and unfinished cleanup from the previous worker process.
 fn restore_after_restart(db: &mut Db<'_>) -> Result<()> {
     db.restore_chat_summaries(None)?;
-    for run in db.active()? {
-        let id = text(&run, "id");
-        if run["status"] != RunStatus::Running {
+    for run in db.active_run_states()? {
+        let id = &run.id;
+        if run.status != RunStatus::Running {
             // Waiting was committed before fencing and release. A restart must
             // finish that cleanup even when the wakeup is still far away.
-            if run["status"] == RunStatus::Waiting || !run["cancelRequestedAt"].is_null() {
+            if run.status == RunStatus::Waiting || run.cancel_requested_at.is_some() {
                 db.change_run(
                     id,
                     crate::runs::RunChanges {
@@ -198,7 +197,7 @@ fn restore_after_restart(db: &mut Db<'_>) -> Result<()> {
             }
             continue;
         }
-        if db.kv(&checkpoint::key(id))?.is_none() && !run["startedAt"].is_null() {
+        if db.kv(&checkpoint::key(id))?.is_none() && run.started_at.is_some() {
             let patch = crate::runs::RunChanges { status : Some(RunStatus::Interrupted), finished_at : Some(Some(now())), summary : Some(("This run has no restart checkpoint. Review its working files before retrying.").to_owned()), ..Default::default() };
             db.change_run(id, patch)?;
             continue;
@@ -248,7 +247,7 @@ async fn audit(store: &Store, action: &str, detail: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mission_fixture::MissionFixture;
+    use crate::{mission_fixture::MissionFixture, validation::text};
 
     #[tokio::test]
     async fn committed_work_and_deployment_release_wake_the_scheduler() {

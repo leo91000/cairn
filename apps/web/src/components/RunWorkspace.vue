@@ -2,7 +2,11 @@
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
+
+import { cancelRun } from '../../../../packages/contracts/generated/cancelRun'
+import { cleanupRun } from '../../../../packages/contracts/generated/cleanupRun'
 import { resumeRun } from '../../../../packages/contracts/generated/resume-run'
+import { retryRun } from '../../../../packages/contracts/generated/retryRun'
 import {
   api,
   date,
@@ -111,7 +115,7 @@ watch(() => props.runId, () => {
 
 async function cancel() {
   try {
-    await api(`/runs/${run.value!.id}/cancel`, { method: 'POST' })
+    await cancelRun(api, { runId: run.value!.id })
     confirm.value = false
     notify('Cancellation requested')
   }
@@ -131,7 +135,7 @@ async function resume() {
 
 async function retry() {
   try {
-    const next = await api(`/runs/${run.value!.id}/retry`, { method: 'POST' })
+    const next = await retryRun(api, { runId: run.value!.id })
     router.push(props.runPath(next.id))
   }
   catch (e) {
@@ -153,7 +157,7 @@ async function continueInChat() {
 
 async function cleanup() {
   try {
-    await api(`/runs/${run.value!.id}/cleanup`, { method: 'POST' })
+    await cleanupRun(api, { runId: run.value!.id })
     confirmCleanup.value = false
     notify('Worktree removed. Its Git branch is preserved.')
   }

@@ -304,12 +304,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
 
 /// Run list projection: drops the heavy snapshot and summary, keeps display names and the
 /// explicit coding agent saved in the snapshot.
-pub const RUN_SUMMARY: &str = "json_set(
-    json_remove(data,'$.snapshot','$.summary'),
-    '$.taskName',json_extract(data,'$.snapshot.task.name'),
-    '$.agentName',json_extract(data,'$.snapshot.agent.name'),
-    '$.provider',json_extract(data,'$.snapshot.agent.provider')
-)";
+pub const RUN_SUMMARY: &str = "summary_data";
 
 // Database transactions and statement caches stay on their owning database thread.
 pub struct Db<'a>(pub &'a Connection);
@@ -538,20 +533,7 @@ impl Db<'_> {
     }
 
     pub fn run(&self, id: &str) -> Result<Option<Value>> {
-        self.json_row("SELECT data FROM runs WHERE id=?", [id])
-    }
-
-    /// Temporary input adapter for chat/snapshot construction and test fixtures.
-    /// Lifecycle columns are decoded before publishing; the payload has no copies.
-    pub fn add_run(&self, run: &Value, dedupe: Option<&str>) -> Result<Value> {
-        let state: cairn_contracts::RunState = serde_json::from_value(run.clone())?;
-        let mut boundary = run.clone();
-        let state_fields = serde_json::to_value(&state)?;
-        for key in state_fields.as_object().unwrap().keys() {
-            boundary.as_object_mut().unwrap().remove(key);
-        }
-        self.insert_run_state(&state, &boundary, dedupe)?;
-        required(self.run(&state.id)?, "Run not found")
+        self.run_record(id)?.map(|record| record.wire()).transpose()
     }
 
     pub fn active(&self) -> Result<Vec<Value>> {
@@ -656,7 +638,7 @@ impl Db<'_> {
                     "DELETE FROM events
                      WHERE run_id=?1
                        AND id<(SELECT COALESCE(MAX(id),0)-10000 FROM events WHERE run_id=?1)
-                       AND run_id IN (SELECT id FROM runs WHERE json_extract(data,'$.trigger')!='chat')",
+                       AND run_id IN (SELECT id FROM runs WHERE trigger!='chat')",
                 )?
                 .execute([run])?;
         }

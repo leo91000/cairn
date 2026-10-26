@@ -1,3 +1,4 @@
+use crate::common::run_fixture::DbRunFixture;
 use common::AgentFixture;
 use common::MissionFixture;
 use common::ProjectFixture;
@@ -60,7 +61,7 @@ async fn restart_restores_missing_chat_summaries_once_without_repeating_existing
         .store
         .transaction(move |db| {
             for (index, run_id) in fixtures.iter().enumerate() {
-                db.add_run(&summarized_run(index, run_id), None)?;
+                db.add_run_fixture(&summarized_run(index, run_id), None)?;
                 if index == 1 || index == 2 {
                     let existing = json!({
                         "type": "item.completed",

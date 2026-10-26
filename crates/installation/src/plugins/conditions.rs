@@ -557,6 +557,9 @@ pub(crate) async fn maintain(s: Arc<Service>) {
 }
 
 #[cfg(test)]
+use crate::run_fixture::DbRunFixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -580,7 +583,7 @@ mod tests {
                     "id": "run", "taskId": "task", "status": "succeeded", "createdAt": now(),
                     "snapshot": { "agent": source }, "chatExecution": { "messageId": "message" },
                 });
-                db.add_run(&captured_run, None)?;
+                db.add_run_fixture(&captured_run, None)?;
                 let chat = db.put(
                     "chats",
                     &json!({
@@ -591,8 +594,7 @@ mod tests {
                         },
                     }),
                 )?;
-                let current_run =
-                    db.update_run_boundary("run", &json!({ "snapshot": { "agent": target } }))?;
+                let current_run = { db.0.execute("UPDATE runs SET snapshot=json_set(snapshot, '$.agent', json(?)) WHERE id='run'", [target.to_string()])?; db.run("run")?.unwrap() };
                 let stale_denial =
                     crate::waits::access(db, &captured_run, &chat["wakeup"]["condition"])
                         .unwrap_err();

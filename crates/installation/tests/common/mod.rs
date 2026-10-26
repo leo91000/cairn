@@ -3,6 +3,8 @@
 //! Every test crate compiles this module on its own and uses only part of it.
 #![allow(dead_code)]
 
+use self::run_fixture::DbRunFixture;
+
 pub mod github;
 
 use axum::{
@@ -143,7 +145,7 @@ pub async fn reconfigure(service: &mut Arc<Service>, change: impl FnOnce(&mut Co
 pub async fn add_run(store: &Store, record: &Value) {
     let record = record.clone();
     store
-        .write(move |db| db.add_run(&record, None))
+        .write(move |db| db.add_run_fixture(&record, None))
         .await
         .unwrap();
 }

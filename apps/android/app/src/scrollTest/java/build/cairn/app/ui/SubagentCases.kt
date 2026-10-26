@@ -85,7 +85,13 @@ abstract class SubagentCases {
                     agentId = MAIN_AGENT_ID,
                     agentName = "Agent principal",
                     runId = "run",
-                    run = Run("run", status = "running", startedAt = now - 90_000),
+                    run =
+                        Run(
+                            id = "run",
+                            status = "running",
+                            startedAt = now - 90_000,
+                            taskId = "",
+                        ),
                 )
             var serial = 0L
             fun event(type: String, at: Long, payload: JsonObject) =

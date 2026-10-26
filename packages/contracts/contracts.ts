@@ -1,5 +1,3 @@
-import type { Agent } from './generated/typescript/Agent'
-import type { Project } from './generated/typescript/Project'
 import { z } from 'zod'
 
 export const name = z.string().trim().min(1).max(100)
@@ -14,8 +12,7 @@ export type { Agent } from './generated/typescript/Agent'
 export type { AgentAvatar } from './generated/typescript/AgentAvatar'
 export type { Mission as Task } from './generated/typescript/Mission'
 export type { Project } from './generated/typescript/Project'
-export type RunStatus
-  = 'queued' | 'running' | 'waiting' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'
+export type { RunStatus } from './generated/typescript/RunStatus'
 /** Who must act next on work that is blocked or needs input; the user when absent. */
 export type OutcomeWaitingOn = 'user' | 'requester' | 'external'
 export interface TaskOutcome {
@@ -26,95 +23,8 @@ export interface TaskOutcome {
   reportedAt: number
   messageId?: string | null
 }
-export interface Run {
-  /** A durable mission wait; the run keeps its active task slot. */
-  wakeup?: import('./chats').ChatWakeup | null
-  executionBackend?: 'firecracker' | 'native' | null
-  suspendedByExclusive?: import('./nodes').ExclusiveReservation | null
-  retry?: {
-    attempt: number
-    limit: number
-    nextAttemptAt: number | null
-    /** Optional on retained records written by older installations. */
-    startedAt?: number | null
-    deadlineAt?: number | null
-    cause: { kind: 'connection' | 'timeout' | 'rate-limit' | 'server', message: string, startup?: boolean }
-  } | null
-  nodeId?: string | null
-  storage?: {
-    mode: string
-    waitingFor?: string | null
-    dirtyBytes?: number
-    localBytes?: number
-    dirtySince?: number | null
-    freeBytes?: number
-    reserveBytes?: number
-  }
-  nativeMode?: import('./nodes').NativeModeRequest | null
-  nodeState?: string | null
-  pinnedNodeId?: string | null
-  preferredNodeId?: string | null
-  resources?: import('./nodes').NodeResources
-  capacityWaitUntil?: number | null
-  restoredAt?: number | null
-  movementError?: string | null
-  backup?: {
-    id?: string
-    capturedAt?: number
-    status: string
-    error?: string
-    uploadedBytes?: number
-  }
-
-  outcome?: TaskOutcome | null
-  /** The conversation or mission whose agent started this run. */
-  requestedBy?: { runId: string, chatId?: string, taskId?: string } | null
-  chatExecution?: import('./chats').ChatExecution
-  recoveryPending?: boolean
-  resumeAvailable?: boolean
-  resumeCount?: number
-  cancelRequestedAt?: number | null
-  accountId?: string | null
-  accountName?: string | null
-  accountWaitReason?: string | null
-  /** The coding agent whose accounts need the user in Connections before this run can start. */
-  accountRequired?: import('./accounts').Provider | null
-  id: string
-  taskId: string
-  /** Original mission when its execution was transferred to a chat. */
-  sourceTaskId?: string
-  projectId: string | null
-  status: RunStatus
-  trigger: string
-  createdAt: number
-  startedAt: number | null
-  finishedAt: number | null
-  summary: string
-  error?: string | null
-  sessionId: string | null
-  workspace: string | null
-  workspaces?: {
-    projectId: string
-    path: string
-    revision?: string | null
-    kind: 'worktree' | 'clone' | 'copy' | 'direct'
-  }[]
-  isolated?: boolean
-  workspaceCleanedAt?: number
-  snapshot: {
-    task: import('./generated/typescript/RunTaskSnapshot').RunTaskSnapshot
-    agent: Agent
-    project: Project | null
-    projects?: Project[]
-    skills: {
-      name: string
-      path: string
-      content: string
-      bundle?: string
-    }[]
-  }
-  usage: Record<string, number> | null
-}
+/** Complete run details have a snapshot; list projections use RunListItem. */
+export type Run = import('./generated/typescript/Run').Run & { snapshot: import('./generated/typescript/RunSnapshot').RunSnapshot, summary: string }
 export interface Skill {
   name: string
   description: string
@@ -221,17 +131,7 @@ export interface RunEvent {
   payload?: Record<string, unknown>
 }
 
-export type RunListItem = Omit<Run, 'snapshot' | 'summary'> & {
-  taskName: string
-  agentName: string
-  provider?: import('./accounts').Provider
-  /** A mission run that finished after the signed-in account last opened its mission. */
-  unread?: boolean
-  /** The opening of the agent's final message, while unread. */
-  preview?: string | null
-  /** The signed-in account set this run's outcome aside: dismissed, or snoozed `until`. */
-  dismissal?: { until: number | null } | null
-}
+export type RunListItem = Omit<import('./generated/typescript/Run').Run, 'snapshot' | 'summary'>
 
 /** A project a plugin's project source offers for import. */
 export interface PluginProject {

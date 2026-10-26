@@ -55,7 +55,13 @@ abstract class ConversationLifecycleCases {
                     updatedAt = System.currentTimeMillis(),
                     status = if (working) "running" else "succeeded",
                     run =
-                        if (freshSession != null) Run("run", status = "failed", restoredAt = 10)
+                        if (freshSession != null)
+                            Run(
+                                id = "run",
+                                status = "failed",
+                                restoredAt = 10,
+                                taskId = "",
+                            )
                         else null,
                     restoredAt = if (freshSession == false) 10 else null,
                     canRequestNewSession = freshSession == true,

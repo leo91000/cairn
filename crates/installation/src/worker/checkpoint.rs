@@ -6,7 +6,7 @@ use crate::{
     store::{Db, Store},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::sync::{
     Mutex as SyncMutex,
     atomic::{AtomicU64, Ordering},
@@ -22,11 +22,10 @@ pub fn key(run_id: &str) -> String {
 
 /// Restart state persisted under `run-checkpoint:{id}`.
 ///
-/// Other modules read and patch the same document as JSON, so unknown fields
-/// round-trip through `extra` and nullable fields keep `null` distinct from absent.
-/// Present fields must have their current type.
+/// Unconverted chat/node boundaries still serialize these named fields. Nullable
+/// assignments retain null versus absent; no untyped decision fields round-trip.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunCheckpoint {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launched: Option<bool>,
@@ -66,8 +65,20 @@ pub struct RunCheckpoint {
     pub capacity_retry_at: Option<i64>,
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
     pub settled: Nullable<Settled>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fresh_session: Option<bool>,
+    /// The node domain owns the resource negotiation at this boundary (A9/A10).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<crate::nodes::Resources>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub administrative_pause_observation: Option<AdministrativePauseObservation>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdministrativePauseObservation {
+    pub attempt: String,
+    pub total_ms: u64,
 }
 
 /// Final run fields recorded before the previous execution was fenced. They are
@@ -92,14 +103,14 @@ impl Settled {
         }
     }
 
-    /// Captures the outcome already recorded on the run document.
-    pub fn from_run(run: &Value) -> Option<Self> {
-        Some(Self {
-            status: RunStatus::of(run)?,
-            summary: run["summary"].as_str().map(str::to_owned),
+    /// Captures the outcome already recorded by a typed lifecycle transition.
+    pub fn from_state(run: &cairn_contracts::RunState) -> Self {
+        Self {
+            status: run.status,
+            summary: Some(run.summary.clone()),
             error: None,
-            finished_at: run["finishedAt"].as_i64(),
-        })
+            finished_at: run.finished_at,
+        }
     }
 
     pub fn run_changes(&self) -> crate::runs::RunChanges {
@@ -233,17 +244,13 @@ pub struct Checkpoint {
 impl Checkpoint {
     pub fn new(store: Store, id: String, state: RunCheckpoint) -> Self {
         let previous = state
-            .extra
-            .get("administrativePauseObservation")
-            .cloned()
+            .administrative_pause_observation
+            .clone()
             .unwrap_or_default();
         Self {
             deadline_base: state.deadline(),
             administrative_pause_ms: AtomicU64::new(0),
-            pause_observation: SyncMutex::new((
-                previous["attempt"].as_str().unwrap_or("").into(),
-                previous["totalMs"].as_u64().unwrap_or(0),
-            )),
+            pause_observation: SyncMutex::new((previous.attempt, previous.total_ms)),
             state: Mutex::new(state),
             store,
             id,
@@ -303,10 +310,10 @@ impl Checkpoint {
         change(&mut state);
         {
             let previous = self.pause_observation.lock().unwrap();
-            state.extra.insert(
-                "administrativePauseObservation".into(),
-                serde_json::json!({ "attempt": previous.0, "totalMs": previous.1 }),
-            );
+            state.administrative_pause_observation = Some(AdministrativePauseObservation {
+                attempt: previous.0.clone(),
+                total_ms: previous.1,
+            });
             state.remaining_ms = Some(self.deadline().map(|deadline| (deadline - now()).max(0)));
         }
         state.store(&self.store, &self.id).await
@@ -357,7 +364,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn round_trips_null_absent_and_unknown_fields() {
+    fn round_trips_named_checkpoint_fields_and_preserves_null_versus_absent() {
         let stored = json!({
             "launched": true,
             "workspaceInitialized": true,
@@ -366,7 +373,8 @@ mod tests {
             "settled": null,
             "prepared": { "isolated": true, "backend": "firecracker" },
             "runnerId": "runner",
-            "movedFrom": "node-a",
+            "freshSession": true,
+            "administrativePauseObservation": {"attempt":"attempt", "totalMs":123},
         });
         let checkpoint = RunCheckpoint::from_value(stored.clone()).unwrap();
         assert!(checkpoint.launched());
@@ -384,6 +392,7 @@ mod tests {
 
     #[test]
     fn mistyped_fields_are_rejected() {
+        assert!(RunCheckpoint::from_value(json!({ "unknownDecision": true })).is_err());
         assert!(RunCheckpoint::from_value(json!({ "launched": "yes" })).is_err());
         assert!(RunCheckpoint::from_value(json!({ "remainingMs": 1.5 })).is_err());
     }

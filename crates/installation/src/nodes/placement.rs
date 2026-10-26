@@ -899,6 +899,9 @@ pub async fn renew_local(s: &Service, run_id: &str) -> Result<()> {
 }
 
 #[cfg(test)]
+use crate::run_fixture::DbRunFixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -914,10 +917,10 @@ mod tests {
             store.transaction(move |db| {
                 let run = json!({
                     "id": run_id, "taskId": crate::config::id(), "createdAt": now(),
-                    "status": "pending", "moveReservation": held_id,
+                    "status": "queued", "moveReservation": held_id,
                     "snapshot": { "agent": { "provider": "codex", "access": { "backend": backend } } },
                 });
-                db.add_run(&run, None)?;
+                db.add_run_fixture(&run, None)?;
                 db.put("node-attempts", &json!({
                     "id": held_id, "runId": run_id, "nodeId": node_id,
                     "role": "destination", "runtimeId": "previous-build", "released": false,

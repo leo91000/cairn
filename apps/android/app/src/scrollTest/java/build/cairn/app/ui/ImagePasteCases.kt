@@ -44,7 +44,23 @@ abstract class ImagePasteCases {
                     id = MAIN_AGENT_ID,
                     name = "Agent principal",
                 )
-            val run = Run("run", status = "succeeded", snapshot = Snapshot(agent = agent))
+            val run =
+                Run(
+                    id = "run",
+                    status = "succeeded",
+                    snapshot =
+                        Snapshot(
+                            agent = agent,
+                            task =
+                                build.cairn.contracts.RunTaskSnapshot(
+                                    agentId = build.cairn.app.data.MAIN_AGENT_ID,
+                                    id = "00000000-0000-4000-8000-000000000003",
+                                    name = "Fixture",
+                                    prompt = "Fixture",
+                                ),
+                        ),
+                    taskId = "",
+                )
             val chat =
                 Chat("chat", title = "Capture", runId = "run", agentName = agent.name, run = run)
             server.dispatcher =

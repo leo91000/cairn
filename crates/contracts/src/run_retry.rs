@@ -17,6 +17,7 @@ pub enum FailureKind {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct Cause {
+    #[schemars(with = "String", pattern("^(connection|timeout|rate-limit|server)$"))]
     pub kind: FailureKind,
     pub message: String,
     /// The adapter confirmed that no new agent turn was submitted.
@@ -28,8 +29,10 @@ pub struct Cause {
 #[serde(rename_all = "camelCase")]
 pub struct Retry {
     #[ts(type = "number")]
+    #[schemars(range(min = 1, max = 5))]
     pub attempt: u64,
     #[ts(type = "number")]
+    #[schemars(range(min = 5, max = 5))]
     pub limit: u64,
     #[ts(type = "number | null")]
     pub next_attempt_at: Option<i64>,

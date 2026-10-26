@@ -1,3 +1,4 @@
+use crate::common::run_fixture::DbRunFixture;
 use crate::common::run_fixture::RunFixture;
 use common::MissionFixture;
 
@@ -37,7 +38,7 @@ async fn fixture() -> (tempfile::TempDir, std::sync::Arc<Service>, Value, Value)
     run["workspace"] = "/saved/workspace".into();
     let saved = run.clone();
     service.store.transaction(move |db| {
-        db.add_run(&saved, None)?;
+        db.add_run_fixture(&saved, None)?;
         db.event(text(&saved, "id"), "item.completed", "Deployment reviewed", Some(&json!({
             "item": { "id": "original-answer", "type": "agent_message", "text": "Deployment reviewed" },
         })))?;
@@ -149,8 +150,8 @@ async fn mission_conversion_keeps_delegated_work_attached_to_its_requester() {
     service
         .store
         .transaction(move |db| {
-            db.add_run(&saved_child, None)?;
-            db.add_run(&saved_unrelated, None)?;
+            db.add_run_fixture(&saved_child, None)?;
+            db.add_run_fixture(&saved_unrelated, None)?;
             Ok(())
         })
         .await

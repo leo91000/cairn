@@ -240,7 +240,7 @@ async fn pending_recovery_can_be_inspected_and_cancelled_through_both_tool_inter
             let (_, history) =
                 node_management_call(&app, endpoint, token, "get_run", json!({ "runId": run_id }))
                     .await;
-            assert_eq!(result(&history)["run"]["retry"], retry);
+            assert_eq!(result(&history)["run"]["run"]["retry"], retry);
             let (name, args) = if chat_retry {
                 ("stop_chat", json!({ "chatId": chat["id"] }))
             } else {
@@ -1143,7 +1143,7 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         .await
         .unwrap();
     let history = call(&s, &configuration, "get_run", json!({ "runId": run["id"] })).await;
-    assert_eq!(result(&history)["run"]["id"], run["id"]);
+    assert_eq!(result(&history)["run"]["run"]["id"], run["id"]);
     let events = result(&history)["events"].as_array().unwrap().clone();
     assert!(
         events
@@ -3220,8 +3220,12 @@ async fn waiting_missions_are_visible_and_cancellable_through_both_installation_
             node_management_call(&app, endpoint, token, "get_run", json!({ "runId": run_id }))
                 .await;
         assert_eq!(status, StatusCode::OK, "{fetched}");
-        assert_eq!(result(&fetched)["run"]["status"], "waiting", "{fetched}");
-        assert_eq!(result(&fetched)["run"]["wakeup"], wakeup);
+        assert_eq!(
+            result(&fetched)["run"]["run"]["status"],
+            "waiting",
+            "{fetched}"
+        );
+        assert_eq!(result(&fetched)["run"]["run"]["wakeup"], wakeup);
         let (_, listed) = node_management_call(
             &app,
             endpoint,

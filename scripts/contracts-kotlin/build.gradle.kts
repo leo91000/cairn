@@ -18,6 +18,7 @@ application { mainClass.set("GenerateKt") }
 
 sourceSets.test {
     kotlin.srcDir("../../apps/android/app/src/main/java/build/cairn/contracts")
+    kotlin.srcDir("../../apps/android/app/src/main/java/build/cairn/boundary")
     kotlin.exclude("**/*Client.kt")
 }
 

@@ -470,7 +470,7 @@ abstract class BackgroundWaitCases {
                     runId = SAVED_RUN_ID,
                     run =
                         Run(
-                            SAVED_RUN_ID,
+                            id = SAVED_RUN_ID,
                             status = status,
                             startedAt = now - 60_000,
                             snapshot =
@@ -492,7 +492,14 @@ abstract class BackgroundWaitCases {
                                                     mcps = null,
                                                 ),
                                             provider = if (quota) "claude" else "codex",
-                                        )
+                                        ),
+                                    task =
+                                        build.cairn.contracts.RunTaskSnapshot(
+                                            agentId = build.cairn.app.data.MAIN_AGENT_ID,
+                                            id = "00000000-0000-4000-8000-000000000003",
+                                            name = "Fixture",
+                                            prompt = "Fixture",
+                                        ),
                                 ),
                             accountWaitReason =
                                 when {
@@ -503,6 +510,7 @@ abstract class BackgroundWaitCases {
                                     else -> null
                                 },
                             error = if (quota && status == "failed") SPEND_LIMIT else null,
+                            taskId = "",
                         ),
                     wakeup =
                         if (sleeping || conditional)

@@ -111,8 +111,28 @@ impl Worker {
     }
 
     pub async fn cleanup(&self, s: &Service, id: &str) -> Result<Value> {
+        self.cleanup_authorized(s, id, |_| Ok(())).await
+    }
+
+    pub(crate) async fn cleanup_authorized<F>(
+        &self,
+        s: &Service,
+        id: &str,
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
+    {
         let active = self.active.lock().await;
-        let run = s.store.run(id).await?;
+        let proof = authorize.clone();
+        let run_id = id.to_owned();
+        let run = s
+            .store
+            .read(move |db| {
+                proof(db)?;
+                required(db.run(&run_id)?, "Run not found")
+            })
+            .await?;
         if RunStatus::of(&run).is_some_and(RunStatus::is_active) || active.contains_key(id) {
             return Err(Error::conflict(
                 "Wait for this run to finish before cleaning up.",
@@ -145,6 +165,8 @@ impl Worker {
         for workspace in &managed {
             ensure_clean(workspace, &root, &env).await?;
         }
+        let proof = authorize.clone();
+        s.store.read(move |db| proof(db)).await?;
         for workspace in &managed {
             remove_workspace(&run, workspace, &env).await?;
         }
@@ -154,18 +176,22 @@ impl Worker {
             workspace_cleaned_at: Some(Some(now())),
             ..Default::default()
         };
-        s.store.change_run(id, patch).await?;
+        let id = id.to_owned();
         s.store
-            .audit("run.workspace.cleaned", json!({ "id": id }))
+            .transaction(move |db| {
+                authorize(db)?;
+                db.change_run(&id, patch)?;
+                db.audit("run.workspace.cleaned", &json!({ "id": id }))
+            })
             .await?;
         Ok(json!({ "cleaned": true }))
     }
 }
 
 fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
-    let run = required(db.run(id)?, "Run not found")?;
+    let run = required(db.run_state(id)?, "Run not found")?;
     let waiting = crate::chats::continuation::cancel_for_run(db, id)?;
-    if !RunStatus::of(&run).is_some_and(RunStatus::is_active) {
+    if !run.status.is_active() {
         if waiting {
             return db.audit("run.wakeup.cancelled", &json!({ "id": id }));
         }
@@ -181,7 +207,7 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
     // Waiting means the agent process already exited. Release may still hold
     // its in-memory slot; cancellation must settle this wait even in that gap.
     // Executing or recovering runs are settled by their worker once stopped.
-    if (!is_active || run["status"] == RunStatus::Waiting) && run["recoveryPending"] != true {
+    if (!is_active || run.status == RunStatus::Waiting) && !run.recovery_pending {
         let patch = crate::runs::RunChanges {
             status: Some(RunStatus::Cancelled),
             finished_at: Some(Some(now())),
@@ -192,7 +218,11 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
         db.change_run(id, patch)?;
         // A run waiting for an automatic retry shows the stop in its conversation; a wait's
         // own card already shows its cancellation.
-        if run["retry"]["nextAttemptAt"].is_number() {
+        if run
+            .retry
+            .as_ref()
+            .is_some_and(|r| r.next_attempt_at.is_some())
+        {
             db.event(id, "status", RunStatus::Cancelled.as_str(), None)?;
         }
     }
@@ -201,7 +231,9 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
 
 /// Queues a stopped run to continue its saved conversation.
 fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
-    let run = required(db.run(id)?, "Run not found")?;
+    let record = required(db.run_record(id)?, "Run not found")?;
+    let run = record.wire()?;
+    let state = &record.state;
     if run["backendMigration"].is_object() {
         return Err(Error::conflict(
             "Wait for the backend migration to finish before resuming.",
@@ -218,27 +250,31 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
         ));
     }
     let checkpoint = RunCheckpoint::load_in(db, id)?;
-    let status = RunStatus::of(&run);
+    let status = state.status;
     // A chat that failed before its process launched simply starts again.
     let before_launch = run["chatExecution"].is_object()
-        && matches!(status, Some(RunStatus::Failed | RunStatus::Cancelled))
+        && matches!(status, RunStatus::Failed | RunStatus::Cancelled)
         && checkpoint.as_ref().is_none_or(|c| !c.launched());
-    let resumable = status.is_some_and(RunStatus::is_resumable)
-        && run["resumeAvailable"] == true
+    let resumable = status.is_resumable()
+        && state.resume_available
         && checkpoint.as_ref().is_some_and(|c| c.prepared().is_some())
-        && run["workspaceCleanedAt"].is_null();
+        && state.workspace_cleaned_at.is_none();
     if !before_launch && !resumable {
         return Err(Error::conflict(
             "This run has no saved conversation available to resume.",
         ));
     }
-    if db.active()?.iter().any(|a| a["taskId"] == run["taskId"]) {
+    if db
+        .active_run_states()?
+        .iter()
+        .any(|a| a.task_id == state.task_id)
+    {
         return Err(Error::conflict("This task already has an active run."));
     }
     // A parked mission completed its provider turn. Explicitly continuing it
     // creates a new turn, while recovery of interrupted turns keeps its identity.
     let completed_mission =
-        run["trigger"] != "chat" && checkpoint.as_ref().is_some_and(RunCheckpoint::completed);
+        state.trigger != "chat" && checkpoint.as_ref().is_some_and(RunCheckpoint::completed);
     // A manual resume may arrive before chat_tick observes the terminal turn.
     // Its scheduled continuation must not survive into the resumed execution.
     crate::chats::continuation::cancel_for_run(db, id)?;
@@ -250,7 +286,7 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
         checkpoint.settled = None;
         // A confirmed pre-turn failure may have no session yet. Its safety
         // evidence survives a manual budget reset until the next supervised launch.
-        let pending_startup = !run["sessionId"].is_string()
+        let pending_startup = state.session_id.is_none()
             && checkpoint
                 .retry_cause
                 .as_ref()
@@ -277,7 +313,8 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
         patch.boundary.as_mut().unwrap()["missionTurnId"] = crate::config::id().into();
         patch.boundary.as_mut().unwrap()["waitContinuation"] = Value::Null;
     }
-    let result = db.change_run(id, patch)?;
+    db.change_run(id, patch)?;
+    let result = required(db.run(id)?, "Run not found")?;
     db.event(id, "status", "Resume requested", None)?;
     Ok(result)
 }
@@ -360,7 +397,24 @@ pub async fn routes(s: &Arc<Service>, input: &crate::http::Input) -> Option<Resu
         .split('/')
         .collect::<Vec<_>>();
     let result = match segments.as_slice() {
-        ["runs", id, "cancel"] => s.worker.cancel(s, id).await.map(|()| json!({ "ok": true })),
+        ["runs", id, action @ ("cancel" | "cleanup" | "retry")] => {
+            async {
+                let name = match *action {
+                    "cancel" => "cancel_run",
+                    "cleanup" => "cleanup_run",
+                    _ => "retry_run",
+                };
+                crate::capabilities::run_operation(name)
+                    .expect("run operation")
+                    .invoke(
+                        s,
+                        json!({ "runId": id }),
+                        crate::capabilities::ResumeContext::http(input)?,
+                    )
+                    .await
+            }
+            .await
+        }
         ["runs", id, "resume"] => {
             async {
                 let command = crate::capabilities::RESUME_RUN.decode(json!({ "runId": id }))?;
@@ -372,7 +426,6 @@ pub async fn routes(s: &Arc<Service>, input: &crate::http::Input) -> Option<Resu
             }
             .await
         }
-        ["runs", id, "cleanup"] => s.worker.cleanup(s, id).await,
         ["chats", id, "pause"] => pause_chat(s, input, id).await,
         ["chats", id, "stop"] => stop_chat(s, id).await,
         _ => return None,
@@ -425,6 +478,9 @@ async fn stop_chat(s: &Service, id: &str) -> Result<Value> {
 }
 
 #[cfg(test)]
+use crate::run_fixture::DbRunFixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -435,7 +491,7 @@ mod tests {
             let store = crate::store::Store::open(root.path()).unwrap();
             store
                 .transaction(move |db| {
-                    db.add_run(&json!({
+                    db.add_run_fixture(&json!({
                     "id": "mission", "taskId": "task", "status": "cancelled", "createdAt": 0,
                     "resumeAvailable": true, "missionTurnId": "previous-turn",
                     "waitContinuation": { "observation": { "state": "completed" } },
@@ -465,7 +521,7 @@ mod tests {
         let store = crate::store::Store::open(root.path()).unwrap();
         store
             .transaction(|db| {
-                db.add_run(
+                db.add_run_fixture(
                     &json!({
                         "id": "mission", "taskId": "task", "status": "waiting", "createdAt": 0,
                         "wakeup": { "id": "wake" },

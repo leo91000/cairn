@@ -456,10 +456,11 @@ abstract class NodePlacementCases {
                 )
             val run =
                 Run(
-                    "neighbor",
+                    id = "neighbor",
                     status = "running",
                     taskName = "Exécution voisine",
                     suspendedByExclusive = reservation,
+                    taskId = "",
                 )
             val chat =
                 Chat(
@@ -723,6 +724,7 @@ abstract class NodePlacementCases {
                                 state = "acquired",
                                 expiresAt = 4102444800000,
                             ),
+                        taskId = "",
                     )
                 )
             compose.setContent {
@@ -819,6 +821,7 @@ abstract class NodePlacementCases {
                         executionBackend = "native",
                         storage = RunStorage(mode = "native", dirtyBytes = 0),
                         backup = NodeBackup(capturedAt = System.currentTimeMillis() - 120_000),
+                        taskId = "",
                     )
                 )
             compose.setContent {
@@ -988,6 +991,7 @@ abstract class NodePlacementCases {
                                             capturedAt = System.currentTimeMillis() - 120000,
                                             status = "ready",
                                         ),
+                                    taskId = "",
                                 ),
                             )
                         }

@@ -466,6 +466,9 @@ pub async fn run(s: Arc<Service>) {
 }
 
 #[cfg(test)]
+use crate::run_fixture::DbRunFixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::provider::Provider;
@@ -525,7 +528,7 @@ mod tests {
                     "trigger": "chat",
                     "createdAt": 1,
                 });
-                db.add_run(&run, None)?;
+                db.add_run_fixture(&run, None)?;
                 db.event(
                     "run",
                     "chat.user",
@@ -677,7 +680,7 @@ mod tests {
             });
             s.store
                 .transaction(move |db| {
-                    db.add_run(&foreground, None)?;
+                    db.add_run_fixture(&foreground, None)?;
                     Ok(())
                 })
                 .await

@@ -1,6 +1,7 @@
 #[allow(unused_imports)]
 use common::{PluginServiceFixture as _, PluginStoreFixture as _};
 
+use crate::common::run_fixture::DbRunFixture;
 use common::AgentFixture;
 use common::MissionFixture;
 use common::StoreAgentFixture;
@@ -205,7 +206,7 @@ async fn same_engine_merge_keeps_the_conversation_model_on_implicit_follow_up() 
             let mut chat = chat.clone();
             let run = run.clone();
             move |db| {
-                db.add_run(&run, None)?;
+                db.add_run_fixture(&run, None)?;
                 db.set(
                     &format!("run-checkpoint:{}", run["id"].as_str().unwrap()),
                     &json!({}),

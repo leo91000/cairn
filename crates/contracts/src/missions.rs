@@ -222,6 +222,36 @@ pub struct RunTaskSnapshot {
     #[serde(flatten)]
     #[ts(flatten)]
     pub settings: MissionSettings,
+    #[serde(default)]
+    pub revision: Option<String>,
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub created_at: Option<i64>,
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub next_run: Option<i64>,
+    #[serde(default)]
+    pub author_id: Option<String>,
+    #[serde(default)]
+    pub author_access_id: Option<String>,
+    #[serde(default)]
+    pub author_removed: bool,
+    #[serde(default)]
+    pub schedule_wait_reason: Option<String>,
+    #[serde(default)]
+    pub schedule_failure: Option<ScheduleFailure>,
+    #[serde(default)]
+    pub native_principals: Vec<String>,
+    #[serde(default)]
+    pub native_authority_nodes: Vec<String>,
+    #[serde(default)]
+    pub native_parent_run_id: Option<String>,
+    #[serde(default)]
+    pub native_parent_access: Option<String>,
+    #[serde(default)]
+    pub native_provenance_unknown: bool,
+    #[serde(default)]
+    pub native_plugin_grants: Option<Vec<MissionPluginGrant>>,
 }
 
 #[cfg(test)]

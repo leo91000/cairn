@@ -35,7 +35,15 @@ class LiveTest {
         runBlocking {
             MockWebServer().use { server ->
                 val history = "v1:r1:1"
-                val state = LiveState(run = Run("r1", status = "running"))
+                val state =
+                    LiveState(
+                        run =
+                            Run(
+                                id = "r1",
+                                status = "running",
+                                taskId = "",
+                            )
+                    )
                 for (id in listOf(12L, 13L)) {
                     server.enqueue(
                         MockResponse()
@@ -104,7 +112,15 @@ class LiveTest {
     fun `cached scoped subagents resume without duplicate workers`() = runBlocking {
         run {
             MockWebServer().use { server ->
-                val state = LiveState(run = Run("r1", status = "running"))
+                val state =
+                    LiveState(
+                        run =
+                            Run(
+                                id = "r1",
+                                status = "running",
+                                taskId = "",
+                            )
+                    )
                 fun item(id: Long, body: JsonObjectBuilder.() -> Unit) =
                     RunEvent(
                         id,
@@ -180,7 +196,15 @@ class LiveTest {
         for (reset in listOf(false, true)) {
             MockWebServer().use { server ->
                 val revision = "v1:r1:1"
-                val state = LiveState(run = Run("r1", status = "running"))
+                val state =
+                    LiveState(
+                        run =
+                            Run(
+                                id = "r1",
+                                status = "running",
+                                taskId = "",
+                            )
+                    )
                 server.enqueue(
                     MockResponse()
                         .setHeader("Content-Type", "text/event-stream")
@@ -229,7 +253,15 @@ class LiveTest {
         for (follow in listOf(true, false)) {
             MockWebServer().use { server ->
                 val revision = "v1:r1:1"
-                val state = LiveState(run = Run("r1", status = "succeeded"))
+                val state =
+                    LiveState(
+                        run =
+                            Run(
+                                id = "r1",
+                                status = "succeeded",
+                                taskId = "",
+                            )
+                    )
                 // The installation answers `recent=1` with its recent window as a history reset.
                 server.dispatcher =
                     object : Dispatcher() {
@@ -299,7 +331,14 @@ class LiveTest {
                             1,
                             LiveBatch(
                                 listOf(message(1, "Bonjour")),
-                                LiveState(run = Run("r1", status = "running")),
+                                LiveState(
+                                    run =
+                                        Run(
+                                            id = "r1",
+                                            status = "running",
+                                            taskId = "",
+                                        )
+                                ),
                                 false,
                                 false,
                             ),
@@ -421,7 +460,14 @@ class LiveTest {
                                 1,
                                 LiveBatch(
                                     emptyList(),
-                                    LiveState(run = Run("r1", status = "succeeded")),
+                                    LiveState(
+                                        run =
+                                            Run(
+                                                id = "r1",
+                                                status = "succeeded",
+                                                taskId = "",
+                                            )
+                                    ),
                                     false,
                                     false,
                                     revision,
@@ -437,7 +483,14 @@ class LiveTest {
                     CachedHistory(
                         1,
                         revision,
-                        LiveState(run = Run("r1", status = "running")),
+                        LiveState(
+                            run =
+                                Run(
+                                    id = "r1",
+                                    status = "running",
+                                    taskId = "",
+                                )
+                        ),
                         listOf(message(1, "saved")),
                     ),
                     path,
@@ -462,14 +515,28 @@ class LiveTest {
                 val first =
                     LiveBatch(
                         listOf(message(1, "premier")),
-                        LiveState(run = Run(id = "r1", status = "running")),
+                        LiveState(
+                            run =
+                                Run(
+                                    id = "r1",
+                                    status = "running",
+                                    taskId = "",
+                                )
+                        ),
                         false,
                         false,
                     )
                 val second =
                     LiveBatch(
                         listOf(message(1, "autre run")),
-                        LiveState(run = Run(id = "r2", status = "running")),
+                        LiveState(
+                            run =
+                                Run(
+                                    id = "r2",
+                                    status = "running",
+                                    taskId = "",
+                                )
+                        ),
                         true,
                         false,
                     )
@@ -516,7 +583,14 @@ class LiveTest {
                                 id,
                                 LiveBatch(
                                     listOf(event),
-                                    LiveState(run = Run("r1", status = "running")),
+                                    LiveState(
+                                        run =
+                                            Run(
+                                                id = "r1",
+                                                status = "running",
+                                                taskId = "",
+                                            )
+                                    ),
                                     false,
                                     false,
                                 ),

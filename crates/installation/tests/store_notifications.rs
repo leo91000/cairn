@@ -1,3 +1,5 @@
+use crate::common::run_fixture::DbRunFixture;
+
 mod common;
 
 use cairn_installation::{config::MAIN_AGENT_ID, service::Service, store::Store};
@@ -32,7 +34,7 @@ async fn failed_paused_chats_without_wakeups_do_not_need_the_writer() {
         service
             .store
             .transaction(move |db| {
-                db.add_run(
+                db.add_run_fixture(
                     &json!({
                         "id": "run",
                         "taskId": "chat",
@@ -95,7 +97,7 @@ async fn an_idle_tick_does_not_lose_a_concurrently_committed_wakeup() {
     service
         .store
         .transaction(|db| {
-            db.add_run(
+            db.add_run_fixture(
                 &json!({
                     "id": "run",
                     "taskId": "chat",
@@ -181,7 +183,7 @@ async fn measure_failed_paused_scheduler() {
         service
             .store
             .write(move |db| {
-                db.add_run(
+                db.add_run_fixture(
                     &json!({
                         "id": "run",
                         "taskId": "chat",

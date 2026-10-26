@@ -270,8 +270,16 @@ impl Execution<'_> {
         }
         let current_policy = policy(&current);
         self.run["snapshot"]["agent"]["access"]["nodes"] = current_policy["nodes"].clone();
-        let patch = json!({ "snapshot": self.run["snapshot"] });
-        s.store.update_run_boundary(&self.id, patch).await?;
+        let snapshot = serde_json::from_value(self.run["snapshot"].clone())?;
+        s.store
+            .change_run(
+                &self.id,
+                crate::runs::RunChanges {
+                    snapshot: Some(snapshot),
+                    ..Default::default()
+                },
+            )
+            .await?;
         Ok(())
     }
 
@@ -294,7 +302,8 @@ impl Execution<'_> {
             ),
             ..Default::default()
         };
-        *self.run = s.store.change_run(&self.id, patch).await?;
+        s.store.change_run(&self.id, patch).await?;
+        *self.run = s.store.run(&self.id).await?;
         timing.next("environment");
         let mut env = self
             .environment(prepared["isolated"] == true, &state_home)

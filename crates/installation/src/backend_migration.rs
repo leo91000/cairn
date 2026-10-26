@@ -661,6 +661,9 @@ async fn materialize(
 }
 
 #[cfg(test)]
+use crate::run_fixture::DbRunFixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -732,7 +735,7 @@ mod tests {
                 "nativeAuthorityNodes": [node],
                 "nativeProvenanceUnknown": false,
             });
-            db.add_run(&parent_run, None)?;
+            db.add_run_fixture(&parent_run, None)?;
             let agent = serde_json::to_value(crate::agent_fixture::profile(json!({ "id": target, "access": { "backend": "native", "nodes": [node] } }))?)?;
             db.save_agent(&serde_json::from_value(agent.clone())?)?;
             db.put("nodes", &json!({

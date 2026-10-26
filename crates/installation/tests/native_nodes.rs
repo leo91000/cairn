@@ -1,6 +1,7 @@
 #[allow(unused_imports)]
 use common::{PluginServiceFixture as _, PluginStoreFixture as _};
 
+use crate::common::run_fixture::DbRunFixture;
 use crate::common::run_fixture::RunFixture;
 use common::AgentFixture;
 use common::MissionFixture;
@@ -486,7 +487,7 @@ async fn converting_a_mission_retains_native_authority_and_rejects_unauthorized_
     f.service
         .store
         .transaction(move |db| {
-            db.add_run(&saved, None)?;
+            db.add_run_fixture(&saved, None)?;
             db.set(
                 &format!("run-checkpoint:{}", saved["id"].as_str().unwrap()),
                 &json!({ "prepared": {} }),

@@ -54,8 +54,7 @@ impl Fixture {
         let detail = self.s.chat_detail(chat).await.unwrap();
         let run = detail["run"].clone();
         let run_id = text(&run, "id").to_owned();
-        let run = self
-            .s
+        self.s
             .store
             .change_run(
                 &run_id,
@@ -66,6 +65,7 @@ impl Fixture {
             )
             .await
             .unwrap();
+        let run = self.s.store.run(&run_id).await.unwrap();
         let message = text(&run["chatExecution"], "messageId").to_owned();
         self.s.chat_acknowledge(&run_id, &message).await.unwrap();
         let config = self.s.mcps.run_configuration(&self.s, &run).await.unwrap();
