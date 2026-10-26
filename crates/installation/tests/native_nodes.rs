@@ -24,6 +24,154 @@ const TRUSTED: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const OTHER: &str = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 
 #[tokio::test]
+async fn an_owner_approved_bot_can_submit_to_its_native_agent() {
+    use cairn_installation::plugins::{capabilities, connections, registry, work};
+
+    let f = Fixture::new().await;
+    f.service
+        .plugins
+        .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+    let mut node = f.node.clone();
+    node["nativeAccounts"] = json!([TRUSTED, "fixture-owner"]);
+    f.service.store.put("nodes", node.clone()).await.unwrap();
+    f.service.store.set("native-authority", json!({
+        "observedAt": now(),
+        "accounts": { "fixture-owner": { "email": "owner@example.test", "accessId": "fixture-owner" } }
+    }), None).await.unwrap();
+    let owner = RelayContext::new(&common::relay_fixture::context(&f.service).await);
+    let input = json!({
+        "name": "Native bot", "enabled": true, "agentId": f.agent["id"],
+        "accessMode": "everyone", "settings": { "guildId": "100", "channelId": "200" },
+        "token": "synthetic-discord-token",
+        "nativeAuthority": { "nativePrincipals": ["fixture-owner"], "nativeProvenanceUnknown": false }
+    });
+    let denied = connections::save(&f.service, "discord", &input, None)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        denied.status, 403,
+        "Unscoped management cannot mint a native bot grant"
+    );
+    let (status, saved) = f
+        .call_as(
+            &owner,
+            "POST",
+            "/api/plugins/discord/connections",
+            input,
+            false,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let connection: connections::Connection = serde_json::from_value(saved).unwrap();
+    let event = json!({
+        "name": "message", "revision": connection.revision, "authorId": "external-person",
+        "payload": { "id": "external-message", "author": { "id": "external-person", "name": "Person" } }
+    });
+    let context = capabilities::Context {
+        management: None,
+        connection: connection.clone(),
+        manifest: registry::builtin("discord").unwrap().manifest,
+        event,
+        link: None,
+        draft: None,
+    };
+    let receipt = work::submit(
+        &f.service,
+        &context,
+        &json!({
+            "text": "Which projects can you access?", "thread": "500", "shared": true
+        }),
+    )
+    .await
+    .expect("The selected native agent must honor the owner's bot delegation");
+    f.service.chat_tick(&HashSet::new()).await.unwrap();
+    let chat = f
+        .service
+        .get("chats", text(&receipt, "chatId"))
+        .await
+        .unwrap();
+    let run = f.service.store.run(text(&chat, "runId")).await.unwrap();
+    assert_eq!(run["nativePrincipals"], json!(["fixture-owner"]));
+    assert_eq!(run["nativeProvenanceUnknown"], false);
+    let check = run.clone();
+    let target = node.clone();
+    assert!(
+        f.service
+            .store
+            .read(move |db| policy::allows(db, &check, &target))
+            .await
+            .unwrap()
+    );
+
+    let original = serde_json::to_value(&connection).unwrap();
+    for (label, field, value) in [
+        ("disabled", "enabled", json!(false)),
+        ("replaced", "revision", json!(id())),
+        ("person removed", "accessMode", json!("allowlist")),
+        ("owner changed", "ownerAccessId", json!("different-owner")),
+        (
+            "agent policy revoked",
+            "grantedAccess",
+            json!({ "backend": "firecracker" }),
+        ),
+    ] {
+        let mut changed = original.clone();
+        changed[field] = value;
+        f.service
+            .store
+            .put(connections::KIND, changed)
+            .await
+            .unwrap();
+        let (check, target) = (run.clone(), node.clone());
+        assert!(
+            !f.service
+                .store
+                .read(move |db| policy::allows(db, &check, &target))
+                .await
+                .unwrap(),
+            "{label}"
+        );
+        f.service
+            .store
+            .put(connections::KIND, original.clone())
+            .await
+            .unwrap();
+    }
+
+    f.service.store.set("native-authority", json!({
+        "observedAt": now(), "accounts": {
+            "fixture-owner": { "email": "owner@example.test", "accessId": "replacement-access" }
+        }
+    }), None).await.unwrap();
+    let (check, target) = (run.clone(), node.clone());
+    assert!(
+        !f.service
+            .store
+            .read(move |db| policy::allows(db, &check, &target))
+            .await
+            .unwrap(),
+        "Fresh membership must match the owner access that approved the delegation"
+    );
+
+    connections::set_enabled(
+        &f.service,
+        "discord",
+        &connection.id,
+        &json!({ "enabled": false }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !f.service
+            .store
+            .read(move |db| policy::allows(db, &run, &node))
+            .await
+            .unwrap(),
+        "Disabling the bot must revoke its native work, including already queued work"
+    );
+}
+
+#[tokio::test]
 async fn native_administrator_requires_owner_review_verified_generation_and_explicit_admission() {
     let f = Fixture::new().await;
     let node_id = text(&f.node, "id");

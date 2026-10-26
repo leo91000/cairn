@@ -190,6 +190,10 @@ impl Service {
         let owner_review =
             editor == AgentEditor::Owner && crate::nodes::native_mode::owner().is_some();
         let reapproved = !review.reapprove_delegations.is_empty();
+        let origin = crate::native::policy::origin();
+        if reapproved && crate::native::policy::native(&snapshot) {
+            crate::native::policy::refresh(self).await?;
+        }
         let (agent, created) = self.store.transaction(move |db| {
             authorize(db)?;
             let current = db.agent(&agent.id.to_string())?;
@@ -247,7 +251,7 @@ impl Service {
             let agent = crate::agent_grants::save_profile(db, agent, &access, owner_review, &review.native_node_reviews)?;
             let snapshot = serde_json::to_value(&agent)?;
             for connection in &review.reapprove_delegations {
-                crate::plugins::connections::reapprove(db, connection, &snapshot)?;
+                crate::plugins::connections::reapprove(db, connection, &snapshot, &origin)?;
             }
             Ok((agent, creating))
         }).await?;

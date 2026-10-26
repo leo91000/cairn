@@ -257,6 +257,18 @@ fn admit(db: &Db<'_>, expected: &Connection, event: &Value) -> Result<(Connectio
     Ok((connection, author))
 }
 
+fn origin(context: &Context) -> crate::native::policy::Origin {
+    use crate::native::policy::{Origin, PluginOrigin};
+    if context.connection.native_authority["nativeProvenanceUnknown"] != false {
+        return Origin::Unknown;
+    }
+    Origin::Plugin(PluginOrigin {
+        connection: context.connection.id.clone(),
+        revision: context.connection.revision.clone(),
+        author: text(&context.event, "authorId").to_owned(),
+    })
+}
+
 /// Hourly counters to increment when the submission is accepted.
 struct Counters(Vec<(String, u64)>);
 
@@ -366,6 +378,8 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
         ));
     }
     ensure_owner(s, expected).await?;
+    let origin = origin(context);
+    crate::native::policy::refresh_agent(s, &expected.agent_id).await?;
     let content = text(args, "text").trim().to_owned();
     let thread = text(args, "thread").to_owned();
     let shared = args["shared"] == true;
@@ -386,11 +400,12 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
 
     // Resolve (or start) the conversation first, so attachments can be stored in it.
     let resolved = {
-        let (expected, event, dedupe, thread) = (
+        let (expected, event, dedupe, thread, origin) = (
             expected.clone(),
             event.clone(),
             dedupe.clone(),
             thread.clone(),
+            origin.clone(),
         );
         s.store
             .transaction(move |db| {
@@ -417,16 +432,18 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
                             .ok_or_else(|| Error::forbidden("Agent no longer exists."))?;
                         let compatible = previous.as_ref().is_none_or(|run| {
                             crate::service::covers(&agent, &run["snapshot"]["agent"])
-                        });
+                        }) && (!crate::native::policy::native(&agent)
+                            || crate::native::policy::chat_grant(db, &chat, &origin).is_ok());
                         compatible.then_some(chat)
                     }
                     None => None,
                 };
                 let chat = match usable {
                     Some(chat) => chat,
-                    None => crate::chats::create_in(
+                    None => crate::chats::create_as(
                         db,
                         json!({ "agentId": connection.agent_id, "projectId": connection.project_id }),
+                        &origin,
                     )?,
                 };
                 let chat_id = text(&chat, "id").to_owned();
@@ -461,9 +478,12 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
         {
             let expected = expected.clone();
             let event = event.clone();
+            let origin = origin.clone();
+            let resumed = run_id.to_owned();
             s.worker
                 .resume_authorized(s, run_id, move |db| {
-                    admit(db, &expected, &event).map(|_| ())
+                    admit(db, &expected, &event)?;
+                    crate::native::policy::authorize_run_in(db, &resumed, &origin)
                 })
                 .await?;
         }
@@ -491,10 +511,11 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
             db.put("chats", &chat)?;
             let counters = limits(db, &connection, &author)?;
             let message_id = id();
-            let queued = crate::chats::send_in(
+            let queued = crate::chats::send_as_in(
                 db,
                 &chat_id,
                 json!({ "id": message_id, "text": content, "attachmentIds": attachment_ids }),
+                &origin,
             )?;
             counters.increment(db)?;
             let receipt = json!({ "chatId": chat_id, "messageId": queued["id"] });
@@ -638,8 +659,11 @@ pub async fn answer(s: &Service, context: &Context, args: &Value) -> Result<Valu
         }
         answers.insert(field.clone(), json!([value]));
     }
-    let answered = s
-        .question_answer(&chat, question, json!({ "id": id(), "answers": answers }))
+    let answered = crate::native::policy::DELEGATION
+        .scope(
+            origin(context),
+            s.question_answer(&chat, question, json!({ "id": id(), "answers": answers })),
+        )
         .await?;
     Ok(json!({ "status": answered["status"] }))
 }
