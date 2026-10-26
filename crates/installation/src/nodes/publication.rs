@@ -1626,7 +1626,7 @@ mod capture_policy_tests {
         let store = crate::store::Store::open(root.path()).unwrap();
         store.transaction(|db| {
             for status in ["succeeded", "failed", "cancelled", "interrupted"] {
-                db.add_run(&json!({
+                db.add_run_fixture(&json!({
                     "id": status,
                     "taskId": status,
                     "status": status,

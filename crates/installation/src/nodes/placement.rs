@@ -481,21 +481,27 @@ fn request_reclamation(db: &Db<'_>, run: &Value, configured: bool) -> Result<()>
 /// Growth leaves enough capacity for the oldest eligible queued conversation.
 /// This is a transaction-local ceiling, not an allocation or an authority grant.
 pub(super) fn waiting_disk_bytes(db: &Db<'_>, node: &Value, attempts: &[Value]) -> Result<u64> {
-    let runs = db.json_rows(
-        "SELECT data FROM runs WHERE status='queued' AND json_extract(data,'$.isolated')=1 ORDER BY created_at,id",
-        [],
-    )?;
-    for run in runs {
-        if !run["cancelRequestedAt"].is_null()
-            || run["backendMigration"].is_object()
+    let mut runs = db.queued_run_records()?;
+    runs.sort_by(|left, right| {
+        left.state
+            .created_at
+            .cmp(&right.state.created_at)
+            .then_with(|| left.state.id.cmp(&right.state.id))
+    });
+    for record in runs {
+        let state = &record.state;
+        if record.boundary["isolated"] != true
+            || state.cancel_requested_at.is_some()
+            || record.boundary["backendMigration"].is_object()
             || attempts
                 .iter()
-                .any(|a| a["runId"] == run["id"] && super::is_active_attempt(a))
-            || crate::run_retry::Retry::waiting(&run, crate::config::now())
-            || crate::conversation_lifecycle::require_active_run(db, text(&run, "id")).is_err()
+                .any(|attempt| attempt["runId"] == state.id && super::is_active_attempt(attempt))
+            || crate::run_retry::Retry::waiting(state.retry.as_ref(), crate::config::now())
+            || crate::conversation_lifecycle::require_active_run(db, &state.id).is_err()
         {
             continue;
         }
+        let run = record.wire()?;
         let agent = db
             .agent_snapshot(super::run_agent(&run))?
             .unwrap_or_default();

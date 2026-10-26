@@ -592,7 +592,7 @@ mod tests {
                 let node_id = super::super::LOCAL_NODE_ID;
                 let mut storage = db.run(&run)?.unwrap()["storage"].clone();
                 storage["dirtyBytes"] = 0.into();
-                db.patch_run(&run, &json!({ "nodeId": node_id, "storage": storage }))?;
+                db.update_run_boundary(&run, &json!({ "nodeId": node_id, "storage": storage }))?;
                 let mut node = db.get("nodes", node_id)?.unwrap();
                 node["limits"] = json!({ "diskMiB": 102400 });
                 node["diskCapacity"] = json!({
@@ -605,7 +605,7 @@ mod tests {
                 assert_eq!(accounting["unsynchronizedBytes"], 0);
                 let mut storage = db.run(&run)?.unwrap()["storage"].clone();
                 storage["dirtyBytes"] = 4096.into();
-                db.patch_run(&run, &json!({ "storage": storage }))?;
+                db.update_run_boundary(&run, &json!({ "storage": storage }))?;
                 let accounting = super::super::disk_capacity::accounting(db, &node, &[])?;
                 assert_eq!(accounting["reclaimableBytes"], 0);
                 assert_eq!(accounting["unsynchronizedBytes"], 4096);
